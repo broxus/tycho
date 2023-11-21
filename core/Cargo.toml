@@ -5,7 +5,7 @@ edition = "2021"
 description = "Basic functionality of peer."
 
 [dependencies]
-# creates.io deps
+# crates.io deps
 
 # local deps
 tycho-network = { path = "../network", version = "=0.0.1" }
