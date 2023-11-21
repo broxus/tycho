@@ -6,3 +6,5 @@ target/
 .idea/
 .vscode/
 .fleet/
+
+perf.data*
