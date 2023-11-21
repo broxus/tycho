@@ -8,3 +8,6 @@ description = "Shared utilities for node components."
 # creates.io deps
 
 # local deps
+
+[lints]
+workspace= true

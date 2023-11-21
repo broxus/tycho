@@ -9,3 +9,6 @@ description = "A peer-to-peer networking library."
 
 # local deps
 tycho-util = { path = "../util", version = "=0.0.1" }
+
+[lints]
+workspace= true
