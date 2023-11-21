@@ -1,0 +1,10 @@
+[package]
+name = "tycho-util"
+version = "0.0.1"
+edition = "2021"
+description = "Shared utilities for node components."
+
+[dependencies]
+# creates.io deps
+
+# local deps
