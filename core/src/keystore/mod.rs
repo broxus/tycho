@@ -57,13 +57,11 @@ impl KeyStoreImpl {
 
         let keys = if force_regenerate {
             Self::generate(timestamp.unwrap_or_default())
+        } else if let Ok(keys) = serde_json::from_reader::<&File, NodeKeys>(&file) {
+            Self::try_from(keys)
         } else {
-            if let Ok(keys) = serde_json::from_reader::<&File, NodeKeys>(&file) {
-                Self::try_from(keys)
-            } else {
-                log::warn!("failed to read keys, generating new");
-                Self::generate(timestamp.unwrap_or_default())
-            }
+            log::warn!("failed to read keys, generating new");
+            Self::generate(timestamp.unwrap_or_default())
         }?;
 
         keys.save(file)
