@@ -3,8 +3,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use pkcs8::EncodePrivateKey;
 
+use crate::types::PeerId;
+
 pub fn generate_cert(
-    keypair: &ed25519_dalek::ed25519::KeypairBytes,
+    keypair: &ed25519::KeypairBytes,
     subject_name: &str,
 ) -> Result<(rustls::Certificate, rustls::PrivateKey)> {
     static ALGO: &rcgen::SignatureAlgorithm = &rcgen::PKCS_ED25519;
@@ -23,17 +25,37 @@ pub fn generate_cert(
     Ok((rustls::Certificate(cert), key_der))
 }
 
-/// Verifies self-signed certificates for the specified SNI.
-pub struct CertVerifier<'a>(pub webpki::SubjectNameRef<'a>);
+pub fn peer_id_from_certificate(
+    certificate: &rustls::Certificate,
+) -> Result<PeerId, rustls::Error> {
+    use pkcs8::DecodePublicKey;
+    use x509_parser::prelude::{FromDer, X509Certificate};
 
-impl CertVerifier<'static> {
-    /// Creates a verifier from a SNI string (IP or DNS).
-    pub fn from_static_str(name: &'static str) -> Result<Self, webpki::InvalidSubjectNameError> {
-        webpki::SubjectNameRef::try_from_ascii_str(name).map(CertVerifier)
+    let (_, cert) = X509Certificate::from_der(certificate.0.as_ref())
+        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+    let spki = cert.public_key();
+    let public_key =
+        ed25519::pkcs8::PublicKeyBytes::from_public_key_der(spki.raw).map_err(|e| {
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Other(Arc::new(
+                InvalidCertificatePublicKey(e),
+            )))
+        })?;
+
+    Ok(PeerId(public_key.to_bytes()))
+}
+
+/// Verifies self-signed certificates for the specified SNI.
+pub struct CertVerifier {
+    server_name: String,
+}
+
+impl From<String> for CertVerifier {
+    fn from(server_name: String) -> Self {
+        Self { server_name }
     }
 }
 
-impl rustls::server::ClientCertVerifier for CertVerifier<'_> {
+impl rustls::server::ClientCertVerifier for CertVerifier {
     fn offer_client_auth(&self) -> bool {
         true
     }
@@ -69,16 +91,20 @@ impl rustls::server::ClientCertVerifier for CertVerifier<'_> {
             )
             .map_err(map_pki_error)?;
 
+        let Ok(subject_name) = webpki::DnsNameRef::try_from_ascii_str(&self.server_name) else {
+            return Err(rustls::Error::UnsupportedNameType);
+        };
+
         // Verify subject name in the certificate
         prepared
             .parsed
-            .verify_is_valid_for_subject_name(self.0)
+            .verify_is_valid_for_subject_name(webpki::SubjectNameRef::DnsName(subject_name))
             .map_err(map_pki_error)
             .map(|_| rustls::server::ClientCertVerified::assertion())
     }
 }
 
-impl rustls::client::ServerCertVerifier for CertVerifier<'_> {
+impl rustls::client::ServerCertVerifier for CertVerifier {
     fn verify_server_cert(
         &self,
         end_entity: &rustls::Certificate,
@@ -91,8 +117,11 @@ impl rustls::client::ServerCertVerifier for CertVerifier<'_> {
         // Filter subject name before verifying the certificate
         let subject_name = 'name: {
             if let rustls::ServerName::DnsName(name) = server_name {
-                if let Ok(name) = webpki::SubjectNameRef::try_from_ascii_str(name.as_ref()) {
-                    if name.as_ref() == self.0.as_ref() {
+                if let (Ok(name), Ok(target)) = (
+                    webpki::DnsNameRef::try_from_ascii_str(name.as_ref()),
+                    webpki::DnsNameRef::try_from_ascii_str(&self.server_name),
+                ) {
+                    if name.as_ref() == target.as_ref() {
                         break 'name name;
                     }
                 }
@@ -120,7 +149,7 @@ impl rustls::client::ServerCertVerifier for CertVerifier<'_> {
         // Verify subject name in the certificate
         prepared
             .parsed
-            .verify_is_valid_for_subject_name(subject_name)
+            .verify_is_valid_for_subject_name(webpki::SubjectNameRef::DnsName(subject_name))
             .map_err(map_pki_error)
             .map(|_| rustls::client::ServerCertVerified::assertion())
     }
@@ -167,13 +196,17 @@ fn map_pki_error(error: webpki::Error) -> rustls::Error {
             rustls::Error::InvalidCertificate(rustls::CertificateError::BadSignature)
         }
         e => rustls::Error::InvalidCertificate(rustls::CertificateError::Other(Arc::new(
-            InvalidCertificateOtherError(e),
+            WebpkiCertificateError(e),
         ))),
     }
 }
 
 #[derive(thiserror::Error, Debug)]
 #[error("invalid peer certificate: {0}")]
-struct InvalidCertificateOtherError(webpki::Error);
+struct WebpkiCertificateError(webpki::Error);
+
+#[derive(thiserror::Error, Debug)]
+#[error("invalid ed25519 public key: {0}")]
+struct InvalidCertificatePublicKey(pkcs8::spki::Error);
 
 static SIGNATURE_ALGHORITHMS: &[&webpki::SignatureAlgorithm] = &[&webpki::ED25519];
