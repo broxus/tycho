@@ -58,12 +58,11 @@ impl KeyStoreImpl {
         let keys = if force_regenerate {
             Self::generate(timestamp.unwrap_or_default())
         } else {
-            match serde_json::from_reader::<&File, NodeKeys>(&file) {
-                Ok(keys) => Self::try_from(keys),
-                Err(_) => {
-                    log::warn!("failed to read keys, generating new");
-                    Self::generate(timestamp.unwrap_or_default())
-                }
+            if let Ok(keys) = serde_json::from_reader::<&File, NodeKeys>(&file) {
+                Self::try_from(keys)
+            } else {
+                log::warn!("failed to read keys, generating new");
+                Self::generate(timestamp.unwrap_or_default())
             }
         }?;
 
@@ -111,13 +110,13 @@ impl KeyStore for KeyStoreImpl {
     }
 
     fn sign_by_network_key(&self, data: &[u8]) -> [u8; 64] {
-        self.network_key.sign(&data).to_bytes()
+        self.network_key.sign(data).to_bytes()
     }
 
     fn sign_by_validator_key(&self, timestamp: i64, data: &[u8]) -> Result<[u8; 64]> {
         if let Some(r) = self.validator_keys.get(&timestamp) {
             let keypair = r.value();
-            Ok(keypair.sign(&data).to_bytes())
+            Ok(keypair.sign(data).to_bytes())
         } else {
             Err(anyhow::anyhow!("No key for timestamp {} found", timestamp))
         }
