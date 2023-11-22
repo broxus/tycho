@@ -24,3 +24,18 @@ impl std::fmt::Debug for PeerId {
         write!(f, "PeerId({self})")
     }
 }
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum Direction {
+    Inbound,
+    Outbound,
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        })
+    }
+}

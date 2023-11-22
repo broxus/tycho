@@ -1070,6 +1070,7 @@ dependencies = [
  "anyhow",
  "ed25519",
  "hex",
+ "pin-project-lite",
  "pkcs8",
  "quinn",
  "rcgen",
