@@ -41,6 +41,10 @@ impl Connection {
         self.inner.remote_address()
     }
 
+    pub fn close(&self) {
+        self.inner.close(0u8.into(), b"connection closed")
+    }
+
     pub async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
         self.inner.open_uni().await.map(SendStream)
     }

@@ -7,8 +7,10 @@ include = ["src/**/*.rs", "src/**/*.tl"]
 
 [dependencies]
 # crates.io deps
+ahash = "0.8"
 anyhow = "1.0"
 bytes = "1.0"
+dashmap = "5.4"
 ed25519 = { version = "2.0", features = ["alloc", "pkcs8"] }
 futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
