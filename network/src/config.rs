@@ -5,6 +5,12 @@ use anyhow::{Context, Result};
 use crate::crypto::CertVerifier;
 use crate::types::PeerId;
 
+#[derive(Debug, Default, Clone)]
+#[non_exhaustive]
+pub struct Config {
+    pub max_frame_size: Option<usize>,
+}
+
 pub struct EndpointConfig {
     pub peer_id: PeerId,
     pub server_name: String,
