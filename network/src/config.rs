@@ -1,14 +1,39 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use crate::crypto::CertVerifier;
 use crate::types::PeerId;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
+    pub connection_manager_channel_capacity: usize,
+    pub connectivity_check_interval: Duration,
     pub max_frame_size: Option<usize>,
+    pub connect_timeout: Duration,
+    pub connection_backoff: Duration,
+    pub max_connection_backoff: Duration,
+    pub max_concurrent_outstanding_connections: usize,
+    pub max_concurrent_connections: Option<usize>,
+    pub shutdown_idle_timeout: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            connection_manager_channel_capacity: 128,
+            connectivity_check_interval: Duration::from_millis(5000),
+            max_frame_size: None,
+            connect_timeout: Duration::from_secs(10),
+            connection_backoff: Duration::from_secs(10),
+            max_connection_backoff: Duration::from_secs(60),
+            max_concurrent_outstanding_connections: 100,
+            max_concurrent_connections: None,
+            shutdown_idle_timeout: Duration::from_secs(60),
+        }
+    }
 }
 
 pub struct EndpointConfig {

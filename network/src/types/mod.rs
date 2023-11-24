@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 pub use self::peer_id::*;
@@ -5,6 +6,7 @@ pub use self::peer_id::*;
 mod peer_id;
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
+pub type FastHashMap<K, V> = HashMap<K, V, ahash::RandomState>;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
