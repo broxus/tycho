@@ -94,7 +94,7 @@ impl Endpoint {
         address: SocketAddr,
     ) -> Result<Connecting> {
         self.inner
-            .connect_with(config, address, &self.config.server_name)
+            .connect_with(config, address, &self.config.service_name)
             .map_err(Into::into)
             .map(Connecting::new_outbound)
     }

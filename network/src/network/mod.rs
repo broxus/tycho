@@ -1,8 +1,8 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::Result;
-use socket2::{Domain, Socket};
+use rand::Rng;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{Config, EndpointConfig};
@@ -35,7 +35,7 @@ impl<MandatoryFields> Builder<MandatoryFields> {
 }
 
 impl<T2> Builder<((), T2)> {
-    pub fn with_server_name<T: Into<String>>(self, name: T) -> Builder<(String, T2)> {
+    pub fn with_service_name<T: Into<String>>(self, name: T) -> Builder<(String, T2)> {
         let (_, private_key) = self.mandatory_fields;
         Builder {
             mandatory_fields: (name.into(), private_key),
@@ -46,31 +46,44 @@ impl<T2> Builder<((), T2)> {
 
 impl<T1> Builder<(T1, ())> {
     pub fn with_private_key(self, private_key: [u8; 32]) -> Builder<(T1, [u8; 32])> {
-        let (server_name, _) = self.mandatory_fields;
+        let (service_name, _) = self.mandatory_fields;
         Builder {
-            mandatory_fields: (server_name, private_key),
+            mandatory_fields: (service_name, private_key),
             optional_fields: self.optional_fields,
         }
+    }
+
+    pub fn with_random_private_key(self) -> Builder<(T1, [u8; 32])> {
+        self.with_private_key(rand::thread_rng().gen())
     }
 }
 
 impl Builder {
-    pub fn build(self, bind_address: SocketAddr) -> Result<Network> {
+    pub fn build<T: ToSocketAddrs>(self, bind_address: T) -> Result<Network> {
+        use socket2::{Domain, Protocol, Socket, Type};
+
         let config = self.optional_fields.config.unwrap_or_default();
         let quic_config = config.quic.clone().unwrap_or_default();
-        let (server_name, private_key) = self.mandatory_fields;
+        let (service_name, private_key) = self.mandatory_fields;
 
         let endpoint_config = EndpointConfig::builder()
-            .with_server_name(server_name)
+            .with_service_name(service_name)
             .with_private_key(private_key)
             .with_transport_config(quic_config.make_transport_config())
             .build()?;
 
-        let socket = Socket::new(
-            Domain::for_address(bind_address),
-            socket2::Type::DGRAM,
-            Some(socket2::Protocol::UDP),
-        )?;
+        let socket = 'socket: {
+            let mut err = anyhow::anyhow!("no addresses to bind to");
+            for addr in bind_address.to_socket_addrs()? {
+                let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+                if let Err(e) = s.bind(&socket2::SockAddr::from(addr)) {
+                    err = e.into();
+                } else {
+                    break 'socket s;
+                }
+            }
+            return Err(err);
+        };
 
         if let Some(send_buffer_size) = quic_config.socket_send_buffer_size {
             if let Err(e) = socket.set_send_buffer_size(send_buffer_size) {
@@ -118,7 +131,7 @@ impl Builder {
 pub struct Network(Arc<NetworkInner>);
 
 impl Network {
-    pub fn builder<T: Into<String>>() -> Builder<((), ())> {
+    pub fn builder() -> Builder<((), ())> {
         Builder {
             mandatory_fields: ((), ()),
             optional_fields: Default::default(),
@@ -200,5 +213,42 @@ impl NetworkInner {
         let active_peers = self.active_peers.upgrade()?;
         let connection = active_peers.get(peer_id)?;
         Some(Peer::new(connection, self.config.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_test::traced_test;
+
+    use super::*;
+
+    #[tokio::test]
+    #[traced_test]
+    async fn connection_manager_works() -> anyhow::Result<()> {
+        let peer1 = Network::builder()
+            .with_random_private_key()
+            .with_service_name("tycho")
+            .build("127.0.0.1:0")?;
+
+        let peer2 = Network::builder()
+            .with_random_private_key()
+            .with_service_name("tycho")
+            .build("127.0.0.1:0")?;
+
+        let peer3 = Network::builder()
+            .with_random_private_key()
+            .with_service_name("not-tycho")
+            .build("127.0.0.1:0")?;
+
+        assert!(peer1.connect(peer2.local_addr()).await.is_ok());
+        assert!(peer2.connect(peer1.local_addr()).await.is_ok());
+
+        assert!(peer1.connect(peer3.local_addr()).await.is_err());
+        assert!(peer2.connect(peer3.local_addr()).await.is_err());
+
+        assert!(peer3.connect(peer1.local_addr()).await.is_err());
+        assert!(peer3.connect(peer2.local_addr()).await.is_err());
+
+        Ok(())
     }
 }

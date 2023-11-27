@@ -92,7 +92,7 @@ impl QuicConfig {
 
 pub struct EndpointConfig {
     pub peer_id: PeerId,
-    pub server_name: String,
+    pub service_name: String,
     pub client_cert: rustls::Certificate,
     pub pkcs8_der: rustls::PrivateKey,
     pub quinn_server_config: quinn::ServerConfig,
@@ -113,7 +113,7 @@ impl EndpointConfig {
         let client_config = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(
-                self.server_name.clone(),
+                self.service_name.clone(),
                 peer_id,
             )))
             .with_client_auth_cert(vec![self.client_cert.clone()], self.pkcs8_der.clone())?;
@@ -142,13 +142,13 @@ impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
 }
 
 impl<T2> EndpointConfigBuilder<((), T2)> {
-    pub fn with_server_name<T: Into<String>>(
+    pub fn with_service_name<T: Into<String>>(
         self,
-        server_name: T,
+        service_name: T,
     ) -> EndpointConfigBuilder<(String, T2)> {
         let (_, private_key) = self.mandatory_fields;
         EndpointConfigBuilder {
-            mandatory_fields: (server_name.into(), private_key),
+            mandatory_fields: (service_name.into(), private_key),
             optional_fields: self.optional_fields,
         }
     }
@@ -156,9 +156,9 @@ impl<T2> EndpointConfigBuilder<((), T2)> {
 
 impl<T1> EndpointConfigBuilder<(T1, ())> {
     pub fn with_private_key(self, private_key: [u8; 32]) -> EndpointConfigBuilder<(T1, [u8; 32])> {
-        let (server_name, _) = self.mandatory_fields;
+        let (service_name, _) = self.mandatory_fields;
         EndpointConfigBuilder {
-            mandatory_fields: (server_name, private_key),
+            mandatory_fields: (service_name, private_key),
             optional_fields: self.optional_fields,
         }
     }
@@ -166,7 +166,7 @@ impl<T1> EndpointConfigBuilder<(T1, ())> {
 
 impl EndpointConfigBuilder {
     pub fn build(self) -> Result<EndpointConfig> {
-        let (server_name, private_key) = self.mandatory_fields;
+        let (service_name, private_key) = self.mandatory_fields;
 
         let keypair = ed25519::KeypairBytes {
             secret_key: private_key,
@@ -178,10 +178,10 @@ impl EndpointConfigBuilder {
         let reset_key = compute_reset_key(&keypair.secret_key);
         let quinn_endpoint_config = quinn::EndpointConfig::new(Arc::new(reset_key));
 
-        let (cert, pkcs8_der) = crate::crypto::generate_cert(&keypair, &server_name)
+        let (cert, pkcs8_der) = crate::crypto::generate_cert(&keypair, &service_name)
             .context("Failed to generate a certificate")?;
 
-        let cert_verifier = Arc::new(CertVerifier::from(server_name.clone()));
+        let cert_verifier = Arc::new(CertVerifier::from(service_name.clone()));
         let quinn_client_config = make_client_config(
             cert.clone(),
             pkcs8_der.clone(),
@@ -190,7 +190,7 @@ impl EndpointConfigBuilder {
         )?;
 
         let quinn_server_config = make_server_config(
-            &server_name,
+            &service_name,
             pkcs8_der.clone(),
             cert.clone(),
             cert_verifier,
@@ -201,7 +201,7 @@ impl EndpointConfigBuilder {
 
         Ok(EndpointConfig {
             peer_id,
-            server_name,
+            service_name,
             client_cert: cert,
             pkcs8_der,
             quinn_server_config,
@@ -229,7 +229,7 @@ fn make_client_config(
 }
 
 fn make_server_config(
-    server_name: &str,
+    service_name: &str,
     pkcs8_der: rustls::PrivateKey,
     cert: rustls::Certificate,
     cert_verifier: Arc<CertVerifier>,
@@ -239,7 +239,7 @@ fn make_server_config(
 
     let key = rustls::sign::any_eddsa_type(&pkcs8_der).context("Invalid private key")?;
     let certified_key = rustls::sign::CertifiedKey::new(vec![cert], key);
-    server_cert_resolver.add(server_name, certified_key)?;
+    server_cert_resolver.add(service_name, certified_key)?;
 
     let server_crypto = rustls::ServerConfig::builder()
         .with_safe_defaults()

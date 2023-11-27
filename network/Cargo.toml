@@ -36,6 +36,7 @@ tycho-util = { path = "../util", version = "=0.0.1" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing-test = "0.2"
 
 [lints]
 workspace = true

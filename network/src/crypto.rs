@@ -50,9 +50,9 @@ pub struct CertVerifierWithPeerId {
 }
 
 impl CertVerifierWithPeerId {
-    pub fn new(server_name: String, peer_id: PeerId) -> Self {
+    pub fn new(service_name: String, peer_id: PeerId) -> Self {
         Self {
-            inner: CertVerifier::from(server_name),
+            inner: CertVerifier::from(service_name),
             peer_id,
         }
     }
@@ -88,12 +88,12 @@ impl rustls::client::ServerCertVerifier for CertVerifierWithPeerId {
 
 /// Verifies self-signed certificates for the specified SNI.
 pub struct CertVerifier {
-    server_name: String,
+    service_name: String,
 }
 
 impl From<String> for CertVerifier {
-    fn from(server_name: String) -> Self {
-        Self { server_name }
+    fn from(service_name: String) -> Self {
+        Self { service_name }
     }
 }
 
@@ -133,7 +133,7 @@ impl rustls::server::ClientCertVerifier for CertVerifier {
             )
             .map_err(map_pki_error)?;
 
-        let Ok(subject_name) = webpki::DnsNameRef::try_from_ascii_str(&self.server_name) else {
+        let Ok(subject_name) = webpki::DnsNameRef::try_from_ascii_str(&self.service_name) else {
             return Err(rustls::Error::UnsupportedNameType);
         };
 
@@ -161,7 +161,7 @@ impl rustls::client::ServerCertVerifier for CertVerifier {
             if let rustls::ServerName::DnsName(name) = server_name {
                 if let (Ok(name), Ok(target)) = (
                     webpki::DnsNameRef::try_from_ascii_str(name.as_ref()),
-                    webpki::DnsNameRef::try_from_ascii_str(&self.server_name),
+                    webpki::DnsNameRef::try_from_ascii_str(&self.service_name),
                 ) {
                     if name.as_ref() == target.as_ref() {
                         break 'name name;
