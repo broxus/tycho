@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use ahash::HashMap;
@@ -330,7 +330,7 @@ impl ConnectionManager {
 
         let connecting = match peer_id {
             None => self.endpoint.connect(address),
-            Some(peer_id) => todo!(),
+            Some(peer_id) => self.endpoint.connect_with_expected_id(address, peer_id),
         };
         self.pending_connections.spawn(dial_peer_task(
             connecting,
@@ -414,6 +414,19 @@ impl ActivePeers {
 
     pub fn len(&self) -> usize {
         self.0.len()
+    }
+
+    pub fn downgrade(this: &Self) -> WeakActivePeers {
+        WeakActivePeers(Arc::downgrade(&this.0))
+    }
+}
+
+#[derive(Clone)]
+pub struct WeakActivePeers(Weak<ActivePeersInner>);
+
+impl WeakActivePeers {
+    pub fn upgrade(&self) -> Option<ActivePeers> {
+        self.0.upgrade().map(ActivePeers)
     }
 }
 

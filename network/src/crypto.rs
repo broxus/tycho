@@ -44,6 +44,48 @@ pub fn peer_id_from_certificate(
     Ok(PeerId(public_key.to_bytes()))
 }
 
+pub struct CertVerifierWithPeerId {
+    inner: CertVerifier,
+    peer_id: PeerId,
+}
+
+impl CertVerifierWithPeerId {
+    pub fn new(server_name: String, peer_id: PeerId) -> Self {
+        Self {
+            inner: CertVerifier::from(server_name),
+            peer_id,
+        }
+    }
+}
+
+impl rustls::client::ServerCertVerifier for CertVerifierWithPeerId {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::Certificate,
+        intermediates: &[rustls::Certificate],
+        server_name: &rustls::ServerName,
+        scts: &mut dyn Iterator<Item = &[u8]>,
+        ocsp_response: &[u8],
+        now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        let peer_id = peer_id_from_certificate(end_entity)?;
+        if peer_id != self.peer_id {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::Other(Arc::new(CertificatePeerIdMismatch)),
+            ));
+        }
+
+        self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            scts,
+            ocsp_response,
+            now,
+        )
+    }
+}
+
 /// Verifies self-signed certificates for the specified SNI.
 pub struct CertVerifier {
     server_name: String,
@@ -208,5 +250,9 @@ struct WebpkiCertificateError(webpki::Error);
 #[derive(thiserror::Error, Debug)]
 #[error("invalid ed25519 public key: {0}")]
 struct InvalidCertificatePublicKey(pkcs8::spki::Error);
+
+#[derive(thiserror::Error, Debug)]
+#[error("certificate peer id mismatch")]
+struct CertificatePeerIdMismatch;
 
 static SIGNATURE_ALGHORITHMS: &[&webpki::SignatureAlgorithm] = &[&webpki::ED25519];

@@ -23,6 +23,7 @@ ring = "0.16"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-webpki = "0.101"
 serde = "1.0"
+socket2 = "0.5"
 thiserror = "1"
 tl-proto = "0.4"
 tokio = { version = "1", features = ["rt", "sync", "io-util", "macros"] }

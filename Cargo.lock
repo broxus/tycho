@@ -1230,6 +1230,7 @@ dependencies = [
  "rustls",
  "rustls-webpki",
  "serde",
+ "socket2",
  "thiserror",
  "tl-proto",
  "tokio",

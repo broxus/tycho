@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::crypto::CertVerifier;
+use crate::crypto::{CertVerifier, CertVerifierWithPeerId};
 use crate::types::PeerId;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Config {
+    pub quic: Option<QuicConfig>,
     pub connection_manager_channel_capacity: usize,
     pub connectivity_check_interval: Duration,
     pub max_frame_size: Option<usize>,
@@ -17,12 +18,14 @@ pub struct Config {
     pub max_connection_backoff: Duration,
     pub max_concurrent_outstanding_connections: usize,
     pub max_concurrent_connections: Option<usize>,
+    pub active_peers_event_channel_capacity: usize,
     pub shutdown_idle_timeout: Duration,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
+            quic: None,
             connection_manager_channel_capacity: 128,
             connectivity_check_interval: Duration::from_millis(5000),
             max_frame_size: None,
@@ -31,8 +34,59 @@ impl Default for Config {
             max_connection_backoff: Duration::from_secs(60),
             max_concurrent_outstanding_connections: 100,
             max_concurrent_connections: None,
+            active_peers_event_channel_capacity: 128,
             shutdown_idle_timeout: Duration::from_secs(60),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QuicConfig {
+    pub max_concurrent_bidi_streams: u64,
+    pub max_concurrent_uni_streams: u64,
+    pub stream_receive_window: Option<u64>,
+    pub receive_window: Option<u64>,
+    pub send_window: Option<u64>,
+    // TODO: add all other fields from quin::TransportConfig
+    pub socket_send_buffer_size: Option<usize>,
+    pub socket_recv_buffer_size: Option<usize>,
+}
+
+impl Default for QuicConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_bidi_streams: 100,
+            max_concurrent_uni_streams: 100,
+            stream_receive_window: None,
+            receive_window: None,
+            send_window: None,
+            socket_send_buffer_size: None,
+            socket_recv_buffer_size: None,
+        }
+    }
+}
+
+impl QuicConfig {
+    pub fn make_transport_config(&self) -> quinn::TransportConfig {
+        fn make_varint(value: u64) -> quinn::VarInt {
+            quinn::VarInt::from_u64(value).unwrap_or(quinn::VarInt::MAX)
+        }
+
+        let mut config = quinn::TransportConfig::default();
+        config.max_concurrent_bidi_streams(make_varint(self.max_concurrent_bidi_streams));
+        config.max_concurrent_uni_streams(make_varint(self.max_concurrent_uni_streams));
+
+        if let Some(stream_receive_window) = self.stream_receive_window {
+            config.stream_receive_window(make_varint(stream_receive_window));
+        }
+        if let Some(receive_window) = self.receive_window {
+            config.receive_window(make_varint(receive_window));
+        }
+        if let Some(send_window) = self.send_window {
+            config.receive_window(make_varint(send_window));
+        }
+
+        config
     }
 }
 
@@ -48,46 +102,86 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
-    pub fn builder<T: Into<String>>(name: T, private_key: [u8; 32]) -> EndpointConfigBuilder {
-        EndpointConfigBuilder::new(name, private_key)
-    }
-}
-
-pub struct EndpointConfigBuilder {
-    server_name: String,
-    private_key: [u8; 32],
-    transport_config: Option<quinn::TransportConfig>,
-}
-
-impl EndpointConfigBuilder {
-    pub fn new<T: Into<String>>(name: T, private_key: [u8; 32]) -> Self {
-        Self {
-            server_name: name.into(),
-            private_key,
-            transport_config: None,
+    pub fn builder() -> EndpointConfigBuilder<((), ())> {
+        EndpointConfigBuilder {
+            mandatory_fields: ((), ()),
+            optional_fields: Default::default(),
         }
     }
 
+    pub fn make_client_config_for_peer_id(&self, peer_id: PeerId) -> Result<quinn::ClientConfig> {
+        let client_config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(
+                self.server_name.clone(),
+                peer_id,
+            )))
+            .with_client_auth_cert(vec![self.client_cert.clone()], self.pkcs8_der.clone())?;
+
+        let mut client = quinn::ClientConfig::new(Arc::new(client_config));
+        client.transport_config(self.transport_config.clone());
+        Ok(client)
+    }
+}
+
+pub struct EndpointConfigBuilder<MandatoryFields = (String, [u8; 32])> {
+    mandatory_fields: MandatoryFields,
+    optional_fields: EndpointConfigBuilderFields,
+}
+
+#[derive(Default)]
+struct EndpointConfigBuilderFields {
+    transport_config: Option<quinn::TransportConfig>,
+}
+
+impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
     pub fn with_transport_config(mut self, transport_config: quinn::TransportConfig) -> Self {
-        self.transport_config = Some(transport_config);
+        self.optional_fields.transport_config = Some(transport_config);
         self
     }
+}
 
+impl<T2> EndpointConfigBuilder<((), T2)> {
+    pub fn with_server_name<T: Into<String>>(
+        self,
+        server_name: T,
+    ) -> EndpointConfigBuilder<(String, T2)> {
+        let (_, private_key) = self.mandatory_fields;
+        EndpointConfigBuilder {
+            mandatory_fields: (server_name.into(), private_key),
+            optional_fields: self.optional_fields,
+        }
+    }
+}
+
+impl<T1> EndpointConfigBuilder<(T1, ())> {
+    pub fn with_private_key(self, private_key: [u8; 32]) -> EndpointConfigBuilder<(T1, [u8; 32])> {
+        let (server_name, _) = self.mandatory_fields;
+        EndpointConfigBuilder {
+            mandatory_fields: (server_name, private_key),
+            optional_fields: self.optional_fields,
+        }
+    }
+}
+
+impl EndpointConfigBuilder {
     pub fn build(self) -> Result<EndpointConfig> {
+        let (server_name, private_key) = self.mandatory_fields;
+
         let keypair = ed25519::KeypairBytes {
-            secret_key: self.private_key,
+            secret_key: private_key,
             public_key: None,
         };
 
-        let transport_config = Arc::new(self.transport_config.unwrap_or_default());
+        let transport_config = Arc::new(self.optional_fields.transport_config.unwrap_or_default());
 
         let reset_key = compute_reset_key(&keypair.secret_key);
         let quinn_endpoint_config = quinn::EndpointConfig::new(Arc::new(reset_key));
 
-        let (cert, pkcs8_der) = crate::crypto::generate_cert(&keypair, &self.server_name)
+        let (cert, pkcs8_der) = crate::crypto::generate_cert(&keypair, &server_name)
             .context("Failed to generate a certificate")?;
 
-        let cert_verifier = Arc::new(CertVerifier::from(self.server_name.clone()));
+        let cert_verifier = Arc::new(CertVerifier::from(server_name.clone()));
         let quinn_client_config = make_client_config(
             cert.clone(),
             pkcs8_der.clone(),
@@ -96,7 +190,7 @@ impl EndpointConfigBuilder {
         )?;
 
         let quinn_server_config = make_server_config(
-            &self.server_name,
+            &server_name,
             pkcs8_der.clone(),
             cert.clone(),
             cert_verifier,
@@ -107,7 +201,7 @@ impl EndpointConfigBuilder {
 
         Ok(EndpointConfig {
             peer_id,
-            server_name: self.server_name,
+            server_name,
             client_cert: cert,
             pkcs8_der,
             quinn_server_config,

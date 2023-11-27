@@ -77,6 +77,16 @@ impl Endpoint {
         self.connect_with_client_config(self.config.quinn_client_config.clone(), address)
     }
 
+    /// Connect to a remote endpoint expecting it to have the provided peer id.
+    pub fn connect_with_expected_id(
+        &self,
+        address: SocketAddr,
+        peer_id: PeerId,
+    ) -> Result<Connecting> {
+        let config = self.config.make_client_config_for_peer_id(peer_id)?;
+        self.connect_with_client_config(config, address)
+    }
+
     /// Connect to a remote endpoint using a custom configuration.
     fn connect_with_client_config(
         &self,
