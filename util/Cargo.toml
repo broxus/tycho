@@ -5,7 +5,7 @@ edition = "2021"
 description = "Shared utilities for node components."
 
 [dependencies]
-# creates.io deps
+# crates.io deps
 
 # local deps
 

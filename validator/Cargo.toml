@@ -5,7 +5,7 @@ edition = "2021"
 description = "A validator node."
 
 [dependencies]
-# creates.io deps
+# crates.io deps
 
 # local deps
 tycho-core = { path = "../core", version = "=0.0.1" }

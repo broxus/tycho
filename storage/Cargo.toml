@@ -5,10 +5,10 @@ edition = "2021"
 description = "A unified storage interface."
 
 [dependencies]
-# creates.io deps
+# crates.io deps
 
 # local deps
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [lints]
-workspace= true
+workspace = true
