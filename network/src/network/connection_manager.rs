@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -5,16 +6,20 @@ use std::time::{Duration, Instant};
 
 use ahash::HashMap;
 use anyhow::Result;
+use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
+use tower::util::BoxCloneService;
 
 use crate::config::Config;
 use crate::connection::Connection;
 use crate::endpoint::{Connecting, Endpoint};
 use crate::types::{
-    Direction, DisconnectReason, FastDashMap, FastHashMap, PeerAffinity, PeerEvent, PeerId,
-    PeerInfo,
+    Direction, DisconnectReason, FastDashMap, FastHashMap, InboundServiceRequest, PeerAffinity,
+    PeerEvent, PeerId, PeerInfo, Response,
 };
+
+use super::request_handler::InboundRequestHandler;
 
 #[derive(Debug)]
 pub enum ConnectionManagerRequest {
@@ -36,6 +41,8 @@ pub struct ConnectionManager {
 
     active_peers: ActivePeers,
     known_peers: KnownPeers,
+
+    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
 }
 
 impl Drop for ConnectionManager {
@@ -50,6 +57,7 @@ impl ConnectionManager {
         endpoint: Arc<Endpoint>,
         active_peers: ActivePeers,
         known_peers: KnownPeers,
+        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
     ) -> (Self, mpsc::Sender<ConnectionManagerRequest>) {
         let (mailbox_tx, mailbox) = mpsc::channel(config.connection_manager_channel_capacity);
         let connection_manager = Self {
@@ -62,6 +70,7 @@ impl ConnectionManager {
             dial_backoff_states: Default::default(),
             active_peers,
             known_peers,
+            service,
         };
         (connection_manager, mailbox_tx)
     }
@@ -292,7 +301,13 @@ impl ConnectionManager {
 
     fn add_peer(&mut self, connection: Connection) {
         if let Some(connection) = self.active_peers.add(self.endpoint.peer_id(), connection) {
-            // TODO: spawn request handler
+            let handler = InboundRequestHandler::new(
+                self.config.clone(),
+                connection,
+                self.service.clone(),
+                self.active_peers.clone(),
+            );
+            self.connection_handlers.spawn(handler.start());
         }
     }
 

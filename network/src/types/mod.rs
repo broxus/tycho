@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 pub use self::peer_id::*;
 
@@ -42,6 +43,18 @@ pub struct Response<T> {
     pub body: T,
 }
 
+pub struct InboundServiceRequest<T> {
+    pub metadata: Arc<InboundRequestMeta>,
+    pub body: T,
+}
+
+#[derive(Debug, Clone)]
+pub struct InboundRequestMeta {
+    pub peer_id: PeerId,
+    pub origin: Direction,
+    pub remote_address: SocketAddr,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PeerAffinity {
     High,
@@ -75,7 +88,14 @@ pub enum DisconnectReason {
 }
 
 impl From<quinn::ConnectionError> for DisconnectReason {
+    #[inline]
     fn from(value: quinn::ConnectionError) -> Self {
+        Self::from(&value)
+    }
+}
+
+impl From<&quinn::ConnectionError> for DisconnectReason {
+    fn from(value: &quinn::ConnectionError) -> Self {
         match value {
             quinn::ConnectionError::VersionMismatch => Self::VersionMismatch,
             quinn::ConnectionError::TransportError(_) => Self::TransportError,

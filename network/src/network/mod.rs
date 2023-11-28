@@ -1,13 +1,16 @@
+use std::convert::Infallible;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use rand::Rng;
 use tokio::sync::{mpsc, oneshot};
+use tower::ServiceExt;
 
 use crate::config::{Config, EndpointConfig};
 use crate::endpoint::Endpoint;
-use crate::types::{DisconnectReason, PeerId};
+use crate::types::{DisconnectReason, InboundServiceRequest, PeerId, Response};
 
 use self::connection_manager::{
     ActivePeers, ConnectionManager, ConnectionManagerRequest, KnownPeers, WeakActivePeers,
@@ -16,6 +19,7 @@ use self::peer::Peer;
 
 pub mod connection_manager;
 pub mod peer;
+pub mod request_handler;
 
 pub struct Builder<MandatoryFields = (String, [u8; 32])> {
     mandatory_fields: MandatoryFields,
@@ -59,7 +63,16 @@ impl<T1> Builder<(T1, ())> {
 }
 
 impl Builder {
-    pub fn build<T: ToSocketAddrs>(self, bind_address: T) -> Result<Network> {
+    pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
+    where
+        S: Clone + Send + 'static,
+        S: tower::Service<
+            InboundServiceRequest<Bytes>,
+            Response = Response<Bytes>,
+            Error = Infallible,
+        >,
+        <S as tower::Service<InboundServiceRequest<Bytes>>>::Future: Send + 'static,
+    {
         use socket2::{Domain, Protocol, Socket, Type};
 
         let config = self.optional_fields.config.unwrap_or_default();
@@ -109,22 +122,29 @@ impl Builder {
         let weak_active_peers = ActivePeers::downgrade(&active_peers);
         let known_peers = KnownPeers::new();
 
-        let (connection_manager, connection_manager_handle) = ConnectionManager::new(
-            config.clone(),
-            endpoint.clone(),
-            active_peers,
-            known_peers.clone(),
-        );
+        let inner = Arc::new_cyclic(move |_weak| {
+            let service = service.boxed_clone();
 
-        tokio::spawn(connection_manager.start());
+            let (connection_manager, connection_manager_handle) = ConnectionManager::new(
+                config.clone(),
+                endpoint.clone(),
+                active_peers,
+                known_peers.clone(),
+                service,
+            );
 
-        Ok(Network(Arc::new(NetworkInner {
-            config,
-            endpoint,
-            active_peers: weak_active_peers,
-            known_peers,
-            connection_manager_handle,
-        })))
+            tokio::spawn(connection_manager.start());
+
+            NetworkInner {
+                config,
+                endpoint,
+                active_peers: weak_active_peers,
+                known_peers,
+                connection_manager_handle,
+            }
+        });
+
+        Ok(Network(inner))
     }
 }
 
@@ -218,9 +238,23 @@ impl NetworkInner {
 
 #[cfg(test)]
 mod tests {
+    use tower::util::BoxCloneService;
     use tracing_test::traced_test;
 
     use super::*;
+
+    fn echo_service() -> BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>
+    {
+        let handle = |request: InboundServiceRequest<Bytes>| async move {
+            tracing::trace!("received: {}", request.body.escape_ascii());
+            let response = Response {
+                version: Default::default(),
+                body: request.body,
+            };
+            Ok::<_, Infallible>(response)
+        };
+        tower::service_fn(handle).boxed_clone()
+    }
 
     #[tokio::test]
     #[traced_test]
@@ -228,17 +262,17 @@ mod tests {
         let peer1 = Network::builder()
             .with_random_private_key()
             .with_service_name("tycho")
-            .build("127.0.0.1:0")?;
+            .build("127.0.0.1:0", echo_service())?;
 
         let peer2 = Network::builder()
             .with_random_private_key()
             .with_service_name("tycho")
-            .build("127.0.0.1:0")?;
+            .build("127.0.0.1:0", echo_service())?;
 
         let peer3 = Network::builder()
             .with_random_private_key()
             .with_service_name("not-tycho")
-            .build("127.0.0.1:0")?;
+            .build("127.0.0.1:0", echo_service())?;
 
         assert!(peer1.connect(peer2.local_addr()).await.is_ok());
         assert!(peer2.connect(peer1.local_addr()).await.is_ok());

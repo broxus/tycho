@@ -7,31 +7,134 @@ int256 8*[ int ] = Int256;
 ---types---
 
 /**
-* @param id    hash of the TL repr of the full key (@see transport.id.Full)
-*/
-transport.id.short id:int256 = transport.id.Short;
-
-/**
 * @param key   compressed ed25519 verifying key
 */
-transport.id.full.ed25519 key:int256 = transport.id.Full;
+transport.peerId key:int256 = transport.PeerId;
 
 transport.address.ipv4 ip:int port:int = transport.Address;
 transport.address.ipv6 ip:int128 port:int = transport.Address;
 
 /**
 * @param items      multiple possible addresses for the same peer
-* @param version    unix timestamp when the list was generated
-* @param created_at unix timestamp when the peer was started
-* @param expire_at  unix timestamp up to which this list is valid
+* @param created_at unix timestamp when the list was generated
+* @param expires_at unix timestamp up to which this list is valid
 */
 transport.addressList
     items:(vector transport.Address)
-    version:int
     created_at:int
-    expire_at:int
+    expires_at:int
     = transport.AddressList;
 
-transport.message.notify data:bytes = transport.Message;
-transport.message.query data:bytes = transport.Message;
-transport.message.answer data:bytes = transport.Message;
+// DHT
+////////////////////////////////////////////////////////////////////////////////
+
+---types---
+
+/**
+* @param id         node public key
+* @param addr_list  list of possible peer addresses
+* @param created_at unix timestamp when the entry was generated
+* @param signature  a ed25519 signature of the entry
+*/
+dht.node
+    id:transport.PeerId
+    addr_list:transport.addressList
+    created_at:int
+    signature:bytes
+    = dht.Node;
+
+/**
+* @param nodes list of DHT nodes
+*/
+dht.nodes nodes:(vector dht.node) = dht.Nodes;
+
+
+/**
+* Key for the value that can only be updated by an owner
+*
+* @param name       key name as UTF-8 string
+* @param idx        key index used for versioning
+* @param peer_id    owner id
+* @param signature  a ed25519 signature of this structure by the owner
+*/
+dht.signedKey
+    name:bytes
+    idx:int
+    peer_id:transport.PeerId
+    signature:bytes
+    = dht.Key;
+
+/**
+* Key for the overlay-managed value
+*
+* @param id     overlay id
+* @param name   key name as UTF-8 string
+* @param idx    key index used for versioning
+*/
+dht.overlayKey id:int256 name:bytes idx:int = dht.Key;
+
+
+/**
+* A value with an exact owner
+*
+* @param key        signed key
+* @param value      any data
+* @param expires_at unix timestamp up to which this value is valid
+*/
+dht.signedValue key:dht.signedKey data:bytes expires_at:int signature:bytes = dht.Value;
+
+/**
+* An overlay-managed value
+*
+* @param key        overlay key
+* @param value      any data
+* @param expires_at unix timestamp up to which this value is valid
+*/
+dht.signedValue key:dht.overlayKey data:bytes expires_at:int = dht.Value;
+
+
+/**
+* A response for the `dht.store` query
+*/
+dht.stored = dht.Stored;
+
+
+/**
+* A successful response for the `dht.findValue` query
+*
+* @param value  an existing value
+*/
+dht.valueFound value:dht.Value = dht.ValueResponse;
+/**
+* An unsuccessul response for the `dht.findValue` query
+*
+* @param value  a list of nodes with the shortest distances
+*/
+dht.valueNotFound nodes:dht.nodes = dht.ValueResponse;
+
+---functions---
+
+/**
+* Suggest a node to store that value
+*
+* @param value  value to store
+*/
+dht.store value:dht.value = dht.Stored;
+/**
+* Searches for k closest nodes
+*
+* @param peer_id    peer_id to measure distances
+* @param k          max length of the result list
+*/
+dht.findNode peer_id:transport.PeerId k:int = dht.Nodes;
+/**
+* Searches for a value by the hash of its key
+*
+* @param peer_id    peer_id to measure distances
+* @param k          max length of the nodes list if it is not found
+*/
+dht.findValue key:int256 k:int = dht.ValueResponse;
+/**
+* Requests a signed address list
+*/
+dht.getNodeInfo = dht.Node;

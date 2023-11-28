@@ -1,32 +1,39 @@
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
 use quinn::{ConnectionError, RecvStream};
 
-use crate::types::{Direction, PeerId};
+use crate::types::{Direction, InboundRequestMeta, PeerId};
 
 #[derive(Clone)]
 pub struct Connection {
     inner: quinn::Connection,
-    peer_id: PeerId,
-    origin: Direction,
+    request_meta: Arc<InboundRequestMeta>,
 }
 
 impl Connection {
     pub fn new(inner: quinn::Connection, origin: Direction) -> Result<Self> {
         let peer_id = extract_peer_id(&inner)?;
         Ok(Self {
+            request_meta: Arc::new(InboundRequestMeta {
+                peer_id,
+                origin,
+                remote_address: inner.remote_address(),
+            }),
             inner,
-            peer_id,
-            origin,
         })
     }
 
+    pub fn request_meta(&self) -> &Arc<InboundRequestMeta> {
+        &self.request_meta
+    }
+
     pub fn peer_id(&self) -> &PeerId {
-        &self.peer_id
+        &self.request_meta.peer_id
     }
 
     pub fn stable_id(&self) -> usize {
@@ -34,11 +41,11 @@ impl Connection {
     }
 
     pub fn origin(&self) -> Direction {
-        self.origin
+        self.request_meta.origin
     }
 
     pub fn remote_address(&self) -> SocketAddr {
-        self.inner.remote_address()
+        self.request_meta.remote_address
     }
 
     pub fn close(&self) {
@@ -75,10 +82,10 @@ impl Connection {
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Connection")
-            .field("origin", &self.origin)
+            .field("origin", &self.request_meta.origin)
             .field("id", &self.stable_id())
             .field("remote_address", &self.remote_address())
-            .field("peer_id", &self.peer_id)
+            .field("peer_id", &self.request_meta.peer_id)
             .finish_non_exhaustive()
     }
 }
