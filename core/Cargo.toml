@@ -6,6 +6,7 @@ description = "Basic functionality of peer."
 
 [dependencies]
 # crates.io deps
+anyhow = "1.0"
 
 # local deps
 tycho-network = { path = "../network", version = "=0.0.1" }
