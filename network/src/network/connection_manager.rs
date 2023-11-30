@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -15,15 +14,15 @@ use crate::config::Config;
 use crate::connection::Connection;
 use crate::endpoint::{Connecting, Endpoint};
 use crate::types::{
-    Direction, DisconnectReason, FastDashMap, FastHashMap, InboundServiceRequest, PeerAffinity,
-    PeerEvent, PeerId, PeerInfo, Response,
+    Address, Direction, DisconnectReason, FastDashMap, FastHashMap, InboundServiceRequest,
+    PeerAffinity, PeerEvent, PeerId, PeerInfo, Response,
 };
 
 use super::request_handler::InboundRequestHandler;
 
 #[derive(Debug)]
 pub enum ConnectionManagerRequest {
-    Connect(SocketAddr, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
+    Connect(Address, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -47,7 +46,7 @@ pub struct ConnectionManager {
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
-        self.endpoint.close()
+        self.endpoint.close();
     }
 }
 
@@ -192,8 +191,7 @@ impl ConnectionManager {
                     && self
                         .dial_backoff_states
                         .get(&peer_info.peer_id)
-                        .map(|state| now > state.next_attempt_at)
-                        .unwrap_or(true)
+                        .map_or(true, |state| now > state.next_attempt_at)
             })
             .take(outstanding_connections_limit)
             .map(|item| item.value().clone())
@@ -208,11 +206,11 @@ impl ConnectionManager {
 
     fn handle_connect_request(
         &mut self,
-        address: SocketAddr,
+        address: Address,
         peer_id: Option<PeerId>,
         callback: oneshot::Sender<Result<PeerId>>,
     ) {
-        self.dial_peer(address, peer_id, callback)
+        self.dial_peer(address, peer_id, callback);
     }
 
     fn handle_incoming(&mut self, connecting: Connecting) {
@@ -314,13 +312,13 @@ impl ConnectionManager {
     #[tracing::instrument(level = "trace", skip_all, fields(peer_id = ?peer_id, address = %address))]
     fn dial_peer(
         &mut self,
-        address: SocketAddr,
+        address: Address,
         peer_id: Option<PeerId>,
         callback: oneshot::Sender<Result<PeerId>>,
     ) {
         async fn dial_peer_task(
             connecting: Result<Connecting>,
-            address: SocketAddr,
+            address: Address,
             peer_id: Option<PeerId>,
             callback: oneshot::Sender<Result<PeerId>>,
             config: Arc<Config>,
@@ -343,13 +341,14 @@ impl ConnectionManager {
             }
         }
 
+        let target_address = address.clone();
         let connecting = match peer_id {
             None => self.endpoint.connect(address),
             Some(peer_id) => self.endpoint.connect_with_expected_id(address, peer_id),
         };
         self.pending_connections.spawn(dial_peer_task(
             connecting,
-            address,
+            target_address,
             peer_id,
             callback,
             self.config.clone(),
@@ -360,7 +359,7 @@ impl ConnectionManager {
 struct ConnectingOutput {
     connecting_result: Result<Connection>,
     callback: Option<oneshot::Sender<Result<PeerId>>>,
-    target_address: Option<SocketAddr>,
+    target_address: Option<Address>,
     target_peer_id: Option<PeerId>,
 }
 
@@ -411,7 +410,7 @@ impl ActivePeers {
     }
 
     pub fn remove(&self, peer_id: &PeerId, reason: DisconnectReason) {
-        self.0.remove(peer_id, reason)
+        self.0.remove(peer_id, reason);
     }
 
     pub fn remove_with_stable_id(
@@ -420,7 +419,7 @@ impl ActivePeers {
         stable_id: usize,
         reason: DisconnectReason,
     ) {
-        self.0.remove_with_stable_id(peer_id, stable_id, reason)
+        self.0.remove_with_stable_id(peer_id, stable_id, reason);
     }
 
     pub fn is_empty(&self) -> bool {

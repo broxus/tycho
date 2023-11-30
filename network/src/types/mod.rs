@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-pub use self::peer_id::*;
+pub use self::address::{Address, AddressList};
+pub use self::peer_id::{Direction, PeerId};
 
+mod address;
 mod peer_id;
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
@@ -66,7 +68,8 @@ pub enum PeerAffinity {
 pub struct PeerInfo {
     pub peer_id: PeerId,
     pub affinity: PeerAffinity,
-    pub address: SocketAddr,
+    // TODO: change to address list
+    pub address: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,7 +10,7 @@ use tower::ServiceExt;
 
 use crate::config::{Config, EndpointConfig};
 use crate::endpoint::Endpoint;
-use crate::types::{DisconnectReason, InboundServiceRequest, PeerId, Response};
+use crate::types::{Address, DisconnectReason, InboundServiceRequest, PeerId, Response};
 
 use self::connection_manager::{
     ActivePeers, ConnectionManager, ConnectionManagerRequest, KnownPeers, WeakActivePeers,
@@ -174,12 +174,18 @@ impl Network {
         self.0.known_peers()
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> Result<PeerId> {
-        self.0.connect(addr, None).await
+    pub async fn connect<T>(&self, addr: T) -> Result<PeerId>
+    where
+        T: Into<Address>,
+    {
+        self.0.connect(addr.into(), None).await
     }
 
-    pub async fn connect_with_peer_id(&self, addr: SocketAddr, peer_id: &PeerId) -> Result<PeerId> {
-        self.0.connect(addr, Some(peer_id)).await
+    pub async fn connect_with_peer_id<T>(&self, addr: T, peer_id: &PeerId) -> Result<PeerId>
+    where
+        T: Into<Address>,
+    {
+        self.0.connect(addr.into(), Some(peer_id)).await
     }
 
     pub fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
@@ -208,7 +214,7 @@ impl NetworkInner {
         &self.known_peers
     }
 
-    async fn connect(&self, addr: SocketAddr, peer_id: Option<&PeerId>) -> Result<PeerId> {
+    async fn connect(&self, addr: Address, peer_id: Option<&PeerId>) -> Result<PeerId> {
         let (tx, rx) = oneshot::channel();
         self.connection_manager_handle
             .send(ConnectionManagerRequest::Connect(
@@ -217,7 +223,7 @@ impl NetworkInner {
                 tx,
             ))
             .await
-            .map_err(|_| anyhow::anyhow!("network has been shutdown"))?;
+            .map_err(|_e| anyhow::anyhow!("network has been shutdown"))?;
         rx.await?
     }
 

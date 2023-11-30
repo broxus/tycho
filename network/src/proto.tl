@@ -90,7 +90,7 @@ dht.signedValue key:dht.signedKey data:bytes expires_at:int signature:bytes = dh
 * @param value      any data
 * @param expires_at unix timestamp up to which this value is valid
 */
-dht.signedValue key:dht.overlayKey data:bytes expires_at:int = dht.Value;
+dht.overlayValue key:dht.overlayKey data:bytes expires_at:int = dht.Value;
 
 
 /**
@@ -123,15 +123,15 @@ dht.store value:dht.value = dht.Stored;
 /**
 * Searches for k closest nodes
 *
-* @param peer_id    peer_id to measure distances
-* @param k          max length of the result list
+* @param key    key hash
+* @param k      max length of the result list
 */
-dht.findNode peer_id:transport.PeerId k:int = dht.Nodes;
+dht.findNode key:int256 k:int = dht.Nodes;
 /**
-* Searches for a value by the hash of its key
+* Searches for a value if stored or k closest nodes
 *
-* @param peer_id    peer_id to measure distances
-* @param k          max length of the nodes list if it is not found
+* @param key    key hash
+* @param k      max length of the nodes list if it is not found
 */
 dht.findValue key:int256 k:int = dht.ValueResponse;
 /**

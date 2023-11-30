@@ -32,7 +32,7 @@ pub fn peer_id_from_certificate(
     use x509_parser::prelude::{FromDer, X509Certificate};
 
     let (_, cert) = X509Certificate::from_der(certificate.0.as_ref())
-        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+        .map_err(|_e| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
     let spki = cert.public_key();
     let public_key =
         ed25519::pkcs8::PublicKeyBytes::from_public_key_der(spki.raw).map_err(|e| {
@@ -118,7 +118,8 @@ impl rustls::server::ClientCertVerifier for CertVerifier {
     ) -> Result<rustls::server::ClientCertVerified, rustls::Error> {
         // Parse the certificate
         let prepared = prepare_for_self_signed(end_entity, intermediates)?;
-        let now = webpki::Time::try_from(now).map_err(|_| rustls::Error::FailedToGetCurrentTime)?;
+        let now =
+            webpki::Time::try_from(now).map_err(|_e| rustls::Error::FailedToGetCurrentTime)?;
 
         // Verify the certificate
         prepared
@@ -173,7 +174,8 @@ impl rustls::client::ServerCertVerifier for CertVerifier {
 
         // Parse the certificate
         let prepared = prepare_for_self_signed(end_entity, intermediates)?;
-        let now = webpki::Time::try_from(now).map_err(|_| rustls::Error::FailedToGetCurrentTime)?;
+        let now =
+            webpki::Time::try_from(now).map_err(|_e| rustls::Error::FailedToGetCurrentTime)?;
 
         // Verify the certificate
         prepared

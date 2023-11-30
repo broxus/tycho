@@ -49,7 +49,7 @@ impl Connection {
     }
 
     pub fn close(&self) {
-        self.inner.close(0u8.into(), b"connection closed")
+        self.inner.close(0u8.into(), b"connection closed");
     }
 
     pub async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
