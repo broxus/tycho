@@ -16,6 +16,18 @@ impl PeerId {
     }
 }
 
+impl<'a> TlRead<'a> for &'a PeerId {
+    type Repr = tl_proto::Boxed;
+
+    #[inline]
+    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
+        if u32::read_from(packet, offset)? != PeerId::TL_ID {
+            return Err(tl_proto::TlError::UnknownConstructor);
+        }
+        <_>::read_from(packet, offset).map(PeerId::wrap)
+    }
+}
+
 impl std::fmt::Display for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let len = f.precision().unwrap_or(32);

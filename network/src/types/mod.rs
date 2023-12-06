@@ -4,9 +4,11 @@ use std::sync::Arc;
 
 pub use self::address::{Address, AddressList};
 pub use self::peer_id::{Direction, PeerId};
+pub use self::rpc::RpcQuery;
 
 mod address;
 mod peer_id;
+mod rpc;
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 pub type FastHashMap<K, V> = HashMap<K, V, ahash::RandomState>;

@@ -100,6 +100,14 @@ dht.stored = dht.Stored;
 
 
 /**
+* A response for the `dht.findNode` query
+*
+* @param value  a list of nodes with the shortest distances
+*/
+dht.nodesFound nodes:dht.nodes = dht.NodeResponse;
+
+
+/**
 * A successful response for the `dht.findValue` query
 *
 * @param value  an existing value
@@ -112,6 +120,14 @@ dht.valueFound value:dht.Value = dht.ValueResponse;
 */
 dht.valueNotFound nodes:dht.nodes = dht.ValueResponse;
 
+
+/*
+* A response for the `dht.getNodeInfo` query
+*
+* @param info   a signed node info
+*/
+dht.nodeInfoFound info:dht.node = dht.NodeInfoResponse;
+
 ---functions---
 
 /**
@@ -119,14 +135,14 @@ dht.valueNotFound nodes:dht.nodes = dht.ValueResponse;
 *
 * @param value  value to store
 */
-dht.store value:dht.value = dht.Stored;
+dht.store value:dht.Value = dht.Stored;
 /**
 * Searches for k closest nodes
 *
 * @param key    key hash
 * @param k      max length of the result list
 */
-dht.findNode key:int256 k:int = dht.Nodes;
+dht.findNode key:int256 k:int = dht.NodeResponse;
 /**
 * Searches for a value if stored or k closest nodes
 *
@@ -137,4 +153,4 @@ dht.findValue key:int256 k:int = dht.ValueResponse;
 /**
 * Requests a signed address list
 */
-dht.getNodeInfo = dht.Node;
+dht.getNodeInfo = dht.NodeInfoResponse;
