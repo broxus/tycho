@@ -27,9 +27,6 @@ pub struct SignedKey {
     pub idx: u32,
     /// Public key of the owner.
     pub peer_id: PeerId,
-    /// A `ed25519` signature of this entry.
-    #[tl(signature)]
-    pub signature: Bytes,
 }
 
 /// Key for overlay-managed values.
@@ -78,6 +75,29 @@ pub enum Value {
     Signed(SignedValue),
     /// Overlay-managed value.
     Overlay(OverlayValue),
+}
+
+impl Value {
+    pub fn key_name(&self) -> &[u8] {
+        match self {
+            Self::Signed(value) => value.key.name.as_ref(),
+            Self::Overlay(value) => value.key.name.as_ref(),
+        }
+    }
+
+    pub const fn key_index(&self) -> u32 {
+        match self {
+            Self::Signed(value) => value.key.idx,
+            Self::Overlay(value) => value.key.idx,
+        }
+    }
+
+    pub const fn expires_at(&self) -> u32 {
+        match self {
+            Self::Signed(value) => value.expires_at,
+            Self::Overlay(value) => value.expires_at,
+        }
+    }
 }
 
 impl TlWrite for Value {

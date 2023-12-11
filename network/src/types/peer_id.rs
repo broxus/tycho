@@ -1,3 +1,4 @@
+use everscale_crypto::ed25519;
 use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone, Copy, TlRead, TlWrite, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -13,6 +14,10 @@ impl PeerId {
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    pub fn as_public_key(&self) -> Option<ed25519::PublicKey> {
+        ed25519::PublicKey::from_bytes(self.0)
     }
 }
 

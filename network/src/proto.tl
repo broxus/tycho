@@ -55,13 +55,11 @@ dht.nodes nodes:(vector dht.node) = dht.Nodes;
 * @param name       key name as UTF-8 string
 * @param idx        key index used for versioning
 * @param peer_id    owner id
-* @param signature  a ed25519 signature of this structure by the owner
 */
 dht.signedKey
     name:bytes
     idx:int
     peer_id:transport.PeerId
-    signature:bytes
     = dht.Key;
 
 /**
