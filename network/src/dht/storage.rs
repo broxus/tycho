@@ -1,3 +1,4 @@
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -12,8 +13,25 @@ use crate::dht::proto;
 type DhtCache<S> = Cache<StorageKeyId, StoredValue, S>;
 type DhtCacheBuilder<S> = CacheBuilder<StorageKeyId, StoredValue, DhtCache<S>>;
 
+pub trait OverlayValueMerger {
+    fn check_value(&self, new: &proto::OverlayValue) -> Result<(), StorageError>;
+
+    fn merge_value(&self, new: &proto::OverlayValue, stored: &mut proto::OverlayValue) -> bool;
+}
+
+impl OverlayValueMerger for () {
+    fn check_value(&self, _new: &proto::OverlayValue) -> Result<(), StorageError> {
+        Err(StorageError::InvalidKey)
+    }
+
+    fn merge_value(&self, _new: &proto::OverlayValue, _stored: &mut proto::OverlayValue) -> bool {
+        false
+    }
+}
+
 pub struct Builder {
     cache_builder: DhtCacheBuilder<std::collections::hash_map::RandomState>,
+    overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl: Duration,
     max_key_name_len: usize,
     max_key_index: u32,
@@ -24,6 +42,7 @@ impl Default for Builder {
     fn default() -> Self {
         Self {
             cache_builder: Default::default(),
+            overlay_value_merger: Weak::<()>::new(),
             max_ttl: Duration::from_secs(3600),
             max_key_name_len: 128,
             max_key_index: 4,
@@ -34,7 +53,9 @@ impl Default for Builder {
 impl Builder {
     pub fn build(self) -> Storage {
         fn weigher(_key: &StorageKeyId, value: &StoredValue) -> u32 {
-            32 + 4 + value.data.len() as u32
+            std::mem::size_of::<StorageKeyId>() as u32
+                + std::mem::size_of::<StoredValue>() as u32
+                + value.data.len() as u32
         }
 
         Storage {
@@ -44,10 +65,16 @@ impl Builder {
                 .weigher(weigher)
                 .expire_after(ValueExpiry)
                 .build_with_hasher(ahash::RandomState::default()),
+            overlay_value_merger: self.overlay_value_merger,
             max_ttl_sec: self.max_ttl.as_secs().try_into().unwrap_or(u32::MAX),
             max_key_name_len: self.max_key_name_len,
             max_key_index: self.max_key_index,
         }
+    }
+
+    pub fn with_overlay_value_merger(mut self, merger: &Arc<dyn OverlayValueMerger>) -> Self {
+        self.overlay_value_merger = Arc::downgrade(merger);
+        self
     }
 
     pub fn with_max_key_name_len(mut self, len: usize) -> Self {
@@ -78,6 +105,7 @@ impl Builder {
 
 pub struct Storage {
     cache: DhtCache<ahash::RandomState>,
+    overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl_sec: u32,
     max_key_name_len: usize,
     max_key_index: u32,
@@ -131,8 +159,42 @@ impl Storage {
             .is_fresh())
     }
 
-    fn insert_overlay_value(&self, _value: &proto::OverlayValue) -> Result<bool, StorageError> {
-        todo!()
+    fn insert_overlay_value(&self, value: &proto::OverlayValue) -> Result<bool, StorageError> {
+        use std::borrow::Cow;
+        use std::cell::RefCell;
+
+        let Some(merger) = self.overlay_value_merger.upgrade() else {
+            return Ok(false);
+        };
+
+        merger.check_value(value)?;
+
+        let new_value = RefCell::new(Cow::Borrowed(value));
+
+        Ok(self
+            .cache
+            .entry(tl_proto::hash(&value.key))
+            .or_insert_with_if(
+                || {
+                    let value = new_value.borrow();
+                    StoredValue::new(value.as_ref(), value.expires_at)
+                },
+                |prev| {
+                    let Ok(mut prev) = tl_proto::deserialize::<proto::OverlayValue>(&prev.data)
+                    else {
+                        // Invalid values are always replaced with new values
+                        return true;
+                    };
+
+                    if merger.merge_value(value, &mut prev) {
+                        *new_value.borrow_mut() = Cow::Owned(prev);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            )
+            .is_fresh())
     }
 }
 
