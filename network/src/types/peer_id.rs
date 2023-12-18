@@ -49,6 +49,51 @@ impl std::fmt::Debug for PeerId {
     }
 }
 
+impl std::ops::BitXor for PeerId {
+    type Output = PeerId;
+
+    #[inline]
+    fn bitxor(mut self, rhs: PeerId) -> Self::Output {
+        self ^= rhs;
+        self
+    }
+}
+
+impl std::ops::BitXor<&PeerId> for PeerId {
+    type Output = PeerId;
+
+    #[inline]
+    fn bitxor(mut self, rhs: &PeerId) -> Self::Output {
+        self ^= rhs;
+        self
+    }
+}
+
+impl std::ops::BitXor<&PeerId> for &PeerId {
+    type Output = PeerId;
+
+    #[inline]
+    fn bitxor(self, rhs: &PeerId) -> Self::Output {
+        *self ^ rhs
+    }
+}
+
+impl std::ops::BitXorAssign for PeerId {
+    #[inline]
+    fn bitxor_assign(&mut self, rhs: PeerId) {
+        std::ops::BitXorAssign::bitxor_assign(self, &rhs)
+    }
+}
+
+impl std::ops::BitXorAssign<&PeerId> for PeerId {
+    #[inline]
+    fn bitxor_assign(&mut self, rhs: &PeerId) {
+        for (left, right) in self.0.iter_mut().zip(&rhs.0) {
+            *left ^= right;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub enum Direction {
     Inbound,
