@@ -8,11 +8,11 @@ use tokio::task::JoinSet;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tower::util::{BoxCloneService, ServiceExt};
 
+use super::connection_manager::ActivePeers;
+use super::wire::{make_codec, recv_request, send_response};
 use crate::config::Config;
 use crate::connection::{Connection, SendStream};
 use crate::types::{DisconnectReason, InboundRequestMeta, InboundServiceRequest, Response};
-
-use super::connection_manager::ActivePeers;
 
 pub struct InboundRequestHandler {
     config: Arc<Config>,
@@ -116,8 +116,8 @@ impl BiStreamRequestHandler {
         Self {
             meta,
             service,
-            send_stream: FramedWrite::new(send_stream, crate::proto::make_codec(config)),
-            recv_stream: FramedRead::new(recv_stream, crate::proto::make_codec(config)),
+            send_stream: FramedWrite::new(send_stream, make_codec(config)),
+            recv_stream: FramedRead::new(recv_stream, make_codec(config)),
         }
     }
 
@@ -128,7 +128,7 @@ impl BiStreamRequestHandler {
     }
 
     async fn do_handle(mut self) -> Result<()> {
-        let req = crate::proto::recv_request(&mut self.recv_stream).await?;
+        let req = recv_request(&mut self.recv_stream).await?;
         let res = {
             let handler = self.service.oneshot(InboundServiceRequest {
                 metadata: self.meta,
@@ -142,7 +142,7 @@ impl BiStreamRequestHandler {
             }
         };
 
-        crate::proto::send_response(&mut self.send_stream, res).await?;
+        send_response(&mut self.send_stream, res).await?;
         self.send_stream.get_mut().finish().await?;
 
         Ok(())

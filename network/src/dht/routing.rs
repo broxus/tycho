@@ -3,13 +3,13 @@ use std::time::{Duration, Instant};
 
 use crate::types::PeerId;
 
-pub struct Builder {
+pub struct RoutingTableBuilder {
     local_id: PeerId,
     max_k: usize,
     node_timeout: Duration,
 }
 
-impl Builder {
+impl RoutingTableBuilder {
     pub fn build(self) -> RoutingTable {
         RoutingTable {
             local_id: self.local_id,
@@ -33,8 +33,8 @@ pub struct RoutingTable {
 }
 
 impl RoutingTable {
-    pub fn builder(local_id: PeerId) -> Builder {
-        Builder {
+    pub fn builder(local_id: PeerId) -> RoutingTableBuilder {
+        RoutingTableBuilder {
             local_id,
             max_k: 20,
             node_timeout: Duration::from_secs(15 * 60),

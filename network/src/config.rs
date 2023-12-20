@@ -90,7 +90,7 @@ impl QuicConfig {
     }
 }
 
-pub struct EndpointConfig {
+pub(crate) struct EndpointConfig {
     pub peer_id: PeerId,
     pub service_name: String,
     pub client_cert: rustls::Certificate,
@@ -124,7 +124,7 @@ impl EndpointConfig {
     }
 }
 
-pub struct EndpointConfigBuilder<MandatoryFields = (String, [u8; 32])> {
+pub(crate) struct EndpointConfigBuilder<MandatoryFields = (String, [u8; 32])> {
     mandatory_fields: MandatoryFields,
     optional_fields: EndpointConfigBuilderFields,
 }

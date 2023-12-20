@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -12,16 +12,18 @@ use crate::config::{Config, EndpointConfig};
 use crate::endpoint::Endpoint;
 use crate::types::{Address, DisconnectReason, InboundServiceRequest, PeerId, Response};
 
+pub use self::peer::Peer;
+
 use self::connection_manager::{
     ActivePeers, ConnectionManager, ConnectionManagerRequest, KnownPeers, WeakActivePeers,
 };
-use self::peer::Peer;
 
-pub mod connection_manager;
-pub mod peer;
-pub mod request_handler;
+mod connection_manager;
+mod peer;
+mod request_handler;
+mod wire;
 
-pub struct Builder<MandatoryFields = (String, [u8; 32])> {
+pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
     mandatory_fields: MandatoryFields,
     optional_fields: BuilderFields,
 }
@@ -31,38 +33,38 @@ struct BuilderFields {
     config: Option<Config>,
 }
 
-impl<MandatoryFields> Builder<MandatoryFields> {
+impl<MandatoryFields> NetworkBuilder<MandatoryFields> {
     pub fn with_config(mut self, config: Config) -> Self {
         self.optional_fields.config = Some(config);
         self
     }
 }
 
-impl<T2> Builder<((), T2)> {
-    pub fn with_service_name<T: Into<String>>(self, name: T) -> Builder<(String, T2)> {
+impl<T2> NetworkBuilder<((), T2)> {
+    pub fn with_service_name<T: Into<String>>(self, name: T) -> NetworkBuilder<(String, T2)> {
         let (_, private_key) = self.mandatory_fields;
-        Builder {
+        NetworkBuilder {
             mandatory_fields: (name.into(), private_key),
             optional_fields: self.optional_fields,
         }
     }
 }
 
-impl<T1> Builder<(T1, ())> {
-    pub fn with_private_key(self, private_key: [u8; 32]) -> Builder<(T1, [u8; 32])> {
+impl<T1> NetworkBuilder<(T1, ())> {
+    pub fn with_private_key(self, private_key: [u8; 32]) -> NetworkBuilder<(T1, [u8; 32])> {
         let (service_name, _) = self.mandatory_fields;
-        Builder {
+        NetworkBuilder {
             mandatory_fields: (service_name, private_key),
             optional_fields: self.optional_fields,
         }
     }
 
-    pub fn with_random_private_key(self) -> Builder<(T1, [u8; 32])> {
+    pub fn with_random_private_key(self) -> NetworkBuilder<(T1, [u8; 32])> {
         self.with_private_key(rand::thread_rng().gen())
     }
 }
 
-impl Builder {
+impl NetworkBuilder {
     pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
     where
         S: Clone + Send + 'static,
@@ -148,11 +150,25 @@ impl Builder {
     }
 }
 
+#[derive(Clone)]
+pub struct WeakNetwork(Weak<NetworkInner>);
+
+impl WeakNetwork {
+    pub fn upgrade(&self) -> Option<Network> {
+        self.0
+            .upgrade()
+            .map(Network)
+            .and_then(|network| (!network.is_closed()).then_some(network))
+    }
+}
+
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct Network(Arc<NetworkInner>);
 
 impl Network {
-    pub fn builder() -> Builder<((), ())> {
-        Builder {
+    pub fn builder() -> NetworkBuilder<((), ())> {
+        NetworkBuilder {
             mandatory_fields: ((), ()),
             optional_fields: Default::default(),
         }
@@ -191,9 +207,17 @@ impl Network {
     pub fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
         self.0.disconnect(peer_id)
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        self.0.shutdown().await
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
 }
 
-pub struct NetworkInner {
+struct NetworkInner {
     config: Arc<Config>,
     endpoint: Arc<Endpoint>,
     active_peers: WeakActivePeers,
@@ -239,6 +263,19 @@ impl NetworkInner {
         let active_peers = self.active_peers.upgrade()?;
         let connection = active_peers.get(peer_id)?;
         Some(Peer::new(connection, self.config.clone()))
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.connection_manager_handle
+            .send(ConnectionManagerRequest::Shutdown(sender))
+            .await
+            .map_err(|_e| anyhow::anyhow!("network has been shutdown"))?;
+        receiver.await.map_err(Into::into)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.connection_manager_handle.is_closed()
     }
 }
 

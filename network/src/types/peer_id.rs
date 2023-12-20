@@ -97,7 +97,7 @@ impl std::ops::BitXor<&PeerId> for &PeerId {
 impl std::ops::BitXorAssign for PeerId {
     #[inline]
     fn bitxor_assign(&mut self, rhs: PeerId) {
-        std::ops::BitXorAssign::bitxor_assign(self, &rhs)
+        std::ops::BitXorAssign::bitxor_assign(self, &rhs);
     }
 }
 

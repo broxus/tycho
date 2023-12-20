@@ -8,28 +8,36 @@ use moka::Expiry;
 use tl_proto::TlWrite;
 use tycho_util::time::*;
 
-use crate::dht::proto;
+use crate::proto;
 
 type DhtCache<S> = Cache<StorageKeyId, StoredValue, S>;
 type DhtCacheBuilder<S> = CacheBuilder<StorageKeyId, StoredValue, DhtCache<S>>;
 
 pub trait OverlayValueMerger {
-    fn check_value(&self, new: &proto::OverlayValue) -> Result<(), StorageError>;
+    fn check_value(&self, new: &proto::dht::OverlayValue) -> Result<(), StorageError>;
 
-    fn merge_value(&self, new: &proto::OverlayValue, stored: &mut proto::OverlayValue) -> bool;
+    fn merge_value(
+        &self,
+        new: &proto::dht::OverlayValue,
+        stored: &mut proto::dht::OverlayValue,
+    ) -> bool;
 }
 
 impl OverlayValueMerger for () {
-    fn check_value(&self, _new: &proto::OverlayValue) -> Result<(), StorageError> {
+    fn check_value(&self, _new: &proto::dht::OverlayValue) -> Result<(), StorageError> {
         Err(StorageError::InvalidKey)
     }
 
-    fn merge_value(&self, _new: &proto::OverlayValue, _stored: &mut proto::OverlayValue) -> bool {
+    fn merge_value(
+        &self,
+        _new: &proto::dht::OverlayValue,
+        _stored: &mut proto::dht::OverlayValue,
+    ) -> bool {
         false
     }
 }
 
-pub struct Builder {
+pub struct StorageBuilder {
     cache_builder: DhtCacheBuilder<std::collections::hash_map::RandomState>,
     overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl: Duration,
@@ -38,7 +46,7 @@ pub struct Builder {
     // TODO: add a hashset for allowed keys (maybe separate signed keys from overlay keys)
 }
 
-impl Default for Builder {
+impl Default for StorageBuilder {
     fn default() -> Self {
         Self {
             cache_builder: Default::default(),
@@ -50,7 +58,7 @@ impl Default for Builder {
     }
 }
 
-impl Builder {
+impl StorageBuilder {
     pub fn build(self) -> Storage {
         fn weigher(_key: &StorageKeyId, value: &StoredValue) -> u32 {
             std::mem::size_of::<StorageKeyId>() as u32
@@ -112,11 +120,11 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn builder() -> Builder {
-        Builder::default()
+    pub fn builder() -> StorageBuilder {
+        StorageBuilder::default()
     }
 
-    pub fn insert(&self, value: &proto::Value) -> Result<bool, StorageError> {
+    pub fn insert(&self, value: &proto::dht::Value) -> Result<bool, StorageError> {
         match value.expires_at().checked_sub(now_sec()) {
             Some(0) | None => return Err(StorageError::ValueExpired),
             Some(remaining_ttl) if remaining_ttl > self.max_ttl_sec => {
@@ -132,12 +140,12 @@ impl Storage {
         }
 
         match value {
-            proto::Value::Signed(value) => self.insert_signed_value(value),
-            proto::Value::Overlay(value) => self.insert_overlay_value(value),
+            proto::dht::Value::Signed(value) => self.insert_signed_value(value),
+            proto::dht::Value::Overlay(value) => self.insert_overlay_value(value),
         }
     }
 
-    fn insert_signed_value(&self, value: &proto::SignedValue) -> Result<bool, StorageError> {
+    fn insert_signed_value(&self, value: &proto::dht::SignedValue) -> Result<bool, StorageError> {
         let Some(public_key) = value.key.peer_id.as_public_key() else {
             return Err(StorageError::InvalidSignature);
         };
@@ -159,7 +167,7 @@ impl Storage {
             .is_fresh())
     }
 
-    fn insert_overlay_value(&self, value: &proto::OverlayValue) -> Result<bool, StorageError> {
+    fn insert_overlay_value(&self, value: &proto::dht::OverlayValue) -> Result<bool, StorageError> {
         use std::borrow::Cow;
         use std::cell::RefCell;
 
@@ -180,7 +188,8 @@ impl Storage {
                     StoredValue::new(value.as_ref(), value.expires_at)
                 },
                 |prev| {
-                    let Ok(mut prev) = tl_proto::deserialize::<proto::OverlayValue>(&prev.data)
+                    let Ok(mut prev) =
+                        tl_proto::deserialize::<proto::dht::OverlayValue>(&prev.data)
                     else {
                         // Invalid values are always replaced with new values
                         return true;

@@ -168,6 +168,7 @@ pub struct NodeInfoResponse {
     pub info: NodeInfo,
 }
 
+/// DHT RPC models.
 pub mod rpc {
     use crate::types::RpcQuery;
 

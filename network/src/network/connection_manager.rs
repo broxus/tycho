@@ -10,6 +10,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tower::util::BoxCloneService;
 
+use super::request_handler::InboundRequestHandler;
+use super::wire::handshake;
 use crate::config::Config;
 use crate::connection::Connection;
 use crate::endpoint::{Connecting, Endpoint};
@@ -17,8 +19,6 @@ use crate::types::{
     Address, Direction, DisconnectReason, FastDashMap, FastHashMap, InboundServiceRequest,
     PeerAffinity, PeerEvent, PeerId, PeerInfo, Response,
 };
-
-use super::request_handler::InboundRequestHandler;
 
 #[derive(Debug)]
 pub enum ConnectionManagerRequest {
@@ -248,7 +248,7 @@ impl ConnectionManager {
                     }
                 }
 
-                crate::proto::handshake(connection).await
+                handshake(connection).await
             };
 
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
@@ -325,7 +325,7 @@ impl ConnectionManager {
         ) -> ConnectingOutput {
             let fut = async {
                 let connection = connecting?.await?;
-                crate::proto::handshake(connection).await
+                handshake(connection).await
             };
 
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)

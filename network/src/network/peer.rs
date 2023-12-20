@@ -4,9 +4,9 @@ use anyhow::Result;
 use bytes::Bytes;
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use super::wire::{make_codec, recv_response, send_request};
 use crate::config::Config;
 use crate::connection::Connection;
-use crate::proto::{make_codec, recv_response, send_request};
 use crate::types::{PeerId, Request, Response};
 
 #[derive(Clone)]

@@ -1,8 +1,16 @@
-pub mod config;
-pub mod connection;
-pub mod crypto;
-pub mod dht;
-pub mod endpoint;
-pub mod network;
-pub mod proto;
-pub mod types;
+pub use config::{Config, QuicConfig};
+pub use dht::Dht;
+pub use network::{Network, NetworkBuilder, Peer, WeakNetwork};
+pub use types::{Address, AddressList, Direction, PeerId, Request, Response, RpcQuery, Version};
+
+mod config;
+mod connection;
+mod crypto;
+mod dht;
+mod endpoint;
+mod network;
+mod types;
+
+pub mod proto {
+    pub mod dht;
+}
