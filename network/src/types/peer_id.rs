@@ -1,4 +1,7 @@
+use std::str::FromStr;
+
 use everscale_crypto::ed25519;
+use rand::Rng;
 use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone, Copy, TlRead, TlWrite, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -18,6 +21,10 @@ impl PeerId {
 
     pub fn as_public_key(&self) -> Option<ed25519::PublicKey> {
         ed25519::PublicKey::from_bytes(self.0)
+    }
+
+    pub fn random() -> Self {
+        Self(rand::thread_rng().gen())
     }
 }
 
@@ -46,6 +53,15 @@ impl std::fmt::Display for PeerId {
 impl std::fmt::Debug for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PeerId({self})")
+    }
+}
+
+impl FromStr for PeerId {
+    type Err = hex::FromHexError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut peer_id = PeerId([0; 32]);
+        hex::decode_to_slice(s, &mut peer_id.0).map(|_| peer_id)
     }
 }
 
