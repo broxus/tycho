@@ -422,6 +422,10 @@ impl ActivePeers {
         self.0.remove_with_stable_id(peer_id, stable_id, reason);
     }
 
+    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        self.0.subscribe()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -522,6 +526,10 @@ impl ActivePeersInner {
         }
     }
 
+    fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        self.events_tx.subscribe()
+    }
+
     fn send_event(&self, event: PeerEvent) {
         _ = self.events_tx.send(event);
     }
@@ -556,6 +564,10 @@ pub struct KnownPeers(Arc<FastDashMap<PeerId, PeerInfo>>);
 impl KnownPeers {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        self.0.contains_key(peer_id)
     }
 
     pub fn get(&self, peer_id: &PeerId) -> Option<PeerInfo> {

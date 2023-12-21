@@ -6,7 +6,7 @@ use bytes::{Bytes, BytesMut};
 use moka::sync::{Cache, CacheBuilder};
 use moka::Expiry;
 use tl_proto::TlWrite;
-use tycho_util::time::*;
+use tycho_util::time::now_sec;
 
 use crate::proto;
 

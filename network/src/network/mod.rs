@@ -2,15 +2,15 @@ use std::convert::Infallible;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Weak};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tower::ServiceExt;
 
 use crate::config::{Config, EndpointConfig};
 use crate::endpoint::Endpoint;
-use crate::types::{Address, DisconnectReason, InboundServiceRequest, PeerId, Response};
+use crate::types::{Address, DisconnectReason, InboundServiceRequest, PeerEvent, PeerId, Response};
 
 pub use self::peer::Peer;
 
@@ -190,6 +190,11 @@ impl Network {
         self.0.known_peers()
     }
 
+    pub fn subscribe(&self) -> Result<broadcast::Receiver<PeerEvent>> {
+        let active_peers = self.0.active_peers.upgrade().ok_or(NetworkShutdownError)?;
+        Ok(active_peers.subscribe())
+    }
+
     pub async fn connect<T>(&self, addr: T) -> Result<PeerId>
     where
         T: Into<Address>,
@@ -247,7 +252,7 @@ impl NetworkInner {
                 tx,
             ))
             .await
-            .map_err(|_e| anyhow::anyhow!("network has been shutdown"))?;
+            .map_err(|_e| NetworkShutdownError)?;
         rx.await?
     }
 
@@ -270,7 +275,7 @@ impl NetworkInner {
         self.connection_manager_handle
             .send(ConnectionManagerRequest::Shutdown(sender))
             .await
-            .map_err(|_e| anyhow::anyhow!("network has been shutdown"))?;
+            .map_err(|_e| NetworkShutdownError)?;
         receiver.await.map_err(Into::into)
     }
 
@@ -278,6 +283,10 @@ impl NetworkInner {
         self.connection_manager_handle.is_closed()
     }
 }
+
+#[derive(thiserror::Error, Debug)]
+#[error("network has been shutdown")]
+struct NetworkShutdownError;
 
 #[cfg(test)]
 mod tests {

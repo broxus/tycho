@@ -11,6 +11,8 @@ mod endpoint;
 mod network;
 mod types;
 
+pub mod util;
+
 pub mod proto {
     pub mod dht;
 }

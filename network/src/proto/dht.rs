@@ -17,6 +17,12 @@ pub struct NodeInfo {
     pub signature: Bytes,
 }
 
+pub trait WithValue:
+    TlWrite<Repr = tl_proto::Boxed> + for<'a> TlRead<'a, Repr = tl_proto::Boxed>
+{
+    type Value<'a>: TlWrite<Repr = tl_proto::Boxed> + TlRead<'a, Repr = tl_proto::Boxed>;
+}
+
 /// Key for values that can only be updated by the owner.
 #[derive(Debug, Clone, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.signedKey", scheme = "proto.tl")]
@@ -29,6 +35,10 @@ pub struct SignedKey {
     pub peer_id: PeerId,
 }
 
+impl WithValue for SignedKey {
+    type Value<'a> = SignedValue;
+}
+
 /// Key for overlay-managed values.
 #[derive(Debug, Clone, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.overlayKey", scheme = "proto.tl")]
@@ -39,6 +49,10 @@ pub struct OverlayKey {
     pub name: Bytes,
     /// Key index (version).
     pub idx: u32,
+}
+
+impl WithValue for OverlayKey {
+    type Value<'a> = OverlayValue;
 }
 
 /// Value with a known owner.
