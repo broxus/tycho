@@ -1,1 +1,1 @@
-mod queue;
+mod msg_queue;
