@@ -97,6 +97,20 @@ where
     /// Should execute it first when syncing queue from other nodes.
     fn apply_persistent_state(&mut self, p_state: PersistentStateData) -> Result<()>;
 
+    /// Shrinks diff history in storage, create and save persistent state.
+    /// Persistent state is identified by the block on which it was created.
+    ///
+    /// Actions:
+    ///  1. find diff (Dn) in storage by specified block
+    ///  2. get all uprocessed messages (Mu) from it and prev diffs (from [D0..Dn])
+    ///  3. get top "processed upto" marks (Upto) from it and diffs (from [D0..Dn])
+    ///  4. create and store persistent state data object with:
+    /// uprocessed messages (Mu) and top "processed upto" marks (Upto)
+    ///  5. remove diff (Dn) and all prevs ([D0..Dn]) from storage
+    ///
+    /// New persistent state replaces the previous one.
+    fn create_persistent_state(&mut self, block_ident: BlockIdent) -> Result<PersistentStateData>;
+
     /// Get queue state data on the specified block for syncing to another node:
     ///  - persistent state  if exists
     ///  - all diffs upto specified block
@@ -201,6 +215,10 @@ where
     }
 
     fn apply_persistent_state(&mut self, p_state: PersistentStateData) -> Result<()> {
+        todo!()
+    }
+
+    fn create_persistent_state(&mut self, block_ident: BlockIdent) -> Result<PersistentStateData> {
         todo!()
     }
 
