@@ -1,7 +1,10 @@
 pub use config::{Config, QuicConfig};
 pub use dht::Dht;
 pub use network::{Network, NetworkBuilder, Peer, WeakNetwork};
-pub use types::{Address, AddressList, Direction, PeerId, Request, Response, RpcQuery, Version};
+pub use types::{
+    Address, AddressList, Direction, FastDashMap, FastHashMap, InboundServiceRequest, PeerId,
+    Request, Response, RpcQuery, Version,
+};
 
 mod config;
 mod connection;
