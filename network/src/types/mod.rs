@@ -1,17 +1,18 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub use self::address::{Address, AddressList};
 pub use self::peer_id::{Direction, PeerId};
 pub use self::rpc::RpcQuery;
+pub use self::service::{
+    service_datagram_fn, service_message_fn, service_query_fn, BoxCloneService, BoxService,
+    Service, ServiceDatagramFn, ServiceExt, ServiceMessageFn, ServiceQueryFn,
+};
 
 mod address;
 mod peer_id;
 mod rpc;
-
-pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
-pub type FastHashMap<K, V> = HashMap<K, V, ahash::RandomState>;
+mod service;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]

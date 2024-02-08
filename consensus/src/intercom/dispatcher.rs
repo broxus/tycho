@@ -1,21 +1,16 @@
-use std::convert::Infallible;
-use std::net::SocketAddr;
-use std::str::FromStr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tower::util::BoxCloneService;
-use tower::ServiceExt;
 
 use tycho_network::util::NetworkExt;
-use tycho_network::{Config, InboundServiceRequest, Network, Response, Version};
+use tycho_network::{service_query_fn, Config, InboundServiceRequest, Network, Response, Version};
 
 use crate::intercom::responses::*;
 use crate::models::{Location, Point, PointId, RoundId, Signature};
 
-const LOCAL_ADDR: &str = "127.0.0.1:0";
 #[derive(Serialize, Deserialize, Debug)]
 enum MPRequest {
     // by author
@@ -56,14 +51,17 @@ pub struct Dispatcher {
 impl Dispatcher {
     pub fn new() -> Result<Self> {
         let inner = Arc::new(DispatcherInner {});
-        let handler = inner.clone();
-        let service_fn: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible> =
-            tower::service_fn(move |a| handler.clone().handle(a)).boxed_clone();
+        let service_fn = service_query_fn({
+            let inner = inner.clone();
+            move |req| inner.clone().handle(req)
+        });
+
         let network = Network::builder()
             .with_config(Config::default())
             .with_random_private_key()
             .with_service_name("tycho-mempool-router")
-            .build(LOCAL_ADDR, service_fn)?;
+            .build((Ipv4Addr::LOCALHOST, 0), service_fn)?;
+
         Ok(Self { inner, network })
     }
 
@@ -157,96 +155,66 @@ struct DispatcherInner {
 }
 
 impl DispatcherInner {
-    async fn handle(
-        self: Arc<Self>,
-        request: InboundServiceRequest<Bytes>,
-    ) -> Result<Response<Bytes>, Infallible> {
-        let result = match bincode::deserialize::<MPRequest>(&request.body) {
-            Ok(request_body) => {
-                let result: Result<MPResponse> = match &request_body {
-                    MPRequest::Broadcast { point } => {
-                        // 1.1 sigs for my block + 1.2 my next includes
-                        // ?? + 3.1 ask last
-                        Ok(MPResponse::Broadcast(BroadcastResponse {
-                            current_round: RoundId(0),
-                            signature: Signature(Bytes::new()),
-                            signer_point: None,
-                        }))
-                    }
-                    MPRequest::Point { id } => {
-                        // 1.2 my next includes (merged with Broadcast flow)
-                        Ok(MPResponse::Point(PointResponse {
-                            current_round: RoundId(0),
-                            point: None,
-                        }))
-                    }
-                    MPRequest::Vertex { id } => {
-                        // verification flow: downloader
-                        Ok(MPResponse::Vertex(VertexResponse {
-                            current_round: RoundId(0),
-                            vertex: None,
-                        }))
-                    }
-                    MPRequest::Evidence { vertex_id } => {
-                        // verification flow: downloader
-                        Ok(MPResponse::Evidence(EvidenceResponse {
-                            current_round: RoundId(0),
-                            point: None,
-                        }))
-                    }
-                    MPRequest::Vertices { round } => {
-                        // cold sync flow: downloader
-                        Ok(MPResponse::Vertices(VerticesResponse {
-                            vertices: Vec::new(),
-                        }))
-                    }
-                };
-                result
-                    .map(|r| MPRemoteResult::Ok(r))
-                    .map_err(|e| {
-                        let msg = format!("{e:?}");
-                        tracing::error!(
-                            "failed to process request {:?} from {:?}: {msg}",
-                            request_body,
-                            request.metadata.as_ref()
-                        );
-                        MPRemoteResult::Err(format!("remote exception in execution: {msg}"))
-                    })
-                    .unwrap()
-            }
+    async fn handle(self: Arc<Self>, req: InboundServiceRequest<Bytes>) -> Option<Response<Bytes>> {
+        let body = match bincode::deserialize::<MPRequest>(&req.body) {
+            Ok(body) => body,
             Err(e) => {
-                let msg = format!("{e:?}");
-                tracing::warn!(
-                    "unexpected request from {:?}: {msg}",
-                    request.metadata.as_ref()
-                );
-                MPRemoteResult::Err(format!(
-                    "remote exception on request deserialization: {msg}"
-                ))
+                tracing::error!("unexpected request from {:?}: {e:?}", req.metadata);
+                // NOTE: malformed request is a reason to ignore it
+                return None;
             }
         };
 
-        let body = bincode::serialize(&result)
-            .map(Bytes::from)
-            .unwrap_or_else(|err| {
-                let msg = format!("{err:?}");
-                tracing::error!(
-                    "cannot serialize response to {:?}: {msg}; data: {result:?}",
-                    request.metadata.as_ref()
-                );
-                bincode::serialize(&MPRemoteResult::Err(format!(
-                    "remote exception on response serialization: {msg}"
-                )))
-                .map(Bytes::from)
-                // empty body denotes a failure during serialization of error serialization, unlikely to happen
-                .unwrap_or(Bytes::new())
-            });
-
-        let response = Response {
-            version: Version::default(),
-            body,
+        let response = match body {
+            MPRequest::Broadcast { point } => {
+                // 1.1 sigs for my block + 1.2 my next includes
+                // ?? + 3.1 ask last
+                MPResponse::Broadcast(BroadcastResponse {
+                    current_round: RoundId(0),
+                    signature: Signature(Bytes::new()),
+                    signer_point: None,
+                })
+            }
+            MPRequest::Point { id } => {
+                // 1.2 my next includes (merged with Broadcast flow)
+                MPResponse::Point(PointResponse {
+                    current_round: RoundId(0),
+                    point: None,
+                })
+            }
+            MPRequest::Vertex { id } => {
+                // verification flow: downloader
+                MPResponse::Vertex(VertexResponse {
+                    current_round: RoundId(0),
+                    vertex: None,
+                })
+            }
+            MPRequest::Evidence { vertex_id } => {
+                // verification flow: downloader
+                MPResponse::Evidence(EvidenceResponse {
+                    current_round: RoundId(0),
+                    point: None,
+                })
+            }
+            MPRequest::Vertices { round } => {
+                // cold sync flow: downloader
+                MPResponse::Vertices(VerticesResponse {
+                    vertices: Vec::new(),
+                })
+            }
         };
-        Ok::<_, Infallible>(response)
+
+        Some(Response {
+            version: Version::default(),
+            body: Bytes::from(match bincode::serialize(&response) {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::error!("failed to serialize response to {:?}: {e:?}", req.metadata);
+                    bincode::serialize(&MPRemoteResult::Err(format!("internal error")))
+                        .expect("must not fail")
+                }
+            }),
+        })
     }
 }
 

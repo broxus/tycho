@@ -6,8 +6,10 @@ description = "Shared utilities for node components."
 
 [dependencies]
 # crates.io deps
+ahash = "0.8"
+dashmap = "5.4"
 
 # local deps
 
 [lints]
-workspace= true
+workspace = true

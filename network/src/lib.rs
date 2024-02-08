@@ -2,8 +2,10 @@ pub use config::{Config, QuicConfig};
 pub use dht::Dht;
 pub use network::{Network, NetworkBuilder, Peer, WeakNetwork};
 pub use types::{
-    Address, AddressList, Direction, FastDashMap, FastHashMap, InboundServiceRequest, PeerId,
-    Request, Response, RpcQuery, Version,
+    service_datagram_fn, service_message_fn, service_query_fn, Address, AddressList,
+    BoxCloneService, BoxService, Direction, DisconnectReason, InboundRequestMeta,
+    InboundServiceRequest, PeerId, Request, Response, RpcQuery, Service, ServiceDatagramFn,
+    ServiceExt, ServiceMessageFn, ServiceQueryFn, Version,
 };
 
 mod config;

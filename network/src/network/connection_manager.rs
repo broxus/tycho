@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -8,7 +7,7 @@ use anyhow::Result;
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
-use tower::util::BoxCloneService;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use super::request_handler::InboundRequestHandler;
 use super::wire::handshake;
@@ -16,8 +15,8 @@ use crate::config::Config;
 use crate::connection::Connection;
 use crate::endpoint::{Connecting, Endpoint};
 use crate::types::{
-    Address, Direction, DisconnectReason, FastDashMap, FastHashMap, InboundServiceRequest,
-    PeerAffinity, PeerEvent, PeerId, PeerInfo, Response,
+    Address, BoxCloneService, Direction, DisconnectReason, InboundServiceRequest, PeerAffinity,
+    PeerEvent, PeerId, PeerInfo, Response,
 };
 
 #[derive(Debug)]
@@ -41,7 +40,7 @@ pub struct ConnectionManager {
     active_peers: ActivePeers,
     known_peers: KnownPeers,
 
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
+    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
 }
 
 impl Drop for ConnectionManager {
@@ -56,7 +55,7 @@ impl ConnectionManager {
         endpoint: Arc<Endpoint>,
         active_peers: ActivePeers,
         known_peers: KnownPeers,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
+        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
     ) -> (Self, mpsc::Sender<ConnectionManagerRequest>) {
         let (mailbox_tx, mailbox) = mpsc::channel(config.connection_manager_channel_capacity);
         let connection_manager = Self {

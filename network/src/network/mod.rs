@@ -1,16 +1,17 @@
-use std::convert::Infallible;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Weak};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use rand::Rng;
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tower::ServiceExt;
 
 use crate::config::{Config, EndpointConfig};
 use crate::endpoint::Endpoint;
-use crate::types::{Address, DisconnectReason, InboundServiceRequest, PeerEvent, PeerId, Response};
+use crate::types::{
+    Address, DisconnectReason, InboundServiceRequest, PeerEvent, PeerId, Response, Service,
+    ServiceExt,
+};
 
 pub use self::peer::Peer;
 
@@ -68,12 +69,7 @@ impl NetworkBuilder {
     pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
     where
         S: Clone + Send + 'static,
-        S: tower::Service<
-            InboundServiceRequest<Bytes>,
-            Response = Response<Bytes>,
-            Error = Infallible,
-        >,
-        <S as tower::Service<InboundServiceRequest<Bytes>>>::Future: Send + 'static,
+        S: Service<InboundServiceRequest<Bytes>, QueryResponse = Response<Bytes>>,
     {
         use socket2::{Domain, Protocol, Socket, Type};
 
@@ -290,22 +286,21 @@ struct NetworkShutdownError;
 
 #[cfg(test)]
 mod tests {
-    use tower::util::BoxCloneService;
     use tracing_test::traced_test;
 
     use super::*;
+    use crate::types::{service_query_fn, BoxCloneService};
 
-    fn echo_service() -> BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>
-    {
+    fn echo_service() -> BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>> {
         let handle = |request: InboundServiceRequest<Bytes>| async move {
             tracing::trace!("received: {}", request.body.escape_ascii());
             let response = Response {
                 version: Default::default(),
                 body: request.body,
             };
-            Ok::<_, Infallible>(response)
+            Some(response)
         };
-        tower::service_fn(handle).boxed_clone()
+        service_query_fn(handle).boxed_clone()
     }
 
     #[tokio::test]

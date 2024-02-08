@@ -13,7 +13,7 @@ use crate::proto;
 type DhtCache<S> = Cache<StorageKeyId, StoredValue, S>;
 type DhtCacheBuilder<S> = CacheBuilder<StorageKeyId, StoredValue, DhtCache<S>>;
 
-pub trait OverlayValueMerger {
+pub trait OverlayValueMerger: Send + Sync + 'static {
     fn check_value(&self, new: &proto::dht::OverlayValue) -> Result<(), StorageError>;
 
     fn merge_value(

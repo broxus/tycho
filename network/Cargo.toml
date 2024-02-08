@@ -30,7 +30,6 @@ thiserror = "1"
 tl-proto = "0.4"
 tokio = { version = "1", features = ["rt", "sync", "io-util", "macros"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tower = { version = "0.4", features = ["util"] }
 tracing = "0.1"
 x509-parser = "0.15"
 

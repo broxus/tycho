@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use tycho_network::FastHashMap;
+use tycho_util::FastHashMap;
 
 pub const POINT_DIGEST_SIZE: usize = 32;
 pub const SIGNATURE_SIZE: usize = 64;

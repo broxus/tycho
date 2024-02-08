@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,18 +5,19 @@ use bytes::Bytes;
 use quinn::RecvStream;
 use tokio::task::JoinSet;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-use tower::util::{BoxCloneService, ServiceExt};
 
 use super::connection_manager::ActivePeers;
 use super::wire::{make_codec, recv_request, send_response};
 use crate::config::Config;
 use crate::connection::{Connection, SendStream};
-use crate::types::{DisconnectReason, InboundRequestMeta, InboundServiceRequest, Response};
+use crate::types::{
+    BoxCloneService, DisconnectReason, InboundRequestMeta, InboundServiceRequest, Response, Service,
+};
 
 pub struct InboundRequestHandler {
     config: Arc<Config>,
     connection: Connection,
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
+    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
     active_peers: ActivePeers,
 }
 
@@ -25,7 +25,7 @@ impl InboundRequestHandler {
     pub fn new(
         config: Arc<Config>,
         connection: Connection,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
+        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
         active_peers: ActivePeers,
     ) -> Self {
         Self {
@@ -100,7 +100,7 @@ impl InboundRequestHandler {
 
 struct BiStreamRequestHandler {
     meta: Arc<InboundRequestMeta>,
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
+    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
     send_stream: FramedWrite<SendStream, LengthDelimitedCodec>,
     recv_stream: FramedRead<RecvStream, LengthDelimitedCodec>,
 }
@@ -109,7 +109,7 @@ impl BiStreamRequestHandler {
     fn new(
         config: &Config,
         meta: Arc<InboundRequestMeta>,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>, Infallible>,
+        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
         send_stream: SendStream,
         recv_stream: RecvStream,
     ) -> Self {
@@ -129,22 +129,21 @@ impl BiStreamRequestHandler {
 
     async fn do_handle(mut self) -> Result<()> {
         let req = recv_request(&mut self.recv_stream).await?;
-        let res = {
-            let handler = self.service.oneshot(InboundServiceRequest {
-                metadata: self.meta,
-                body: req.body,
-            });
+        let handler = self.service.on_query(InboundServiceRequest {
+            metadata: self.meta,
+            body: req.body,
+        });
 
-            let stopped = self.send_stream.get_mut().stopped();
-            tokio::select! {
-                res = handler => res.expect("infallible always succeeds"),
-                _ = stopped => anyhow::bail!("send_stream closed by remote"),
-            }
-        };
-
-        send_response(&mut self.send_stream, res).await?;
-        self.send_stream.get_mut().finish().await?;
-
-        Ok(())
+        let stopped = self.send_stream.get_mut().stopped();
+        tokio::select! {
+            res = handler => {
+                if let Some(res) = res {
+                    send_response(&mut self.send_stream, res).await?;
+                }
+                self.send_stream.get_mut().finish().await?;
+                Ok(())
+            },
+            _ = stopped => anyhow::bail!("send_stream closed by remote"),
+        }
     }
 }
