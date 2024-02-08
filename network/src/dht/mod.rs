@@ -37,25 +37,25 @@ struct DhtInner {
     network: WeakNetwork,
 }
 
-impl Service<InboundServiceRequest<Bytes>> for Dht {
+impl Service<InboundServiceRequest<Bytes>> for DhtInner {
     type QueryResponse = Response<Bytes>;
     type OnQueryFuture = BoxFuture<'static, Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
-    fn on_query(&mut self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
+    fn on_query(&self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
         // TODO: parse query and dispatch to appropriate method
 
         todo!()
     }
 
     #[inline]
-    fn on_message(&mut self, req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
+    fn on_message(&self, req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
         futures_util::future::ready(())
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: InboundServiceRequest<Bytes>) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, req: InboundServiceRequest<Bytes>) -> Self::OnDatagramFuture {
         futures_util::future::ready(())
     }
 }

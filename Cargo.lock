@@ -232,6 +232,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "castaway"
+version = "0.2.3"
+source = "git+https://github.com/sagebind/castaway.git#564b11fb3394802b895f44fe42a7bba7b17df69b"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.0.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1290,6 +1298,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustversion"
+version = "1.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ffc183a10b4478d04cbbbfc96d0873219d962dd5accaff2ffbd4ceb7df837f4"
+
+[[package]]
 name = "ryu"
 version = "1.0.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1807,6 +1821,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "bytes",
+ "castaway",
  "dashmap",
  "ed25519",
  "everscale-crypto",

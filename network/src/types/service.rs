@@ -1,9 +1,10 @@
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 
-pub trait Service<Request>: Send {
+pub trait Service<Request> {
     type QueryResponse: Send + 'static;
     type OnQueryFuture: Future<Output = Option<Self::QueryResponse>> + Send + 'static;
     type OnMessageFuture: Future<Output = ()> + Send + 'static;
@@ -13,13 +14,13 @@ pub trait Service<Request>: Send {
     ///
     /// Returns a future that resolves to the either response to the query if `Some`,
     /// or cancellation of the query if `None`.
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture;
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture;
 
     /// Called when a message is received.
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture;
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture;
 
     /// Called when a datagram is received.
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture;
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture;
 }
 
 pub trait ServiceExt<Request>: Service<Request> {
@@ -48,9 +49,9 @@ pub trait ServiceExt<Request>: Service<Request> {
 
 impl<T, Request> ServiceExt<Request> for T where T: Service<Request> + Send + ?Sized {}
 
-impl<'a, S, Request> Service<Request> for &'a mut S
+impl<'a, S, Request> Service<Request> for &'a S
 where
-    S: Service<Request> + 'a,
+    S: Service<Request> + Sync + 'a,
 {
     type QueryResponse = S::QueryResponse;
     type OnQueryFuture = S::OnQueryFuture;
@@ -58,18 +59,43 @@ where
     type OnDatagramFuture = S::OnDatagramFuture;
 
     #[inline]
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture {
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
         <S as Service<Request>>::on_query(*self, req)
     }
 
     #[inline]
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture {
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
         <S as Service<Request>>::on_message(*self, req)
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
         <S as Service<Request>>::on_datagram(*self, req)
+    }
+}
+
+impl<S, Request> Service<Request> for Arc<S>
+where
+    S: Service<Request> + Sync + ?Sized,
+{
+    type QueryResponse = S::QueryResponse;
+    type OnQueryFuture = S::OnQueryFuture;
+    type OnMessageFuture = S::OnMessageFuture;
+    type OnDatagramFuture = S::OnDatagramFuture;
+
+    #[inline]
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
+        <S as Service<Request>>::on_query(self.as_ref(), req)
+    }
+
+    #[inline]
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
+        <S as Service<Request>>::on_message(self.as_ref(), req)
+    }
+
+    #[inline]
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
+        <S as Service<Request>>::on_datagram(self.as_ref(), req)
     }
 }
 
@@ -83,33 +109,33 @@ where
     type OnDatagramFuture = S::OnDatagramFuture;
 
     #[inline]
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture {
-        <S as Service<Request>>::on_query(self.as_mut(), req)
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
+        <S as Service<Request>>::on_query(self.as_ref(), req)
     }
 
     #[inline]
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture {
-        <S as Service<Request>>::on_message(self.as_mut(), req)
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
+        <S as Service<Request>>::on_message(self.as_ref(), req)
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture {
-        <S as Service<Request>>::on_datagram(self.as_mut(), req)
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
+        <S as Service<Request>>::on_datagram(self.as_ref(), req)
     }
 }
 
 #[repr(transparent)]
 pub struct BoxService<Request, Q> {
-    inner: Box<
-        dyn Service<
-                Request,
-                QueryResponse = Q,
-                OnQueryFuture = BoxFuture<'static, Option<Q>>,
-                OnMessageFuture = BoxFuture<'static, ()>,
-                OnDatagramFuture = BoxFuture<'static, ()>,
-            > + Send,
-    >,
+    inner: Box<DynBoxService<Request, Q>>,
 }
+
+type DynBoxService<Request, Q> = dyn Service<
+        Request,
+        QueryResponse = Q,
+        OnQueryFuture = BoxFuture<'static, Option<Q>>,
+        OnMessageFuture = BoxFuture<'static, ()>,
+        OnDatagramFuture = BoxFuture<'static, ()>,
+    > + Send;
 
 impl<Request, Q> BoxService<Request, Q> {
     pub fn new<S>(inner: S) -> Self
@@ -136,33 +162,33 @@ where
     type OnDatagramFuture = BoxFuture<'static, ()>;
 
     #[inline]
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture {
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
         self.inner.on_query(req)
     }
 
     #[inline]
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture {
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
         self.inner.on_message(req)
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
         self.inner.on_datagram(req)
     }
 }
 
 #[repr(transparent)]
 pub struct BoxCloneService<Request, Q> {
-    inner: Box<
-        dyn CloneService<
-                Request,
-                QueryResponse = Q,
-                OnQueryFuture = BoxFuture<'static, Option<Q>>,
-                OnMessageFuture = BoxFuture<'static, ()>,
-                OnDatagramFuture = BoxFuture<'static, ()>,
-            > + Send,
-    >,
+    inner: Box<DynBoxCloneService<Request, Q>>,
 }
+
+type DynBoxCloneService<Request, Q> = dyn CloneService<
+        Request,
+        QueryResponse = Q,
+        OnQueryFuture = BoxFuture<'static, Option<Q>>,
+        OnMessageFuture = BoxFuture<'static, ()>,
+        OnDatagramFuture = BoxFuture<'static, ()>,
+    > + Send;
 
 impl<Request, Q> BoxCloneService<Request, Q>
 where
@@ -192,17 +218,17 @@ where
     type OnDatagramFuture = BoxFuture<'static, ()>;
 
     #[inline]
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture {
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
         self.inner.on_query(req)
     }
 
     #[inline]
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture {
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
         self.inner.on_message(req)
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
         self.inner.on_datagram(req)
     }
 }
@@ -219,17 +245,7 @@ where
 }
 
 trait CloneService<Request>: Service<Request> {
-    fn clone_box(
-        &self,
-    ) -> Box<
-        dyn CloneService<
-                Request,
-                QueryResponse = Self::QueryResponse,
-                OnQueryFuture = Self::OnQueryFuture,
-                OnMessageFuture = Self::OnMessageFuture,
-                OnDatagramFuture = Self::OnDatagramFuture,
-            > + Send,
-    >;
+    fn clone_box(&self) -> Box<DynCloneService<Self, Request>>;
 }
 
 impl<Request, S> CloneService<Request> for S
@@ -239,20 +255,18 @@ where
     S::OnMessageFuture: Send + 'static,
     S::OnDatagramFuture: Send + 'static,
 {
-    fn clone_box(
-        &self,
-    ) -> Box<
-        dyn CloneService<
-                Request,
-                QueryResponse = Self::QueryResponse,
-                OnQueryFuture = Self::OnQueryFuture,
-                OnMessageFuture = Self::OnMessageFuture,
-                OnDatagramFuture = Self::OnDatagramFuture,
-            > + Send,
-    > {
+    fn clone_box(&self) -> Box<DynCloneService<Self, Request>> {
         Box::new(self.clone())
     }
 }
+
+type DynCloneService<S, Request> = dyn CloneService<
+        Request,
+        QueryResponse = <S as Service<Request>>::QueryResponse,
+        OnQueryFuture = <S as Service<Request>>::OnQueryFuture,
+        OnMessageFuture = <S as Service<Request>>::OnMessageFuture,
+        OnDatagramFuture = <S as Service<Request>>::OnDatagramFuture,
+    > + Send;
 
 #[repr(transparent)]
 struct BoxPinFutures<S>(S);
@@ -274,18 +288,30 @@ where
     type OnDatagramFuture = BoxFuture<'static, ()>;
 
     #[inline]
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture {
-        Box::pin(self.0.on_query(req))
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
+        let f = self.0.on_query(req);
+        match castaway::cast!(f, Self::OnQueryFuture) {
+            Ok(f) => f,
+            Err(f) => Box::pin(f),
+        }
     }
 
     #[inline]
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture {
-        Box::pin(self.0.on_message(req))
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
+        let f = self.0.on_message(req);
+        match castaway::cast!(f, Self::OnMessageFuture) {
+            Ok(f) => f,
+            Err(f) => Box::pin(f),
+        }
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture {
-        Box::pin(self.0.on_datagram(req))
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
+        let f = self.0.on_datagram(req);
+        match castaway::cast!(f, Self::OnDatagramFuture) {
+            Ok(f) => f,
+            Err(f) => Box::pin(f),
+        }
     }
 }
 
@@ -307,7 +333,7 @@ impl<T: Clone> Clone for ServiceQueryFn<T> {
 impl<Request, Q, T, F> Service<Request> for ServiceQueryFn<T>
 where
     Q: Send + 'static,
-    T: FnMut(Request) -> F + Send + 'static,
+    T: Fn(Request) -> F + Send + 'static,
     F: Future<Output = Option<Q>> + Send + 'static,
 {
     type QueryResponse = Q;
@@ -316,17 +342,17 @@ where
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[inline]
-    fn on_query(&mut self, req: Request) -> Self::OnQueryFuture {
+    fn on_query(&self, req: Request) -> Self::OnQueryFuture {
         (self.f)(req)
     }
 
     #[inline]
-    fn on_message(&mut self, _req: Request) -> Self::OnMessageFuture {
+    fn on_message(&self, _req: Request) -> Self::OnMessageFuture {
         futures_util::future::ready(())
     }
 
     #[inline]
-    fn on_datagram(&mut self, _req: Request) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, _req: Request) -> Self::OnDatagramFuture {
         futures_util::future::ready(())
     }
 }
@@ -356,7 +382,7 @@ pub struct ServiceMessageFn<Q, T> {
 impl<Request, Q, T, F> Service<Request> for ServiceMessageFn<Q, T>
 where
     Q: Send + 'static,
-    T: FnMut(Request) -> F + Send + 'static,
+    T: Fn(Request) -> F + Send + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
     type QueryResponse = Q;
@@ -365,17 +391,17 @@ where
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[inline]
-    fn on_query(&mut self, _req: Request) -> Self::OnQueryFuture {
+    fn on_query(&self, _req: Request) -> Self::OnQueryFuture {
         futures_util::future::ready(None)
     }
 
     #[inline]
-    fn on_message(&mut self, req: Request) -> Self::OnMessageFuture {
+    fn on_message(&self, req: Request) -> Self::OnMessageFuture {
         (self.f)(req)
     }
 
     #[inline]
-    fn on_datagram(&mut self, _req: Request) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, _req: Request) -> Self::OnDatagramFuture {
         futures_util::future::ready(())
     }
 }
@@ -405,7 +431,7 @@ impl<Q, T: Clone> Clone for ServiceDatagramFn<Q, T> {
 impl<Request, Q, T, F> Service<Request> for ServiceDatagramFn<Q, T>
 where
     Q: Send + 'static,
-    T: FnMut(Request) -> F + Send + 'static,
+    T: Fn(Request) -> F + Send + 'static,
     F: Future<Output = ()> + Send + 'static,
 {
     type QueryResponse = Q;
@@ -414,17 +440,17 @@ where
     type OnDatagramFuture = F;
 
     #[inline]
-    fn on_query(&mut self, _req: Request) -> Self::OnQueryFuture {
+    fn on_query(&self, _req: Request) -> Self::OnQueryFuture {
         futures_util::future::ready(None)
     }
 
     #[inline]
-    fn on_message(&mut self, _req: Request) -> Self::OnMessageFuture {
+    fn on_message(&self, _req: Request) -> Self::OnMessageFuture {
         futures_util::future::ready(())
     }
 
     #[inline]
-    fn on_datagram(&mut self, req: Request) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, req: Request) -> Self::OnDatagramFuture {
         (self.f)(req)
     }
 }

@@ -33,6 +33,10 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 x509-parser = "0.15"
 
+# NOTE: use crates.io dependency when it is released
+# https://github.com/sagebind/castaway/issues/18
+castaway = { git = "https://github.com/sagebind/castaway.git" }
+
 # local deps
 tycho-util = { path = "../util", version = "=0.0.1" }
 

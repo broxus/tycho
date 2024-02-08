@@ -68,8 +68,10 @@ impl<T1> NetworkBuilder<(T1, ())> {
 impl NetworkBuilder {
     pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
     where
-        S: Clone + Send + 'static,
-        S: Service<InboundServiceRequest<Bytes>, QueryResponse = Response<Bytes>>,
+        S: Service<InboundServiceRequest<Bytes>, QueryResponse = Response<Bytes>>
+            + Send
+            + Clone
+            + 'static,
     {
         use socket2::{Domain, Protocol, Socket, Type};
 
@@ -147,6 +149,7 @@ impl NetworkBuilder {
 }
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct WeakNetwork(Weak<NetworkInner>);
 
 impl WeakNetwork {
