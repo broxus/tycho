@@ -30,7 +30,7 @@ pub struct RouterBuilder<Request, Q> {
 impl<Request, Q> RouterBuilder<Request, Q> {
     pub fn route<S>(mut self, service: S) -> Self
     where
-        S: Service<Request, QueryResponse = Q> + Routable + Send + 'static,
+        S: Service<Request, QueryResponse = Q> + Routable + Send + Sync + 'static,
     {
         let index = self.inner.services.len();
         for id in service.query_ids() {

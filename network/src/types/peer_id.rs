@@ -65,6 +65,13 @@ impl FromStr for PeerId {
     }
 }
 
+impl From<ed25519::PublicKey> for PeerId {
+    #[inline]
+    fn from(public_key: ed25519::PublicKey) -> Self {
+        Self(public_key.to_bytes())
+    }
+}
+
 impl std::ops::BitXor for PeerId {
     type Output = PeerId;
 

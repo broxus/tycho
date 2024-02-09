@@ -59,7 +59,7 @@ impl Default for StorageBuilder {
 }
 
 impl StorageBuilder {
-    pub fn build(self) -> Storage {
+    pub(crate) fn build(self) -> Storage {
         fn weigher(_key: &StorageKeyId, value: &StoredValue) -> u32 {
             std::mem::size_of::<StorageKeyId>() as u32
                 + std::mem::size_of::<StoredValue>() as u32

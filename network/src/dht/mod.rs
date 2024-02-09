@@ -1,137 +1,183 @@
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use futures_util::Future;
 use tl_proto::TlWrite;
+use tycho_util::time::now_sec;
 
-use self::routing::{RoutingTable, RoutingTableBuilder};
-use self::storage::{Storage, StorageBuilder};
+use self::routing::RoutingTable;
+use self::storage::{Storage, StorageError};
+use crate::proto::dht;
 use crate::types::{PeerId, Response, Service};
-use crate::util::{BoxFutureOrNoop, Routable};
-use crate::{proto, InboundServiceRequest, Network};
+use crate::util::Routable;
+use crate::{AddressList, InboundServiceRequest, Network, WeakNetwork};
+
+pub use self::routing::RoutingTableBuilder;
+pub use self::storage::StorageBuilder;
 
 mod routing;
 mod storage;
 
-pub struct DhtBuilder<MandatoryFields = (RoutingTable, Storage)> {
+pub struct DhtClientBuilder {
+    inner: Arc<DhtInner>,
+    disable_background_tasks: bool,
+}
+
+impl DhtClientBuilder {
+    pub fn disable_background_tasks(mut self) -> Self {
+        self.disable_background_tasks = true;
+        self
+    }
+
+    pub fn build(self, network: Network) -> DhtClient {
+        if !self.disable_background_tasks {
+            self.inner
+                .start_background_tasks(Network::downgrade(&network));
+        }
+
+        DhtClient {
+            inner: self.inner,
+            network,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DhtClient {
+    inner: Arc<DhtInner>,
+    network: Network,
+}
+
+impl DhtClient {
+    pub fn network(&self) -> &Network {
+        &self.network
+    }
+
+    pub fn add_peer(&self, peer: Arc<dht::NodeInfo>) {
+        self.inner.routing_table.lock().unwrap().add(peer);
+    }
+
+    pub async fn find_peers(&self, key: &PeerId) -> Result<Vec<PeerId>> {
+        todo!()
+    }
+
+    pub async fn find_value<T>(&self, key: T) -> Result<T::Value<'static>>
+    where
+        T: dht::WithValue,
+    {
+        todo!()
+    }
+}
+
+pub struct DhtServiceBuilder<MandatoryFields = (RoutingTable, Storage)> {
     mandatory_fields: MandatoryFields,
     local_id: PeerId,
 }
 
-impl DhtBuilder {
+impl DhtServiceBuilder {
     pub fn build(self) -> (DhtClientBuilder, DhtService) {
         let (routing_table, storage) = self.mandatory_fields;
 
         let inner = Arc::new(DhtInner {
             local_id: self.local_id,
             routing_table: Mutex::new(routing_table),
-            last_table_refresh: Instant::now(),
             storage,
             node_info: Mutex::new(None),
         });
 
-        (DhtClientBuilder(inner.clone()), DhtService(inner))
+        let client_builder = DhtClientBuilder {
+            inner: inner.clone(),
+            disable_background_tasks: false,
+        };
+
+        (client_builder, DhtService(inner))
     }
 }
 
-impl<T1> DhtBuilder<(T1, ())> {
-    pub fn with_storage<F>(self, f: F) -> DhtBuilder<(T1, Storage)>
+impl<T1> DhtServiceBuilder<(T1, ())> {
+    pub fn with_storage<F>(self, f: F) -> DhtServiceBuilder<(T1, Storage)>
     where
         F: FnOnce(StorageBuilder) -> StorageBuilder,
     {
         let (routing_table, _) = self.mandatory_fields;
         let storage = f(Storage::builder()).build();
-        DhtBuilder {
+        DhtServiceBuilder {
             mandatory_fields: (routing_table, storage),
             local_id: self.local_id,
         }
     }
 }
 
-impl<T2> DhtBuilder<((), T2)> {
-    pub fn with_routing_table<F>(self, f: F) -> DhtBuilder<(RoutingTable, T2)>
+impl<T2> DhtServiceBuilder<((), T2)> {
+    pub fn with_routing_table<F>(self, f: F) -> DhtServiceBuilder<(RoutingTable, T2)>
     where
         F: FnOnce(RoutingTableBuilder) -> RoutingTableBuilder,
     {
         let routing_table = f(RoutingTable::builder(self.local_id)).build();
         let (_, storage) = self.mandatory_fields;
-        DhtBuilder {
+        DhtServiceBuilder {
             mandatory_fields: (routing_table, storage),
             local_id: self.local_id,
         }
     }
 }
 
-pub struct DhtClientBuilder(Arc<DhtInner>);
-
-impl DhtClientBuilder {
-    pub fn build(self, network: Network) -> DhtClient {
-        // TODO: spawn background tasks here:
-        // - refresh routing table
-        // - update and broadcast node info
-
-        DhtClient {
-            inner: self.0,
-            network,
-        }
-    }
-}
-
+#[derive(Clone)]
 pub struct DhtService(Arc<DhtInner>);
 
 impl DhtService {
-    pub fn builder(local_id: PeerId) -> DhtBuilder<((), ())> {
-        DhtBuilder {
+    pub fn builder(local_id: PeerId) -> DhtServiceBuilder<((), ())> {
+        DhtServiceBuilder {
             mandatory_fields: ((), ()),
             local_id,
         }
     }
-
-    pub fn make_client(&self, network: Network) -> DhtClient {
-        DhtClient {
-            inner: self.0.clone(),
-            network,
-        }
-    }
-}
-
-macro_rules! match_req {
-    ($req:ident, {
-        $($ty:path as $pat:pat => $expr:expr),*$(,)?
-    }) => {{
-        let e = if $req.body.len() >= 4 {
-            match $req.body.as_ref().get_u32_le() {
-                $(
-                    <$ty>::TL_ID => match tl_proto::deserialize::<$ty>(&$req.body) {
-                        Ok($pat) => return ($expr).boxed_or_noop(),
-                        Err(e) => e,
-                    }
-                )*
-                _ => tl_proto::TlError::UnknownConstructor,
-            }
-        } else {
-            tl_proto::TlError::UnexpectedEof
-        };
-        tracing::debug!("failed to deserialize request: {e:?}");
-        BoxFutureOrNoop::Noop
-    }};
 }
 
 impl Service<InboundServiceRequest<Bytes>> for DhtService {
     type QueryResponse = Response<Bytes>;
-    type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
+    type OnQueryFuture = futures_util::future::Ready<Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     fn on_query(&self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
-        match_req!(req, {
-            proto::dht::rpc::Store as req => self.0.clone().store(req),
-            proto::dht::rpc::FindNode as req => self.0.clone().find_node(req),
-            proto::dht::rpc::FindValue as req => self.0.clone().find_value(req),
-            proto::dht::rpc::GetNodeInfo as _ => self.0.clone().get_node_info(),
-        })
+        let response = crate::match_tl_request!(req.body, {
+            dht::rpc::Store as r => match self.0.handle_store(r) {
+                Ok(res) => Some(tl_proto::serialize(res)),
+                Err(e) => {
+                    tracing::debug!(
+                        peer_id = %req.metadata.peer_id,
+                        addr = %req.metadata.remote_address,
+                        "failed to store value: {e:?}"
+                    );
+                    None
+                }
+            },
+            dht::rpc::FindNode as r => {
+                let res = self.0.handle_find_node(r);
+                Some(tl_proto::serialize(res))
+            },
+            dht::rpc::FindValue as r => {
+                let res = self.0.handle_find_value(r);
+                Some(tl_proto::serialize(res))
+            },
+            dht::rpc::GetNodeInfo as _ => {
+                self.0.handle_get_node_info().map(tl_proto::serialize)
+            },
+        }, e => {
+            tracing::debug!(
+                peer_id = %req.metadata.peer_id,
+                addr = %req.metadata.remote_address,
+                "failed to deserialize request from: {e:?}"
+            );
+            None
+        });
+
+        futures_util::future::ready(response.map(|body| Response {
+            version: Default::default(),
+            body: Bytes::from(body),
+        }))
     }
 
     #[inline]
@@ -148,62 +194,91 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
 impl Routable for DhtService {
     fn query_ids(&self) -> impl IntoIterator<Item = u32> {
         [
-            proto::dht::rpc::Store::TL_ID,
-            proto::dht::rpc::FindNode::TL_ID,
-            proto::dht::rpc::FindValue::TL_ID,
-            proto::dht::rpc::GetNodeInfo::TL_ID,
+            dht::rpc::Store::TL_ID,
+            dht::rpc::FindNode::TL_ID,
+            dht::rpc::FindValue::TL_ID,
+            dht::rpc::GetNodeInfo::TL_ID,
         ]
-    }
-}
-
-pub struct DhtClient {
-    inner: Arc<DhtInner>,
-    network: Network,
-}
-
-impl DhtClient {
-    pub async fn find_peers(&self, key: &PeerId) -> Result<Vec<PeerId>> {
-        todo!()
-    }
-
-    pub async fn find_value<T>(&self, key: T) -> Result<T::Value<'static>>
-    where
-        T: proto::dht::WithValue,
-    {
-        todo!()
     }
 }
 
 struct DhtInner {
     local_id: PeerId,
     routing_table: Mutex<RoutingTable>,
-    last_table_refresh: Instant,
     storage: Storage,
-    node_info: Mutex<Option<proto::dht::NodeInfo>>,
+    node_info: Mutex<Option<dht::NodeInfo>>,
 }
 
 impl DhtInner {
-    async fn store(self: Arc<Self>, req: proto::dht::rpc::Store) -> Result<proto::dht::Stored> {
-        self.storage.insert(&req.value)?;
-        Ok(proto::dht::Stored)
+    fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
+        const INFO_TTL: u32 = 3600;
+        const INFO_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
+        const ANNOUNCE_EVERY_N_STEPS: usize = 10;
+
+        let this = Arc::downgrade(self);
+        tokio::spawn(async move {
+            tracing::debug!("background DHT loop started");
+            let mut interval = tokio::time::interval(INFO_UPDATE_INTERVAL);
+            let mut step = 0;
+            loop {
+                interval.tick().await;
+                let (Some(this), Some(network)) = (this.upgrade(), network.upgrade()) else {
+                    break;
+                };
+
+                this.refresh_local_node_info(&network, INFO_TTL);
+
+                step = (step + 1) % ANNOUNCE_EVERY_N_STEPS;
+                if step == 0 {
+                    if let Err(e) = this.announce_local_node_info(&network).await {
+                        tracing::error!("failed to announce local DHT node info: {e:?}");
+                    }
+                }
+            }
+            tracing::debug!("background DHT loop finished");
+        });
     }
 
-    async fn find_node(self: Arc<Self>, req: proto::dht::rpc::FindNode) -> Result<NodeResponseRaw> {
+    fn refresh_local_node_info(&self, network: &Network, ttl: u32) {
+        let now = now_sec();
+        let mut node_info = dht::NodeInfo {
+            id: self.local_id,
+            address_list: AddressList {
+                items: vec![network.local_addr().into()],
+                created_at: now,
+                expires_at: now + ttl,
+            },
+            created_at: now,
+            signature: Bytes::new(),
+        };
+        let signature = network.sign_tl(&node_info);
+        node_info.signature = signature.to_vec().into();
+
+        *self.node_info.lock().unwrap() = Some(node_info);
+    }
+
+    async fn announce_local_node_info(self: &Arc<Self>, _network: &Network) -> Result<()> {
+        // TODO: store node info in the DHT
+        todo!()
+    }
+
+    fn handle_store(&self, req: dht::rpc::Store) -> Result<dht::Stored, StorageError> {
+        self.storage.insert(&req.value).map(|_| dht::Stored)
+    }
+
+    fn handle_find_node(&self, req: dht::rpc::FindNode) -> NodeResponseRaw {
         let nodes = self
             .routing_table
             .lock()
             .unwrap()
             .closest(&req.key, req.k as usize);
 
-        Ok(NodeResponseRaw { nodes })
+        NodeResponseRaw { nodes }
     }
 
-    async fn find_value(
-        self: Arc<Self>,
-        req: proto::dht::rpc::FindValue,
-    ) -> Result<ValueResponseRaw> {
+    fn handle_find_value(&self, req: dht::rpc::FindValue) -> ValueResponseRaw {
         match self.storage.get(&req.key) {
-            Some(value) => Ok(ValueResponseRaw::Found(value)),
+            Some(value) => ValueResponseRaw::Found(value),
             None => {
                 let nodes = self
                     .routing_table
@@ -211,60 +286,31 @@ impl DhtInner {
                     .unwrap()
                     .closest(&req.key, req.k as usize);
 
-                Ok(ValueResponseRaw::NotFound(
-                    nodes.into_iter().map(|node| node.into()).collect(),
-                ))
+                ValueResponseRaw::NotFound(nodes.into_iter().map(|node| node.into()).collect())
             }
         }
     }
 
-    async fn get_node_info(self: Arc<Self>) -> Result<proto::dht::NodeInfoResponse> {
-        match self.node_info.lock().unwrap().as_ref() {
-            Some(info) => Ok(proto::dht::NodeInfoResponse { info: info.clone() }),
-            None => Err(anyhow::anyhow!("node info not available")),
-        }
+    fn handle_get_node_info(&self) -> Option<dht::NodeInfoResponse> {
+        self.node_info
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|info| dht::NodeInfoResponse { info })
     }
 }
 
-trait HandlerFuture<T> {
-    fn boxed_or_noop(self) -> BoxFutureOrNoop<T>;
-}
-
-impl<F, T, E> HandlerFuture<Option<Response<Bytes>>> for F
-where
-    F: Future<Output = Result<T, E>> + Send + 'static,
-    T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
-    E: std::fmt::Debug,
-{
-    fn boxed_or_noop(self) -> BoxFutureOrNoop<Option<Response<Bytes>>> {
-        BoxFutureOrNoop::Boxed(Box::pin(async move {
-            match self.await {
-                Ok(res) => Some(Response {
-                    version: Default::default(),
-                    body: Bytes::from(tl_proto::serialize(&res)),
-                }),
-                Err(e) => {
-                    tracing::debug!("failed to handle request: {e:?}");
-                    // TODO: return error response here?
-                    None
-                }
-            }
-        }))
-    }
-}
-
-#[derive(Debug, Clone, TlWrite)]
+#[derive(TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 enum ValueResponseRaw {
     #[tl(id = "dht.valueFound")]
     Found(Bytes),
     #[tl(id = "dht.valueNotFound")]
-    NotFound(Vec<Arc<proto::dht::NodeInfo>>),
+    NotFound(Vec<Arc<dht::NodeInfo>>),
 }
 
-#[derive(Debug, Clone, TlWrite)]
+#[derive(TlWrite)]
 #[tl(boxed, id = "dht.nodesFound", scheme = "proto.tl")]
-pub struct NodeResponseRaw {
-    /// List of nodes closest to the key.
-    pub nodes: Vec<Arc<proto::dht::NodeInfo>>,
+struct NodeResponseRaw {
+    nodes: Vec<Arc<dht::NodeInfo>>,
 }

@@ -69,10 +69,8 @@ impl<T1> NetworkBuilder<(T1, ())> {
 impl NetworkBuilder {
     pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
     where
-        S: Service<InboundServiceRequest<Bytes>, QueryResponse = Response<Bytes>>
-            + Send
-            + Clone
-            + 'static,
+        S: Send + Sync + Clone + 'static,
+        S: Service<InboundServiceRequest<Bytes>, QueryResponse = Response<Bytes>>,
     {
         use socket2::{Domain, Protocol, Socket, Type};
 
@@ -230,6 +228,10 @@ impl Network {
 
     pub fn sign_raw(&self, data: &[u8]) -> [u8; 64] {
         self.0.keypair.sign_raw(data)
+    }
+
+    pub fn downgrade(this: &Self) -> WeakNetwork {
+        WeakNetwork(Arc::downgrade(&this.0))
     }
 }
 

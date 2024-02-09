@@ -12,7 +12,7 @@ pub struct RoutingTableBuilder {
 }
 
 impl RoutingTableBuilder {
-    pub fn build(self) -> RoutingTable {
+    pub(crate) fn build(self) -> RoutingTable {
         RoutingTable {
             local_id: self.local_id,
             buckets: BTreeMap::default(),

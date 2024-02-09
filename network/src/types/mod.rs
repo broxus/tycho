@@ -43,14 +43,35 @@ pub struct Request<T> {
     pub body: T,
 }
 
+impl<T: AsRef<[u8]>> AsRef<[u8]> for Request<T> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.body.as_ref()
+    }
+}
+
 pub struct Response<T> {
     pub version: Version,
     pub body: T,
 }
 
+impl<T: AsRef<[u8]>> AsRef<[u8]> for Response<T> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.body.as_ref()
+    }
+}
+
 pub struct InboundServiceRequest<T> {
     pub metadata: Arc<InboundRequestMeta>,
     pub body: T,
+}
+
+impl<T: AsRef<[u8]>> AsRef<[u8]> for InboundServiceRequest<T> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.body.as_ref()
+    }
 }
 
 #[derive(Debug, Clone)]

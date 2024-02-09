@@ -27,7 +27,7 @@ pub trait ServiceExt<Request>: Service<Request> {
     #[inline]
     fn boxed(self) -> BoxService<Request, Self::QueryResponse>
     where
-        Self: Sized + Send + 'static,
+        Self: Sized + Send + Sync + 'static,
         Self::OnQueryFuture: Send + 'static,
         Self::OnMessageFuture: Send + 'static,
         Self::OnDatagramFuture: Send + 'static,
@@ -38,7 +38,7 @@ pub trait ServiceExt<Request>: Service<Request> {
     #[inline]
     fn boxed_clone(self) -> BoxCloneService<Request, Self::QueryResponse>
     where
-        Self: Clone + Sized + Send + 'static,
+        Self: Clone + Sized + Send + Sync + 'static,
         Self::OnQueryFuture: Send + 'static,
         Self::OnMessageFuture: Send + 'static,
         Self::OnDatagramFuture: Send + 'static,
@@ -47,7 +47,7 @@ pub trait ServiceExt<Request>: Service<Request> {
     }
 }
 
-impl<T, Request> ServiceExt<Request> for T where T: Service<Request> + Send + ?Sized {}
+impl<T, Request> ServiceExt<Request> for T where T: Service<Request> + ?Sized {}
 
 impl<'a, S, Request> Service<Request> for &'a S
 where
@@ -135,12 +135,13 @@ type DynBoxService<Request, Q> = dyn Service<
         OnQueryFuture = BoxFuture<'static, Option<Q>>,
         OnMessageFuture = BoxFuture<'static, ()>,
         OnDatagramFuture = BoxFuture<'static, ()>,
-    > + Send;
+    > + Send
+    + Sync;
 
 impl<Request, Q> BoxService<Request, Q> {
     pub fn new<S>(inner: S) -> Self
     where
-        S: Service<Request, QueryResponse = Q> + Send + 'static,
+        S: Service<Request, QueryResponse = Q> + Send + Sync + 'static,
         S::OnQueryFuture: Send + 'static,
         S::OnMessageFuture: Send + 'static,
         S::OnDatagramFuture: Send + 'static,
@@ -188,7 +189,8 @@ type DynBoxCloneService<Request, Q> = dyn CloneService<
         OnQueryFuture = BoxFuture<'static, Option<Q>>,
         OnMessageFuture = BoxFuture<'static, ()>,
         OnDatagramFuture = BoxFuture<'static, ()>,
-    > + Send;
+    > + Send
+    + Sync;
 
 impl<Request, Q> BoxCloneService<Request, Q>
 where
@@ -196,7 +198,7 @@ where
 {
     pub fn new<S>(inner: S) -> Self
     where
-        S: Service<Request, QueryResponse = Q> + Clone + Send + 'static,
+        S: Service<Request, QueryResponse = Q> + Clone + Send + Sync + 'static,
         S::OnQueryFuture: Send + 'static,
         S::OnMessageFuture: Send + 'static,
         S::OnDatagramFuture: Send + 'static,
@@ -235,7 +237,7 @@ where
 
 impl<Request, Q> Clone for BoxCloneService<Request, Q>
 where
-    Q: Send + 'static,
+    Q: Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         BoxCloneService {
@@ -250,7 +252,7 @@ trait CloneService<Request>: Service<Request> {
 
 impl<Request, S> CloneService<Request> for S
 where
-    S: Service<Request> + Clone + Send + 'static,
+    S: Service<Request> + Clone + Send + Sync + 'static,
     S::OnQueryFuture: Send + 'static,
     S::OnMessageFuture: Send + 'static,
     S::OnDatagramFuture: Send + 'static,
@@ -266,7 +268,8 @@ type DynCloneService<S, Request> = dyn CloneService<
         OnQueryFuture = <S as Service<Request>>::OnQueryFuture,
         OnMessageFuture = <S as Service<Request>>::OnMessageFuture,
         OnDatagramFuture = <S as Service<Request>>::OnDatagramFuture,
-    > + Send;
+    > + Send
+    + Sync;
 
 #[repr(transparent)]
 struct BoxPinFutures<S>(S);
