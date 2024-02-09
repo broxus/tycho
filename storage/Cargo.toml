@@ -5,10 +5,20 @@ edition = "2021"
 description = "A unified storage interface."
 
 [dependencies]
-# crates.io deps
+anyhow = { version = "1"}
+
+weedb = "0.1.1"
+rlimit = "0.10.1"
+fdlimit = "0.3.0"
+bytesize = { version = "1.3.0", features = ["serde"] }
+tokio = { version = "1.36.0", features = ["full"] }
+tracing = "0.1.40"
+humantime = "2.1.0"
+sysinfo = "0.30.5"
+serde = { version = "1.0.196", features = ["derive"] }
 
 # local deps
 tycho-util = { path = "../util", version = "=0.0.1" }
-
+tycho-constansts = { path = "../constansts", version = "0.1" }
 [lints]
 workspace = true
