@@ -4,6 +4,7 @@ use std::time::Instant;
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use futures_util::Future;
+use tl_proto::TlWrite;
 
 use self::routing::{RoutingTable, RoutingTableBuilder};
 use self::storage::{Storage, StorageBuilder};
@@ -28,6 +29,7 @@ impl DhtBuilder {
             routing_table: Mutex::new(routing_table),
             last_table_refresh: Instant::now(),
             storage,
+            node_info: Mutex::new(None),
         });
 
         (DhtClientBuilder(inner.clone()), DhtService(inner))
@@ -66,7 +68,9 @@ pub struct DhtClientBuilder(Arc<DhtInner>);
 
 impl DhtClientBuilder {
     pub fn build(self, network: Network) -> DhtClient {
-        // TODO: spawn background tasks here
+        // TODO: spawn background tasks here:
+        // - refresh routing table
+        // - update and broadcast node info
 
         DhtClient {
             inner: self.0,
@@ -126,7 +130,7 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
             proto::dht::rpc::Store as req => self.0.clone().store(req),
             proto::dht::rpc::FindNode as req => self.0.clone().find_node(req),
             proto::dht::rpc::FindValue as req => self.0.clone().find_value(req),
-            proto::dht::rpc::GetNodeInfo as req => self.0.clone().get_node_info(req),
+            proto::dht::rpc::GetNodeInfo as _ => self.0.clone().get_node_info(),
         })
     }
 
@@ -175,32 +179,50 @@ struct DhtInner {
     routing_table: Mutex<RoutingTable>,
     last_table_refresh: Instant,
     storage: Storage,
+    node_info: Mutex<Option<proto::dht::NodeInfo>>,
 }
 
 impl DhtInner {
     async fn store(self: Arc<Self>, req: proto::dht::rpc::Store) -> Result<proto::dht::Stored> {
-        todo!()
+        self.storage.insert(&req.value)?;
+        Ok(proto::dht::Stored)
     }
 
-    async fn find_node(
-        self: Arc<Self>,
-        req: proto::dht::rpc::FindNode,
-    ) -> Result<proto::dht::NodeResponse> {
-        todo!()
+    async fn find_node(self: Arc<Self>, req: proto::dht::rpc::FindNode) -> Result<NodeResponseRaw> {
+        let nodes = self
+            .routing_table
+            .lock()
+            .unwrap()
+            .closest(&req.key, req.k as usize);
+
+        Ok(NodeResponseRaw { nodes })
     }
 
     async fn find_value(
         self: Arc<Self>,
         req: proto::dht::rpc::FindValue,
-    ) -> Result<proto::dht::ValueResponse> {
-        todo!()
+    ) -> Result<ValueResponseRaw> {
+        match self.storage.get(&req.key) {
+            Some(value) => Ok(ValueResponseRaw::Found(value)),
+            None => {
+                let nodes = self
+                    .routing_table
+                    .lock()
+                    .unwrap()
+                    .closest(&req.key, req.k as usize);
+
+                Ok(ValueResponseRaw::NotFound(
+                    nodes.into_iter().map(|node| node.into()).collect(),
+                ))
+            }
+        }
     }
 
-    async fn get_node_info(
-        self: Arc<Self>,
-        req: proto::dht::rpc::GetNodeInfo,
-    ) -> Result<proto::dht::NodeInfoResponse> {
-        todo!()
+    async fn get_node_info(self: Arc<Self>) -> Result<proto::dht::NodeInfoResponse> {
+        match self.node_info.lock().unwrap().as_ref() {
+            Some(info) => Ok(proto::dht::NodeInfoResponse { info: info.clone() }),
+            None => Err(anyhow::anyhow!("node info not available")),
+        }
     }
 }
 
@@ -229,4 +251,20 @@ where
             }
         }))
     }
+}
+
+#[derive(Debug, Clone, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+enum ValueResponseRaw {
+    #[tl(id = "dht.valueFound")]
+    Found(Bytes),
+    #[tl(id = "dht.valueNotFound")]
+    NotFound(Vec<Arc<proto::dht::NodeInfo>>),
+}
+
+#[derive(Debug, Clone, TlWrite)]
+#[tl(boxed, id = "dht.nodesFound", scheme = "proto.tl")]
+pub struct NodeResponseRaw {
+    /// List of nodes closest to the key.
+    pub nodes: Vec<Arc<proto::dht::NodeInfo>>,
 }

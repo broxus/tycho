@@ -3,6 +3,7 @@ use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 use bytes::Bytes;
+use everscale_crypto::ed25519;
 use rand::Rng;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -79,6 +80,8 @@ impl NetworkBuilder {
         let quic_config = config.quic.clone().unwrap_or_default();
         let (service_name, private_key) = self.mandatory_fields;
 
+        let keypair = ed25519::KeyPair::from(&ed25519::SecretKey::from_bytes(private_key));
+
         let endpoint_config = EndpointConfig::builder()
             .with_service_name(service_name)
             .with_private_key(private_key)
@@ -141,6 +144,7 @@ impl NetworkBuilder {
                 active_peers: weak_active_peers,
                 known_peers,
                 connection_manager_handle,
+                keypair,
             }
         });
 
@@ -219,6 +223,14 @@ impl Network {
     pub fn is_closed(&self) -> bool {
         self.0.is_closed()
     }
+
+    pub fn sign_tl<T: tl_proto::TlWrite>(&self, data: T) -> [u8; 64] {
+        self.0.keypair.sign(data)
+    }
+
+    pub fn sign_raw(&self, data: &[u8]) -> [u8; 64] {
+        self.0.keypair.sign_raw(data)
+    }
 }
 
 struct NetworkInner {
@@ -227,6 +239,7 @@ struct NetworkInner {
     active_peers: WeakActivePeers,
     known_peers: KnownPeers,
     connection_manager_handle: mpsc::Sender<ConnectionManagerRequest>,
+    keypair: ed25519::KeyPair,
 }
 
 impl NetworkInner {

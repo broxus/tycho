@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::proto::dht;
 use crate::types::PeerId;
 
 pub struct RoutingTableBuilder {
@@ -41,8 +43,8 @@ impl RoutingTable {
         }
     }
 
-    pub fn add(&mut self, key: &PeerId) -> bool {
-        let distance = distance(&self.local_id, key);
+    pub fn add(&mut self, node: Arc<dht::NodeInfo>) -> bool {
+        let distance = distance(&self.local_id, &node.id);
         if distance == 0 {
             return false;
         }
@@ -50,7 +52,7 @@ impl RoutingTable {
         self.buckets
             .entry(distance)
             .or_insert_with(|| Bucket::with_capacity(self.max_k))
-            .insert(key, self.max_k, &self.node_timeout)
+            .insert(node, self.max_k, &self.node_timeout)
     }
 
     pub fn remove(&mut self, key: &PeerId) -> bool {
@@ -62,7 +64,7 @@ impl RoutingTable {
         }
     }
 
-    pub fn closest(&self, key: &PeerId, count: usize) -> Vec<PeerId> {
+    pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<dht::NodeInfo>> {
         let count = count.min(self.max_k);
         if count == 0 {
             return Vec::new();
@@ -70,7 +72,7 @@ impl RoutingTable {
 
         // TODO: fill secure and unsecure buckets in parallel
         let mut result = Vec::with_capacity(count);
-        let distance = distance(&self.local_id, key);
+        let distance = distance(&self.local_id, PeerId::wrap(key));
 
         // Search for closest nodes first
         for i in (distance..=MAX_DISTANCE).chain((0..distance).rev()) {
@@ -81,7 +83,7 @@ impl RoutingTable {
 
             if let Some(bucket) = self.buckets.get(&i) {
                 for node in bucket.nodes.iter().take(remaining) {
-                    result.push(node.id);
+                    result.push(node.data.clone());
                 }
             }
         }
@@ -117,8 +119,12 @@ impl Bucket {
         }
     }
 
-    fn insert(&mut self, key: &PeerId, max_k: usize, timeout: &Duration) -> bool {
-        if let Some(index) = self.nodes.iter_mut().position(|node| &node.id == key) {
+    fn insert(&mut self, node: Arc<dht::NodeInfo>, max_k: usize, timeout: &Duration) -> bool {
+        if let Some(index) = self
+            .nodes
+            .iter_mut()
+            .position(|item| item.data.id == node.id)
+        {
             self.nodes.remove(index);
         } else if self.nodes.len() >= max_k {
             if matches!(self.nodes.front(), Some(node) if node.is_expired(timeout)) {
@@ -128,12 +134,12 @@ impl Bucket {
             }
         }
 
-        self.nodes.push_back(Node::new(key));
+        self.nodes.push_back(Node::new(node));
         true
     }
 
     fn remove(&mut self, key: &PeerId) -> bool {
-        if let Some(index) = self.nodes.iter().position(|node| &node.id == key) {
+        if let Some(index) = self.nodes.iter().position(|node| &node.data.id == key) {
             self.nodes.remove(index);
             true
         } else {
@@ -142,7 +148,7 @@ impl Bucket {
     }
 
     fn contains(&self, key: &PeerId) -> bool {
-        self.nodes.iter().any(|node| &node.id == key)
+        self.nodes.iter().any(|node| &node.data.id == key)
     }
 
     fn is_empty(&self) -> bool {
@@ -151,14 +157,14 @@ impl Bucket {
 }
 
 struct Node {
-    id: PeerId,
+    data: Arc<dht::NodeInfo>,
     last_updated_at: Instant,
 }
 
 impl Node {
-    fn new(peer_id: &PeerId) -> Self {
+    fn new(data: Arc<dht::NodeInfo>) -> Self {
         Self {
-            id: *peer_id,
+            data,
             last_updated_at: Instant::now(),
         }
     }
@@ -187,15 +193,30 @@ const MAX_DISTANCE: usize = 256;
 mod tests {
     use std::str::FromStr;
 
+    use crate::AddressList;
+
     use super::*;
+
+    fn make_node(id: PeerId) -> Arc<dht::NodeInfo> {
+        Arc::new(dht::NodeInfo {
+            id,
+            address_list: AddressList {
+                items: Default::default(),
+                created_at: 0,
+                expires_at: 0,
+            },
+            created_at: 0,
+            signature: Default::default(),
+        })
+    }
 
     #[test]
     fn buckets_are_sets() {
         let mut table = RoutingTable::builder(PeerId::random()).build();
 
         let peer = PeerId::random();
-        assert!(table.add(&peer));
-        assert!(table.add(&peer)); // returns true because the node was updated
+        assert!(table.add(make_node(peer)));
+        assert!(table.add(make_node(peer))); // returns true because the node was updated
         assert_eq!(table.len(), 1);
     }
 
@@ -204,7 +225,7 @@ mod tests {
         let local_id = PeerId::random();
         let mut table = RoutingTable::builder(local_id).build();
 
-        assert!(!table.add(&local_id));
+        assert!(!table.add(make_node(local_id)));
         assert!(table.is_empty());
     }
 
@@ -215,9 +236,9 @@ mod tests {
         let mut bucket = Bucket::with_capacity(k);
 
         for _ in 0..k {
-            assert!(bucket.insert(&PeerId::random(), k, &timeout));
+            assert!(bucket.insert(make_node(PeerId::random()), k, &timeout));
         }
-        assert!(!bucket.insert(&PeerId::random(), k, &timeout));
+        assert!(!bucket.insert(make_node(PeerId::random()), k, &timeout));
     }
 
     #[test]
@@ -336,7 +357,7 @@ mod tests {
 
         let mut table = RoutingTable::builder(local_id).build();
         for id in ids {
-            table.add(&id);
+            table.add(make_node(id));
         }
 
         {
@@ -368,7 +389,11 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
 
-            let mut closest = table.closest(&local_id, 20);
+            let mut closest = table
+                .closest(local_id.as_bytes(), 20)
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
             closest.sort();
             assert_eq!(closest, expected_closest_ids);
         }
@@ -407,7 +432,11 @@ mod tests {
             )
             .unwrap();
 
-            let mut closest = table.closest(&target, 20);
+            let mut closest = table
+                .closest(target.as_bytes(), 20)
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
             closest.sort();
             assert_eq!(closest, expected_closest_ids);
         }

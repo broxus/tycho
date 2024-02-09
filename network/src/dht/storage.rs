@@ -124,6 +124,11 @@ impl Storage {
         StorageBuilder::default()
     }
 
+    pub fn get(&self, key: &[u8; 32]) -> Option<Bytes> {
+        let stored_value = self.cache.get(key)?;
+        (stored_value.expires_at > now_sec()).then(|| stored_value.data)
+    }
+
     pub fn insert(&self, value: &proto::dht::Value) -> Result<bool, StorageError> {
         match value.expires_at().checked_sub(now_sec()) {
             Some(0) | None => return Err(StorageError::ValueExpired),
