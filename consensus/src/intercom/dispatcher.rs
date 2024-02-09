@@ -5,8 +5,9 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use tycho_network::util::NetworkExt;
-use tycho_network::{service_query_fn, Config, InboundServiceRequest, Network, Response, Version};
+use tycho_network::{
+    service_query_fn, Config, InboundServiceRequest, Network, NetworkExt, Response, Version,
+};
 
 use crate::intercom::responses::*;
 use crate::models::{Location, Point, PointId, RoundId, Signature};

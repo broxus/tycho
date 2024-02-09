@@ -1,16 +1,93 @@
 use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use futures_util::future::BoxFuture;
-use futures_util::{Future, FutureExt};
 use tycho_util::FastHashMap;
 
-use crate::types::{BoxService, Service};
+use crate::types::{BoxService, Service, ServiceExt};
+use crate::util::BoxFutureOrNoop;
+
+pub trait Routable {
+    #[inline]
+    fn query_ids(&self) -> impl IntoIterator<Item = u32> {
+        std::iter::empty()
+    }
+
+    #[inline]
+    fn message_ids(&self) -> impl IntoIterator<Item = u32> {
+        std::iter::empty()
+    }
+
+    #[inline]
+    fn datagram_ids(&self) -> impl IntoIterator<Item = u32> {
+        std::iter::empty()
+    }
+}
+
+pub struct RouterBuilder<Request, Q> {
+    inner: Inner<Request, Q>,
+}
+
+impl<Request, Q> RouterBuilder<Request, Q> {
+    pub fn route<S>(mut self, service: S) -> Self
+    where
+        S: Service<Request, QueryResponse = Q> + Routable + Send + 'static,
+    {
+        let index = self.inner.services.len();
+        for id in service.query_ids() {
+            let prev = self.inner.query_handlers.insert(id, index);
+            assert!(prev.is_none(), "duplicate query id: {:08x}", id);
+        }
+        for id in service.message_ids() {
+            let prev = self.inner.message_handlers.insert(id, index);
+            assert!(prev.is_none(), "duplicate message id: {:08x}", id);
+        }
+        for id in service.datagram_ids() {
+            let prev = self.inner.datagram_handlers.insert(id, index);
+            assert!(prev.is_none(), "duplicate datagram id: {:08x}", id);
+        }
+
+        self.inner.services.push(service.boxed());
+        self
+    }
+
+    pub fn build(self) -> Router<Request, Q> {
+        Router {
+            inner: Arc::new(self.inner),
+        }
+    }
+}
+
+impl<Request, Q> Default for RouterBuilder<Request, Q> {
+    fn default() -> Self {
+        Self {
+            inner: Inner {
+                services: Vec::new(),
+                query_handlers: FastHashMap::default(),
+                message_handlers: FastHashMap::default(),
+                datagram_handlers: FastHashMap::default(),
+                _response: PhantomData,
+            },
+        }
+    }
+}
 
 pub struct Router<Request, Q> {
     inner: Arc<Inner<Request, Q>>,
+}
+
+impl<Request, Q> Router<Request, Q> {
+    pub fn builder() -> RouterBuilder<Request, Q> {
+        RouterBuilder::default()
+    }
+}
+
+impl<Request, Q> Clone for Router<Request, Q> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<Request, Q> Service<Request> for Router<Request, Q>
@@ -58,33 +135,6 @@ fn find_handler<'a, T: AsRef<[u8]>, S>(
         }
     }
     None
-}
-
-pub enum BoxFutureOrNoop<T> {
-    Boxed(BoxFuture<'static, T>),
-    Noop,
-}
-
-impl Future for BoxFutureOrNoop<()> {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            BoxFutureOrNoop::Boxed(fut) => fut.poll_unpin(cx),
-            BoxFutureOrNoop::Noop => std::task::Poll::Ready(()),
-        }
-    }
-}
-
-impl<T> Future for BoxFutureOrNoop<Option<T>> {
-    type Output = Option<T>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            BoxFutureOrNoop::Boxed(fut) => fut.poll_unpin(cx),
-            BoxFutureOrNoop::Noop => std::task::Poll::Ready(None),
-        }
-    }
 }
 
 struct Inner<Request, Q> {
