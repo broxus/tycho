@@ -6,7 +6,7 @@ use bytes::{Buf, Bytes};
 use tl_proto::TlWrite;
 use tycho_util::time::now_sec;
 
-use self::query::FindNodesQuery;
+use self::query::Query;
 use self::routing::RoutingTable;
 use self::storage::{Storage, StorageError};
 use crate::network::{Network, WeakNetwork};
@@ -63,32 +63,45 @@ impl DhtClient {
             .add(peer, self.inner.max_k, &self.inner.node_ttl);
     }
 
-    pub async fn find_peers(&self, key: &PeerId) -> Result<Vec<Arc<dht::NodeInfo>>> {
-        let max_k = self.inner.max_k;
-        let closest_nodes = {
-            let routing_table = self.inner.routing_table.lock().unwrap();
-            routing_table.closest(key.as_bytes(), max_k)
-        };
-        // TODO: deduplicate shared futures
-        let nodes = FindNodesQuery::new(self.network.clone(), key, closest_nodes, max_k)
-            .run()
-            .await;
-        Ok(nodes.into_values().collect())
-    }
-
-    pub async fn find_value<T>(&self, key: T) -> Result<T::Value<'static>>
-    where
-        T: dht::WithValue,
-    {
-        todo!()
-    }
-
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<dht::NodeInfo> {
         self.network
             .query(peer_id, Request::from_tl(dht::rpc::GetNodeInfo))
             .await?
             .parse_tl()
             .map_err(Into::into)
+    }
+
+    pub async fn find_peers(&self, target_id: &[u8; 32]) -> Result<Vec<Arc<dht::NodeInfo>>> {
+        let max_k = self.inner.max_k;
+        let closest_nodes = {
+            let routing_table = self.inner.routing_table.lock().unwrap();
+            routing_table.closest(target_id, max_k)
+        };
+        // TODO: deduplicate shared futures
+        let nodes = Query::new(self.network.clone(), target_id, closest_nodes, max_k)
+            .find_peers()
+            .await;
+        Ok(nodes.into_values().collect())
+    }
+
+    pub async fn find_value<T>(&self, key: &T) -> Option<Result<T::Value<'static>>>
+    where
+        T: dht::WithValue,
+    {
+        let res = self.find_value_impl(&tl_proto::hash(key)).await?;
+        Some(res.and_then(|value| T::parse_value(value).map_err(Into::into)))
+    }
+
+    async fn find_value_impl(&self, hash: &[u8; 32]) -> Option<Result<Box<dht::Value>>> {
+        let max_k = self.inner.max_k;
+        let closest_nodes = {
+            let routing_table = self.inner.routing_table.lock().unwrap();
+            routing_table.closest(hash, max_k)
+        };
+        // TODO: deduplicate shared futures
+        Query::new(self.network.clone(), hash, closest_nodes, max_k)
+            .find_value()
+            .await
     }
 }
 
@@ -168,11 +181,11 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
 
     fn on_query(&self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
         let response = crate::match_tl_request!(req.body, {
-            dht::rpc::FindNode as r => {
+            dht::rpc::FindNode as ref r => {
                 let res = self.0.handle_find_node(r);
                 Some(tl_proto::serialize(res))
             },
-            dht::rpc::FindValue as r => {
+            dht::rpc::FindValue as ref r => {
                 let res = self.0.handle_find_value(r);
                 Some(tl_proto::serialize(res))
             },
@@ -197,7 +210,7 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
     #[inline]
     fn on_message(&self, req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
         crate::match_tl_request!(req.body, {
-            dht::rpc::Store as r => match self.0.handle_store(r) {
+            dht::rpc::Store as ref r => match self.0.handle_store(r) {
                 Ok(_) => {},
                 Err(e) => {
                     tracing::debug!(
@@ -300,11 +313,11 @@ impl DhtInner {
         todo!()
     }
 
-    fn handle_store(&self, req: dht::rpc::Store) -> Result<bool, StorageError> {
+    fn handle_store(&self, req: &dht::rpc::Store) -> Result<bool, StorageError> {
         self.storage.insert(&req.value)
     }
 
-    fn handle_find_node(&self, req: dht::rpc::FindNode) -> NodeResponseRaw {
+    fn handle_find_node(&self, req: &dht::rpc::FindNode) -> NodeResponseRaw {
         let nodes = self
             .routing_table
             .lock()
@@ -314,18 +327,17 @@ impl DhtInner {
         NodeResponseRaw { nodes }
     }
 
-    fn handle_find_value(&self, req: dht::rpc::FindValue) -> ValueResponseRaw {
-        match self.storage.get(&req.key) {
-            Some(value) => ValueResponseRaw::Found(value),
-            None => {
-                let nodes = self
-                    .routing_table
-                    .lock()
-                    .unwrap()
-                    .closest(&req.key, req.k as usize);
+    fn handle_find_value(&self, req: &dht::rpc::FindValue) -> ValueResponseRaw {
+        if let Some(value) = self.storage.get(&req.key) {
+            ValueResponseRaw::Found(value)
+        } else {
+            let nodes = self
+                .routing_table
+                .lock()
+                .unwrap()
+                .closest(&req.key, req.k as usize);
 
-                ValueResponseRaw::NotFound(nodes.into_iter().map(|node| node.into()).collect())
-            }
+            ValueResponseRaw::NotFound(nodes)
         }
     }
 

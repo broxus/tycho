@@ -39,7 +39,7 @@ impl RoutingTable {
         self.buckets
             .entry(distance)
             .or_insert_with(|| Bucket::with_capacity(max_k))
-            .insert(node, max_k, &node_ttl)
+            .insert(node, max_k, node_ttl)
     }
 
     pub fn remove(&mut self, key: &PeerId) -> bool {

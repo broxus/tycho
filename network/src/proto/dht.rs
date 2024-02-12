@@ -21,6 +21,8 @@ pub trait WithValue:
     TlWrite<Repr = tl_proto::Boxed> + for<'a> TlRead<'a, Repr = tl_proto::Boxed>
 {
     type Value<'a>: TlWrite<Repr = tl_proto::Boxed> + TlRead<'a, Repr = tl_proto::Boxed>;
+
+    fn parse_value(value: Box<Value>) -> tl_proto::TlResult<Self::Value<'static>>;
 }
 
 /// Key for values that can only be updated by the owner.
@@ -37,6 +39,13 @@ pub struct SignedKey {
 
 impl WithValue for SignedKey {
     type Value<'a> = SignedValue;
+
+    fn parse_value(value: Box<Value>) -> tl_proto::TlResult<Self::Value<'static>> {
+        match *value {
+            Value::Signed(value) => Ok(value),
+            Value::Overlay(_) => Err(tl_proto::TlError::UnknownConstructor),
+        }
+    }
 }
 
 /// Key for overlay-managed values.
@@ -53,6 +62,13 @@ pub struct OverlayKey {
 
 impl WithValue for OverlayKey {
     type Value<'a> = OverlayValue;
+
+    fn parse_value(value: Box<Value>) -> tl_proto::TlResult<Self::Value<'static>> {
+        match *value {
+            Value::Signed(_) => Err(tl_proto::TlError::UnknownConstructor),
+            Value::Overlay(value) => Ok(value),
+        }
+    }
 }
 
 /// Value with a known owner.
@@ -163,7 +179,7 @@ pub struct NodeResponse {
 pub enum ValueResponse {
     /// An existing value for the specified key.
     #[tl(id = "dht.valueFound")]
-    Found(Value),
+    Found(Box<Value>),
     /// List of nodes closest to the key.
     #[tl(id = "dht.valueNotFound")]
     NotFound(Vec<NodeInfo>),

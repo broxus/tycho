@@ -89,7 +89,7 @@ impl InboundRequestHandler {
                                         metadata,
                                         body: datagram,
                                     })
-                                    .await
+                                    .await;
                             }
                         });
                     },
