@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use bytes::{Buf, Bytes};
 use tl_proto::TlWrite;
-use tycho_util::time::now_sec;
+use tycho_util::time::{now_sec, shifted_interval};
 
 use self::query::Query;
 use self::routing::RoutingTable;
@@ -71,37 +71,15 @@ impl DhtClient {
             .map_err(Into::into)
     }
 
-    pub async fn find_peers(&self, target_id: &[u8; 32]) -> Result<Vec<Arc<dht::NodeInfo>>> {
-        let max_k = self.inner.max_k;
-        let closest_nodes = {
-            let routing_table = self.inner.routing_table.lock().unwrap();
-            routing_table.closest(target_id, max_k)
-        };
-        // TODO: deduplicate shared futures
-        let nodes = Query::new(self.network.clone(), target_id, closest_nodes, max_k)
-            .find_peers()
-            .await;
-        Ok(nodes.into_values().collect())
-    }
-
     pub async fn find_value<T>(&self, key: &T) -> Option<Result<T::Value<'static>>>
     where
         T: dht::WithValue,
     {
-        let res = self.find_value_impl(&tl_proto::hash(key)).await?;
+        let res = self
+            .inner
+            .find_value(&self.network, &tl_proto::hash(key))
+            .await?;
         Some(res.and_then(|value| T::parse_value(value).map_err(Into::into)))
-    }
-
-    async fn find_value_impl(&self, hash: &[u8; 32]) -> Option<Result<Box<dht::Value>>> {
-        let max_k = self.inner.max_k;
-        let closest_nodes = {
-            let routing_table = self.inner.routing_table.lock().unwrap();
-            routing_table.closest(hash, max_k)
-        };
-        // TODO: deduplicate shared futures
-        Query::new(self.network.clone(), hash, closest_nodes, max_k)
-            .find_value()
-            .await
     }
 }
 
@@ -263,26 +241,53 @@ struct DhtInner {
 impl DhtInner {
     fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
         const INFO_TTL: u32 = 3600;
-        const INFO_UPDATE_INTERVAL: Duration = Duration::from_secs(60);
-        const ANNOUNCE_EVERY_N_STEPS: usize = 10;
+        const INFO_UPDATE_PERIOD: Duration = Duration::from_secs(60);
+
+        const ANNOUNCE_PERIOD: Duration = Duration::from_secs(600);
+        const ANNOUNCE_SHIFT: Duration = Duration::from_secs(60);
+        const POPULATE_PERIOD: Duration = Duration::from_secs(60);
+        const POPULATE_SHIFT: Duration = Duration::from_secs(10);
+
+        enum Action {
+            Refresh,
+            Announce,
+            Populate,
+        }
 
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             tracing::debug!("background DHT loop started");
-            let mut interval = tokio::time::interval(INFO_UPDATE_INTERVAL);
-            let mut step = 0;
+            let mut refresh_interval = tokio::time::interval(INFO_UPDATE_PERIOD);
+            let mut announce_interval = shifted_interval(ANNOUNCE_PERIOD, ANNOUNCE_SHIFT);
+            let mut populate_interval = shifted_interval(POPULATE_PERIOD, POPULATE_SHIFT);
+
             loop {
-                interval.tick().await;
+                let action = tokio::select! {
+                    _ = refresh_interval.tick() => Action::Refresh,
+                    _ = announce_interval.tick() => Action::Announce,
+                    _ = populate_interval.tick() => Action::Populate,
+                };
+
                 let (Some(this), Some(network)) = (this.upgrade(), network.upgrade()) else {
                     break;
                 };
 
-                this.refresh_local_node_info(&network, INFO_TTL);
+                match action {
+                    Action::Refresh => {
+                        this.refresh_local_node_info(&network, INFO_TTL);
+                    }
+                    Action::Announce => {
+                        // Always refresh node info before announcing
+                        this.refresh_local_node_info(&network, INFO_TTL);
+                        refresh_interval.reset();
 
-                step = (step + 1) % ANNOUNCE_EVERY_N_STEPS;
-                if step == 0 {
-                    if let Err(e) = this.announce_local_node_info(&network).await {
-                        tracing::error!("failed to announce local DHT node info: {e:?}");
+                        if let Err(e) = this.announce_local_node_info(&network).await {
+                            tracing::error!("failed to announce local DHT node info: {e:?}");
+                        }
+                    }
+                    Action::Populate => {
+                        // TODO: spawn and await in the background?
+                        this.find_more_dht_nodes(&network).await;
                     }
                 }
             }
@@ -311,6 +316,41 @@ impl DhtInner {
     async fn announce_local_node_info(self: &Arc<Self>, _network: &Network) -> Result<()> {
         // TODO: store node info in the DHT
         todo!()
+    }
+
+    async fn find_more_dht_nodes(self: &Arc<Self>, network: &Network) {
+        // TODO: deduplicate shared futures
+        let query = Query::new(
+            network.clone(),
+            &self.routing_table.lock().unwrap(),
+            self.local_id.as_bytes(),
+            self.max_k,
+        );
+
+        // NOTE: expression is intentionally split to drop the routing table guard
+        let peers = query.find_peers().await;
+
+        let mut routing_table = self.routing_table.lock().unwrap();
+        for peer in peers {
+            routing_table.add(peer, self.max_k, &self.node_ttl);
+        }
+    }
+
+    async fn find_value(
+        &self,
+        network: &Network,
+        key_hash: &[u8; 32],
+    ) -> Option<Result<Box<dht::Value>>> {
+        // TODO: deduplicate shared futures
+        let query = Query::new(
+            network.clone(),
+            &self.routing_table.lock().unwrap(),
+            key_hash,
+            self.max_k,
+        );
+
+        // NOTE: expression is intentionally split to drop the routing table guard
+        query.find_value().await
     }
 
     fn handle_store(&self, req: &dht::rpc::Store) -> Result<bool, StorageError> {

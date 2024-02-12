@@ -25,14 +25,14 @@ pub struct Query {
 impl Query {
     pub fn new(
         network: Network,
+        routing_table: &RoutingTable,
         target_id: &[u8; 32],
-        closest_nodes: Vec<Arc<dht::NodeInfo>>,
         max_k: usize,
     ) -> Self {
         let mut candidates = RoutingTable::new(PeerId(*target_id));
-        for node in closest_nodes {
-            candidates.add(node, max_k, &Duration::MAX);
-        }
+        routing_table.visit_closest(target_id, max_k, |node| {
+            candidates.add(node.clone(), max_k, &Duration::MAX);
+        });
 
         Self {
             network,
@@ -113,7 +113,7 @@ impl Query {
         None
     }
 
-    pub async fn find_peers(mut self) -> FastHashMap<PeerId, Arc<dht::NodeInfo>> {
+    pub async fn find_peers(mut self) -> impl Iterator<Item = Arc<dht::NodeInfo>> {
         // Prepare shared request
         let request_body = Bytes::from(tl_proto::serialize(dht::rpc::FindNode {
             key: *self.local_id(),
@@ -169,7 +169,7 @@ impl Query {
         }
 
         // Done
-        result
+        result.into_values()
     }
 
     fn update_candidates(

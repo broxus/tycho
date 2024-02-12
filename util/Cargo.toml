@@ -8,6 +8,8 @@ description = "Shared utilities for node components."
 # crates.io deps
 ahash = "0.8"
 dashmap = "5.4"
+rand = "0.8"
+tokio = { version = "1", default-features = false, features = ["time"] }
 
 # local deps
 
