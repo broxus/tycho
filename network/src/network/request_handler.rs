@@ -44,7 +44,16 @@ impl InboundRequestHandler {
         let reason: quinn::ConnectionError = loop {
             tokio::select! {
                 uni = self.connection.accept_uni() => match uni {
-                    Ok(stream) => tracing::trace!(id = %stream.id(), "incoming uni stream"),
+                    Ok(stream) => {
+                        tracing::trace!(id = %stream.id(), "incoming uni stream");
+                        let handler = UniStreamRequestHandler::new(
+                            &self.config,
+                            self.connection.request_meta().clone(),
+                            self.service.clone(),
+                            stream,
+                        );
+                        inflight_requests.spawn(handler.handle());
+                    },
                     Err(e) => {
                         tracing::trace!("failed to accept an incoming uni stream: {e:?}");
                         break e;
@@ -68,7 +77,22 @@ impl InboundRequestHandler {
                     }
                 },
                 datagram = self.connection.read_datagram() => match datagram {
-                    Ok(datagram) => tracing::trace!(byte_len = datagram.len(), "incoming datagram"),
+                    Ok(datagram) => {
+                        tracing::trace!(byte_len = datagram.len(), "incoming datagram");
+
+                        inflight_requests.spawn({
+                            let metadata = self.connection.request_meta().clone();
+                            let service = self.service.clone();
+                            async move {
+                                service
+                                    .on_datagram(InboundServiceRequest {
+                                        metadata,
+                                        body: datagram,
+                                    })
+                                    .await
+                            }
+                        });
+                    },
                     Err(e) => {
                         tracing::trace!("failed to read datagram: {e:?}");
                         break e;
@@ -79,9 +103,8 @@ impl InboundRequestHandler {
                     Err(e) => {
                         if e.is_panic() {
                             std::panic::resume_unwind(e.into_panic());
-                        } else {
-                            tracing::trace!("request handler task cancelled");
                         }
+                        tracing::trace!("request handler task cancelled");
                     }
                 }
             }
@@ -95,6 +118,44 @@ impl InboundRequestHandler {
 
         inflight_requests.shutdown().await;
         tracing::debug!(peer_id = %self.connection.peer_id(), "request handler stopped");
+    }
+}
+
+struct UniStreamRequestHandler {
+    meta: Arc<InboundRequestMeta>,
+    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+    recv_stream: FramedRead<RecvStream, LengthDelimitedCodec>,
+}
+
+impl UniStreamRequestHandler {
+    fn new(
+        config: &Config,
+        meta: Arc<InboundRequestMeta>,
+        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+        recv_stream: RecvStream,
+    ) -> Self {
+        Self {
+            meta,
+            service,
+            recv_stream: FramedRead::new(recv_stream, make_codec(config)),
+        }
+    }
+
+    async fn handle(self) {
+        if let Err(e) = self.do_handle().await {
+            tracing::trace!("request handler task failed: {e:?}");
+        }
+    }
+
+    async fn do_handle(mut self) -> Result<()> {
+        let req = recv_request(&mut self.recv_stream).await?;
+        self.service
+            .on_query(InboundServiceRequest {
+                metadata: self.meta,
+                body: req.body,
+            })
+            .await;
+        Ok(())
     }
 }
 

@@ -16,6 +16,7 @@ use crate::{AddressList, InboundServiceRequest, Network, WeakNetwork};
 pub use self::routing::RoutingTableBuilder;
 pub use self::storage::StorageBuilder;
 
+mod query;
 mod routing;
 mod storage;
 
@@ -143,17 +144,6 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
 
     fn on_query(&self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
         let response = crate::match_tl_request!(req.body, {
-            dht::rpc::Store as r => match self.0.handle_store(r) {
-                Ok(res) => Some(tl_proto::serialize(res)),
-                Err(e) => {
-                    tracing::debug!(
-                        peer_id = %req.metadata.peer_id,
-                        addr = %req.metadata.remote_address,
-                        "failed to store value: {e:?}"
-                    );
-                    None
-                }
-            },
             dht::rpc::FindNode as r => {
                 let res = self.0.handle_find_node(r);
                 Some(tl_proto::serialize(res))
@@ -169,7 +159,7 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
             tracing::debug!(
                 peer_id = %req.metadata.peer_id,
                 addr = %req.metadata.remote_address,
-                "failed to deserialize request from: {e:?}"
+                "failed to deserialize query from: {e:?}"
             );
             None
         });
@@ -181,7 +171,26 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
     }
 
     #[inline]
-    fn on_message(&self, _req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
+    fn on_message(&self, req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
+        crate::match_tl_request!(req.body, {
+            dht::rpc::Store as r => match self.0.handle_store(r) {
+                Ok(_) => {},
+                Err(e) => {
+                    tracing::debug!(
+                        peer_id = %req.metadata.peer_id,
+                        addr = %req.metadata.remote_address,
+                        "failed to store value: {e:?}"
+                    );
+                }
+            }
+        }, e => {
+            tracing::debug!(
+                peer_id = %req.metadata.peer_id,
+                addr = %req.metadata.remote_address,
+                "failed to deserialize message from: {e:?}"
+            );
+        });
+
         futures_util::future::ready(())
     }
 
@@ -194,11 +203,14 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
 impl Routable for DhtService {
     fn query_ids(&self) -> impl IntoIterator<Item = u32> {
         [
-            dht::rpc::Store::TL_ID,
             dht::rpc::FindNode::TL_ID,
             dht::rpc::FindValue::TL_ID,
             dht::rpc::GetNodeInfo::TL_ID,
         ]
+    }
+
+    fn message_ids(&self) -> impl IntoIterator<Item = u32> {
+        [dht::rpc::Store::TL_ID]
     }
 }
 
@@ -262,8 +274,8 @@ impl DhtInner {
         todo!()
     }
 
-    fn handle_store(&self, req: dht::rpc::Store) -> Result<dht::Stored, StorageError> {
-        self.storage.insert(&req.value).map(|_| dht::Stored)
+    fn handle_store(&self, req: dht::rpc::Store) -> Result<bool, StorageError> {
+        self.storage.insert(&req.value)
     }
 
     fn handle_find_node(&self, req: dht::rpc::FindNode) -> NodeResponseRaw {

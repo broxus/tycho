@@ -92,12 +92,6 @@ dht.overlayValue key:dht.overlayKey data:bytes expires_at:int = dht.Value;
 
 
 /**
-* A response for the `dht.store` query
-*/
-dht.stored = dht.Stored;
-
-
-/**
 * A response for the `dht.findNode` query
 *
 * @param value  a list of nodes with the shortest distances
@@ -133,7 +127,7 @@ dht.nodeInfoFound info:dht.node = dht.NodeInfoResponse;
 *
 * @param value  value to store
 */
-dht.store value:dht.Value = dht.Stored;
+dht.store value:dht.Value = True;
 /**
 * Searches for k closest nodes
 *

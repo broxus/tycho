@@ -149,11 +149,6 @@ impl<'a> TlRead<'a> for Value {
     }
 }
 
-/// A response for the [`rpc::Store`] query.
-#[derive(Debug, Clone, Copy, TlRead, TlWrite)]
-#[tl(boxed, id = "dht.stored", scheme = "proto.tl")]
-pub struct Stored;
-
 /// A response for the [`rpc::FindNode`] query.
 #[derive(Debug, Clone, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.nodesFound", scheme = "proto.tl")]
@@ -196,10 +191,6 @@ pub mod rpc {
     pub struct Store {
         /// A value to store.
         pub value: Value,
-    }
-
-    impl RpcQuery for Store {
-        type Response = Stored;
     }
 
     /// Search for `k` closest nodes.
