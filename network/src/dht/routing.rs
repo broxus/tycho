@@ -5,45 +5,32 @@ use std::time::{Duration, Instant};
 use crate::proto::dht;
 use crate::types::PeerId;
 
-pub struct RoutingTableBuilder {
-    local_id: PeerId,
-    max_k: usize,
-    node_timeout: Duration,
-}
-
-impl RoutingTableBuilder {
-    pub(crate) fn build(self) -> RoutingTable {
-        RoutingTable {
-            local_id: self.local_id,
-            buckets: BTreeMap::default(),
-            max_k: self.max_k,
-            node_timeout: self.node_timeout,
-        }
-    }
-
-    pub fn with_node_timeout(mut self, timeout: Duration) -> Self {
-        self.node_timeout = timeout;
-        self
-    }
-}
-
 pub struct RoutingTable {
     local_id: PeerId,
     buckets: BTreeMap<usize, Bucket>,
-    max_k: usize,
-    node_timeout: Duration,
 }
 
 impl RoutingTable {
-    pub fn builder(local_id: PeerId) -> RoutingTableBuilder {
-        RoutingTableBuilder {
+    pub fn new(local_id: PeerId) -> Self {
+        Self {
             local_id,
-            max_k: 20,
-            node_timeout: Duration::from_secs(15 * 60),
+            buckets: Default::default(),
         }
     }
 
-    pub fn add(&mut self, node: Arc<dht::NodeInfo>) -> bool {
+    pub fn local_id(&self) -> &PeerId {
+        &self.local_id
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buckets.values().all(Bucket::is_empty)
+    }
+
+    pub fn len(&self) -> usize {
+        self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
+    }
+
+    pub fn add(&mut self, node: Arc<dht::NodeInfo>, max_k: usize, node_ttl: &Duration) -> bool {
         let distance = distance(&self.local_id, &node.id);
         if distance == 0 {
             return false;
@@ -51,8 +38,8 @@ impl RoutingTable {
 
         self.buckets
             .entry(distance)
-            .or_insert_with(|| Bucket::with_capacity(self.max_k))
-            .insert(node, self.max_k, &self.node_timeout)
+            .or_insert_with(|| Bucket::with_capacity(max_k))
+            .insert(node, max_k, &node_ttl)
     }
 
     pub fn remove(&mut self, key: &PeerId) -> bool {
@@ -65,7 +52,6 @@ impl RoutingTable {
     }
 
     pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<dht::NodeInfo>> {
-        let count = count.min(self.max_k);
         if count == 0 {
             return Vec::new();
         }
@@ -91,12 +77,32 @@ impl RoutingTable {
         result
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.buckets.values().all(Bucket::is_empty)
-    }
+    pub fn visit_closest<F>(&self, key: &[u8; 32], count: usize, mut f: F)
+    where
+        F: FnMut(&Arc<dht::NodeInfo>),
+    {
+        if count == 0 {
+            return;
+        }
 
-    pub fn len(&self) -> usize {
-        self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
+        let distance = distance(&self.local_id, PeerId::wrap(key));
+
+        let mut processed = 0;
+
+        // Search for closest nodes first
+        for i in (distance..=MAX_DISTANCE).chain((0..distance).rev()) {
+            let remaining = match count.checked_sub(processed) {
+                None | Some(0) => break,
+                Some(n) => n,
+            };
+
+            if let Some(bucket) = self.buckets.get(&i) {
+                for node in bucket.nodes.iter().take(remaining) {
+                    f(&node.data);
+                    processed += 1;
+                }
+            }
+        }
     }
 
     pub fn contains(&self, key: &PeerId) -> bool {
@@ -197,6 +203,8 @@ mod tests {
 
     use super::*;
 
+    const MAX_K: usize = 20;
+
     fn make_node(id: PeerId) -> Arc<dht::NodeInfo> {
         Arc::new(dht::NodeInfo {
             id,
@@ -212,20 +220,20 @@ mod tests {
 
     #[test]
     fn buckets_are_sets() {
-        let mut table = RoutingTable::builder(PeerId::random()).build();
+        let mut table = RoutingTable::new(PeerId::random());
 
         let peer = PeerId::random();
-        assert!(table.add(make_node(peer)));
-        assert!(table.add(make_node(peer))); // returns true because the node was updated
+        assert!(table.add(make_node(peer), MAX_K, &Duration::MAX));
+        assert!(table.add(make_node(peer), MAX_K, &Duration::MAX)); // returns true because the node was updated
         assert_eq!(table.len(), 1);
     }
 
     #[test]
     fn sould_not_add_seld() {
         let local_id = PeerId::random();
-        let mut table = RoutingTable::builder(local_id).build();
+        let mut table = RoutingTable::new(local_id);
 
-        assert!(!table.add(make_node(local_id)));
+        assert!(!table.add(make_node(local_id), MAX_K, &Duration::MAX));
         assert!(table.is_empty());
     }
 
@@ -355,9 +363,9 @@ mod tests {
             PeerId::from_str("bdbc554024c65b463b0f0a01037b55985190f4fc01c47dc81c19aab4b4b2d9ab")
                 .unwrap();
 
-        let mut table = RoutingTable::builder(local_id).build();
+        let mut table = RoutingTable::new(local_id);
         for id in ids {
-            table.add(make_node(id));
+            table.add(make_node(id), MAX_K, &Duration::MAX);
         }
 
         {

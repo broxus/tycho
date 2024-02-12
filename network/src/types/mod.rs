@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 pub use self::address::{Address, AddressList};
 pub use self::peer_id::{Direction, PeerId};
 pub use self::rpc::RpcQuery;
@@ -43,6 +45,18 @@ pub struct Request<T> {
     pub body: T,
 }
 
+impl Request<Bytes> {
+    pub fn from_tl<T>(body: T) -> Self
+    where
+        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        Self {
+            version: Default::default(),
+            body: tl_proto::serialize(body).into(),
+        }
+    }
+}
+
 impl<T: AsRef<[u8]>> AsRef<[u8]> for Request<T> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
@@ -53,6 +67,25 @@ impl<T: AsRef<[u8]>> AsRef<[u8]> for Request<T> {
 pub struct Response<T> {
     pub version: Version,
     pub body: T,
+}
+
+impl Response<Bytes> {
+    pub fn from_tl<T>(body: T) -> Self
+    where
+        T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        Self {
+            version: Default::default(),
+            body: tl_proto::serialize(body).into(),
+        }
+    }
+
+    pub fn parse_tl<T>(self) -> tl_proto::TlResult<T>
+    where
+        for<'a> T: tl_proto::TlRead<'a>,
+    {
+        tl_proto::deserialize(self.body.as_ref())
+    }
 }
 
 impl<T: AsRef<[u8]>> AsRef<[u8]> for Response<T> {

@@ -1,8 +1,6 @@
 pub use self::util::{NetworkExt, Routable, Router, RouterBuilder};
 pub use config::{Config, QuicConfig};
-pub use dht::{
-    DhtClient, DhtClientBuilder, DhtService, DhtServiceBuilder, RoutingTableBuilder, StorageBuilder,
-};
+pub use dht::{DhtClient, DhtClientBuilder, DhtService, DhtServiceBuilder, StorageBuilder};
 pub use network::{Network, NetworkBuilder, Peer, WeakNetwork};
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, AddressList,
@@ -41,7 +39,6 @@ mod tests {
 
         let (dht_client, dht) = DhtService::builder(keypair.public_key.into())
             .with_storage(|builder| builder)
-            .with_routing_table(|builder| builder)
             .build();
 
         let router = Router::builder().route(dht).build();

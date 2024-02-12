@@ -6,14 +6,14 @@ use bytes::{Buf, Bytes};
 use tl_proto::TlWrite;
 use tycho_util::time::now_sec;
 
+use self::query::FindNodesQuery;
 use self::routing::RoutingTable;
 use self::storage::{Storage, StorageError};
+use crate::network::{Network, WeakNetwork};
 use crate::proto::dht;
-use crate::types::{PeerId, Response, Service};
-use crate::util::Routable;
-use crate::{AddressList, InboundServiceRequest, Network, WeakNetwork};
+use crate::types::{AddressList, InboundServiceRequest, PeerId, Request, Response, Service};
+use crate::util::{NetworkExt, Routable};
 
-pub use self::routing::RoutingTableBuilder;
 pub use self::storage::StorageBuilder;
 
 mod query;
@@ -56,11 +56,24 @@ impl DhtClient {
     }
 
     pub fn add_peer(&self, peer: Arc<dht::NodeInfo>) {
-        self.inner.routing_table.lock().unwrap().add(peer);
+        self.inner
+            .routing_table
+            .lock()
+            .unwrap()
+            .add(peer, self.inner.max_k, &self.inner.node_ttl);
     }
 
-    pub async fn find_peers(&self, key: &PeerId) -> Result<Vec<PeerId>> {
-        todo!()
+    pub async fn find_peers(&self, key: &PeerId) -> Result<Vec<Arc<dht::NodeInfo>>> {
+        let max_k = self.inner.max_k;
+        let closest_nodes = {
+            let routing_table = self.inner.routing_table.lock().unwrap();
+            routing_table.closest(key.as_bytes(), max_k)
+        };
+        // TODO: deduplicate shared futures
+        let nodes = FindNodesQuery::new(self.network.clone(), key, closest_nodes, max_k)
+            .run()
+            .await;
+        Ok(nodes.into_values().collect())
     }
 
     pub async fn find_value<T>(&self, key: T) -> Result<T::Value<'static>>
@@ -69,22 +82,34 @@ impl DhtClient {
     {
         todo!()
     }
+
+    pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<dht::NodeInfo> {
+        self.network
+            .query(peer_id, Request::from_tl(dht::rpc::GetNodeInfo))
+            .await?
+            .parse_tl()
+            .map_err(Into::into)
+    }
 }
 
-pub struct DhtServiceBuilder<MandatoryFields = (RoutingTable, Storage)> {
+pub struct DhtServiceBuilder<MandatoryFields = Storage> {
     mandatory_fields: MandatoryFields,
     local_id: PeerId,
+    node_ttl: Duration,
+    max_k: usize,
 }
 
 impl DhtServiceBuilder {
     pub fn build(self) -> (DhtClientBuilder, DhtService) {
-        let (routing_table, storage) = self.mandatory_fields;
+        let storage = self.mandatory_fields;
 
         let inner = Arc::new(DhtInner {
             local_id: self.local_id,
-            routing_table: Mutex::new(routing_table),
+            routing_table: Mutex::new(RoutingTable::new(self.local_id)),
             storage,
             node_info: Mutex::new(None),
+            max_k: self.max_k,
+            node_ttl: self.node_ttl,
         });
 
         let client_builder = DhtClientBuilder {
@@ -94,32 +119,29 @@ impl DhtServiceBuilder {
 
         (client_builder, DhtService(inner))
     }
-}
 
-impl<T1> DhtServiceBuilder<(T1, ())> {
-    pub fn with_storage<F>(self, f: F) -> DhtServiceBuilder<(T1, Storage)>
-    where
-        F: FnOnce(StorageBuilder) -> StorageBuilder,
-    {
-        let (routing_table, _) = self.mandatory_fields;
-        let storage = f(Storage::builder()).build();
-        DhtServiceBuilder {
-            mandatory_fields: (routing_table, storage),
-            local_id: self.local_id,
-        }
+    pub fn with_max_k(mut self, max_k: usize) -> Self {
+        self.max_k = max_k;
+        self
+    }
+
+    pub fn with_node_ttl(mut self, ttl: Duration) -> Self {
+        self.node_ttl = ttl;
+        self
     }
 }
 
-impl<T2> DhtServiceBuilder<((), T2)> {
-    pub fn with_routing_table<F>(self, f: F) -> DhtServiceBuilder<(RoutingTable, T2)>
+impl DhtServiceBuilder<()> {
+    pub fn with_storage<F>(self, f: F) -> DhtServiceBuilder<Storage>
     where
-        F: FnOnce(RoutingTableBuilder) -> RoutingTableBuilder,
+        F: FnOnce(StorageBuilder) -> StorageBuilder,
     {
-        let routing_table = f(RoutingTable::builder(self.local_id)).build();
-        let (_, storage) = self.mandatory_fields;
+        let storage = f(Storage::builder()).build();
         DhtServiceBuilder {
-            mandatory_fields: (routing_table, storage),
+            mandatory_fields: storage,
             local_id: self.local_id,
+            node_ttl: self.node_ttl,
+            max_k: self.max_k,
         }
     }
 }
@@ -128,10 +150,12 @@ impl<T2> DhtServiceBuilder<((), T2)> {
 pub struct DhtService(Arc<DhtInner>);
 
 impl DhtService {
-    pub fn builder(local_id: PeerId) -> DhtServiceBuilder<((), ())> {
+    pub fn builder(local_id: PeerId) -> DhtServiceBuilder<()> {
         DhtServiceBuilder {
-            mandatory_fields: ((), ()),
+            mandatory_fields: (),
             local_id,
+            node_ttl: Duration::from_secs(15 * 60),
+            max_k: 20,
         }
     }
 }
@@ -219,6 +243,8 @@ struct DhtInner {
     routing_table: Mutex<RoutingTable>,
     storage: Storage,
     node_info: Mutex<Option<dht::NodeInfo>>,
+    max_k: usize,
+    node_ttl: Duration,
 }
 
 impl DhtInner {

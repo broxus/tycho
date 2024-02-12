@@ -15,8 +15,14 @@ impl PeerId {
         unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
     }
 
+    #[inline]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    #[inline]
+    pub fn to_bytes(self) -> [u8; 32] {
+        self.0
     }
 
     pub fn as_public_key(&self) -> Option<ed25519::PublicKey> {
