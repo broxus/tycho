@@ -73,7 +73,6 @@ impl ConnectionManager {
         (connection_manager, mailbox_tx)
     }
 
-    #[tracing::instrument(skip_all, fields(local_id = %self.endpoint.peer_id()))]
     pub async fn start(mut self) {
         tracing::info!("connection manager started");
 
@@ -579,5 +578,11 @@ impl KnownPeers {
 
     pub fn remove(&self, peer_id: &PeerId) -> Option<PeerInfo> {
         self.0.remove(peer_id).map(|(_, value)| value)
+    }
+
+    pub fn print_all(&self) {
+        for item in self.0.iter() {
+            println!("{}: {:?}", item.peer_id, item.value());
+        }
     }
 }

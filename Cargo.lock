@@ -1843,6 +1843,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "tracing-test",
  "tycho-util",
  "x509-parser",

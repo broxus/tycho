@@ -11,8 +11,10 @@ use self::routing::RoutingTable;
 use self::storage::{Storage, StorageError};
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht;
-use crate::types::{AddressList, InboundServiceRequest, PeerId, Request, Response, Service};
-use crate::util::{NetworkExt, Routable};
+use crate::types::{
+    AddressList, InboundServiceRequest, PeerAffinity, PeerId, PeerInfo, Request, Response, Service,
+};
+use crate::util::{validate_signature, NetworkExt, Routable};
 
 pub use self::storage::StorageBuilder;
 
@@ -55,20 +57,17 @@ impl DhtClient {
         &self.network
     }
 
-    pub fn add_peer(&self, peer: Arc<dht::NodeInfo>) {
-        self.inner
-            .routing_table
-            .lock()
-            .unwrap()
-            .add(peer, self.inner.max_k, &self.inner.node_ttl);
+    pub fn add_peer(&self, peer: Arc<dht::NodeInfo>) -> Result<bool> {
+        self.inner.add_peer(&self.network, peer)
     }
 
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<dht::NodeInfo> {
-        self.network
+        let res = self
+            .network
             .query(peer_id, Request::from_tl(dht::rpc::GetNodeInfo))
-            .await?
-            .parse_tl()
-            .map_err(Into::into)
+            .await?;
+        let dht::NodeInfoResponse { info } = res.parse_tl()?;
+        Ok(info)
     }
 
     pub async fn find_value<T>(&self, key: &T) -> Option<Result<T::Value<'static>>>
@@ -114,16 +113,6 @@ impl DhtServiceBuilder {
 
         (client_builder, DhtService(inner))
     }
-
-    pub fn with_max_k(mut self, max_k: usize) -> Self {
-        self.max_k = max_k;
-        self
-    }
-
-    pub fn with_node_ttl(mut self, ttl: Duration) -> Self {
-        self.node_ttl = ttl;
-        self
-    }
 }
 
 impl DhtServiceBuilder<()> {
@@ -138,6 +127,18 @@ impl DhtServiceBuilder<()> {
             node_ttl: self.node_ttl,
             max_k: self.max_k,
         }
+    }
+}
+
+impl<T> DhtServiceBuilder<T> {
+    pub fn with_max_k(mut self, max_k: usize) -> Self {
+        self.max_k = max_k;
+        self
+    }
+
+    pub fn with_node_ttl(mut self, ttl: Duration) -> Self {
+        self.node_ttl = ttl;
+        self
     }
 }
 
@@ -162,6 +163,13 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     fn on_query(&self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
+        tracing::debug!(
+            peer_id = %req.metadata.peer_id,
+            addr = %req.metadata.remote_address,
+            byte_len = req.body.len(),
+            "processing DHT query",
+        );
+
         let response = crate::match_tl_request!(req.body, {
             dht::rpc::FindNode as ref r => {
                 let res = self.0.handle_find_node(r);
@@ -191,6 +199,13 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
 
     #[inline]
     fn on_message(&self, req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
+        tracing::debug!(
+            peer_id = %req.metadata.peer_id,
+            addr = %req.metadata.remote_address,
+            byte_len = req.body.len(),
+            "processing DHT message",
+        );
+
         crate::match_tl_request!(req.body, {
             dht::rpc::Store as ref r => match self.0.handle_store(r) {
                 Ok(_) => {},
@@ -285,7 +300,7 @@ impl DhtInner {
                         this.refresh_local_node_info(&network, INFO_TTL);
                         refresh_interval.reset();
 
-                        if let Err(e) = this.announce_local_node_info(&network).await {
+                        if let Err(e) = this.announce_local_node_info(&network, INFO_TTL).await {
                             tracing::error!("failed to announce local DHT node info: {e:?}");
                         }
                     }
@@ -311,15 +326,34 @@ impl DhtInner {
             created_at: now,
             signature: Bytes::new(),
         };
-        let signature = network.sign_tl(&node_info);
-        node_info.signature = signature.to_vec().into();
+        node_info.signature = network.sign_tl(&node_info).to_vec().into();
 
         *self.node_info.lock().unwrap() = Some(node_info);
     }
 
-    async fn announce_local_node_info(self: &Arc<Self>, _network: &Network) -> Result<()> {
-        // TODO: store node info in the DHT
-        todo!()
+    async fn announce_local_node_info(self: &Arc<Self>, network: &Network, ttl: u32) -> Result<()> {
+        let value = {
+            let now = now_sec();
+
+            let mut value = dht::SignedValue {
+                key: dht::SignedKey {
+                    name: "addr".to_owned().into(),
+                    idx: 0,
+                    peer_id: self.local_id,
+                },
+                data: Bytes::from(tl_proto::serialize(AddressList {
+                    items: vec![network.local_addr().into()],
+                    created_at: now,
+                    expires_at: now + ttl,
+                })),
+                expires_at: now_sec() + ttl,
+                signature: Bytes::new(),
+            };
+            value.signature = network.sign_tl(&value).to_vec().into();
+            Box::new(dht::Value::Signed(value))
+        };
+
+        self.store_value(network, value).await
     }
 
     async fn find_more_dht_nodes(self: &Arc<Self>, network: &Network) {
@@ -372,6 +406,30 @@ impl DhtInner {
         Ok(())
     }
 
+    fn add_peer(&self, network: &Network, peer: Arc<dht::NodeInfo>) -> Result<bool> {
+        anyhow::ensure!(
+            validate_node_info(now_sec(), &peer),
+            "invalid peer node info"
+        );
+
+        // TODO: add support for multiple addresses
+        let peer_info = match peer.address_list.items.first() {
+            Some(address) if peer.id != self.local_id => PeerInfo {
+                peer_id: peer.id,
+                affinity: PeerAffinity::Allowed,
+                address: address.clone(),
+            },
+            _ => return Ok(false),
+        };
+
+        let mut routing_table = self.routing_table.lock().unwrap();
+        let is_new = routing_table.add(peer, self.max_k, &self.node_ttl);
+        if is_new {
+            network.known_peers().insert(peer_info);
+        }
+        Ok(is_new)
+    }
+
     fn handle_store(&self, req: &dht::rpc::Store) -> Result<bool, StorageError> {
         self.storage.insert(&req.value)
     }
@@ -409,6 +467,25 @@ impl DhtInner {
     }
 }
 
+fn validate_node_info(now: u32, info: &dht::NodeInfo) -> bool {
+    info.created_at <= now + CLOCK_THRESHOLD
+        && info.address_list.created_at <= now + CLOCK_THRESHOLD
+        && info.address_list.expires_at >= now
+        && !info.address_list.items.is_empty()
+        && validate_signature(&info.id, &info.signature, info)
+}
+
+fn validate_value(now: u32, key: &[u8; 32], value: &dht::Value) -> bool {
+    match value {
+        dht::Value::Signed(value) => {
+            value.expires_at >= now
+                && key == &tl_proto::hash(&value.key)
+                && validate_signature(&value.key.peer_id, &value.signature, value)
+        }
+        dht::Value::Overlay(value) => value.expires_at >= now && key == &tl_proto::hash(&value.key),
+    }
+}
+
 #[derive(TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 enum ValueResponseRaw {
@@ -423,3 +500,5 @@ enum ValueResponseRaw {
 struct NodeResponseRaw {
     nodes: Vec<Arc<dht::NodeInfo>>,
 }
+
+const CLOCK_THRESHOLD: u32 = 1;

@@ -1,6 +1,10 @@
+use bytes::Bytes;
+
 pub use self::futures::BoxFutureOrNoop;
 pub use self::router::{Routable, Router, RouterBuilder};
 pub use self::traits::NetworkExt;
+
+use crate::types::PeerId;
 
 mod futures;
 mod router;
@@ -28,4 +32,17 @@ macro_rules! match_tl_request {
             $err_exr
         }
     };
+}
+
+pub(crate) fn validate_signature<T>(peed_id: &PeerId, signature: &Bytes, data: &T) -> bool
+where
+    T: tl_proto::TlWrite,
+{
+    let Some(public_key) = peed_id.as_public_key() else {
+        return false;
+    };
+    let Ok::<&[u8; 64], _>(signature) = signature.as_ref().try_into() else {
+        return false;
+    };
+    public_key.verify(data, signature)
 }

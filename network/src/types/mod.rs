@@ -82,7 +82,7 @@ impl Response<Bytes> {
 
     pub fn parse_tl<T>(self) -> tl_proto::TlResult<T>
     where
-        for<'a> T: tl_proto::TlRead<'a>,
+        for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
         tl_proto::deserialize(self.body.as_ref())
     }

@@ -12,6 +12,7 @@ use tycho_util::time::now_sec;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dht::routing::RoutingTable;
+use crate::dht::{validate_node_info, validate_value};
 use crate::network::Network;
 use crate::proto::dht;
 use crate::types::{PeerId, Request};
@@ -346,38 +347,5 @@ impl<T: Future<Output = (Arc<dht::NodeInfo>, Option<Result<()>>)> + Send> StoreV
     }
 }
 
-fn validate_node_info(now: u32, info: &dht::NodeInfo) -> bool {
-    info.created_at <= now + CLOCK_THRESHOLD
-        && info.address_list.created_at <= now + CLOCK_THRESHOLD
-        && info.address_list.expires_at < now
-        && !info.address_list.items.is_empty()
-        && validate_signature(&info.id, &info.signature, info)
-}
-
-fn validate_value(now: u32, key: &[u8; 32], value: &dht::Value) -> bool {
-    match value {
-        dht::Value::Signed(value) => {
-            value.expires_at < now
-                && key == &tl_proto::hash(&value.key)
-                && validate_signature(&value.key.peer_id, &value.signature, value)
-        }
-        dht::Value::Overlay(value) => value.expires_at < now && key == &tl_proto::hash(&value.key),
-    }
-}
-
-fn validate_signature<T>(peed_id: &PeerId, signature: &Bytes, data: &T) -> bool
-where
-    T: tl_proto::TlWrite,
-{
-    let Some(pubkey) = peed_id.as_public_key() else {
-        return false;
-    };
-    let Ok::<&[u8; 64], _>(signature) = signature.as_ref().try_into() else {
-        return false;
-    };
-    pubkey.verify(data, signature)
-}
-
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
-const CLOCK_THRESHOLD: u32 = 1;
 const MAX_PARALLEL_REQUESTS: usize = 10;

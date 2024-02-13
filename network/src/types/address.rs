@@ -147,7 +147,7 @@ impl<'a> TlRead<'a> for AddressList {
         use tl_proto::TlError;
 
         let len = u32::read_from(packet, offset)? as usize;
-        if len > Self::MAX_LEN {
+        if len == 0 || len > Self::MAX_LEN {
             return Err(TlError::InvalidData);
         }
 
