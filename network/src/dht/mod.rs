@@ -6,7 +6,7 @@ use bytes::{Buf, Bytes};
 use tl_proto::TlWrite;
 use tycho_util::time::{now_sec, shifted_interval};
 
-use self::query::Query;
+use self::query::{Query, StoreValue};
 use self::routing::RoutingTable;
 use self::storage::{Storage, StorageError};
 use crate::network::{Network, WeakNetwork};
@@ -80,6 +80,10 @@ impl DhtClient {
             .find_value(&self.network, &tl_proto::hash(key))
             .await?;
         Some(res.and_then(|value| T::parse_value(value).map_err(Into::into)))
+    }
+
+    pub async fn store_value(&self, value: Box<dht::Value>) -> Result<()> {
+        self.inner.store_value(&self.network, value).await
     }
 }
 
@@ -351,6 +355,21 @@ impl DhtInner {
 
         // NOTE: expression is intentionally split to drop the routing table guard
         query.find_value().await
+    }
+
+    async fn store_value(&self, network: &Network, value: Box<dht::Value>) -> Result<()> {
+        self.storage.insert(&value)?;
+
+        let query = StoreValue::new(
+            network.clone(),
+            &self.routing_table.lock().unwrap(),
+            value,
+            self.max_k,
+        );
+
+        // NOTE: expression is intentionally split to drop the routing table guard
+        query.run().await;
+        Ok(())
     }
 
     fn handle_store(&self, req: &dht::rpc::Store) -> Result<bool, StorageError> {

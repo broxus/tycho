@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use quinn::{ConnectionError, RecvStream};
+use quinn::{ConnectionError, RecvStream, SendDatagramError};
 
 use crate::types::{Direction, InboundRequestMeta, PeerId};
 
@@ -52,10 +52,6 @@ impl Connection {
         self.inner.close(0u8.into(), b"connection closed");
     }
 
-    pub async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
-        self.inner.open_uni().await.map(SendStream)
-    }
-
     pub async fn open_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.inner
             .open_bi()
@@ -63,15 +59,23 @@ impl Connection {
             .map(|(send, recv)| (SendStream(send), recv))
     }
 
-    pub async fn accept_uni(&self) -> Result<RecvStream, ConnectionError> {
-        self.inner.accept_uni().await
-    }
-
     pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.inner
             .accept_bi()
             .await
             .map(|(send, recv)| (SendStream(send), recv))
+    }
+
+    pub async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
+        self.inner.open_uni().await.map(SendStream)
+    }
+
+    pub async fn accept_uni(&self) -> Result<RecvStream, ConnectionError> {
+        self.inner.accept_uni().await
+    }
+
+    pub fn send_datagram(&self, data: Bytes) -> Result<(), SendDatagramError> {
+        self.inner.send_datagram(data)
     }
 
     pub async fn read_datagram(&self) -> Result<Bytes, ConnectionError> {

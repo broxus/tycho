@@ -34,4 +34,19 @@ impl Peer {
 
         recv_response(&mut recv_stream).await
     }
+
+    pub async fn send_message(&self, request: Request<Bytes>) -> Result<()> {
+        let send_stream = self.connection.open_uni().await?;
+        let mut send_stream = FramedWrite::new(send_stream, make_codec(&self.config));
+
+        send_request(&mut send_stream, request).await?;
+        send_stream.get_mut().finish().await?;
+
+        Ok(())
+    }
+
+    pub fn send_datagram(&self, request: Bytes) -> Result<()> {
+        self.connection.send_datagram(request)?;
+        Ok(())
+    }
 }

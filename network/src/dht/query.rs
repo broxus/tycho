@@ -6,7 +6,8 @@ use ahash::{HashMapExt, HashSetExt};
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures_util::{Future, StreamExt};
+use tokio::sync::Semaphore;
 use tycho_util::time::now_sec;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -53,6 +54,7 @@ impl Query {
         }));
 
         // Prepare request to initial candidates
+        let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
@@ -60,6 +62,7 @@ impl Query {
                     self.network.clone(),
                     node.clone(),
                     request_body.clone(),
+                    &semaphore,
                 ));
             });
 
@@ -95,6 +98,7 @@ impl Query {
                                 self.network.clone(),
                                 node.clone(),
                                 request_body.clone(),
+                                &semaphore,
                             ));
                         });
                 }
@@ -121,6 +125,7 @@ impl Query {
         }));
 
         // Prepare request to initial candidates
+        let semaphore = Semaphore::new(MAX_PARALLEL_REQUESTS);
         let mut futures = FuturesUnordered::new();
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
@@ -128,6 +133,7 @@ impl Query {
                     self.network.clone(),
                     node.clone(),
                     request_body.clone(),
+                    &semaphore,
                 ));
             });
 
@@ -154,6 +160,7 @@ impl Query {
                                 self.network.clone(),
                                 node.clone(),
                                 request_body.clone(),
+                                &semaphore,
                             ));
                         });
                 }
@@ -233,10 +240,15 @@ impl Query {
         network: Network,
         node: Arc<dht::NodeInfo>,
         request_body: Bytes,
+        semaphore: &Semaphore,
     ) -> (Arc<dht::NodeInfo>, Option<Result<T>>)
     where
         for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
+        let Ok(_permit) = semaphore.acquire().await else {
+            return (node, None);
+        };
+
         let req = network.query(
             &node.id,
             Request {
@@ -253,6 +265,84 @@ impl Query {
         };
 
         (node, res)
+    }
+}
+
+pub struct StoreValue<F = ()> {
+    futures: FuturesUnordered<F>,
+}
+
+impl StoreValue<()> {
+    pub fn new(
+        network: Network,
+        routing_table: &RoutingTable,
+        value: Box<dht::Value>,
+        max_k: usize,
+    ) -> StoreValue<impl Future<Output = (Arc<dht::NodeInfo>, Option<Result<()>>)> + Send> {
+        let key_hash = match value.as_ref() {
+            dht::Value::Signed(value) => tl_proto::hash(&value.key),
+            dht::Value::Overlay(value) => tl_proto::hash(&value.key),
+        };
+
+        let request_body = Bytes::from(tl_proto::serialize(dht::rpc::Store { value }));
+
+        let semaphore = Arc::new(Semaphore::new(10));
+        let futures = futures_util::stream::FuturesUnordered::new();
+        routing_table.visit_closest(&key_hash, max_k, |node| {
+            futures.push(Self::visit(
+                network.clone(),
+                node.clone(),
+                request_body.clone(),
+                semaphore.clone(),
+            ));
+        });
+
+        StoreValue { futures }
+    }
+
+    async fn visit(
+        network: Network,
+        node: Arc<dht::NodeInfo>,
+        request_body: Bytes,
+        semaphore: Arc<Semaphore>,
+    ) -> (Arc<dht::NodeInfo>, Option<Result<()>>) {
+        let Ok(_permit) = semaphore.acquire().await else {
+            return (node, None);
+        };
+
+        let req = network.send(
+            &node.id,
+            Request {
+                version: Default::default(),
+                body: request_body.clone(),
+            },
+        );
+
+        let res = match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
+            Ok(res) => Some(res),
+            Err(_) => None,
+        };
+
+        (node, res)
+    }
+}
+
+impl<T: Future<Output = (Arc<dht::NodeInfo>, Option<Result<()>>)> + Send> StoreValue<T> {
+    pub async fn run(mut self) {
+        while let Some((node, res)) = self.futures.next().await {
+            match res {
+                Some(Ok(())) => {
+                    tracing::debug!(peer_id = %node.id, "value stored");
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(peer_id = %node.id, "failed to store value: {e:?}");
+                }
+                // Do nothing on timeout
+                None => {
+                    tracing::warn!(peer_id = %node.id, "failed to store value: timeout");
+                }
+            }
+        }
     }
 }
 
@@ -290,3 +380,4 @@ where
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
 const CLOCK_THRESHOLD: u32 = 1;
+const MAX_PARALLEL_REQUESTS: usize = 10;

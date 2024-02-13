@@ -206,7 +206,7 @@ pub mod rpc {
     #[tl(boxed, id = "dht.store", scheme = "proto.tl")]
     pub struct Store {
         /// A value to store.
-        pub value: Value,
+        pub value: Box<Value>,
     }
 
     /// Search for `k` closest nodes.
