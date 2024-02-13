@@ -21,9 +21,7 @@ impl Node {
     fn new(key: &ed25519::SecretKey) -> Result<Self> {
         let keypair = everscale_crypto::ed25519::KeyPair::from(key);
 
-        let (dht_client, dht) = DhtService::builder(keypair.public_key.into())
-            .with_storage(|builder| builder)
-            .build();
+        let (dht_client, dht) = DhtService::builder(keypair.public_key.into()).build();
 
         let router = Router::builder().route(dht).build();
 

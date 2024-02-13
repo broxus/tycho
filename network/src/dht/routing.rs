@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
 use crate::proto::dht;
 use crate::types::PeerId;
 
-pub struct RoutingTable {
+pub(crate) struct RoutingTable {
     local_id: PeerId,
     buckets: BTreeMap<usize, Bucket>,
 }
@@ -33,7 +34,7 @@ impl RoutingTable {
     }
 
     pub fn add(&mut self, node: Arc<dht::NodeInfo>, max_k: usize, node_ttl: &Duration) -> bool {
-        let distance = distance(&self.local_id, &node.id);
+        let distance = xor_distance(&self.local_id, &node.id);
         if distance == 0 {
             return false;
         }
@@ -46,7 +47,7 @@ impl RoutingTable {
 
     #[allow(unused)]
     pub fn remove(&mut self, key: &PeerId) -> bool {
-        let distance = distance(&self.local_id, key);
+        let distance = xor_distance(&self.local_id, key);
         if let Some(bucket) = self.buckets.get_mut(&distance) {
             bucket.remove(key)
         } else {
@@ -61,10 +62,10 @@ impl RoutingTable {
 
         // TODO: fill secure and unsecure buckets in parallel
         let mut result = Vec::with_capacity(count);
-        let distance = distance(&self.local_id, PeerId::wrap(key));
+        let distance = xor_distance(&self.local_id, PeerId::wrap(key));
 
         // Search for closest nodes first
-        for i in (distance..=MAX_DISTANCE).chain((0..distance).rev()) {
+        for i in (distance..=MAX_XOR_DISTANCE).chain((0..distance).rev()) {
             let remaining = match count.checked_sub(result.len()) {
                 None | Some(0) => break,
                 Some(n) => n,
@@ -88,12 +89,12 @@ impl RoutingTable {
             return;
         }
 
-        let distance = distance(&self.local_id, PeerId::wrap(key));
+        let distance = xor_distance(&self.local_id, PeerId::wrap(key));
 
         let mut processed = 0;
 
         // Search for closest nodes first
-        for i in (distance..=MAX_DISTANCE).chain((0..distance).rev()) {
+        for i in (distance..=MAX_XOR_DISTANCE).chain((0..distance).rev()) {
             let remaining = match count.checked_sub(processed) {
                 None | Some(0) => break,
                 Some(n) => n,
@@ -110,7 +111,7 @@ impl RoutingTable {
 
     #[allow(unused)]
     pub fn contains(&self, key: &PeerId) -> bool {
-        let distance = distance(&self.local_id, key);
+        let distance = xor_distance(&self.local_id, key);
         self.buckets
             .get(&distance)
             .map(|bucket| bucket.contains(key))
@@ -183,21 +184,6 @@ impl Node {
         &self.last_updated_at.elapsed() >= timeout
     }
 }
-
-pub fn distance(left: &PeerId, right: &PeerId) -> usize {
-    for (i, (left, right)) in std::iter::zip(left.0.chunks(8), right.0.chunks(8)).enumerate() {
-        let left = u64::from_be_bytes(left.try_into().unwrap());
-        let right = u64::from_be_bytes(right.try_into().unwrap());
-        let diff = left ^ right;
-        if diff != 0 {
-            return MAX_DISTANCE - (i * 64 + diff.leading_zeros() as usize);
-        }
-    }
-
-    0
-}
-
-const MAX_DISTANCE: usize = 256;
 
 #[cfg(test)]
 mod tests {

@@ -37,7 +37,7 @@ impl OverlayValueMerger for () {
     }
 }
 
-pub struct StorageBuilder {
+pub(crate) struct StorageBuilder {
     cache_builder: DhtCacheBuilder<std::collections::hash_map::RandomState>,
     overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl: Duration,
@@ -59,7 +59,7 @@ impl Default for StorageBuilder {
 }
 
 impl StorageBuilder {
-    pub(crate) fn build(self) -> Storage {
+    pub fn build(self) -> Storage {
         fn weigher(_key: &StorageKeyId, value: &StoredValue) -> u32 {
             std::mem::size_of::<StorageKeyId>() as u32
                 + std::mem::size_of::<StoredValue>() as u32
@@ -111,7 +111,7 @@ impl StorageBuilder {
     }
 }
 
-pub struct Storage {
+pub(crate) struct Storage {
     cache: DhtCache<ahash::RandomState>,
     overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl_sec: u32,

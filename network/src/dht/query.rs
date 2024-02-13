@@ -12,7 +12,6 @@ use tycho_util::time::now_sec;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dht::routing::RoutingTable;
-use crate::dht::{validate_node_info, validate_value};
 use crate::network::Network;
 use crate::proto::dht;
 use crate::types::{PeerId, Request};
@@ -73,7 +72,7 @@ impl Query {
             match res {
                 // Return the value if found
                 Some(Ok(dht::ValueResponse::Found(value))) => {
-                    if !validate_value(now_sec(), self.local_id(), &value) {
+                    if !value.is_valid(now_sec(), self.local_id()) {
                         // Ignore invalid values
                         continue;
                     }
@@ -190,7 +189,7 @@ impl Query {
         let mut has_new = false;
         for node in nodes {
             // Skip invalid entries
-            if !validate_node_info(now, &node) {
+            if !node.is_valid(now) {
                 continue;
             }
 
@@ -214,7 +213,7 @@ impl Query {
         let mut has_new = false;
         for node in nodes {
             // Skip invalid entries
-            if !validate_node_info(now, &node) {
+            if !node.is_valid(now) {
                 continue;
             }
 

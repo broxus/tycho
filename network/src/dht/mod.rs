@@ -8,16 +8,18 @@ use tycho_util::time::{now_sec, shifted_interval};
 
 use self::query::{Query, StoreValue};
 use self::routing::RoutingTable;
-use self::storage::{Storage, StorageError};
+use self::storage::Storage;
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht;
 use crate::types::{
     AddressList, PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest,
 };
-use crate::util::{check_peer_signature, NetworkExt, Routable};
+use crate::util::{NetworkExt, Routable};
 
-pub use self::storage::StorageBuilder;
+pub use self::config::DhtConfig;
+pub use self::storage::{OverlayValueMerger, StorageError};
 
+mod config;
 mod query;
 mod routing;
 mod storage;
@@ -58,7 +60,7 @@ impl DhtClient {
     }
 
     pub fn add_peer(&self, peer: Arc<dht::NodeInfo>) -> Result<bool> {
-        self.inner.add_peer(&self.network, peer)
+        self.inner.add_node_info(&self.network, peer)
     }
 
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<dht::NodeInfo> {
@@ -86,24 +88,52 @@ impl DhtClient {
     }
 }
 
-pub struct DhtServiceBuilder<MandatoryFields = Storage> {
-    mandatory_fields: MandatoryFields,
+pub struct DhtServiceBuilder {
     local_id: PeerId,
-    node_ttl: Duration,
-    max_k: usize,
+    config: Option<DhtConfig>,
+    overlay_merger: Option<Arc<dyn OverlayValueMerger>>,
 }
 
+// TODO: add overlay merger methods
 impl DhtServiceBuilder {
+    pub fn with_config(mut self, config: DhtConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
+    pub fn with_overlay_value_merger(mut self, merger: Arc<dyn OverlayValueMerger>) -> Self {
+        self.overlay_merger = Some(merger);
+        self
+    }
+
     pub fn build(self) -> (DhtClientBuilder, DhtService) {
-        let storage = self.mandatory_fields;
+        let config = self.config.unwrap_or_default();
+
+        let storage = {
+            let mut builder = Storage::builder()
+                .with_max_key_name_len(config.max_stored_key_name_len)
+                .with_max_key_index(config.max_stored_key_index)
+                .with_max_capacity(config.max_storage_capacity)
+                .with_max_ttl(config.max_stored_value_ttl);
+
+            if let Some(time_to_idle) = config.storage_item_time_to_idle {
+                builder = builder.with_max_idle(time_to_idle);
+            }
+
+            if let Some(ref merger) = self.overlay_merger {
+                builder = builder.with_overlay_value_merger(merger);
+            }
+
+            builder.build()
+        };
 
         let inner = Arc::new(DhtInner {
             local_id: self.local_id,
             routing_table: Mutex::new(RoutingTable::new(self.local_id)),
             storage,
             node_info: Mutex::new(None),
-            max_k: self.max_k,
-            node_ttl: self.node_ttl,
+            max_k: config.max_k,
+            node_ttl: config.max_node_info_ttl,
         });
 
         let client_builder = DhtClientBuilder {
@@ -115,43 +145,15 @@ impl DhtServiceBuilder {
     }
 }
 
-impl DhtServiceBuilder<()> {
-    pub fn with_storage<F>(self, f: F) -> DhtServiceBuilder<Storage>
-    where
-        F: FnOnce(StorageBuilder) -> StorageBuilder,
-    {
-        let storage = f(Storage::builder()).build();
-        DhtServiceBuilder {
-            mandatory_fields: storage,
-            local_id: self.local_id,
-            node_ttl: self.node_ttl,
-            max_k: self.max_k,
-        }
-    }
-}
-
-impl<T> DhtServiceBuilder<T> {
-    pub fn with_max_k(mut self, max_k: usize) -> Self {
-        self.max_k = max_k;
-        self
-    }
-
-    pub fn with_node_ttl(mut self, ttl: Duration) -> Self {
-        self.node_ttl = ttl;
-        self
-    }
-}
-
 #[derive(Clone)]
 pub struct DhtService(Arc<DhtInner>);
 
 impl DhtService {
-    pub fn builder(local_id: PeerId) -> DhtServiceBuilder<()> {
+    pub fn builder(local_id: PeerId) -> DhtServiceBuilder {
         DhtServiceBuilder {
-            mandatory_fields: (),
             local_id,
-            node_ttl: Duration::from_secs(15 * 60),
-            max_k: 20,
+            config: None,
+            overlay_merger: None,
         }
     }
 }
@@ -406,16 +408,13 @@ impl DhtInner {
         Ok(())
     }
 
-    fn add_peer(&self, network: &Network, peer: Arc<dht::NodeInfo>) -> Result<bool> {
-        anyhow::ensure!(
-            validate_node_info(now_sec(), &peer),
-            "invalid peer node info"
-        );
+    fn add_node_info(&self, network: &Network, node: Arc<dht::NodeInfo>) -> Result<bool> {
+        anyhow::ensure!(node.is_valid(now_sec()), "invalid peer node info");
 
         // TODO: add support for multiple addresses
-        let peer_info = match peer.address_list.items.first() {
-            Some(address) if peer.id != self.local_id => PeerInfo {
-                peer_id: peer.id,
+        let peer_info = match node.address_list.items.first() {
+            Some(address) if node.id != self.local_id => PeerInfo {
+                peer_id: node.id,
                 affinity: PeerAffinity::Allowed,
                 address: address.clone(),
             },
@@ -423,7 +422,7 @@ impl DhtInner {
         };
 
         let mut routing_table = self.routing_table.lock().unwrap();
-        let is_new = routing_table.add(peer, self.max_k, &self.node_ttl);
+        let is_new = routing_table.add(node, self.max_k, &self.node_ttl);
         if is_new {
             network.known_peers().insert(peer_info);
         }
@@ -439,7 +438,7 @@ impl DhtInner {
             .routing_table
             .lock()
             .unwrap()
-            .closest(&req.key, req.k as usize);
+            .closest(&req.key, (req.k as usize).min(self.max_k));
 
         NodeResponseRaw { nodes }
     }
@@ -452,7 +451,7 @@ impl DhtInner {
                 .routing_table
                 .lock()
                 .unwrap()
-                .closest(&req.key, req.k as usize);
+                .closest(&req.key, (req.k as usize).min(self.max_k));
 
             ValueResponseRaw::NotFound(nodes)
         }
@@ -464,25 +463,6 @@ impl DhtInner {
             .unwrap()
             .clone()
             .map(|info| dht::NodeInfoResponse { info })
-    }
-}
-
-fn validate_node_info(now: u32, info: &dht::NodeInfo) -> bool {
-    info.created_at <= now + CLOCK_THRESHOLD
-        && info.address_list.created_at <= now + CLOCK_THRESHOLD
-        && info.address_list.expires_at >= now
-        && !info.address_list.items.is_empty()
-        && check_peer_signature(&info.id, &info.signature, info)
-}
-
-fn validate_value(now: u32, key: &[u8; 32], value: &dht::Value) -> bool {
-    match value {
-        dht::Value::Signed(value) => {
-            value.expires_at >= now
-                && key == &tl_proto::hash(&value.key)
-                && check_peer_signature(&value.key.peer_id, &value.signature, value)
-        }
-        dht::Value::Overlay(value) => value.expires_at >= now && key == &tl_proto::hash(&value.key),
     }
 }
 
@@ -501,4 +481,17 @@ struct NodeResponseRaw {
     nodes: Vec<Arc<dht::NodeInfo>>,
 }
 
-const CLOCK_THRESHOLD: u32 = 1;
+pub fn xor_distance(left: &PeerId, right: &PeerId) -> usize {
+    for (i, (left, right)) in std::iter::zip(left.0.chunks(8), right.0.chunks(8)).enumerate() {
+        let left = u64::from_be_bytes(left.try_into().unwrap());
+        let right = u64::from_be_bytes(right.try_into().unwrap());
+        let diff = left ^ right;
+        if diff != 0 {
+            return MAX_XOR_DISTANCE - (i * 64 + diff.leading_zeros() as usize);
+        }
+    }
+
+    0
+}
+
+const MAX_XOR_DISTANCE: usize = 256;

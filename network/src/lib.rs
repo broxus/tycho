@@ -1,5 +1,8 @@
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
-pub use dht::{DhtClient, DhtClientBuilder, DhtService, DhtServiceBuilder, StorageBuilder};
+pub use dht::{
+    xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtService, DhtServiceBuilder,
+    OverlayValueMerger, StorageError,
+};
 pub use network::{
     ActivePeers, Connection, KnownPeers, Network, NetworkBuilder, NetworkConfig, Peer, QuicConfig,
     RecvStream, SendStream, WeakActivePeers, WeakNetwork,
@@ -37,9 +40,7 @@ mod tests {
     async fn init_works() {
         let keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
 
-        let (dht_client, dht) = DhtService::builder(keypair.public_key.into())
-            .with_storage(|builder| builder)
-            .build();
+        let (dht_client, dht) = DhtService::builder(keypair.public_key.into()).build();
 
         let router = Router::builder().route(dht).build();
 

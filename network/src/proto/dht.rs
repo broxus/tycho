@@ -2,6 +2,7 @@ use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 
 use crate::types::{AddressList, PeerId};
+use crate::util::check_peer_signature;
 
 /// A signed DHT node info.
 #[derive(Debug, Clone, TlRead, TlWrite)]
@@ -15,6 +16,18 @@ pub struct NodeInfo {
     /// A `ed25519` signature of this entry.
     #[tl(signature)]
     pub signature: Bytes,
+}
+
+impl NodeInfo {
+    pub fn is_valid(&self, at: u32) -> bool {
+        const CLOCK_THRESHOLD: u32 = 1;
+
+        self.created_at <= at + CLOCK_THRESHOLD
+            && self.address_list.created_at <= at + CLOCK_THRESHOLD
+            && self.address_list.expires_at >= at
+            && !self.address_list.items.is_empty()
+            && check_peer_signature(&self.id, &self.signature, self)
+    }
 }
 
 pub trait WithValue:
@@ -108,6 +121,19 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn is_valid(&self, at: u32, key_hash: &[u8; 32]) -> bool {
+        match self {
+            Self::Signed(value) => {
+                value.expires_at >= at
+                    && key_hash == &tl_proto::hash(&value.key)
+                    && check_peer_signature(&value.key.peer_id, &value.signature, value)
+            }
+            Self::Overlay(value) => {
+                value.expires_at >= at && key_hash == &tl_proto::hash(&value.key)
+            }
+        }
+    }
+
     pub fn key_name(&self) -> &[u8] {
         match self {
             Self::Signed(value) => value.key.name.as_ref(),
