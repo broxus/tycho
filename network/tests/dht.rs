@@ -8,8 +8,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
+use tl_proto::{TlRead, TlWrite};
 use tycho_network::proto::dht;
-use tycho_network::{proto, Address, AddressList, DhtClient, DhtService, Network, PeerId, Router};
+use tycho_network::{
+    Address, AddressList, DhtClient, DhtService, FindValueError, Network, PeerId, Router,
+};
 use tycho_util::time::now_sec;
 
 struct Node {
@@ -36,14 +39,14 @@ impl Node {
         Ok(Self { network, dht })
     }
 
-    fn make_node_info(key: &ed25519::SecretKey, address: Address) -> proto::dht::NodeInfo {
+    fn make_node_info(key: &ed25519::SecretKey, address: Address) -> dht::NodeInfo {
         const TTL: u32 = 3600;
 
         let keypair = ed25519::KeyPair::from(key);
         let peer_id = PeerId::from(keypair.public_key);
 
         let now = now_sec();
-        let mut node_info = proto::dht::NodeInfo {
+        let mut node_info = dht::NodeInfo {
             id: peer_id,
             address_list: AddressList {
                 items: vec![address],
@@ -83,7 +86,7 @@ fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<dht::NodeInfo>>) {
 
 #[tokio::test]
 async fn bootstrap_nodes_accessible() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt::try_init().ok();
 
     let (nodes, _) = make_network(5);
 
@@ -98,6 +101,43 @@ async fn bootstrap_nodes_accessible() -> Result<()> {
             left.dht.get_node_info(right.network.peer_id()).await?;
         }
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn bootstrap_nodes_store_value() -> Result<()> {
+    tracing_subscriber::fmt::try_init().ok();
+
+    #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+    struct SomeValue(u32);
+
+    let (nodes, _) = make_network(5);
+
+    // Store value
+    let first = &nodes[0].dht;
+    let value_to_store = first.make_signed_value("test", now_sec() + 600, SomeValue(123123));
+    first.store_value(value_to_store.clone()).await?;
+
+    // Retrieve an existing value
+    let queried_value = first
+        .find_value(&dht::SignedKey {
+            name: "test".to_owned().into(),
+            idx: 0,
+            peer_id: *first.network().peer_id(),
+        })
+        .await?;
+    assert_eq!(&dht::Value::Signed(queried_value), value_to_store.as_ref());
+
+    // Retrieve a non-existing value
+    let res = first
+        .find_value(&dht::SignedKey {
+            name: "not-existing".to_owned().into(),
+            idx: 1,
+            peer_id: *first.network().peer_id(),
+        })
+        .await;
+    assert!(matches!(res, Err(FindValueError::NotFound)));
 
     Ok(())
 }

@@ -46,7 +46,8 @@ impl Query {
         self.candidates.local_id().as_bytes()
     }
 
-    pub async fn find_value(mut self) -> Option<Result<Box<dht::Value>>> {
+    #[tracing::instrument(level = "debug", skip_all)]
+    pub async fn find_value(mut self) -> Option<Box<dht::Value>> {
         // Prepare shared request
         let request_body = Bytes::from(tl_proto::serialize(dht::rpc::FindValue {
             key: *self.local_id(),
@@ -77,7 +78,7 @@ impl Query {
                         continue;
                     }
 
-                    return Some(Ok(value));
+                    return Some(value);
                 }
                 // Refill futures from the nodes response
                 Some(Ok(dht::ValueResponse::NotFound(nodes))) => {
@@ -117,6 +118,7 @@ impl Query {
         None
     }
 
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn find_peers(mut self) -> impl Iterator<Item = Arc<dht::NodeInfo>> {
         // Prepare shared request
         let request_body = Bytes::from(tl_proto::serialize(dht::rpc::FindNode {
@@ -328,6 +330,7 @@ impl StoreValue<()> {
 }
 
 impl<T: Future<Output = (Arc<dht::NodeInfo>, Option<Result<()>>)> + Send> StoreValue<T> {
+    #[tracing::instrument(level = "debug", skip_all, name = "store_value")]
     pub async fn run(mut self) {
         while let Some((node, res)) = self.futures.next().await {
             match res {

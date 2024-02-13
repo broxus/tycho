@@ -148,7 +148,7 @@ impl UniStreamRequestHandler {
     async fn do_handle(mut self) -> Result<()> {
         let req = recv_request(&mut self.recv_stream).await?;
         self.service
-            .on_query(ServiceRequest {
+            .on_message(ServiceRequest {
                 metadata: self.meta,
                 body: req.body,
             })

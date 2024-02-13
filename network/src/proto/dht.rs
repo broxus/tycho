@@ -39,7 +39,7 @@ pub trait WithValue:
 }
 
 /// Key for values that can only be updated by the owner.
-#[derive(Debug, Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.signedKey", scheme = "proto.tl")]
 pub struct SignedKey {
     /// Key name.
@@ -62,7 +62,7 @@ impl WithValue for SignedKey {
 }
 
 /// Key for overlay-managed values.
-#[derive(Debug, Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.overlayKey", scheme = "proto.tl")]
 pub struct OverlayKey {
     /// Overlay id.
@@ -85,7 +85,7 @@ impl WithValue for OverlayKey {
 }
 
 /// Value with a known owner.
-#[derive(Debug, Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.signedValue", scheme = "proto.tl")]
 pub struct SignedValue {
     /// Signed key.
@@ -100,7 +100,7 @@ pub struct SignedValue {
 }
 
 /// Overlay-managed value.
-#[derive(Debug, Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "dht.overlayValue", scheme = "proto.tl")]
 pub struct OverlayValue {
     /// Overlay key.
@@ -112,7 +112,7 @@ pub struct OverlayValue {
 }
 
 /// Stored value.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     /// Value with a known owner.
     Signed(SignedValue),

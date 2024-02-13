@@ -1,7 +1,7 @@
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
     xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtService, DhtServiceBuilder,
-    OverlayValueMerger, StorageError,
+    FindValueError, OverlayValueMerger, StorageError,
 };
 pub use network::{
     ActivePeers, Connection, KnownPeers, Network, NetworkBuilder, NetworkConfig, Peer, QuicConfig,

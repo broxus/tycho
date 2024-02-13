@@ -72,19 +72,30 @@ impl DhtClient {
         Ok(info)
     }
 
-    pub async fn find_value<T>(&self, key: &T) -> Option<Result<T::Value<'static>>>
+    pub async fn find_value<T>(&self, key: &T) -> Result<T::Value<'static>, FindValueError>
     where
         T: dht::WithValue,
     {
-        let res = self
+        match self
             .inner
             .find_value(&self.network, &tl_proto::hash(key))
-            .await?;
-        Some(res.and_then(|value| T::parse_value(value).map_err(Into::into)))
+            .await
+        {
+            Some(value) => T::parse_value(value).map_err(FindValueError::InvalidData),
+            None => Err(FindValueError::NotFound),
+        }
     }
 
     pub async fn store_value(&self, value: Box<dht::Value>) -> Result<()> {
         self.inner.store_value(&self.network, value).await
+    }
+
+    pub fn make_signed_value<T>(&self, name: &str, expires_at: u32, data: T) -> Box<dht::Value>
+    where
+        T: TlWrite + 'static,
+    {
+        self.inner
+            .make_signed_value(&self.network, name, expires_at, data)
     }
 }
 
@@ -94,14 +105,13 @@ pub struct DhtServiceBuilder {
     overlay_merger: Option<Arc<dyn OverlayValueMerger>>,
 }
 
-// TODO: add overlay merger methods
 impl DhtServiceBuilder {
     pub fn with_config(mut self, config: DhtConfig) -> Self {
         self.config = Some(config);
         self
     }
 
-    pub fn with_overlay_value_merger(mut self, merger: Arc<dyn OverlayValueMerger>) -> Self {
+    pub fn with_overlay_value_merger<T: OverlayValueMerger>(mut self, merger: Arc<T>) -> Self {
         self.overlay_merger = Some(merger);
         self
     }
@@ -164,32 +174,33 @@ impl Service<ServiceRequest> for DhtService {
     type OnMessageFuture = futures_util::future::Ready<()>;
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
+    #[tracing::instrument(
+        level = "debug",
+        name = "on_dht_query",
+        skip_all,
+        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
+    )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        tracing::debug!(
-            peer_id = %req.metadata.peer_id,
-            addr = %req.metadata.remote_address,
-            byte_len = req.body.len(),
-            "processing DHT query",
-        );
-
         let response = crate::match_tl_request!(req.body, {
             dht::rpc::FindNode as ref r => {
+                tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_node");
+
                 let res = self.0.handle_find_node(r);
                 Some(tl_proto::serialize(res))
             },
             dht::rpc::FindValue as ref r => {
+                tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_value");
+
                 let res = self.0.handle_find_value(r);
                 Some(tl_proto::serialize(res))
             },
             dht::rpc::GetNodeInfo as _ => {
+                tracing::debug!("get_node_info");
+
                 self.0.handle_get_node_info().map(tl_proto::serialize)
             },
         }, e => {
-            tracing::debug!(
-                peer_id = %req.metadata.peer_id,
-                addr = %req.metadata.remote_address,
-                "failed to deserialize query from: {e:?}"
-            );
+            tracing::debug!("failed to deserialize query from: {e:?}");
             None
         });
 
@@ -199,32 +210,23 @@ impl Service<ServiceRequest> for DhtService {
         }))
     }
 
-    #[inline]
+    #[tracing::instrument(
+        level = "debug",
+        name = "on_dht_message",
+        skip_all,
+        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
+    )]
     fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
-        tracing::debug!(
-            peer_id = %req.metadata.peer_id,
-            addr = %req.metadata.remote_address,
-            byte_len = req.body.len(),
-            "processing DHT message",
-        );
-
         crate::match_tl_request!(req.body, {
-            dht::rpc::Store as ref r => match self.0.handle_store(r) {
-                Ok(_) => {},
-                Err(e) => {
-                    tracing::debug!(
-                        peer_id = %req.metadata.peer_id,
-                        addr = %req.metadata.remote_address,
-                        "failed to store value: {e:?}"
-                    );
+            dht::rpc::Store as ref r => {
+                tracing::debug!("store");
+
+                if let Err(e) = self.0.handle_store(r) {
+                    tracing::debug!("failed to store value: {e:?}");
                 }
             }
         }, e => {
-            tracing::debug!(
-                peer_id = %req.metadata.peer_id,
-                addr = %req.metadata.remote_address,
-                "failed to deserialize message from: {e:?}"
-            );
+            tracing::debug!("failed to deserialize message from: {e:?}");
         });
 
         futures_util::future::ready(())
@@ -333,32 +335,27 @@ impl DhtInner {
         *self.node_info.lock().unwrap() = Some(node_info);
     }
 
-    async fn announce_local_node_info(self: &Arc<Self>, network: &Network, ttl: u32) -> Result<()> {
+    async fn announce_local_node_info(&self, network: &Network, ttl: u32) -> Result<()> {
         let value = {
-            let now = now_sec();
+            let created_at = now_sec();
+            let expires_at = created_at + ttl;
 
-            let mut value = dht::SignedValue {
-                key: dht::SignedKey {
-                    name: "addr".to_owned().into(),
-                    idx: 0,
-                    peer_id: self.local_id,
-                },
-                data: Bytes::from(tl_proto::serialize(AddressList {
+            self.make_signed_value(
+                network,
+                "addr",
+                expires_at,
+                AddressList {
                     items: vec![network.local_addr().into()],
-                    created_at: now,
-                    expires_at: now + ttl,
-                })),
-                expires_at: now_sec() + ttl,
-                signature: Bytes::new(),
-            };
-            value.signature = network.sign_tl(&value).to_vec().into();
-            Box::new(dht::Value::Signed(value))
+                    created_at,
+                    expires_at,
+                },
+            )
         };
 
         self.store_value(network, value).await
     }
 
-    async fn find_more_dht_nodes(self: &Arc<Self>, network: &Network) {
+    async fn find_more_dht_nodes(&self, network: &Network) {
         // TODO: deduplicate shared futures
         let query = Query::new(
             network.clone(),
@@ -376,11 +373,7 @@ impl DhtInner {
         }
     }
 
-    async fn find_value(
-        &self,
-        network: &Network,
-        key_hash: &[u8; 32],
-    ) -> Option<Result<Box<dht::Value>>> {
+    async fn find_value(&self, network: &Network, key_hash: &[u8; 32]) -> Option<Box<dht::Value>> {
         // TODO: deduplicate shared futures
         let query = Query::new(
             network.clone(),
@@ -429,6 +422,34 @@ impl DhtInner {
         Ok(is_new)
     }
 
+    fn make_signed_value<T>(
+        &self,
+        network: &Network,
+        name: &str,
+        expires_at: u32,
+        data: T,
+    ) -> Box<dht::Value>
+    where
+        T: TlWrite + 'static,
+    {
+        let mut value = dht::SignedValue {
+            key: dht::SignedKey {
+                name: name.to_owned().into(),
+                idx: 0,
+                peer_id: self.local_id,
+            },
+            data: match castaway::cast!(data, Bytes) {
+                Ok(data) => data,
+                Err(data) => tl_proto::serialize(data).into(),
+            },
+            expires_at,
+            signature: Default::default(),
+        };
+        value.signature = network.sign_tl(&value).to_vec().into();
+
+        Box::new(dht::Value::Signed(value))
+    }
+
     fn handle_store(&self, req: &dht::rpc::Store) -> Result<bool, StorageError> {
         self.storage.insert(&req.value)
     }
@@ -466,13 +487,39 @@ impl DhtInner {
     }
 }
 
-#[derive(TlWrite)]
-#[tl(boxed, scheme = "proto.tl")]
 enum ValueResponseRaw {
-    #[tl(id = "dht.valueFound")]
     Found(Bytes),
-    #[tl(id = "dht.valueNotFound")]
     NotFound(Vec<Arc<dht::NodeInfo>>),
+}
+
+impl TlWrite for ValueResponseRaw {
+    type Repr = tl_proto::Boxed;
+
+    fn max_size_hint(&self) -> usize {
+        4 + match self {
+            Self::Found(value) => value.max_size_hint(),
+            Self::NotFound(nodes) => nodes.max_size_hint(),
+        }
+    }
+
+    fn write_to<P>(&self, packet: &mut P)
+    where
+        P: tl_proto::TlPacket,
+    {
+        const FOUND_TL_ID: u32 = tl_proto::id!("dht.valueFound", scheme = "proto.tl");
+        const NOT_FOUND_TL_ID: u32 = tl_proto::id!("dht.valueNotFound", scheme = "proto.tl");
+
+        match self {
+            Self::Found(value) => {
+                packet.write_u32(FOUND_TL_ID);
+                packet.write_raw_slice(&value);
+            }
+            Self::NotFound(nodes) => {
+                packet.write_u32(NOT_FOUND_TL_ID);
+                nodes.write_to(packet);
+            }
+        }
+    }
 }
 
 #[derive(TlWrite)]
@@ -495,3 +542,11 @@ pub fn xor_distance(left: &PeerId, right: &PeerId) -> usize {
 }
 
 const MAX_XOR_DISTANCE: usize = 256;
+
+#[derive(Debug, thiserror::Error)]
+pub enum FindValueError {
+    #[error("failed to deserialize value: {0}")]
+    InvalidData(#[from] tl_proto::TlError),
+    #[error("value not found")]
+    NotFound,
+}
