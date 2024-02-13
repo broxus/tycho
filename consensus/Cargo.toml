@@ -16,7 +16,7 @@ weedb = "0.1"
 
 # local deps
 tycho-network = { path = "../network", version = "=0.0.1" }
-tycho-storage = { path = "../storage", version = "=0.0.1" }
+tycho-storage = { path = "../storage", version = "0.1" }
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [dev-dependencies]

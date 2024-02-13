@@ -621,6 +621,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a26ae43d7bcc3b814de94796a5e736d4029efb0ee900c12e2d54c993ad1a1e07"
 
 [[package]]
+name = "equivalent"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
+
+[[package]]
 name = "errno"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1274,6 +1280,18 @@ dependencies = [
  "wasi",
  "web-sys",
  "winapi",
+]
+
+[[package]]
+name = "quick_cache"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "58c20af3800cee5134b79a3bd4a3d4b583c16ccfa5f53338f46400851a5b3819"
+dependencies = [
+ "ahash",
+ "equivalent",
+ "hashbrown",
+ "parking_lot",
 ]
 
 [[package]]
@@ -2217,19 +2235,33 @@ dependencies = [
 
 [[package]]
 name = "tycho-storage"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
+ "bumpalo",
+ "bytes",
  "bytesize",
+ "crc",
+ "dashmap",
+ "everscale-types",
  "fdlimit",
+ "hex",
  "humantime",
+ "libc",
+ "parking_lot",
+ "parking_lot_core",
+ "quick_cache",
  "rlimit",
  "serde",
+ "sha2",
+ "smallvec",
  "sysinfo",
+ "thiserror",
  "tokio",
  "tracing",
+ "tycho-block-util",
  "tycho-constansts",
- "tycho-util",
  "weedb",
 ]
 

@@ -1,14 +1,15 @@
 [package]
-name = "tycho-core"
+name = "tycho-validator"
 version = "0.0.1"
 edition = "2021"
-description = "Basic functionality of peer."
+description = "A validator node."
 
 [dependencies]
 # crates.io deps
 
 # local deps
-tycho-network = { path = "../network", version = "=0.0.1" }
+tycho-core = { path = "../core", version = "=0.0.1" }
+tycho-consensus = { path = "../consensus", version = "=0.0.1" }
 tycho-storage = { path = "../storage", version = "0.1" }
 tycho-util = { path = "../util", version = "=0.0.1" }
 
