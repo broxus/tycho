@@ -1,10 +1,10 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::FastHashMap;
 
 use crate::types::{BoxService, Service, ServiceExt};
-use crate::util::BoxFutureOrNoop;
 
 pub trait Routable {
     #[inline]

@@ -1,19 +1,19 @@
-pub use self::util::{NetworkExt, Routable, Router, RouterBuilder};
-pub use config::{Config, QuicConfig};
+pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{DhtClient, DhtClientBuilder, DhtService, DhtServiceBuilder, StorageBuilder};
-pub use network::{Network, NetworkBuilder, Peer, WeakNetwork};
+pub use network::{
+    ActivePeers, Connection, KnownPeers, Network, NetworkBuilder, NetworkConfig, Peer, QuicConfig,
+    RecvStream, SendStream, WeakActivePeers, WeakNetwork,
+};
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, AddressList,
-    BoxCloneService, BoxService, Direction, DisconnectReason, InboundRequestMeta,
-    InboundServiceRequest, PeerId, Request, Response, RpcQuery, Service, ServiceDatagramFn,
-    ServiceExt, ServiceMessageFn, ServiceQueryFn, Version,
+    BoxCloneService, BoxService, Direction, DisconnectReason, InboundRequestMeta, PeerAffinity,
+    PeerEvent, PeerId, PeerInfo, Request, Response, RpcQuery, Service, ServiceDatagramFn,
+    ServiceExt, ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
 };
 
-mod config;
-mod connection;
-mod crypto;
+pub use quinn;
+
 mod dht;
-mod endpoint;
 mod network;
 mod types;
 mod util;

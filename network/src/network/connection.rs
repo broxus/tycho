@@ -5,8 +5,9 @@ use std::task::{Context, Poll};
 
 use anyhow::{Context as _, Result};
 use bytes::Bytes;
-use quinn::{ConnectionError, RecvStream, SendDatagramError};
+use quinn::{ConnectionError, SendDatagramError};
 
+use crate::network::crypto::peer_id_from_certificate;
 use crate::types::{Direction, InboundRequestMeta, PeerId};
 
 #[derive(Clone)]
@@ -56,14 +57,14 @@ impl Connection {
         self.inner
             .open_bi()
             .await
-            .map(|(send, recv)| (SendStream(send), recv))
+            .map(|(send, recv)| (SendStream(send), RecvStream(recv)))
     }
 
     pub async fn accept_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         self.inner
             .accept_bi()
             .await
-            .map(|(send, recv)| (SendStream(send), recv))
+            .map(|(send, recv)| (SendStream(send), RecvStream(recv)))
     }
 
     pub async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
@@ -71,7 +72,7 @@ impl Connection {
     }
 
     pub async fn accept_uni(&self) -> Result<RecvStream, ConnectionError> {
-        self.inner.accept_uni().await
+        self.inner.accept_uni().await.map(RecvStream)
     }
 
     pub fn send_datagram(&self, data: Bytes) -> Result<(), SendDatagramError> {
@@ -94,6 +95,7 @@ impl std::fmt::Debug for Connection {
     }
 }
 
+#[repr(transparent)]
 pub struct SendStream(quinn::SendStream);
 
 impl Drop for SendStream {
@@ -145,6 +147,36 @@ impl tokio::io::AsyncWrite for SendStream {
     }
 }
 
+#[repr(transparent)]
+pub struct RecvStream(quinn::RecvStream);
+
+impl std::ops::Deref for RecvStream {
+    type Target = quinn::RecvStream;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for RecvStream {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl tokio::io::AsyncRead for RecvStream {
+    #[inline]
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.0).poll_read(cx, buf)
+    }
+}
+
 fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
     let certificate = connection
         .peer_identity()
@@ -152,5 +184,5 @@ fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
         .and_then(|certificates| certificates.into_iter().next())
         .context("No certificate found in the connection")?;
 
-    crate::crypto::peer_id_from_certificate(&certificate).map_err(Into::into)
+    peer_id_from_certificate(&certificate).map_err(Into::into)
 }

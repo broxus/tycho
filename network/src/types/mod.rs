@@ -40,12 +40,12 @@ impl Version {
     }
 }
 
-pub struct Request<T> {
+pub struct Request {
     pub version: Version,
-    pub body: T,
+    pub body: Bytes,
 }
 
-impl Request<Bytes> {
+impl Request {
     pub fn from_tl<T>(body: T) -> Self
     where
         T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
@@ -57,19 +57,19 @@ impl Request<Bytes> {
     }
 }
 
-impl<T: AsRef<[u8]>> AsRef<[u8]> for Request<T> {
+impl AsRef<[u8]> for Request {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         self.body.as_ref()
     }
 }
 
-pub struct Response<T> {
+pub struct Response {
     pub version: Version,
-    pub body: T,
+    pub body: Bytes,
 }
 
-impl Response<Bytes> {
+impl Response {
     pub fn from_tl<T>(body: T) -> Self
     where
         T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
@@ -88,19 +88,19 @@ impl Response<Bytes> {
     }
 }
 
-impl<T: AsRef<[u8]>> AsRef<[u8]> for Response<T> {
+impl AsRef<[u8]> for Response {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         self.body.as_ref()
     }
 }
 
-pub struct InboundServiceRequest<T> {
+pub struct ServiceRequest {
     pub metadata: Arc<InboundRequestMeta>,
-    pub body: T,
+    pub body: Bytes,
 }
 
-impl<T: AsRef<[u8]>> AsRef<[u8]> for InboundServiceRequest<T> {
+impl AsRef<[u8]> for ServiceRequest {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         self.body.as_ref()

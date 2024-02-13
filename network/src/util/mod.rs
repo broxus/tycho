@@ -1,12 +1,10 @@
 use bytes::Bytes;
 
-pub use self::futures::BoxFutureOrNoop;
 pub use self::router::{Routable, Router, RouterBuilder};
 pub use self::traits::NetworkExt;
 
 use crate::types::PeerId;
 
-mod futures;
 mod router;
 mod traits;
 
@@ -34,7 +32,7 @@ macro_rules! match_tl_request {
     };
 }
 
-pub(crate) fn validate_signature<T>(peed_id: &PeerId, signature: &Bytes, data: &T) -> bool
+pub fn check_peer_signature<T>(peed_id: &PeerId, signature: &Bytes, data: &T) -> bool
 where
     T: tl_proto::TlWrite,
 {

@@ -2,25 +2,27 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Weak};
 
 use anyhow::Result;
-use bytes::Bytes;
 use everscale_crypto::ed25519;
 use rand::Rng;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::config::{Config, EndpointConfig};
-use crate::endpoint::Endpoint;
+use self::config::EndpointConfig;
+use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
+use self::endpoint::Endpoint;
 use crate::types::{
-    Address, DisconnectReason, InboundServiceRequest, PeerEvent, PeerId, Response, Service,
-    ServiceExt,
+    Address, DisconnectReason, PeerEvent, PeerId, Response, Service, ServiceExt, ServiceRequest,
 };
 
+pub use self::config::{NetworkConfig, QuicConfig};
+pub use self::connection::{Connection, RecvStream, SendStream};
+pub use self::connection_manager::{ActivePeers, KnownPeers, WeakActivePeers};
 pub use self::peer::Peer;
 
-use self::connection_manager::{
-    ActivePeers, ConnectionManager, ConnectionManagerRequest, KnownPeers, WeakActivePeers,
-};
-
+mod config;
+mod connection;
 mod connection_manager;
+mod crypto;
+mod endpoint;
 mod peer;
 mod request_handler;
 mod wire;
@@ -32,11 +34,11 @@ pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
 
 #[derive(Default)]
 struct BuilderFields {
-    config: Option<Config>,
+    config: Option<NetworkConfig>,
 }
 
 impl<MandatoryFields> NetworkBuilder<MandatoryFields> {
-    pub fn with_config(mut self, config: Config) -> Self {
+    pub fn with_config(mut self, config: NetworkConfig) -> Self {
         self.optional_fields.config = Some(config);
         self
     }
@@ -70,7 +72,7 @@ impl NetworkBuilder {
     pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
     where
         S: Send + Sync + Clone + 'static,
-        S: Service<InboundServiceRequest<Bytes>, QueryResponse = Response<Bytes>>,
+        S: Service<ServiceRequest, QueryResponse = Response>,
     {
         use socket2::{Domain, Protocol, Socket, Type};
 
@@ -236,7 +238,7 @@ impl Network {
 }
 
 struct NetworkInner {
-    config: Arc<Config>,
+    config: Arc<NetworkConfig>,
     endpoint: Arc<Endpoint>,
     active_peers: WeakActivePeers,
     known_peers: KnownPeers,
@@ -309,8 +311,8 @@ mod tests {
     use super::*;
     use crate::types::{service_query_fn, BoxCloneService};
 
-    fn echo_service() -> BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>> {
-        let handle = |request: InboundServiceRequest<Bytes>| async move {
+    fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
+        let handle = |request: ServiceRequest| async move {
             tracing::trace!("received: {}", request.body.escape_ascii());
             let response = Response {
                 version: Default::default(),

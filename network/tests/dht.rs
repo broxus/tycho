@@ -1,8 +1,14 @@
+//! Run tests with this env:
+//! ```text
+//! RUST_LOG=info,tycho_network=trace
+//! ```
+
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
+use tycho_network::proto::dht;
 use tycho_network::{proto, Address, AddressList, DhtClient, DhtService, Network, PeerId, Router};
 use tycho_util::time::now_sec;
 
@@ -54,9 +60,9 @@ impl Node {
     }
 }
 
-fn make_network(node_count: usize) -> Vec<Node> {
+fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<dht::NodeInfo>>) {
     let keys = (0..node_count)
-        .map(|i| ed25519::SecretKey::generate(&mut rand::thread_rng()))
+        .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
         .collect::<Vec<_>>();
 
     let nodes = keys
@@ -74,14 +80,14 @@ fn make_network(node_count: usize) -> Vec<Node> {
         }
     }
 
-    nodes
+    (nodes, bootstrap_info)
 }
 
 #[tokio::test]
 async fn bootstrap_nodes_accessible() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let nodes = make_network(5);
+    let (nodes, _) = make_network(5);
 
     for i in 0..nodes.len() {
         for j in 0..nodes.len() {

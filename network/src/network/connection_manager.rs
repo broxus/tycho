@@ -4,29 +4,28 @@ use std::time::{Duration, Instant};
 
 use ahash::HashMap;
 use anyhow::Result;
-use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use super::request_handler::InboundRequestHandler;
-use super::wire::handshake;
-use crate::config::Config;
-use crate::connection::Connection;
-use crate::endpoint::{Connecting, Endpoint};
+use crate::network::config::NetworkConfig;
+use crate::network::connection::Connection;
+use crate::network::endpoint::{Connecting, Endpoint};
+use crate::network::request_handler::InboundRequestHandler;
+use crate::network::wire::handshake;
 use crate::types::{
-    Address, BoxCloneService, Direction, DisconnectReason, InboundServiceRequest, PeerAffinity,
-    PeerEvent, PeerId, PeerInfo, Response,
+    Address, BoxCloneService, Direction, DisconnectReason, PeerAffinity, PeerEvent, PeerId,
+    PeerInfo, Response, ServiceRequest,
 };
 
 #[derive(Debug)]
-pub enum ConnectionManagerRequest {
+pub(crate) enum ConnectionManagerRequest {
     Connect(Address, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
     Shutdown(oneshot::Sender<()>),
 }
 
-pub struct ConnectionManager {
-    config: Arc<Config>,
+pub(crate) struct ConnectionManager {
+    config: Arc<NetworkConfig>,
     endpoint: Arc<Endpoint>,
 
     mailbox: mpsc::Receiver<ConnectionManagerRequest>,
@@ -40,7 +39,7 @@ pub struct ConnectionManager {
     active_peers: ActivePeers,
     known_peers: KnownPeers,
 
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+    service: BoxCloneService<ServiceRequest, Response>,
 }
 
 impl Drop for ConnectionManager {
@@ -51,11 +50,11 @@ impl Drop for ConnectionManager {
 
 impl ConnectionManager {
     pub fn new(
-        config: Arc<Config>,
+        config: Arc<NetworkConfig>,
         endpoint: Arc<Endpoint>,
         active_peers: ActivePeers,
         known_peers: KnownPeers,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+        service: BoxCloneService<ServiceRequest, Response>,
     ) -> (Self, mpsc::Sender<ConnectionManagerRequest>) {
         let (mailbox_tx, mailbox) = mpsc::channel(config.connection_manager_channel_capacity);
         let connection_manager = Self {
@@ -214,7 +213,7 @@ impl ConnectionManager {
     fn handle_incoming(&mut self, connecting: Connecting) {
         async fn handle_incoming_task(
             connecting: Connecting,
-            config: Arc<Config>,
+            config: Arc<NetworkConfig>,
             active_peers: ActivePeers,
             known_peers: KnownPeers,
         ) -> ConnectingOutput {
@@ -319,7 +318,7 @@ impl ConnectionManager {
             address: Address,
             peer_id: Option<PeerId>,
             callback: oneshot::Sender<Result<PeerId>>,
-            config: Arc<Config>,
+            config: Arc<NetworkConfig>,
         ) -> ConnectingOutput {
             let fut = async {
                 let connection = connecting?.await?;

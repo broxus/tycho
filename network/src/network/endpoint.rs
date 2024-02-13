@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::config::EndpointConfig;
-use crate::connection::Connection;
+use crate::network::config::EndpointConfig;
+use crate::network::connection::Connection;
 use crate::types::{Address, Direction, PeerId};
 
-pub struct Endpoint {
+pub(crate) struct Endpoint {
     inner: quinn::Endpoint,
     local_addr: RwLock<SocketAddr>,
     config: EndpointConfig,
@@ -114,7 +114,7 @@ impl Endpoint {
 
 pin_project_lite::pin_project! {
     #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct Accept<'a> {
+    pub(crate) struct Accept<'a> {
         #[pin]
         inner: quinn::Accept<'a>,
     }
@@ -133,7 +133,7 @@ impl<'a> Future for Accept<'a> {
 
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct Connecting {
+pub(crate) struct Connecting {
     inner: quinn::Connecting,
     origin: Direction,
 }

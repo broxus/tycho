@@ -22,10 +22,12 @@ impl RoutingTable {
         &self.local_id
     }
 
+    #[allow(unused)]
     pub fn is_empty(&self) -> bool {
         self.buckets.values().all(Bucket::is_empty)
     }
 
+    #[allow(unused)]
     pub fn len(&self) -> usize {
         self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
     }
@@ -42,6 +44,7 @@ impl RoutingTable {
             .insert(node, max_k, node_ttl)
     }
 
+    #[allow(unused)]
     pub fn remove(&mut self, key: &PeerId) -> bool {
         let distance = distance(&self.local_id, key);
         if let Some(bucket) = self.buckets.get_mut(&distance) {
@@ -105,6 +108,7 @@ impl RoutingTable {
         }
     }
 
+    #[allow(unused)]
     pub fn contains(&self, key: &PeerId) -> bool {
         let distance = distance(&self.local_id, key);
         self.buckets

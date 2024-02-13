@@ -6,7 +6,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 use tycho_network::{
-    service_query_fn, Config, InboundServiceRequest, Network, NetworkExt, Response, Version,
+    service_query_fn, Network, NetworkConfig, NetworkExt, Response, ServiceRequest, Version,
 };
 
 use crate::intercom::responses::*;
@@ -58,7 +58,7 @@ impl Dispatcher {
         });
 
         let network = Network::builder()
-            .with_config(Config::default())
+            .with_config(NetworkConfig::default())
             .with_random_private_key()
             .with_service_name("tycho-mempool-router")
             .build((Ipv4Addr::LOCALHOST, 0), service_fn)?;
@@ -156,7 +156,7 @@ struct DispatcherInner {
 }
 
 impl DispatcherInner {
-    async fn handle(self: Arc<Self>, req: InboundServiceRequest<Bytes>) -> Option<Response<Bytes>> {
+    async fn handle(self: Arc<Self>, req: ServiceRequest) -> Option<Response> {
         let body = match bincode::deserialize::<MPRequest>(&req.body) {
             Ok(body) => body,
             Err(e) => {

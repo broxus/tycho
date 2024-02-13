@@ -1,7 +1,6 @@
 use std::future::Future;
 
 use anyhow::Result;
-use bytes::Bytes;
 
 use crate::network::{Network, Peer};
 use crate::types::{PeerEvent, PeerId, Request, Response};
@@ -10,22 +9,18 @@ pub trait NetworkExt {
     fn query(
         &self,
         peer_id: &PeerId,
-        request: Request<Bytes>,
-    ) -> impl Future<Output = Result<Response<Bytes>>> + Send;
+        request: Request,
+    ) -> impl Future<Output = Result<Response>> + Send;
 
-    fn send(
-        &self,
-        peer_id: &PeerId,
-        request: Request<Bytes>,
-    ) -> impl Future<Output = Result<()>> + Send;
+    fn send(&self, peer_id: &PeerId, request: Request) -> impl Future<Output = Result<()>> + Send;
 }
 
 impl NetworkExt for Network {
-    async fn query(&self, peer_id: &PeerId, request: Request<Bytes>) -> Result<Response<Bytes>> {
+    async fn query(&self, peer_id: &PeerId, request: Request) -> Result<Response> {
         on_connected_peer(self, Peer::rpc, peer_id, request).await
     }
 
-    async fn send(&self, peer_id: &PeerId, request: Request<Bytes>) -> Result<()> {
+    async fn send(&self, peer_id: &PeerId, request: Request) -> Result<()> {
         on_connected_peer(self, Peer::send_message, peer_id, request).await
     }
 }
@@ -34,7 +29,7 @@ async fn on_connected_peer<T, F>(
     network: &Network,
     f: F,
     peer_id: &PeerId,
-    request: Request<Bytes>,
+    request: Request,
 ) -> Result<T>
 where
     for<'a> F: PeerTask<'a, T>,
@@ -87,18 +82,18 @@ where
 trait PeerTask<'a, T> {
     type Output: Future<Output = Result<T>> + 'a;
 
-    fn call(self, peer: &'a Peer, request: Request<Bytes>) -> Self::Output;
+    fn call(self, peer: &'a Peer, request: Request) -> Self::Output;
 }
 
 impl<'a, T, F, Fut> PeerTask<'a, T> for F
 where
-    F: FnOnce(&'a Peer, Request<Bytes>) -> Fut,
+    F: FnOnce(&'a Peer, Request) -> Fut,
     Fut: Future<Output = Result<T>> + 'a,
 {
     type Output = Fut;
 
     #[inline]
-    fn call(self, peer: &'a Peer, request: Request<Bytes>) -> Fut {
+    fn call(self, peer: &'a Peer, request: Request) -> Fut {
         self(peer, request)
     }
 }

@@ -1,14 +1,14 @@
 use anyhow::Result;
-use bytes::Bytes;
 use futures_util::sink::SinkExt;
 use futures_util::StreamExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use crate::config::Config;
+use crate::network::config::NetworkConfig;
+use crate::network::connection::Connection;
 use crate::types::{Direction, Request, Response, Version};
 
-pub fn make_codec(config: &Config) -> LengthDelimitedCodec {
+pub(crate) fn make_codec(config: &NetworkConfig) -> LengthDelimitedCodec {
     let mut builder = LengthDelimitedCodec::builder();
 
     if let Some(max_frame_size) = config.max_frame_size {
@@ -18,9 +18,7 @@ pub fn make_codec(config: &Config) -> LengthDelimitedCodec {
     builder.length_field_length(4).big_endian().new_codec()
 }
 
-pub async fn handshake(
-    connection: crate::connection::Connection,
-) -> Result<crate::connection::Connection> {
+pub(crate) async fn handshake(connection: Connection) -> Result<Connection> {
     match connection.origin() {
         Direction::Inbound => {
             let mut send_stream = connection.open_uni().await?;
@@ -35,18 +33,18 @@ pub async fn handshake(
     Ok(connection)
 }
 
-pub async fn send_request<T: AsyncWrite + Unpin>(
+pub(crate) async fn send_request<T: AsyncWrite + Unpin>(
     send_stream: &mut FramedWrite<T, LengthDelimitedCodec>,
-    request: Request<Bytes>,
+    request: Request,
 ) -> Result<()> {
     send_version(send_stream.get_mut(), request.version).await?;
     send_stream.send(request.body).await?;
     Ok(())
 }
 
-pub async fn recv_request<T: AsyncRead + Unpin>(
+pub(crate) async fn recv_request<T: AsyncRead + Unpin>(
     recv_stream: &mut FramedRead<T, LengthDelimitedCodec>,
-) -> Result<Request<Bytes>> {
+) -> Result<Request> {
     let version = recv_version(recv_stream.get_mut()).await?;
     let body = match recv_stream.next().await {
         Some(body) => body?.freeze(),
@@ -55,18 +53,18 @@ pub async fn recv_request<T: AsyncRead + Unpin>(
     Ok(Request { version, body })
 }
 
-pub async fn send_response<T: AsyncWrite + Unpin>(
+pub(crate) async fn send_response<T: AsyncWrite + Unpin>(
     send_stream: &mut FramedWrite<T, LengthDelimitedCodec>,
-    response: Response<Bytes>,
+    response: Response,
 ) -> Result<()> {
     send_version(send_stream.get_mut(), response.version).await?;
     send_stream.send(response.body).await?;
     Ok(())
 }
 
-pub async fn recv_response<T: AsyncRead + Unpin>(
+pub(crate) async fn recv_response<T: AsyncRead + Unpin>(
     recv_stream: &mut FramedRead<T, LengthDelimitedCodec>,
-) -> Result<Response<Bytes>> {
+) -> Result<Response> {
     let version = recv_version(recv_stream.get_mut()).await?;
     let body = match recv_stream.next().await {
         Some(body) => body?.freeze(),

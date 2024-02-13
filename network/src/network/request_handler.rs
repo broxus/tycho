@@ -1,31 +1,29 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::Bytes;
-use quinn::RecvStream;
 use tokio::task::JoinSet;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
-use super::connection_manager::ActivePeers;
-use super::wire::{make_codec, recv_request, send_response};
-use crate::config::Config;
-use crate::connection::{Connection, SendStream};
+use crate::network::config::NetworkConfig;
+use crate::network::connection::{Connection, RecvStream, SendStream};
+use crate::network::connection_manager::ActivePeers;
+use crate::network::wire::{make_codec, recv_request, send_response};
 use crate::types::{
-    BoxCloneService, DisconnectReason, InboundRequestMeta, InboundServiceRequest, Response, Service,
+    BoxCloneService, DisconnectReason, InboundRequestMeta, Response, Service, ServiceRequest,
 };
 
-pub struct InboundRequestHandler {
-    config: Arc<Config>,
+pub(crate) struct InboundRequestHandler {
+    config: Arc<NetworkConfig>,
     connection: Connection,
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+    service: BoxCloneService<ServiceRequest, Response>,
     active_peers: ActivePeers,
 }
 
 impl InboundRequestHandler {
     pub fn new(
-        config: Arc<Config>,
+        config: Arc<NetworkConfig>,
         connection: Connection,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+        service: BoxCloneService<ServiceRequest, Response>,
         active_peers: ActivePeers,
     ) -> Self {
         Self {
@@ -85,7 +83,7 @@ impl InboundRequestHandler {
                             let service = self.service.clone();
                             async move {
                                 service
-                                    .on_datagram(InboundServiceRequest {
+                                    .on_datagram(ServiceRequest {
                                         metadata,
                                         body: datagram,
                                     })
@@ -123,15 +121,15 @@ impl InboundRequestHandler {
 
 struct UniStreamRequestHandler {
     meta: Arc<InboundRequestMeta>,
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+    service: BoxCloneService<ServiceRequest, Response>,
     recv_stream: FramedRead<RecvStream, LengthDelimitedCodec>,
 }
 
 impl UniStreamRequestHandler {
     fn new(
-        config: &Config,
+        config: &NetworkConfig,
         meta: Arc<InboundRequestMeta>,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+        service: BoxCloneService<ServiceRequest, Response>,
         recv_stream: RecvStream,
     ) -> Self {
         Self {
@@ -150,7 +148,7 @@ impl UniStreamRequestHandler {
     async fn do_handle(mut self) -> Result<()> {
         let req = recv_request(&mut self.recv_stream).await?;
         self.service
-            .on_query(InboundServiceRequest {
+            .on_query(ServiceRequest {
                 metadata: self.meta,
                 body: req.body,
             })
@@ -161,16 +159,16 @@ impl UniStreamRequestHandler {
 
 struct BiStreamRequestHandler {
     meta: Arc<InboundRequestMeta>,
-    service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+    service: BoxCloneService<ServiceRequest, Response>,
     send_stream: FramedWrite<SendStream, LengthDelimitedCodec>,
     recv_stream: FramedRead<RecvStream, LengthDelimitedCodec>,
 }
 
 impl BiStreamRequestHandler {
     fn new(
-        config: &Config,
+        config: &NetworkConfig,
         meta: Arc<InboundRequestMeta>,
-        service: BoxCloneService<InboundServiceRequest<Bytes>, Response<Bytes>>,
+        service: BoxCloneService<ServiceRequest, Response>,
         send_stream: SendStream,
         recv_stream: RecvStream,
     ) -> Self {
@@ -190,7 +188,7 @@ impl BiStreamRequestHandler {
 
     async fn do_handle(mut self) -> Result<()> {
         let req = recv_request(&mut self.recv_stream).await?;
-        let handler = self.service.on_query(InboundServiceRequest {
+        let handler = self.service.on_query(ServiceRequest {
             metadata: self.meta,
             body: req.body,
         });

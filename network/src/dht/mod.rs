@@ -12,9 +12,9 @@ use self::storage::{Storage, StorageError};
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht;
 use crate::types::{
-    AddressList, InboundServiceRequest, PeerAffinity, PeerId, PeerInfo, Request, Response, Service,
+    AddressList, PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest,
 };
-use crate::util::{validate_signature, NetworkExt, Routable};
+use crate::util::{check_peer_signature, NetworkExt, Routable};
 
 pub use self::storage::StorageBuilder;
 
@@ -156,13 +156,13 @@ impl DhtService {
     }
 }
 
-impl Service<InboundServiceRequest<Bytes>> for DhtService {
-    type QueryResponse = Response<Bytes>;
+impl Service<ServiceRequest> for DhtService {
+    type QueryResponse = Response;
     type OnQueryFuture = futures_util::future::Ready<Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
-    fn on_query(&self, req: InboundServiceRequest<Bytes>) -> Self::OnQueryFuture {
+    fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         tracing::debug!(
             peer_id = %req.metadata.peer_id,
             addr = %req.metadata.remote_address,
@@ -198,7 +198,7 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
     }
 
     #[inline]
-    fn on_message(&self, req: InboundServiceRequest<Bytes>) -> Self::OnMessageFuture {
+    fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
         tracing::debug!(
             peer_id = %req.metadata.peer_id,
             addr = %req.metadata.remote_address,
@@ -229,7 +229,7 @@ impl Service<InboundServiceRequest<Bytes>> for DhtService {
     }
 
     #[inline]
-    fn on_datagram(&self, _req: InboundServiceRequest<Bytes>) -> Self::OnDatagramFuture {
+    fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
         futures_util::future::ready(())
     }
 }
@@ -472,7 +472,7 @@ fn validate_node_info(now: u32, info: &dht::NodeInfo) -> bool {
         && info.address_list.created_at <= now + CLOCK_THRESHOLD
         && info.address_list.expires_at >= now
         && !info.address_list.items.is_empty()
-        && validate_signature(&info.id, &info.signature, info)
+        && check_peer_signature(&info.id, &info.signature, info)
 }
 
 fn validate_value(now: u32, key: &[u8; 32], value: &dht::Value) -> bool {
@@ -480,7 +480,7 @@ fn validate_value(now: u32, key: &[u8; 32], value: &dht::Value) -> bool {
         dht::Value::Signed(value) => {
             value.expires_at >= now
                 && key == &tl_proto::hash(&value.key)
-                && validate_signature(&value.key.peer_id, &value.signature, value)
+                && check_peer_signature(&value.key.peer_id, &value.signature, value)
         }
         dht::Value::Overlay(value) => value.expires_at >= now && key == &tl_proto::hash(&value.key),
     }

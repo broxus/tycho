@@ -3,12 +3,14 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-use crate::crypto::{CertVerifier, CertVerifierWithPeerId};
+use crate::network::crypto::{
+    generate_cert, peer_id_from_certificate, CertVerifier, CertVerifierWithPeerId,
+};
 use crate::types::PeerId;
 
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct Config {
+pub struct NetworkConfig {
     pub quic: Option<QuicConfig>,
     pub connection_manager_channel_capacity: usize,
     pub connectivity_check_interval: Duration,
@@ -22,7 +24,7 @@ pub struct Config {
     pub shutdown_idle_timeout: Duration,
 }
 
-impl Default for Config {
+impl Default for NetworkConfig {
     fn default() -> Self {
         Self {
             quic: None,
@@ -178,8 +180,8 @@ impl EndpointConfigBuilder {
         let reset_key = compute_reset_key(&keypair.secret_key);
         let quinn_endpoint_config = quinn::EndpointConfig::new(Arc::new(reset_key));
 
-        let (cert, pkcs8_der) = crate::crypto::generate_cert(&keypair, &service_name)
-            .context("Failed to generate a certificate")?;
+        let (cert, pkcs8_der) =
+            generate_cert(&keypair, &service_name).context("Failed to generate a certificate")?;
 
         let cert_verifier = Arc::new(CertVerifier::from(service_name.clone()));
         let quinn_client_config = make_client_config(
@@ -197,7 +199,7 @@ impl EndpointConfigBuilder {
             transport_config.clone(),
         )?;
 
-        let peer_id = crate::crypto::peer_id_from_certificate(&cert)?;
+        let peer_id = peer_id_from_certificate(&cert)?;
 
         Ok(EndpointConfig {
             peer_id,

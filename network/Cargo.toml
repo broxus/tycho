@@ -10,6 +10,7 @@ include = ["src/**/*.rs", "src/**/*.tl"]
 ahash = "0.8"
 anyhow = "1.0"
 bytes = "1.0"
+castaway = "0.2"
 dashmap = "5.4"
 ed25519 = { version = "2.0", features = ["alloc", "pkcs8"] }
 everscale-crypto = { version = "0.2", features = ["tl-proto"] }
@@ -32,10 +33,6 @@ tokio = { version = "1", features = ["rt", "sync", "io-util", "macros"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 x509-parser = "0.15"
-
-# NOTE: use crates.io dependency when it is released
-# https://github.com/sagebind/castaway/issues/18
-castaway = { git = "https://github.com/sagebind/castaway.git" }
 
 # local deps
 tycho-util = { path = "../util", version = "=0.0.1" }

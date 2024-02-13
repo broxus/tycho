@@ -1861,7 +1861,9 @@ name = "tycho-util"
 version = "0.0.1"
 dependencies = [
  "ahash",
+ "castaway",
  "dashmap",
+ "futures-util",
  "rand",
  "tokio",
 ]

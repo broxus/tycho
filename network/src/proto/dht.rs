@@ -200,8 +200,6 @@ pub mod rpc {
     use super::*;
 
     /// Suggest a node to store that value.
-    ///
-    /// See [`Stored`].
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "dht.store", scheme = "proto.tl")]
     pub struct Store {
