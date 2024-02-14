@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use weedb::{Caches, WeeDb};
 
 pub use weedb::Stats as RocksdbStats;
-pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Table, UnboundedCfHandle};
+pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Table};
 pub mod refcount;
 pub mod tables;
 

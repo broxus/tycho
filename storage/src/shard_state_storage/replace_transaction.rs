@@ -218,7 +218,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
-                let cell = self.cell_storage.load_cell(&cell_id)?;
+                let cell = self.cell_storage.load_cell(cell_id)?;
                 Ok(Arc::new(ShardStateStuff::new(
                     block_id,
                     Cell::from(cell as Arc<_>),

@@ -31,7 +31,7 @@ pub struct ShardStateStorage {
     cell_storage: Arc<CellStorage>,
     downloads_dir: Arc<PathBuf>,
 
-    gc_lock: tokio::sync::RwLock<()>,
+    gc_lock: tokio::sync::Mutex<()>,
     min_ref_mc_state: Arc<MinRefMcState>,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
@@ -105,7 +105,7 @@ impl ShardStateStorage {
 
         let mut batch = weedb::rocksdb::WriteBatch::default();
 
-        let _gc_lock = self.gc_lock.read().await;
+        let _gc_lock = self.gc_lock.lock().await;
 
         let len = self
             .cell_storage
@@ -144,7 +144,7 @@ impl ShardStateStorage {
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<Arc<ShardStateStuff>> {
         let cell_id = self.load_state_root(block_id.as_short_id())?;
-        let cell = self.cell_storage.load_cell(&cell_id)?;
+        let cell = self.cell_storage.load_cell(cell_id)?;
 
         ShardStateStuff::new(
             *block_id,
@@ -223,7 +223,7 @@ impl ShardStateStorage {
             alloc.reset();
             let mut batch = weedb::rocksdb::WriteBatch::default();
             {
-                let _guard = self.gc_lock.write().await;
+                let _guard = self.gc_lock.lock().await;
                 let total = self
                     .cell_storage
                     .remove_cell(&mut batch, &alloc, root_hash)?;

@@ -36,6 +36,7 @@ rlimit = "0.10.1"
 fdlimit = "0.3.0"
 humantime = "2.1.0"
 sysinfo = "0.30.5"
+triomphe = "0.1.11"
 
 [lints]
 workspace = true

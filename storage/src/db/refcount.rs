@@ -53,6 +53,7 @@ pub fn decode_value_with_rc(bytes: &[u8]) -> (RcType, Option<&[u8]>) {
     }
 }
 
+// will be use in persistent storage writer
 pub fn strip_refcount(bytes: &[u8]) -> Option<&[u8]> {
     if bytes.len() < RC_BYTES {
         return None;
@@ -62,10 +63,6 @@ pub fn strip_refcount(bytes: &[u8]) -> Option<&[u8]> {
     } else {
         None
     }
-}
-
-pub fn has_value(bytes: &[u8]) -> bool {
-    bytes.len() >= RC_BYTES && RcType::from_le_bytes(bytes[..RC_BYTES].try_into().unwrap()) > 0
 }
 
 pub fn add_positive_refount(rc: u32, data: Option<&[u8]>, target: &mut Vec<u8>) {
