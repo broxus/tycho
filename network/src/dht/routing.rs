@@ -3,8 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
-use crate::proto::dht;
-use crate::types::PeerId;
+use crate::types::{PeerId, PeerInfo};
 
 pub(crate) struct RoutingTable {
     local_id: PeerId,
@@ -33,7 +32,7 @@ impl RoutingTable {
         self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
     }
 
-    pub fn add(&mut self, node: Arc<dht::NodeInfo>, max_k: usize, node_ttl: &Duration) -> bool {
+    pub fn add(&mut self, node: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration) -> bool {
         let distance = xor_distance(&self.local_id, &node.id);
         if distance == 0 {
             return false;
@@ -55,7 +54,7 @@ impl RoutingTable {
         }
     }
 
-    pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<dht::NodeInfo>> {
+    pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<PeerInfo>> {
         if count == 0 {
             return Vec::new();
         }
@@ -83,7 +82,7 @@ impl RoutingTable {
 
     pub fn visit_closest<F>(&self, key: &[u8; 32], count: usize, mut f: F)
     where
-        F: FnMut(&Arc<dht::NodeInfo>),
+        F: FnMut(&Arc<PeerInfo>),
     {
         if count == 0 {
             return;
@@ -130,7 +129,7 @@ impl Bucket {
         }
     }
 
-    fn insert(&mut self, node: Arc<dht::NodeInfo>, max_k: usize, timeout: &Duration) -> bool {
+    fn insert(&mut self, node: Arc<PeerInfo>, max_k: usize, timeout: &Duration) -> bool {
         if let Some(index) = self
             .nodes
             .iter_mut()
@@ -168,12 +167,12 @@ impl Bucket {
 }
 
 struct Node {
-    data: Arc<dht::NodeInfo>,
+    data: Arc<PeerInfo>,
     last_updated_at: Instant,
 }
 
 impl Node {
-    fn new(data: Arc<dht::NodeInfo>) -> Self {
+    fn new(data: Arc<PeerInfo>) -> Self {
         Self {
             data,
             last_updated_at: Instant::now(),
@@ -189,22 +188,17 @@ impl Node {
 mod tests {
     use std::str::FromStr;
 
-    use crate::AddressList;
-
     use super::*;
 
     const MAX_K: usize = 20;
 
-    fn make_node(id: PeerId) -> Arc<dht::NodeInfo> {
-        Arc::new(dht::NodeInfo {
+    fn make_node(id: PeerId) -> Arc<PeerInfo> {
+        Arc::new(PeerInfo {
             id,
-            address_list: AddressList {
-                items: Default::default(),
-                created_at: 0,
-                expires_at: 0,
-            },
+            address_list: Default::default(),
             created_at: 0,
-            signature: Default::default(),
+            expires_at: 0,
+            signature: Box::new([0; 64]),
         })
     }
 

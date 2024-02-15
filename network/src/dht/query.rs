@@ -13,8 +13,8 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dht::routing::RoutingTable;
 use crate::network::Network;
-use crate::proto::dht;
-use crate::types::{PeerId, Request};
+use crate::proto::dht::{rpc, NodeResponse, Value, ValueRef, ValueResponse};
+use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
 
 pub struct Query {
@@ -47,9 +47,9 @@ impl Query {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn find_value(mut self) -> Option<Box<dht::Value>> {
+    pub async fn find_value(mut self) -> Option<Box<Value>> {
         // Prepare shared request
-        let request_body = Bytes::from(tl_proto::serialize(dht::rpc::FindValue {
+        let request_body = Bytes::from(tl_proto::serialize(rpc::FindValue {
             key: *self.local_id(),
             k: self.max_k as u32,
         }));
@@ -59,7 +59,7 @@ impl Query {
         let mut futures = FuturesUnordered::new();
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
-                futures.push(Self::visit::<dht::ValueResponse>(
+                futures.push(Self::visit::<ValueResponse>(
                     self.network.clone(),
                     node.clone(),
                     request_body.clone(),
@@ -72,7 +72,7 @@ impl Query {
         while let Some((node, res)) = futures.next().await {
             match res {
                 // Return the value if found
-                Some(Ok(dht::ValueResponse::Found(value))) => {
+                Some(Ok(ValueResponse::Found(value))) => {
                     if !value.is_valid(now_sec(), self.local_id()) {
                         // Ignore invalid values
                         continue;
@@ -81,7 +81,7 @@ impl Query {
                     return Some(value);
                 }
                 // Refill futures from the nodes response
-                Some(Ok(dht::ValueResponse::NotFound(nodes))) => {
+                Some(Ok(ValueResponse::NotFound(nodes))) => {
                     tracing::debug!(peer_id = %node.id, count = nodes.len(), "received nodes");
                     if !self.update_candidates(now_sec(), self.max_k, nodes, &mut visited) {
                         // Do nothing if candidates were not changed
@@ -95,7 +95,7 @@ impl Query {
                                 // Skip already visited nodes
                                 return;
                             }
-                            futures.push(Self::visit::<dht::ValueResponse>(
+                            futures.push(Self::visit::<ValueResponse>(
                                 self.network.clone(),
                                 node.clone(),
                                 request_body.clone(),
@@ -119,9 +119,9 @@ impl Query {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn find_peers(mut self) -> impl Iterator<Item = Arc<dht::NodeInfo>> {
+    pub async fn find_peers(mut self) -> impl Iterator<Item = Arc<PeerInfo>> {
         // Prepare shared request
-        let request_body = Bytes::from(tl_proto::serialize(dht::rpc::FindNode {
+        let request_body = Bytes::from(tl_proto::serialize(rpc::FindNode {
             key: *self.local_id(),
             k: self.max_k as u32,
         }));
@@ -131,7 +131,7 @@ impl Query {
         let mut futures = FuturesUnordered::new();
         self.candidates
             .visit_closest(self.local_id(), self.max_k, |node| {
-                futures.push(Self::visit::<dht::NodeResponse>(
+                futures.push(Self::visit::<NodeResponse>(
                     self.network.clone(),
                     node.clone(),
                     request_body.clone(),
@@ -140,11 +140,11 @@ impl Query {
             });
 
         // Process responses and refill futures until all peers are traversed
-        let mut result = FastHashMap::<PeerId, Arc<dht::NodeInfo>>::new();
+        let mut result = FastHashMap::<PeerId, Arc<PeerInfo>>::new();
         while let Some((node, res)) = futures.next().await {
             match res {
                 // Refill futures from the nodes response
-                Some(Ok(dht::NodeResponse { nodes })) => {
+                Some(Ok(NodeResponse { nodes })) => {
                     tracing::debug!(peer_id = %node.id, count = nodes.len(), "received nodes");
                     if !self.update_candidates_full(now_sec(), self.max_k, nodes, &mut result) {
                         // Do nothing if candidates were not changed
@@ -158,7 +158,7 @@ impl Query {
                                 // Skip already visited nodes
                                 return;
                             }
-                            futures.push(Self::visit::<dht::NodeResponse>(
+                            futures.push(Self::visit::<NodeResponse>(
                                 self.network.clone(),
                                 node.clone(),
                                 request_body.clone(),
@@ -185,7 +185,7 @@ impl Query {
         &mut self,
         now: u32,
         max_k: usize,
-        nodes: Vec<dht::NodeInfo>,
+        nodes: Vec<Arc<PeerInfo>>,
         visited: &mut FastHashSet<PeerId>,
     ) -> bool {
         let mut has_new = false;
@@ -197,7 +197,7 @@ impl Query {
 
             // Insert a new entry
             if visited.insert(node.id) {
-                self.candidates.add(Arc::new(node), max_k, &Duration::MAX);
+                self.candidates.add(node, max_k, &Duration::MAX);
                 has_new = true;
             }
         }
@@ -209,8 +209,8 @@ impl Query {
         &mut self,
         now: u32,
         max_k: usize,
-        nodes: Vec<dht::NodeInfo>,
-        visited: &mut FastHashMap<PeerId, Arc<dht::NodeInfo>>,
+        nodes: Vec<Arc<PeerInfo>>,
+        visited: &mut FastHashMap<PeerId, Arc<PeerInfo>>,
     ) -> bool {
         let mut has_new = false;
         for node in nodes {
@@ -222,14 +222,14 @@ impl Query {
             match visited.entry(node.id) {
                 // Insert a new entry
                 hash_map::Entry::Vacant(entry) => {
-                    let node = entry.insert(Arc::new(node)).clone();
+                    let node = entry.insert(node).clone();
                     self.candidates.add(node, max_k, &Duration::MAX);
                     has_new = true;
                 }
                 // Try to replace an old entry
                 hash_map::Entry::Occupied(mut entry) => {
                     if entry.get().created_at < node.created_at {
-                        *entry.get_mut() = Arc::new(node);
+                        *entry.get_mut() = node;
                     }
                 }
             }
@@ -240,10 +240,10 @@ impl Query {
 
     async fn visit<T>(
         network: Network,
-        node: Arc<dht::NodeInfo>,
+        node: Arc<PeerInfo>,
         request_body: Bytes,
         semaphore: &Semaphore,
-    ) -> (Arc<dht::NodeInfo>, Option<Result<T>>)
+    ) -> (Arc<PeerInfo>, Option<Result<T>>)
     where
         for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
@@ -278,15 +278,15 @@ impl StoreValue<()> {
     pub fn new(
         network: Network,
         routing_table: &RoutingTable,
-        value: Box<dht::Value>,
+        value: ValueRef<'_>,
         max_k: usize,
-    ) -> StoreValue<impl Future<Output = (Arc<dht::NodeInfo>, Option<Result<()>>)> + Send> {
-        let key_hash = match value.as_ref() {
-            dht::Value::Signed(value) => tl_proto::hash(&value.key),
-            dht::Value::Overlay(value) => tl_proto::hash(&value.key),
+    ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> {
+        let key_hash = match &value {
+            ValueRef::Peer(value) => tl_proto::hash(&value.key),
+            ValueRef::Overlay(value) => tl_proto::hash(&value.key),
         };
 
-        let request_body = Bytes::from(tl_proto::serialize(dht::rpc::Store { value }));
+        let request_body = Bytes::from(tl_proto::serialize(rpc::StoreRef { value }));
 
         let semaphore = Arc::new(Semaphore::new(10));
         let futures = futures_util::stream::FuturesUnordered::new();
@@ -304,10 +304,10 @@ impl StoreValue<()> {
 
     async fn visit(
         network: Network,
-        node: Arc<dht::NodeInfo>,
+        node: Arc<PeerInfo>,
         request_body: Bytes,
         semaphore: Arc<Semaphore>,
-    ) -> (Arc<dht::NodeInfo>, Option<Result<()>>) {
+    ) -> (Arc<PeerInfo>, Option<Result<()>>) {
         let Ok(_permit) = semaphore.acquire().await else {
             return (node, None);
         };
@@ -329,7 +329,7 @@ impl StoreValue<()> {
     }
 }
 
-impl<T: Future<Output = (Arc<dht::NodeInfo>, Option<Result<()>>)> + Send> StoreValue<T> {
+impl<T: Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> StoreValue<T> {
     #[tracing::instrument(level = "debug", skip_all, name = "store_value")]
     pub async fn run(mut self) {
         while let Some((node, res)) = self.futures.next().await {

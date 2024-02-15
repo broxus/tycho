@@ -180,24 +180,35 @@ impl ConnectionManager {
             .0
             .iter()
             .filter(|item| {
-                let peer_info = item.value();
-                peer_info.affinity == PeerAffinity::High
-                    && &peer_info.peer_id != self.endpoint.peer_id()
-                    && !self.active_peers.contains(&peer_info.peer_id)
-                    && !self.pending_dials.contains_key(&peer_info.peer_id)
+                let KnownPeer {
+                    peer_info,
+                    affinity,
+                } = item.value();
+
+                *affinity == PeerAffinity::High
+                    && &peer_info.id != self.endpoint.peer_id()
+                    && !self.active_peers.contains(&peer_info.id)
+                    && !self.pending_dials.contains_key(&peer_info.id)
                     && self
                         .dial_backoff_states
-                        .get(&peer_info.peer_id)
+                        .get(&peer_info.id)
                         .map_or(true, |state| now > state.next_attempt_at)
             })
             .take(outstanding_connections_limit)
-            .map(|item| item.value().clone())
+            .map(|item| item.value().peer_info.clone())
             .collect::<Vec<_>>();
 
         for peer_info in outstanding_connections {
+            // TODO: handle multiple addresses
+            let address = peer_info
+                .iter_addresses()
+                .next()
+                .cloned()
+                .expect("address list must have at least one item");
+
             let (tx, rx) = oneshot::channel();
-            self.dial_peer(peer_info.address, Some(peer_info.peer_id), tx);
-            self.pending_dials.insert(peer_info.peer_id, rx);
+            self.dial_peer(address, Some(peer_info.id), tx);
+            self.pending_dials.insert(peer_info.id, rx);
         }
     }
 
@@ -220,15 +231,9 @@ impl ConnectionManager {
             let fut = async {
                 let connection = connecting.await?;
 
-                match known_peers.get(connection.peer_id()) {
-                    Some(PeerInfo {
-                        affinity: PeerAffinity::High | PeerAffinity::Allowed,
-                        ..
-                    }) => {}
-                    Some(PeerInfo {
-                        affinity: PeerAffinity::Never,
-                        ..
-                    }) => {
+                match known_peers.get_affinity(connection.peer_id()) {
+                    Some(PeerAffinity::High | PeerAffinity::Allowed) => {}
+                    Some(PeerAffinity::Never) => {
                         anyhow::bail!(
                             "rejecting connection from peer {} due to PeerAffinity::Never",
                             connection.peer_id(),
@@ -556,7 +561,7 @@ fn simultaneous_dial_tie_breaking(
 }
 
 #[derive(Default, Clone)]
-pub struct KnownPeers(Arc<FastDashMap<PeerId, PeerInfo>>);
+pub struct KnownPeers(Arc<FastDashMap<PeerId, KnownPeer>>);
 
 impl KnownPeers {
     pub fn new() -> Self {
@@ -567,21 +572,31 @@ impl KnownPeers {
         self.0.contains_key(peer_id)
     }
 
-    pub fn get(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+    pub fn get(&self, peer_id: &PeerId) -> Option<KnownPeer> {
         self.0.get(peer_id).map(|item| item.value().clone())
     }
 
-    pub fn insert(&self, peer_info: PeerInfo) -> Option<PeerInfo> {
-        self.0.insert(peer_info.peer_id, peer_info)
+    pub fn get_affinity(&self, peer_id: &PeerId) -> Option<PeerAffinity> {
+        self.0.get(peer_id).map(|item| item.value().affinity)
     }
 
-    pub fn remove(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+    pub fn insert(&self, peer_info: Arc<PeerInfo>, affinity: PeerAffinity) -> Option<KnownPeer> {
+        self.0.insert(
+            peer_info.id,
+            KnownPeer {
+                peer_info,
+                affinity,
+            },
+        )
+    }
+
+    pub fn remove(&self, peer_id: &PeerId) -> Option<KnownPeer> {
         self.0.remove(peer_id).map(|(_, value)| value)
     }
+}
 
-    pub fn print_all(&self) {
-        for item in self.0.iter() {
-            println!("{}: {:?}", item.peer_id, item.value());
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct KnownPeer {
+    pub peer_info: Arc<PeerInfo>,
+    pub affinity: PeerAffinity,
 }

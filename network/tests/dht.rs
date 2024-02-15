@@ -9,9 +9,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use everscale_crypto::ed25519;
 use tl_proto::{TlRead, TlWrite};
-use tycho_network::proto::dht;
 use tycho_network::{
-    Address, AddressList, DhtClient, DhtService, FindValueError, Network, PeerId, Router,
+    Address, DhtClient, DhtService, FindValueError, Network, PeerId, PeerInfo, Router,
 };
 use tycho_util::time::now_sec;
 
@@ -39,29 +38,24 @@ impl Node {
         Ok(Self { network, dht })
     }
 
-    fn make_node_info(key: &ed25519::SecretKey, address: Address) -> dht::NodeInfo {
-        const TTL: u32 = 3600;
-
+    fn make_peer_info(key: &ed25519::SecretKey, address: Address) -> PeerInfo {
         let keypair = ed25519::KeyPair::from(key);
         let peer_id = PeerId::from(keypair.public_key);
 
         let now = now_sec();
-        let mut node_info = dht::NodeInfo {
+        let mut node_info = PeerInfo {
             id: peer_id,
-            address_list: AddressList {
-                items: vec![address],
-                created_at: now,
-                expires_at: now + TTL,
-            },
+            address_list: vec![address].into_boxed_slice(),
             created_at: now,
-            signature: Default::default(),
+            expires_at: u32::MAX,
+            signature: Box::new([0; 64]),
         };
-        node_info.signature = keypair.sign(&node_info).to_vec().into();
+        *node_info.signature = keypair.sign(&node_info);
         node_info
     }
 }
 
-fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<dht::NodeInfo>>) {
+fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
     let keys = (0..node_count)
         .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
         .collect::<Vec<_>>();
@@ -73,7 +67,7 @@ fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<dht::NodeInfo>>) {
         .unwrap();
 
     let bootstrap_info = std::iter::zip(&keys, &nodes)
-        .map(|(key, node)| Arc::new(Node::make_node_info(key, node.network.local_addr().into())))
+        .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
         .collect::<Vec<_>>();
     for node in &nodes {
         for info in &bootstrap_info {
@@ -112,30 +106,31 @@ async fn bootstrap_nodes_store_value() -> Result<()> {
     #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
     struct SomeValue(u32);
 
+    const VALUE: SomeValue = SomeValue(123123);
+
     let (nodes, _) = make_network(5);
 
     // Store value
     let first = &nodes[0].dht;
-    let value_to_store = first.make_signed_value("test", now_sec() + 600, SomeValue(123123));
-    first.store_value(value_to_store.clone()).await?;
+
+    first
+        .entry(b"test")
+        .with_data(VALUE)
+        .with_time(now_sec())
+        .store_as_peer()
+        .await?;
 
     // Retrieve an existing value
-    let queried_value = first
-        .find_value(&dht::SignedKey {
-            name: "test".to_owned().into(),
-            idx: 0,
-            peer_id: *first.network().peer_id(),
-        })
+    let value = first
+        .entry(b"test")
+        .find_peer_value::<SomeValue>(&first.network().peer_id())
         .await?;
-    assert_eq!(&dht::Value::Signed(queried_value), value_to_store.as_ref());
+    assert_eq!(value, VALUE);
 
     // Retrieve a non-existing value
     let res = first
-        .find_value(&dht::SignedKey {
-            name: "not-existing".to_owned().into(),
-            idx: 1,
-            peer_id: *first.network().peer_id(),
-        })
+        .entry(b"non-existing")
+        .find_peer_value_raw(&first.network().peer_id())
         .await;
     assert!(matches!(res, Err(FindValueError::NotFound)));
 

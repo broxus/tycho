@@ -14,17 +14,6 @@ transport.peerId key:int256 = transport.PeerId;
 transport.address.ipv4 ip:int port:int = transport.Address;
 transport.address.ipv6 ip:int128 port:int = transport.Address;
 
-/**
-* @param items      multiple possible addresses for the same peer
-* @param created_at unix timestamp when the list was generated
-* @param expires_at unix timestamp up to which this list is valid
-*/
-transport.addressList
-    items:(vector transport.Address)
-    created_at:int
-    expires_at:int
-    = transport.AddressList;
-
 // DHT
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -32,14 +21,16 @@ transport.addressList
 
 /**
 * @param id         node public key
-* @param addr_list  list of possible peer addresses
-* @param created_at unix timestamp when the entry was generated
-* @param signature  a ed25519 signature of the entry
+* @param addr_list  multiple possible addresses for the same peer
+* @param created_at unix timestamp when the info was generated
+* @param expires_at unix timestamp up to which the info is valid
+* @param signature  a ed25519 signature of the info
 */
 dht.node
     id:transport.PeerId
-    addr_list:transport.addressList
+    addr_list:(vector transport.Address)
     created_at:int
+    expires_at:int
     signature:bytes
     = dht.Node;
 
@@ -56,7 +47,7 @@ dht.nodes nodes:(vector dht.node) = dht.Nodes;
 * @param idx        key index used for versioning
 * @param peer_id    owner id
 */
-dht.signedKey
+dht.peerValueKey
     name:bytes
     idx:int
     peer_id:transport.PeerId
@@ -65,21 +56,25 @@ dht.signedKey
 /**
 * Key for the overlay-managed value
 *
-* @param id     overlay id
-* @param name   key name as UTF-8 string
-* @param idx    key index used for versioning
+* @param name       key name as UTF-8 string
+* @param idx        key index used for versioning
+* @param overlay_id overlay id
 */
-dht.overlayKey id:int256 name:bytes idx:int = dht.Key;
+dht.overlayValueKey
+    name:bytes
+    idx:int
+    overlay_id:int256
+    = dht.Key;
 
 
 /**
 * A value with an exact owner
 *
-* @param key        signed key
+* @param key        peer value key
 * @param value      any data
 * @param expires_at unix timestamp up to which this value is valid
 */
-dht.signedValue key:dht.signedKey data:bytes expires_at:int signature:bytes = dht.Value;
+dht.peerValue key:dht.peerValueKey data:bytes expires_at:int signature:bytes = dht.Value;
 
 /**
 * An overlay-managed value
@@ -88,7 +83,7 @@ dht.signedValue key:dht.signedKey data:bytes expires_at:int signature:bytes = dh
 * @param value      any data
 * @param expires_at unix timestamp up to which this value is valid
 */
-dht.overlayValue key:dht.overlayKey data:bytes expires_at:int = dht.Value;
+dht.overlayValue key:dht.overlayValueKey data:bytes expires_at:int = dht.Value;
 
 
 /**
@@ -143,6 +138,6 @@ dht.findNode key:int256 k:int = dht.NodeResponse;
 */
 dht.findValue key:int256 k:int = dht.ValueResponse;
 /**
-* Requests a signed address list
+* Requests a signed node info
 */
 dht.getNodeInfo = dht.NodeInfoResponse;

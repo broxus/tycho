@@ -2,7 +2,7 @@ use std::future::Future;
 
 use anyhow::Result;
 
-use crate::network::{Network, Peer};
+use crate::network::{KnownPeer, Network, Peer};
 use crate::types::{PeerEvent, PeerId, Request, Response};
 
 pub trait NetworkExt {
@@ -45,10 +45,15 @@ where
 
     match network.known_peers().get(peer_id) {
         // Initiate a connection of it is a known peer
-        Some(peer_info) => {
-            network
-                .connect_with_peer_id(peer_info.address, peer_id)
-                .await?;
+        Some(KnownPeer { peer_info, .. }) => {
+            // TODO: try multiple addresses
+            let address = peer_info
+                .iter_addresses()
+                .next()
+                .cloned()
+                .expect("address list must have at least one item");
+
+            network.connect_with_peer_id(address, peer_id).await?;
         }
         // Error otherwise
         None => anyhow::bail!("trying to interact with an unknown peer: {peer_id}"),

@@ -129,40 +129,5 @@ impl FromStr for Address {
     }
 }
 
-#[derive(Debug, Clone, TlWrite, Eq, PartialEq)]
-pub struct AddressList {
-    pub items: Vec<Address>,
-    pub created_at: u32,
-    pub expires_at: u32,
-}
-
-impl AddressList {
-    pub const MAX_LEN: usize = 4;
-}
-
-impl<'a> TlRead<'a> for AddressList {
-    type Repr = tl_proto::Bare;
-
-    fn read_from(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<Self> {
-        use tl_proto::TlError;
-
-        let len = u32::read_from(packet, offset)? as usize;
-        if len == 0 || len > Self::MAX_LEN {
-            return Err(TlError::InvalidData);
-        }
-
-        let mut items = Vec::with_capacity(len);
-        for _ in 0..len {
-            items.push(Address::read_from(packet, offset)?);
-        }
-
-        Ok(Self {
-            items,
-            created_at: u32::read_from(packet, offset)?,
-            expires_at: u32::read_from(packet, offset)?,
-        })
-    }
-}
-
 const ADDRESS_V4_TL_ID: u32 = tl_proto::id!("transport.address.ipv4", scheme = "proto.tl");
 const ADDRESS_V6_TL_ID: u32 = tl_proto::id!("transport.address.ipv6", scheme = "proto.tl");

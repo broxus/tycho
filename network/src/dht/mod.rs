@@ -3,16 +3,19 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use tl_proto::TlWrite;
+use tycho_util::realloc_box_enum;
 use tycho_util::time::{now_sec, shifted_interval};
 
 use self::query::{Query, StoreValue};
 use self::routing::RoutingTable;
 use self::storage::Storage;
 use crate::network::{Network, WeakNetwork};
-use crate::proto::dht;
+use crate::proto::dht::{
+    rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyRef, PeerValueRef,
+    Value, ValueRef, ValueResponseRaw,
+};
 use crate::types::{
-    AddressList, PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest,
+    Address, PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest,
 };
 use crate::util::{NetworkExt, Routable};
 
@@ -59,43 +62,159 @@ impl DhtClient {
         &self.network
     }
 
-    pub fn add_peer(&self, peer: Arc<dht::NodeInfo>) -> Result<bool> {
+    pub fn add_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
         self.inner.add_node_info(&self.network, peer)
     }
 
-    pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<dht::NodeInfo> {
+    pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<PeerInfo> {
         let res = self
             .network
-            .query(peer_id, Request::from_tl(dht::rpc::GetNodeInfo))
+            .query(peer_id, Request::from_tl(rpc::GetNodeInfo))
             .await?;
-        let dht::NodeInfoResponse { info } = res.parse_tl()?;
+        let NodeInfoResponse { info } = res.parse_tl()?;
         Ok(info)
     }
 
-    pub async fn find_value<T>(&self, key: &T) -> Result<T::Value<'static>, FindValueError>
+    pub fn entry<'n>(&self, name: &'n [u8]) -> DhtQueryBuilder<'_, 'n> {
+        DhtQueryBuilder {
+            inner: &self.inner,
+            network: &self.network,
+            name,
+            idx: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct DhtQueryBuilder<'a, 'n> {
+    inner: &'a DhtInner,
+    network: &'a Network,
+    name: &'n [u8],
+    idx: u32,
+}
+
+impl<'a, 'n> DhtQueryBuilder<'a, 'n> {
+    #[inline]
+    pub fn with_idx(&mut self, idx: u32) -> &mut Self {
+        self.idx = idx;
+        self
+    }
+
+    pub async fn find_peer_value<T>(&self, peer_id: &PeerId) -> Result<T, FindValueError>
     where
-        T: dht::WithValue,
+        for<'tl> T: tl_proto::TlRead<'tl>,
     {
-        match self
-            .inner
-            .find_value(&self.network, &tl_proto::hash(key))
-            .await
-        {
-            Some(value) => T::parse_value(value).map_err(FindValueError::InvalidData),
+        let key_hash = tl_proto::hash(PeerValueKeyRef {
+            name: self.name,
+            idx: self.idx,
+            peer_id,
+        });
+
+        match self.inner.find_value(self.network, &key_hash).await {
+            Some(value) => match value.as_ref() {
+                Value::Peer(value) => {
+                    tl_proto::deserialize(&value.data).map_err(FindValueError::InvalidData)
+                }
+                Value::Overlay(_) => Err(FindValueError::InvalidData(
+                    tl_proto::TlError::UnknownConstructor,
+                )),
+            },
             None => Err(FindValueError::NotFound),
         }
     }
 
-    pub async fn store_value(&self, value: Box<dht::Value>) -> Result<()> {
-        self.inner.store_value(&self.network, value).await
+    pub async fn find_peer_value_raw(
+        &self,
+        peer_id: &PeerId,
+    ) -> Result<Box<PeerValue>, FindValueError> {
+        let key_hash = tl_proto::hash(PeerValueKeyRef {
+            name: self.name,
+            idx: self.idx,
+            peer_id,
+        });
+
+        match self.inner.find_value(self.network, &key_hash).await {
+            Some(value) => {
+                realloc_box_enum!(value, {
+                    Value::Peer(value) => Box::new(value) => Ok(value),
+                    Value::Overlay(_) => Err(FindValueError::InvalidData(
+                        tl_proto::TlError::UnknownConstructor,
+                    )),
+                })
+            }
+            None => Err(FindValueError::NotFound),
+        }
     }
 
-    pub fn make_signed_value<T>(&self, name: &str, expires_at: u32, data: T) -> Box<dht::Value>
+    pub fn with_data<T>(&self, data: T) -> DhtQueryWithDataBuilder<'a, 'n>
     where
-        T: TlWrite + 'static,
+        T: tl_proto::TlWrite,
     {
-        self.inner
-            .make_signed_value(&self.network, name, expires_at, data)
+        DhtQueryWithDataBuilder {
+            inner: *self,
+            data: tl_proto::serialize(&data),
+            at: None,
+            ttl: DhtQueryWithDataBuilder::DEFAULT_TTL,
+        }
+    }
+}
+
+pub struct DhtQueryWithDataBuilder<'a, 'n> {
+    inner: DhtQueryBuilder<'a, 'n>,
+    data: Vec<u8>,
+    at: Option<u32>,
+    ttl: u32,
+}
+
+impl DhtQueryWithDataBuilder<'_, '_> {
+    const DEFAULT_TTL: u32 = 3600;
+
+    pub fn with_time(&mut self, at: u32) -> &mut Self {
+        self.at = Some(at);
+        self
+    }
+
+    pub fn with_ttl(&mut self, ttl: u32) -> &mut Self {
+        self.ttl = ttl;
+        self
+    }
+
+    pub async fn store_as_peer(&self) -> Result<()> {
+        let dht = self.inner.inner;
+        let network = self.inner.network;
+
+        let mut value = PeerValueRef {
+            key: PeerValueKeyRef {
+                name: self.inner.name,
+                idx: self.inner.idx,
+                peer_id: &dht.local_id,
+            },
+            data: &self.data,
+            expires_at: self.at.unwrap_or_else(now_sec) + self.ttl,
+            signature: &[0; 64],
+        };
+        let signature = network.sign_tl(&value);
+        value.signature = &signature;
+
+        dht.store_value(network, ValueRef::Peer(value)).await
+    }
+
+    pub fn into_signed_peer_value(self) -> PeerValue {
+        let dht = self.inner.inner;
+        let network = self.inner.network;
+
+        let mut value = PeerValue {
+            key: PeerValueKey {
+                name: Box::from(self.inner.name),
+                idx: self.inner.idx,
+                peer_id: dht.local_id,
+            },
+            data: self.data.into_boxed_slice(),
+            expires_at: self.at.unwrap_or_else(now_sec) + self.ttl,
+            signature: Box::new([0; 64]),
+        };
+        *value.signature = network.sign_tl(&value);
+        value
     }
 }
 
@@ -182,19 +301,19 @@ impl Service<ServiceRequest> for DhtService {
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         let response = crate::match_tl_request!(req.body, {
-            dht::rpc::FindNode as ref r => {
+            rpc::FindNode as ref r => {
                 tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_node");
 
                 let res = self.0.handle_find_node(r);
                 Some(tl_proto::serialize(res))
             },
-            dht::rpc::FindValue as ref r => {
+            rpc::FindValue as ref r => {
                 tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_value");
 
                 let res = self.0.handle_find_value(r);
                 Some(tl_proto::serialize(res))
             },
-            dht::rpc::GetNodeInfo as _ => {
+            rpc::GetNodeInfo as _ => {
                 tracing::debug!("get_node_info");
 
                 self.0.handle_get_node_info().map(tl_proto::serialize)
@@ -218,7 +337,7 @@ impl Service<ServiceRequest> for DhtService {
     )]
     fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
         crate::match_tl_request!(req.body, {
-            dht::rpc::Store as ref r => {
+            rpc::StoreRef<'_> as ref r => {
                 tracing::debug!("store");
 
                 if let Err(e) = self.0.handle_store(r) {
@@ -241,14 +360,14 @@ impl Service<ServiceRequest> for DhtService {
 impl Routable for DhtService {
     fn query_ids(&self) -> impl IntoIterator<Item = u32> {
         [
-            dht::rpc::FindNode::TL_ID,
-            dht::rpc::FindValue::TL_ID,
-            dht::rpc::GetNodeInfo::TL_ID,
+            rpc::FindNode::TL_ID,
+            rpc::FindValue::TL_ID,
+            rpc::GetNodeInfo::TL_ID,
         ]
     }
 
     fn message_ids(&self) -> impl IntoIterator<Item = u32> {
-        [dht::rpc::Store::TL_ID]
+        [rpc::Store::TL_ID]
     }
 }
 
@@ -256,7 +375,7 @@ struct DhtInner {
     local_id: PeerId,
     routing_table: Mutex<RoutingTable>,
     storage: Storage,
-    node_info: Mutex<Option<dht::NodeInfo>>,
+    node_info: Mutex<Option<PeerInfo>>,
     max_k: usize,
     node_ttl: Duration,
 }
@@ -320,39 +439,26 @@ impl DhtInner {
 
     fn refresh_local_node_info(&self, network: &Network, ttl: u32) {
         let now = now_sec();
-        let mut node_info = dht::NodeInfo {
+        let mut node_info = PeerInfo {
             id: self.local_id,
-            address_list: AddressList {
-                items: vec![network.local_addr().into()],
-                created_at: now,
-                expires_at: now + ttl,
-            },
+            address_list: vec![network.local_addr().into()].into_boxed_slice(),
             created_at: now,
-            signature: Bytes::new(),
+            expires_at: now + ttl,
+            signature: Box::new([0; 64]),
         };
-        node_info.signature = network.sign_tl(&node_info).to_vec().into();
+        *node_info.signature = network.sign_tl(&node_info);
 
         *self.node_info.lock().unwrap() = Some(node_info);
     }
 
     async fn announce_local_node_info(&self, network: &Network, ttl: u32) -> Result<()> {
-        let value = {
-            let created_at = now_sec();
-            let expires_at = created_at + ttl;
+        let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
 
-            self.make_signed_value(
-                network,
-                "addr",
-                expires_at,
-                AddressList {
-                    items: vec![network.local_addr().into()],
-                    created_at,
-                    expires_at,
-                },
-            )
-        };
+        let mut value = self.make_unsigned_peer_value(b"addr", &data, now_sec() + ttl);
+        let signature = network.sign_tl(&value);
+        value.signature = &signature;
 
-        self.store_value(network, value).await
+        self.store_value(network, ValueRef::Peer(value)).await
     }
 
     async fn find_more_dht_nodes(&self, network: &Network) {
@@ -373,7 +479,7 @@ impl DhtInner {
         }
     }
 
-    async fn find_value(&self, network: &Network, key_hash: &[u8; 32]) -> Option<Box<dht::Value>> {
+    async fn find_value(&self, network: &Network, key_hash: &[u8; 32]) -> Option<Box<Value>> {
         // TODO: deduplicate shared futures
         let query = Query::new(
             network.clone(),
@@ -386,7 +492,7 @@ impl DhtInner {
         query.find_value().await
     }
 
-    async fn store_value(&self, network: &Network, value: Box<dht::Value>) -> Result<()> {
+    async fn store_value(&self, network: &Network, value: ValueRef<'_>) -> Result<()> {
         self.storage.insert(&value)?;
 
         let query = StoreValue::new(
@@ -401,70 +507,54 @@ impl DhtInner {
         Ok(())
     }
 
-    fn add_node_info(&self, network: &Network, node: Arc<dht::NodeInfo>) -> Result<bool> {
+    fn add_node_info(&self, network: &Network, node: Arc<PeerInfo>) -> Result<bool> {
         anyhow::ensure!(node.is_valid(now_sec()), "invalid peer node info");
 
-        // TODO: add support for multiple addresses
-        let peer_info = match node.address_list.items.first() {
-            Some(address) if node.id != self.local_id => PeerInfo {
-                peer_id: node.id,
-                affinity: PeerAffinity::Allowed,
-                address: address.clone(),
-            },
-            _ => return Ok(false),
-        };
+        if node.id == self.local_id {
+            return Ok(false);
+        }
 
         let mut routing_table = self.routing_table.lock().unwrap();
-        let is_new = routing_table.add(node, self.max_k, &self.node_ttl);
+        let is_new = routing_table.add(node.clone(), self.max_k, &self.node_ttl);
         if is_new {
-            network.known_peers().insert(peer_info);
+            network.known_peers().insert(node, PeerAffinity::Allowed);
         }
         Ok(is_new)
     }
 
-    fn make_signed_value<T>(
-        &self,
-        network: &Network,
-        name: &str,
+    fn make_unsigned_peer_value<'a>(
+        &'a self,
+        name: &'a [u8],
+        data: &'a [u8],
         expires_at: u32,
-        data: T,
-    ) -> Box<dht::Value>
-    where
-        T: TlWrite + 'static,
-    {
-        let mut value = dht::SignedValue {
-            key: dht::SignedKey {
-                name: name.to_owned().into(),
+    ) -> PeerValueRef<'a> {
+        PeerValueRef {
+            key: PeerValueKeyRef {
+                name,
                 idx: 0,
-                peer_id: self.local_id,
+                peer_id: &self.local_id,
             },
-            data: match castaway::cast!(data, Bytes) {
-                Ok(data) => data,
-                Err(data) => tl_proto::serialize(data).into(),
-            },
+            data,
             expires_at,
-            signature: Default::default(),
-        };
-        value.signature = network.sign_tl(&value).to_vec().into();
-
-        Box::new(dht::Value::Signed(value))
+            signature: &[0; 64],
+        }
     }
 
-    fn handle_store(&self, req: &dht::rpc::Store) -> Result<bool, StorageError> {
+    fn handle_store(&self, req: &rpc::StoreRef<'_>) -> Result<bool, StorageError> {
         self.storage.insert(&req.value)
     }
 
-    fn handle_find_node(&self, req: &dht::rpc::FindNode) -> NodeResponseRaw {
+    fn handle_find_node(&self, req: &rpc::FindNode) -> NodeResponse {
         let nodes = self
             .routing_table
             .lock()
             .unwrap()
             .closest(&req.key, (req.k as usize).min(self.max_k));
 
-        NodeResponseRaw { nodes }
+        NodeResponse { nodes }
     }
 
-    fn handle_find_value(&self, req: &dht::rpc::FindValue) -> ValueResponseRaw {
+    fn handle_find_value(&self, req: &rpc::FindValue) -> ValueResponseRaw {
         if let Some(value) = self.storage.get(&req.key) {
             ValueResponseRaw::Found(value)
         } else {
@@ -478,54 +568,13 @@ impl DhtInner {
         }
     }
 
-    fn handle_get_node_info(&self) -> Option<dht::NodeInfoResponse> {
+    fn handle_get_node_info(&self) -> Option<NodeInfoResponse> {
         self.node_info
             .lock()
             .unwrap()
             .clone()
-            .map(|info| dht::NodeInfoResponse { info })
+            .map(|info| NodeInfoResponse { info })
     }
-}
-
-enum ValueResponseRaw {
-    Found(Bytes),
-    NotFound(Vec<Arc<dht::NodeInfo>>),
-}
-
-impl TlWrite for ValueResponseRaw {
-    type Repr = tl_proto::Boxed;
-
-    fn max_size_hint(&self) -> usize {
-        4 + match self {
-            Self::Found(value) => value.max_size_hint(),
-            Self::NotFound(nodes) => nodes.max_size_hint(),
-        }
-    }
-
-    fn write_to<P>(&self, packet: &mut P)
-    where
-        P: tl_proto::TlPacket,
-    {
-        const FOUND_TL_ID: u32 = tl_proto::id!("dht.valueFound", scheme = "proto.tl");
-        const NOT_FOUND_TL_ID: u32 = tl_proto::id!("dht.valueNotFound", scheme = "proto.tl");
-
-        match self {
-            Self::Found(value) => {
-                packet.write_u32(FOUND_TL_ID);
-                packet.write_raw_slice(&value);
-            }
-            Self::NotFound(nodes) => {
-                packet.write_u32(NOT_FOUND_TL_ID);
-                nodes.write_to(packet);
-            }
-        }
-    }
-}
-
-#[derive(TlWrite)]
-#[tl(boxed, id = "dht.nodesFound", scheme = "proto.tl")]
-struct NodeResponseRaw {
-    nodes: Vec<Arc<dht::NodeInfo>>,
 }
 
 pub fn xor_distance(left: &PeerId, right: &PeerId) -> usize {

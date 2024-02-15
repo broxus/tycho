@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -8,37 +9,27 @@ use moka::Expiry;
 use tl_proto::TlWrite;
 use tycho_util::time::now_sec;
 
-use crate::proto;
+use crate::proto::dht::{OverlayValue, OverlayValueRef, PeerValueRef, ValueRef};
 
 type DhtCache<S> = Cache<StorageKeyId, StoredValue, S>;
 type DhtCacheBuilder<S> = CacheBuilder<StorageKeyId, StoredValue, DhtCache<S>>;
 
 pub trait OverlayValueMerger: Send + Sync + 'static {
-    fn check_value(&self, new: &proto::dht::OverlayValue) -> Result<(), StorageError>;
-
-    fn merge_value(
-        &self,
-        new: &proto::dht::OverlayValue,
-        stored: &mut proto::dht::OverlayValue,
-    ) -> bool;
+    fn check_value(&self, new: &OverlayValueRef<'_>) -> Result<(), StorageError>;
+    fn merge_value(&self, new: &OverlayValueRef<'_>, stored: &mut OverlayValue) -> bool;
 }
 
 impl OverlayValueMerger for () {
-    fn check_value(&self, _new: &proto::dht::OverlayValue) -> Result<(), StorageError> {
+    fn check_value(&self, _new: &OverlayValueRef<'_>) -> Result<(), StorageError> {
         Err(StorageError::InvalidKey)
     }
-
-    fn merge_value(
-        &self,
-        _new: &proto::dht::OverlayValue,
-        _stored: &mut proto::dht::OverlayValue,
-    ) -> bool {
+    fn merge_value(&self, _new: &OverlayValueRef<'_>, _stored: &mut OverlayValue) -> bool {
         false
     }
 }
 
 pub(crate) struct StorageBuilder {
-    cache_builder: DhtCacheBuilder<std::collections::hash_map::RandomState>,
+    cache_builder: DhtCacheBuilder<std::hash::RandomState>,
     overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl: Duration,
     max_key_name_len: usize,
@@ -129,7 +120,7 @@ impl Storage {
         (stored_value.expires_at > now_sec()).then_some(stored_value.data)
     }
 
-    pub fn insert(&self, value: &proto::dht::Value) -> Result<bool, StorageError> {
+    pub fn insert(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
         match value.expires_at().checked_sub(now_sec()) {
             Some(0) | None => return Err(StorageError::ValueExpired),
             Some(remaining_ttl) if remaining_ttl > self.max_ttl_sec => {
@@ -145,12 +136,12 @@ impl Storage {
         }
 
         match value {
-            proto::dht::Value::Signed(value) => self.insert_signed_value(value),
-            proto::dht::Value::Overlay(value) => self.insert_overlay_value(value),
+            ValueRef::Peer(value) => self.insert_signed_value(value),
+            ValueRef::Overlay(value) => self.insert_overlay_value(value),
         }
     }
 
-    fn insert_signed_value(&self, value: &proto::dht::SignedValue) -> Result<bool, StorageError> {
+    fn insert_signed_value(&self, value: &PeerValueRef<'_>) -> Result<bool, StorageError> {
         let Some(public_key) = value.key.peer_id.as_public_key() else {
             return Err(StorageError::InvalidSignature);
         };
@@ -172,17 +163,28 @@ impl Storage {
             .is_fresh())
     }
 
-    fn insert_overlay_value(&self, value: &proto::dht::OverlayValue) -> Result<bool, StorageError> {
-        use std::borrow::Cow;
-        use std::cell::RefCell;
-
+    fn insert_overlay_value(&self, value: &OverlayValueRef<'_>) -> Result<bool, StorageError> {
         let Some(merger) = self.overlay_value_merger.upgrade() else {
             return Ok(false);
         };
 
         merger.check_value(value)?;
 
-        let new_value = RefCell::new(Cow::Borrowed(value));
+        enum OverlayValueCow<'a, 'b> {
+            Borrowed(&'a OverlayValueRef<'b>),
+            Owned(OverlayValue),
+        }
+
+        impl OverlayValueCow<'_, '_> {
+            fn make_stored_value(&self) -> StoredValue {
+                match self {
+                    Self::Borrowed(value) => StoredValue::new(*value, value.expires_at),
+                    Self::Owned(value) => StoredValue::new(value, value.expires_at),
+                }
+            }
+        }
+
+        let new_value = RefCell::new(OverlayValueCow::Borrowed(value));
 
         Ok(self
             .cache
@@ -190,18 +192,16 @@ impl Storage {
             .or_insert_with_if(
                 || {
                     let value = new_value.borrow();
-                    StoredValue::new(value.as_ref(), value.expires_at)
+                    value.make_stored_value()
                 },
                 |prev| {
-                    let Ok(mut prev) =
-                        tl_proto::deserialize::<proto::dht::OverlayValue>(&prev.data)
-                    else {
+                    let Ok(mut prev) = tl_proto::deserialize::<OverlayValue>(&prev.data) else {
                         // Invalid values are always replaced with new values
                         return true;
                     };
 
                     if merger.merge_value(value, &mut prev) {
-                        *new_value.borrow_mut() = Cow::Owned(prev);
+                        *new_value.borrow_mut() = OverlayValueCow::Owned(prev);
                         true
                     } else {
                         false

@@ -1,17 +1,17 @@
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
-    xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtService, DhtServiceBuilder,
-    FindValueError, OverlayValueMerger, StorageError,
+    xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder,
+    DhtService, DhtServiceBuilder, FindValueError, OverlayValueMerger, StorageError,
 };
 pub use network::{
-    ActivePeers, Connection, KnownPeers, Network, NetworkBuilder, NetworkConfig, Peer, QuicConfig,
-    RecvStream, SendStream, WeakActivePeers, WeakNetwork,
+    ActivePeers, Connection, KnownPeer, KnownPeers, Network, NetworkBuilder, NetworkConfig, Peer,
+    QuicConfig, RecvStream, SendStream, WeakActivePeers, WeakNetwork,
 };
 pub use types::{
-    service_datagram_fn, service_message_fn, service_query_fn, Address, AddressList,
-    BoxCloneService, BoxService, Direction, DisconnectReason, InboundRequestMeta, PeerAffinity,
-    PeerEvent, PeerId, PeerInfo, Request, Response, RpcQuery, Service, ServiceDatagramFn,
-    ServiceExt, ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
+    service_datagram_fn, service_message_fn, service_query_fn, Address, BoxCloneService,
+    BoxService, Direction, DisconnectReason, InboundRequestMeta, PeerAffinity, PeerEvent, PeerId,
+    PeerInfo, Request, Response, RpcQuery, Service, ServiceDatagramFn, ServiceExt,
+    ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
 };
 
 pub use quinn;

@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 pub use self::router::{Routable, Router, RouterBuilder};
 pub use self::traits::NetworkExt;
 
@@ -7,6 +5,8 @@ use crate::types::PeerId;
 
 mod router;
 mod traits;
+
+pub(crate) mod tl;
 
 #[macro_export]
 macro_rules! match_tl_request {
@@ -32,14 +32,11 @@ macro_rules! match_tl_request {
     };
 }
 
-pub fn check_peer_signature<T>(peed_id: &PeerId, signature: &Bytes, data: &T) -> bool
+pub fn check_peer_signature<T>(peed_id: &PeerId, signature: &[u8; 64], data: &T) -> bool
 where
     T: tl_proto::TlWrite,
 {
     let Some(public_key) = peed_id.as_public_key() else {
-        return false;
-    };
-    let Ok::<&[u8; 64], _>(signature) = signature.as_ref().try_into() else {
         return false;
     };
     public_key.verify(data, signature)

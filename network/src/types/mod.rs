@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-pub use self::address::{Address, AddressList};
+pub use self::address::Address;
 pub use self::peer_id::{Direction, PeerId};
+pub use self::peer_info::{PeerAffinity, PeerInfo};
 pub use self::rpc::RpcQuery;
 pub use self::service::{
     service_datagram_fn, service_message_fn, service_query_fn, BoxCloneService, BoxService,
@@ -13,6 +14,7 @@ pub use self::service::{
 
 mod address;
 mod peer_id;
+mod peer_info;
 mod rpc;
 mod service;
 
@@ -112,21 +114,6 @@ pub struct InboundRequestMeta {
     pub peer_id: PeerId,
     pub origin: Direction,
     pub remote_address: SocketAddr,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PeerAffinity {
-    High,
-    Allowed,
-    Never,
-}
-
-#[derive(Debug, Clone)]
-pub struct PeerInfo {
-    pub peer_id: PeerId,
-    pub affinity: PeerAffinity,
-    // TODO: change to address list
-    pub address: Address,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

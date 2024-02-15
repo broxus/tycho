@@ -15,7 +15,7 @@ use crate::types::{
 
 pub use self::config::{NetworkConfig, QuicConfig};
 pub use self::connection::{Connection, RecvStream, SendStream};
-pub use self::connection_manager::{ActivePeers, KnownPeers, WeakActivePeers};
+pub use self::connection_manager::{ActivePeers, KnownPeer, KnownPeers, WeakActivePeers};
 pub use self::peer::Peer;
 
 mod config;
