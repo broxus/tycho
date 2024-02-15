@@ -6,8 +6,8 @@ use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
 use crate::types::{PeerId, PeerInfo};
 
 pub(crate) struct RoutingTable {
-    local_id: PeerId,
-    buckets: BTreeMap<usize, Bucket>,
+    pub local_id: PeerId,
+    pub buckets: BTreeMap<usize, Bucket>,
 }
 
 impl RoutingTable {
@@ -16,10 +16,6 @@ impl RoutingTable {
             local_id,
             buckets: Default::default(),
         }
-    }
-
-    pub fn local_id(&self) -> &PeerId {
-        &self.local_id
     }
 
     #[allow(unused)]
@@ -32,8 +28,8 @@ impl RoutingTable {
         self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
     }
 
-    pub fn add(&mut self, node: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration) -> bool {
-        let distance = xor_distance(&self.local_id, &node.id);
+    pub fn add(&mut self, peer: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration) -> bool {
+        let distance = xor_distance(&self.local_id, &peer.id);
         if distance == 0 {
             return false;
         }
@@ -41,7 +37,7 @@ impl RoutingTable {
         self.buckets
             .entry(distance)
             .or_insert_with(|| Bucket::with_capacity(max_k))
-            .insert(node, max_k, node_ttl)
+            .insert(peer, max_k, node_ttl)
     }
 
     #[allow(unused)]
@@ -118,7 +114,7 @@ impl RoutingTable {
     }
 }
 
-struct Bucket {
+pub(crate) struct Bucket {
     nodes: VecDeque<Node>,
 }
 
@@ -148,7 +144,7 @@ impl Bucket {
         true
     }
 
-    fn remove(&mut self, key: &PeerId) -> bool {
+    pub fn remove(&mut self, key: &PeerId) -> bool {
         if let Some(index) = self.nodes.iter().position(|node| &node.data.id == key) {
             self.nodes.remove(index);
             true
@@ -157,18 +153,18 @@ impl Bucket {
         }
     }
 
-    fn contains(&self, key: &PeerId) -> bool {
+    pub fn contains(&self, key: &PeerId) -> bool {
         self.nodes.iter().any(|node| &node.data.id == key)
     }
 
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
 }
 
-struct Node {
-    data: Arc<PeerInfo>,
-    last_updated_at: Instant,
+pub(crate) struct Node {
+    pub data: Arc<PeerInfo>,
+    pub last_updated_at: Instant,
 }
 
 impl Node {
@@ -179,7 +175,7 @@ impl Node {
         }
     }
 
-    fn is_expired(&self, timeout: &Duration) -> bool {
+    pub fn is_expired(&self, timeout: &Duration) -> bool {
         &self.last_updated_at.elapsed() >= timeout
     }
 }

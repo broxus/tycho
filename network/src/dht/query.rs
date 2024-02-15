@@ -43,7 +43,7 @@ impl Query {
     }
 
     fn local_id(&self) -> &[u8; 32] {
-        self.candidates.local_id().as_bytes()
+        self.candidates.local_id.as_bytes()
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -126,7 +126,7 @@ impl Query {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub async fn find_peers(mut self) -> impl Iterator<Item = Arc<PeerInfo>> {
+    pub async fn find_peers(mut self, depth: Option<usize>) -> FastHashMap<PeerId, Arc<PeerInfo>> {
         // Prepare shared request
         let request_body = Bytes::from(tl_proto::serialize(rpc::FindNode {
             key: *self.local_id(),
@@ -147,6 +147,8 @@ impl Query {
             });
 
         // Process responses and refill futures until all peers are traversed
+        let mut current_depth = 0;
+        let max_depth = depth.unwrap_or(usize::MAX);
         let mut result = FastHashMap::<PeerId, Arc<PeerInfo>>::new();
         while let Some((node, res)) = futures.next().await {
             match res {
@@ -156,6 +158,12 @@ impl Query {
                     if !self.update_candidates_full(now_sec(), self.max_k, nodes, &mut result) {
                         // Do nothing if candidates were not changed
                         continue;
+                    }
+
+                    current_depth += 1;
+                    if current_depth >= max_depth {
+                        // Stop on max depth
+                        break;
                     }
 
                     // Add new nodes from the closest range
@@ -185,7 +193,7 @@ impl Query {
         }
 
         // Done
-        result.into_values()
+        result
     }
 
     fn update_candidates(

@@ -1,8 +1,14 @@
+use std::collections::hash_map;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
+use rand::RngCore;
+use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tycho_util::realloc_box_enum;
 use tycho_util::time::{now_sec, shifted_interval};
 
@@ -394,7 +400,7 @@ impl DhtInner {
 
         const ANNOUNCE_PERIOD: Duration = Duration::from_secs(600);
         const ANNOUNCE_SHIFT: Duration = Duration::from_secs(60);
-        const POPULATE_PERIOD: Duration = Duration::from_secs(60);
+        const POPULATE_PERIOD: Duration = Duration::from_secs(600);
         const POPULATE_SHIFT: Duration = Duration::from_secs(10);
 
         enum Action {
@@ -410,6 +416,7 @@ impl DhtInner {
             let mut announce_interval = shifted_interval(ANNOUNCE_PERIOD, ANNOUNCE_SHIFT);
             let mut populate_interval = shifted_interval(POPULATE_PERIOD, POPULATE_SHIFT);
 
+            let mut prev_populate_fut = None::<JoinHandle<()>>;
             loop {
                 let action = tokio::select! {
                     _ = refresh_interval.tick() => Action::Refresh,
@@ -435,8 +442,17 @@ impl DhtInner {
                         }
                     }
                     Action::Populate => {
-                        // TODO: spawn and await in the background?
-                        this.find_more_dht_nodes(&network).await;
+                        if let Some(fut) = prev_populate_fut.take() {
+                            if let Err(e) = fut.await {
+                                if e.is_panic() {
+                                    std::panic::resume_unwind(e.into_panic());
+                                }
+                            }
+                        }
+
+                        prev_populate_fut = Some(tokio::spawn(async move {
+                            this.populate(&network).await;
+                        }));
                     }
                 }
             }
@@ -458,6 +474,7 @@ impl DhtInner {
         *self.node_info.lock().unwrap() = Some(node_info);
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
     async fn announce_local_node_info(&self, network: &Network, ttl: u32) -> Result<()> {
         let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
 
@@ -469,22 +486,85 @@ impl DhtInner {
         self.store_value(network, ValueRef::Peer(value)).await
     }
 
-    async fn find_more_dht_nodes(&self, network: &Network) {
-        // TODO: deduplicate shared futures
-        let query = Query::new(
-            network.clone(),
-            &self.routing_table.lock().unwrap(),
-            self.local_id.as_bytes(),
-            self.max_k,
-        );
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
+    async fn populate(&self, network: &Network) {
+        const PARALLEL_QUERIES: usize = 3;
+        const MAX_DISTANCE: usize = 15;
+        const QUERY_DEPTH: usize = 3;
 
-        // NOTE: expression is intentionally split to drop the routing table guard
-        let peers = query.find_peers().await;
+        // Prepare futures for each bucket
+        let semaphore = Semaphore::new(PARALLEL_QUERIES);
+        let mut futures = FuturesUnordered::new();
+        {
+            // NOTE: rng is intentionally dropped after this block to make this future `Send`.
+            let rng = &mut rand::thread_rng();
+
+            let routing_table = self.routing_table.lock().unwrap();
+
+            // Iterate over the first buckets up until some distance (`MAX_DISTANCE`)
+            // or up to the last non-empty bucket.
+            let first_n_non_empty_buckets = routing_table
+                .buckets
+                .range(..=MAX_DISTANCE)
+                .rev()
+                .skip_while(|(_, bucket)| bucket.is_empty());
+
+            for (&distance, _) in first_n_non_empty_buckets {
+                // Query K closest nodes for a random ID at the specified distance from the local ID.
+                let random_id = random_key_at_distance(&routing_table.local_id, distance, rng);
+                let query = Query::new(
+                    network.clone(),
+                    &routing_table,
+                    random_id.as_bytes(),
+                    self.max_k,
+                );
+
+                futures.push(async {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    query.find_peers(Some(QUERY_DEPTH)).await
+                });
+            }
+        }
+
+        // Receive initial set of peers
+        let Some(mut peers) = futures.next().await else {
+            tracing::debug!("no new peers found");
+            return;
+        };
+
+        // Merge new peers into the result set
+        while let Some(new_peers) = futures.next().await {
+            for (peer_id, peer) in new_peers {
+                match peers.entry(peer_id) {
+                    // Just insert the peer if it's new
+                    hash_map::Entry::Vacant(entry) => {
+                        entry.insert(peer);
+                    }
+                    // Replace the peer if it's newer (by creation time)
+                    hash_map::Entry::Occupied(mut entry) => {
+                        if entry.get().created_at < peer.created_at {
+                            entry.insert(peer);
+                        }
+                    }
+                }
+            }
+        }
 
         let mut routing_table = self.routing_table.lock().unwrap();
-        for peer in peers {
-            routing_table.add(peer, self.max_k, &self.node_ttl);
+        let mut count = 0usize;
+        for peer in peers.into_values() {
+            if peer.id == self.local_id {
+                continue;
+            }
+
+            let is_new = routing_table.add(peer.clone(), self.max_k, &self.node_ttl);
+            if is_new {
+                network.known_peers().insert(peer, PeerAffinity::Allowed);
+                count += 1;
+            }
         }
+
+        tracing::debug!(count, "found new peers");
     }
 
     async fn find_value(&self, network: &Network, key_hash: &[u8; 32]) -> Option<Box<Value>> {
@@ -582,6 +662,12 @@ impl DhtInner {
             .clone()
             .map(|info| NodeInfoResponse { info })
     }
+}
+
+fn random_key_at_distance(from: &PeerId, distance: usize, rng: &mut impl RngCore) -> PeerId {
+    let mut result = *from;
+    rng.fill_bytes(&mut result.0[distance..]);
+    result
 }
 
 pub fn xor_distance(left: &PeerId, right: &PeerId) -> usize {
