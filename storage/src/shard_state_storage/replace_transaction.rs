@@ -183,7 +183,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                     hashes_file.write_all_at(
                         cell_index as usize * HashesEntry::LEN,
                         ctx.entries_buffer.current_entry_buffer(),
-                    )
+                    );
                 };
 
                 chunk_buffer.truncate(chunk_size);
@@ -368,7 +368,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             cell.descriptor.d1,
             cell.descriptor.d2,
         ]);
-        output_buffer.extend_from_slice(&(cell.bit_len as u16).to_le_bytes());
+        output_buffer.extend_from_slice(&cell.bit_len.to_le_bytes());
         output_buffer.extend_from_slice(cell.data);
 
         let hash_count = cell.descriptor.hash_count();

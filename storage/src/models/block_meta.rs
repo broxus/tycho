@@ -1,9 +1,9 @@
-/// This file is a modified copy of the file from https://github.com/tonlabs/ton-labs-node
-///
-/// Changes:
-/// - replaced old `failure` crate with `anyhow`
-/// - moved all flags here from block handle
-/// - removed temporary unused flags
+// This file is a modified copy of the file from https://github.com/tonlabs/ton-labs-node
+//
+// Changes:
+// - replaced old `failure` crate with `anyhow`
+// - moved all flags here from block handle
+// - removed temporary unused flags
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
@@ -209,7 +209,7 @@ impl BlockMeta {
 
 impl StoredValue for BlockMeta {
     /// 8 bytes flags
-    /// 4 bytes gen_utime
+    /// 4 bytes `gen_utime`
     const SIZE_HINT: usize = 8 + 4;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];

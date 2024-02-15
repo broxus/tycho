@@ -243,7 +243,7 @@ impl CellStorage {
         let cells = &self.db.cells;
         let cells_cf = &cells.cf();
 
-        let mut transaction: FastHashMap<&HashBytes, CellState> =
+        let mut transaction: FastHashMap<&HashBytes, CellState<'_>> =
             FastHashMap::with_capacity_and_hasher(128, Default::default());
         let mut buffer = Vec::with_capacity(4);
 
@@ -394,7 +394,7 @@ impl StorageCell {
         };
 
         for slot in reference_data.iter().take(ref_count) {
-            let slot = slot.get() as *mut u8;
+            let slot = slot.get().cast::<u8>();
             unsafe { std::ptr::copy_nonoverlapping(buffer.as_ptr().add(offset), slot, 32) };
             offset += 32;
         }

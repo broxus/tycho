@@ -89,7 +89,7 @@ impl ColumnFamily for PackageEntries {
     }
 }
 
-/// Maps BlockId to root cell hash
+/// Maps `BlockId` to root cell hash
 /// - Key: `BlockId`
 /// - Value: `[u8; 32]`
 pub struct ShardStates;

@@ -53,7 +53,7 @@ impl BlockStorage {
             );
 
             if let Some(Err(e)) = value.map(check_archive) {
-                tracing::error!(archive_id, "failed to read archive: {e:?}")
+                tracing::error!(archive_id, "failed to read archive: {e:?}");
             }
 
             archive_ids.insert(archive_id);

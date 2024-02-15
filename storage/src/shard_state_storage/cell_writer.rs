@@ -240,7 +240,7 @@ fn write_rev_cells<P: AsRef<Path>>(
 
                     for i in 0..preload_count {
                         let index = indices_buffer[i];
-                        let hash = unsafe { *(keys[i] as *const [u8; 32]) };
+                        let hash = unsafe { *keys[i].cast::<[u8; 32]>() };
                         stack.push((index, StackItem::New(hash)));
                     }
                 }

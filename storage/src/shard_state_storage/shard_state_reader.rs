@@ -2,7 +2,7 @@ use std::io::Read;
 
 use anyhow::{Context, Result};
 use crc::{Crc, CRC_32_ISCSI};
-use everscale_types::cell::{CellDescriptor, CellType, LevelMask};
+use everscale_types::cell::{CellDescriptor, LevelMask};
 use smallvec::SmallVec;
 
 macro_rules! try_read {
@@ -301,8 +301,8 @@ impl<'a> RawCell<'a> {
         cell_index: usize,
         data_buffer: &'a mut [u8],
     ) -> Result<Self>
-        where
-            R: Read,
+    where
+        R: Read,
     {
         let mut descriptor = [0u8; 2];
         src.read_exact(&mut descriptor)?;

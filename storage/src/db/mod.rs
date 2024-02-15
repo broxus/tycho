@@ -173,7 +173,7 @@ impl Db {
             let cf = db.instantiate_table::<T>();
             let res: (usize, usize) = cf
                 .iterator(rocksdb::IteratorMode::Start)
-                .flat_map(|x| {
+                .filter_map(|x| {
                     let x = match x {
                         Ok(x) => x,
                         Err(e) => {
@@ -243,7 +243,7 @@ pub struct DiskUsageInfo {
 
 impl Drop for Db {
     fn drop(&mut self) {
-        self.raw().cancel_all_background_work(true)
+        self.raw().cancel_all_background_work(true);
     }
 }
 

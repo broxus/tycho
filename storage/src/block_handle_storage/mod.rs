@@ -1,8 +1,8 @@
-/// This file is a modified copy of the file from https://github.com/tonlabs/ton-labs-node
-///
-/// Changes:
-/// - replaced old `failure` crate with `anyhow`
-/// - simplified storing
+// This file is a modified copy of the file from https://github.com/tonlabs/ton-labs-node
+//
+// Changes:
+// - replaced old `failure` crate with `anyhow`
+// - simplified storing
 use std::sync::{Arc, Weak};
 
 use anyhow::Result;
