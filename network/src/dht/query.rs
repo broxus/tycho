@@ -73,7 +73,10 @@ impl Query {
             match res {
                 // Return the value if found
                 Some(Ok(ValueResponse::Found(value))) => {
-                    if !value.is_valid(now_sec(), self.local_id()) {
+                    let is_valid = value.is_valid(now_sec(), self.local_id());
+                    tracing::debug!(peer_id = %node.id, is_valid, "found value");
+
+                    if !is_valid {
                         // Ignore invalid values
                         continue;
                     }
@@ -82,8 +85,12 @@ impl Query {
                 }
                 // Refill futures from the nodes response
                 Some(Ok(ValueResponse::NotFound(nodes))) => {
-                    tracing::debug!(peer_id = %node.id, count = nodes.len(), "received nodes");
-                    if !self.update_candidates(now_sec(), self.max_k, nodes, &mut visited) {
+                    let node_count = nodes.len();
+                    let has_new =
+                        self.update_candidates(now_sec(), self.max_k, nodes, &mut visited);
+                    tracing::debug!(peer_id = %node.id, count = node_count, has_new, "received nodes");
+
+                    if !has_new {
                         // Do nothing if candidates were not changed
                         continue;
                     }

@@ -43,29 +43,32 @@ dht.nodes nodes:(vector dht.node) = dht.Nodes;
 /**
 * Key for the value that can only be updated by an owner
 *
-* @param name       key name as UTF-8 string
-* @param idx        key index used for versioning
+* @param name       key name enum
 * @param peer_id    owner id
 */
 dht.peerValueKey
-    name:bytes
-    idx:int
+    name:dht.PeerValueKeyName
     peer_id:transport.PeerId
     = dht.Key;
 
 /**
 * Key for the overlay-managed value
 *
-* @param name       key name as UTF-8 string
-* @param idx        key index used for versioning
+* @param name       key name enum
 * @param overlay_id overlay id
 */
 dht.overlayValueKey
-    name:bytes
-    idx:int
+    name:dht.OverlayValueKeyName
     overlay_id:int256
     = dht.Key;
 
+// Peer value key names {
+dht.peerValueKeyName.nodeInfo = dht.PeerValueKeyName;
+// }
+
+// Overlay value key names {
+dht.overlayValueKeyName.peersList = dht.OverlayValueKeyName;
+// }
 
 /**
 * A value with an exact owner

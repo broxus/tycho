@@ -32,9 +32,6 @@ pub(crate) struct StorageBuilder {
     cache_builder: DhtCacheBuilder<std::hash::RandomState>,
     overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl: Duration,
-    max_key_name_len: usize,
-    max_key_index: u32,
-    // TODO: add a hashset for allowed keys (maybe separate signed keys from overlay keys)
 }
 
 impl Default for StorageBuilder {
@@ -43,8 +40,6 @@ impl Default for StorageBuilder {
             cache_builder: Default::default(),
             overlay_value_merger: Weak::<()>::new(),
             max_ttl: Duration::from_secs(3600),
-            max_key_name_len: 128,
-            max_key_index: 4,
         }
     }
 }
@@ -66,23 +61,11 @@ impl StorageBuilder {
                 .build_with_hasher(ahash::RandomState::default()),
             overlay_value_merger: self.overlay_value_merger,
             max_ttl_sec: self.max_ttl.as_secs().try_into().unwrap_or(u32::MAX),
-            max_key_name_len: self.max_key_name_len,
-            max_key_index: self.max_key_index,
         }
     }
 
     pub fn with_overlay_value_merger(mut self, merger: &Arc<dyn OverlayValueMerger>) -> Self {
         self.overlay_value_merger = Arc::downgrade(merger);
-        self
-    }
-
-    pub fn with_max_key_name_len(mut self, len: usize) -> Self {
-        self.max_key_name_len = len;
-        self
-    }
-
-    pub fn with_max_key_index(mut self, index: u32) -> Self {
-        self.max_key_index = index;
         self
     }
 
@@ -106,8 +89,6 @@ pub(crate) struct Storage {
     cache: DhtCache<ahash::RandomState>,
     overlay_value_merger: Weak<dyn OverlayValueMerger>,
     max_ttl_sec: u32,
-    max_key_name_len: usize,
-    max_key_index: u32,
 }
 
 impl Storage {
@@ -127,12 +108,6 @@ impl Storage {
                 return Err(StorageError::UnsupportedTtl)
             }
             _ => {}
-        }
-
-        if !(0..=self.max_key_name_len).contains(&value.key_name().len())
-            || value.key_index() > self.max_key_index
-        {
-            return Err(StorageError::InvalidKey);
         }
 
         match value {

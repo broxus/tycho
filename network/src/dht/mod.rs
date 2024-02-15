@@ -11,8 +11,8 @@ use self::routing::RoutingTable;
 use self::storage::Storage;
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht::{
-    rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyRef, PeerValueRef,
-    Value, ValueRef, ValueResponseRaw,
+    rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName,
+    PeerValueKeyRef, PeerValueRef, Value, ValueRef, ValueResponseRaw,
 };
 use crate::types::{
     Address, PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest,
@@ -75,7 +75,7 @@ impl DhtClient {
         Ok(info)
     }
 
-    pub fn entry<'n>(&self, name: &'n [u8]) -> DhtQueryBuilder<'_, 'n> {
+    pub fn entry(&self, name: PeerValueKeyName) -> DhtQueryBuilder<'_> {
         DhtQueryBuilder {
             inner: &self.inner,
             network: &self.network,
@@ -86,27 +86,26 @@ impl DhtClient {
 }
 
 #[derive(Clone, Copy)]
-pub struct DhtQueryBuilder<'a, 'n> {
+pub struct DhtQueryBuilder<'a> {
     inner: &'a DhtInner,
     network: &'a Network,
-    name: &'n [u8],
+    name: PeerValueKeyName,
     idx: u32,
 }
 
-impl<'a, 'n> DhtQueryBuilder<'a, 'n> {
+impl<'a> DhtQueryBuilder<'a> {
     #[inline]
     pub fn with_idx(&mut self, idx: u32) -> &mut Self {
         self.idx = idx;
         self
     }
 
-    pub async fn find_peer_value<T>(&self, peer_id: &PeerId) -> Result<T, FindValueError>
+    pub async fn find_value<T>(&self, peer_id: &PeerId) -> Result<T, FindValueError>
     where
         for<'tl> T: tl_proto::TlRead<'tl>,
     {
         let key_hash = tl_proto::hash(PeerValueKeyRef {
             name: self.name,
-            idx: self.idx,
             peer_id,
         });
 
@@ -129,7 +128,6 @@ impl<'a, 'n> DhtQueryBuilder<'a, 'n> {
     ) -> Result<Box<PeerValue>, FindValueError> {
         let key_hash = tl_proto::hash(PeerValueKeyRef {
             name: self.name,
-            idx: self.idx,
             peer_id,
         });
 
@@ -146,7 +144,7 @@ impl<'a, 'n> DhtQueryBuilder<'a, 'n> {
         }
     }
 
-    pub fn with_data<T>(&self, data: T) -> DhtQueryWithDataBuilder<'a, 'n>
+    pub fn with_data<T>(&self, data: T) -> DhtQueryWithDataBuilder<'a>
     where
         T: tl_proto::TlWrite,
     {
@@ -154,21 +152,19 @@ impl<'a, 'n> DhtQueryBuilder<'a, 'n> {
             inner: *self,
             data: tl_proto::serialize(&data),
             at: None,
-            ttl: DhtQueryWithDataBuilder::DEFAULT_TTL,
+            ttl: DEFAULT_TTL,
         }
     }
 }
 
-pub struct DhtQueryWithDataBuilder<'a, 'n> {
-    inner: DhtQueryBuilder<'a, 'n>,
+pub struct DhtQueryWithDataBuilder<'a> {
+    inner: DhtQueryBuilder<'a>,
     data: Vec<u8>,
     at: Option<u32>,
     ttl: u32,
 }
 
-impl DhtQueryWithDataBuilder<'_, '_> {
-    const DEFAULT_TTL: u32 = 3600;
-
+impl DhtQueryWithDataBuilder<'_> {
     pub fn with_time(&mut self, at: u32) -> &mut Self {
         self.at = Some(at);
         self
@@ -179,14 +175,13 @@ impl DhtQueryWithDataBuilder<'_, '_> {
         self
     }
 
-    pub async fn store_as_peer(&self) -> Result<()> {
+    pub async fn store(&self) -> Result<()> {
         let dht = self.inner.inner;
         let network = self.inner.network;
 
         let mut value = PeerValueRef {
             key: PeerValueKeyRef {
                 name: self.inner.name,
-                idx: self.inner.idx,
                 peer_id: &dht.local_id,
             },
             data: &self.data,
@@ -199,14 +194,13 @@ impl DhtQueryWithDataBuilder<'_, '_> {
         dht.store_value(network, ValueRef::Peer(value)).await
     }
 
-    pub fn into_signed_peer_value(self) -> PeerValue {
+    pub fn into_signed_value(self) -> PeerValue {
         let dht = self.inner.inner;
         let network = self.inner.network;
 
         let mut value = PeerValue {
             key: PeerValueKey {
-                name: Box::from(self.inner.name),
-                idx: self.inner.idx,
+                name: self.name,
                 peer_id: dht.local_id,
             },
             data: self.data.into_boxed_slice(),
@@ -215,6 +209,22 @@ impl DhtQueryWithDataBuilder<'_, '_> {
         };
         *value.signature = network.sign_tl(&value);
         value
+    }
+}
+
+impl<'a> std::ops::Deref for DhtQueryWithDataBuilder<'a> {
+    type Target = DhtQueryBuilder<'a>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'a> std::ops::DerefMut for DhtQueryWithDataBuilder<'a> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -240,8 +250,6 @@ impl DhtServiceBuilder {
 
         let storage = {
             let mut builder = Storage::builder()
-                .with_max_key_name_len(config.max_stored_key_name_len)
-                .with_max_key_index(config.max_stored_key_index)
                 .with_max_capacity(config.max_storage_capacity)
                 .with_max_ttl(config.max_stored_value_ttl);
 
@@ -382,7 +390,6 @@ struct DhtInner {
 
 impl DhtInner {
     fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
-        const INFO_TTL: u32 = 3600;
         const INFO_UPDATE_PERIOD: Duration = Duration::from_secs(60);
 
         const ANNOUNCE_PERIOD: Duration = Duration::from_secs(600);
@@ -416,14 +423,14 @@ impl DhtInner {
 
                 match action {
                     Action::Refresh => {
-                        this.refresh_local_node_info(&network, INFO_TTL);
+                        this.refresh_local_node_info(&network, DEFAULT_TTL);
                     }
                     Action::Announce => {
                         // Always refresh node info before announcing
-                        this.refresh_local_node_info(&network, INFO_TTL);
+                        this.refresh_local_node_info(&network, DEFAULT_TTL);
                         refresh_interval.reset();
 
-                        if let Err(e) = this.announce_local_node_info(&network, INFO_TTL).await {
+                        if let Err(e) = this.announce_local_node_info(&network, DEFAULT_TTL).await {
                             tracing::error!("failed to announce local DHT node info: {e:?}");
                         }
                     }
@@ -454,7 +461,8 @@ impl DhtInner {
     async fn announce_local_node_info(&self, network: &Network, ttl: u32) -> Result<()> {
         let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
 
-        let mut value = self.make_unsigned_peer_value(b"addr", &data, now_sec() + ttl);
+        let mut value =
+            self.make_unsigned_peer_value(PeerValueKeyName::NodeInfo, &data, now_sec() + ttl);
         let signature = network.sign_tl(&value);
         value.signature = &signature;
 
@@ -524,14 +532,13 @@ impl DhtInner {
 
     fn make_unsigned_peer_value<'a>(
         &'a self,
-        name: &'a [u8],
+        name: PeerValueKeyName,
         data: &'a [u8],
         expires_at: u32,
     ) -> PeerValueRef<'a> {
         PeerValueRef {
             key: PeerValueKeyRef {
                 name,
-                idx: 0,
                 peer_id: &self.local_id,
             },
             data,
@@ -599,3 +606,5 @@ pub enum FindValueError {
     #[error("value not found")]
     NotFound,
 }
+
+const DEFAULT_TTL: u32 = 3600;

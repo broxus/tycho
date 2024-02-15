@@ -6,6 +6,20 @@ use tl_proto::{TlRead, TlWrite};
 use crate::types::{PeerId, PeerInfo};
 use crate::util::{check_peer_signature, tl};
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum PeerValueKeyName {
+    #[tl(id = "dht.peerValueKeyName.nodeInfo")]
+    NodeInfo,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum OverlayValueKeyName {
+    #[tl(id = "dht.overlayValueKeyName.peersList")]
+    PeersList,
+}
+
 /// Key for values that can only be updated by the owner.
 ///
 /// See [`SignedValueKeyRef`] for the non-owned version of the struct.
@@ -13,10 +27,7 @@ use crate::util::{check_peer_signature, tl};
 #[tl(boxed, id = "dht.peerValueKey", scheme = "proto.tl")]
 pub struct PeerValueKey {
     /// Key name.
-    #[tl(with = "tl_name_owned")]
-    pub name: Box<[u8]>,
-    /// Key index (version).
-    pub idx: u32,
+    pub name: PeerValueKeyName,
     /// Public key of the owner.
     pub peer_id: PeerId,
 }
@@ -28,10 +39,7 @@ pub struct PeerValueKey {
 #[tl(boxed, id = "dht.peerValueKey", scheme = "proto.tl")]
 pub struct PeerValueKeyRef<'tl> {
     /// Key name.
-    #[tl(with = "tl_name_ref")]
-    pub name: &'tl [u8],
-    /// Key index (version).
-    pub idx: u32,
+    pub name: PeerValueKeyName,
     /// Public key of the owner.
     pub peer_id: &'tl PeerId,
 }
@@ -39,8 +47,7 @@ pub struct PeerValueKeyRef<'tl> {
 impl PeerValueKeyRef<'_> {
     pub fn as_owned(&self) -> PeerValueKey {
         PeerValueKey {
-            name: Box::from(self.name),
-            idx: self.idx,
+            name: self.name,
             peer_id: *self.peer_id,
         }
     }
@@ -53,10 +60,7 @@ impl PeerValueKeyRef<'_> {
 #[tl(boxed, id = "dht.overlayValueKey", scheme = "proto.tl")]
 pub struct OverlayValueKey {
     /// Key name.
-    #[tl(with = "tl_name_owned")]
-    pub name: Box<[u8]>,
-    /// Key index (version).
-    pub idx: u32,
+    pub name: OverlayValueKeyName,
     /// Overlay id.
     pub overlay_id: [u8; 32],
 }
@@ -68,10 +72,7 @@ pub struct OverlayValueKey {
 #[tl(boxed, id = "dht.overlayValueKey", scheme = "proto.tl")]
 pub struct OverlayValueKeyRef<'tl> {
     /// Key name.
-    #[tl(with = "tl_name_ref")]
-    pub name: &'tl [u8],
-    /// Key index (version).
-    pub idx: u32,
+    pub name: OverlayValueKeyName,
     /// Overlay id.
     pub overlay_id: &'tl [u8; 32],
 }
@@ -79,8 +80,7 @@ pub struct OverlayValueKeyRef<'tl> {
 impl OverlayValueKeyRef<'_> {
     pub fn as_owned(&self) -> OverlayValueKey {
         OverlayValueKey {
-            name: Box::from(self.name),
-            idx: self.idx,
+            name: self.name,
             overlay_id: *self.overlay_id,
         }
     }
@@ -194,20 +194,6 @@ impl Value {
         }
     }
 
-    pub fn key_name(&self) -> &[u8] {
-        match self {
-            Self::Peer(value) => value.key.name.as_ref(),
-            Self::Overlay(value) => value.key.name.as_ref(),
-        }
-    }
-
-    pub const fn key_index(&self) -> u32 {
-        match self {
-            Self::Peer(value) => value.key.idx,
-            Self::Overlay(value) => value.key.idx,
-        }
-    }
-
     pub const fn expires_at(&self) -> u32 {
         match self {
             Self::Peer(value) => value.expires_at,
@@ -273,20 +259,6 @@ impl ValueRef<'_> {
             Self::Overlay(value) => {
                 value.expires_at >= at && key_hash == &tl_proto::hash(&value.key)
             }
-        }
-    }
-
-    pub fn key_name(&self) -> &[u8] {
-        match self {
-            Self::Peer(value) => value.key.name,
-            Self::Overlay(value) => value.key.name,
-        }
-    }
-
-    pub const fn key_index(&self) -> u32 {
-        match self {
-            Self::Peer(value) => value.key.idx,
-            Self::Overlay(value) => value.key.idx,
         }
     }
 
@@ -448,41 +420,4 @@ pub mod rpc {
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "dht.getNodeInfo", scheme = "proto.tl")]
     pub struct GetNodeInfo;
-}
-
-mod tl_name_ref {
-    use super::*;
-
-    #[inline]
-    pub fn size_hint(name: &[u8]) -> usize {
-        name.max_size_hint()
-    }
-
-    #[inline]
-    pub fn write<P: tl_proto::TlPacket>(name: &[u8], packet: &mut P) {
-        name.as_ref().write_to(packet);
-    }
-
-    pub fn read<'a>(packet: &'a [u8], offset: &mut usize) -> tl_proto::TlResult<&'a [u8]> {
-        <&tl_proto::BoundedBytes<128>>::read_from(packet, offset).map(|bytes| bytes.as_ref())
-    }
-}
-
-mod tl_name_owned {
-    use super::*;
-
-    #[inline]
-    pub fn size_hint(name: &[u8]) -> usize {
-        name.max_size_hint()
-    }
-
-    #[inline]
-    pub fn write<P: tl_proto::TlPacket>(name: &[u8], packet: &mut P) {
-        name.as_ref().write_to(packet);
-    }
-
-    pub fn read(packet: &[u8], offset: &mut usize) -> tl_proto::TlResult<Box<[u8]>> {
-        <&tl_proto::BoundedBytes<128>>::read_from(packet, offset)
-            .map(|bytes| Box::from(bytes.as_ref()))
-    }
 }

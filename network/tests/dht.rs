@@ -10,7 +10,7 @@ use anyhow::Result;
 use everscale_crypto::ed25519;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    Address, DhtClient, DhtService, FindValueError, Network, PeerId, PeerInfo, Router,
+    proto, Address, DhtClient, DhtService, FindValueError, Network, PeerId, PeerInfo, Router,
 };
 use tycho_util::time::now_sec;
 
@@ -114,23 +114,23 @@ async fn bootstrap_nodes_store_value() -> Result<()> {
     let first = &nodes[0].dht;
 
     first
-        .entry(b"test")
+        .entry(proto::dht::PeerValueKeyName::NodeInfo)
         .with_data(VALUE)
         .with_time(now_sec())
-        .store_as_peer()
+        .store()
         .await?;
 
     // Retrieve an existing value
     let value = first
-        .entry(b"test")
-        .find_peer_value::<SomeValue>(&first.network().peer_id())
+        .entry(proto::dht::PeerValueKeyName::NodeInfo)
+        .find_value::<SomeValue>(&first.network().peer_id())
         .await?;
     assert_eq!(value, VALUE);
 
     // Retrieve a non-existing value
     let res = first
-        .entry(b"non-existing")
-        .find_peer_value_raw(&first.network().peer_id())
+        .entry(proto::dht::PeerValueKeyName::NodeInfo)
+        .find_peer_value_raw(nodes[1].network.peer_id())
         .await;
     assert!(matches!(res, Err(FindValueError::NotFound)));
 
