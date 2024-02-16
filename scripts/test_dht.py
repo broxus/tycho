@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 import yaml
-import time
 import subprocess
 import os
+import json
 
 
 def generate_entrypoint_script(service_name, start_delay, params: str = ""):
     script_content = f"""#!/bin/bash
     # Introduce startup delay
     sleep {start_delay}
+    export RUST_LOG="info,tycho_network=trace"
     /app/network-node {params}
     """
     script_path = f".scratch/entrypoints/{service_name}_entrypoint.sh"
@@ -25,22 +26,18 @@ def generate_docker_compose(services):
     compose_dict = {"version": "3.7", "services": {}}
 
     for service, details in services.items():
-        # Generate entrypoint script for each service
-        generate_entrypoint_script(
-            service, details.get("start_delay", 0), details.get("latency", 0)
-        )
-
         compose_dict["services"][service] = {
             "image": details["image"],
-            "entrypoint": f"/entrypoints/{service}_entrypoint.sh",
+            "entrypoint": "/entrypoints/entrypoint.sh",
             "volumes": [
-                f"./entrypoints/{service}_entrypoint.sh:/entrypoints/{service}_entrypoint.sh"
+                f"./entrypoints/{service}_entrypoint.sh:/entrypoints/entrypoint.sh",
+                "./global-config.json:/app/global-config.json",
             ],
             "networks": {"default": {"ipv4_address": details["ip"]}},
         }
 
     networks_dict = {
-        "networks": {"default": {"ipam": {"config": [{"subnet": "172.20.0.0/16"}]}}}
+        "networks": {"default": {"ipam": {"config": [{"subnet": "172.30.0.0/24"}]}}}
     }
 
     compose_dict.update(networks_dict)
@@ -51,11 +48,16 @@ def generate_docker_compose(services):
     print("Docker Compose file and entrypoint scripts generated.")
 
 
+def execute_command(command):
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    return result.stdout
+
+
 def run_docker_compose(services):
     """
     Runs the Docker Compose file and applies the specified start delays.
     """
-    os.system("docker compose up  -f .scratch/docker-compose.yml -d")
+    os.system("docker compose -f .scratch/docker-compose.yml up")
 
     # for service, details in services.items():
     #     latency = details.get("latency", 0)
@@ -76,26 +78,39 @@ def run_docker_compose(services):
 
 def main():
     # Example input
-    services = {
-        "node-1": {
-            "image": "tycho-network",
-            "ip": "172.20.0.2",
-            "start_delay": 5,
-            "latency": 100,
-        },
-        "node-2": {
-            "image": "tycho-network",
-            "ip": "172.20.0.3",
-            "start_delay": 10,
-            "latency": 50,
-        },
-    }
+    node_count = 5
+    node_port = 25565
 
-    generate_entrypoint_script("node-1", 5, "--help")
-    generate_entrypoint_script("node-2", 10, "--help")
+    services = {}
+    bootstrap_peers = []
+
+    for i in range(node_count):
+        key = os.urandom(32).hex()
+        ip = f"172.30.0.{i + 10}"
+
+        cmd = (
+            f"cargo run --example network-node -- gendht '{ip}:{node_port}' --key {key}"
+        )
+        dht_entry = json.loads(execute_command(cmd))
+        bootstrap_peers.append(dht_entry)
+
+        node_name = f"node-{i}"
+        services[node_name] = {
+            "image": "tycho-network",
+            "ip": ip,
+        }
+        generate_entrypoint_script(
+            node_name,
+            start_delay=0,
+            params=f"run '{ip}:{node_port}' --key {key} --global-config /app/global-config.json",
+        )
+
+    with open(".scratch/global-config.json", "w") as f:
+        json.dump({"bootstrap_peers": bootstrap_peers}, f, indent=2)
+
     generate_docker_compose(services)
     print("To manually test the setup, run the following commands:")
-    print("docker-compose up -f .scratch/docker-compose.yml -d")
+    print("docker compose -f .scratch/docker-compose.yml up")
     run_docker_compose(services)
 
 
