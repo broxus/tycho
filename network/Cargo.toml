@@ -6,8 +6,8 @@ description = "A peer-to-peer networking library."
 include = ["src/**/*.rs", "src/**/*.tl"]
 
 [[example]]
-name = "simple"
-path = "examples/simple.rs"
+name = "network-node"
+path = "examples/network_node.rs"
 
 [dependencies]
 # crates.io deps
