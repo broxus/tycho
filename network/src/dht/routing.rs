@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tycho_util::time::now_sec;
+
 use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
 use crate::types::{PeerId, PeerInfo};
 
@@ -38,16 +40,6 @@ impl RoutingTable {
             .entry(distance)
             .or_insert_with(|| Bucket::with_capacity(max_k))
             .insert(peer, max_k, node_ttl)
-    }
-
-    #[allow(unused)]
-    pub fn remove(&mut self, key: &PeerId) -> bool {
-        let distance = xor_distance(&self.local_id, key);
-        if let Some(bucket) = self.buckets.get_mut(&distance) {
-            bucket.remove(key)
-        } else {
-            false
-        }
     }
 
     pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<PeerInfo>> {
@@ -103,15 +95,6 @@ impl RoutingTable {
             }
         }
     }
-
-    #[allow(unused)]
-    pub fn contains(&self, key: &PeerId) -> bool {
-        let distance = xor_distance(&self.local_id, key);
-        self.buckets
-            .get(&distance)
-            .map(|bucket| bucket.contains(key))
-            .unwrap_or_default()
-    }
 }
 
 pub(crate) struct Bucket {
@@ -133,7 +116,7 @@ impl Bucket {
         {
             self.nodes.remove(index);
         } else if self.nodes.len() >= max_k {
-            if matches!(self.nodes.front(), Some(node) if node.is_expired(timeout)) {
+            if matches!(self.nodes.front(), Some(node) if node.is_expired(now_sec(), timeout)) {
                 self.nodes.pop_front();
             } else {
                 return false;
@@ -144,17 +127,11 @@ impl Bucket {
         true
     }
 
-    pub fn remove(&mut self, key: &PeerId) -> bool {
-        if let Some(index) = self.nodes.iter().position(|node| &node.data.id == key) {
-            self.nodes.remove(index);
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn contains(&self, key: &PeerId) -> bool {
-        self.nodes.iter().any(|node| &node.data.id == key)
+    pub fn retain_nodes<F>(&mut self, f: F)
+    where
+        F: FnMut(&Node) -> bool,
+    {
+        self.nodes.retain(f)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -175,8 +152,8 @@ impl Node {
         }
     }
 
-    pub fn is_expired(&self, timeout: &Duration) -> bool {
-        &self.last_updated_at.elapsed() >= timeout
+    pub fn is_expired(&self, at: u32, timeout: &Duration) -> bool {
+        self.data.is_expired(at) || &self.last_updated_at.elapsed() >= timeout
     }
 }
 
@@ -193,7 +170,7 @@ mod tests {
             id,
             address_list: Default::default(),
             created_at: 0,
-            expires_at: 0,
+            expires_at: u32::MAX,
             signature: Box::new([0; 64]),
         })
     }

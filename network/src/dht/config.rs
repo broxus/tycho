@@ -57,13 +57,13 @@ pub struct DhtConfig {
     ///
     /// Default: 10 minutes.
     #[serde(with = "serde_helpers::humantime")]
-    pub populate_period: Duration,
+    pub routing_table_refresh_period: Duration,
 
-    /// A maximum value of a random jitter for the populate period.
+    /// A maximum value of a random jitter for the routing table refresh period.
     ///
     /// Default: 1 minutes.
     #[serde(with = "serde_helpers::humantime")]
-    pub max_populate_period_jitter: Duration,
+    pub max_routing_table_refresh_period_jitter: Duration,
 }
 
 impl Default for DhtConfig {
@@ -77,8 +77,8 @@ impl Default for DhtConfig {
             local_info_refresh_period: Duration::from_secs(60),
             local_info_announce_period: Duration::from_secs(600),
             max_local_info_announce_period_jitter: Duration::from_secs(60),
-            populate_period: Duration::from_secs(600),
-            max_populate_period_jitter: Duration::from_secs(60),
+            routing_table_refresh_period: Duration::from_secs(600),
+            max_routing_table_refresh_period_jitter: Duration::from_secs(60),
         }
     }
 }

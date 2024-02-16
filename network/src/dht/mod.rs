@@ -394,31 +394,32 @@ struct DhtInner {
 impl DhtInner {
     fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
         enum Action {
-            Refresh,
-            Announce,
-            Populate,
+            RefreshLocalNodeInfo,
+            AnnounceLocalNodeInfo,
+            RefreshRoutingTable,
         }
 
-        let mut refresh_interval = tokio::time::interval(self.config.local_info_refresh_period);
-        let mut announce_interval = shifted_interval(
+        let mut refresh_node_info_interval =
+            tokio::time::interval(self.config.local_info_refresh_period);
+        let mut announce_node_info_interval = shifted_interval(
             self.config.local_info_announce_period,
             self.config.max_local_info_announce_period_jitter,
         );
-        let mut populate_interval = shifted_interval(
-            self.config.populate_period,
-            self.config.max_populate_period_jitter,
+        let mut refresh_routing_table_interval = shifted_interval(
+            self.config.routing_table_refresh_period,
+            self.config.max_routing_table_refresh_period_jitter,
         );
 
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             tracing::debug!("background DHT loop started");
 
-            let mut prev_populate_fut = None::<JoinHandle<()>>;
+            let mut prev_refresh_routing_table_fut = None::<JoinHandle<()>>;
             loop {
                 let action = tokio::select! {
-                    _ = refresh_interval.tick() => Action::Refresh,
-                    _ = announce_interval.tick() => Action::Announce,
-                    _ = populate_interval.tick() => Action::Populate,
+                    _ = refresh_node_info_interval.tick() => Action::RefreshLocalNodeInfo,
+                    _ = announce_node_info_interval.tick() => Action::AnnounceLocalNodeInfo,
+                    _ = refresh_routing_table_interval.tick() => Action::RefreshRoutingTable,
                 };
 
                 let (Some(this), Some(network)) = (this.upgrade(), network.upgrade()) else {
@@ -426,20 +427,20 @@ impl DhtInner {
                 };
 
                 match action {
-                    Action::Refresh => {
+                    Action::RefreshLocalNodeInfo => {
                         this.refresh_local_node_info(&network);
                     }
-                    Action::Announce => {
+                    Action::AnnounceLocalNodeInfo => {
                         // Always refresh node info before announcing
                         this.refresh_local_node_info(&network);
-                        refresh_interval.reset();
+                        refresh_node_info_interval.reset();
 
                         if let Err(e) = this.announce_local_node_info(&network).await {
                             tracing::error!("failed to announce local DHT node info: {e:?}");
                         }
                     }
-                    Action::Populate => {
-                        if let Some(fut) = prev_populate_fut.take() {
+                    Action::RefreshRoutingTable => {
+                        if let Some(fut) = prev_refresh_routing_table_fut.take() {
                             if let Err(e) = fut.await {
                                 if e.is_panic() {
                                     std::panic::resume_unwind(e.into_panic());
@@ -447,8 +448,8 @@ impl DhtInner {
                             }
                         }
 
-                        prev_populate_fut = Some(tokio::spawn(async move {
-                            this.populate(&network).await;
+                        prev_refresh_routing_table_fut = Some(tokio::spawn(async move {
+                            this.refresh_routing_table(&network).await;
                         }));
                     }
                 }
@@ -487,7 +488,7 @@ impl DhtInner {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
-    async fn populate(&self, network: &Network) {
+    async fn refresh_routing_table(&self, network: &Network) {
         const PARALLEL_QUERIES: usize = 3;
         const MAX_DISTANCE: usize = 15;
         const QUERY_DEPTH: usize = 3;
@@ -496,20 +497,24 @@ impl DhtInner {
         let semaphore = Semaphore::new(PARALLEL_QUERIES);
         let mut futures = FuturesUnordered::new();
         {
-            // NOTE: rng is intentionally dropped after this block to make this future `Send`.
             let rng = &mut rand::thread_rng();
 
-            let routing_table = self.routing_table.lock().unwrap();
+            let mut routing_table = self.routing_table.lock().unwrap();
+
+            // Filter out expired nodes
+            let now = now_sec();
+            for (_, bucket) in routing_table.buckets.range_mut(..=MAX_DISTANCE) {
+                bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_node_info_ttl));
+            }
 
             // Iterate over the first buckets up until some distance (`MAX_DISTANCE`)
-            // or up to the last non-empty bucket.
-            let first_n_non_empty_buckets = routing_table
-                .buckets
-                .range(..=MAX_DISTANCE)
-                .rev()
-                .skip_while(|(_, bucket)| bucket.is_empty());
+            // or up to the last non-empty bucket (?).
+            for (&distance, bucket) in routing_table.buckets.range(..=MAX_DISTANCE).rev() {
+                // TODO: Should we skip empty buckets?
+                if bucket.is_empty() {
+                    continue;
+                }
 
-            for (&distance, _) in first_n_non_empty_buckets {
                 // Query the K closest nodes for a random ID at the specified distance from the local ID.
                 let random_id = random_key_at_distance(&routing_table.local_id, distance, rng);
                 let query = Query::new(

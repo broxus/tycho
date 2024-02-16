@@ -581,13 +581,31 @@ impl KnownPeers {
     }
 
     pub fn insert(&self, peer_info: Arc<PeerInfo>, affinity: PeerAffinity) -> Option<KnownPeer> {
-        self.0.insert(
-            peer_info.id,
-            KnownPeer {
-                peer_info,
-                affinity,
-            },
-        )
+        match self.0.entry(peer_info.id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(KnownPeer {
+                    peer_info,
+                    affinity,
+                });
+                None
+            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                if entry.get().peer_info.created_at >= peer_info.created_at {
+                    return None;
+                }
+
+                let affinity = match affinity {
+                    PeerAffinity::High | PeerAffinity::Never => affinity,
+                    PeerAffinity::Allowed => entry.get().affinity,
+                };
+
+                let (_, old) = entry.replace_entry(KnownPeer {
+                    peer_info,
+                    affinity,
+                });
+                Some(old)
+            }
+        }
     }
 
     pub fn remove(&self, peer_id: &PeerId) -> Option<KnownPeer> {
