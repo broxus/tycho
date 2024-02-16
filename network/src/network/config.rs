@@ -2,25 +2,53 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use tycho_util::serde_helpers;
 
 use crate::network::crypto::{
     generate_cert, peer_id_from_certificate, CertVerifier, CertVerifierWithPeerId,
 };
 use crate::types::PeerId;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 #[non_exhaustive]
 pub struct NetworkConfig {
     pub quic: Option<QuicConfig>,
+
+    /// Default: 128.
     pub connection_manager_channel_capacity: usize,
+
+    /// Default: 5 seconds.
+    #[serde(with = "serde_helpers::humantime")]
     pub connectivity_check_interval: Duration,
+
+    /// Default: yes.
     pub max_frame_size: Option<usize>,
+
+    /// Default: 10 seconds.
+    #[serde(with = "serde_helpers::humantime")]
     pub connect_timeout: Duration,
+
+    /// Default: 10 seconds.
+    #[serde(with = "serde_helpers::humantime")]
     pub connection_backoff: Duration,
+
+    /// Default: 1 minute.
+    #[serde(with = "serde_helpers::humantime")]
     pub max_connection_backoff: Duration,
+
+    /// Default: 100.
     pub max_concurrent_outstanding_connections: usize,
+
+    /// Default: unlimited.
     pub max_concurrent_connections: Option<usize>,
+
+    /// Default: 128.
     pub active_peers_event_channel_capacity: usize,
+
+    /// Default: 1 minute.
+    #[serde(with = "serde_helpers::humantime")]
     pub shutdown_idle_timeout: Duration,
 }
 
@@ -42,15 +70,24 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct QuicConfig {
+    /// Default: 100.
     pub max_concurrent_bidi_streams: u64,
+    /// Default: 100.
     pub max_concurrent_uni_streams: u64,
+    /// Default: auto.
     pub stream_receive_window: Option<u64>,
+    /// Default: auto.
     pub receive_window: Option<u64>,
+    /// Default: auto.
     pub send_window: Option<u64>,
+
     // TODO: add all other fields from quin::TransportConfig
+    /// Default: auto.
     pub socket_send_buffer_size: Option<usize>,
+    /// Default: auto.
     pub socket_recv_buffer_size: Option<usize>,
 }
 

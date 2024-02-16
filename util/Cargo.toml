@@ -10,7 +10,10 @@ ahash = "0.8"
 castaway = "0.2"
 dashmap = "5.4"
 futures-util = "0.3"
+hex = "0.4"
+humantime = "2"
 rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", default-features = false, features = ["time"] }
 
 # local deps

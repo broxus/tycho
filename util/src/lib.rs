@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 pub mod futures;
+pub mod serde_helpers;
 pub mod time;
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;

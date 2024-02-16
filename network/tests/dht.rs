@@ -81,6 +81,7 @@ fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
 #[tokio::test]
 async fn bootstrap_nodes_accessible() -> Result<()> {
     tracing_subscriber::fmt::try_init().ok();
+    tracing::info!("bootstrap_nodes_accessible");
 
     let (nodes, _) = make_network(5);
 
@@ -102,6 +103,7 @@ async fn bootstrap_nodes_accessible() -> Result<()> {
 #[tokio::test]
 async fn bootstrap_nodes_store_value() -> Result<()> {
     tracing_subscriber::fmt::try_init().ok();
+    tracing::info!("bootstrap_nodes_store_value");
 
     #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
     struct SomeValue(u32);

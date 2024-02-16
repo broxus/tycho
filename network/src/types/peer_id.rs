@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
 use everscale_crypto::ed25519;
-use rand::Rng;
 use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone, Copy, TlRead, TlWrite, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -30,7 +29,7 @@ impl PeerId {
     }
 
     pub fn random() -> Self {
-        Self(rand::thread_rng().gen())
+        Self(rand::random())
     }
 }
 
@@ -68,6 +67,32 @@ impl FromStr for PeerId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut peer_id = PeerId([0; 32]);
         hex::decode_to_slice(s, &mut peer_id.0).map(|_| peer_id)
+    }
+}
+
+impl serde::Serialize for PeerId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.collect_str(self)
+        } else {
+            self.0.serialize(serializer)
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PeerId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(tycho_util::serde_helpers::StrVisitor::new())
+        } else {
+            <[u8; 32]>::deserialize(deserializer).map(Self)
+        }
     }
 }
 
@@ -123,17 +148,20 @@ impl std::ops::BitXorAssign<&PeerId> for PeerId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub enum Direction {
-    Inbound,
-    Outbound,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl std::fmt::Display for Direction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Inbound => "inbound",
-            Self::Outbound => "outbound",
-        })
+    #[test]
+    fn serde() {
+        const SOME_ID: &str = "5d09fe251943525a30f471791d5b4fea1298613f52ad2ad6d985fed05eb00533";
+
+        let from_json: PeerId = serde_json::from_str(&format!("\"{SOME_ID}\"")).unwrap();
+        let from_str = PeerId::from_str(SOME_ID).unwrap();
+        assert_eq!(from_json, from_str);
+
+        let to_json = serde_json::to_string(&from_json).unwrap();
+        let from_json: PeerId = serde_json::from_str(&to_json).unwrap();
+        assert_eq!(from_json, from_str);
     }
 }

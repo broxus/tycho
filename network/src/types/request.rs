@@ -2,14 +2,21 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
-use crate::types::{Direction, PeerId};
+use crate::types::PeerId;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum Version {
     #[default]
     V1 = 1,
+}
+
+impl Version {
+    pub fn to_u16(self) -> u16 {
+        self as u16
+    }
 }
 
 impl TryFrom<u16> for Version {
@@ -23,14 +30,31 @@ impl TryFrom<u16> for Version {
     }
 }
 
-impl Version {
-    pub fn to_u16(self) -> u16 {
-        self as u16
+impl Serialize for Version {
+    #[inline]
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u16(self.to_u16())
     }
 }
 
+impl<'de> Deserialize<'de> for Version {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        u16::deserialize(deserializer).and_then(|v| Self::try_from(v).map_err(Error::custom))
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Request {
     pub version: Version,
+    #[serde(with = "serde_body")]
     pub body: Bytes,
 }
 
@@ -53,8 +77,10 @@ impl AsRef<[u8]> for Request {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct Response {
     pub version: Version,
+    #[serde(with = "serde_body")]
     pub body: Bytes,
 }
 
@@ -96,9 +122,64 @@ impl AsRef<[u8]> for ServiceRequest {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundRequestMeta {
     pub peer_id: PeerId,
     pub origin: Direction,
+    #[serde(with = "tycho_util::serde_helpers::socket_addr")]
     pub remote_address: SocketAddr,
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Direction {
+    Inbound,
+    Outbound,
+}
+
+impl std::fmt::Display for Direction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Inbound => "inbound",
+            Self::Outbound => "outbound",
+        })
+    }
+}
+
+mod serde_body {
+    use base64::engine::Engine as _;
+    use base64::prelude::BASE64_STANDARD;
+    use tycho_util::serde_helpers::BorrowedStr;
+
+    use super::*;
+
+    pub fn serialize<S>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            serializer.serialize_str(&BASE64_STANDARD.encode(data))
+        } else {
+            data.serialize(serializer)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Bytes, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        if deserializer.is_human_readable() {
+            <BorrowedStr<'_> as Deserialize>::deserialize(deserializer).and_then(
+                |BorrowedStr(s)| {
+                    BASE64_STANDARD
+                        .decode(s.as_ref())
+                        .map(Bytes::from)
+                        .map_err(Error::custom)
+                },
+            )
+        } else {
+            Bytes::deserialize(deserializer)
+        }
+    }
 }

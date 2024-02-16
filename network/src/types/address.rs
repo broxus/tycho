@@ -1,10 +1,12 @@
 use std::net::{SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::str::FromStr;
 
+use serde::{Deserialize, Serialize};
 use tl_proto::{TlRead, TlWrite};
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Address(SocketAddr);
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Address(#[serde(with = "tycho_util::serde_helpers::socket_addr")] SocketAddr);
 
 impl Address {
     pub fn resolve(&self) -> std::io::Result<SocketAddr> {
@@ -131,3 +133,24 @@ impl FromStr for Address {
 
 const ADDRESS_V4_TL_ID: u32 = tl_proto::id!("transport.address.ipv4", scheme = "proto.tl");
 const ADDRESS_V6_TL_ID: u32 = tl_proto::id!("transport.address.ipv6", scheme = "proto.tl");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde() {
+        const SOME_ADDR_V4: &str = "101.102.103.104:12345";
+        const SOME_ADDR_V6: &str = "[2345:0425:2CA1:0:0:0567:5673:23b5]:12345";
+
+        for addr in [SOME_ADDR_V4, SOME_ADDR_V6] {
+            let from_json: Address = serde_json::from_str(&format!("\"{addr}\"")).unwrap();
+            let from_str = Address::from_str(addr).unwrap();
+            assert_eq!(from_json, from_str);
+
+            let to_json = serde_json::to_string(&from_json).unwrap();
+            let from_json: Address = serde_json::from_str(&to_json).unwrap();
+            assert_eq!(from_json, from_str);
+        }
+    }
+}

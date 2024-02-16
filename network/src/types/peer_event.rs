@@ -1,12 +1,14 @@
+use serde::{Deserialize, Serialize};
+
 use crate::types::PeerId;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PeerEvent {
     NewPeer(PeerId),
     LostPeer(PeerId, DisconnectReason),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DisconnectReason {
     Requested,
     VersionMismatch,

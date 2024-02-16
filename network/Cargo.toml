@@ -5,11 +5,16 @@ edition = "2021"
 description = "A peer-to-peer networking library."
 include = ["src/**/*.rs", "src/**/*.tl"]
 
+[[example]]
+name = "simple"
+path = "examples/simple.rs"
+
 [dependencies]
 # crates.io deps
 ahash = "0.8"
 anyhow = "1.0"
-bytes = "1.0"
+base64 = "0.21"
+bytes = { version = "1.0", features = ["serde"] }
 castaway = "0.2"
 dashmap = "5.4"
 ed25519 = { version = "2.0", features = ["alloc", "pkcs8"] }
@@ -38,6 +43,8 @@ x509-parser = "0.15"
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [dev-dependencies]
+argh = "0.1"
+serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
