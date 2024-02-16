@@ -1,6 +1,5 @@
 use std::collections::hash_map;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
@@ -158,7 +157,7 @@ impl<'a> DhtQueryBuilder<'a> {
             inner: *self,
             data: tl_proto::serialize(&data),
             at: None,
-            ttl: DEFAULT_TTL,
+            ttl: self.inner.config.max_stored_value_ttl.as_secs() as _,
         }
     }
 }
@@ -275,8 +274,7 @@ impl DhtServiceBuilder {
             routing_table: Mutex::new(RoutingTable::new(self.local_id)),
             storage,
             node_info: Mutex::new(None),
-            max_k: config.max_k,
-            node_ttl: config.max_node_info_ttl,
+            config,
         });
 
         let client_builder = DhtClientBuilder {
@@ -308,10 +306,10 @@ impl Service<ServiceRequest> for DhtService {
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
-        level = "debug",
-        name = "on_dht_query",
-        skip_all,
-        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
+    level = "debug",
+    name = "on_dht_query",
+    skip_all,
+    fields(peer_id = % req.metadata.peer_id, addr = % req.metadata.remote_address)
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         let response = crate::match_tl_request!(req.body, {
@@ -344,10 +342,10 @@ impl Service<ServiceRequest> for DhtService {
     }
 
     #[tracing::instrument(
-        level = "debug",
-        name = "on_dht_message",
-        skip_all,
-        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
+    level = "debug",
+    name = "on_dht_message",
+    skip_all,
+    fields(peer_id = % req.metadata.peer_id, addr = % req.metadata.remote_address)
     )]
     fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
         crate::match_tl_request!(req.body, {
@@ -390,31 +388,30 @@ struct DhtInner {
     routing_table: Mutex<RoutingTable>,
     storage: Storage,
     node_info: Mutex<Option<PeerInfo>>,
-    max_k: usize,
-    node_ttl: Duration,
+    config: DhtConfig,
 }
 
 impl DhtInner {
     fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
-        const INFO_UPDATE_PERIOD: Duration = Duration::from_secs(60);
-
-        const ANNOUNCE_PERIOD: Duration = Duration::from_secs(600);
-        const ANNOUNCE_SHIFT: Duration = Duration::from_secs(60);
-        const POPULATE_PERIOD: Duration = Duration::from_secs(600);
-        const POPULATE_SHIFT: Duration = Duration::from_secs(10);
-
         enum Action {
             Refresh,
             Announce,
             Populate,
         }
 
+        let mut refresh_interval = tokio::time::interval(self.config.local_info_refresh_period);
+        let mut announce_interval = shifted_interval(
+            self.config.local_info_announce_period,
+            self.config.max_local_info_announce_period_jitter,
+        );
+        let mut populate_interval = shifted_interval(
+            self.config.populate_period,
+            self.config.max_populate_period_jitter,
+        );
+
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             tracing::debug!("background DHT loop started");
-            let mut refresh_interval = tokio::time::interval(INFO_UPDATE_PERIOD);
-            let mut announce_interval = shifted_interval(ANNOUNCE_PERIOD, ANNOUNCE_SHIFT);
-            let mut populate_interval = shifted_interval(POPULATE_PERIOD, POPULATE_SHIFT);
 
             let mut prev_populate_fut = None::<JoinHandle<()>>;
             loop {
@@ -430,14 +427,14 @@ impl DhtInner {
 
                 match action {
                     Action::Refresh => {
-                        this.refresh_local_node_info(&network, DEFAULT_TTL);
+                        this.refresh_local_node_info(&network);
                     }
                     Action::Announce => {
                         // Always refresh node info before announcing
-                        this.refresh_local_node_info(&network, DEFAULT_TTL);
+                        this.refresh_local_node_info(&network);
                         refresh_interval.reset();
 
-                        if let Err(e) = this.announce_local_node_info(&network, DEFAULT_TTL).await {
+                        if let Err(e) = this.announce_local_node_info(&network).await {
                             tracing::error!("failed to announce local DHT node info: {e:?}");
                         }
                     }
@@ -460,13 +457,13 @@ impl DhtInner {
         });
     }
 
-    fn refresh_local_node_info(&self, network: &Network, ttl: u32) {
+    fn refresh_local_node_info(&self, network: &Network) {
         let now = now_sec();
         let mut node_info = PeerInfo {
             id: self.local_id,
             address_list: vec![network.local_addr().into()].into_boxed_slice(),
             created_at: now,
-            expires_at: now + ttl,
+            expires_at: now + self.config.max_node_info_ttl.as_secs() as u32,
             signature: Box::new([0; 64]),
         };
         *node_info.signature = network.sign_tl(&node_info);
@@ -474,19 +471,22 @@ impl DhtInner {
         *self.node_info.lock().unwrap() = Some(node_info);
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
-    async fn announce_local_node_info(&self, network: &Network, ttl: u32) -> Result<()> {
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
+    async fn announce_local_node_info(&self, network: &Network) -> Result<()> {
         let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
 
-        let mut value =
-            self.make_unsigned_peer_value(PeerValueKeyName::NodeInfo, &data, now_sec() + ttl);
+        let mut value = self.make_unsigned_peer_value(
+            PeerValueKeyName::NodeInfo,
+            &data,
+            now_sec() + self.config.max_node_info_ttl.as_secs() as u32,
+        );
         let signature = network.sign_tl(&value);
         value.signature = &signature;
 
         self.store_value(network, ValueRef::Peer(value)).await
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
     async fn populate(&self, network: &Network) {
         const PARALLEL_QUERIES: usize = 3;
         const MAX_DISTANCE: usize = 15;
@@ -510,13 +510,13 @@ impl DhtInner {
                 .skip_while(|(_, bucket)| bucket.is_empty());
 
             for (&distance, _) in first_n_non_empty_buckets {
-                // Query K closest nodes for a random ID at the specified distance from the local ID.
+                // Query the K closest nodes for a random ID at the specified distance from the local ID.
                 let random_id = random_key_at_distance(&routing_table.local_id, distance, rng);
                 let query = Query::new(
                     network.clone(),
                     &routing_table,
                     random_id.as_bytes(),
-                    self.max_k,
+                    self.config.max_k,
                 );
 
                 futures.push(async {
@@ -557,7 +557,11 @@ impl DhtInner {
                 continue;
             }
 
-            let is_new = routing_table.add(peer.clone(), self.max_k, &self.node_ttl);
+            let is_new = routing_table.add(
+                peer.clone(),
+                self.config.max_k,
+                &self.config.max_node_info_ttl,
+            );
             if is_new {
                 network.known_peers().insert(peer, PeerAffinity::Allowed);
                 count += 1;
@@ -573,7 +577,7 @@ impl DhtInner {
             network.clone(),
             &self.routing_table.lock().unwrap(),
             key_hash,
-            self.max_k,
+            self.config.max_k,
         );
 
         // NOTE: expression is intentionally split to drop the routing table guard
@@ -587,7 +591,7 @@ impl DhtInner {
             network.clone(),
             &self.routing_table.lock().unwrap(),
             value,
-            self.max_k,
+            self.config.max_k,
         );
 
         // NOTE: expression is intentionally split to drop the routing table guard
@@ -603,7 +607,11 @@ impl DhtInner {
         }
 
         let mut routing_table = self.routing_table.lock().unwrap();
-        let is_new = routing_table.add(node.clone(), self.max_k, &self.node_ttl);
+        let is_new = routing_table.add(
+            node.clone(),
+            self.config.max_k,
+            &self.config.max_node_info_ttl,
+        );
         if is_new {
             network.known_peers().insert(node, PeerAffinity::Allowed);
         }
@@ -636,7 +644,7 @@ impl DhtInner {
             .routing_table
             .lock()
             .unwrap()
-            .closest(&req.key, (req.k as usize).min(self.max_k));
+            .closest(&req.key, (req.k as usize).min(self.config.max_k));
 
         NodeResponse { nodes }
     }
@@ -649,7 +657,7 @@ impl DhtInner {
                 .routing_table
                 .lock()
                 .unwrap()
-                .closest(&req.key, (req.k as usize).min(self.max_k));
+                .closest(&req.key, (req.k as usize).min(self.config.max_k));
 
             ValueResponseRaw::NotFound(nodes)
         }
@@ -692,5 +700,3 @@ pub enum FindValueError {
     #[error("value not found")]
     NotFound,
 }
-
-const DEFAULT_TTL: u32 = 3600;
