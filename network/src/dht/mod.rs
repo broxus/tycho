@@ -6,13 +6,14 @@ use bytes::{Buf, Bytes};
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use rand::RngCore;
-use tokio::sync::Semaphore;
+use tl_proto::TlRead;
+use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 use tycho_util::realloc_box_enum;
 use tycho_util::time::{now_sec, shifted_interval};
 
 use self::query::{Query, StoreValue};
-use self::routing::RoutingTable;
+use self::routing::{RoutingTable, RoutingTableSource};
 use self::storage::Storage;
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht::{
@@ -68,7 +69,8 @@ impl DhtClient {
     }
 
     pub fn add_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
-        self.inner.add_node_info(&self.network, peer)
+        self.inner
+            .add_peer_info(&self.network, peer, RoutingTableSource::Trusted)
     }
 
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<PeerInfo> {
@@ -158,6 +160,7 @@ impl<'a> DhtQueryBuilder<'a> {
             data: tl_proto::serialize(&data),
             at: None,
             ttl: self.inner.config.max_stored_value_ttl.as_secs() as _,
+            with_peer_info: false,
         }
     }
 }
@@ -167,6 +170,7 @@ pub struct DhtQueryWithDataBuilder<'a> {
     data: Vec<u8>,
     at: Option<u32>,
     ttl: u32,
+    with_peer_info: bool,
 }
 
 impl DhtQueryWithDataBuilder<'_> {
@@ -177,6 +181,11 @@ impl DhtQueryWithDataBuilder<'_> {
 
     pub fn with_ttl(&mut self, ttl: u32) -> &mut Self {
         self.ttl = ttl;
+        self
+    }
+
+    pub fn with_peer_info(&mut self, with_peer_info: bool) -> &mut Self {
+        self.with_peer_info = with_peer_info;
         self
     }
 
@@ -196,7 +205,8 @@ impl DhtQueryWithDataBuilder<'_> {
         let signature = network.sign_tl(&value);
         value.signature = &signature;
 
-        dht.store_value(network, ValueRef::Peer(value)).await
+        dht.store_value(network, ValueRef::Peer(value), self.with_peer_info)
+            .await
     }
 
     pub fn into_signed_value(self) -> PeerValue {
@@ -269,12 +279,15 @@ impl DhtServiceBuilder {
             builder.build()
         };
 
+        let (announced_peers, _) = broadcast::channel(config.announced_peers_channel_capacity);
+
         let inner = Arc::new(DhtInner {
             local_id: self.local_id,
             routing_table: Mutex::new(RoutingTable::new(self.local_id)),
             storage,
-            node_info: Mutex::new(None),
+            local_peer_info: Mutex::new(None),
             config,
+            announced_peers,
         });
 
         let client_builder = DhtClientBuilder {
@@ -306,13 +319,21 @@ impl Service<ServiceRequest> for DhtService {
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
-    level = "debug",
-    name = "on_dht_query",
-    skip_all,
-    fields(peer_id = % req.metadata.peer_id, addr = % req.metadata.remote_address)
+        level = "debug",
+        name = "on_dht_query",
+        skip_all,
+        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        let response = crate::match_tl_request!(req.body, {
+        let (constructor, body) = match self.0.try_handle_prefix(&req) {
+            Ok(rest) => rest,
+            Err(e) => {
+                tracing::debug!("failed to deserialize query: {e:?}");
+                return futures_util::future::ready(None);
+            }
+        };
+
+        let response = crate::match_tl_request!(body, tag = constructor, {
             rpc::FindNode as ref r => {
                 tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_node");
 
@@ -331,7 +352,7 @@ impl Service<ServiceRequest> for DhtService {
                 self.0.handle_get_node_info().map(tl_proto::serialize)
             },
         }, e => {
-            tracing::debug!("failed to deserialize query from: {e:?}");
+            tracing::debug!("failed to deserialize query: {e:?}");
             None
         });
 
@@ -342,13 +363,21 @@ impl Service<ServiceRequest> for DhtService {
     }
 
     #[tracing::instrument(
-    level = "debug",
-    name = "on_dht_message",
-    skip_all,
-    fields(peer_id = % req.metadata.peer_id, addr = % req.metadata.remote_address)
+        level = "debug",
+        name = "on_dht_message",
+        skip_all,
+        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
-        crate::match_tl_request!(req.body, {
+        let (constructor, body) = match self.0.try_handle_prefix(&req) {
+            Ok(rest) => rest,
+            Err(e) => {
+                tracing::debug!("failed to deserialize message: {e:?}");
+                return futures_util::future::ready(());
+            }
+        };
+
+        crate::match_tl_request!(body, tag = constructor, {
             rpc::StoreRef<'_> as ref r => {
                 tracing::debug!("store");
 
@@ -357,7 +386,7 @@ impl Service<ServiceRequest> for DhtService {
                 }
             }
         }, e => {
-            tracing::debug!("failed to deserialize message from: {e:?}");
+            tracing::debug!("failed to deserialize message: {e:?}");
         });
 
         futures_util::future::ready(())
@@ -372,6 +401,7 @@ impl Service<ServiceRequest> for DhtService {
 impl Routable for DhtService {
     fn query_ids(&self) -> impl IntoIterator<Item = u32> {
         [
+            rpc::WithPeerInfo::TL_ID,
             rpc::FindNode::TL_ID,
             rpc::FindValue::TL_ID,
             rpc::GetNodeInfo::TL_ID,
@@ -379,7 +409,7 @@ impl Routable for DhtService {
     }
 
     fn message_ids(&self) -> impl IntoIterator<Item = u32> {
-        [rpc::Store::TL_ID]
+        [rpc::WithPeerInfo::TL_ID, rpc::Store::TL_ID]
     }
 }
 
@@ -387,21 +417,23 @@ struct DhtInner {
     local_id: PeerId,
     routing_table: Mutex<RoutingTable>,
     storage: Storage,
-    node_info: Mutex<Option<PeerInfo>>,
+    local_peer_info: Mutex<Option<PeerInfo>>,
     config: DhtConfig,
+    announced_peers: broadcast::Sender<Arc<PeerInfo>>,
 }
 
 impl DhtInner {
     fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
         enum Action {
-            RefreshLocalNodeInfo,
-            AnnounceLocalNodeInfo,
+            RefreshLocalPeerInfo,
+            AnnounceLocalPeerInfo,
             RefreshRoutingTable,
+            AddPeer(Arc<PeerInfo>),
         }
 
-        let mut refresh_node_info_interval =
+        let mut refresh_peer_info_interval =
             tokio::time::interval(self.config.local_info_refresh_period);
-        let mut announce_node_info_interval = shifted_interval(
+        let mut announce_peer_info_interval = shifted_interval(
             self.config.local_info_announce_period,
             self.config.max_local_info_announce_period_jitter,
         );
@@ -410,6 +442,8 @@ impl DhtInner {
             self.config.max_routing_table_refresh_period_jitter,
         );
 
+        let mut announced_peers = self.announced_peers.subscribe();
+
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             tracing::debug!("background DHT loop started");
@@ -417,9 +451,13 @@ impl DhtInner {
             let mut prev_refresh_routing_table_fut = None::<JoinHandle<()>>;
             loop {
                 let action = tokio::select! {
-                    _ = refresh_node_info_interval.tick() => Action::RefreshLocalNodeInfo,
-                    _ = announce_node_info_interval.tick() => Action::AnnounceLocalNodeInfo,
+                    _ = refresh_peer_info_interval.tick() => Action::RefreshLocalPeerInfo,
+                    _ = announce_peer_info_interval.tick() => Action::AnnounceLocalPeerInfo,
                     _ = refresh_routing_table_interval.tick() => Action::RefreshRoutingTable,
+                    peer = announced_peers.recv() => match peer {
+                        Ok(peer) => Action::AddPeer(peer),
+                        Err(_) => continue,
+                    }
                 };
 
                 let (Some(this), Some(network)) = (this.upgrade(), network.upgrade()) else {
@@ -427,15 +465,15 @@ impl DhtInner {
                 };
 
                 match action {
-                    Action::RefreshLocalNodeInfo => {
-                        this.refresh_local_node_info(&network);
+                    Action::RefreshLocalPeerInfo => {
+                        this.refresh_local_peer_info(&network);
                     }
-                    Action::AnnounceLocalNodeInfo => {
-                        // Always refresh node info before announcing
-                        this.refresh_local_node_info(&network);
-                        refresh_node_info_interval.reset();
+                    Action::AnnounceLocalPeerInfo => {
+                        // Always refresh peer info before announcing
+                        this.refresh_local_peer_info(&network);
+                        refresh_peer_info_interval.reset();
 
-                        if let Err(e) = this.announce_local_node_info(&network).await {
+                        if let Err(e) = this.announce_local_peer_info(&network).await {
                             tracing::error!("failed to announce local DHT node info: {e:?}");
                         }
                     }
@@ -452,39 +490,38 @@ impl DhtInner {
                             this.refresh_routing_table(&network).await;
                         }));
                     }
+                    Action::AddPeer(peer_info) => {
+                        tracing::info!(peer_id = %peer_info.id, "received peer info");
+                        if let Err(e) =
+                            this.add_peer_info(&network, peer_info, RoutingTableSource::Untrusted)
+                        {
+                            tracing::error!("failed to add peer to the routing table: {e:?}");
+                        }
+                    }
                 }
             }
             tracing::debug!("background DHT loop finished");
         });
     }
 
-    fn refresh_local_node_info(&self, network: &Network) {
-        let now = now_sec();
-        let mut node_info = PeerInfo {
-            id: self.local_id,
-            address_list: vec![network.local_addr().into()].into_boxed_slice(),
-            created_at: now,
-            expires_at: now + self.config.max_node_info_ttl.as_secs() as u32,
-            signature: Box::new([0; 64]),
-        };
-        *node_info.signature = network.sign_tl(&node_info);
-
-        *self.node_info.lock().unwrap() = Some(node_info);
+    fn refresh_local_peer_info(&self, network: &Network) {
+        let peer_info = self.make_local_peer_info(network, now_sec());
+        *self.local_peer_info.lock().unwrap() = Some(peer_info);
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
-    async fn announce_local_node_info(&self, network: &Network) -> Result<()> {
+    async fn announce_local_peer_info(&self, network: &Network) -> Result<()> {
         let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
 
         let mut value = self.make_unsigned_peer_value(
             PeerValueKeyName::NodeInfo,
             &data,
-            now_sec() + self.config.max_node_info_ttl.as_secs() as u32,
+            now_sec() + self.config.max_peer_info_ttl.as_secs() as u32,
         );
         let signature = network.sign_tl(&value);
         value.signature = &signature;
 
-        self.store_value(network, ValueRef::Peer(value)).await
+        self.store_value(network, ValueRef::Peer(value), true).await
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
@@ -504,7 +541,7 @@ impl DhtInner {
             // Filter out expired nodes
             let now = now_sec();
             for (_, bucket) in routing_table.buckets.range_mut(..=MAX_DISTANCE) {
-                bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_node_info_ttl));
+                bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_peer_info_ttl));
             }
 
             // Iterate over the first buckets up until some distance (`MAX_DISTANCE`)
@@ -565,7 +602,8 @@ impl DhtInner {
             let is_new = routing_table.add(
                 peer.clone(),
                 self.config.max_k,
-                &self.config.max_node_info_ttl,
+                &self.config.max_peer_info_ttl,
+                RoutingTableSource::Trusted,
             );
             if is_new {
                 network.known_peers().insert(peer, PeerAffinity::Allowed);
@@ -589,14 +627,31 @@ impl DhtInner {
         query.find_value().await
     }
 
-    async fn store_value(&self, network: &Network, value: ValueRef<'_>) -> Result<()> {
+    async fn store_value(
+        &self,
+        network: &Network,
+        value: ValueRef<'_>,
+        with_peer_info: bool,
+    ) -> Result<()> {
         self.storage.insert(&value)?;
+
+        let local_peer_info = if with_peer_info {
+            let mut node_info = self.local_peer_info.lock().unwrap();
+            Some(
+                node_info
+                    .get_or_insert_with(|| self.make_local_peer_info(network, now_sec()))
+                    .clone(),
+            )
+        } else {
+            None
+        };
 
         let query = StoreValue::new(
             network.clone(),
             &self.routing_table.lock().unwrap(),
             value,
             self.config.max_k,
+            local_peer_info.as_ref(),
         );
 
         // NOTE: expression is intentionally split to drop the routing table guard
@@ -604,21 +659,29 @@ impl DhtInner {
         Ok(())
     }
 
-    fn add_node_info(&self, network: &Network, node: Arc<PeerInfo>) -> Result<bool> {
-        anyhow::ensure!(node.is_valid(now_sec()), "invalid peer node info");
+    fn add_peer_info(
+        &self,
+        network: &Network,
+        peer_info: Arc<PeerInfo>,
+        source: RoutingTableSource,
+    ) -> Result<bool> {
+        anyhow::ensure!(peer_info.is_valid(now_sec()), "invalid peer info");
 
-        if node.id == self.local_id {
+        if peer_info.id == self.local_id {
             return Ok(false);
         }
 
         let mut routing_table = self.routing_table.lock().unwrap();
         let is_new = routing_table.add(
-            node.clone(),
+            peer_info.clone(),
             self.config.max_k,
-            &self.config.max_node_info_ttl,
+            &self.config.max_peer_info_ttl,
+            source,
         );
         if is_new {
-            network.known_peers().insert(node, PeerAffinity::Allowed);
+            network
+                .known_peers()
+                .insert(peer_info, PeerAffinity::Allowed);
         }
         Ok(is_new)
     }
@@ -638,6 +701,44 @@ impl DhtInner {
             expires_at,
             signature: &[0; 64],
         }
+    }
+
+    fn make_local_peer_info(&self, network: &Network, now: u32) -> PeerInfo {
+        let mut peer_info = PeerInfo {
+            id: self.local_id,
+            address_list: vec![network.local_addr().into()].into_boxed_slice(),
+            created_at: now,
+            expires_at: now + self.config.max_peer_info_ttl.as_secs() as u32,
+            signature: Box::new([0; 64]),
+        };
+        *peer_info.signature = network.sign_tl(&peer_info);
+        peer_info
+    }
+
+    fn try_handle_prefix<'a>(&self, req: &'a ServiceRequest) -> Result<(u32, &'a [u8])> {
+        let mut body = req.as_ref();
+        anyhow::ensure!(body.len() >= 4, tl_proto::TlError::UnexpectedEof);
+
+        // NOTE: read constructor without advancing the body
+        let mut constructor = std::convert::identity(body).get_u32_le();
+        let mut offset = 0;
+
+        if constructor == rpc::WithPeerInfo::TL_ID {
+            let peer_info = rpc::WithPeerInfo::read_from(body, &mut offset)?.peer_info;
+            anyhow::ensure!(
+                peer_info.id == req.metadata.peer_id,
+                "suggested peer ID does not belong to the sender"
+            );
+            self.announced_peers.send(peer_info).ok();
+
+            body = &body[offset..];
+            anyhow::ensure!(body.len() >= 4, tl_proto::TlError::UnexpectedEof);
+
+            // NOTE: read constructor without advancing the body
+            constructor = std::convert::identity(body).get_u32_le();
+        }
+
+        Ok((constructor, body))
     }
 
     fn handle_store(&self, req: &rpc::StoreRef<'_>) -> Result<bool, StorageError> {
@@ -669,7 +770,7 @@ impl DhtInner {
     }
 
     fn handle_get_node_info(&self) -> Option<NodeInfoResponse> {
-        self.node_info
+        self.local_peer_info
             .lock()
             .unwrap()
             .clone()

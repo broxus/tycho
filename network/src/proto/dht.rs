@@ -374,6 +374,22 @@ pub struct NodeInfoResponse {
 pub mod rpc {
     use super::*;
 
+    /// Query wrapper with an announced peer info.
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "dht.withPeerInfo", scheme = "proto.tl")]
+    pub struct WithPeerInfo {
+        /// A signed info of the sender.
+        pub peer_info: Arc<PeerInfo>,
+    }
+
+    /// Query wrapper with an announced peer info.
+    #[derive(Debug, Clone, TlWrite)]
+    #[tl(boxed, id = "dht.withPeerInfo", scheme = "proto.tl")]
+    pub struct WithPeerInfoRef<'tl> {
+        /// A signed info of the sender.
+        pub peer_info: &'tl PeerInfo,
+    }
+
     /// Suggest a node to store that value.
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "dht.store", scheme = "proto.tl")]

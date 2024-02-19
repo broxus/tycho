@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use tycho_util::time::now_sec;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::dht::routing::RoutingTable;
+use crate::dht::routing::{RoutingTable, RoutingTableSource};
 use crate::network::Network;
 use crate::proto::dht::{rpc, NodeResponse, Value, ValueRef, ValueResponse};
 use crate::types::{PeerId, PeerInfo, Request};
@@ -32,7 +32,12 @@ impl Query {
     ) -> Self {
         let mut candidates = RoutingTable::new(PeerId(*target_id));
         routing_table.visit_closest(target_id, max_k, |node| {
-            candidates.add(node.clone(), max_k, &Duration::MAX);
+            candidates.add(
+                node.clone(),
+                max_k,
+                &Duration::MAX,
+                RoutingTableSource::Trusted,
+            );
         });
 
         Self {
@@ -212,7 +217,8 @@ impl Query {
 
             // Insert a new entry
             if visited.insert(node.id) {
-                self.candidates.add(node, max_k, &Duration::MAX);
+                self.candidates
+                    .add(node, max_k, &Duration::MAX, RoutingTableSource::Trusted);
                 has_new = true;
             }
         }
@@ -238,7 +244,8 @@ impl Query {
                 // Insert a new entry
                 hash_map::Entry::Vacant(entry) => {
                     let node = entry.insert(node).clone();
-                    self.candidates.add(node, max_k, &Duration::MAX);
+                    self.candidates
+                        .add(node, max_k, &Duration::MAX, RoutingTableSource::Trusted);
                     has_new = true;
                 }
                 // Try to replace an old entry
@@ -295,13 +302,19 @@ impl StoreValue<()> {
         routing_table: &RoutingTable,
         value: ValueRef<'_>,
         max_k: usize,
+        local_peer_info: Option<&PeerInfo>,
     ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> {
         let key_hash = match &value {
             ValueRef::Peer(value) => tl_proto::hash(&value.key),
             ValueRef::Overlay(value) => tl_proto::hash(&value.key),
         };
 
-        let request_body = Bytes::from(tl_proto::serialize(rpc::StoreRef { value }));
+        let request_body = Bytes::from(match local_peer_info {
+            Some(peer_info) => {
+                tl_proto::serialize((rpc::WithPeerInfoRef { peer_info }, rpc::StoreRef { value }))
+            }
+            None => tl_proto::serialize(rpc::StoreRef { value }),
+        });
 
         let semaphore = Arc::new(Semaphore::new(10));
         let futures = futures_util::stream::FuturesUnordered::new();

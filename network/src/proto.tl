@@ -121,6 +121,13 @@ dht.nodeInfoFound info:dht.node = dht.NodeInfoResponse;
 ---functions---
 
 /**
+* Query wrapper with an announced peer info.
+*
+* @param peer_info  a signed info of the sender
+*/
+dht.withPeerInfo peer_info:dht.node = True;
+
+/**
 * Suggest a node to store that value
 *
 * @param value  value to store

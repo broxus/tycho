@@ -10,24 +10,31 @@ pub(crate) mod tl;
 
 #[macro_export]
 macro_rules! match_tl_request {
-    ($req_body:expr, {
+    ($req_body:expr, $(tag = $tag:expr,)? {
         $($ty:path as $pat:pat => $expr:expr),*$(,)?
     }, $err:pat => $err_exr:expr) => {
         '__match_req: {
-            let $err = if ($req_body).len() >= 4 {
-                match ($req_body).as_ref().get_u32_le() {
-                    $(
-                        <$ty>::TL_ID => match $crate::__internal::tl_proto::deserialize::<$ty>(&($req_body)) {
-                            Ok($pat) => break '__match_req ($expr),
-                            Err(e) => e,
-                        }
-                    )*
-                    _ => $crate::__internal::tl_proto::TlError::UnknownConstructor,
-                }
-            } else {
-                $crate::__internal::tl_proto::TlError::UnexpectedEof
-            };
+            let $err = $crate::match_tl_request!(@inner $req_body, $($tag)?, {
+                $(
+                    <$ty>::TL_ID => match $crate::__internal::tl_proto::deserialize::<$ty>(&($req_body)) {
+                        Ok($pat) => break '__match_req ($expr),
+                        Err(e) => e,
+                    }
+                )*
+                _ => $crate::__internal::tl_proto::TlError::UnknownConstructor,
+            });
             $err_exr
+        }
+    };
+
+    (@inner $req_body:expr, $tag:expr, $($rest:tt)*) => {
+        match $tag $($rest)*
+    };
+    (@inner $req_body:expr, , $($rest:tt)*) => {
+        if ($req_body).len() >= 4 {
+            match ($req_body).as_ref().get_u32_le() $($rest)*
+        } else {
+            $crate::__internal::tl_proto::TlError::UnexpectedEof
         }
     };
 }

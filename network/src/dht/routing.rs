@@ -7,6 +7,12 @@ use tycho_util::time::now_sec;
 use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
 use crate::types::{PeerId, PeerInfo};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoutingTableSource {
+    Untrusted,
+    Trusted,
+}
+
 pub(crate) struct RoutingTable {
     pub local_id: PeerId,
     pub buckets: BTreeMap<usize, Bucket>,
@@ -30,7 +36,13 @@ impl RoutingTable {
         self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
     }
 
-    pub fn add(&mut self, peer: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration) -> bool {
+    pub fn add(
+        &mut self,
+        peer: Arc<PeerInfo>,
+        max_k: usize,
+        node_ttl: &Duration,
+        source: RoutingTableSource,
+    ) -> bool {
         let distance = xor_distance(&self.local_id, &peer.id);
         if distance == 0 {
             return false;
@@ -39,7 +51,7 @@ impl RoutingTable {
         self.buckets
             .entry(distance)
             .or_insert_with(|| Bucket::with_capacity(max_k))
-            .insert(peer, max_k, node_ttl)
+            .insert(peer, max_k, node_ttl, source)
     }
 
     pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<PeerInfo>> {
@@ -108,12 +120,26 @@ impl Bucket {
         }
     }
 
-    fn insert(&mut self, node: Arc<PeerInfo>, max_k: usize, timeout: &Duration) -> bool {
+    fn insert(
+        &mut self,
+        node: Arc<PeerInfo>,
+        max_k: usize,
+        timeout: &Duration,
+        source: RoutingTableSource,
+    ) -> bool {
         if let Some(index) = self
             .nodes
             .iter_mut()
             .position(|item| item.data.id == node.id)
         {
+            if source == RoutingTableSource::Untrusted {
+                let slot = &mut self.nodes[index];
+                // Do nothing if node info was not updated (by created_at field)
+                if node.created_at <= slot.data.created_at {
+                    return false;
+                }
+            }
+
             self.nodes.remove(index);
         } else if self.nodes.len() >= max_k {
             if matches!(self.nodes.front(), Some(node) if node.is_expired(now_sec(), timeout)) {
@@ -131,7 +157,7 @@ impl Bucket {
     where
         F: FnMut(&Node) -> bool,
     {
-        self.nodes.retain(f)
+        self.nodes.retain(f);
     }
 
     pub fn is_empty(&self) -> bool {
@@ -180,8 +206,18 @@ mod tests {
         let mut table = RoutingTable::new(PeerId::random());
 
         let peer = PeerId::random();
-        assert!(table.add(make_node(peer), MAX_K, &Duration::MAX));
-        assert!(table.add(make_node(peer), MAX_K, &Duration::MAX)); // returns true because the node was updated
+        assert!(table.add(
+            make_node(peer),
+            MAX_K,
+            &Duration::MAX,
+            RoutingTableSource::Trusted
+        ));
+        assert!(table.add(
+            make_node(peer),
+            MAX_K,
+            &Duration::MAX,
+            RoutingTableSource::Trusted
+        )); // returns true because the node was updated
         assert_eq!(table.len(), 1);
     }
 
@@ -190,7 +226,12 @@ mod tests {
         let local_id = PeerId::random();
         let mut table = RoutingTable::new(local_id);
 
-        assert!(!table.add(make_node(local_id), MAX_K, &Duration::MAX));
+        assert!(!table.add(
+            make_node(local_id),
+            MAX_K,
+            &Duration::MAX,
+            RoutingTableSource::Trusted
+        ));
         assert!(table.is_empty());
     }
 
@@ -201,9 +242,19 @@ mod tests {
         let mut bucket = Bucket::with_capacity(k);
 
         for _ in 0..k {
-            assert!(bucket.insert(make_node(PeerId::random()), k, &timeout));
+            assert!(bucket.insert(
+                make_node(PeerId::random()),
+                k,
+                &timeout,
+                RoutingTableSource::Trusted
+            ));
         }
-        assert!(!bucket.insert(make_node(PeerId::random()), k, &timeout));
+        assert!(!bucket.insert(
+            make_node(PeerId::random()),
+            k,
+            &timeout,
+            RoutingTableSource::Trusted
+        ));
     }
 
     #[test]
@@ -322,7 +373,12 @@ mod tests {
 
         let mut table = RoutingTable::new(local_id);
         for id in ids {
-            table.add(make_node(id), MAX_K, &Duration::MAX);
+            table.add(
+                make_node(id),
+                MAX_K,
+                &Duration::MAX,
+                RoutingTableSource::Trusted,
+            );
         }
 
         {
