@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["consensus", "core", "network", "storage", "util", "validator"]
+members = ["consensus", "core", "network", "storage", "util", "collator"]
 
 [profile.release]
 debug = true

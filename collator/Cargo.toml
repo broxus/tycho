@@ -1,8 +1,8 @@
 [package]
-name = "tycho-validator"
+name = "tycho-collator"
 version = "0.0.1"
 edition = "2021"
-description = "A validator node."
+description = "A collator node."
 
 [dependencies]
 # crates.io deps
@@ -14,4 +14,4 @@ tycho-storage = { path = "../storage", version = "=0.0.1" }
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [lints]
-workspace= true
+workspace = true

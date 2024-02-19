@@ -1343,6 +1343,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-collator"
+version = "0.0.1"
+dependencies = [
+ "tycho-consensus",
+ "tycho-core",
+ "tycho-storage",
+ "tycho-util",
+]
+
+[[package]]
 name = "tycho-consensus"
 version = "0.0.1"
 dependencies = [
@@ -1401,16 +1411,6 @@ dependencies = [
 [[package]]
 name = "tycho-util"
 version = "0.0.1"
-
-[[package]]
-name = "tycho-validator"
-version = "0.0.1"
-dependencies = [
- "tycho-consensus",
- "tycho-core",
- "tycho-storage",
- "tycho-util",
-]
 
 [[package]]
 name = "typenum"
