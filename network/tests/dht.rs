@@ -138,3 +138,51 @@ async fn bootstrap_nodes_store_value() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn connect_new_node_to_bootstrap() -> Result<()> {
+    tracing_subscriber::fmt::try_init().ok();
+    tracing::info!("connect_new_node_to_bootstrap");
+
+    #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
+    struct SomeValue(u32);
+
+    const VALUE: SomeValue = SomeValue(123123);
+
+    let (bootstrap_nodes, global_config) = make_network(5);
+
+    let node = Node::new(&ed25519::SecretKey::generate(&mut rand::thread_rng()))?;
+    for peer_info in &global_config {
+        node.dht.add_peer(peer_info.clone())?;
+    }
+
+    // Ensure that the node is not known by the bootstrap nodes
+    let mut somebody_knows_the_peer = false;
+    for bootstrap_node in &bootstrap_nodes {
+        somebody_knows_the_peer |= bootstrap_node
+            .network
+            .known_peers()
+            .contains(node.network.peer_id());
+    }
+    assert!(!somebody_knows_the_peer);
+
+    // Store value and announce the peer info
+    node.dht
+        .entry(proto::dht::PeerValueKeyName::NodeInfo)
+        .with_data(VALUE)
+        .with_peer_info(true)
+        .store()
+        .await?;
+
+    // The node must be known by some bootstrap nodes now
+    let mut somebody_knows_the_peer = false;
+    for bootstrap_node in &bootstrap_nodes {
+        somebody_knows_the_peer |= bootstrap_node
+            .network
+            .known_peers()
+            .contains(node.network.peer_id());
+    }
+    assert!(somebody_knows_the_peer);
+
+    Ok(())
+}
