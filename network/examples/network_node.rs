@@ -1,0 +1,247 @@
+//! Run tests with this env:
+//! ```text
+//! RUST_LOG=info,tycho_network=trace
+//! ```
+
+use std::io::IsTerminal;
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::Result;
+use argh::FromArgs;
+use everscale_crypto::ed25519;
+use serde::{Deserialize, Serialize};
+use tycho_network::{
+    Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, PeerId, PeerInfo, Router,
+};
+use tycho_util::time::now_sec;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let app: App = argh::from_env();
+    app.run().await
+}
+
+/// Tycho network node.
+#[derive(FromArgs)]
+struct App {
+    #[argh(subcommand)]
+    cmd: Cmd,
+}
+
+impl App {
+    async fn run(self) -> Result<()> {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(tracing::Level::INFO.into())
+                    .from_env_lossy(),
+            )
+            .with_ansi(std::io::stdout().is_terminal())
+            .init();
+
+        match self.cmd {
+            Cmd::Run(cmd) => cmd.run().await,
+            Cmd::GenKey(cmd) => cmd.run(),
+            Cmd::GenDht(cmd) => cmd.run(),
+        }
+    }
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand)]
+enum Cmd {
+    Run(CmdRun),
+    GenKey(CmdGenKey),
+    GenDht(CmdGenDht),
+}
+
+/// run a node
+#[derive(FromArgs)]
+#[argh(subcommand, name = "run")]
+struct CmdRun {
+    /// local node address
+    #[argh(positional)]
+    addr: SocketAddr,
+
+    /// node secret key
+    #[argh(option)]
+    key: String,
+
+    /// path to the node config
+    #[argh(option)]
+    config: Option<String>,
+
+    /// path to the global config
+    #[argh(option)]
+    global_config: String,
+}
+
+impl CmdRun {
+    async fn run(self) -> Result<()> {
+        let node_config = self
+            .config
+            .map(NodeConfig::from_file)
+            .transpose()?
+            .unwrap_or_default();
+        let global_config = GlobalConfig::from_file(self.global_config)?;
+
+        let node = Node::new(parse_key(&self.key)?, self.addr.into(), node_config)?;
+
+        let mut initial_peer_count = 0usize;
+        for peer in global_config.bootstrap_peers {
+            let is_new = node.dht.add_peer(Arc::new(peer))?;
+            initial_peer_count += is_new as usize;
+        }
+
+        tracing::info!(
+            local_id = %node.network.peer_id(),
+            addr = %self.addr,
+            initial_peer_count,
+            "node started"
+        );
+
+        futures_util::future::pending().await
+    }
+}
+
+/// generate a key
+#[derive(FromArgs)]
+#[argh(subcommand, name = "genkey")]
+struct CmdGenKey {}
+
+impl CmdGenKey {
+    fn run(self) -> Result<()> {
+        let secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let public_key = ed25519::PublicKey::from(&secret_key);
+        let peer_id = PeerId::from(public_key);
+
+        let data = serde_json::json!({
+            "key": hex::encode(secret_key.as_bytes()),
+            "peer_id": peer_id.to_string(),
+        });
+        let output = if std::io::stdin().is_terminal() {
+            serde_json::to_string_pretty(&data)
+        } else {
+            serde_json::to_string(&data)
+        }?;
+        println!("{output}");
+        Ok(())
+    }
+}
+
+/// generate a dht node info
+#[derive(FromArgs)]
+#[argh(subcommand, name = "gendht")]
+struct CmdGenDht {
+    /// local node address
+    #[argh(positional)]
+    addr: SocketAddr,
+
+    /// node secret key
+    #[argh(option)]
+    key: String,
+
+    /// time to live in seconds (default: unlimited)
+    #[argh(option)]
+    ttl: Option<u32>,
+}
+
+impl CmdGenDht {
+    fn run(self) -> Result<()> {
+        let entry = Node::make_peer_info(parse_key(&self.key)?, self.addr.into(), self.ttl);
+        let output = if std::io::stdin().is_terminal() {
+            serde_json::to_string_pretty(&entry)
+        } else {
+            serde_json::to_string(&entry)
+        }?;
+        println!("{output}");
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct GlobalConfig {
+    bootstrap_peers: Vec<PeerInfo>,
+}
+
+impl GlobalConfig {
+    fn from_file(path: impl AsRef<str>) -> Result<Self> {
+        let config: Self = {
+            let data = std::fs::read_to_string(path.as_ref())?;
+            serde_json::from_str(&data)?
+        };
+
+        let now = now_sec();
+        for peer in &config.bootstrap_peers {
+            anyhow::ensure!(peer.is_valid(now), "invalid peer info for {}", peer.id);
+        }
+
+        Ok(config)
+    }
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct NodeConfig {
+    network: NetworkConfig,
+    dht: DhtConfig,
+}
+
+impl NodeConfig {
+    fn from_file(path: impl AsRef<str>) -> Result<Self> {
+        let data = std::fs::read_to_string(path.as_ref())?;
+        let config = serde_json::from_str(&data)?;
+        Ok(config)
+    }
+}
+
+struct Node {
+    network: Network,
+    dht: DhtClient,
+}
+
+impl Node {
+    fn new(key: ed25519::SecretKey, address: Address, config: NodeConfig) -> Result<Self> {
+        let keypair = everscale_crypto::ed25519::KeyPair::from(&key);
+
+        let (dht_client, dht) = DhtService::builder(keypair.public_key.into())
+            .with_config(config.dht)
+            .build();
+
+        let router = Router::builder().route(dht).build();
+
+        let network = Network::builder()
+            .with_config(config.network)
+            .with_private_key(key.to_bytes())
+            .with_service_name("test-service")
+            .build(address, router)?;
+
+        let dht = dht_client.build(network.clone());
+
+        Ok(Self { network, dht })
+    }
+
+    fn make_peer_info(key: ed25519::SecretKey, address: Address, ttl: Option<u32>) -> PeerInfo {
+        let keypair = ed25519::KeyPair::from(&key);
+        let peer_id = PeerId::from(keypair.public_key);
+
+        let now = now_sec();
+        let mut node_info = PeerInfo {
+            id: peer_id,
+            address_list: vec![address].into_boxed_slice(),
+            created_at: now,
+            expires_at: ttl.unwrap_or(u32::MAX),
+            signature: Box::new([0; 64]),
+        };
+        *node_info.signature = keypair.sign(&node_info);
+        node_info
+    }
+}
+
+fn parse_key(key: &str) -> Result<ed25519::SecretKey> {
+    match hex::decode(key)?.try_into() {
+        Ok(bytes) => Ok(ed25519::SecretKey::from_bytes(bytes)),
+        Err(_) => anyhow::bail!("invalid secret key"),
+    }
+}

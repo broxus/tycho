@@ -1,70 +1,86 @@
 use std::net::{SocketAddr, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
+use everscale_crypto::ed25519;
 use rand::Rng;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::config::{Config, EndpointConfig};
-use crate::endpoint::Endpoint;
-use crate::types::{DisconnectReason, PeerId};
-
-use self::connection_manager::{
-    ActivePeers, ConnectionManager, ConnectionManagerRequest, KnownPeers, WeakActivePeers,
+use self::config::EndpointConfig;
+use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
+use self::endpoint::Endpoint;
+use crate::types::{
+    Address, DisconnectReason, PeerEvent, PeerId, Response, Service, ServiceExt, ServiceRequest,
 };
-use self::peer::Peer;
 
-pub mod connection_manager;
-pub mod peer;
+pub use self::config::{NetworkConfig, QuicConfig};
+pub use self::connection::{Connection, RecvStream, SendStream};
+pub use self::connection_manager::{ActivePeers, KnownPeer, KnownPeers, WeakActivePeers};
+pub use self::peer::Peer;
 
-pub struct Builder<MandatoryFields = (String, [u8; 32])> {
+mod config;
+mod connection;
+mod connection_manager;
+mod crypto;
+mod endpoint;
+mod peer;
+mod request_handler;
+mod wire;
+
+pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
     mandatory_fields: MandatoryFields,
     optional_fields: BuilderFields,
 }
 
 #[derive(Default)]
 struct BuilderFields {
-    config: Option<Config>,
+    config: Option<NetworkConfig>,
 }
 
-impl<MandatoryFields> Builder<MandatoryFields> {
-    pub fn with_config(mut self, config: Config) -> Self {
+impl<MandatoryFields> NetworkBuilder<MandatoryFields> {
+    pub fn with_config(mut self, config: NetworkConfig) -> Self {
         self.optional_fields.config = Some(config);
         self
     }
 }
 
-impl<T2> Builder<((), T2)> {
-    pub fn with_service_name<T: Into<String>>(self, name: T) -> Builder<(String, T2)> {
+impl<T2> NetworkBuilder<((), T2)> {
+    pub fn with_service_name<T: Into<String>>(self, name: T) -> NetworkBuilder<(String, T2)> {
         let (_, private_key) = self.mandatory_fields;
-        Builder {
+        NetworkBuilder {
             mandatory_fields: (name.into(), private_key),
             optional_fields: self.optional_fields,
         }
     }
 }
 
-impl<T1> Builder<(T1, ())> {
-    pub fn with_private_key(self, private_key: [u8; 32]) -> Builder<(T1, [u8; 32])> {
+impl<T1> NetworkBuilder<(T1, ())> {
+    pub fn with_private_key(self, private_key: [u8; 32]) -> NetworkBuilder<(T1, [u8; 32])> {
         let (service_name, _) = self.mandatory_fields;
-        Builder {
+        NetworkBuilder {
             mandatory_fields: (service_name, private_key),
             optional_fields: self.optional_fields,
         }
     }
 
-    pub fn with_random_private_key(self) -> Builder<(T1, [u8; 32])> {
+    pub fn with_random_private_key(self) -> NetworkBuilder<(T1, [u8; 32])> {
         self.with_private_key(rand::thread_rng().gen())
     }
 }
 
-impl Builder {
-    pub fn build<T: ToSocketAddrs>(self, bind_address: T) -> Result<Network> {
+impl NetworkBuilder {
+    pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
+    where
+        S: Send + Sync + Clone + 'static,
+        S: Service<ServiceRequest, QueryResponse = Response>,
+    {
         use socket2::{Domain, Protocol, Socket, Type};
 
         let config = self.optional_fields.config.unwrap_or_default();
         let quic_config = config.quic.clone().unwrap_or_default();
         let (service_name, private_key) = self.mandatory_fields;
+
+        let keypair = ed25519::KeyPair::from(&ed25519::SecretKey::from_bytes(private_key));
 
         let endpoint_config = EndpointConfig::builder()
             .with_service_name(service_name)
@@ -109,30 +125,53 @@ impl Builder {
         let weak_active_peers = ActivePeers::downgrade(&active_peers);
         let known_peers = KnownPeers::new();
 
-        let (connection_manager, connection_manager_handle) = ConnectionManager::new(
-            config.clone(),
-            endpoint.clone(),
-            active_peers,
-            known_peers.clone(),
-        );
+        let inner = Arc::new_cyclic(move |_weak| {
+            let service = service.boxed_clone();
 
-        tokio::spawn(connection_manager.start());
+            let (connection_manager, connection_manager_handle) = ConnectionManager::new(
+                config.clone(),
+                endpoint.clone(),
+                active_peers,
+                known_peers.clone(),
+                service,
+            );
 
-        Ok(Network(Arc::new(NetworkInner {
-            config,
-            endpoint,
-            active_peers: weak_active_peers,
-            known_peers,
-            connection_manager_handle,
-        })))
+            tokio::spawn(connection_manager.start());
+
+            NetworkInner {
+                config,
+                endpoint,
+                active_peers: weak_active_peers,
+                known_peers,
+                connection_manager_handle,
+                keypair,
+            }
+        });
+
+        Ok(Network(inner))
     }
 }
 
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct WeakNetwork(Weak<NetworkInner>);
+
+impl WeakNetwork {
+    pub fn upgrade(&self) -> Option<Network> {
+        self.0
+            .upgrade()
+            .map(Network)
+            .and_then(|network| (!network.is_closed()).then_some(network))
+    }
+}
+
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct Network(Arc<NetworkInner>);
 
 impl Network {
-    pub fn builder() -> Builder<((), ())> {
-        Builder {
+    pub fn builder() -> NetworkBuilder<((), ())> {
+        NetworkBuilder {
             mandatory_fields: ((), ()),
             optional_fields: Default::default(),
         }
@@ -154,25 +193,57 @@ impl Network {
         self.0.known_peers()
     }
 
-    pub async fn connect(&self, addr: SocketAddr) -> Result<PeerId> {
-        self.0.connect(addr, None).await
+    pub fn subscribe(&self) -> Result<broadcast::Receiver<PeerEvent>> {
+        let active_peers = self.0.active_peers.upgrade().ok_or(NetworkShutdownError)?;
+        Ok(active_peers.subscribe())
     }
 
-    pub async fn connect_with_peer_id(&self, addr: SocketAddr, peer_id: &PeerId) -> Result<PeerId> {
-        self.0.connect(addr, Some(peer_id)).await
+    pub async fn connect<T>(&self, addr: T) -> Result<PeerId>
+    where
+        T: Into<Address>,
+    {
+        self.0.connect(addr.into(), None).await
+    }
+
+    pub async fn connect_with_peer_id<T>(&self, addr: T, peer_id: &PeerId) -> Result<PeerId>
+    where
+        T: Into<Address>,
+    {
+        self.0.connect(addr.into(), Some(peer_id)).await
     }
 
     pub fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
         self.0.disconnect(peer_id)
     }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        self.0.shutdown().await
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
+    pub fn sign_tl<T: tl_proto::TlWrite>(&self, data: T) -> [u8; 64] {
+        self.0.keypair.sign(data)
+    }
+
+    pub fn sign_raw(&self, data: &[u8]) -> [u8; 64] {
+        self.0.keypair.sign_raw(data)
+    }
+
+    pub fn downgrade(this: &Self) -> WeakNetwork {
+        WeakNetwork(Arc::downgrade(&this.0))
+    }
 }
 
-pub struct NetworkInner {
-    config: Arc<Config>,
+struct NetworkInner {
+    config: Arc<NetworkConfig>,
     endpoint: Arc<Endpoint>,
     active_peers: WeakActivePeers,
     known_peers: KnownPeers,
     connection_manager_handle: mpsc::Sender<ConnectionManagerRequest>,
+    keypair: ed25519::KeyPair,
 }
 
 impl NetworkInner {
@@ -188,7 +259,7 @@ impl NetworkInner {
         &self.known_peers
     }
 
-    async fn connect(&self, addr: SocketAddr, peer_id: Option<&PeerId>) -> Result<PeerId> {
+    async fn connect(&self, addr: Address, peer_id: Option<&PeerId>) -> Result<PeerId> {
         let (tx, rx) = oneshot::channel();
         self.connection_manager_handle
             .send(ConnectionManagerRequest::Connect(
@@ -197,7 +268,7 @@ impl NetworkInner {
                 tx,
             ))
             .await
-            .map_err(|_| anyhow::anyhow!("network has been shutdown"))?;
+            .map_err(|_e| NetworkShutdownError)?;
         rx.await?
     }
 
@@ -214,13 +285,43 @@ impl NetworkInner {
         let connection = active_peers.get(peer_id)?;
         Some(Peer::new(connection, self.config.clone()))
     }
+
+    async fn shutdown(&self) -> Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        self.connection_manager_handle
+            .send(ConnectionManagerRequest::Shutdown(sender))
+            .await
+            .map_err(|_e| NetworkShutdownError)?;
+        receiver.await.map_err(Into::into)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.connection_manager_handle.is_closed()
+    }
 }
+
+#[derive(thiserror::Error, Debug)]
+#[error("network has been shutdown")]
+struct NetworkShutdownError;
 
 #[cfg(test)]
 mod tests {
     use tracing_test::traced_test;
 
     use super::*;
+    use crate::types::{service_query_fn, BoxCloneService};
+
+    fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
+        let handle = |request: ServiceRequest| async move {
+            tracing::trace!("received: {}", request.body.escape_ascii());
+            let response = Response {
+                version: Default::default(),
+                body: request.body,
+            };
+            Some(response)
+        };
+        service_query_fn(handle).boxed_clone()
+    }
 
     #[tokio::test]
     #[traced_test]
@@ -228,17 +329,17 @@ mod tests {
         let peer1 = Network::builder()
             .with_random_private_key()
             .with_service_name("tycho")
-            .build("127.0.0.1:0")?;
+            .build("127.0.0.1:0", echo_service())?;
 
         let peer2 = Network::builder()
             .with_random_private_key()
             .with_service_name("tycho")
-            .build("127.0.0.1:0")?;
+            .build("127.0.0.1:0", echo_service())?;
 
         let peer3 = Network::builder()
             .with_random_private_key()
             .with_service_name("not-tycho")
-            .build("127.0.0.1:0")?;
+            .build("127.0.0.1:0", echo_service())?;
 
         assert!(peer1.connect(peer2.local_addr()).await.is_ok());
         assert!(peer2.connect(peer1.local_addr()).await.is_ok());

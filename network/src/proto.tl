@@ -7,31 +7,147 @@ int256 8*[ int ] = Int256;
 ---types---
 
 /**
-* @param id    hash of the TL repr of the full key (@see transport.id.Full)
-*/
-transport.id.short id:int256 = transport.id.Short;
-
-/**
 * @param key   compressed ed25519 verifying key
 */
-transport.id.full.ed25519 key:int256 = transport.id.Full;
+transport.peerId key:int256 = transport.PeerId;
 
 transport.address.ipv4 ip:int port:int = transport.Address;
 transport.address.ipv6 ip:int128 port:int = transport.Address;
 
-/**
-* @param items      multiple possible addresses for the same peer
-* @param version    unix timestamp when the list was generated
-* @param created_at unix timestamp when the peer was started
-* @param expire_at  unix timestamp up to which this list is valid
-*/
-transport.addressList
-    items:(vector transport.Address)
-    version:int
-    created_at:int
-    expire_at:int
-    = transport.AddressList;
+// DHT
+////////////////////////////////////////////////////////////////////////////////
 
-transport.message.notify data:bytes = transport.Message;
-transport.message.query data:bytes = transport.Message;
-transport.message.answer data:bytes = transport.Message;
+---types---
+
+/**
+* @param id         node public key
+* @param addr_list  multiple possible addresses for the same peer
+* @param created_at unix timestamp when the info was generated
+* @param expires_at unix timestamp up to which the info is valid
+* @param signature  a ed25519 signature of the info
+*/
+dht.node
+    id:transport.PeerId
+    addr_list:(vector transport.Address)
+    created_at:int
+    expires_at:int
+    signature:bytes
+    = dht.Node;
+
+/**
+* @param nodes list of DHT nodes
+*/
+dht.nodes nodes:(vector dht.node) = dht.Nodes;
+
+
+/**
+* Key for the value that can only be updated by an owner
+*
+* @param name       key name enum
+* @param peer_id    owner id
+*/
+dht.peerValueKey
+    name:dht.PeerValueKeyName
+    peer_id:transport.PeerId
+    = dht.Key;
+
+/**
+* Key for the overlay-managed value
+*
+* @param name       key name enum
+* @param overlay_id overlay id
+*/
+dht.overlayValueKey
+    name:dht.OverlayValueKeyName
+    overlay_id:int256
+    = dht.Key;
+
+// Peer value key names {
+dht.peerValueKeyName.nodeInfo = dht.PeerValueKeyName;
+// }
+
+// Overlay value key names {
+dht.overlayValueKeyName.peersList = dht.OverlayValueKeyName;
+// }
+
+/**
+* A value with an exact owner
+*
+* @param key        peer value key
+* @param value      any data
+* @param expires_at unix timestamp up to which this value is valid
+*/
+dht.peerValue key:dht.peerValueKey data:bytes expires_at:int signature:bytes = dht.Value;
+
+/**
+* An overlay-managed value
+*
+* @param key        overlay key
+* @param value      any data
+* @param expires_at unix timestamp up to which this value is valid
+*/
+dht.overlayValue key:dht.overlayValueKey data:bytes expires_at:int = dht.Value;
+
+
+/**
+* A response for the `dht.findNode` query
+*
+* @param value  a list of nodes with the shortest distances
+*/
+dht.nodesFound nodes:dht.nodes = dht.NodeResponse;
+
+
+/**
+* A successful response for the `dht.findValue` query
+*
+* @param value  an existing value
+*/
+dht.valueFound value:dht.Value = dht.ValueResponse;
+/**
+* An unsuccessul response for the `dht.findValue` query
+*
+* @param value  a list of nodes with the shortest distances
+*/
+dht.valueNotFound nodes:dht.nodes = dht.ValueResponse;
+
+
+/*
+* A response for the `dht.getNodeInfo` query
+*
+* @param info   a signed node info
+*/
+dht.nodeInfoFound info:dht.node = dht.NodeInfoResponse;
+
+---functions---
+
+/**
+* Query wrapper with an announced peer info.
+*
+* @param peer_info  a signed info of the sender
+*/
+dht.withPeerInfo peer_info:dht.node = True;
+
+/**
+* Suggest a node to store that value
+*
+* @param value  value to store
+*/
+dht.store value:dht.Value = True;
+/**
+* Searches for k closest nodes
+*
+* @param key    key hash
+* @param k      max length of the result list
+*/
+dht.findNode key:int256 k:int = dht.NodeResponse;
+/**
+* Searches for a value if stored or k closest nodes
+*
+* @param key    key hash
+* @param k      max length of the nodes list if it is not found
+*/
+dht.findValue key:int256 k:int = dht.ValueResponse;
+/**
+* Requests a signed node info
+*/
+dht.getNodeInfo = dht.NodeInfoResponse;

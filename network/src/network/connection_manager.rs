@@ -1,4 +1,3 @@
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -7,23 +6,26 @@ use ahash::HashMap;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
+use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::config::Config;
-use crate::connection::Connection;
-use crate::endpoint::{Connecting, Endpoint};
+use crate::network::config::NetworkConfig;
+use crate::network::connection::Connection;
+use crate::network::endpoint::{Connecting, Endpoint};
+use crate::network::request_handler::InboundRequestHandler;
+use crate::network::wire::handshake;
 use crate::types::{
-    Direction, DisconnectReason, FastDashMap, FastHashMap, PeerAffinity, PeerEvent, PeerId,
-    PeerInfo,
+    Address, BoxCloneService, Direction, DisconnectReason, PeerAffinity, PeerEvent, PeerId,
+    PeerInfo, Response, ServiceRequest,
 };
 
 #[derive(Debug)]
-pub enum ConnectionManagerRequest {
-    Connect(SocketAddr, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
+pub(crate) enum ConnectionManagerRequest {
+    Connect(Address, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
     Shutdown(oneshot::Sender<()>),
 }
 
-pub struct ConnectionManager {
-    config: Arc<Config>,
+pub(crate) struct ConnectionManager {
+    config: Arc<NetworkConfig>,
     endpoint: Arc<Endpoint>,
 
     mailbox: mpsc::Receiver<ConnectionManagerRequest>,
@@ -36,20 +38,23 @@ pub struct ConnectionManager {
 
     active_peers: ActivePeers,
     known_peers: KnownPeers,
+
+    service: BoxCloneService<ServiceRequest, Response>,
 }
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
-        self.endpoint.close()
+        self.endpoint.close();
     }
 }
 
 impl ConnectionManager {
     pub fn new(
-        config: Arc<Config>,
+        config: Arc<NetworkConfig>,
         endpoint: Arc<Endpoint>,
         active_peers: ActivePeers,
         known_peers: KnownPeers,
+        service: BoxCloneService<ServiceRequest, Response>,
     ) -> (Self, mpsc::Sender<ConnectionManagerRequest>) {
         let (mailbox_tx, mailbox) = mpsc::channel(config.connection_manager_channel_capacity);
         let connection_manager = Self {
@@ -62,11 +67,11 @@ impl ConnectionManager {
             dial_backoff_states: Default::default(),
             active_peers,
             known_peers,
+            service,
         };
         (connection_manager, mailbox_tx)
     }
 
-    #[tracing::instrument(skip_all, fields(local_id = %self.endpoint.peer_id()))]
     pub async fn start(mut self) {
         tracing::info!("connection manager started");
 
@@ -175,56 +180,60 @@ impl ConnectionManager {
             .0
             .iter()
             .filter(|item| {
-                let peer_info = item.value();
-                peer_info.affinity == PeerAffinity::High
-                    && &peer_info.peer_id != self.endpoint.peer_id()
-                    && !self.active_peers.contains(&peer_info.peer_id)
-                    && !self.pending_dials.contains_key(&peer_info.peer_id)
+                let KnownPeer {
+                    peer_info,
+                    affinity,
+                } = item.value();
+
+                *affinity == PeerAffinity::High
+                    && &peer_info.id != self.endpoint.peer_id()
+                    && !self.active_peers.contains(&peer_info.id)
+                    && !self.pending_dials.contains_key(&peer_info.id)
                     && self
                         .dial_backoff_states
-                        .get(&peer_info.peer_id)
-                        .map(|state| now > state.next_attempt_at)
-                        .unwrap_or(true)
+                        .get(&peer_info.id)
+                        .map_or(true, |state| now > state.next_attempt_at)
             })
             .take(outstanding_connections_limit)
-            .map(|item| item.value().clone())
+            .map(|item| item.value().peer_info.clone())
             .collect::<Vec<_>>();
 
         for peer_info in outstanding_connections {
+            // TODO: handle multiple addresses
+            let address = peer_info
+                .iter_addresses()
+                .next()
+                .cloned()
+                .expect("address list must have at least one item");
+
             let (tx, rx) = oneshot::channel();
-            self.dial_peer(peer_info.address, Some(peer_info.peer_id), tx);
-            self.pending_dials.insert(peer_info.peer_id, rx);
+            self.dial_peer(address, Some(peer_info.id), tx);
+            self.pending_dials.insert(peer_info.id, rx);
         }
     }
 
     fn handle_connect_request(
         &mut self,
-        address: SocketAddr,
+        address: Address,
         peer_id: Option<PeerId>,
         callback: oneshot::Sender<Result<PeerId>>,
     ) {
-        self.dial_peer(address, peer_id, callback)
+        self.dial_peer(address, peer_id, callback);
     }
 
     fn handle_incoming(&mut self, connecting: Connecting) {
         async fn handle_incoming_task(
             connecting: Connecting,
-            config: Arc<Config>,
+            config: Arc<NetworkConfig>,
             active_peers: ActivePeers,
             known_peers: KnownPeers,
         ) -> ConnectingOutput {
             let fut = async {
                 let connection = connecting.await?;
 
-                match known_peers.get(connection.peer_id()) {
-                    Some(PeerInfo {
-                        affinity: PeerAffinity::High | PeerAffinity::Allowed,
-                        ..
-                    }) => {}
-                    Some(PeerInfo {
-                        affinity: PeerAffinity::Never,
-                        ..
-                    }) => {
+                match known_peers.get_affinity(connection.peer_id()) {
+                    Some(PeerAffinity::High | PeerAffinity::Allowed) => {}
+                    Some(PeerAffinity::Never) => {
                         anyhow::bail!(
                             "rejecting connection from peer {} due to PeerAffinity::Never",
                             connection.peer_id(),
@@ -241,7 +250,7 @@ impl ConnectionManager {
                     }
                 }
 
-                crate::proto::handshake(connection).await
+                handshake(connection).await
             };
 
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
@@ -292,27 +301,33 @@ impl ConnectionManager {
 
     fn add_peer(&mut self, connection: Connection) {
         if let Some(connection) = self.active_peers.add(self.endpoint.peer_id(), connection) {
-            // TODO: spawn request handler
+            let handler = InboundRequestHandler::new(
+                self.config.clone(),
+                connection,
+                self.service.clone(),
+                self.active_peers.clone(),
+            );
+            self.connection_handlers.spawn(handler.start());
         }
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(peer_id = ?peer_id, address = %address))]
     fn dial_peer(
         &mut self,
-        address: SocketAddr,
+        address: Address,
         peer_id: Option<PeerId>,
         callback: oneshot::Sender<Result<PeerId>>,
     ) {
         async fn dial_peer_task(
             connecting: Result<Connecting>,
-            address: SocketAddr,
+            address: Address,
             peer_id: Option<PeerId>,
             callback: oneshot::Sender<Result<PeerId>>,
-            config: Arc<Config>,
+            config: Arc<NetworkConfig>,
         ) -> ConnectingOutput {
             let fut = async {
                 let connection = connecting?.await?;
-                crate::proto::handshake(connection).await
+                handshake(connection).await
             };
 
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
@@ -328,13 +343,14 @@ impl ConnectionManager {
             }
         }
 
+        let target_address = address.clone();
         let connecting = match peer_id {
             None => self.endpoint.connect(address),
             Some(peer_id) => self.endpoint.connect_with_expected_id(address, peer_id),
         };
         self.pending_connections.spawn(dial_peer_task(
             connecting,
-            address,
+            target_address,
             peer_id,
             callback,
             self.config.clone(),
@@ -345,7 +361,7 @@ impl ConnectionManager {
 struct ConnectingOutput {
     connecting_result: Result<Connection>,
     callback: Option<oneshot::Sender<Result<PeerId>>>,
-    target_address: Option<SocketAddr>,
+    target_address: Option<Address>,
     target_peer_id: Option<PeerId>,
 }
 
@@ -396,7 +412,7 @@ impl ActivePeers {
     }
 
     pub fn remove(&self, peer_id: &PeerId, reason: DisconnectReason) {
-        self.0.remove(peer_id, reason)
+        self.0.remove(peer_id, reason);
     }
 
     pub fn remove_with_stable_id(
@@ -405,7 +421,11 @@ impl ActivePeers {
         stable_id: usize,
         reason: DisconnectReason,
     ) {
-        self.0.remove_with_stable_id(peer_id, stable_id, reason)
+        self.0.remove_with_stable_id(peer_id, stable_id, reason);
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        self.0.subscribe()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -508,6 +528,10 @@ impl ActivePeersInner {
         }
     }
 
+    fn subscribe(&self) -> broadcast::Receiver<PeerEvent> {
+        self.events_tx.subscribe()
+    }
+
     fn send_event(&self, event: PeerEvent) {
         _ = self.events_tx.send(event);
     }
@@ -537,22 +561,60 @@ fn simultaneous_dial_tie_breaking(
 }
 
 #[derive(Default, Clone)]
-pub struct KnownPeers(Arc<FastDashMap<PeerId, PeerInfo>>);
+pub struct KnownPeers(Arc<FastDashMap<PeerId, KnownPeer>>);
 
 impl KnownPeers {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn get(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        self.0.contains_key(peer_id)
+    }
+
+    pub fn get(&self, peer_id: &PeerId) -> Option<KnownPeer> {
         self.0.get(peer_id).map(|item| item.value().clone())
     }
 
-    pub fn insert(&self, peer_info: PeerInfo) -> Option<PeerInfo> {
-        self.0.insert(peer_info.peer_id, peer_info)
+    pub fn get_affinity(&self, peer_id: &PeerId) -> Option<PeerAffinity> {
+        self.0.get(peer_id).map(|item| item.value().affinity)
     }
 
-    pub fn remove(&self, peer_id: &PeerId) -> Option<PeerInfo> {
+    pub fn insert(&self, peer_info: Arc<PeerInfo>, affinity: PeerAffinity) -> Option<KnownPeer> {
+        match self.0.entry(peer_info.id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(KnownPeer {
+                    peer_info,
+                    affinity,
+                });
+                None
+            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                if entry.get().peer_info.created_at >= peer_info.created_at {
+                    return None;
+                }
+
+                let affinity = match affinity {
+                    PeerAffinity::High | PeerAffinity::Never => affinity,
+                    PeerAffinity::Allowed => entry.get().affinity,
+                };
+
+                let (_, old) = entry.replace_entry(KnownPeer {
+                    peer_info,
+                    affinity,
+                });
+                Some(old)
+            }
+        }
+    }
+
+    pub fn remove(&self, peer_id: &PeerId) -> Option<KnownPeer> {
         self.0.remove(peer_id).map(|(_, value)| value)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct KnownPeer {
+    pub peer_info: Arc<PeerInfo>,
+    pub affinity: PeerAffinity,
 }

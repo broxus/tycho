@@ -5,7 +5,7 @@ use pkcs8::EncodePrivateKey;
 
 use crate::types::PeerId;
 
-pub fn generate_cert(
+pub(crate) fn generate_cert(
     keypair: &ed25519::KeypairBytes,
     subject_name: &str,
 ) -> Result<(rustls::Certificate, rustls::PrivateKey)> {
@@ -25,14 +25,14 @@ pub fn generate_cert(
     Ok((rustls::Certificate(cert), key_der))
 }
 
-pub fn peer_id_from_certificate(
+pub(crate) fn peer_id_from_certificate(
     certificate: &rustls::Certificate,
 ) -> Result<PeerId, rustls::Error> {
     use pkcs8::DecodePublicKey;
     use x509_parser::prelude::{FromDer, X509Certificate};
 
     let (_, cert) = X509Certificate::from_der(certificate.0.as_ref())
-        .map_err(|_| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
+        .map_err(|_e| rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding))?;
     let spki = cert.public_key();
     let public_key =
         ed25519::pkcs8::PublicKeyBytes::from_public_key_der(spki.raw).map_err(|e| {
@@ -44,7 +44,7 @@ pub fn peer_id_from_certificate(
     Ok(PeerId(public_key.to_bytes()))
 }
 
-pub struct CertVerifierWithPeerId {
+pub(crate) struct CertVerifierWithPeerId {
     inner: CertVerifier,
     peer_id: PeerId,
 }
@@ -87,7 +87,7 @@ impl rustls::client::ServerCertVerifier for CertVerifierWithPeerId {
 }
 
 /// Verifies self-signed certificates for the specified SNI.
-pub struct CertVerifier {
+pub(crate) struct CertVerifier {
     service_name: String,
 }
 
@@ -118,13 +118,14 @@ impl rustls::server::ClientCertVerifier for CertVerifier {
     ) -> Result<rustls::server::ClientCertVerified, rustls::Error> {
         // Parse the certificate
         let prepared = prepare_for_self_signed(end_entity, intermediates)?;
-        let now = webpki::Time::try_from(now).map_err(|_| rustls::Error::FailedToGetCurrentTime)?;
+        let now =
+            webpki::Time::try_from(now).map_err(|_e| rustls::Error::FailedToGetCurrentTime)?;
 
         // Verify the certificate
         prepared
             .parsed
             .verify_for_usage(
-                SIGNATURE_ALGHORITHMS,
+                SIGNATURE_ALGORITHMS,
                 std::slice::from_ref(&prepared.root),
                 &prepared.intermediates,
                 now,
@@ -173,13 +174,14 @@ impl rustls::client::ServerCertVerifier for CertVerifier {
 
         // Parse the certificate
         let prepared = prepare_for_self_signed(end_entity, intermediates)?;
-        let now = webpki::Time::try_from(now).map_err(|_| rustls::Error::FailedToGetCurrentTime)?;
+        let now =
+            webpki::Time::try_from(now).map_err(|_e| rustls::Error::FailedToGetCurrentTime)?;
 
         // Verify the certificate
         prepared
             .parsed
             .verify_for_usage(
-                SIGNATURE_ALGHORITHMS,
+                SIGNATURE_ALGORITHMS,
                 std::slice::from_ref(&prepared.root),
                 &prepared.intermediates,
                 now,
@@ -255,4 +257,4 @@ struct InvalidCertificatePublicKey(pkcs8::spki::Error);
 #[error("certificate peer id mismatch")]
 struct CertificatePeerIdMismatch;
 
-static SIGNATURE_ALGHORITHMS: &[&webpki::SignatureAlgorithm] = &[&webpki::ED25519];
+static SIGNATURE_ALGORITHMS: &[&webpki::SignatureAlgorithm] = &[&webpki::ED25519];

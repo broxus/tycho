@@ -5,6 +5,11 @@ members = ["consensus", "core", "network", "storage", "util", "collator"]
 [profile.release]
 debug = true
 
+[patch.crates-io]
+# NOTE: use crates.io dependency when it is released
+# https://github.com/sagebind/castaway/issues/18
+castaway = { git = "https://github.com/sagebind/castaway.git" }
+
 [workspace.lints.rust]
 future_incompatible = "warn"
 nonstandard_style = "warn"

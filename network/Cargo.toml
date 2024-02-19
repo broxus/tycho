@@ -5,18 +5,26 @@ edition = "2021"
 description = "A peer-to-peer networking library."
 include = ["src/**/*.rs", "src/**/*.tl"]
 
+[[example]]
+name = "network-node"
+path = "examples/network_node.rs"
+
 [dependencies]
 # crates.io deps
 ahash = "0.8"
 anyhow = "1.0"
-bytes = "1.0"
+base64 = "0.21"
+bytes = { version = "1.0", features = ["serde"] }
+castaway = "0.2"
 dashmap = "5.4"
 ed25519 = { version = "2.0", features = ["alloc", "pkcs8"] }
+everscale-crypto = { version = "0.2", features = ["tl-proto"] }
 futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
+moka = { version = "0.12", features = ["sync"] }
 pin-project-lite = "0.2"
 pkcs8 = "0.10"
-quinn = { version = "0.10", features = ["runtime-tokio", "tls-rustls"] }
+quinn = { version = "0.10", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
 rand = "0.8"
 rcgen = "0.11"
 ring = "0.16"
@@ -35,7 +43,10 @@ x509-parser = "0.15"
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [dev-dependencies]
+argh = "0.1"
+serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
 
 [lints]

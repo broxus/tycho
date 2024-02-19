@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 
-use crate::config::EndpointConfig;
-use crate::connection::Connection;
-use crate::types::{Direction, PeerId};
+use crate::network::config::EndpointConfig;
+use crate::network::connection::Connection;
+use crate::types::{Address, Direction, PeerId};
 
-pub struct Endpoint {
+pub(crate) struct Endpoint {
     inner: quinn::Endpoint,
     local_addr: RwLock<SocketAddr>,
     config: EndpointConfig,
@@ -73,14 +73,14 @@ impl Endpoint {
     }
 
     /// Connect to a remote endpoint using the endpoint configuration.
-    pub fn connect(&self, address: SocketAddr) -> Result<Connecting> {
+    pub fn connect(&self, address: Address) -> Result<Connecting> {
         self.connect_with_client_config(self.config.quinn_client_config.clone(), address)
     }
 
     /// Connect to a remote endpoint expecting it to have the provided peer id.
     pub fn connect_with_expected_id(
         &self,
-        address: SocketAddr,
+        address: Address,
         peer_id: PeerId,
     ) -> Result<Connecting> {
         let config = self.config.make_client_config_for_peer_id(peer_id)?;
@@ -91,8 +91,10 @@ impl Endpoint {
     fn connect_with_client_config(
         &self,
         config: quinn::ClientConfig,
-        address: SocketAddr,
+        address: Address,
     ) -> Result<Connecting> {
+        let address = address.resolve()?;
+
         self.inner
             .connect_with(config, address, &self.config.service_name)
             .map_err(Into::into)
@@ -112,7 +114,7 @@ impl Endpoint {
 
 pin_project_lite::pin_project! {
     #[must_use = "futures do nothing unless you `.await` or poll them"]
-    pub struct Accept<'a> {
+    pub(crate) struct Accept<'a> {
         #[pin]
         inner: quinn::Accept<'a>,
     }
@@ -131,7 +133,7 @@ impl<'a> Future for Accept<'a> {
 
 #[derive(Debug)]
 #[must_use = "futures do nothing unless you `.await` or poll them"]
-pub struct Connecting {
+pub(crate) struct Connecting {
     inner: quinn::Connecting,
     origin: Direction,
 }
