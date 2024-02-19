@@ -11,6 +11,8 @@ use anyhow::Result;
 use argh::FromArgs;
 use everscale_crypto::ed25519;
 use serde::{Deserialize, Serialize};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{fmt, EnvFilter, Layer};
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, PeerId, PeerInfo, Router,
 };
@@ -31,14 +33,31 @@ struct App {
 
 impl App {
     async fn run(self) -> Result<()> {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(tracing::Level::INFO.into())
-                    .from_env_lossy(),
-            )
-            .with_ansi(std::io::stdout().is_terminal())
-            .init();
+        let enable_persistent_logs = std::env::var("TYCHO_PERSISTENT_LOGS").is_ok();
+
+        let collector = tracing_subscriber::registry().with(
+            fmt::Layer::new()
+                .with_ansi(std::io::stdout().is_terminal())
+                .compact()
+                .with_writer(std::io::stdout)
+                .with_filter(EnvFilter::from_default_env()),
+        );
+
+        if enable_persistent_logs {
+            let file_appender = tracing_appender::rolling::hourly("logs", "tycho-network");
+            let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+            let collector = collector.with(
+                fmt::Layer::new()
+                    .with_ansi(false)
+                    .compact()
+                    .with_writer(non_blocking)
+                    .with_filter(EnvFilter::new("trace")), //todo: update with needed crates
+            );
+            tracing::subscriber::set_global_default(collector)?;
+        } else {
+            tracing::subscriber::set_global_default(collector)?;
+        };
 
         match self.cmd {
             Cmd::Run(cmd) => cmd.run().await,

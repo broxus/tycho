@@ -1,0 +1,18 @@
+[package]
+name = "network-sim"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.80"
+clap = { version = "4.5.1", features = ["derive"] }
+hex = "0.4.3"
+rand = "0.8.5"
+serde = { version = "1.0.196", features = ["derive"] }
+serde_json = "1.0.113"
+serde_yaml = "0.9.32"
+
+[lints]
+workspace = true
