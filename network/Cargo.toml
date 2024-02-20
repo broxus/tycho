@@ -26,7 +26,7 @@ pin-project-lite = "0.2"
 pkcs8 = "0.10"
 quinn = { version = "0.10", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
 rand = "0.8"
-rcgen = "0.11"
+rcgen = "0.12"
 ring = "0.16"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-webpki = "0.101"
