@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tl_proto::{TlRead, TlWrite};
 
 use crate::types::PeerId;
@@ -33,7 +35,7 @@ pub struct PublicEntry {
 #[tl(boxed, scheme = "proto.tl")]
 pub enum PublicEntriesResponse {
     #[tl(id = "overlay.publicEntries")]
-    PublicEntries(#[tl(with = "tl::VecWithMaxLen::<20>")] Vec<PublicEntry>),
+    PublicEntries(#[tl(with = "tl::VecWithMaxLen::<20>")] Vec<Arc<PublicEntry>>),
     #[tl(id = "overlay.overlayNotFound")]
     OverlayNotFound,
 }
@@ -50,7 +52,7 @@ pub mod rpc {
         pub overlay_id: [u8; 32],
         /// A list of public overlay entries.
         #[tl(with = "tl::VecWithMaxLen::<20>")]
-        pub entries: Vec<PublicEntry>,
+        pub entries: Vec<Arc<PublicEntry>>,
     }
 
     /// Overlay query/message prefix with an overlay id.

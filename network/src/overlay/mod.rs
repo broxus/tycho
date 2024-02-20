@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::Buf;
 use tl_proto::{TlError, TlRead};
 use tycho_util::futures::BoxFutureOrNoop;
-use tycho_util::FastDashMap;
+use tycho_util::{FastDashMap, FastHashSet};
 
 use crate::proto::overlay::{rpc, PublicEntriesResponse};
 use crate::types::{PeerId, Response, Service, ServiceRequest};
@@ -22,9 +22,7 @@ pub struct OverlayServiceBuilder {
 
 impl OverlayServiceBuilder {
     pub fn with_public_overlay(self, overlay: PublicOverlay) -> Self {
-        let prev = self
-            .public_overlays
-            .insert(overlay.overlay_id().clone(), overlay);
+        let prev = self.public_overlays.insert(*overlay.overlay_id(), overlay);
         if let Some(prev) = prev {
             panic!("overlay with id {} already exists", prev.overlay_id());
         }
@@ -89,7 +87,7 @@ impl Service<ServiceRequest> for OverlayService {
                     };
                     tracing::debug!("exchange_random_public_entries");
 
-                    let res = self.0.handle_exchange_public_entires(&req);
+                    let res = self.0.handle_exchange_public_entries(&req);
                     return BoxFutureOrNoop::future(futures_util::future::ready(Some(
                         Response::from_tl(res),
                     )));
@@ -194,18 +192,44 @@ impl OverlayServiceInner {
         // TODO
     }
 
-    fn handle_exchange_public_entires(
+    fn handle_exchange_public_entries(
         &self,
         req: &rpc::ExchangeRandomPublicEntries,
     ) -> PublicEntriesResponse {
+        // NOTE: validation is done in the TL parser.
+        debug_assert!(req.entries.len() <= 20);
+
+        // Find the overlay
         let overlay = match self.public_overlays.get(&req.overlay_id) {
             Some(overlay) => overlay,
             None => return PublicEntriesResponse::OverlayNotFound,
         };
 
-        overlay.add_entires(&req.entries);
+        // TODO: skip adding entires past the limit
+        // Add proposed entries to the overlay
+        overlay.add_entries(&req.entries);
 
-        // TODO: get random entries
-        PublicEntriesResponse::PublicEntries(Vec::new())
+        // Collect proposed entries to exclude from the response
+        let requested_ids = req
+            .entries
+            .iter()
+            .map(|id| id.peer_id)
+            .collect::<FastHashSet<_>>();
+
+        let entries = {
+            let entries = overlay.read_entries();
+
+            // Choose 2x random entries to ensure we have enough new entires to send back
+            // TODO: use response size limit from the config
+            entries
+                .choose_multiple(&mut rand::thread_rng(), requested_ids.len() * 2)
+                .filter_map(|entry| {
+                    let is_new = !requested_ids.contains(&entry.peer_id);
+                    is_new.then(|| entry.clone())
+                })
+                .collect::<Vec<_>>()
+        };
+
+        PublicEntriesResponse::PublicEntries(entries)
     }
 }
