@@ -29,7 +29,7 @@ rand = "0.8"
 rcgen = "0.11"
 ring = "0.16"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
-rustls-webpki = "0.101"
+rustls-webpki = "0.102"
 serde = "1.0"
 socket2 = "0.5"
 thiserror = "1"
