@@ -18,11 +18,13 @@ pub use quinn;
 
 mod dht;
 mod network;
+mod overlay;
 mod types;
 mod util;
 
 pub mod proto {
     pub mod dht;
+    pub mod overlay;
 }
 
 #[doc(hidden)]

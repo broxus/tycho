@@ -151,3 +151,61 @@ dht.findValue key:int256 k:int = dht.ValueResponse;
 * Requests a signed node info
 */
 dht.getNodeInfo = dht.NodeInfoResponse;
+
+// Overlay
+////////////////////////////////////////////////////////////////////////////////
+
+---types---
+
+/**
+* A data to sign for `overlay.publicEntry`.
+*
+* @param overlay_id     public overlay id
+* @param peer_id        node public key
+* @param created_at     unix timestamp when the info was generated
+*/
+overlay.publicEntryToSign
+    overlay_id:int256
+    peer_id:transport.PeerId
+    created_at:int
+    = overlay.PublicEntryToSign;
+
+/**
+* A public overlay entry.
+*
+* @param peer_id        node public key
+* @param created_at     unix timestamp when the info was generated
+* @param signature      a signature of the `overlay.PublicEntryToSign` struct (as boxed)
+*/
+overlay.publicEntry
+    peer_id:transport.PeerId
+    created_at:int
+    signature:bytes
+    = overlay.PublicEntry;
+
+/**
+* @param entries    list of public overlay entries.
+*/
+overlay.publicEntries entries:(vector overlay.publicEntry) = overlay.PublicEntriesResponse;
+
+// TODO: add broadcast
+
+---functions---
+
+/**
+* Exchanges random entries of the specified public overlay.
+*
+* @param overlay_id     public overlay id
+* @param entries        list of public overlay entries
+*/
+overlay.exchangeRandomPublicEntries
+    overlay_id:int256
+    entries:(vector overlay.publicEntry)
+    = overlay.PublicEntries;
+
+/**
+* Overlay query/message prefix with an overlay id.
+*
+* @param overlay_id     overlay id
+*/
+overlay.prefix overlay_id:int256 = True;
