@@ -1,7 +1,14 @@
+# syntax=docker/dockerfile:1.2
 FROM rust:1.76-buster as builder
+WORKDIR /build
 COPY . .
-RUN cargo build --release --example network-node
+
+# Use cache mounts for cargo registry and git to speed up builds
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --example network-node
 
 FROM debian:buster-slim
 RUN mkdir /app
-COPY --from=builder /target/release/examples/network-node /app/network-node
+RUN apt update && apt install iproute2 iputils-ping -y && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /build/target/release/examples/network-node /app/network-node
