@@ -1,4 +1,6 @@
-pub use self::overlay::{OverlayService, OverlayServiceBuilder};
+pub use self::overlay::{
+    OverlayId, OverlayService, OverlayServiceBuilder, PublicOverlay, PublicOverlayBuilder,
+};
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
     xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder,
@@ -42,10 +44,18 @@ mod tests {
     #[tokio::test]
     async fn init_works() {
         let keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
+        let peer_id: PeerId = keypair.public_key.into();
 
-        let (dht_client, dht) = DhtService::builder(keypair.public_key.into()).build();
+        let some_overlay = PublicOverlay::builder(rand::random())
+            .build(service_message_fn(|_| futures_util::future::ready(())));
 
-        let router = Router::builder().route(dht).build();
+        let overlay_service = OverlayService::builder(peer_id)
+            .with_public_overlay(some_overlay)
+            .build();
+
+        let (dht_client, dht) = DhtService::builder(peer_id).build();
+
+        let router = Router::builder().route(dht).route(overlay_service).build();
 
         let network = Network::builder()
             .with_random_private_key()

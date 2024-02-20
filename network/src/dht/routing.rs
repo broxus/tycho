@@ -203,9 +203,9 @@ mod tests {
 
     #[test]
     fn buckets_are_sets() {
-        let mut table = RoutingTable::new(PeerId::random());
+        let mut table = RoutingTable::new(rand::random());
 
-        let peer = PeerId::random();
+        let peer = rand::random();
         assert!(table.add(
             make_node(peer),
             MAX_K,
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn sould_not_add_seld() {
-        let local_id = PeerId::random();
+        let local_id = rand::random();
         let mut table = RoutingTable::new(local_id);
 
         assert!(!table.add(
@@ -243,14 +243,14 @@ mod tests {
 
         for _ in 0..k {
             assert!(bucket.insert(
-                make_node(PeerId::random()),
+                make_node(rand::random()),
                 k,
                 &timeout,
                 RoutingTableSource::Trusted
             ));
         }
         assert!(!bucket.insert(
-            make_node(PeerId::random()),
+            make_node(rand::random()),
             k,
             &timeout,
             RoutingTableSource::Trusted

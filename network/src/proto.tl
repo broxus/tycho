@@ -187,6 +187,7 @@ overlay.publicEntry
 * @param entries    list of public overlay entries.
 */
 overlay.publicEntries entries:(vector overlay.publicEntry) = overlay.PublicEntriesResponse;
+overlay.overlayNotFound = overlay.PublicEntriesResponse;
 
 // TODO: add broadcast
 

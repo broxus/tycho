@@ -30,11 +30,12 @@ pub struct PublicEntry {
 
 /// A list of public overlay entries.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, TlRead, TlWrite)]
-#[tl(boxed, id = "overlay.publicEntries", scheme = "proto.tl")]
-pub struct PublicEntries {
-    // TODO: Add size guard.
-    #[tl(with = "tl::VecWithMaxLen::<20>")]
-    pub entries: Vec<PublicEntry>,
+#[tl(boxed, scheme = "proto.tl")]
+pub enum PublicEntriesResponse {
+    #[tl(id = "overlay.publicEntries")]
+    PublicEntries(#[tl(with = "tl::VecWithMaxLen::<20>")] Vec<PublicEntry>),
+    #[tl(id = "overlay.overlayNotFound")]
+    OverlayNotFound,
 }
 
 /// Overlay RPC models.
