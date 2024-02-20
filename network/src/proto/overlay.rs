@@ -33,7 +33,8 @@ pub struct PublicEntry {
 #[tl(boxed, id = "overlay.publicEntries", scheme = "proto.tl")]
 pub struct PublicEntries {
     // TODO: Add size guard.
-    entries: Vec<PublicEntry>,
+    #[tl(with = "tl::VecWithMaxLen::<20>")]
+    pub entries: Vec<PublicEntry>,
 }
 
 /// Overlay RPC models.
@@ -47,6 +48,7 @@ pub mod rpc {
         /// Public overlay id.
         pub overlay_id: [u8; 32],
         /// A list of public overlay entries.
+        #[tl(with = "tl::VecWithMaxLen::<20>")]
         pub entries: Vec<PublicEntry>,
     }
 

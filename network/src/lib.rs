@@ -1,3 +1,4 @@
+pub use self::overlay::{OverlayService, OverlayServiceBuilder};
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
     xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder,

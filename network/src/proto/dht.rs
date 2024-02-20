@@ -310,6 +310,7 @@ impl<'a> TlRead<'a> for ValueRef<'a> {
 #[tl(boxed, id = "dht.nodesFound", scheme = "proto.tl")]
 pub struct NodeResponse {
     /// List of nodes closest to the key.
+    #[tl(with = "tl::VecWithMaxLen::<20>")]
     pub nodes: Vec<Arc<PeerInfo>>,
 }
 
@@ -322,7 +323,7 @@ pub enum ValueResponse {
     Found(Box<Value>),
     /// List of nodes closest to the key.
     #[tl(id = "dht.valueNotFound")]
-    NotFound(Vec<Arc<PeerInfo>>),
+    NotFound(#[tl(with = "tl::VecWithMaxLen::<20>")] Vec<Arc<PeerInfo>>),
 }
 
 /// A response for the [`rpc::FindValue`] query.
