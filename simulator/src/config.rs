@@ -40,7 +40,7 @@ impl ServiceConfig {
     }
 
     pub fn compose_path(&self) -> PathBuf {
-        self.scratch_dir.join("docker-compose.yml")
+        self.scratch_dir.join("docker-compose.json")
     }
 
     pub fn entrypoints(&self) -> PathBuf {

@@ -1,10 +1,12 @@
-use crate::config::ServiceConfig;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::config::ServiceConfig;
 
 pub struct ComposeRunner {
     compose_path: PathBuf,
@@ -28,7 +30,7 @@ impl ComposeRunner {
         let compose_path = config.compose_path();
         let compose = std::fs::read_to_string(&compose_path)
             .with_context(|| format!("Failed to read {:?}", &compose_path))?;
-        let compose: DockerCompose = serde_yaml::from_str(&compose)
+        let compose: DockerCompose = serde_json::from_str(&compose)
             .with_context(|| format!("Failed to parse {:?}", &compose_path))?;
         if compose.services.is_empty() {
             anyhow::bail!("No services found in {:?}", &compose_path);
@@ -47,15 +49,15 @@ impl ComposeRunner {
     pub fn finalize(&self) -> Result<()> {
         let file = std::fs::File::create(&self.compose_path)?;
         println!("Writing to {:?}", &self.compose_path);
-        serde_yaml::to_writer(file, &self.compose)?;
+        serde_json::to_writer_pretty(file, &self.compose)?;
 
         Ok(())
     }
 
     /// Executes a Docker Compose command with the given arguments.
     pub fn execute_compose_command<T>(&self, args: &[T]) -> Result<()>
-        where
-            T: AsRef<OsStr>,
+    where
+        T: AsRef<OsStr>,
     {
         let mut command = Command::new("docker");
         let mut command = command.arg("compose").arg("-f").arg(&self.compose_path);

@@ -1,17 +1,19 @@
-use crate::compose::{Service, ServiceNetwork};
-use crate::config::ServiceConfig;
-use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::Command;
 
+use anyhow::{Context, Result};
+
+use crate::compose::{Service, ServiceNetwork};
+use crate::config::ServiceConfig;
+
 pub struct Node {
-    index: usize,
-    ip: Ipv4Addr,
-    port: u16,
-    pub(crate) dht_value: serde_json::Value,
-    key: String,
+    pub index: usize,
+    pub ip: Ipv4Addr,
+    pub port: u16,
+    pub dht_value: serde_json::Value,
+    pub key: String,
 }
 
 impl Node {

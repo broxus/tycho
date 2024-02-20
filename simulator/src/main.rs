@@ -1,18 +1,44 @@
 #![allow(clippy::unused_self)]
 
-use crate::compose::ComposeRunner;
-use crate::simulator::Simulator;
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
 use std::process::Command;
 
-mod compose;
-mod simulator;
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
 
+use crate::compose::ComposeRunner;
+use crate::simulator::Simulator;
+
+mod compose;
 mod config;
 mod node;
+mod simulator;
 
 static DEFAULT_SUBNET: &str = "172.30.0.0/24";
+
+fn main() -> Result<()> {
+    let args: Cli = Cli::parse();
+    test_prerequisites()?;
+    match args.command {
+        Commands::Prepare(a) => a.run(),
+        Commands::Clean(a) => a.run(),
+        Commands::Build(a) => a.run(),
+        Commands::Node(a) => a.run(),
+    }
+}
+
+fn test_prerequisites() -> Result<()> {
+    Command::new("docker")
+        .arg("--version")
+        .output()
+        .context("docker not found")?;
+    Command::new("docker")
+        .arg("compose")
+        .arg("--version")
+        .output()
+        .context("docker-compose not found")?;
+    Command::new("cargo").arg("--version").output()?;
+    Ok(())
+}
 
 #[derive(Parser)]
 struct Cli {
@@ -43,6 +69,8 @@ struct PrepareCommand {
 
 impl PrepareCommand {
     fn run(self) -> Result<()> {
+        CleanCommand { logs: true }.run()?;
+
         let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
         let mut sim = Simulator::new(config)?;
         sim.prepare(self.nodes)?;
@@ -201,30 +229,5 @@ struct NodeExecCommand {
 impl NodeExecCommand {
     fn run(self, compose: ComposeRunner) -> Result<()> {
         compose.exec_command(self.node_index, &self.cmd, self.args)
-    }
-}
-
-fn test_prerequisites() -> Result<()> {
-    Command::new("docker")
-        .arg("--version")
-        .output()
-        .context("docker not found")?;
-    Command::new("docker")
-        .arg("compose")
-        .arg("--version")
-        .output()
-        .context("docker-compose not found")?;
-    Command::new("cargo").arg("--version").output()?;
-    Ok(())
-}
-
-fn main() -> Result<()> {
-    let args: Cli = Cli::parse();
-    test_prerequisites()?;
-    match args.command {
-        Commands::Prepare(a) => a.run(),
-        Commands::Clean(a) => a.run(),
-        Commands::Build(a) => a.run(),
-        Commands::Node(a) => a.run(),
     }
 }

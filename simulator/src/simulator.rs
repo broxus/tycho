@@ -1,10 +1,12 @@
+use std::net::Ipv4Addr;
+use std::os::unix::fs::PermissionsExt;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
 use crate::compose::ComposeRunner;
 use crate::config::ServiceConfig;
 use crate::node::Node;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
-use std::os::unix::fs::PermissionsExt;
 
 pub(crate) struct Simulator {
     config: ServiceConfig,
@@ -117,11 +119,11 @@ impl GlobalConfig {
 fn generate_entrypoint(params: String) -> String {
     format!(
         r#"#!/bin/bash
-    export RUST_LOG="info,tycho_network=trace"
-    export TYCHO_PERSISTENT_LOGS=true
-    cd /app
-    /app/network-node {params}
-    "#
+export RUST_LOG="info,tycho_network=trace"
+export TYCHO_PERSISTENT_LOGS=true
+cd /app
+/app/network-node {params}
+"#
     )
 }
 
