@@ -36,6 +36,10 @@ fn test_prerequisites() -> Result<()> {
         .arg("--version")
         .output()
         .context("docker-compose not found")?;
+    Command::new("docker")
+        .arg("buildx")
+        .arg("--version")
+        .output()?;
     Command::new("cargo").arg("--version").output()?;
     Ok(())
 }
