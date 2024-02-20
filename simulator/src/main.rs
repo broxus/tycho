@@ -69,7 +69,7 @@ struct PrepareCommand {
 
 impl PrepareCommand {
     fn run(self) -> Result<()> {
-        CleanCommand { logs: true }.run()?;
+        CleanCommand { logs: true }.run().ok();
 
         let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
         let mut sim = Simulator::new(config)?;
