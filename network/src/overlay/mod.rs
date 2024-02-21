@@ -9,18 +9,26 @@ use crate::proto::overlay::{rpc, PublicEntriesResponse};
 use crate::types::{PeerId, Response, Service, ServiceRequest};
 use crate::util::Routable;
 
+pub use self::config::OverlayConfig;
 pub use self::overlay_id::OverlayId;
 pub use self::public_overlay::{PublicOverlay, PublicOverlayBuilder};
 
+mod config;
 mod overlay_id;
 mod public_overlay;
 
 pub struct OverlayServiceBuilder {
     local_id: PeerId,
+    config: Option<OverlayConfig>,
     public_overlays: FastDashMap<OverlayId, PublicOverlay>,
 }
 
 impl OverlayServiceBuilder {
+    pub fn with_config(mut self, config: OverlayConfig) -> Self {
+        self.config = Some(config);
+        self
+    }
+
     pub fn with_public_overlay(self, overlay: PublicOverlay) -> Self {
         let prev = self.public_overlays.insert(*overlay.overlay_id(), overlay);
         if let Some(prev) = prev {
@@ -30,8 +38,11 @@ impl OverlayServiceBuilder {
     }
 
     pub fn build(self) -> OverlayService {
+        let config = self.config.unwrap_or_default();
+
         let inner = Arc::new(OverlayServiceInner {
             local_id: self.local_id,
+            config,
             public_overlays: self.public_overlays,
         });
 
@@ -47,6 +58,7 @@ impl OverlayService {
     pub fn builder(local_id: PeerId) -> OverlayServiceBuilder {
         OverlayServiceBuilder {
             local_id,
+            config: None,
             public_overlays: Default::default(),
         }
     }
@@ -184,6 +196,7 @@ impl Routable for OverlayService {
 
 struct OverlayServiceInner {
     local_id: PeerId,
+    config: OverlayConfig,
     public_overlays: FastDashMap<OverlayId, PublicOverlay>,
 }
 
@@ -205,9 +218,8 @@ impl OverlayServiceInner {
             None => return PublicEntriesResponse::OverlayNotFound,
         };
 
-        // TODO: skip adding entires past the limit
         // Add proposed entries to the overlay
-        overlay.add_entries(&req.entries);
+        overlay.add_untrusted_entries(&req.entries);
 
         // Collect proposed entries to exclude from the response
         let requested_ids = req
@@ -219,14 +231,15 @@ impl OverlayServiceInner {
         let entries = {
             let entries = overlay.read_entries();
 
-            // Choose 2x random entries to ensure we have enough new entires to send back
-            // TODO: use response size limit from the config
+            // Choose additional random entries to ensure we have enough new entires to send back
+            let n = self.config.exchanged_peer_response_len;
             entries
-                .choose_multiple(&mut rand::thread_rng(), requested_ids.len() * 2)
+                .choose_multiple(&mut rand::thread_rng(), n + requested_ids.len())
                 .filter_map(|entry| {
                     let is_new = !requested_ids.contains(&entry.peer_id);
                     is_new.then(|| entry.clone())
                 })
+                .take(n)
                 .collect::<Vec<_>>()
         };
 

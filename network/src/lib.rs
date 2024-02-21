@@ -1,5 +1,6 @@
 pub use self::overlay::{
-    OverlayId, OverlayService, OverlayServiceBuilder, PublicOverlay, PublicOverlayBuilder,
+    OverlayConfig, OverlayId, OverlayService, OverlayServiceBuilder, PublicOverlay,
+    PublicOverlayBuilder,
 };
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{

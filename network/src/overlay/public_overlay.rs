@@ -1,4 +1,5 @@
 use std::collections::hash_map;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -12,9 +13,20 @@ use crate::types::{BoxService, PeerId, Response, Service, ServiceExt, ServiceReq
 
 pub struct PublicOverlayBuilder {
     overlay_id: OverlayId,
+    min_capacity: usize,
 }
 
 impl PublicOverlayBuilder {
+    /// Minimum capacity for public overlay.
+    /// Public overlay will use suggested peers from untrusted sources to fill the overlay
+    /// until it reaches this capacity.
+    ///
+    /// Default: 100.
+    pub fn with_min_capacity(mut self, min_capacity: usize) -> Self {
+        self.min_capacity = min_capacity;
+        self
+    }
+
     pub fn build<S>(self, service: S) -> PublicOverlay
     where
         S: Send + Sync + 'static,
@@ -22,7 +34,9 @@ impl PublicOverlayBuilder {
     {
         PublicOverlay {
             overlay_id: self.overlay_id,
+            min_capacity: self.min_capacity,
             entries: RwLock::new(Default::default()),
+            entry_count: AtomicUsize::new(0),
             service: service.boxed(),
         }
     }
@@ -30,13 +44,18 @@ impl PublicOverlayBuilder {
 
 pub struct PublicOverlay {
     overlay_id: OverlayId,
+    min_capacity: usize,
     entries: RwLock<PublicOverlayEntries>,
+    entry_count: AtomicUsize,
     service: BoxService<ServiceRequest, Response>,
 }
 
 impl PublicOverlay {
     pub fn builder(overlay_id: OverlayId) -> PublicOverlayBuilder {
-        PublicOverlayBuilder { overlay_id }
+        PublicOverlayBuilder {
+            overlay_id,
+            min_capacity: 100,
+        }
     }
 
     #[inline]
@@ -49,14 +68,40 @@ impl PublicOverlay {
         &self.service
     }
 
-    // TODO: fail entire insert if any entry fails to verify?
     /// Adds the given entries to the overlay.
-    pub fn add_entries(&self, entries: &[Arc<PublicEntry>]) {
+    pub fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>]) {
+        if entries.is_empty() {
+            return;
+        }
+
+        // Check if we can add more entries to the overlay and optimistically
+        // increase the entry count. (if no other thread has already done so).
+        let to_add = entries.len();
+        let mut entry_count = self.entry_count.load(Ordering::Acquire);
+        let to_add = loop {
+            let to_add = match self.min_capacity.checked_sub(entry_count) {
+                Some(capacity) if capacity > 0 => std::cmp::min(to_add, capacity),
+                _ => return,
+            };
+
+            let res = self.entry_count.compare_exchange_weak(
+                entry_count,
+                entry_count + to_add,
+                Ordering::Release,
+                Ordering::Acquire,
+            );
+            match res {
+                Ok(_) => break to_add,
+                Err(n) => entry_count = n,
+            }
+        };
+
+        // Prepare validation state
         let mut is_valid = vec![false; entries.len()];
-        let mut has_valid = false;
+        let mut valid_count = 0;
 
         // First pass: verify all entries
-        for (i, entry) in entries.iter().enumerate() {
+        for (entry, is_valid) in std::iter::zip(entries, is_valid.iter_mut()) {
             let Some(pubkey) = entry.peer_id.as_public_key() else {
                 continue;
             };
@@ -72,8 +117,12 @@ impl PublicOverlay {
                 continue;
             }
 
-            is_valid[i] = true;
-            has_valid = true;
+            *is_valid = true;
+            valid_count += 1;
+
+            if valid_count >= to_add {
+                break;
+            }
         }
 
         // Second pass: insert all valid entries (if any)
@@ -81,13 +130,19 @@ impl PublicOverlay {
         // NOTE: two passes are necessary because public key parsing and
         // signature verification can be expensive and we want to avoid
         // holding the lock for too long.
-        if has_valid {
+        if valid_count > 0 {
             let mut stored = self.entries.write();
-            for (i, entry) in entries.iter().enumerate() {
-                if is_valid[i] {
+            for (entry, is_valid) in std::iter::zip(entries, is_valid) {
+                if is_valid {
                     stored.insert(entry);
                 }
             }
+        }
+
+        // Rollback entries that were not valid and not inserted
+        if valid_count < to_add {
+            self.entry_count
+                .fetch_sub(to_add - valid_count, Ordering::Release);
         }
     }
 
@@ -168,5 +223,176 @@ impl PublicOverlayEntriesReadGuard<'_> {
         R: Rng + ?Sized,
     {
         self.entries.data.choose_multiple(rng, n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use everscale_crypto::ed25519;
+    use tycho_util::time::now_sec;
+
+    use super::*;
+
+    fn generate_public_entry(overlay: &PublicOverlay, now: u32) -> Arc<PublicEntry> {
+        let keypair = ed25519::KeyPair::generate(&mut rand::thread_rng());
+        let peer_id: PeerId = keypair.public_key.into();
+        let signature = keypair.sign(crate::proto::overlay::PublicEntryToSign {
+            overlay_id: overlay.overlay_id.as_bytes(),
+            peer_id: &peer_id,
+            created_at: now,
+        });
+        Arc::new(PublicEntry {
+            peer_id,
+            created_at: now,
+            signature: Box::new(signature),
+        })
+    }
+
+    fn generate_invalid_public_entry(now: u32) -> Arc<PublicEntry> {
+        let keypair = ed25519::KeyPair::generate(&mut rand::thread_rng());
+        let peer_id: PeerId = keypair.public_key.into();
+        Arc::new(PublicEntry {
+            peer_id,
+            created_at: now,
+            signature: Box::new([0; 64]),
+        })
+    }
+
+    fn generate_public_entries(
+        overlay: &PublicOverlay,
+        now: u32,
+        n: usize,
+    ) -> Vec<Arc<PublicEntry>> {
+        (0..n)
+            .map(|_| generate_public_entry(overlay, now))
+            .collect()
+    }
+
+    fn count_entries(overlay: &PublicOverlay) -> usize {
+        let tracked_count = overlay.entry_count.load(Ordering::Acquire);
+        let guard = overlay.read_entries();
+        assert_eq!(
+            guard.entries.data.len(),
+            guard.entries.peer_id_to_index.len(),
+        );
+        assert_eq!(guard.entries.data.len(), tracked_count);
+        tracked_count
+    }
+
+    fn make_overlay_with_min_capacity(min_capacity: usize) -> PublicOverlay {
+        PublicOverlay::builder(rand::random())
+            .with_min_capacity(min_capacity)
+            .build(crate::service_query_fn(|_| {
+                futures_util::future::ready(None)
+            }))
+    }
+
+    #[test]
+    fn min_capacity_works_with_single_thread() {
+        let now = now_sec();
+
+        // Add with small portions
+        {
+            let overlay = make_overlay_with_min_capacity(10);
+            let entries = generate_public_entries(&overlay, now, 10);
+
+            overlay.add_untrusted_entries(&entries[..5]);
+            assert_eq!(count_entries(&overlay), 5);
+
+            overlay.add_untrusted_entries(&entries[5..]);
+            assert_eq!(count_entries(&overlay), 10);
+        }
+
+        // Add exact
+        {
+            let overlay = make_overlay_with_min_capacity(10);
+            let entries = generate_public_entries(&overlay, now, 10);
+            overlay.add_untrusted_entries(&entries);
+            assert_eq!(count_entries(&overlay), 10);
+        }
+
+        // Add once but too much
+        {
+            let overlay = make_overlay_with_min_capacity(10);
+            let entries = generate_public_entries(&overlay, now, 20);
+            overlay.add_untrusted_entries(&entries);
+            assert_eq!(count_entries(&overlay), 10);
+        }
+
+        // Add once but zero capacity
+        {
+            let overlay = make_overlay_with_min_capacity(0);
+            let entries = generate_public_entries(&overlay, now, 10);
+            overlay.add_untrusted_entries(&entries);
+            assert_eq!(count_entries(&overlay), 0);
+        }
+
+        // Add all invalid entries
+        {
+            let overlay = make_overlay_with_min_capacity(10);
+            let entries = (0..10)
+                .map(|_| generate_invalid_public_entry(now))
+                .collect::<Vec<_>>();
+            overlay.add_untrusted_entries(&entries);
+            assert_eq!(count_entries(&overlay), 0);
+        }
+
+        // Add mixed invalid entries
+        {
+            let overlay = make_overlay_with_min_capacity(10);
+            let entries = [
+                generate_invalid_public_entry(now),
+                generate_public_entry(&overlay, now),
+                generate_invalid_public_entry(now),
+                generate_public_entry(&overlay, now),
+                generate_invalid_public_entry(now),
+                generate_public_entry(&overlay, now),
+                generate_invalid_public_entry(now),
+                generate_public_entry(&overlay, now),
+                generate_invalid_public_entry(now),
+                generate_public_entry(&overlay, now),
+            ];
+            overlay.add_untrusted_entries(&entries);
+            assert_eq!(count_entries(&overlay), 5);
+        }
+
+        // Add mixed invalid entries on edge
+        {
+            let overlay = make_overlay_with_min_capacity(3);
+            let entries = [
+                generate_invalid_public_entry(now),
+                generate_invalid_public_entry(now),
+                generate_invalid_public_entry(now),
+                generate_invalid_public_entry(now),
+                generate_invalid_public_entry(now),
+                generate_public_entry(&overlay, now),
+                generate_public_entry(&overlay, now),
+                generate_public_entry(&overlay, now),
+                generate_public_entry(&overlay, now),
+                generate_public_entry(&overlay, now),
+            ];
+            overlay.add_untrusted_entries(&entries);
+            assert_eq!(count_entries(&overlay), 3);
+        }
+    }
+
+    #[test]
+    fn min_capacity_works_with_multi_thread() {
+        let now = now_sec();
+
+        let overlay = make_overlay_with_min_capacity(201);
+        let entries = generate_public_entries(&overlay, now, 7 * 3 * 10);
+
+        std::thread::scope(|s| {
+            for entries in entries.chunks_exact(7 * 3) {
+                s.spawn(|| {
+                    for entries in entries.chunks_exact(7) {
+                        overlay.add_untrusted_entries(entries);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(count_entries(&overlay), 201);
     }
 }
