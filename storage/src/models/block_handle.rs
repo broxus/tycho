@@ -1,8 +1,3 @@
-// This file is a modified copy of the file from https://github.com/tonlabs/ton-labs-node
-//
-// Changes:
-// - replaced old `failure` crate with `anyhow`
-// - moved all flags to meta
 use std::sync::{Arc, Weak};
 
 use anyhow::Result;
@@ -10,7 +5,7 @@ use everscale_types::models::*;
 use tokio::sync::RwLock;
 
 use super::BlockMeta;
-use tycho_block_util::FastDashMap;
+use tycho_util::FastDashMap;
 
 pub struct BlockHandle {
     id: BlockId,

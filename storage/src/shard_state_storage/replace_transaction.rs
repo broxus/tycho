@@ -9,7 +9,9 @@ use super::entries_buffer::*;
 use super::files_context::*;
 use super::shard_state_reader::*;
 use crate::db::*;
+
 use tycho_block_util::*;
+use tycho_util::FastHashMap;
 
 pub struct ShardStateReplaceTransaction<'a> {
     db: &'a Db,
@@ -231,7 +233,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
     fn finalize_cell(
         &self,
-        ctx: &mut FinalizationContext,
+        ctx: &mut FinalizationContext<'_>,
         cell_index: u32,
         mut cell: RawCell<'_>,
     ) -> Result<()> {

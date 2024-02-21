@@ -19,7 +19,7 @@ smallvec = "1.13.1"
 sha2 = "0.10.8"
 
 tycho-block-util = { path = "../block-util" }
-tycho-constansts = { path = "../constansts" }
+tycho-util = { path = "../util" }
 
 dashmap = "5.5.3"
 bumpalo = "3.14.0"

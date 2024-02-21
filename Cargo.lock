@@ -2177,10 +2177,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tycho-constansts"
-version = "0.1.0"
-
-[[package]]
 name = "tycho-core"
 version = "0.0.1"
 dependencies = [
@@ -2272,7 +2268,7 @@ dependencies = [
  "tracing",
  "triomphe",
  "tycho-block-util",
- "tycho-constansts",
+ "tycho-util",
  "weedb",
 ]
 

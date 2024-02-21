@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use smallvec::SmallVec;
 
 use crate::db::Db;
-use tycho_block_util::FastHashMap;
+use tycho_util::FastHashMap;
 
 pub struct CellWriter<'a> {
     db: &'a Db,

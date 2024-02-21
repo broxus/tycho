@@ -11,7 +11,8 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 
 use crate::db::*;
-use tycho_block_util::{CacheStats, FastDashMap, FastHashMap, FastHasherState};
+use tycho_block_util::{CacheStats};
+use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 
 pub struct CellStorage {
     db: Arc<Db>,

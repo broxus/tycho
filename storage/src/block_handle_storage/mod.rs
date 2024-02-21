@@ -1,8 +1,3 @@
-// This file is a modified copy of the file from https://github.com/tonlabs/ton-labs-node
-//
-// Changes:
-// - replaced old `failure` crate with `anyhow`
-// - simplified storing
 use std::sync::{Arc, Weak};
 
 use anyhow::Result;
@@ -10,7 +5,9 @@ use everscale_types::models::*;
 
 use super::models::*;
 use crate::db::*;
+
 use tycho_block_util::*;
+use tycho_util::FastDashMap;
 
 pub struct BlockHandleStorage {
     db: Arc<Db>,
