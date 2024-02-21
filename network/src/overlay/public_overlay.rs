@@ -2,14 +2,18 @@ use std::collections::hash_map;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use anyhow::Result;
+use bytes::{Bytes, BytesMut};
 use parking_lot::{RwLock, RwLockReadGuard};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use tycho_util::FastHashMap;
 
+use crate::network::Network;
 use crate::overlay::OverlayId;
-use crate::proto::overlay::{PublicEntry, PublicEntryToSign};
-use crate::types::{BoxService, PeerId, Response, Service, ServiceExt, ServiceRequest};
+use crate::proto::overlay::{rpc, PublicEntry, PublicEntryToSign};
+use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
+use crate::util::NetworkExt;
 
 pub struct PublicOverlayBuilder {
     overlay_id: OverlayId,
@@ -32,12 +36,17 @@ impl PublicOverlayBuilder {
         S: Send + Sync + 'static,
         S: Service<ServiceRequest, QueryResponse = Response>,
     {
+        let request_prefix = tl_proto::serialize(rpc::Prefix {
+            overlay_id: self.overlay_id.as_bytes(),
+        });
+
         PublicOverlay {
             overlay_id: self.overlay_id,
             min_capacity: self.min_capacity,
             entries: RwLock::new(Default::default()),
             entry_count: AtomicUsize::new(0),
             service: service.boxed(),
+            request_prefix: request_prefix.into_boxed_slice(),
         }
     }
 }
@@ -48,6 +57,7 @@ pub struct PublicOverlay {
     entries: RwLock<PublicOverlayEntries>,
     entry_count: AtomicUsize,
     service: BoxService<ServiceRequest, Response>,
+    request_prefix: Box<[u8]>,
 }
 
 impl PublicOverlay {
@@ -66,6 +76,26 @@ impl PublicOverlay {
     #[inline]
     pub fn service(&self) -> &BoxService<ServiceRequest, Response> {
         &self.service
+    }
+
+    pub async fn query(
+        &self,
+        network: &Network,
+        peer_id: &PeerId,
+        mut request: Request,
+    ) -> Result<Response> {
+        self.prepend_prefix_to_body(&mut request.body);
+        network.query(peer_id, request).await
+    }
+
+    pub async fn send(
+        &self,
+        network: &Network,
+        peer_id: &PeerId,
+        mut request: Request,
+    ) -> Result<()> {
+        self.prepend_prefix_to_body(&mut request.body);
+        network.send(peer_id, request).await
     }
 
     /// Adds the given entries to the overlay.
@@ -153,6 +183,14 @@ impl PublicOverlay {
             entries: self.entries.read(),
         }
     }
+
+    fn prepend_prefix_to_body(&self, body: &mut Bytes) {
+        // TODO: reduce allocations
+        let mut res = BytesMut::with_capacity(self.request_prefix.len() + body.len());
+        res.extend_from_slice(&self.request_prefix);
+        res.extend_from_slice(body);
+        *body = res.freeze();
+    }
 }
 
 #[derive(Default)]
@@ -212,7 +250,16 @@ pub(crate) struct PublicOverlayEntriesReadGuard<'a> {
 }
 
 impl PublicOverlayEntriesReadGuard<'_> {
-    /// Chooses `n` entires from the set, without repetition,
+    /// Returns a reference to one random element of the slice,
+    /// or `None` if the slice is empty.
+    pub fn choose<R>(&self, rng: &mut R) -> Option<&Arc<PublicEntry>>
+    where
+        R: Rng + ?Sized,
+    {
+        self.entries.data.choose(rng)
+    }
+
+    /// Chooses `n` entries from the set, without repetition,
     /// and in random order.
     pub fn choose_multiple<R>(
         &self,

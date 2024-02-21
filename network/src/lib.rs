@@ -50,7 +50,7 @@ mod tests {
         let some_overlay = PublicOverlay::builder(rand::random())
             .build(service_message_fn(|_| futures_util::future::ready(())));
 
-        let overlay_service = OverlayService::builder(peer_id)
+        let (overlay_tasks, overlay_service) = OverlayService::builder(peer_id)
             .with_public_overlay(some_overlay)
             .build();
 
@@ -64,6 +64,7 @@ mod tests {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        let _dht_client = dht_client.build(network);
+        let _dht_client = dht_client.build(network.clone());
+        overlay_tasks.spawn(network);
     }
 }
