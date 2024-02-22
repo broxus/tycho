@@ -164,6 +164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.77"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c980ee35e870bd1a4d2c8294d4c04d0499e67bca1e4b5cefcc693c2fa00caea9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.48",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -431,6 +442,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
+name = "crc32c"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89254598aa9b9fa608de44b3ae54c810f0f06d755e24c50177f1f8f31ff50ce2"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -605,6 +625,38 @@ dependencies = [
  "rand",
  "sha2",
  "tl-proto",
+]
+
+[[package]]
+name = "everscale-types"
+version = "0.1.0-rc.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff3c058b07bdb5414da10bc8a2489715e31b0c3f4274a213c1a23831e9d94e91"
+dependencies = [
+ "ahash",
+ "base64",
+ "bitflags 2.4.2",
+ "crc32c",
+ "everscale-crypto",
+ "everscale-types-proc",
+ "hex",
+ "once_cell",
+ "serde",
+ "sha2",
+ "smallvec",
+ "thiserror",
+ "tl-proto",
+]
+
+[[package]]
+name = "everscale-types-proc"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "323d8b61c76be2c16eb2d72d007f1542fdeb3760fdf2e2cae219fc0da3db0c09"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.48",
 ]
 
 [[package]]
@@ -1974,6 +2026,11 @@ dependencies = [
 name = "tycho-core"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "everscale-types",
+ "futures-util",
+ "tracing",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
