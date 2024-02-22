@@ -74,7 +74,7 @@ impl BlockStorage {
             .block_handle_storage
             .create_or_load_handle(block_id, meta_data)?;
 
-        let archive_id = PackageEntryId::Block(block_id);
+        let archive_id = ArchiveEntryId::Block(block_id);
         let mut updated = false;
         if !handle.meta().has_data() {
             let data = block.new_archive_data()?;
@@ -105,7 +105,7 @@ impl BlockStorage {
         if !handle.meta().has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
-        self.get_data(handle, &PackageEntryId::Block(handle.id()))
+        self.get_data(handle, &ArchiveEntryId::Block(handle.id()))
             .await
     }
 
@@ -116,7 +116,7 @@ impl BlockStorage {
         if !handle.meta().has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
-        self.get_data_ref(handle, &PackageEntryId::Block(handle.id()))
+        self.get_data_ref(handle, &ArchiveEntryId::Block(handle.id()))
             .await
     }
 
@@ -139,7 +139,7 @@ impl BlockStorage {
 
         let mut updated = false;
         if proof.is_link() {
-            let archive_id = PackageEntryId::ProofLink(block_id);
+            let archive_id = ArchiveEntryId::ProofLink(block_id);
             if !handle.meta().has_proof_link() {
                 let data = proof.new_archive_data()?;
 
@@ -153,7 +153,7 @@ impl BlockStorage {
                 }
             }
         } else {
-            let archive_id = PackageEntryId::Proof(block_id);
+            let archive_id = ArchiveEntryId::Proof(block_id);
             if !handle.meta().has_proof() {
                 let data = proof.new_archive_data()?;
 
@@ -191,12 +191,12 @@ impl BlockStorage {
     ) -> Result<Vec<u8>> {
         let (archive_id, exists) = if is_link {
             (
-                PackageEntryId::ProofLink(handle.id()),
+                ArchiveEntryId::ProofLink(handle.id()),
                 handle.meta().has_proof_link(),
             )
         } else {
             (
-                PackageEntryId::Proof(handle.id()),
+                ArchiveEntryId::Proof(handle.id()),
                 handle.meta().has_proof(),
             )
         };
@@ -215,12 +215,12 @@ impl BlockStorage {
     ) -> Result<impl AsRef<[u8]> + 'a> {
         let (archive_id, exists) = if is_link {
             (
-                PackageEntryId::ProofLink(handle.id()),
+                ArchiveEntryId::ProofLink(handle.id()),
                 handle.meta().has_proof_link(),
             )
         } else {
             (
-                PackageEntryId::Proof(handle.id()),
+                ArchiveEntryId::Proof(handle.id()),
                 handle.meta().has_proof(),
             )
         };
@@ -250,7 +250,7 @@ impl BlockStorage {
         let block_data = if has_data {
             let lock = handle.block_data_lock().write().await;
 
-            let entry_id = PackageEntryId::Block(block_id);
+            let entry_id = ArchiveEntryId::Block(block_id);
             let data = self.make_archive_segment(&entry_id)?;
 
             Some((lock, data))
@@ -262,9 +262,9 @@ impl BlockStorage {
             let lock = handle.proof_data_lock().write().await;
 
             let entry_id = if is_link {
-                PackageEntryId::ProofLink(block_id)
+                ArchiveEntryId::ProofLink(block_id)
             } else {
-                PackageEntryId::Proof(block_id)
+                ArchiveEntryId::Proof(block_id)
             };
             let data = self.make_archive_segment(&entry_id)?;
 
@@ -337,7 +337,7 @@ impl BlockStorage {
         batch.merge_cf(
             &archives_cf,
             archive_id_bytes,
-            make_archive_segment(&PackageEntryId::Block(handle.id()).filename(), block_data),
+            make_archive_segment(&ArchiveEntryId::Block(handle.id()).filename(), block_data),
         );
 
         batch.merge_cf(
@@ -345,9 +345,9 @@ impl BlockStorage {
             archive_id_bytes,
             make_archive_segment(
                 &if is_link {
-                    PackageEntryId::ProofLink(block_id)
+                    ArchiveEntryId::ProofLink(block_id)
                 } else {
-                    PackageEntryId::Proof(block_id)
+                    ArchiveEntryId::Proof(block_id)
                 }
                 .filename(),
                 block_proof_data,
@@ -564,7 +564,7 @@ impl BlockStorage {
         Ok(())
     }
 
-    fn add_data<I>(&self, id: &PackageEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
+    fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
     where
         I: Borrow<BlockId> + Hash,
     {
@@ -572,20 +572,20 @@ impl BlockStorage {
     }
 
     #[allow(dead_code)]
-    fn has_data<I>(&self, id: &PackageEntryId<I>) -> Result<bool, rocksdb::Error>
+    fn has_data<I>(&self, id: &ArchiveEntryId<I>) -> Result<bool, rocksdb::Error>
     where
         I: Borrow<BlockId> + Hash,
     {
         self.db.package_entries.contains_key(id.to_vec())
     }
 
-    async fn get_data<I>(&self, handle: &BlockHandle, id: &PackageEntryId<I>) -> Result<Vec<u8>>
+    async fn get_data<I>(&self, handle: &BlockHandle, id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
     where
         I: Borrow<BlockId> + Hash,
     {
         let _lock = match &id {
-            PackageEntryId::Block(_) => handle.block_data_lock().read().await,
-            PackageEntryId::Proof(_) | PackageEntryId::ProofLink(_) => {
+            ArchiveEntryId::Block(_) => handle.block_data_lock().read().await,
+            ArchiveEntryId::Proof(_) | ArchiveEntryId::ProofLink(_) => {
                 handle.proof_data_lock().read().await
             }
         };
@@ -599,14 +599,14 @@ impl BlockStorage {
     async fn get_data_ref<'a, I>(
         &'a self,
         handle: &'a BlockHandle,
-        id: &PackageEntryId<I>,
+        id: &ArchiveEntryId<I>,
     ) -> Result<impl AsRef<[u8]> + 'a>
     where
         I: Borrow<BlockId> + Hash,
     {
         let lock = match id {
-            PackageEntryId::Block(_) => handle.block_data_lock().read().await,
-            PackageEntryId::Proof(_) | PackageEntryId::ProofLink(_) => {
+            ArchiveEntryId::Block(_) => handle.block_data_lock().read().await,
+            ArchiveEntryId::Proof(_) | ArchiveEntryId::ProofLink(_) => {
                 handle.proof_data_lock().read().await
             }
         };
@@ -646,7 +646,7 @@ impl BlockStorage {
         archive_id
     }
 
-    fn make_archive_segment<I>(&self, entry_id: &PackageEntryId<I>) -> Result<Vec<u8>>
+    fn make_archive_segment<I>(&self, entry_id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
     where
         I: Borrow<BlockId> + Hash,
     {
