@@ -9,7 +9,12 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-# crates.io deps
+async-trait = "0.1.77"
+anyhow = "1.0.80"
+everscale-types = "0.1.0-rc.6"
+tracing = "0.1.40"
+futures-util = "0.3.30"
+
 
 # local deps
 tycho-network = { workspace = true }

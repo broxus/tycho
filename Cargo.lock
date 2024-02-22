@@ -139,6 +139,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-trait"
+version = "0.1.77"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c980ee35e870bd1a4d2c8294d4c04d0499e67bca1e4b5cefcc693c2fa00caea9"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.50",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2165,6 +2176,11 @@ dependencies = [
 name = "tycho-core"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "async-trait",
+ "everscale-types",
+ "futures-util",
+ "tracing",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
