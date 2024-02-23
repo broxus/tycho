@@ -1,11 +1,13 @@
 use std::borrow::Borrow;
 use std::collections::hash_map;
+use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rand::seq::SliceRandom;
 use rand::Rng;
+use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::network::Network;
@@ -48,19 +50,19 @@ impl PrivateOverlayBuilder {
         }
 
         PrivateOverlay {
-            overlay_id: self.overlay_id,
-            entries: RwLock::new(entries),
-            service: service.boxed(),
-            request_prefix: request_prefix.into_boxed_slice(),
+            inner: Arc::new(Inner {
+                overlay_id: self.overlay_id,
+                entries: RwLock::new(entries),
+                service: service.boxed(),
+                request_prefix: request_prefix.into_boxed_slice(),
+            }),
         }
     }
 }
 
+#[derive(Clone)]
 pub struct PrivateOverlay {
-    overlay_id: OverlayId,
-    entries: RwLock<PrivateOverlayEntries>,
-    service: BoxService<ServiceRequest, Response>,
-    request_prefix: Box<[u8]>,
+    inner: Arc<Inner>,
 }
 
 impl PrivateOverlay {
@@ -73,12 +75,7 @@ impl PrivateOverlay {
 
     #[inline]
     pub fn overlay_id(&self) -> &OverlayId {
-        &self.overlay_id
-    }
-
-    #[inline]
-    pub fn service(&self) -> &BoxService<ServiceRequest, Response> {
-        &self.service
+        &self.inner.overlay_id
     }
 
     pub async fn query(
@@ -103,23 +100,54 @@ impl PrivateOverlay {
 
     pub fn write_entries(&self) -> PrivateOverlayEntriesWriteGuard<'_> {
         PrivateOverlayEntriesWriteGuard {
-            entries: self.entries.write(),
+            entries: self.inner.entries.write(),
         }
     }
 
     pub fn read_entries(&self) -> PrivateOverlayEntriesReadGuard<'_> {
         PrivateOverlayEntriesReadGuard {
-            entries: self.entries.read(),
+            entries: self.inner.entries.read(),
+        }
+    }
+
+    pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
+        if self.inner.entries.read().contains(&req.metadata.peer_id) {
+            BoxFutureOrNoop::future(self.inner.service.on_query(req))
+        } else {
+            BoxFutureOrNoop::Noop
+        }
+    }
+
+    pub(crate) fn handle_message(&self, req: ServiceRequest) -> BoxFutureOrNoop<()> {
+        if self.inner.entries.read().contains(&req.metadata.peer_id) {
+            BoxFutureOrNoop::future(self.inner.service.on_message(req))
+        } else {
+            BoxFutureOrNoop::Noop
         }
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
         // TODO: reduce allocations
-        let mut res = BytesMut::with_capacity(self.request_prefix.len() + body.len());
-        res.extend_from_slice(&self.request_prefix);
+        let mut res = BytesMut::with_capacity(self.inner.request_prefix.len() + body.len());
+        res.extend_from_slice(&self.inner.request_prefix);
         res.extend_from_slice(body);
         *body = res.freeze();
     }
+}
+
+impl std::fmt::Debug for PrivateOverlay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrivateOverlay")
+            .field("overlay_id", &self.inner.overlay_id)
+            .finish()
+    }
+}
+
+struct Inner {
+    overlay_id: OverlayId,
+    entries: RwLock<PrivateOverlayEntries>,
+    service: BoxService<ServiceRequest, Response>,
+    request_prefix: Box<[u8]>,
 }
 
 pub struct PrivateOverlayEntries {
@@ -147,6 +175,11 @@ impl PrivateOverlayEntries {
         R: Rng + ?Sized,
     {
         self.data.choose_multiple(rng, n)
+    }
+
+    /// Returns true if the set contains the specified peer id.
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        self.peer_id_to_index.contains_key(peer_id)
     }
 
     /// Adds a peer id to the set.

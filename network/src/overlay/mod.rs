@@ -122,11 +122,11 @@ impl OverlayService {
         }
     }
 
-    pub fn try_add_private_overlay(&self, overlay: PrivateOverlay) -> Result<(), PrivateOverlay> {
+    pub fn try_add_private_overlay(&self, overlay: &PrivateOverlay) -> bool {
         self.0.try_add_private_overlay(overlay)
     }
 
-    pub fn try_add_public_overlay(&self, overlay: PublicOverlay) -> Result<(), PublicOverlay> {
+    pub fn try_add_public_overlay(&self, overlay: &PublicOverlay) -> bool {
         self.0.try_add_public_overlay(overlay)
     }
 }
@@ -181,10 +181,10 @@ impl Service<ServiceRequest> for OverlayService {
 
             if let Some(private_overlay) = self.0.private_overlays.get(overlay_id) {
                 req.body.advance(offset);
-                return BoxFutureOrNoop::future(private_overlay.service().on_query(req));
+                return private_overlay.handle_query(req);
             } else if let Some(public_overlay) = self.0.public_overlays.get(overlay_id) {
                 req.body.advance(offset);
-                return BoxFutureOrNoop::future(public_overlay.service().on_query(req));
+                return public_overlay.handle_query(req);
             }
 
             tracing::debug!(
@@ -230,10 +230,10 @@ impl Service<ServiceRequest> for OverlayService {
 
             if let Some(private_overlay) = self.0.private_overlays.get(overlay_id) {
                 req.body.advance(offset);
-                return BoxFutureOrNoop::future(private_overlay.service().on_message(req));
+                return private_overlay.handle_message(req);
             } else if let Some(public_overlay) = self.0.public_overlays.get(overlay_id) {
                 req.body.advance(offset);
-                return BoxFutureOrNoop::future(public_overlay.service().on_message(req));
+                return public_overlay.handle_message(req);
             }
 
             tracing::debug!(
@@ -464,34 +464,34 @@ impl OverlayServiceInner {
         }
     }
 
-    pub fn try_add_private_overlay(&self, overlay: PrivateOverlay) -> Result<(), PrivateOverlay> {
+    pub fn try_add_private_overlay(&self, overlay: &PrivateOverlay) -> bool {
         use dashmap::mapref::entry::Entry;
 
         if self.public_overlays.contains_key(overlay.overlay_id()) {
-            return Err(overlay);
+            return false;
         }
         match self.private_overlays.entry(*overlay.overlay_id()) {
             Entry::Vacant(entry) => {
-                entry.insert(overlay);
-                Ok(())
+                entry.insert(overlay.clone());
+                true
             }
-            Entry::Occupied(_) => Err(overlay),
+            Entry::Occupied(_) => false,
         }
     }
 
-    pub fn try_add_public_overlay(&self, overlay: PublicOverlay) -> Result<(), PublicOverlay> {
+    pub fn try_add_public_overlay(&self, overlay: &PublicOverlay) -> bool {
         use dashmap::mapref::entry::Entry;
 
         if self.private_overlays.contains_key(overlay.overlay_id()) {
-            return Err(overlay);
+            return false;
         }
         match self.public_overlays.entry(*overlay.overlay_id()) {
             Entry::Vacant(entry) => {
-                entry.insert(overlay);
+                entry.insert(overlay.clone());
                 self.public_overlays_changed.notify_waiters();
-                Ok(())
+                true
             }
-            Entry::Occupied(_) => Err(overlay),
+            Entry::Occupied(_) => false,
         }
     }
 

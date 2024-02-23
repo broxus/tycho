@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::collections::hash_map;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -7,7 +8,8 @@ use bytes::{Bytes, BytesMut};
 use parking_lot::{RwLock, RwLockReadGuard};
 use rand::seq::SliceRandom;
 use rand::Rng;
-use tycho_util::FastHashMap;
+use tycho_util::futures::BoxFutureOrNoop;
+use tycho_util::{FastDashSet, FastHashMap};
 
 use crate::network::Network;
 use crate::overlay::OverlayId;
@@ -18,6 +20,7 @@ use crate::util::NetworkExt;
 pub struct PublicOverlayBuilder {
     overlay_id: OverlayId,
     min_capacity: usize,
+    banned_peer_ids: FastDashSet<PeerId>,
 }
 
 impl PublicOverlayBuilder {
@@ -31,6 +34,16 @@ impl PublicOverlayBuilder {
         self
     }
 
+    pub fn with_banned_peers<I>(mut self, banned_peers: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Borrow<PeerId>,
+    {
+        self.banned_peer_ids
+            .extend(banned_peers.into_iter().map(|id| *id.borrow()));
+        self
+    }
+
     pub fn build<S>(self, service: S) -> PublicOverlay
     where
         S: Send + Sync + 'static,
@@ -41,26 +54,23 @@ impl PublicOverlayBuilder {
         });
 
         PublicOverlay {
-            overlay_id: self.overlay_id,
-            min_capacity: self.min_capacity,
-            entries: RwLock::new(PublicOverlayEntries {
-                peer_id_to_index: Default::default(),
-                data: Default::default(),
+            inner: Arc::new(Inner {
+                overlay_id: self.overlay_id,
+                min_capacity: self.min_capacity,
+                entries: RwLock::new(Default::default()),
+                entry_count: AtomicUsize::new(0),
+                banned_peer_ids: self.banned_peer_ids,
+                service: service.boxed(),
+                request_prefix: request_prefix.into_boxed_slice(),
             }),
-            entry_count: AtomicUsize::new(0),
-            service: service.boxed(),
-            request_prefix: request_prefix.into_boxed_slice(),
         }
     }
 }
 
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct PublicOverlay {
-    overlay_id: OverlayId,
-    min_capacity: usize,
-    entries: RwLock<PublicOverlayEntries>,
-    entry_count: AtomicUsize,
-    service: BoxService<ServiceRequest, Response>,
-    request_prefix: Box<[u8]>,
+    inner: Arc<Inner>,
 }
 
 impl PublicOverlay {
@@ -68,17 +78,13 @@ impl PublicOverlay {
         PublicOverlayBuilder {
             overlay_id,
             min_capacity: 100,
+            banned_peer_ids: Default::default(),
         }
     }
 
     #[inline]
     pub fn overlay_id(&self) -> &OverlayId {
-        &self.overlay_id
-    }
-
-    #[inline]
-    pub fn service(&self) -> &BoxService<ServiceRequest, Response> {
-        &self.service
+        &self.inner.overlay_id
     }
 
     pub async fn query(
@@ -101,9 +107,41 @@ impl PublicOverlay {
         network.send(peer_id, request).await
     }
 
+    /// Bans the given peer from the overlay.
+    ///
+    /// Returns `true` if the peer was not already banned.
+    pub fn ban_peer(&self, peer_id: PeerId) -> bool {
+        self.inner.banned_peer_ids.insert(peer_id)
+    }
+
+    /// Unbans the given peer from the overlay.
+    ///
+    /// Returns `true` if the peer was banned.
+    pub fn unban_peer(&self, peer_id: &PeerId) -> bool {
+        self.inner.banned_peer_ids.remove(peer_id).is_some()
+    }
+
     pub fn read_entries(&self) -> PublicOverlayEntriesReadGuard<'_> {
         PublicOverlayEntriesReadGuard {
-            entries: self.entries.read(),
+            entries: self.inner.entries.read(),
+        }
+    }
+
+    pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
+        if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
+            // TODO: add peer from metadata to the overlay
+            BoxFutureOrNoop::future(self.inner.service.on_query(req))
+        } else {
+            BoxFutureOrNoop::Noop
+        }
+    }
+
+    pub(crate) fn handle_message(&self, req: ServiceRequest) -> BoxFutureOrNoop<()> {
+        if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
+            // TODO: add peer from metadata to the overlay
+            BoxFutureOrNoop::future(self.inner.service.on_message(req))
+        } else {
+            BoxFutureOrNoop::Noop
         }
     }
 
@@ -115,17 +153,19 @@ impl PublicOverlay {
             return;
         }
 
+        let this = self.inner.as_ref();
+
         // Check if we can add more entries to the overlay and optimistically
         // increase the entry count. (if no other thread has already done so).
         let to_add = entries.len();
-        let mut entry_count = self.entry_count.load(Ordering::Acquire);
+        let mut entry_count = this.entry_count.load(Ordering::Acquire);
         let to_add = loop {
-            let to_add = match self.min_capacity.checked_sub(entry_count) {
+            let to_add = match this.min_capacity.checked_sub(entry_count) {
                 Some(capacity) if capacity > 0 => std::cmp::min(to_add, capacity),
                 _ => return,
             };
 
-            let res = self.entry_count.compare_exchange_weak(
+            let res = this.entry_count.compare_exchange_weak(
                 entry_count,
                 entry_count + to_add,
                 Ordering::Release,
@@ -149,7 +189,7 @@ impl PublicOverlay {
 
             if !pubkey.verify(
                 PublicEntryToSign {
-                    overlay_id: self.overlay_id.as_bytes(),
+                    overlay_id: this.overlay_id.as_bytes(),
                     peer_id: &entry.peer_id,
                     created_at: entry.created_at,
                 },
@@ -172,7 +212,7 @@ impl PublicOverlay {
         // signature verification can be expensive and we want to avoid
         // holding the lock for too long.
         if valid_count > 0 {
-            let mut stored = self.entries.write();
+            let mut stored = this.entries.write();
             for (entry, is_valid) in std::iter::zip(entries, is_valid) {
                 if is_valid {
                     stored.insert(entry);
@@ -182,20 +222,41 @@ impl PublicOverlay {
 
         // Rollback entries that were not valid and not inserted
         if valid_count < to_add {
-            self.entry_count
+            this.entry_count
                 .fetch_sub(to_add - valid_count, Ordering::Release);
         }
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
+        let this = self.inner.as_ref();
+
         // TODO: reduce allocations
-        let mut res = BytesMut::with_capacity(self.request_prefix.len() + body.len());
-        res.extend_from_slice(&self.request_prefix);
+        let mut res = BytesMut::with_capacity(this.request_prefix.len() + body.len());
+        res.extend_from_slice(&this.request_prefix);
         res.extend_from_slice(body);
         *body = res.freeze();
     }
 }
 
+impl std::fmt::Debug for PublicOverlay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicOverlay")
+            .field("overlay_id", &self.inner.overlay_id)
+            .finish()
+    }
+}
+
+struct Inner {
+    overlay_id: OverlayId,
+    min_capacity: usize,
+    entries: RwLock<PublicOverlayEntries>,
+    entry_count: AtomicUsize,
+    banned_peer_ids: FastDashSet<PeerId>,
+    service: BoxService<ServiceRequest, Response>,
+    request_prefix: Box<[u8]>,
+}
+
+#[derive(Default)]
 pub struct PublicOverlayEntries {
     peer_id_to_index: FastHashMap<PeerId, usize>,
     data: Vec<Arc<PublicEntry>>,
@@ -293,7 +354,7 @@ mod tests {
         let keypair = ed25519::KeyPair::generate(&mut rand::thread_rng());
         let peer_id: PeerId = keypair.public_key.into();
         let signature = keypair.sign(crate::proto::overlay::PublicEntryToSign {
-            overlay_id: overlay.overlay_id.as_bytes(),
+            overlay_id: overlay.overlay_id().as_bytes(),
             peer_id: &peer_id,
             created_at: now,
         });
@@ -325,7 +386,7 @@ mod tests {
     }
 
     fn count_entries(overlay: &PublicOverlay) -> usize {
-        let tracked_count = overlay.entry_count.load(Ordering::Acquire);
+        let tracked_count = overlay.inner.entry_count.load(Ordering::Acquire);
         let guard = overlay.read_entries();
         assert_eq!(
             guard.entries.data.len(),
