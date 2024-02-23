@@ -6,10 +6,10 @@ use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, TlRead, TlWrite)]
 #[repr(transparent)]
-pub struct OverlayId([u8; 32]);
+pub struct OverlayId(pub [u8; 32]);
 
 impl OverlayId {
-    pub fn wrap(bytes: &[u8; 32]) -> &Self {
+    pub const fn wrap(bytes: &[u8; 32]) -> &Self {
         // SAFETY: `[u8; 32]` has the same layout as `OverlayId`.
         unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
     }

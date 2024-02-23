@@ -95,7 +95,7 @@ impl Response {
         }
     }
 
-    pub fn parse_tl<T>(self) -> tl_proto::TlResult<T>
+    pub fn parse_tl<T>(&self) -> tl_proto::TlResult<T>
     where
         for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
@@ -113,6 +113,15 @@ impl AsRef<[u8]> for Response {
 pub struct ServiceRequest {
     pub metadata: Arc<InboundRequestMeta>,
     pub body: Bytes,
+}
+
+impl ServiceRequest {
+    pub fn parse_tl<T>(&self) -> tl_proto::TlResult<T>
+    where
+        for<'a> T: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
+    {
+        tl_proto::deserialize(self.body.as_ref())
+    }
 }
 
 impl AsRef<[u8]> for ServiceRequest {
