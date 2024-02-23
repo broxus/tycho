@@ -5,7 +5,7 @@ pub struct PeerId(pub [u8; 32]);
 impl PeerId {
     pub fn wrap(bytes: &[u8; 32]) -> &Self {
         // SAFETY: `[u8; 32]` has the same layout as `PeerId`.
-        unsafe { &*(bytes as *const [u8; 32] as *const Self) }
+        unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
     }
 }
 

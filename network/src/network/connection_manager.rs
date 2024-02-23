@@ -40,7 +40,7 @@ pub struct ConnectionManager {
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
-        self.endpoint.close()
+        self.endpoint.close();
     }
 }
 
@@ -183,8 +183,7 @@ impl ConnectionManager {
                     && self
                         .dial_backoff_states
                         .get(&peer_info.peer_id)
-                        .map(|state| now > state.next_attempt_at)
-                        .unwrap_or(true)
+                        .map_or(true, |state| now > state.next_attempt_at)
             })
             .take(outstanding_connections_limit)
             .map(|item| item.value().clone())
@@ -203,7 +202,7 @@ impl ConnectionManager {
         peer_id: Option<PeerId>,
         callback: oneshot::Sender<Result<PeerId>>,
     ) {
-        self.dial_peer(address, peer_id, callback)
+        self.dial_peer(address, peer_id, callback);
     }
 
     fn handle_incoming(&mut self, connecting: Connecting) {
@@ -291,7 +290,7 @@ impl ConnectionManager {
     }
 
     fn add_peer(&mut self, connection: Connection) {
-        if let Some(connection) = self.active_peers.add(self.endpoint.peer_id(), connection) {
+        if let Some(_connection) = self.active_peers.add(self.endpoint.peer_id(), connection) {
             // TODO: spawn request handler
         }
     }
@@ -396,7 +395,7 @@ impl ActivePeers {
     }
 
     pub fn remove(&self, peer_id: &PeerId, reason: DisconnectReason) {
-        self.0.remove(peer_id, reason)
+        self.0.remove(peer_id, reason);
     }
 
     pub fn remove_with_stable_id(
@@ -405,7 +404,7 @@ impl ActivePeers {
         stable_id: usize,
         reason: DisconnectReason,
     ) {
-        self.0.remove_with_stable_id(peer_id, stable_id, reason)
+        self.0.remove_with_stable_id(peer_id, stable_id, reason);
     }
 
     pub fn is_empty(&self) -> bool {
