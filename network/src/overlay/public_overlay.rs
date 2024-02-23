@@ -43,7 +43,10 @@ impl PublicOverlayBuilder {
         PublicOverlay {
             overlay_id: self.overlay_id,
             min_capacity: self.min_capacity,
-            entries: RwLock::new(Default::default()),
+            entries: RwLock::new(PublicOverlayEntries {
+                peer_id_to_index: Default::default(),
+                data: Default::default(),
+            }),
             entry_count: AtomicUsize::new(0),
             service: service.boxed(),
             request_prefix: request_prefix.into_boxed_slice(),
@@ -98,8 +101,16 @@ impl PublicOverlay {
         network.send(peer_id, request).await
     }
 
+    pub fn read_entries(&self) -> PublicOverlayEntriesReadGuard<'_> {
+        PublicOverlayEntriesReadGuard {
+            entries: self.entries.read(),
+        }
+    }
+
     /// Adds the given entries to the overlay.
-    pub fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>]) {
+    ///
+    /// NOTE: Will deadlock if called while `PublicOverlayEntriesReadGuard` is held.
+    pub(crate) fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>]) {
         if entries.is_empty() {
             return;
         }
@@ -176,14 +187,6 @@ impl PublicOverlay {
         }
     }
 
-    /// NOTE: WILL CAUSE DEADLOCK if guard will be held while calling
-    /// `add_entries` or similar methods.
-    pub(crate) fn read_entries(&self) -> PublicOverlayEntriesReadGuard<'_> {
-        PublicOverlayEntriesReadGuard {
-            entries: self.entries.read(),
-        }
-    }
-
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
         // TODO: reduce allocations
         let mut res = BytesMut::with_capacity(self.request_prefix.len() + body.len());
@@ -193,13 +196,34 @@ impl PublicOverlay {
     }
 }
 
-#[derive(Default)]
-struct PublicOverlayEntries {
+pub struct PublicOverlayEntries {
     peer_id_to_index: FastHashMap<PeerId, usize>,
     data: Vec<Arc<PublicEntry>>,
 }
 
 impl PublicOverlayEntries {
+    /// Returns a reference to one random element of the slice,
+    /// or `None` if the slice is empty.
+    pub fn choose<R>(&self, rng: &mut R) -> Option<&Arc<PublicEntry>>
+    where
+        R: Rng + ?Sized,
+    {
+        self.data.choose(rng)
+    }
+
+    /// Chooses `n` entries from the set, without repetition,
+    /// and in random order.
+    pub fn choose_multiple<R>(
+        &self,
+        rng: &mut R,
+        n: usize,
+    ) -> rand::seq::SliceChooseIter<'_, [Arc<PublicEntry>], Arc<PublicEntry>>
+    where
+        R: Rng + ?Sized,
+    {
+        self.data.choose_multiple(rng, n)
+    }
+
     fn insert(&mut self, item: &PublicEntry) -> bool {
         match self.peer_id_to_index.entry(item.peer_id) {
             // No entry for the peer_id, insert a new one
@@ -245,31 +269,16 @@ impl PublicOverlayEntries {
     }
 }
 
-pub(crate) struct PublicOverlayEntriesReadGuard<'a> {
+pub struct PublicOverlayEntriesReadGuard<'a> {
     entries: RwLockReadGuard<'a, PublicOverlayEntries>,
 }
 
-impl PublicOverlayEntriesReadGuard<'_> {
-    /// Returns a reference to one random element of the slice,
-    /// or `None` if the slice is empty.
-    pub fn choose<R>(&self, rng: &mut R) -> Option<&Arc<PublicEntry>>
-    where
-        R: Rng + ?Sized,
-    {
-        self.entries.data.choose(rng)
-    }
+impl std::ops::Deref for PublicOverlayEntriesReadGuard<'_> {
+    type Target = PublicOverlayEntries;
 
-    /// Chooses `n` entries from the set, without repetition,
-    /// and in random order.
-    pub fn choose_multiple<R>(
-        &self,
-        rng: &mut R,
-        n: usize,
-    ) -> rand::seq::SliceChooseIter<'_, [Arc<PublicEntry>], Arc<PublicEntry>>
-    where
-        R: Rng + ?Sized,
-    {
-        self.entries.data.choose_multiple(rng, n)
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.entries
     }
 }
 
