@@ -17,6 +17,7 @@ mod models;
 mod node_state_storage;
 mod runtime_storage;
 mod shard_state_storage;
+mod utils;
 
 pub struct Storage {
     file_db_path: PathBuf,

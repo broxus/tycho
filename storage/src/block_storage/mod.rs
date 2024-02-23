@@ -8,12 +8,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use everscale_types::models::*;
 use parking_lot::RwLock;
-
-use super::block_handle_storage::{BlockHandleStorage, HandleCreationStatus};
-use super::models::*;
-use crate::db::*;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::*;
+use tycho_block_util::archive::{
+    make_archive_entry, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier,
+};
+use tycho_block_util::block::{
+    BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
+};
+
+use super::block_handle_storage::*;
+use super::models::*;
+
+use crate::db::*;
+use crate::utils::*;
 
 pub struct BlockStorage {
     db: Arc<Db>,
@@ -35,9 +42,9 @@ impl BlockStorage {
     }
 
     fn preload(&self) -> Result<()> {
-        fn check_archive(value: &[u8]) -> Result<(), ArchivePackageError> {
-            let mut verifier = ArchivePackageVerifier::default();
-            verifier.verify(value)?;
+        fn check_archive(value: &[u8]) -> Result<(), ArchiveReaderError> {
+            let mut verifier = ArchiveVerifier::default();
+            verifier.write_verify(value)?;
             verifier.final_check()
         }
 
@@ -337,13 +344,13 @@ impl BlockStorage {
         batch.merge_cf(
             &archives_cf,
             archive_id_bytes,
-            make_archive_segment(&ArchiveEntryId::Block(handle.id()).filename(), block_data),
+            make_archive_entry(&ArchiveEntryId::Block(handle.id()).filename(), block_data),
         );
 
         batch.merge_cf(
             &archives_cf,
             archive_id_bytes,
-            make_archive_segment(
+            make_archive_entry(
                 &if is_link {
                     ArchiveEntryId::ProofLink(block_id)
                 } else {
@@ -651,7 +658,7 @@ impl BlockStorage {
         I: Borrow<BlockId> + Hash,
     {
         match self.db.package_entries.get(entry_id.to_vec())? {
-            Some(data) => Ok(make_archive_segment(&entry_id.filename(), &data)),
+            Some(data) => Ok(make_archive_entry(&entry_id.filename(), &data)),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
     }

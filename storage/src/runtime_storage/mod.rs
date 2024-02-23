@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 pub use self::persistent_state_keeper::PersistentStateKeeper;
+
 use super::BlockHandleStorage;
 
 mod persistent_state_keeper;

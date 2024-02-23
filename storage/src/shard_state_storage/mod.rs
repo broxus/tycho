@@ -12,9 +12,12 @@ use self::files_context::FilesContext;
 use self::replace_transaction::ShardStateReplaceTransaction;
 use super::{models::BlockHandle, BlockHandleStorage};
 
-use crate::block_storage::BlockStorage;
+use crate::block_storage::*;
 use crate::db::*;
-use tycho_block_util::*;
+use crate::utils::*;
+
+use tycho_block_util::block::*;
+use tycho_block_util::state::*;
 
 mod cell_storage;
 mod cell_writer;
@@ -32,7 +35,7 @@ pub struct ShardStateStorage {
     downloads_dir: Arc<PathBuf>,
 
     gc_lock: tokio::sync::Mutex<()>,
-    min_ref_mc_state: Arc<MinRefMcState>,
+    min_ref_mc_state: Arc<MinRefMcStateTracker>,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
 }
@@ -79,11 +82,12 @@ impl ShardStateStorage {
         }
     }
 
-    pub fn cache_metrics(&self) -> CacheStats {
+    // TODO: implement metrics
+    /*pub fn cache_metrics(&self) -> CacheStats {
         self.cell_storage.cache_stats()
-    }
+    }*/
 
-    pub fn min_ref_mc_state(&self) -> &Arc<MinRefMcState> {
+    pub fn min_ref_mc_state(&self) -> &Arc<MinRefMcStateTracker> {
         &self.min_ref_mc_state
     }
 

@@ -5,7 +5,7 @@ use everscale_types::models::*;
 use parking_lot::Mutex;
 
 use crate::db::*;
-use tycho_block_util::{read_block_id_le, write_block_id_le, StoredValue};
+use crate::utils::*;
 
 pub struct NodeStateStorage {
     db: Arc<Db>,

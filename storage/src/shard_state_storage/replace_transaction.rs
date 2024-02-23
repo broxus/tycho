@@ -9,14 +9,16 @@ use super::entries_buffer::*;
 use super::files_context::*;
 use super::shard_state_reader::*;
 use crate::db::*;
+use crate::utils::*;
 
+use tycho_block_util::state::*;
 use tycho_block_util::*;
 use tycho_util::FastHashMap;
 
 pub struct ShardStateReplaceTransaction<'a> {
     db: &'a Db,
     cell_storage: &'a Arc<CellStorage>,
-    min_ref_mc_state: &'a Arc<MinRefMcState>,
+    min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
     reader: ShardStatePacketReader,
     header: Option<BocHeader>,
     cells_read: u64,
@@ -26,7 +28,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
     pub fn new(
         db: &'a Db,
         cell_storage: &'a Arc<CellStorage>,
-        min_ref_mc_state: &'a Arc<MinRefMcState>,
+        min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
     ) -> Self {
         Self {
             db,

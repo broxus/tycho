@@ -5,9 +5,10 @@ use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use tokio::sync::Notify;
 
+use tycho_block_util::state::*;
+
 use crate::models::{BlockHandle, BriefBlockMeta};
 use crate::BlockHandleStorage;
-use tycho_block_util::*;
 
 pub struct PersistentStateKeeper {
     block_handle_storage: Arc<BlockHandleStorage>,

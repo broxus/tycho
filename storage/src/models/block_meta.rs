@@ -4,13 +4,23 @@ use anyhow::Result;
 use bytes::Buf;
 use everscale_types::models::BlockInfo;
 
-use tycho_block_util::{StoredValue, StoredValueBuffer};
+use crate::utils::{StoredValue, StoredValueBuffer};
 
 #[derive(Debug, Copy, Clone)]
 pub struct BlockMetaData {
     pub is_key_block: bool,
     pub gen_utime: u32,
     pub mc_ref_seqno: Option<u32>,
+}
+
+impl BlockMetaData {
+    pub fn zero_state(gen_utime: u32) -> Self {
+        Self {
+            is_key_block: true,
+            gen_utime,
+            mc_ref_seqno: Some(0),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -39,17 +49,6 @@ impl From<&BlockInfo> for BriefBlockInfo {
         }
     }
 }
-
-impl BlockMetaData {
-    pub fn zero_state(gen_utime: u32) -> Self {
-        Self {
-            is_key_block: true,
-            gen_utime,
-            mc_ref_seqno: Some(0),
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct BlockMeta {
     flags: AtomicU64,
