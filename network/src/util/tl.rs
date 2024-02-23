@@ -41,3 +41,34 @@ pub mod signature_owned {
         })
     }
 }
+
+pub struct VecWithMaxLen<const N: usize>;
+
+impl<const N: usize> VecWithMaxLen<N> {
+    #[inline]
+    pub fn size_hint<T: tl_proto::TlWrite>(value: &[T]) -> usize {
+        value.max_size_hint()
+    }
+
+    #[inline]
+    pub fn write<P: TlPacket, T: tl_proto::TlWrite>(value: &[T], packet: &mut P) {
+        value.write_to(packet);
+    }
+
+    pub fn read<'tl, T>(packet: &'tl [u8], offset: &mut usize) -> TlResult<Vec<T>>
+    where
+        T: tl_proto::TlRead<'tl>,
+    {
+        let len = u32::read_from(packet, offset)? as usize;
+        if len > N {
+            return Err(TlError::InvalidData);
+        }
+
+        let mut items = Vec::with_capacity(len);
+        for _ in 0..len {
+            items.push(T::read_from(packet, offset)?);
+        }
+
+        Ok(items)
+    }
+}

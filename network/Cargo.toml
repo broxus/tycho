@@ -22,6 +22,7 @@ everscale-crypto = { version = "0.2", features = ["tl-proto"] }
 futures-util = { version = "0.3", features = ["sink"] }
 hex = "0.4"
 moka = { version = "0.12", features = ["sync"] }
+parking_lot = "0.12"
 pin-project-lite = "0.2"
 pkcs8 = "0.10"
 quinn = { version = "0.10", default-features = false, features = ["runtime-tokio", "tls-rustls"] }

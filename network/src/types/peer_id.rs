@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use everscale_crypto::ed25519;
+use rand::Rng;
 use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone, Copy, TlRead, TlWrite, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -9,7 +10,7 @@ use tl_proto::{TlRead, TlWrite};
 pub struct PeerId(pub [u8; 32]);
 
 impl PeerId {
-    pub fn wrap(bytes: &[u8; 32]) -> &Self {
+    pub const fn wrap(bytes: &[u8; 32]) -> &Self {
         // SAFETY: `[u8; 32]` has the same layout as `PeerId`.
         unsafe { &*(bytes as *const [u8; 32]).cast::<Self>() }
     }
@@ -26,10 +27,6 @@ impl PeerId {
 
     pub fn as_public_key(&self) -> Option<ed25519::PublicKey> {
         ed25519::PublicKey::from_bytes(self.0)
-    }
-
-    pub fn random() -> Self {
-        Self(rand::random())
     }
 }
 
@@ -93,6 +90,13 @@ impl<'de> serde::Deserialize<'de> for PeerId {
         } else {
             <[u8; 32]>::deserialize(deserializer).map(Self)
         }
+    }
+}
+
+impl rand::distributions::Distribution<PeerId> for rand::distributions::Standard {
+    #[inline]
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> PeerId {
+        PeerId(rand::distributions::Standard.sample(rng))
     }
 }
 

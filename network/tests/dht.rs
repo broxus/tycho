@@ -20,8 +20,8 @@ struct Node {
 }
 
 impl Node {
-    fn new(key: &ed25519::SecretKey) -> Result<Self> {
-        let keypair = everscale_crypto::ed25519::KeyPair::from(key);
+    fn new(key: &ed25519::SecretKey) -> Self {
+        let keypair = ed25519::KeyPair::from(key);
 
         let (dht_client, dht) = DhtService::builder(keypair.public_key.into()).build();
 
@@ -35,7 +35,7 @@ impl Node {
 
         let dht = dht_client.build(network.clone());
 
-        Ok(Self { network, dht })
+        Self { network, dht }
     }
 
     fn make_peer_info(key: &ed25519::SecretKey, address: Address) -> PeerInfo {
@@ -151,7 +151,7 @@ async fn connect_new_node_to_bootstrap() -> Result<()> {
 
     let (bootstrap_nodes, global_config) = make_network(5);
 
-    let node = Node::new(&ed25519::SecretKey::generate(&mut rand::thread_rng()))?;
+    let node = Node::new(&ed25519::SecretKey::generate(&mut rand::thread_rng()));
     for peer_info in &global_config {
         node.dht.add_peer(peer_info.clone())?;
     }

@@ -509,7 +509,7 @@ impl DhtInner {
         *self.local_peer_info.lock().unwrap() = Some(peer_info);
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
     async fn announce_local_peer_info(&self, network: &Network) -> Result<()> {
         let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
 
@@ -524,7 +524,7 @@ impl DhtInner {
         self.store_value(network, ValueRef::Peer(value), true).await
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(local_id = % self.local_id))]
+    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
     async fn refresh_routing_table(&self, network: &Network) {
         const PARALLEL_QUERIES: usize = 3;
         const MAX_DISTANCE: usize = 15;
