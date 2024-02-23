@@ -49,11 +49,15 @@ mod tests {
         let keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
         let peer_id: PeerId = keypair.public_key.into();
 
-        let some_overlay = PublicOverlay::builder(rand::random())
+        let private_overlay = PrivateOverlay::builder(rand::random())
+            .build(service_message_fn(|_| futures_util::future::ready(())));
+
+        let public_overlay = PublicOverlay::builder(rand::random())
             .build(service_message_fn(|_| futures_util::future::ready(())));
 
         let (overlay_tasks, overlay_service) = OverlayService::builder(peer_id)
-            .with_public_overlay(some_overlay)
+            .with_private_overlay(&private_overlay)
+            .with_public_overlay(&public_overlay)
             .build();
 
         let (dht_client, dht) = DhtService::builder(peer_id).build();

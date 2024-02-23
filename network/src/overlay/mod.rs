@@ -56,14 +56,16 @@ impl OverlayServiceBuilder {
         self
     }
 
-    pub fn with_private_overlay(self, overlay: PrivateOverlay) -> Self {
+    pub fn with_private_overlay(self, overlay: &PrivateOverlay) -> Self {
         assert!(
             !self.public_overlays.contains_key(overlay.overlay_id()),
             "public overlay with id {} already exists",
             overlay.overlay_id()
         );
 
-        let prev = self.private_overlays.insert(*overlay.overlay_id(), overlay);
+        let prev = self
+            .private_overlays
+            .insert(*overlay.overlay_id(), overlay.clone());
         if let Some(prev) = prev {
             panic!(
                 "private overlay with id {} already exists",
@@ -73,14 +75,16 @@ impl OverlayServiceBuilder {
         self
     }
 
-    pub fn with_public_overlay(self, overlay: PublicOverlay) -> Self {
+    pub fn with_public_overlay(self, overlay: &PublicOverlay) -> Self {
         assert!(
             !self.private_overlays.contains_key(overlay.overlay_id()),
             "private overlay with id {} already exists",
             overlay.overlay_id()
         );
 
-        let prev = self.public_overlays.insert(*overlay.overlay_id(), overlay);
+        let prev = self
+            .public_overlays
+            .insert(*overlay.overlay_id(), overlay.clone());
         if let Some(prev) = prev {
             panic!(
                 "public overlay with id {} already exists",
