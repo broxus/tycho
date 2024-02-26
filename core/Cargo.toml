@@ -5,12 +5,12 @@ edition = "2021"
 description = "Basic functionality of peer."
 
 [dependencies]
-async-trait = "0.1.77"
 anyhow = "1.0.80"
+async-trait = "0.1.77"
+castaway = "0.2"
 everscale-types = "0.1.0-rc.6"
-tracing = "0.1.40"
 futures-util = "0.3.30"
-
+tracing = "0.1.40"
 
 # local deps
 tycho-network = { path = "../network", version = "=0.0.1" }

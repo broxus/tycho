@@ -2028,6 +2028,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "castaway",
  "everscale-types",
  "futures-util",
  "tracing",
