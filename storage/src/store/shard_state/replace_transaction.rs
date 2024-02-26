@@ -13,6 +13,7 @@ use crate::utils::*;
 
 use tycho_block_util::state::*;
 use tycho_block_util::*;
+use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
 
 pub struct ShardStateReplaceTransaction<'a> {

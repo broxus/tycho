@@ -5,7 +5,7 @@ use everscale_types::models::*;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
-use tycho_block_util::MappedFile;
+use tycho_util::mapped_file::MappedFile;
 
 pub struct FilesContext {
     cells_path: PathBuf,

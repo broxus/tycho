@@ -10,11 +10,10 @@ use everscale_types::prelude::{Cell, HashBytes};
 use self::cell_storage::*;
 use self::files_context::FilesContext;
 use self::replace_transaction::ShardStateReplaceTransaction;
-use super::{models::BlockHandle, BlockHandleStorage};
 
-use crate::block_storage::*;
 use crate::db::*;
 use crate::utils::*;
+use crate::{models::BlockHandle, BlockHandleStorage, BlockStorage};
 
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;

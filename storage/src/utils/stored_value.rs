@@ -1,9 +1,11 @@
-use anyhow::Result;
 use bytes::Buf;
 use smallvec::SmallVec;
 
+use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use tokio::io::AsyncReadExt;
+use tycho_util::byte_reader::ByteOrderRead;
 
 /// A trait for writing or reading data from a stack-allocated buffer
 pub trait StoredValue {
@@ -95,22 +97,22 @@ impl StoredValue for BlockId {
         buffer.write_raw_slice(self.file_hash.as_slice());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Self
+    fn deserialize(reader: &mut &[u8]) -> Result<Self>
     where
         Self: Sized,
     {
         debug_assert!(reader.remaining() >= Self::SIZE_HINT);
 
-        let shard = ShardIdent::deserialize(reader);
+        let shard = ShardIdent::deserialize(reader)?;
         let seqno = reader.get_u32();
-        let root_hash = HashBytes::from(reader.get_uint(256));
-        let file_hash = HashBytes::from(reader.get_uint(256));
-        Self {
+        let root_hash = HashBytes::from(reader.read_u256()?);
+        let file_hash = HashBytes::from(reader.read_u256()?);
+        Ok(Self {
             shard,
             seqno,
             root_hash,
             file_hash,
-        }
+        })
     }
 }
 
@@ -123,19 +125,19 @@ impl StoredValue for ShardIdent {
 
     #[inline(always)]
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        buffer.write_raw_slice(&self.workchain_id().to_be_bytes());
-        buffer.write_raw_slice(&self.shard_prefix_with_tag().to_be_bytes());
+        buffer.write_raw_slice(&self.workchain().to_be_bytes());
+        buffer.write_raw_slice(&self.prefix().to_be_bytes());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Self
+    fn deserialize(reader: &mut &[u8]) -> Result<Self>
     where
         Self: Sized,
     {
         debug_assert!(reader.remaining() >= ShardIdent::SIZE_HINT);
 
         let workchain = reader.get_u32() as i32;
-        let prefix = reader.get_u64()?;
-        unsafe { Self::new_unchecked(workchain, prefix) }
+        let prefix = reader.get_u64();
+        Ok(unsafe { Self::new_unchecked(workchain, prefix) })
     }
 }
 
@@ -152,15 +154,15 @@ impl StoredValue for BlockIdShort {
         buffer.write_raw_slice(&self.seqno.to_be_bytes());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Self
+    fn deserialize(reader: &mut &[u8]) -> Result<Self>
     where
         Self: Sized,
     {
         debug_assert!(reader.remaining() >= BlockIdShort::SIZE_HINT);
 
-        let shard = ShardIdent::deserialize(reader);
+        let shard = ShardIdent::deserialize(reader)?;
         let seqno = reader.get_u32();
-        Self { shard, seqno }
+        Ok(Self { shard, seqno })
     }
 }
 

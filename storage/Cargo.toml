@@ -11,7 +11,7 @@ anyhow = "1.0.79"
 bytes = "1.5.0"
 
 tokio = { version = "1.36.0", features = ["full"] }
-tracing = "0.1.40"
+tracing = "0.1"
 thiserror = "1.0.57"
 hex = "0.4.3"
 libc = "0.2.153"
@@ -37,6 +37,7 @@ fdlimit = "0.3.0"
 humantime = "2.1.0"
 sysinfo = "0.30.5"
 triomphe = "0.1.11"
+num-traits = "0.2.18"
 
 [lints]
 workspace = true

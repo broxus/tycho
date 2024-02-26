@@ -6,9 +6,8 @@ use tycho_block_util::block::TopBlocks;
 use tycho_block_util::state::is_persistent_state;
 use tycho_util::FastDashMap;
 
-use super::models::*;
-
 use crate::db::*;
+use crate::models::*;
 use crate::utils::*;
 
 pub struct BlockHandleStorage {

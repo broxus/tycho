@@ -1,22 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub use self::block_connection_storage::*;
-pub use self::block_handle_storage::*;
+pub use self::db::*;
 pub use self::models::*;
-pub use self::runtime_storage::*;
+pub use self::store::*;
 
-use self::block_storage::*;
-use self::shard_state_storage::*;
-
-mod block_connection_storage;
-mod block_handle_storage;
-mod block_storage;
 mod db;
 mod models;
-mod node_state_storage;
-mod runtime_storage;
-mod shard_state_storage;
+mod store;
 mod utils;
 
 pub struct Storage {
@@ -27,8 +18,8 @@ pub struct Storage {
     block_storage: Arc<BlockStorage>,
     shard_state_storage: ShardStateStorage,
     block_connection_storage: BlockConnectionStorage,
-    //node_state_storage: NodeStateStorage,
-    //persistent_state_storage: PersistentStateStorage,
+    node_state_storage: NodeStateStorage,
+    persistent_state_storage: PersistentStateStorage,
 }
 
 impl Storage {

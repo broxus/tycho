@@ -10,17 +10,15 @@ use everscale_types::models::*;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::{
-    make_archive_entry, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier,
+    make_archive_entry, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier, GetFileName,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
 
-use super::block_handle_storage::*;
-use super::models::*;
-
 use crate::db::*;
 use crate::utils::*;
+use crate::{models::*, BlockHandleStorage, HandleCreationStatus};
 
 pub struct BlockStorage {
     db: Arc<Db>,

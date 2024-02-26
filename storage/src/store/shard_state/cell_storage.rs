@@ -11,7 +11,6 @@ use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 
 use crate::db::*;
-use tycho_block_util::{CacheStats};
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 
 pub struct CellStorage {
@@ -308,27 +307,6 @@ impl CellStorage {
 
     pub fn drop_cell(&self, hash: &HashBytes) {
         self.cells_cache.remove(hash);
-    }
-
-    pub fn cache_stats(&self) -> CacheStats {
-        let hits = self.raw_cells_cache.0.hits();
-        let misses = self.raw_cells_cache.0.misses();
-        let occupied = self.raw_cells_cache.0.len() as u64;
-        let weight = self.raw_cells_cache.0.weight();
-
-        let hits_ratio = if hits > 0 {
-            hits as f64 / (hits + misses) as f64
-        } else {
-            0.0
-        } * 100.0;
-        CacheStats {
-            hits,
-            misses,
-            requests: hits + misses,
-            occupied,
-            hits_ratio,
-            size_bytes: weight,
-        }
     }
 }
 

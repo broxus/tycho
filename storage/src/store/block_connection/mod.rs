@@ -3,9 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use everscale_types::models::*;
 
-use super::models::*;
-
 use crate::db::*;
+use crate::models::*;
 use crate::utils::*;
 
 /// Stores relations between blocks

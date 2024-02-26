@@ -2143,6 +2143,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "sha2",
+ "smallvec",
  "thiserror",
  "tycho-util",
 ]
@@ -2254,6 +2255,7 @@ dependencies = [
  "hex",
  "humantime",
  "libc",
+ "num-traits",
  "parking_lot",
  "parking_lot_core",
  "quick_cache",
@@ -2281,10 +2283,12 @@ dependencies = [
  "futures-util",
  "hex",
  "humantime",
+ "libc",
  "rand",
  "serde",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
