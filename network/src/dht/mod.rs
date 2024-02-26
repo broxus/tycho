@@ -20,9 +20,7 @@ use crate::proto::dht::{
     rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName,
     PeerValueKeyRef, PeerValueRef, Value, ValueRef, ValueResponseRaw,
 };
-use crate::types::{
-    Address, PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest,
-};
+use crate::types::{PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
@@ -469,8 +467,7 @@ impl DhtInner {
                         this.refresh_local_peer_info(&network);
                     }
                     Action::AnnounceLocalPeerInfo => {
-                        // Always refresh peer info before announcing
-                        this.refresh_local_peer_info(&network);
+                        // Peer info is always refreshed before announcing
                         refresh_peer_info_interval.reset();
 
                         if let Err(e) = this.announce_local_peer_info(&network).await {
@@ -511,12 +508,18 @@ impl DhtInner {
 
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
     async fn announce_local_peer_info(&self, network: &Network) -> Result<()> {
-        let data = tl_proto::serialize(&[network.local_addr().into()] as &[Address]);
+        let now = now_sec();
+        let data = {
+            let peer_info = self.make_local_peer_info(network, now);
+            let data = tl_proto::serialize(&peer_info);
+            *self.local_peer_info.lock().unwrap() = Some(peer_info);
+            data
+        };
 
         let mut value = self.make_unsigned_peer_value(
             PeerValueKeyName::NodeInfo,
             &data,
-            now_sec() + self.config.max_peer_info_ttl.as_secs() as u32,
+            now + self.config.max_peer_info_ttl.as_secs() as u32,
         );
         let signature = network.sign_tl(&value);
         value.signature = &signature;

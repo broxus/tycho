@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::collections::hash_map;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -20,6 +21,7 @@ use crate::util::NetworkExt;
 pub struct PublicOverlayBuilder {
     overlay_id: OverlayId,
     min_capacity: usize,
+    entry_ttl: Duration,
     banned_peer_ids: FastDashSet<PeerId>,
 }
 
@@ -31,6 +33,14 @@ impl PublicOverlayBuilder {
     /// Default: 100.
     pub fn with_min_capacity(mut self, min_capacity: usize) -> Self {
         self.min_capacity = min_capacity;
+        self
+    }
+
+    /// Time-to-live for each entry in the overlay.
+    ///
+    /// Default: 1 hour.
+    pub fn with_entry_ttl(mut self, entry_ttl: Duration) -> Self {
+        self.entry_ttl = entry_ttl;
         self
     }
 
@@ -53,10 +63,13 @@ impl PublicOverlayBuilder {
             overlay_id: self.overlay_id.as_bytes(),
         });
 
+        let entry_ttl_sec = self.entry_ttl.as_secs().try_into().unwrap_or(u32::MAX);
+
         PublicOverlay {
             inner: Arc::new(Inner {
                 overlay_id: self.overlay_id,
                 min_capacity: self.min_capacity,
+                entry_ttl_sec,
                 entries: RwLock::new(Default::default()),
                 entry_count: AtomicUsize::new(0),
                 banned_peer_ids: self.banned_peer_ids,
@@ -78,6 +91,7 @@ impl PublicOverlay {
         PublicOverlayBuilder {
             overlay_id,
             min_capacity: 100,
+            entry_ttl: Duration::from_secs(3600),
             banned_peer_ids: Default::default(),
         }
     }
@@ -148,7 +162,7 @@ impl PublicOverlay {
     /// Adds the given entries to the overlay.
     ///
     /// NOTE: Will deadlock if called while `PublicOverlayEntriesReadGuard` is held.
-    pub(crate) fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>]) {
+    pub(crate) fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>], now: u32) {
         if entries.is_empty() {
             return;
         }
@@ -179,11 +193,19 @@ impl PublicOverlay {
 
         // Prepare validation state
         let mut is_valid = vec![false; entries.len()];
-        let mut valid_count = 0;
+        let mut has_valid = false;
 
         // First pass: verify all entries
         for (entry, is_valid) in std::iter::zip(entries, is_valid.iter_mut()) {
+            if entry.is_expired(now, this.entry_ttl_sec)
+                || self.inner.banned_peer_ids.contains(&entry.peer_id)
+            {
+                // Skip expired or banned peers early
+                continue;
+            }
+
             let Some(pubkey) = entry.peer_id.as_public_key() else {
+                // Skip entries with invalid public keys
                 continue;
             };
 
@@ -195,15 +217,14 @@ impl PublicOverlay {
                 },
                 &entry.signature,
             ) {
+                // Skip entries with invalid signatures
                 continue;
             }
 
+            // NOTE: check all entries, even if we have more than `to_add`.
+            // We might need them if some are duplicates af known entries.
             *is_valid = true;
-            valid_count += 1;
-
-            if valid_count >= to_add {
-                break;
-            }
+            has_valid = true;
         }
 
         // Second pass: insert all valid entries (if any)
@@ -211,20 +232,37 @@ impl PublicOverlay {
         // NOTE: two passes are necessary because public key parsing and
         // signature verification can be expensive and we want to avoid
         // holding the lock for too long.
-        if valid_count > 0 {
+        let mut added = 0;
+        if has_valid {
             let mut stored = this.entries.write();
             for (entry, is_valid) in std::iter::zip(entries, is_valid) {
-                if is_valid {
-                    stored.insert(entry);
+                if !is_valid {
+                    continue;
+                }
+
+                added += stored.insert(entry) as usize;
+                if added >= to_add {
+                    break;
                 }
             }
         }
 
         // Rollback entries that were not valid and not inserted
-        if valid_count < to_add {
+        if added < to_add {
             this.entry_count
-                .fetch_sub(to_add - valid_count, Ordering::Release);
+                .fetch_sub(to_add - added, Ordering::Release);
         }
+    }
+
+    /// Removes all expired and banned entries from the overlay.
+    pub(crate) fn remove_invalid_entries(&self, now: u32) {
+        let this = self.inner.as_ref();
+
+        let mut entries = this.entries.write();
+        entries.retain(|entry| {
+            !entry.is_expired(now, this.entry_ttl_sec)
+                && !this.banned_peer_ids.contains(&entry.peer_id)
+        });
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
@@ -249,6 +287,7 @@ impl std::fmt::Debug for PublicOverlay {
 struct Inner {
     overlay_id: OverlayId,
     min_capacity: usize,
+    entry_ttl_sec: u32,
     entries: RwLock<PublicOverlayEntries>,
     entry_count: AtomicUsize,
     banned_peer_ids: FastDashSet<PeerId>,
@@ -327,6 +366,19 @@ impl PublicOverlayEntries {
         *entry = index;
 
         true
+    }
+
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&Arc<PublicEntry>) -> bool,
+    {
+        self.data.retain(|entry| {
+            let keep = f(entry);
+            if !keep {
+                self.peer_id_to_index.remove(&entry.peer_id);
+            }
+            keep
+        });
     }
 }
 
@@ -413,10 +465,10 @@ mod tests {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
 
-            overlay.add_untrusted_entries(&entries[..5]);
+            overlay.add_untrusted_entries(&entries[..5], now);
             assert_eq!(count_entries(&overlay), 5);
 
-            overlay.add_untrusted_entries(&entries[5..]);
+            overlay.add_untrusted_entries(&entries[5..], now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -424,7 +476,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -432,7 +484,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 20);
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -440,7 +492,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(0);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -450,7 +502,7 @@ mod tests {
             let entries = (0..10)
                 .map(|_| generate_invalid_public_entry(now))
                 .collect::<Vec<_>>();
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -469,7 +521,7 @@ mod tests {
                 generate_invalid_public_entry(now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 5);
         }
 
@@ -488,7 +540,7 @@ mod tests {
                 generate_public_entry(&overlay, now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 3);
         }
     }
@@ -504,7 +556,7 @@ mod tests {
             for entries in entries.chunks_exact(7 * 3) {
                 s.spawn(|| {
                     for entries in entries.chunks_exact(7) {
-                        overlay.add_untrusted_entries(entries);
+                        overlay.add_untrusted_entries(entries, now);
                     }
                 });
             }

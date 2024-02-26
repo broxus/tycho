@@ -6,11 +6,11 @@ use tycho_util::serde_helpers;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayConfig {
-    /// Maximum time to live for public overlay peer entries.
+    /// A period of garbage collection for public overlay entries.
     ///
-    /// Default: 1 hour.
+    /// Default: 1 minute.
     #[serde(with = "serde_helpers::humantime")]
-    pub max_public_entry_tll: Duration,
+    pub public_entires_gc_interval: Duration,
 
     /// A period of exchanging public overlay peers.
     ///
@@ -32,7 +32,7 @@ pub struct OverlayConfig {
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            max_public_entry_tll: Duration::from_secs(3600),
+            public_entires_gc_interval: Duration::from_secs(60),
             public_overlay_peer_exchange_period: Duration::from_secs(3 * 60),
             public_overlay_peer_exchange_max_jitter: Duration::from_secs(30),
             exchange_public_entries_batch: 20,

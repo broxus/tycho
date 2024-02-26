@@ -389,6 +389,8 @@ impl OverlayServiceInner {
             anyhow::bail!("overlay not found");
         };
 
+        overlay.remove_invalid_entries(now_sec());
+
         let n = std::cmp::max(self.config.exchange_public_entries_batch, 1);
         let mut entries = Vec::with_capacity(n);
 
@@ -439,7 +441,7 @@ impl OverlayServiceInner {
                     count = entries.len(),
                     "received public entries"
                 );
-                overlay.add_untrusted_entries(&entries);
+                overlay.add_untrusted_entries(&entries, now_sec());
             }
             PublicEntriesResponse::OverlayNotFound => {
                 tracing::debug!(%peer_id, "overlay not found");
@@ -513,7 +515,7 @@ impl OverlayServiceInner {
         };
 
         // Add proposed entries to the overlay
-        overlay.add_untrusted_entries(&req.entries);
+        overlay.add_untrusted_entries(&req.entries, now_sec());
 
         // Collect proposed entries to exclude from the response
         let requested_ids = req
