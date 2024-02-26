@@ -60,11 +60,7 @@ fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
         .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
         .collect::<Vec<_>>();
 
-    let nodes = keys
-        .iter()
-        .map(Node::new)
-        .collect::<Result<Vec<_>>>()
-        .unwrap();
+    let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
 
     let bootstrap_info = std::iter::zip(&keys, &nodes)
         .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
