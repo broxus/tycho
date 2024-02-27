@@ -9,12 +9,13 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-anyhow = "1.0.80"
-async-trait = "0.1.77"
-castaway = "0.2"
-everscale-types = "0.1.0-rc.6"
-futures-util = "0.3.30"
-tracing = "0.1.40"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+castaway = { workspace = true }
+everscale-types = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 
 # local deps
 tycho-network = { workspace = true }

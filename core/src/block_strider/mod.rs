@@ -1,9 +1,13 @@
-use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use anyhow::Result;
 use everscale_types::models::{Block, BlockId};
-use futures_util::future::BoxFuture;
+
+pub mod provider;
+pub mod state;
+pub mod subscriber;
+
+use provider::BlockProvider;
+use state::BlockStriderState;
+use subscriber::BlockSubscriber;
 
 pub struct BlockStriderBuilder<S, P, B>(BlockStrider<S, P, B>);
 
@@ -140,101 +144,10 @@ where
     }
 }
 
-pub trait BlockStriderState: Send + Sync + 'static {
-    fn load_last_traversed_master_block_id(&self) -> BlockId;
-    fn is_traversed(&self, block_id: &BlockId) -> bool;
-    fn commit_traversed(&self, block_id: BlockId);
-}
-
-impl<T: BlockStriderState> BlockStriderState for Box<T> {
-    fn load_last_traversed_master_block_id(&self) -> BlockId {
-        <T as BlockStriderState>::load_last_traversed_master_block_id(self)
-    }
-
-    fn is_traversed(&self, block_id: &BlockId) -> bool {
-        <T as BlockStriderState>::is_traversed(self, block_id)
-    }
-
-    fn commit_traversed(&self, block_id: BlockId) {
-        <T as BlockStriderState>::commit_traversed(self, block_id);
-    }
-}
-
-/// Block provider *MUST* validate the block before returning it.
-pub trait BlockProvider: Send + Sync + 'static {
-    type GetNextBlockFut<'a>: Future<Output = Option<Result<Block>>> + Send + 'a;
-    type GetBlockFut<'a>: Future<Output = Option<Result<Block>>> + Send + 'a;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a>;
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a>;
-}
-
-impl<T: BlockProvider> BlockProvider for Box<T> {
-    type GetNextBlockFut<'a> = T::GetNextBlockFut<'a>;
-    type GetBlockFut<'a> = T::GetBlockFut<'a>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        <T as BlockProvider>::get_next_block(self, prev_block_id)
-    }
-
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        <T as BlockProvider>::get_block(self, block_id)
-    }
-}
-
-pub trait BlockSubscriber: Send + Sync + 'static {
-    type HandleBlockFut: Future<Output = Result<()>> + Send + 'static;
-
-    fn handle_block(&self, block: &Block) -> Self::HandleBlockFut;
-}
-
-impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
-    type HandleBlockFut = T::HandleBlockFut;
-
-    fn handle_block(&self, block: &Block) -> Self::HandleBlockFut {
-        <T as BlockSubscriber>::handle_block(self, block)
-    }
-}
-
 fn get_shard_hashes(_block: &Block) -> impl IntoIterator<Item = BlockId> {
     vec![].into_iter()
 }
 
 fn get_block_id(_block: &Block) -> BlockId {
     unimplemented!()
-}
-
-// === Provider combinators ===
-struct ChainBlockProvider<T1, T2> {
-    left: T1,
-    right: T2,
-    is_right: AtomicBool,
-}
-
-impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<T1, T2> {
-    type GetNextBlockFut<'a> = BoxFuture<'a, Option<Result<Block>>>;
-    type GetBlockFut<'a> = BoxFuture<'a, Option<Result<Block>>>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async move {
-            if !self.is_right.load(Ordering::Acquire) {
-                let res = self.left.get_next_block(prev_block_id).await;
-                if res.is_some() {
-                    return res;
-                }
-                self.is_right.store(true, Ordering::Release);
-            }
-            self.right.get_next_block(prev_block_id).await
-        })
-    }
-
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(async {
-            let res = self.left.get_block(block_id).await;
-            if res.is_some() {
-                return res;
-            }
-            self.right.get_block(block_id).await
-        })
-    }
 }
