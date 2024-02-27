@@ -5,17 +5,78 @@ use std::time::Duration;
 use ahash::{HashMapExt, HashSetExt};
 use anyhow::Result;
 use bytes::Bytes;
+use futures_util::future::{BoxFuture, WeakShared};
 use futures_util::stream::FuturesUnordered;
-use futures_util::{Future, StreamExt};
-use tokio::sync::Semaphore;
+use futures_util::{Future, FutureExt, StreamExt};
+use tokio::sync::{Mutex, Semaphore};
 use tycho_util::time::now_sec;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::{FastHashMap, FastHashSet, StrongCount};
 
 use crate::dht::routing::{RoutingTable, RoutingTableSource};
 use crate::network::Network;
 use crate::proto::dht::{rpc, NodeResponse, Value, ValueRef, ValueResponse};
 use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
+
+pub struct QueryCache<R> {
+    cache: Mutex<FastHashMap<[u8; 32], QueryCacheItem<R>>>,
+}
+
+impl<R> QueryCache<R> {
+    pub async fn run<F>(&self, target_id: &[u8; 32], f: F) -> R
+    where
+        R: Clone,
+        F: FnOnce() -> BoxFuture<'static, R>,
+    {
+        let (mut fut, strong_count) = match self.cache.lock().await.entry(*target_id) {
+            hash_map::Entry::Vacant(entry) => {
+                let fut = f().shared();
+                let refs = StrongCount::new();
+                if let Some(weak) = fut.downgrade() {
+                    entry.insert(QueryCacheItem {
+                        weak_fut: weak,
+                        refs: refs.clone(),
+                    });
+                }
+                (fut, refs)
+            }
+            hash_map::Entry::Occupied(mut entry) => match entry.get().upgrade() {
+                Some(fut) => fut,
+                None => {
+                    let fut = f().shared();
+                    match fut.downgrade() {
+                        Some(weak) => entry.insert(weak),
+                        None => entry.remove(),
+                    };
+                    fut
+                }
+            },
+        };
+
+        let mut fut = std::pin::pin!(&mut fut);
+        let output = fut.as_mut().await;
+        if fut.strong_count() == Some(1) {
+            self.cache.lock().await.remove(target_id);
+        }
+
+        output
+    }
+}
+
+impl<R> Default for QueryCache<R> {
+    fn default() -> Self {
+        Self {
+            cache: Mutex::new(FastHashMap::default()),
+        }
+    }
+}
+
+struct QueryCacheItem<R> {
+    weak_fut: WeakSharedBoxedFut<R>,
+    refs: StrongCount,
+}
+
+type WeakSharedBoxedFut<T> = WeakShared<BoxFuture<'static, T>>;
 
 pub struct Query {
     network: Network,
