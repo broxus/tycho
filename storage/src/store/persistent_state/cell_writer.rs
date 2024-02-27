@@ -65,7 +65,7 @@ impl<'a> CellWriter<'a> {
         let file_path = Self::make_pss_path(self.base_path, master_block_id, block_id);
 
         // Load cells from db in reverse order into the temp file
-        tracing::info!(block = %block_id.to_string(), "Started loading cells");
+        tracing::info!(block = %block_id, "Started loading cells");
         let now = Instant::now();
         let mut intermediate = write_rev_cells(
             self.db,
@@ -79,7 +79,7 @@ impl<'a> CellWriter<'a> {
 
         let temp_file_path = Self::make_temp_pss_path(&file_path);
 
-        tracing::info!(block = %block_id.to_string(), "Creating intermediate file {:?}", file_path);
+        tracing::info!(block = %block_id, "Creating intermediate file {:?}", file_path);
 
         let file = fs::OpenOptions::new()
             .write(true)

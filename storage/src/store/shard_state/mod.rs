@@ -8,7 +8,6 @@ use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 
 use self::cell_storage::*;
-use self::files_context::FilesContext;
 use self::replace_transaction::ShardStateReplaceTransaction;
 
 use crate::db::*;
@@ -21,7 +20,6 @@ use tycho_block_util::state::*;
 mod cell_storage;
 mod cell_writer;
 mod entries_buffer;
-mod files_context;
 mod replace_transaction;
 mod shard_state_reader;
 
@@ -160,12 +158,12 @@ impl ShardStateStorage {
     pub async fn begin_replace(
         &'_ self,
         block_id: &BlockId,
-    ) -> Result<(ShardStateReplaceTransaction<'_>, FilesContext)> {
-        let ctx = FilesContext::new(self.downloads_dir.as_ref(), block_id).await?;
+    ) -> Result<(ShardStateReplaceTransaction<'_>, FileDb)> {
+        let file_db = FileDb::new(self.downloads_dir.as_ref(), block_id).await?;
 
         Ok((
             ShardStateReplaceTransaction::new(&self.db, &self.cell_storage, &self.min_ref_mc_state),
-            ctx,
+            file_db,
         ))
     }
 

@@ -6,7 +6,6 @@ use everscale_types::models::BlockId;
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
-use super::files_context::*;
 use super::shard_state_reader::*;
 use crate::db::*;
 use crate::utils::*;
@@ -47,13 +46,13 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
     pub async fn process_packet(
         &mut self,
-        ctx: &mut FilesContext,
+        file_db: &mut FileDb,
         packet: Vec<u8>,
         progress_bar: &mut ProgressBar,
     ) -> Result<bool> {
         use tokio::io::AsyncWriteExt;
 
-        let cells_file = ctx.cells_file()?;
+        let cells_file = file_db.cells_file()?;
 
         self.reader.set_next_packet(packet);
 
@@ -110,7 +109,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
     pub async fn finalize(
         self,
-        ctx: &mut FilesContext,
+        file_db: &mut FileDb,
         block_id: BlockId,
         progress_bar: &mut ProgressBar,
     ) -> Result<Arc<ShardStateStuff>> {
@@ -127,8 +126,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         };
 
         let hashes_file =
-            ctx.create_mapped_hashes_file(header.cell_count as usize * HashesEntry::LEN)?;
-        let cells_file = ctx.create_mapped_cells_file().await?;
+            file_db.create_mapped_hashes_file(header.cell_count as usize * HashesEntry::LEN)?;
+        let cells_file = file_db.create_mapped_cells_file().await?;
 
         let raw = self.db.raw().as_ref();
         let write_options = self.db.cells.new_write_config();

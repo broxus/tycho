@@ -1,228 +1,91 @@
-use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use bytes::BytesMut;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::BlockId;
-use tokio::time::Instant;
+use anyhow::{Context, Result};
+use everscale_types::models::*;
+use tokio::fs::File;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
-use crate::db::Db;
-use crate::store::BlockHandleStorage;
+pub use mapped_file::MappedFile;
 
-use self::cell_writer::*;
+mod mapped_file;
 
-mod cell_writer;
-
-const KEY_BLOCK_UTIME_STEP: u32 = 86400;
-
-pub struct PersistentStateStorage {
-    block_handle_storage: Arc<BlockHandleStorage>,
-    storage_path: PathBuf,
-    db: Arc<Db>,
-    is_cancelled: Arc<AtomicBool>,
+pub struct FileDb {
+    cells_path: PathBuf,
+    cells_file: Option<BufWriter<File>>,
+    hashes_path: PathBuf,
 }
 
-impl PersistentStateStorage {
-    pub async fn new(
-        file_db_path: PathBuf,
-        db: Arc<Db>,
-        block_handle_storage: Arc<BlockHandleStorage>,
-    ) -> Result<Self> {
-        let dir = file_db_path.join("states");
-        tokio::fs::create_dir_all(&dir).await?;
-        let is_cancelled = Arc::new(Default::default());
+impl FileDb {
+    pub async fn new<P>(downloads_dir: P, block_id: &BlockId) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        let block_id = format!(
+            "({},{:016x},{})",
+            block_id.shard.workchain(),
+            block_id.shard.prefix(),
+            block_id.seqno
+        );
+
+        let cells_path = downloads_dir
+            .as_ref()
+            .join(format!("state_cells_{block_id}"));
+        let hashes_path = downloads_dir
+            .as_ref()
+            .join(format!("state_hashes_{block_id}"));
+
+        let cells_file = Some(BufWriter::new(
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .read(true)
+                .open(&cells_path)
+                .await
+                .context("Failed to create cells file")?,
+        ));
 
         Ok(Self {
-            block_handle_storage,
-            storage_path: dir,
-            db,
-            is_cancelled,
+            cells_path,
+            cells_file,
+            hashes_path,
         })
     }
 
-    pub async fn save_state(
-        &self,
-        block_id: &BlockId,
-        master_block_id: &BlockId,
-        state_root_hash: &HashBytes,
-    ) -> Result<()> {
-        let block_id = block_id.clone();
-        let master_block_id = master_block_id.clone();
-        let state_root_hash = *state_root_hash;
-        let db = self.db.clone();
-        let base_path = self.storage_path.clone();
-        let is_cancelled = self.is_cancelled.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let cell_writer = CellWriter::new(&db, &base_path);
-            match cell_writer.write(&master_block_id, &block_id, &state_root_hash, is_cancelled) {
-                Ok(path) => {
-                    tracing::info!(
-                        block_id = %block_id.to_string(),
-                        path = %path.display(),
-                        "Successfully wrote persistent state to a file",
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        block_id = %block_id.to_string(),
-                        "Writing persistent state failed. Err: {e:?}"
-                    );
-
-                    CellWriter::clear_temp(&base_path, &master_block_id, &block_id);
-                }
-            }
-        })
-        .await
-        .map_err(From::from)
-    }
-
-    pub async fn read_state_part(
-        &self,
-        mc_block_id: &BlockId,
-        block_id: &BlockId,
-        offset: u64,
-        size: u64,
-    ) -> Option<Vec<u8>> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-
-        // TODO: cache file handles
-        let mut file = tokio::fs::File::open(self.get_state_file_path(mc_block_id, block_id))
-            .await
-            .ok()?;
-
-        if let Err(e) = file.seek(SeekFrom::Start(offset)).await {
-            tracing::error!("Failed to seek state file offset. Err: {e:?}");
-            return None;
-        }
-
-        // SAFETY: size must be checked
-        let mut result = BytesMut::with_capacity(size as usize);
-        let now = Instant::now();
-        loop {
-            match file.read_buf(&mut result).await {
-                Ok(bytes_read) => {
-                    tracing::debug!("Reading state file. Bytes read: {}", bytes_read);
-                    if bytes_read == 0 || bytes_read == size as usize {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to read state file. Err: {e:?}");
-                    return None;
-                }
-            }
-        }
-        tracing::info!(
-            "Finished reading buffer after: {} ms",
-            now.elapsed().as_millis()
-        );
-
-        // TODO: use `Bytes`
-        Some(result.to_vec())
-    }
-
-    pub fn state_exists(&self, mc_block_id: &BlockId, block_id: &BlockId) -> bool {
-        // TODO: cache file handles
-        self.get_state_file_path(mc_block_id, block_id).is_file()
-    }
-
-    pub fn prepare_persistent_states_dir(&self, mc_block: &BlockId) -> Result<()> {
-        let dir_path = mc_block.seqno.to_string();
-        let path = self.storage_path.join(dir_path);
-        if !path.exists() {
-            tracing::info!(mc_block = %mc_block, "Creating persistent state directory");
-            fs::create_dir(path)?;
-        }
+    pub async fn clear(self) -> Result<()> {
+        tokio::fs::remove_file(self.cells_path).await?;
+        tokio::fs::remove_file(self.hashes_path).await?;
         Ok(())
     }
 
-    fn get_state_file_path(&self, mc_block_id: &BlockId, block_id: &BlockId) -> PathBuf {
-        CellWriter::make_pss_path(&self.storage_path, mc_block_id, block_id)
+    pub fn cells_file(&mut self) -> Result<&mut BufWriter<File>> {
+        match &mut self.cells_file {
+            Some(file) => Ok(file),
+            None => Err(FileDbError::AlreadyFinalized.into()),
+        }
     }
 
-    pub fn cancel(&self) {
-        self.is_cancelled.store(true, Ordering::Release);
+    pub fn create_mapped_hashes_file(&self, length: usize) -> Result<MappedFile> {
+        let mapped_file = MappedFile::new(&self.hashes_path, length)?;
+        Ok(mapped_file)
     }
 
-    pub async fn clear_old_persistent_states(&self) -> Result<()> {
-        tracing::info!("Started clearing old persistent state directories");
-        let start = Instant::now();
-
-        // Keep 2 days of states + 1 state before
-        let block = {
-            let now = tycho_util::time::now_sec();
-            let mut key_block = self.block_handle_storage.find_last_key_block()?;
-
-            loop {
-                match self
-                    .block_handle_storage
-                    .find_prev_persistent_key_block(key_block.id().seqno)?
-                {
-                    Some(prev_key_block) => {
-                        if prev_key_block.meta().gen_utime() + 2 * KEY_BLOCK_UTIME_STEP < now {
-                            break prev_key_block;
-                        } else {
-                            key_block = prev_key_block;
-                        }
-                    }
-                    None => return Ok(()),
-                }
+    pub async fn create_mapped_cells_file(&mut self) -> Result<MappedFile> {
+        let file = match self.cells_file.take() {
+            Some(mut file) => {
+                file.flush().await?;
+                file.into_inner().into_std().await
             }
+            None => return Err(FileDbError::AlreadyFinalized.into()),
         };
 
-        self.clear_outdated_state_entries(block.id())?;
-
-        tracing::info!(
-            elapsed = %humantime::format_duration(start.elapsed()),
-            "Clearing old persistent state directories completed"
-        );
-
-        Ok(())
+        let mapped_file = MappedFile::from_existing_file(file)?;
+        Ok(mapped_file)
     }
+}
 
-    fn clear_outdated_state_entries(&self, recent_block_id: &BlockId) -> Result<()> {
-        let mut directories_to_remove: Vec<PathBuf> = Vec::new();
-        let mut files_to_remove: Vec<PathBuf> = Vec::new();
-
-        for entry in fs::read_dir(&self.storage_path)?.flatten() {
-            let path = entry.path();
-
-            if path.is_file() {
-                files_to_remove.push(path);
-                continue;
-            }
-
-            let Ok(name) = entry.file_name().into_string() else {
-                directories_to_remove.push(path);
-                continue;
-            };
-
-            let is_recent =
-                matches!(name.parse::<u32>(), Ok(seqno) if seqno >= recent_block_id.seqno);
-
-            if !is_recent {
-                directories_to_remove.push(path);
-            }
-        }
-
-        for dir in directories_to_remove {
-            tracing::info!(dir = %dir.display(), "Removing an old persistent state directory");
-            if let Err(e) = fs::remove_dir_all(&dir) {
-                tracing::error!(dir = %dir.display(), "Failed to remove an old persistent state: {e:?}");
-            }
-        }
-
-        for file in files_to_remove {
-            tracing::info!(file = %file.display(), "Removing file");
-            if let Err(e) = fs::remove_file(&file) {
-                tracing::error!(file = %file.display(), "Failed to remove file: {e:?}");
-            }
-        }
-
-        Ok(())
-    }
+#[derive(thiserror::Error, Debug)]
+enum FileDbError {
+    #[error("Already finalized")]
+    AlreadyFinalized,
 }
