@@ -19,3 +19,25 @@ impl<T: BlockStriderState> BlockStriderState for Box<T> {
         <T as BlockStriderState>::commit_traversed(self, block_id);
     }
 }
+
+#[cfg(test)]
+#[derive(Default)]
+pub struct InMemoryBlockStriderState {
+    last_traversed_master_block_id: BlockId,
+    traversed_blocks: tycho_util::FastDashSet<BlockId>,
+}
+
+#[cfg(test)]
+impl BlockStriderState for InMemoryBlockStriderState {
+    fn load_last_traversed_master_block_id(&self) -> BlockId {
+        self.last_traversed_master_block_id
+    }
+
+    fn is_traversed(&self, block_id: &BlockId) -> bool {
+        self.traversed_blocks.contains(block_id)
+    }
+
+    fn commit_traversed(&self, block_id: BlockId) {
+        self.traversed_blocks.insert(block_id);
+    }
+}

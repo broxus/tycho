@@ -22,9 +22,13 @@ serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt"] }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
+
+[features]
+test-util = ["tracing-subscriber"]
 
 [lints]
 workspace = true

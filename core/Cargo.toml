@@ -22,5 +22,8 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
+[dev-dependencies]
+tycho-util = { path = "../util", features = ["test-util"] }
+
 [lints]
 workspace = true

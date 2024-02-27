@@ -138,3 +138,11 @@ mod tests {
         assert_eq!(one.unwrap().0, value.0);
     }
 }
+
+#[cfg(feature = "test-util")]
+pub fn init_logger() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
+        .try_init()
+        .ok();
+}
