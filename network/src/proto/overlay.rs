@@ -34,7 +34,7 @@ impl PublicEntry {
     pub fn is_expired(&self, at: u32, ttl_sec: u32) -> bool {
         const CLOCK_THRESHOLD: u32 = 1;
 
-        self.created_at <= at + CLOCK_THRESHOLD && self.created_at.saturating_add(ttl_sec) >= at
+        self.created_at > at + CLOCK_THRESHOLD || self.created_at.saturating_add(ttl_sec) < at
     }
 }
 
