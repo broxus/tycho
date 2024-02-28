@@ -309,6 +309,13 @@ impl DhtService {
             overlay_merger: None,
         }
     }
+
+    pub fn make_client(&self, network: Network) -> DhtClient {
+        DhtClient {
+            inner: self.0.clone(),
+            network,
+        }
+    }
 }
 
 impl Service<ServiceRequest> for DhtService {

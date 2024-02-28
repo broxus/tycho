@@ -81,13 +81,11 @@ impl<R> QueryCache<R> {
             };
             let fut = guard.fut.insert(fut);
 
-            // Await future
-            let res = fut.await;
-
-            // Reset the guard if the future was successfully awaited
-            guard.fut = None;
-
-            res
+            // Await future.
+            // If `Shared` future is not polled to `Complete` state,
+            // the guard will try to consume it and remove from cache
+            // if it was the last instance.
+            fut.await
         };
 
         // TODO: add ttl and force others to make a request for a fresh data

@@ -19,9 +19,18 @@ use crate::util::NetworkExt;
 pub struct PrivateOverlayBuilder {
     overlay_id: OverlayId,
     entries: FastHashSet<PeerId>,
+    resolve_peers: bool,
 }
 
 impl PrivateOverlayBuilder {
+    /// Whether to resolve peer info in the background.
+    ///
+    /// Default: `false`.
+    pub fn resolve_peers(mut self, resolve_peers: bool) -> Self {
+        self.resolve_peers = resolve_peers;
+        self
+    }
+
     pub fn with_entries<I>(mut self, allowed_peers: I) -> Self
     where
         I: IntoIterator,
@@ -54,6 +63,7 @@ impl PrivateOverlayBuilder {
                 overlay_id: self.overlay_id,
                 entries: RwLock::new(entries),
                 service: service.boxed(),
+                resolve_peers: self.resolve_peers,
                 request_prefix: request_prefix.into_boxed_slice(),
             }),
         }
@@ -70,6 +80,7 @@ impl PrivateOverlay {
         PrivateOverlayBuilder {
             overlay_id,
             entries: Default::default(),
+            resolve_peers: false,
         }
     }
 
@@ -126,6 +137,10 @@ impl PrivateOverlay {
         }
     }
 
+    pub(crate) fn should_resolve_peers(&self) -> bool {
+        self.inner.resolve_peers
+    }
+
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
         // TODO: reduce allocations
         let mut res = BytesMut::with_capacity(self.inner.request_prefix.len() + body.len());
@@ -147,6 +162,7 @@ struct Inner {
     overlay_id: OverlayId,
     entries: RwLock<PrivateOverlayEntries>,
     service: BoxService<ServiceRequest, Response>,
+    resolve_peers: bool,
     request_prefix: Box<[u8]>,
 }
 
@@ -156,6 +172,11 @@ pub struct PrivateOverlayEntries {
 }
 
 impl PrivateOverlayEntries {
+    /// Returns an iterator over the entries.
+    pub fn iter(&self) -> std::slice::Iter<'_, PeerId> {
+        self.data.iter()
+    }
+
     /// Returns one random peer, or `None` if set is empty.
     pub fn choose<R>(&self, rng: &mut R) -> Option<&PeerId>
     where

@@ -4,17 +4,19 @@ use std::task::{Context, Poll, Waker};
 
 use anyhow::Result;
 use bytes::Buf;
+use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt};
 use tl_proto::{TlError, TlRead};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::time::{now_sec, shifted_interval};
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
+use crate::dht::{DhtClient, DhtService};
 use crate::network::{Network, WeakNetwork};
 use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry, PublicEntryToSign};
-use crate::types::{PeerId, Request, Response, Service, ServiceRequest};
+use crate::types::{PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::OverlayConfig;
@@ -34,18 +36,20 @@ mod public_overlay;
 
 pub struct OverlayServiceBackgroundTasks {
     inner: Arc<OverlayServiceInner>,
+    dht: Option<DhtService>,
 }
 
 impl OverlayServiceBackgroundTasks {
     pub fn spawn(self, network: Network) {
         self.inner
-            .start_background_tasks(Network::downgrade(&network));
+            .start_background_tasks(Network::downgrade(&network), self.dht);
     }
 }
 
 pub struct OverlayServiceBuilder {
     local_id: PeerId,
     config: Option<OverlayConfig>,
+    dht: Option<DhtService>,
     private_overlays: FastDashMap<OverlayId, PrivateOverlay>,
     public_overlays: FastDashMap<OverlayId, PublicOverlay>,
 }
@@ -53,6 +57,11 @@ pub struct OverlayServiceBuilder {
 impl OverlayServiceBuilder {
     pub fn with_config(mut self, config: OverlayConfig) -> Self {
         self.config = Some(config);
+        self
+    }
+
+    pub fn with_dht_service(mut self, dht: DhtService) -> Self {
+        self.dht = Some(dht);
         self
     }
 
@@ -103,10 +112,12 @@ impl OverlayServiceBuilder {
             private_overlays: self.private_overlays,
             public_overlays: self.public_overlays,
             public_overlays_changed: Arc::new(Notify::new()),
+            private_overlays_changed: Arc::new(Notify::new()),
         });
 
         let background_tasks = OverlayServiceBackgroundTasks {
             inner: inner.clone(),
+            dht: self.dht,
         };
 
         (background_tasks, OverlayService(inner))
@@ -121,6 +132,7 @@ impl OverlayService {
         OverlayServiceBuilder {
             local_id,
             config: None,
+            dht: None,
             private_overlays: Default::default(),
             public_overlays: Default::default(),
         }
@@ -273,43 +285,58 @@ struct OverlayServiceInner {
     public_overlays: FastDashMap<OverlayId, PublicOverlay>,
     private_overlays: FastDashMap<OverlayId, PrivateOverlay>,
     public_overlays_changed: Arc<Notify>,
+    private_overlays_changed: Arc<Notify>,
 }
 
 impl OverlayServiceInner {
-    fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
+    fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork, dht: Option<DhtService>) {
         enum Action<'a> {
             UpdatePublicOverlaysList {
-                exchange_state: &'a mut ExchangeState,
+                exchange_state: &'a mut TasksState,
+            },
+            UpdatePrivateOverlaysList {
+                resolve_state: &'a mut TasksState,
             },
             ExchangePublicEntries {
-                exchange_state: &'a mut ExchangeState,
+                exchange_state: &'a mut TasksState,
+                overlay_id: OverlayId,
+            },
+            ResolvePrivateOverlayPeers {
+                resolve_state: &'a mut TasksState,
                 overlay_id: OverlayId,
             },
         }
 
         #[derive(Default)]
-        struct ExchangeState {
-            stream: PublicOverlayActionsStream,
+        struct TasksState {
+            stream: OverlayActionsStream,
             futures: FastHashMap<OverlayId, Option<JoinHandle<()>>>,
         }
 
         let public_overlays_notify = self.public_overlays_changed.clone();
+        let private_overlays_notify = self.private_overlays_changed.clone();
 
         let this = Arc::downgrade(self);
         tokio::spawn(async move {
             tracing::debug!("background overlay loop started");
 
-            let mut exchange_state = None::<ExchangeState>;
+            let mut exchange_state = None::<TasksState>;
+            let mut private_overlay_resolve_state = None::<TasksState>;
             let mut public_overlays_changed = Box::pin(public_overlays_notify.notified());
+            let mut private_overlays_changed = Box::pin(private_overlays_notify.notified());
 
             loop {
-                let action = match &mut exchange_state {
-                    // Initial update
-                    None => Action::UpdatePublicOverlaysList {
+                let action = match (&mut exchange_state, &mut private_overlay_resolve_state) {
+                    // Initial update for public overlays list
+                    (None, _) => Action::UpdatePublicOverlaysList {
                         exchange_state: exchange_state.get_or_insert_with(Default::default),
                     },
+                    (_, None) => Action::UpdatePrivateOverlaysList {
+                        resolve_state: private_overlay_resolve_state
+                            .get_or_insert_with(Default::default),
+                    },
                     // Default actions
-                    Some(exchange_state) => {
+                    (Some(exchange_state), Some(private_overlay_resolve_state)) => {
                         tokio::select! {
                             _ = &mut public_overlays_changed => {
                                 public_overlays_changed = Box::pin(public_overlays_notify.notified());
@@ -317,9 +344,22 @@ impl OverlayServiceInner {
                                     exchange_state
                                 }
                             },
+                            _ = &mut private_overlays_changed => {
+                                private_overlays_changed = Box::pin(private_overlays_notify.notified());
+                                Action::UpdatePrivateOverlaysList {
+                                    resolve_state: private_overlay_resolve_state
+                                }
+                            },
                             overlay_id = exchange_state.stream.next() => match overlay_id {
                                 Some(id) => Action::ExchangePublicEntries {
                                     exchange_state,
+                                    overlay_id: id
+                                },
+                                None => continue,
+                            },
+                            overlay_id = private_overlay_resolve_state.stream.next() => match overlay_id {
+                                Some(id) => Action::ResolvePrivateOverlayPeers {
+                                    resolve_state: private_overlay_resolve_state,
                                     overlay_id: id
                                 },
                                 None => continue,
@@ -333,22 +373,56 @@ impl OverlayServiceInner {
                 };
 
                 match action {
-                    Action::UpdatePublicOverlaysList { exchange_state } => exchange_state.stream.rebuild(
-                        this.public_overlays.iter().map(|item| *item.key()),
-                        |_| {
-                            shifted_interval(
-                                this.config.public_overlay_peer_exchange_period,
-                                this.config.public_overlay_peer_exchange_max_jitter,
-                            )
-                        },
-                        |overlay_id| {
-                            if let Some(fut) = exchange_state.futures.remove(overlay_id).flatten() {
-                                tracing::debug!(%overlay_id, "cancelling exchange public entries task");
-                                fut.abort();
-                            }
-                        },
-                    ),
-                    Action::ExchangePublicEntries { exchange_state, overlay_id } => {
+                    Action::UpdatePublicOverlaysList { exchange_state } => {
+                        exchange_state.stream.rebuild(
+                            this.public_overlays.iter().map(|item| *item.key()),
+                            |_| {
+                                shifted_interval(
+                                    this.config.public_overlay_peer_exchange_period,
+                                    this.config.public_overlay_peer_exchange_max_jitter,
+                                )
+                            },
+                            |overlay_id| {
+                                if let Some(fut) =
+                                    exchange_state.futures.remove(overlay_id).flatten()
+                                {
+                                    tracing::debug!(
+                                        %overlay_id,
+                                        "cancelling exchange public entries task",
+                                    );
+                                    fut.abort();
+                                }
+                            },
+                        )
+                    }
+                    Action::UpdatePrivateOverlaysList { resolve_state } => {
+                        resolve_state.stream.rebuild(
+                            this.private_overlays.iter().filter_map(|item| {
+                                item.value().should_resolve_peers().then(|| *item.key())
+                            }),
+                            |_| {
+                                shifted_interval(
+                                    this.config.private_overlay_peer_resolve_period,
+                                    this.config.private_overlay_peer_resolve_max_jitter,
+                                )
+                            },
+                            |overlay_id| {
+                                if let Some(fut) =
+                                    resolve_state.futures.remove(overlay_id).flatten()
+                                {
+                                    tracing::debug!(
+                                        %overlay_id,
+                                        "cancelling resolve private overlay peers task",
+                                    );
+                                    fut.abort();
+                                }
+                            },
+                        )
+                    }
+                    Action::ExchangePublicEntries {
+                        exchange_state,
+                        overlay_id,
+                    } => {
                         let fut_entry = exchange_state.futures.entry(overlay_id).or_default();
 
                         // Wait for the previous exchange to finish.
@@ -368,6 +442,45 @@ impl OverlayServiceInner {
                             };
                         }));
                     }
+                    Action::ResolvePrivateOverlayPeers {
+                        resolve_state,
+                        overlay_id,
+                    } => {
+                        let dht_client = match &dht {
+                            Some(dht) => dht.make_client(network.clone()),
+                            None => {
+                                tracing::warn!(
+                                    "DHT service was not provided, \
+                                    skipping private overlay peers resolution"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let fut_entry = resolve_state.futures.entry(overlay_id).or_default();
+
+                        // Wait for the previous exchange to finish.
+                        if let Some(fut) = fut_entry.take() {
+                            if let Err(e) = fut.await {
+                                if e.is_panic() {
+                                    std::panic::resume_unwind(e.into_panic());
+                                }
+                            }
+                        }
+
+                        // Spawn a new resolver
+                        *fut_entry = Some(tokio::spawn(async move {
+                            let res = this
+                                .resolve_private_overlay_peers(&network, &dht_client, &overlay_id)
+                                .await;
+                            if let Err(e) = res {
+                                tracing::error!(
+                                    %overlay_id,
+                                    "failed to resolve private overlay peers: {e:?}",
+                                );
+                            };
+                        }));
+                    }
                 }
             }
 
@@ -380,13 +493,79 @@ impl OverlayServiceInner {
         skip_all,
         fields(local_id = %self.local_id, overlay_id = %overlay_id),
     )]
+    async fn resolve_private_overlay_peers(
+        &self,
+        network: &Network,
+        dht_client: &DhtClient,
+        overlay_id: &OverlayId,
+    ) -> Result<()> {
+        use crate::proto::dht;
+
+        const PARRALLEL_REQUESTS: usize = 10;
+
+        let overlay = match self.private_overlays.get(overlay_id) {
+            Some(overlay) => overlay.value().clone(),
+            None => {
+                tracing::debug!(%overlay_id, "overlay not found");
+                return Ok(());
+            }
+        };
+
+        let semaphore = Arc::new(Semaphore::new(PARRALLEL_REQUESTS));
+        let mut futures = FuturesUnordered::new();
+        let known_peers = network.known_peers();
+        {
+            let entries = overlay.read_entries();
+            for peer_id in entries.iter() {
+                // TODO: check ttl
+                if known_peers.contains(peer_id) {
+                    continue;
+                }
+
+                let peer_id = *peer_id;
+                let semaphore = semaphore.clone();
+                futures.push(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+
+                    let res = dht_client
+                        .entry(dht::PeerValueKeyName::NodeInfo)
+                        .find_value::<PeerInfo>(&peer_id)
+                        .await;
+                    (peer_id, res)
+                });
+            }
+        };
+
+        while let Some((peer_id, res)) = futures.next().await {
+            match res {
+                Ok(info) => {
+                    known_peers.insert(Arc::new(info), PeerAffinity::Allowed);
+                }
+                Err(e) => {
+                    tracing::warn!(%peer_id, "failed to resolve peer info: {e:?}");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(local_id = %self.local_id, overlay_id = %overlay_id),
+    )]
     async fn exchange_public_entries(
         &self,
         network: &Network,
         overlay_id: &OverlayId,
     ) -> Result<()> {
-        let Some(overlay) = self.public_overlays.get(overlay_id) else {
-            anyhow::bail!("overlay not found");
+        let overlay = match self.public_overlays.get(overlay_id) {
+            Some(overlay) => overlay.value().clone(),
+            None => {
+                tracing::debug!(%overlay_id, "overlay not found");
+                return Ok(());
+            }
         };
 
         overlay.remove_invalid_entries(now_sec());
@@ -544,12 +723,12 @@ impl OverlayServiceInner {
 }
 
 #[derive(Default)]
-struct PublicOverlayActionsStream {
+struct OverlayActionsStream {
     intervals: Vec<(tokio::time::Interval, OverlayId)>,
     waker: Option<Waker>,
 }
 
-impl PublicOverlayActionsStream {
+impl OverlayActionsStream {
     fn rebuild<I: Iterator<Item = OverlayId>, A, R>(
         &mut self,
         iter: I,
@@ -578,7 +757,7 @@ impl PublicOverlayActionsStream {
     }
 }
 
-impl Stream for PublicOverlayActionsStream {
+impl Stream for OverlayActionsStream {
     type Item = OverlayId;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

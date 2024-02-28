@@ -55,12 +55,13 @@ mod tests {
         let public_overlay = PublicOverlay::builder(rand::random())
             .build(service_message_fn(|_| futures_util::future::ready(())));
 
+        let (dht_client, dht) = DhtService::builder(peer_id).build();
+
         let (overlay_tasks, overlay_service) = OverlayService::builder(peer_id)
+            .with_dht_service(dht.clone())
             .with_private_overlay(&private_overlay)
             .with_public_overlay(&public_overlay)
             .build();
-
-        let (dht_client, dht) = DhtService::builder(peer_id).build();
 
         let router = Router::builder().route(dht).route(overlay_service).build();
 
