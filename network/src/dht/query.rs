@@ -8,10 +8,10 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::time::now_sec;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use crate::dht::routing::{RoutingTable, RoutingTableSource};
 use crate::network::Network;
@@ -20,7 +20,7 @@ use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
 
 pub struct QueryCache<R> {
-    cache: Mutex<FastHashMap<[u8; 32], WeakSharedBoxedFut<R>>>,
+    cache: FastDashMap<[u8; 32], WeakSharedBoxedFut<R>>,
 }
 
 impl<R> QueryCache<R> {
@@ -29,15 +29,17 @@ impl<R> QueryCache<R> {
         R: Clone,
         F: FnOnce() -> BoxFuture<'static, R>,
     {
-        let fut = match self.cache.lock().await.entry(*target_id) {
-            hash_map::Entry::Vacant(entry) => {
+        use dashmap::mapref::entry::Entry;
+
+        let fut = match self.cache.entry(*target_id) {
+            Entry::Vacant(entry) => {
                 let fut = Shared::new(f());
                 if let Some(weak) = fut.downgrade() {
                     entry.insert(weak);
                 }
                 fut
             }
-            hash_map::Entry::Occupied(mut entry) => {
+            Entry::Occupied(mut entry) => {
                 if let Some(fut) = entry.get().upgrade() {
                     fut
                 } else {
@@ -51,16 +53,47 @@ impl<R> QueryCache<R> {
             }
         };
 
-        let (output, is_last) = fut.await;
+        fn on_drop<R>(_key: &[u8; 32], value: &WeakSharedBoxedFut<R>) -> bool {
+            value.strong_count() == 0
+        }
+
+        let (output, is_last) = {
+            struct Guard<'a, R> {
+                target_id: &'a [u8; 32],
+                cache: &'a FastDashMap<[u8; 32], WeakSharedBoxedFut<R>>,
+                fut: Option<Shared<BoxFuture<'static, R>>>,
+            }
+
+            impl<R> Drop for Guard<'_, R> {
+                fn drop(&mut self) {
+                    // Remove value from cache if we consumed the last future instance
+                    if self.fut.take().map(Shared::consume).unwrap_or_default() {
+                        self.cache.remove_if(self.target_id, on_drop);
+                    }
+                }
+            }
+
+            // Wrap future into guard to remove it from cache event it was cancelled
+            let mut guard = Guard {
+                target_id,
+                cache: &self.cache,
+                fut: None,
+            };
+            let fut = guard.fut.insert(fut);
+
+            // Await future
+            let res = fut.await;
+
+            // Reset the guard if the future was successfully awaited
+            guard.fut = None;
+
+            res
+        };
 
         // TODO: add ttl and force others to make a request for a fresh data
         if is_last {
-            // Try to remove the future on last call
-            if let hash_map::Entry::Occupied(entry) = self.cache.lock().await.entry(*target_id) {
-                if entry.get().strong_count() == 0 {
-                    entry.remove();
-                }
-            }
+            // Remove value from cache if we consumed the last future instance
+            self.cache.remove_if(target_id, on_drop);
         }
 
         output
@@ -70,7 +103,7 @@ impl<R> QueryCache<R> {
 impl<R> Default for QueryCache<R> {
     fn default() -> Self {
         Self {
-            cache: Mutex::new(FastHashMap::default()),
+            cache: Default::default(),
         }
     }
 }

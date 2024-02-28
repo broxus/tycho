@@ -46,6 +46,14 @@ impl<Fut: Future> Shared<Fut> {
             .as_ref()
             .map(|inner| WeakShared(Arc::downgrade(inner)))
     }
+
+    /// Drops the future, returning whether it was the last instance.
+    pub fn consume(mut self) -> bool {
+        self.inner
+            .take()
+            .map(|inner| Arc::into_inner(inner).is_some())
+            .unwrap_or_default()
+    }
 }
 
 impl<Fut> Future for Shared<Fut>
