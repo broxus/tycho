@@ -4,8 +4,6 @@ use std::task::{Context, Poll};
 use futures_util::future::BoxFuture;
 use futures_util::{Future, FutureExt};
 
-mod shared;
-
 pub enum BoxFutureOrNoop<T> {
     Boxed(BoxFuture<'static, T>),
     Noop,

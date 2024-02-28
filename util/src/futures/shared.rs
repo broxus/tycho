@@ -2,39 +2,214 @@ use std::cell::UnsafeCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
-use std::task::{Context, Poll, Waker};
+use std::sync::{Arc, Weak};
+use std::task::{Context, Poll};
 
-use slab::Slab;
+use futures_util::future::BoxFuture;
+use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
+#[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Shared<Fut: Future> {
     inner: Option<Arc<Inner<Fut>>>,
-    waker_key: usize,
+    permit_fut: Option<BoxFuture<'static, Result<OwnedSemaphorePermit, AcquireError>>>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
-struct Inner<Fut: Future> {
-    future_or_output: UnsafeCell<FutureOrOutput<Fut>>,
-    notifier: Arc<Notifier>,
-}
-
-struct Notifier {
-    state: AtomicUsize,
-    wakers: Mutex<Option<Slab<Option<Waker>>>>,
-}
-
-/// A weak reference to a [`Shared`] that can be upgraded much like an `Arc`.
-#[repr(transparent)]
-pub struct WeakShared<Fut: Future>(Weak<Inner<Fut>>);
-
-impl<Fut: Future> Clone for WeakShared<Fut> {
+impl<Fut: Future> Clone for Shared<Fut> {
     fn clone(&self) -> Self {
-        Self(self.0.clone())
+        Self {
+            inner: self.inner.clone(),
+            permit_fut: None,
+            permit: None,
+        }
     }
 }
 
-enum FutureOrOutput<Fut: Future> {
-    Future(Fut),
-    Output(Fut::Output),
+impl<Fut: Future> Shared<Fut> {
+    pub fn new(future: Fut) -> Self {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let inner = Arc::new(Inner {
+            state: AtomicUsize::new(POLLING),
+            future_or_output: UnsafeCell::new(FutureOrOutput::Future(future)),
+            semaphore,
+        });
+
+        Self {
+            inner: Some(inner),
+            permit_fut: None,
+            permit: None,
+        }
+    }
+
+    pub fn downgrade(&self) -> Option<WeakShared<Fut>> {
+        self.inner
+            .as_ref()
+            .map(|inner| WeakShared(Arc::downgrade(inner)))
+    }
+}
+
+impl<Fut> Future for Shared<Fut>
+where
+    Fut: Future,
+    Fut::Output: Clone,
+{
+    type Output = Fut::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = &mut *self;
+
+        let inner = this
+            .inner
+            .take()
+            .expect("Shared future polled again after completion");
+
+        // Fast path for when the wrapped future has already completed
+        if inner.state.load(Ordering::Acquire) == COMPLETE {
+            // Safety: We're in the COMPLETE state
+            return unsafe { Poll::Ready(inner.take_or_clone_output()) };
+        }
+
+        if this.permit.is_none() {
+            this.permit = Some('permit: {
+                // Poll semaphore future
+                let permit_fut = match this.permit_fut.as_mut() {
+                    Some(fut) => fut,
+                    None => {
+                        // Avoid allocations completely if we can grab a permit immediately
+                        match Arc::clone(&inner.semaphore).try_acquire_owned() {
+                            Ok(permit) => break 'permit permit,
+                            Err(TryAcquireError::NoPermits) => {}
+                            // NOTE: We don't expect the semaphore to be closed
+                            Err(TryAcquireError::Closed) => unreachable!(),
+                        }
+
+                        let next_fut = Arc::clone(&inner.semaphore).acquire_owned();
+                        this.permit_fut.get_or_insert(Box::pin(next_fut))
+                    }
+                };
+
+                // Acquire a permit to poll the inner future
+                match Pin::new(permit_fut).poll(cx) {
+                    Poll::Pending => {
+                        this.inner = Some(inner);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Ok(permit)) => {
+                        // Reset the permit future as we don't need it anymore
+                        this.permit_fut = None;
+                        permit
+                    }
+                    // NOTE: We don't expect the semaphore to be closed
+                    Poll::Ready(Err(_e)) => unreachable!(),
+                }
+            });
+        }
+
+        match inner.state.load(Ordering::Acquire) {
+            COMPLETE => {
+                // SAFETY: We're in the COMPLETE state
+                return unsafe { Poll::Ready(inner.take_or_clone_output()) };
+            }
+            POISONED => panic!("inner future panicked during poll"),
+            _ => {}
+        }
+
+        // Create poison guard
+        struct Reset<'a> {
+            state: &'a AtomicUsize,
+            did_not_panic: bool,
+        }
+
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                if !self.did_not_panic {
+                    self.state.store(POISONED, Ordering::Release);
+                }
+            }
+        }
+
+        let mut reset = Reset {
+            state: &inner.state,
+            did_not_panic: false,
+        };
+
+        let output = {
+            // SAFETY: We are now a sole owner of the permit to poll the inner future
+            let future = unsafe {
+                match &mut *inner.future_or_output.get() {
+                    FutureOrOutput::Future(fut) => Pin::new_unchecked(fut),
+                    _ => unreachable!(),
+                }
+            };
+
+            let poll_result = future.poll(cx);
+            reset.did_not_panic = true;
+
+            match poll_result {
+                Poll::Pending => {
+                    drop(reset); // Make borrow checker happy
+                    this.inner = Some(inner);
+                    return Poll::Pending;
+                }
+                Poll::Ready(output) => output,
+            }
+        };
+
+        unsafe {
+            *inner.future_or_output.get() = FutureOrOutput::Output(output);
+        }
+
+        inner.state.store(COMPLETE, Ordering::Release);
+
+        drop(reset); // Make borrow checker happy
+
+        // Reset permits
+        self.permit_fut = None;
+        self.permit = None;
+
+        // SAFETY: We're in the COMPLETE state
+        unsafe { Poll::Ready(inner.take_or_clone_output()) }
+    }
+}
+
+#[repr(transparent)]
+pub struct WeakShared<Fut: Future>(Weak<Inner<Fut>>);
+
+impl<Fut: Future> WeakShared<Fut> {
+    pub fn upgrade(&self) -> Option<Shared<Fut>> {
+        self.0.upgrade().map(|inner| Shared {
+            inner: Some(inner),
+            permit_fut: None,
+            permit: None,
+        })
+    }
+}
+
+struct Inner<Fut: Future> {
+    state: AtomicUsize,
+    future_or_output: UnsafeCell<FutureOrOutput<Fut>>,
+    semaphore: Arc<Semaphore>,
+}
+
+impl<Fut> Inner<Fut>
+where
+    Fut: Future,
+    Fut::Output: Clone,
+{
+    /// Safety: callers must first ensure that `inner.state`
+    /// is `COMPLETE`
+    unsafe fn take_or_clone_output(self: Arc<Self>) -> Fut::Output {
+        match Arc::try_unwrap(self) {
+            Ok(inner) => match inner.future_or_output.into_inner() {
+                FutureOrOutput::Output(item) => item,
+                FutureOrOutput::Future(_) => unreachable!(),
+            },
+            Err(inner) => match &*inner.future_or_output.get() {
+                FutureOrOutput::Output(item) => item.clone(),
+                FutureOrOutput::Future(_) => unreachable!(),
+            },
+        }
+    }
 }
 
 unsafe impl<Fut> Send for Inner<Fut>
@@ -51,270 +226,67 @@ where
 {
 }
 
-const IDLE: usize = 0;
-const POLLING: usize = 1;
+enum FutureOrOutput<Fut: Future> {
+    Future(Fut),
+    Output(Fut::Output),
+}
+
+const POLLING: usize = 0;
 const COMPLETE: usize = 2;
 const POISONED: usize = 3;
 
-const NULL_WAKER_KEY: usize = usize::MAX;
+#[cfg(test)]
+mod tests {
+    //! Addresses the original `Shared` futures issue:
+    //! https://github.com/rust-lang/futures-rs/issues/2706
 
-impl<Fut: Future> Shared<Fut> {
-    pub fn new(future: Fut) -> Self {
-        let inner = Inner {
-            future_or_output: UnsafeCell::new(FutureOrOutput::Future(future)),
-            notifier: Arc::new(Notifier {
-                state: AtomicUsize::new(IDLE),
-                wakers: Mutex::new(Some(Slab::new())),
-            }),
-        };
+    use futures_util::FutureExt;
 
-        Self {
-            inner: Some(Arc::new(inner)),
-            waker_key: NULL_WAKER_KEY,
-        }
-    }
-}
+    use super::*;
 
-impl<Fut> Shared<Fut>
-where
-    Fut: Future,
-{
-    /// Creates a new [`WeakShared`] for this [`Shared`].
-    ///
-    /// Returns [`None`] if it has already been polled to completion.
-    pub fn downgrade(&self) -> Option<WeakShared<Fut>> {
-        if let Some(inner) = self.inner.as_ref() {
-            return Some(WeakShared(Arc::downgrade(inner)));
-        }
-        None
-    }
-}
-
-impl<Fut> Inner<Fut>
-where
-    Fut: Future,
-{
-    /// Safety: callers must first ensure that `self.inner.state`
-    /// is `COMPLETE`
-    unsafe fn output(&self) -> &Fut::Output {
-        match &*self.future_or_output.get() {
-            FutureOrOutput::Output(ref item) => item,
-            FutureOrOutput::Future(_) => unreachable!(),
-        }
-    }
-}
-
-impl<Fut> Inner<Fut>
-where
-    Fut: Future,
-    Fut::Output: Clone,
-{
-    /// Registers the current task to receive a wakeup when we are awoken.
-    fn record_waker(&self, waker_key: &mut usize, cx: &mut Context<'_>) {
-        let mut wakers_guard = self.notifier.wakers.lock().unwrap();
-
-        let wakers = match wakers_guard.as_mut() {
-            Some(wakers) => wakers,
-            None => return,
-        };
-
-        let new_waker = cx.waker();
-
-        if *waker_key == NULL_WAKER_KEY {
-            *waker_key = wakers.insert(Some(new_waker.clone()));
-        } else {
-            match wakers[*waker_key] {
-                Some(ref old_waker) if new_waker.will_wake(old_waker) => {}
-                // Could use clone_from here, but Waker doesn't specialize it.
-                ref mut slot => *slot = Some(new_waker.clone()),
-            }
-        }
-        debug_assert!(*waker_key != NULL_WAKER_KEY);
-    }
-
-    /// Safety: callers must first ensure that `inner.state`
-    /// is `COMPLETE`
-    unsafe fn take_or_clone_output(self: Arc<Self>) -> (Fut::Output, bool) {
-        match Arc::try_unwrap(self) {
-            Ok(inner) => match inner.future_or_output.into_inner() {
-                FutureOrOutput::Output(item) => (item, true),
-                FutureOrOutput::Future(_) => unreachable!(),
-            },
-            Err(inner) => (inner.output().clone(), false),
-        }
-    }
-}
-
-impl<Fut> Future for Shared<Fut>
-where
-    Fut: Future,
-    Fut::Output: Clone,
-{
-    type Output = (Fut::Output, bool);
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = &mut *self;
-
-        let inner = this
-            .inner
-            .take()
-            .expect("Shared future polled again after completion");
-
-        // Fast path for when the wrapped future has already completed
-        if inner.notifier.state.load(Ordering::Acquire) == COMPLETE {
-            // Safety: We're in the COMPLETE state
-            return unsafe { Poll::Ready(inner.take_or_clone_output()) };
+    async fn yield_now() {
+        /// Yield implementation
+        struct YieldNow {
+            yielded: bool,
         }
 
-        inner.record_waker(&mut this.waker_key, cx);
+        impl Future for YieldNow {
+            type Output = ();
 
-        match inner
-            .notifier
-            .state
-            .compare_exchange(IDLE, POLLING, Ordering::SeqCst, Ordering::SeqCst)
-            .unwrap_or_else(|x| x)
-        {
-            IDLE => {
-                // Lock acquired, fall through
-            }
-            POLLING => {
-                // Another task is currently polling, at this point we just want
-                // to ensure that the waker for this task is registered
-                this.inner = Some(inner);
-                return Poll::Pending;
-            }
-            COMPLETE => {
-                // Safety: We're in the COMPLETE state
-                return unsafe { Poll::Ready(inner.take_or_clone_output()) };
-            }
-            POISONED => panic!("inner future panicked during poll"),
-            _ => unreachable!(),
-        }
-
-        let waker = waker_ref(&inner.notifier);
-        let mut cx = Context::from_waker(&waker);
-
-        struct Reset<'a> {
-            state: &'a AtomicUsize,
-            did_not_panic: bool,
-        }
-
-        impl Drop for Reset<'_> {
-            fn drop(&mut self) {
-                if !self.did_not_panic {
-                    self.state.store(POISONED, Ordering::SeqCst);
+            fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+                if self.yielded {
+                    return Poll::Ready(());
                 }
+
+                self.yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
             }
         }
 
-        let mut reset = Reset {
-            state: &inner.notifier.state,
-            did_not_panic: false,
-        };
-
-        let output = {
-            let future = unsafe {
-                match &mut *inner.future_or_output.get() {
-                    FutureOrOutput::Future(fut) => Pin::new_unchecked(fut),
-                    _ => unreachable!(),
-                }
-            };
-
-            let poll_result = future.poll(&mut cx);
-            reset.did_not_panic = true;
-
-            match poll_result {
-                Poll::Pending => {
-                    if inner
-                        .notifier
-                        .state
-                        .compare_exchange(POLLING, IDLE, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                    {
-                        // Success
-                        drop(reset);
-                        this.inner = Some(inner);
-                        return Poll::Pending;
-                    } else {
-                        unreachable!()
-                    }
-                }
-                Poll::Ready(output) => output,
-            }
-        };
-
-        unsafe {
-            *inner.future_or_output.get() = FutureOrOutput::Output(output);
-        }
-
-        inner.notifier.state.store(COMPLETE, Ordering::SeqCst);
-
-        // Wake all tasks and drop the slab
-        let mut wakers_guard = inner.notifier.wakers.lock().unwrap();
-        let mut wakers = wakers_guard.take().unwrap();
-        for waker in wakers.drain().flatten() {
-            waker.wake();
-        }
-
-        drop(reset); // Make borrow checker happy
-        drop(wakers_guard);
-
-        // Safety: We're in the COMPLETE state
-        unsafe { Poll::Ready(inner.take_or_clone_output()) }
+        YieldNow { yielded: false }.await
     }
-}
 
-impl<Fut> Clone for Shared<Fut>
-where
-    Fut: Future,
-{
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            waker_key: NULL_WAKER_KEY,
-        }
-    }
-}
-
-impl<Fut> Drop for Shared<Fut>
-where
-    Fut: Future,
-{
-    fn drop(&mut self) {
-        if self.waker_key != NULL_WAKER_KEY {
-            if let Some(ref inner) = self.inner {
-                if let Ok(mut wakers) = inner.notifier.wakers.lock() {
-                    if let Some(wakers) = wakers.as_mut() {
-                        wakers.remove(self.waker_key);
-                    }
-                }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn must_not_hang_up() {
+        for _ in 0..200 {
+            for _ in 0..1000 {
+                test_fut().await;
             }
         }
+        println!();
     }
-}
 
-impl ArcWake for Notifier {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        let wakers = &mut *arc_self.wakers.lock().unwrap();
-        if let Some(wakers) = wakers.as_mut() {
-            for (_key, opt_waker) in wakers {
-                if let Some(waker) = opt_waker.take() {
-                    waker.wake();
-                }
-            }
-        }
-    }
-}
-
-impl<Fut: Future> WeakShared<Fut> {
-    /// Attempts to upgrade this [`WeakShared`] into a [`Shared`].
-    ///
-    /// Returns [`None`] if all clones of the [`Shared`] have been dropped or polled
-    /// to completion.
-    pub fn upgrade(&self) -> Option<Shared<Fut>> {
-        Some(Shared {
-            inner: Some(self.0.upgrade()?),
-            waker_key: NULL_WAKER_KEY,
-        })
+    async fn test_fut() {
+        let f1 = Shared::new(yield_now());
+        let f2 = f1.clone();
+        let x1 = tokio::spawn(async move {
+            f1.now_or_never();
+        });
+        let x2 = tokio::spawn(async move {
+            f2.await;
+        });
+        x1.await.ok();
+        x2.await.ok();
     }
 }

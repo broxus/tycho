@@ -1,9 +1,16 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-pub mod futures;
 pub mod serde_helpers;
 pub mod time;
+
+pub mod futures {
+    pub use self::box_future_or_noop::BoxFutureOrNoop;
+    pub use self::shared::{Shared, WeakShared};
+
+    mod box_future_or_noop;
+    mod shared;
+}
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 pub type FastDashSet<K> = dashmap::DashSet<K, ahash::RandomState>;
