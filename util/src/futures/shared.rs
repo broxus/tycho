@@ -53,7 +53,7 @@ where
     Fut: Future,
     Fut::Output: Clone,
 {
-    type Output = Fut::Output;
+    type Output = (Fut::Output, bool);
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
@@ -72,20 +72,19 @@ where
         if this.permit.is_none() {
             this.permit = Some('permit: {
                 // Poll semaphore future
-                let permit_fut = match this.permit_fut.as_mut() {
-                    Some(fut) => fut,
-                    None => {
-                        // Avoid allocations completely if we can grab a permit immediately
-                        match Arc::clone(&inner.semaphore).try_acquire_owned() {
-                            Ok(permit) => break 'permit permit,
-                            Err(TryAcquireError::NoPermits) => {}
-                            // NOTE: We don't expect the semaphore to be closed
-                            Err(TryAcquireError::Closed) => unreachable!(),
-                        }
-
-                        let next_fut = Arc::clone(&inner.semaphore).acquire_owned();
-                        this.permit_fut.get_or_insert(Box::pin(next_fut))
+                let permit_fut = if let Some(fut) = this.permit_fut.as_mut() {
+                    fut
+                } else {
+                    // Avoid allocations completely if we can grab a permit immediately
+                    match Arc::clone(&inner.semaphore).try_acquire_owned() {
+                        Ok(permit) => break 'permit permit,
+                        Err(TryAcquireError::NoPermits) => {}
+                        // NOTE: We don't expect the semaphore to be closed
+                        Err(TryAcquireError::Closed) => unreachable!(),
                     }
+
+                    let next_fut = Arc::clone(&inner.semaphore).acquire_owned();
+                    this.permit_fut.get_or_insert(Box::pin(next_fut))
                 };
 
                 // Acquire a permit to poll the inner future
@@ -138,7 +137,7 @@ where
             let future = unsafe {
                 match &mut *inner.future_or_output.get() {
                     FutureOrOutput::Future(fut) => Pin::new_unchecked(fut),
-                    _ => unreachable!(),
+                    FutureOrOutput::Output(_) => unreachable!(),
                 }
             };
 
@@ -183,6 +182,10 @@ impl<Fut: Future> WeakShared<Fut> {
             permit: None,
         })
     }
+
+    pub fn strong_count(&self) -> usize {
+        self.0.strong_count()
+    }
 }
 
 struct Inner<Fut: Future> {
@@ -198,14 +201,14 @@ where
 {
     /// Safety: callers must first ensure that `inner.state`
     /// is `COMPLETE`
-    unsafe fn take_or_clone_output(self: Arc<Self>) -> Fut::Output {
+    unsafe fn take_or_clone_output(self: Arc<Self>) -> (Fut::Output, bool) {
         match Arc::try_unwrap(self) {
             Ok(inner) => match inner.future_or_output.into_inner() {
-                FutureOrOutput::Output(item) => item,
+                FutureOrOutput::Output(item) => (item, true),
                 FutureOrOutput::Future(_) => unreachable!(),
             },
             Err(inner) => match &*inner.future_or_output.get() {
-                FutureOrOutput::Output(item) => item.clone(),
+                FutureOrOutput::Output(item) => (item.clone(), false),
                 FutureOrOutput::Future(_) => unreachable!(),
             },
         }

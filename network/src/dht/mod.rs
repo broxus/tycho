@@ -12,7 +12,7 @@ use tokio::task::JoinHandle;
 use tycho_util::realloc_box_enum;
 use tycho_util::time::{now_sec, shifted_interval};
 
-use self::query::{Query, StoreValue};
+use self::query::{Query, QueryCache, StoreValue};
 use self::routing::{RoutingTable, RoutingTableSource};
 use self::storage::Storage;
 use crate::network::{Network, WeakNetwork};
@@ -286,6 +286,7 @@ impl DhtServiceBuilder {
             local_peer_info: Mutex::new(None),
             config,
             announced_peers,
+            find_value_queries: Default::default(),
         });
 
         let client_builder = DhtClientBuilder {
@@ -418,6 +419,7 @@ struct DhtInner {
     local_peer_info: Mutex<Option<PeerInfo>>,
     config: DhtConfig,
     announced_peers: broadcast::Sender<Arc<PeerInfo>>,
+    find_value_queries: QueryCache<Option<Box<Value>>>,
 }
 
 impl DhtInner {
@@ -618,16 +620,19 @@ impl DhtInner {
     }
 
     async fn find_value(&self, network: &Network, key_hash: &[u8; 32]) -> Option<Box<Value>> {
-        // TODO: deduplicate shared futures
-        let query = Query::new(
-            network.clone(),
-            &self.routing_table.lock().unwrap(),
-            key_hash,
-            self.config.max_k,
-        );
+        self.find_value_queries
+            .run(key_hash, || {
+                let query = Query::new(
+                    network.clone(),
+                    &self.routing_table.lock().unwrap(),
+                    key_hash,
+                    self.config.max_k,
+                );
 
-        // NOTE: expression is intentionally split to drop the routing table guard
-        query.find_value().await
+                // NOTE: expression is intentionally split to drop the routing table guard
+                Box::pin(query.find_value())
+            })
+            .await
     }
 
     async fn store_value(
