@@ -1,91 +1,70 @@
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use everscale_types::models::*;
-use tokio::fs::File;
-use tokio::io::{AsyncWriteExt, BufWriter};
 
 pub use mapped_file::MappedFile;
 
 mod mapped_file;
 
 pub struct FileDb {
-    cells_path: PathBuf,
-    cells_file: Option<BufWriter<File>>,
-    hashes_path: PathBuf,
+    root_path: PathBuf,
 }
 
 impl FileDb {
-    pub async fn new<P>(downloads_dir: P, block_id: &BlockId) -> Result<Self>
+    pub fn new(root_path: PathBuf) -> Self {
+        Self { root_path }
+    }
+
+    pub fn open<P>(&self, path: P, is_relative_path: bool) -> Result<File>
     where
         P: AsRef<Path>,
     {
-        let block_id = format!(
-            "({},{:016x},{})",
-            block_id.shard.workchain(),
-            block_id.shard.prefix(),
-            block_id.seqno
-        );
+        let path = if is_relative_path {
+            self.root_path.join(path)
+        } else {
+            PathBuf::from(path.as_ref())
+        };
 
-        let cells_path = downloads_dir
-            .as_ref()
-            .join(format!("state_cells_{block_id}"));
-        let hashes_path = downloads_dir
-            .as_ref()
-            .join(format!("state_hashes_{block_id}"));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .open(&path)
+            .context("Failed to create cells file")?;
 
-        let cells_file = Some(BufWriter::new(
-            tokio::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .read(true)
-                .open(&cells_path)
-                .await
-                .context("Failed to create cells file")?,
-        ));
-
-        Ok(Self {
-            cells_path,
-            cells_file,
-            hashes_path,
-        })
+        Ok(file)
     }
 
-    pub async fn clear(self) -> Result<()> {
-        tokio::fs::remove_file(self.cells_path).await?;
-        tokio::fs::remove_file(self.hashes_path).await?;
+    pub fn clear<P>(&self, path: P, is_relative_path: bool) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        let path = if is_relative_path {
+            self.root_path.join(path)
+        } else {
+            PathBuf::from(path.as_ref())
+        };
+
+        std::fs::remove_file(path)?;
+
         Ok(())
     }
 
-    pub fn cells_file(&mut self) -> Result<&mut BufWriter<File>> {
-        match &mut self.cells_file {
-            Some(file) => Ok(file),
-            None => Err(FileDbError::AlreadyFinalized.into()),
-        }
+    pub fn write_all(file: &mut File, buf: &[u8]) -> Result<()> {
+        file.write_all(buf)?;
+        Ok(())
     }
 
-    pub fn create_mapped_hashes_file(&self, length: usize) -> Result<MappedFile> {
-        let mapped_file = MappedFile::new(&self.hashes_path, length)?;
-        Ok(mapped_file)
+    pub fn flush(file: &mut File) -> Result<()> {
+        file.flush()?;
+        Ok(())
     }
 
-    pub async fn create_mapped_cells_file(&mut self) -> Result<MappedFile> {
-        let file = match self.cells_file.take() {
-            Some(mut file) => {
-                file.flush().await?;
-                file.into_inner().into_std().await
-            }
-            None => return Err(FileDbError::AlreadyFinalized.into()),
-        };
-
-        let mapped_file = MappedFile::from_existing_file(file)?;
-        Ok(mapped_file)
+    pub fn root_path(&self) -> &PathBuf {
+        &self.root_path
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-enum FileDbError {
-    #[error("Already finalized")]
-    AlreadyFinalized,
 }

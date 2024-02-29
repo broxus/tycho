@@ -1,3 +1,6 @@
+use std::fs::File;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -17,42 +20,49 @@ use tycho_util::FastHashMap;
 
 pub struct ShardStateReplaceTransaction<'a> {
     db: &'a Db,
+    file_db: &'a FileDb,
     cell_storage: &'a Arc<CellStorage>,
     min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
     reader: ShardStatePacketReader,
     header: Option<BocHeader>,
     cells_read: u64,
+    file_ctx: FilesContext,
 }
 
 impl<'a> ShardStateReplaceTransaction<'a> {
     pub fn new(
         db: &'a Db,
+        file_db: &'a FileDb,
         cell_storage: &'a Arc<CellStorage>,
         min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
-    ) -> Self {
-        Self {
+        block_id: &BlockId,
+    ) -> Result<Self> {
+        let file_ctx = FilesContext::new(file_db, block_id)?;
+
+        Ok(Self {
             db,
+            file_db,
+            file_ctx,
             cell_storage,
             min_ref_mc_state,
             reader: ShardStatePacketReader::new(),
             header: None,
             cells_read: 0,
-        }
+        })
     }
 
     pub fn header(&self) -> &Option<BocHeader> {
         &self.header
     }
 
-    pub async fn process_packet(
+    pub fn process_packet(
         &mut self,
-        file_db: &mut FileDb,
         packet: Vec<u8>,
         progress_bar: &mut ProgressBar,
     ) -> Result<bool> {
-        use tokio::io::AsyncWriteExt;
+        use std::io::Write;
 
-        let cells_file = file_db.cells_file()?;
+        let cells_file = self.file_ctx.cells_file()?;
 
         self.reader.set_next_packet(packet);
 
@@ -63,7 +73,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
             let header = match self.reader.read_header()? {
                 Some(header) => header,
-                None => return Ok(false),
+                None => {
+                    self.file_ctx.clear()?;
+                    return Ok(false);
+                }
             };
 
             tracing::debug!(?header);
@@ -82,7 +95,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             };
 
             buffer[cell_size] = cell_size as u8;
-            cells_file.write_all(&buffer[..cell_size + 1]).await?;
+            cells_file.write_all(&buffer[..cell_size + 1])?;
 
             chunk_size += cell_size as u32 + 1;
             self.cells_read += 1;
@@ -92,14 +105,16 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
         if chunk_size > 0 {
             tracing::debug!(chunk_size, "creating chunk");
-            cells_file.write_u32_le(chunk_size).await?;
+            cells_file.write(&chunk_size.to_le_bytes())?;
         }
 
         if self.cells_read < header.cell_count {
+            self.file_ctx.clear()?;
             return Ok(false);
         }
 
         if header.has_crc && self.reader.read_crc()?.is_none() {
+            self.file_ctx.clear()?;
             return Ok(false);
         }
 
@@ -108,8 +123,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
     }
 
     pub async fn finalize(
-        self,
-        file_db: &mut FileDb,
+        mut self,
         block_id: BlockId,
         progress_bar: &mut ProgressBar,
     ) -> Result<Arc<ShardStateStuff>> {
@@ -120,14 +134,17 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         let header = match &self.header {
             Some(header) => header,
             None => {
+                self.file_ctx.clear()?;
                 return Err(ReplaceTransactionError::InvalidShardStatePacket)
-                    .context("BOC header not found")
+                    .context("BOC header not found");
             }
         };
 
-        let hashes_file =
-            file_db.create_mapped_hashes_file(header.cell_count as usize * HashesEntry::LEN)?;
-        let cells_file = file_db.create_mapped_cells_file().await?;
+        let hashes_file = self
+            .file_ctx
+            .create_mapped_hashes_file(header.cell_count as usize * HashesEntry::LEN)?;
+
+        let cells_file = self.file_ctx.create_mapped_cells_file()?;
 
         let raw = self.db.raw().as_ref();
         let write_options = self.db.cells.new_write_config();
@@ -218,7 +235,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         progress_bar.complete();
 
         // Load stored shard state
-        match self.db.shard_states.get(shard_state_key)? {
+        let result = match self.db.shard_states.get(shard_state_key)? {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
@@ -230,7 +247,11 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 )?))
             }
             None => Err(ReplaceTransactionError::NotFound.into()),
-        }
+        };
+
+        self.file_ctx.clear()?;
+
+        result
     }
 
     fn finalize_cell(
@@ -466,6 +487,65 @@ impl<'a> FinalizationContext<'a> {
     }
 }
 
+struct FilesContext {
+    cells_path: PathBuf,
+    hashes_path: PathBuf,
+    cells_file: Option<File>,
+}
+
+impl FilesContext {
+    pub fn new(file_db: &FileDb, block_id: &BlockId) -> Result<Self> {
+        let block_id = format!(
+            "({},{:016x},{})",
+            block_id.shard.workchain(),
+            block_id.shard.prefix(),
+            block_id.seqno
+        );
+
+        let cells_path = file_db.root_path().join(format!("state_cells_{block_id}"));
+        let hashes_path = file_db.root_path().join(format!("state_hashes_{block_id}"));
+
+        let cells_file = Some(file_db.open(&cells_path, false)?);
+
+        Ok(Self {
+            cells_file,
+            cells_path,
+            hashes_path,
+        })
+    }
+
+    pub fn cells_file(&mut self) -> Result<&mut File> {
+        match &mut self.cells_file {
+            Some(file) => Ok(file),
+            None => Err(FilesContextError::AlreadyFinalized.into()),
+        }
+    }
+
+    pub fn create_mapped_hashes_file(&self, length: usize) -> Result<MappedFile> {
+        let mapped_file = MappedFile::new(&self.hashes_path, length)?;
+        Ok(mapped_file)
+    }
+
+    pub fn create_mapped_cells_file(&mut self) -> Result<MappedFile> {
+        let file = match self.cells_file.take() {
+            Some(mut file) => {
+                file.flush()?;
+                file
+            }
+            None => return Err(FilesContextError::AlreadyFinalized.into()),
+        };
+
+        let mapped_file = MappedFile::from_existing_file(file)?;
+        Ok(mapped_file)
+    }
+
+    pub fn clear(&self) -> Result<()> {
+        std::fs::remove_file(&self.cells_path)?;
+        std::fs::remove_file(&self.hashes_path)?;
+        Ok(())
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 enum ReplaceTransactionError {
     #[error("Not found")]
@@ -474,6 +554,12 @@ enum ReplaceTransactionError {
     InvalidShardStatePacket,
     #[error("Invalid cell")]
     InvalidCell,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum FilesContextError {
+    #[error("Already finalized")]
+    AlreadyFinalized,
 }
 
 const MAX_LEVEL: u8 = 3;
