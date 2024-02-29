@@ -26,11 +26,11 @@ mod shard_state_reader;
 
 pub struct ShardStateStorage {
     db: Arc<Db>,
-    file_db: Arc<FileDb>,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
     cell_storage: Arc<CellStorage>,
+    downloads_dir: Arc<PathBuf>,
 
     gc_lock: tokio::sync::Mutex<()>,
     min_ref_mc_state: Arc<MinRefMcStateTracker>,
@@ -47,16 +47,14 @@ impl ShardStateStorage {
         cache_size_bytes: u64,
     ) -> Result<Self> {
         let downloads_dir = prepare_file_db_dir(file_db_path, "downloads")?;
-        let file_db = Arc::new(FileDb::new(downloads_dir));
-
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes)?;
 
         let res = Self {
             db,
-            file_db,
             block_handle_storage,
             block_storage,
             cell_storage,
+            downloads_dir,
             gc_lock: Default::default(),
             min_ref_mc_state: Arc::new(Default::default()),
             max_new_mc_cell_count: AtomicUsize::new(0),
@@ -160,9 +158,9 @@ impl ShardStateStorage {
     pub fn begin_replace(&'_ self, block_id: &BlockId) -> Result<ShardStateReplaceTransaction<'_>> {
         ShardStateReplaceTransaction::new(
             &self.db,
-            &self.file_db,
             &self.cell_storage,
             &self.min_ref_mc_state,
+            self.downloads_dir.as_ref(),
             block_id,
         )
     }
@@ -364,9 +362,9 @@ pub struct ShardStateStorageMetrics {
     pub max_new_sc_cell_count: usize,
 }
 
-fn prepare_file_db_dir(file_db_path: PathBuf, folder: &str) -> Result<PathBuf> {
-    let dir = file_db_path.join(folder);
-    std::fs::create_dir_all(&dir)?;
+fn prepare_file_db_dir(file_db_path: PathBuf, folder: &str) -> Result<Arc<PathBuf>> {
+    let dir = Arc::new(file_db_path.join(folder));
+    std::fs::create_dir_all(dir.as_ref())?;
     Ok(dir)
 }
 

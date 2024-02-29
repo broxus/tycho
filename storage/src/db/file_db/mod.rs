@@ -14,8 +14,13 @@ pub struct FileDb {
 }
 
 impl FileDb {
-    pub fn new(root_path: PathBuf) -> Self {
-        Self { root_path }
+    pub fn new<P>(root_path: P) -> Self
+    where
+        P: AsRef<Path>,
+    {
+        Self {
+            root_path: PathBuf::from(root_path.as_ref()),
+        }
     }
 
     pub fn open<P>(&self, path: P, is_relative_path: bool) -> Result<File>
@@ -62,9 +67,5 @@ impl FileDb {
     pub fn flush(file: &mut File) -> Result<()> {
         file.flush()?;
         Ok(())
-    }
-
-    pub fn root_path(&self) -> &PathBuf {
-        &self.root_path
     }
 }

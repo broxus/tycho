@@ -20,7 +20,6 @@ use tycho_util::FastHashMap;
 
 pub struct ShardStateReplaceTransaction<'a> {
     db: &'a Db,
-    file_db: &'a FileDb,
     cell_storage: &'a Arc<CellStorage>,
     min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
     reader: ShardStatePacketReader,
@@ -30,18 +29,20 @@ pub struct ShardStateReplaceTransaction<'a> {
 }
 
 impl<'a> ShardStateReplaceTransaction<'a> {
-    pub fn new(
+    pub fn new<P>(
         db: &'a Db,
-        file_db: &'a FileDb,
         cell_storage: &'a Arc<CellStorage>,
         min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
+        path: P,
         block_id: &BlockId,
-    ) -> Result<Self> {
-        let file_ctx = FilesContext::new(file_db, block_id)?;
+    ) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        let file_ctx = FilesContext::new(path, block_id)?;
 
         Ok(Self {
             db,
-            file_db,
             file_ctx,
             cell_storage,
             min_ref_mc_state,
@@ -494,7 +495,10 @@ struct FilesContext {
 }
 
 impl FilesContext {
-    pub fn new(file_db: &FileDb, block_id: &BlockId) -> Result<Self> {
+    pub fn new<P>(root_path: P, block_id: &BlockId) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
         let block_id = format!(
             "({},{:016x},{})",
             block_id.shard.workchain(),
@@ -502,10 +506,10 @@ impl FilesContext {
             block_id.seqno
         );
 
-        let cells_path = file_db.root_path().join(format!("state_cells_{block_id}"));
-        let hashes_path = file_db.root_path().join(format!("state_hashes_{block_id}"));
+        let cells_path = root_path.as_ref().join(format!("state_cells_{block_id}"));
+        let hashes_path = root_path.as_ref().join(format!("state_hashes_{block_id}"));
 
-        let cells_file = Some(file_db.open(&cells_path, false)?);
+        let cells_file = Some(FileDb::new(root_path).open(&cells_path, false)?);
 
         Ok(Self {
             cells_file,
