@@ -6,12 +6,6 @@ use tycho_util::serde_helpers;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayConfig {
-    /// A period of garbage collection for public overlay entries.
-    ///
-    /// Default: 1 minute.
-    #[serde(with = "serde_helpers::humantime")]
-    pub public_entires_gc_interval: Duration,
-
     /// A period of exchanging public overlay peers.
     ///
     /// Default: 3 minutes.
@@ -22,6 +16,16 @@ pub struct OverlayConfig {
     ///
     /// Default: 30 seconds.
     pub public_overlay_peer_exchange_max_jitter: Duration,
+
+    /// A period of resolving peer info of public overlay entries.
+    ///
+    /// Default: 1 minute.
+    pub public_overlay_peer_resolve_period: Duration,
+
+    /// A maximum value of a random jitter for the public peer resolve period.
+    ///
+    /// Default: 20 seconds.
+    pub public_overlay_peer_resolve_max_jitter: Duration,
 
     /// A period of resolving peer info of private overlay entries.
     ///
@@ -42,9 +46,10 @@ pub struct OverlayConfig {
 impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
-            public_entires_gc_interval: Duration::from_secs(60),
             public_overlay_peer_exchange_period: Duration::from_secs(3 * 60),
             public_overlay_peer_exchange_max_jitter: Duration::from_secs(30),
+            public_overlay_peer_resolve_period: Duration::from_secs(60),
+            public_overlay_peer_resolve_max_jitter: Duration::from_secs(20),
             private_overlay_peer_resolve_period: Duration::from_secs(60),
             private_overlay_peer_resolve_max_jitter: Duration::from_secs(20),
             exchange_public_entries_batch: 20,
