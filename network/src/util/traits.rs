@@ -2,7 +2,7 @@ use std::future::Future;
 
 use anyhow::Result;
 
-use crate::network::{KnownPeer, Network, Peer};
+use crate::network::{Network, Peer};
 use crate::types::{PeerEvent, PeerId, Request, Response};
 
 pub trait NetworkExt {

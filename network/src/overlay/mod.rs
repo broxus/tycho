@@ -18,7 +18,7 @@ use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use crate::dht::{DhtClient, DhtService};
 use crate::network::{Network, WeakNetwork};
 use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry, PublicEntryToSign};
-use crate::types::{PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
+use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::OverlayConfig;
@@ -475,22 +475,7 @@ impl OverlayServiceInner {
         dht_client: &DhtClient,
         overlay_id: &OverlayId,
     ) -> Result<()> {
-        use crate::proto::dht;
-
-        let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
-            overlay.value().clone()
-        } else {
-            tracing::debug!(%overlay_id, "overlay not found");
-            return Ok(());
-        };
-
-        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_resolver_requests));
-        let mut futures = FuturesUnordered::new();
-        let known_peers = network.known_peers();
-        {
-            let entries = overlay.read_entries();
-            for peer_id in entries.iter() {}
-        }
+        todo!()
     }
 
     #[tracing::instrument(
@@ -541,7 +526,8 @@ impl OverlayServiceInner {
         while let Some((peer_id, res)) = futures.next().await {
             match res {
                 Ok(info) => {
-                    known_peers.insert(Arc::new(info), PeerAffinity::Allowed);
+                    let handle = known_peers.insert(Arc::new(info), true);
+                    todo!("SAVE HANDLE SOMEWHERE");
                 }
                 Err(e) => {
                     tracing::warn!(%peer_id, "failed to resolve peer info: {e:?}");

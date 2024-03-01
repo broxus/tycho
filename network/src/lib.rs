@@ -10,8 +10,8 @@ pub use dht::{
     DhtService, DhtServiceBuilder, FindValueError, OverlayValueMerger, StorageError,
 };
 pub use network::{
-    ActivePeers, Connection, KnownPeer, KnownPeers, Network, NetworkBuilder, NetworkConfig, Peer,
-    QuicConfig, RecvStream, SendStream, WeakActivePeers, WeakNetwork,
+    ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,
+    NetworkConfig, Peer, QuicConfig, RecvStream, SendStream, WeakActivePeers, WeakNetwork,
 };
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, BoxCloneService,

@@ -9,7 +9,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    Address, Network, OverlayId, OverlayService, PeerAffinity, PeerId, PeerInfo, PrivateOverlay,
+    Address, KnownPeerHandle, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay,
     Request, Response, Router, Service, ServiceRequest,
 };
 use tycho_util::time::now_sec;
@@ -17,6 +17,7 @@ use tycho_util::time::now_sec;
 struct Node {
     network: Network,
     private_overlay: PrivateOverlay,
+    known_peer_handles: Vec<KnownPeerHandle>,
 }
 
 impl Node {
@@ -43,6 +44,7 @@ impl Node {
         Self {
             network,
             private_overlay,
+            known_peer_handles: Vec::new(),
         }
     }
 
@@ -80,19 +82,22 @@ fn make_network(node_count: usize) -> Vec<Node> {
         .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
         .collect::<Vec<_>>();
 
-    let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
+    let mut nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
 
     let bootstrap_info = std::iter::zip(&keys, &nodes)
         .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
         .collect::<Vec<_>>();
 
-    for node in &nodes {
+    for node in &mut nodes {
         let mut private_overlay_entries = node.private_overlay.write_entries();
 
         for info in &bootstrap_info {
-            node.network
+            let handle = node
+                .network
                 .known_peers()
-                .insert(info.clone(), PeerAffinity::Allowed);
+                .insert(info.clone(), false)
+                .unwrap();
+            node.known_peer_handles.push(handle);
 
             private_overlay_entries.insert(&info.id);
         }

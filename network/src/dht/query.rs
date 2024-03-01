@@ -13,7 +13,7 @@ use tycho_util::futures::{Shared, WeakShared};
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
-use crate::dht::routing::{RoutingTable, RoutingTableSource};
+use crate::dht::routing::{HandlesRoutingTable, SimpleRoutingTable};
 use crate::network::Network;
 use crate::proto::dht::{rpc, NodeResponse, Value, ValueRef, ValueResponse};
 use crate::types::{PeerId, PeerInfo, Request};
@@ -110,25 +110,20 @@ type WeakSharedBoxedFut<T> = WeakShared<BoxFuture<'static, T>>;
 
 pub struct Query {
     network: Network,
-    candidates: RoutingTable,
+    candidates: SimpleRoutingTable,
     max_k: usize,
 }
 
 impl Query {
     pub fn new(
         network: Network,
-        routing_table: &RoutingTable,
+        routing_table: &HandlesRoutingTable,
         target_id: &[u8; 32],
         max_k: usize,
     ) -> Self {
-        let mut candidates = RoutingTable::new(PeerId(*target_id));
+        let mut candidates = SimpleRoutingTable::new(PeerId(*target_id));
         routing_table.visit_closest(target_id, max_k, |node| {
-            candidates.add(
-                node.clone(),
-                max_k,
-                &Duration::MAX,
-                RoutingTableSource::Trusted,
-            );
+            candidates.add(node.load_peer_info(), max_k, &Duration::MAX, Some);
         });
 
         Self {
@@ -308,8 +303,7 @@ impl Query {
 
             // Insert a new entry
             if visited.insert(node.id) {
-                self.candidates
-                    .add(node, max_k, &Duration::MAX, RoutingTableSource::Trusted);
+                self.candidates.add(node, max_k, &Duration::MAX, Some);
                 has_new = true;
             }
         }
@@ -335,8 +329,7 @@ impl Query {
                 // Insert a new entry
                 hash_map::Entry::Vacant(entry) => {
                     let node = entry.insert(node).clone();
-                    self.candidates
-                        .add(node, max_k, &Duration::MAX, RoutingTableSource::Trusted);
+                    self.candidates.add(node, max_k, &Duration::MAX, Some);
                     has_new = true;
                 }
                 // Try to replace an old entry
@@ -390,7 +383,7 @@ pub struct StoreValue<F = ()> {
 impl StoreValue<()> {
     pub fn new(
         network: Network,
-        routing_table: &RoutingTable,
+        routing_table: &HandlesRoutingTable,
         value: ValueRef<'_>,
         max_k: usize,
         local_peer_info: Option<&PeerInfo>,
@@ -412,7 +405,7 @@ impl StoreValue<()> {
         routing_table.visit_closest(&key_hash, max_k, |node| {
             futures.push(Self::visit(
                 network.clone(),
-                node.clone(),
+                node.load_peer_info(),
                 request_body.clone(),
                 semaphore.clone(),
             ));

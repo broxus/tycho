@@ -1,8 +1,6 @@
-use std::cell::UnsafeCell;
 use std::mem::ManuallyDrop;
-use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use ahash::HashMap;
@@ -183,23 +181,25 @@ impl ConnectionManager {
             .known_peers
             .0
             .iter()
-            .filter(|item| {
-                let KnownPeer {
-                    peer_info,
-                    affinity,
-                } = item.value();
+            .filter_map(|item| {
+                let value = match item.value() {
+                    KnownPeerState::Stored(item) => item.upgrade()?,
+                    KnownPeerState::Banned => return None,
+                };
+                let peer_info = value.peer_info.load();
+                let affinity = value.compute_affinity();
 
-                *affinity == PeerAffinity::High
+                (affinity == PeerAffinity::High
                     && &peer_info.id != self.endpoint.peer_id()
                     && !self.active_peers.contains(&peer_info.id)
                     && !self.pending_dials.contains_key(&peer_info.id)
                     && self
                         .dial_backoff_states
                         .get(&peer_info.id)
-                        .map_or(true, |state| now > state.next_attempt_at)
+                        .map_or(true, |state| now > state.next_attempt_at))
+                .then(|| arc_swap::Guard::into_inner(peer_info))
             })
             .take(outstanding_connections_limit)
-            .map(|item| item.value().peer_info.clone())
             .collect::<Vec<_>>();
 
         for peer_info in outstanding_connections {
@@ -577,10 +577,22 @@ impl KnownPeers {
         self.0.contains_key(peer_id)
     }
 
+    pub fn is_banned(&self, peer_id: &PeerId) -> bool {
+        self.0
+            .get(peer_id)
+            .and_then(|item| {
+                Some(match item.value() {
+                    KnownPeerState::Stored(item) => item.upgrade()?.is_banned(),
+                    KnownPeerState::Banned => true,
+                })
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get(&self, peer_id: &PeerId) -> Option<Arc<PeerInfo>> {
         self.0.get(peer_id).and_then(|item| match item.value() {
-            KnownPeerState::Stored(inner) => {
-                let inner = inner.upgrade()?;
+            KnownPeerState::Stored(item) => {
+                let inner = item.upgrade()?;
                 Some(inner.peer_info.load_full())
             }
             KnownPeerState::Banned => None,
@@ -590,7 +602,7 @@ impl KnownPeers {
     pub fn get_affinity(&self, peer_id: &PeerId) -> Option<PeerAffinity> {
         self.0
             .get(peer_id)
-            .map(|item| item.value().compute_affinity())
+            .and_then(|item| item.value().compute_affinity())
     }
 
     pub fn remove(&self, peer_id: &PeerId) {
@@ -598,7 +610,18 @@ impl KnownPeers {
     }
 
     pub fn ban(&self, peer_id: &PeerId) {
-        self.0.insert(*peer_id, KnownPeerState::Banned);
+        match self.0.entry(*peer_id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(KnownPeerState::Banned);
+            }
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
+                KnownPeerState::Banned => {}
+                KnownPeerState::Stored(item) => match item.upgrade() {
+                    Some(item) => item.affinity.store(AFFINITY_BANNED, Ordering::Release),
+                    None => *entry.get_mut() = KnownPeerState::Banned,
+                },
+            },
+        }
     }
 
     pub fn insert(
@@ -614,19 +637,25 @@ impl KnownPeers {
                 inner
             }
             dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
-                KnownPeerState::Banned => Err(KnownPeersError::PeerBanned),
+                KnownPeerState::Banned => return Err(KnownPeersError::PeerBanned),
                 KnownPeerState::Stored(item) => match item.upgrade() {
                     Some(inner) => {
-                        // TODO: should we do anything for banned peers?
-                        if inner.peer_info.load() >= peer_info.created_at {
+                        let created_at = inner.peer_info.load().created_at;
+                        if created_at > peer_info.created_at {
                             return Err(KnownPeersError::OutdatedInfo);
                         }
 
-                        if with_affinity {
-                            inner.increase_affinity();
+                        if with_affinity && !inner.increase_affinity()
+                            || !with_affinity && inner.is_banned()
+                        {
+                            // Do nothing for banned peers
+                            return Err(KnownPeersError::PeerBanned);
                         }
 
-                        inner.peer_info.swap(peer_info);
+                        // TODO: is checking `created_at` enough for equality?
+                        if created_at != peer_info.created_at {
+                            inner.peer_info.swap(peer_info);
+                        }
 
                         inner
                     }
@@ -639,13 +668,13 @@ impl KnownPeers {
             },
         };
 
-        Ok(if with_affinity {
-            KnownPeerHandle::WithAffinity(ManuallyDrop::new(Arc::new(
+        Ok(KnownPeerHandle(if with_affinity {
+            KnownPeerHandleState::WithAffinity(ManuallyDrop::new(Arc::new(
                 KnownPeerHandleWithAffinity { inner },
             )))
         } else {
-            KnownPeerHandle::Simple(ManuallyDrop::new(inner))
-        })
+            KnownPeerHandleState::Simple(ManuallyDrop::new(inner))
+        }))
     }
 }
 
@@ -664,16 +693,14 @@ impl KnownPeerState {
 }
 
 #[derive(Clone)]
-pub enum KnownPeerHandle {
-    Simple(ManuallyDrop<Arc<KnownPeerInner>>),
-    WithAffinity(ManuallyDrop<Arc<KnownPeerHandleWithAffinity>>),
-}
+#[repr(transparent)]
+pub struct KnownPeerHandle(KnownPeerHandleState);
 
 impl KnownPeerHandle {
     pub fn peer_info(&self) -> arc_swap::Guard<Arc<PeerInfo>, arc_swap::DefaultStrategy> {
-        match self {
-            Self::Simple(data) => data.peer_info.load(),
-            Self::WithAffinity(data) => data.inner.peer_info.load(),
+        match &self.0 {
+            KnownPeerHandleState::Simple(data) => data.peer_info.load(),
+            KnownPeerHandleState::WithAffinity(data) => data.inner.peer_info.load(),
         }
     }
 
@@ -682,47 +709,59 @@ impl KnownPeerHandle {
     }
 
     pub fn is_banned(&self) -> bool {
-        let affinity = match self {
-            Self::Simple(data) => &data.affinity,
-            Self::WithAffinity(data) => &data.inner.affinity,
+        let affinity = match &self.0 {
+            KnownPeerHandleState::Simple(data) => &data.affinity,
+            KnownPeerHandleState::WithAffinity(data) => &data.inner.affinity,
         };
         affinity.load(Ordering::Acquire) == AFFINITY_BANNED
     }
 
     pub fn max_affinity(&self) -> PeerAffinity {
-        let inner = match self {
-            Self::Simple(data) => data,
-            Self::WithAffinity(data) => &data.inner,
+        let inner = match &self.0 {
+            KnownPeerHandleState::Simple(data) => data,
+            KnownPeerHandleState::WithAffinity(data) => &data.inner,
         };
         inner.compute_affinity()
     }
 }
 
-impl Drop for KnownPeerHandle {
+#[derive(Clone)]
+enum KnownPeerHandleState {
+    Simple(ManuallyDrop<Arc<KnownPeerInner>>),
+    WithAffinity(ManuallyDrop<Arc<KnownPeerHandleWithAffinity>>),
+}
+
+impl Drop for KnownPeerHandleState {
     fn drop(&mut self) {
         let inner;
         let is_banned;
         match self {
-            KnownPeerHandle::Simple(data) => {
+            KnownPeerHandleState::Simple(data) => {
                 // SAFETY: inner value is dropped only once
                 inner = unsafe { ManuallyDrop::take(data) };
                 is_banned = inner.is_banned();
             }
-            KnownPeerHandle::WithAffinity(data) => {
+            KnownPeerHandleState::WithAffinity(data) => {
                 // SAFETY: inner value is dropped only once
                 match Arc::into_inner(unsafe { ManuallyDrop::take(data) }) {
                     Some(data) => {
                         inner = data.inner;
-                        is_banned = !inner.try_decrease_affinity() || inner.is_banned();
+                        is_banned = !inner.decrease_affinity() || inner.is_banned();
                     }
                     None => return,
                 }
             }
         };
 
-        if !is_banned {
+        if is_banned {
+            // Don't remove banned peers from the known peers cache
+            return;
+        }
+
+        if let Some(inner) = Arc::into_inner(inner) {
+            // If the last reference is dropped, remove the peer from the known peers cache
             if let Some(peers) = inner.weak_known_peers.upgrade() {
-                peers.remove(&inner.peer_info.load());
+                peers.remove(&inner.peer_info.load().id);
             }
         }
     }
@@ -808,4 +847,141 @@ pub enum KnownPeersError {
     PeerBanned,
     #[error("provided peer info is outdated")]
     OutdatedInfo,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(id: PeerId) -> Arc<PeerInfo> {
+        Arc::new(PeerInfo {
+            id,
+            address_list: Default::default(),
+            created_at: 0,
+            expires_at: u32::MAX,
+            signature: Box::new([0; 64]),
+        })
+    }
+
+    #[test]
+    fn remove_from_cache_on_drop_works() {
+        let peers = KnownPeers::new();
+
+        let peer_info = make_node(rand::random());
+        let handle = peers.insert(peer_info.clone(), false).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert!(!peers.is_banned(&peer_info.id));
+        assert_eq!(peers.get(&peer_info.id), Some(peer_info.clone()));
+        assert_eq!(
+            peers.get_affinity(&peer_info.id),
+            Some(PeerAffinity::Allowed)
+        );
+
+        assert_eq!(handle.peer_info().as_ref(), peer_info.as_ref());
+        assert_eq!(handle.max_affinity(), PeerAffinity::Allowed);
+
+        let other_handle = peers.insert(peer_info.clone(), false).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert!(!peers.is_banned(&peer_info.id));
+        assert_eq!(peers.get(&peer_info.id), Some(peer_info.clone()));
+        assert_eq!(
+            peers.get_affinity(&peer_info.id),
+            Some(PeerAffinity::Allowed)
+        );
+
+        assert_eq!(other_handle.peer_info().as_ref(), peer_info.as_ref());
+        assert_eq!(other_handle.max_affinity(), PeerAffinity::Allowed);
+
+        drop(other_handle);
+        assert!(peers.contains(&peer_info.id));
+        assert!(!peers.is_banned(&peer_info.id));
+        assert_eq!(peers.get(&peer_info.id), Some(peer_info.clone()));
+        assert_eq!(
+            peers.get_affinity(&peer_info.id),
+            Some(PeerAffinity::Allowed)
+        );
+
+        drop(handle);
+        assert!(!peers.contains(&peer_info.id));
+        assert!(!peers.is_banned(&peer_info.id));
+        assert_eq!(peers.get(&peer_info.id), None);
+        assert_eq!(peers.get_affinity(&peer_info.id), None);
+
+        peers.insert(peer_info.clone(), false).unwrap();
+    }
+
+    #[test]
+    fn with_affinity_after_simple() {
+        let peers = KnownPeers::new();
+
+        let peer_info = make_node(rand::random());
+        let handle_simple = peers.insert(peer_info.clone(), false).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(
+            peers.get_affinity(&peer_info.id),
+            Some(PeerAffinity::Allowed)
+        );
+        assert_eq!(handle_simple.max_affinity(), PeerAffinity::Allowed);
+
+        let handle_with_affinity = peers.insert(peer_info.clone(), true).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(peers.get_affinity(&peer_info.id), Some(PeerAffinity::High));
+        assert_eq!(handle_with_affinity.max_affinity(), PeerAffinity::High);
+        assert_eq!(handle_simple.max_affinity(), PeerAffinity::High);
+
+        drop(handle_with_affinity);
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(handle_simple.max_affinity(), PeerAffinity::Allowed);
+        assert_eq!(
+            peers.get_affinity(&peer_info.id),
+            Some(PeerAffinity::Allowed)
+        );
+
+        drop(handle_simple);
+        assert!(!peers.contains(&peer_info.id));
+        assert_eq!(peers.get_affinity(&peer_info.id), None);
+    }
+
+    #[test]
+    fn with_affinity_before_simple() {
+        let peers = KnownPeers::new();
+
+        let peer_info = make_node(rand::random());
+        let handle_with_affinity = peers.insert(peer_info.clone(), true).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(peers.get_affinity(&peer_info.id), Some(PeerAffinity::High));
+        assert_eq!(handle_with_affinity.max_affinity(), PeerAffinity::High);
+
+        let handle_simple = peers.insert(peer_info.clone(), false).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(peers.get_affinity(&peer_info.id), Some(PeerAffinity::High));
+        assert_eq!(handle_with_affinity.max_affinity(), PeerAffinity::High);
+        assert_eq!(handle_simple.max_affinity(), PeerAffinity::High);
+
+        drop(handle_simple);
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(handle_with_affinity.max_affinity(), PeerAffinity::High);
+        assert_eq!(peers.get_affinity(&peer_info.id), Some(PeerAffinity::High));
+
+        drop(handle_with_affinity);
+        assert!(!peers.contains(&peer_info.id));
+        assert_eq!(peers.get_affinity(&peer_info.id), None);
+    }
+
+    #[test]
+    fn ban_while_handle_exists() {
+        let peers = KnownPeers::new();
+
+        let peer_info = make_node(rand::random());
+        let handle = peers.insert(peer_info.clone(), false).unwrap();
+        assert!(peers.contains(&peer_info.id));
+        assert_eq!(handle.max_affinity(), PeerAffinity::Allowed);
+
+        peers.ban(&peer_info.id);
+        assert!(peers.contains(&peer_info.id));
+        assert!(peers.is_banned(&peer_info.id));
+        assert_eq!(handle.max_affinity(), PeerAffinity::Never);
+        assert_eq!(peers.get(&peer_info.id), Some(peer_info.clone()));
+        assert_eq!(peers.get_affinity(&peer_info.id), Some(PeerAffinity::Never));
+    }
 }

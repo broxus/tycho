@@ -13,14 +13,14 @@ use tycho_util::realloc_box_enum;
 use tycho_util::time::{now_sec, shifted_interval};
 
 use self::query::{Query, QueryCache, StoreValue};
-use self::routing::{RoutingTable, RoutingTableSource};
+use self::routing::HandlesRoutingTable;
 use self::storage::Storage;
 use crate::network::{Network, WeakNetwork};
 use crate::proto::dht::{
     rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName,
     PeerValueKeyRef, PeerValueRef, Value, ValueRef, ValueResponseRaw,
 };
-use crate::types::{PeerAffinity, PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
+use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
@@ -67,8 +67,7 @@ impl DhtClient {
     }
 
     pub fn add_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
-        self.inner
-            .add_peer_info(&self.network, peer, RoutingTableSource::Trusted)
+        self.inner.add_peer_info(&self.network, peer)
     }
 
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<PeerInfo> {
@@ -281,7 +280,7 @@ impl DhtServiceBuilder {
 
         let inner = Arc::new(DhtInner {
             local_id: self.local_id,
-            routing_table: Mutex::new(RoutingTable::new(self.local_id)),
+            routing_table: Mutex::new(HandlesRoutingTable::new(self.local_id)),
             storage,
             local_peer_info: Mutex::new(None),
             config,
@@ -421,7 +420,7 @@ impl Routable for DhtService {
 
 struct DhtInner {
     local_id: PeerId,
-    routing_table: Mutex<RoutingTable>,
+    routing_table: Mutex<HandlesRoutingTable>,
     storage: Storage,
     local_peer_info: Mutex<Option<PeerInfo>>,
     config: DhtConfig,
@@ -498,9 +497,7 @@ impl DhtInner {
                     }
                     Action::AddPeer(peer_info) => {
                         tracing::info!(peer_id = %peer_info.id, "received peer info");
-                        if let Err(e) =
-                            this.add_peer_info(&network, peer_info, RoutingTableSource::Untrusted)
-                        {
+                        if let Err(e) = this.add_peer_info(&network, peer_info) {
                             tracing::error!("failed to add peer to the routing table: {e:?}");
                         }
                     }
@@ -615,12 +612,9 @@ impl DhtInner {
                 peer.clone(),
                 self.config.max_k,
                 &self.config.max_peer_info_ttl,
-                RoutingTableSource::Trusted,
+                |peer_info| network.known_peers().insert(peer_info, false).ok(),
             );
-            if is_new {
-                network.known_peers().insert(peer, PeerAffinity::Allowed);
-                count += 1;
-            }
+            count += is_new as usize;
         }
 
         tracing::debug!(count, "found new peers");
@@ -674,12 +668,7 @@ impl DhtInner {
         Ok(())
     }
 
-    fn add_peer_info(
-        &self,
-        network: &Network,
-        peer_info: Arc<PeerInfo>,
-        source: RoutingTableSource,
-    ) -> Result<bool> {
+    fn add_peer_info(&self, network: &Network, peer_info: Arc<PeerInfo>) -> Result<bool> {
         anyhow::ensure!(peer_info.is_valid(now_sec()), "invalid peer info");
 
         if peer_info.id == self.local_id {
@@ -687,18 +676,12 @@ impl DhtInner {
         }
 
         let mut routing_table = self.routing_table.lock().unwrap();
-        let is_new = routing_table.add(
+        Ok(routing_table.add(
             peer_info.clone(),
             self.config.max_k,
             &self.config.max_peer_info_ttl,
-            source,
-        );
-        if is_new {
-            network
-                .known_peers()
-                .insert(peer_info, PeerAffinity::Allowed);
-        }
-        Ok(is_new)
+            |peer_info| network.known_peers().insert(peer_info, false).ok(),
+        ))
     }
 
     fn make_unsigned_peer_value<'a>(
