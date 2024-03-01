@@ -41,6 +41,11 @@ pub struct OverlayConfig {
     ///
     /// Default: 20.
     pub exchange_public_entries_batch: usize,
+
+    /// Maximum number of parallel resolver requests (for each overlay).
+    ///
+    /// Default: 10.
+    pub max_parallel_resolver_requests: usize,
 }
 
 impl Default for OverlayConfig {
@@ -53,6 +58,7 @@ impl Default for OverlayConfig {
             private_overlay_peer_resolve_period: Duration::from_secs(60),
             private_overlay_peer_resolve_max_jitter: Duration::from_secs(20),
             exchange_public_entries_batch: 20,
+            max_parallel_resolver_requests: 10,
         }
     }
 }

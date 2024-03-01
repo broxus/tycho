@@ -45,7 +45,7 @@ where
 
     match network.known_peers().get(peer_id) {
         // Initiate a connection of it is a known peer
-        Some(KnownPeer { peer_info, .. }) => {
+        Some(peer_info) => {
             // TODO: try multiple addresses
             let address = peer_info
                 .iter_addresses()

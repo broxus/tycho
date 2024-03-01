@@ -389,7 +389,7 @@ impl OverlayServiceInner {
                                     resolve: &mut private_overlays_state.resolve,
                                 },
                                 None => continue,
-                            }
+                            },
                         }
                     }
                 };
@@ -475,7 +475,22 @@ impl OverlayServiceInner {
         dht_client: &DhtClient,
         overlay_id: &OverlayId,
     ) -> Result<()> {
-        todo!()
+        use crate::proto::dht;
+
+        let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
+            overlay.value().clone()
+        } else {
+            tracing::debug!(%overlay_id, "overlay not found");
+            return Ok(());
+        };
+
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_resolver_requests));
+        let mut futures = FuturesUnordered::new();
+        let known_peers = network.known_peers();
+        {
+            let entries = overlay.read_entries();
+            for peer_id in entries.iter() {}
+        }
     }
 
     #[tracing::instrument(
@@ -491,8 +506,6 @@ impl OverlayServiceInner {
     ) -> Result<()> {
         use crate::proto::dht;
 
-        const PARRALLEL_REQUESTS: usize = 10;
-
         let overlay = if let Some(overlay) = self.private_overlays.get(overlay_id) {
             overlay.value().clone()
         } else {
@@ -500,7 +513,7 @@ impl OverlayServiceInner {
             return Ok(());
         };
 
-        let semaphore = Arc::new(Semaphore::new(PARRALLEL_REQUESTS));
+        let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_resolver_requests));
         let mut futures = FuturesUnordered::new();
         let known_peers = network.known_peers();
         {
