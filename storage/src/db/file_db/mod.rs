@@ -10,62 +10,41 @@ pub use mapped_file::MappedFile;
 mod mapped_file;
 
 pub struct FileDb {
-    root_path: PathBuf,
+    pub file: File,
+    pub path: PathBuf,
 }
 
 impl FileDb {
-    pub fn new<P>(root_path: P) -> Self
+    pub fn open<P>(path: P) -> Result<Self>
     where
         P: AsRef<Path>,
     {
-        Self {
-            root_path: PathBuf::from(root_path.as_ref()),
-        }
-    }
-
-    pub fn open<P>(&self, path: P, is_relative_path: bool) -> Result<File>
-    where
-        P: AsRef<Path>,
-    {
-        let path = if is_relative_path {
-            self.root_path.join(path)
-        } else {
-            PathBuf::from(path.as_ref())
-        };
-
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
             .read(true)
             .open(&path)
-            .context("Failed to create cells file")?;
+            .context("Failed to create file")?;
 
-        Ok(file)
+        Ok(Self {
+            file,
+            path: PathBuf::from(path.as_ref()),
+        })
     }
 
-    pub fn clear<P>(&self, path: P, is_relative_path: bool) -> Result<()>
-    where
-        P: AsRef<Path>,
-    {
-        let path = if is_relative_path {
-            self.root_path.join(path)
-        } else {
-            PathBuf::from(path.as_ref())
-        };
-
-        std::fs::remove_file(path)?;
-
+    pub fn write(&mut self, buf: &[u8]) -> Result<()> {
+        self.file.write(buf)?;
         Ok(())
     }
 
-    pub fn write_all(file: &mut File, buf: &[u8]) -> Result<()> {
-        file.write_all(buf)?;
+    pub fn write_all(&mut self, buf: &[u8]) -> Result<()> {
+        self.file.write_all(buf)?;
         Ok(())
     }
 
-    pub fn flush(file: &mut File) -> Result<()> {
-        file.flush()?;
+    pub fn flush(&mut self) -> Result<()> {
+        self.file.flush()?;
         Ok(())
     }
 }

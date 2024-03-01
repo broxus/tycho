@@ -16,8 +16,8 @@ use smallvec::SmallVec;
 use tycho_util::byte_reader::ByteOrderRead;
 use tycho_util::FastHashMap;
 
-use crate::db;
 use crate::db::Db;
+use crate::{db, FileDb};
 
 pub struct CellWriter<'a> {
     db: &'a Db,
@@ -147,9 +147,11 @@ impl<'a> CellWriter<'a> {
             }
             intermediate.total_size -= cell_size as u64;
             intermediate
+                .file_db
                 .file
                 .seek(SeekFrom::Start(intermediate.total_size))?;
             intermediate
+                .file_db
                 .file
                 .read_exact(&mut cell_buffer[..cell_size as usize])?;
 
@@ -178,7 +180,7 @@ impl<'a> CellWriter<'a> {
 }
 
 struct IntermediateState {
-    file: File,
+    file_db: FileDb,
     cell_sizes: Vec<u8>,
     total_size: u64,
     _remove_on_drop: RemoveOnDrop,

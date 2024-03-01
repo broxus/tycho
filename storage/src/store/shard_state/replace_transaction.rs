@@ -75,7 +75,6 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             let header = match self.reader.read_header()? {
                 Some(header) => header,
                 None => {
-                    self.file_ctx.clear()?;
                     return Ok(false);
                 }
             };
@@ -110,12 +109,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         }
 
         if self.cells_read < header.cell_count {
-            self.file_ctx.clear()?;
             return Ok(false);
         }
 
         if header.has_crc && self.reader.read_crc()?.is_none() {
-            self.file_ctx.clear()?;
             return Ok(false);
         }
 
@@ -135,7 +132,6 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         let header = match &self.header {
             Some(header) => header,
             None => {
-                self.file_ctx.clear()?;
                 return Err(ReplaceTransactionError::InvalidShardStatePacket)
                     .context("BOC header not found");
             }
@@ -249,8 +245,6 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             }
             None => Err(ReplaceTransactionError::NotFound.into()),
         };
-
-        self.file_ctx.clear()?;
 
         result
     }
@@ -491,7 +485,7 @@ impl<'a> FinalizationContext<'a> {
 struct FilesContext {
     cells_path: PathBuf,
     hashes_path: PathBuf,
-    cells_file: Option<File>,
+    cells_file: Option<FileDb>,
 }
 
 impl FilesContext {
@@ -509,7 +503,7 @@ impl FilesContext {
         let cells_path = root_path.as_ref().join(format!("state_cells_{block_id}"));
         let hashes_path = root_path.as_ref().join(format!("state_hashes_{block_id}"));
 
-        let cells_file = Some(FileDb::new(root_path).open(&cells_path, false)?);
+        let cells_file = Some(FileDb::open(&cells_path)?);
 
         Ok(Self {
             cells_file,
@@ -518,7 +512,7 @@ impl FilesContext {
         })
     }
 
-    pub fn cells_file(&mut self) -> Result<&mut File> {
+    pub fn cells_file(&mut self) -> Result<&mut FileDb> {
         match &mut self.cells_file {
             Some(file) => Ok(file),
             None => Err(FilesContextError::AlreadyFinalized.into()),
@@ -542,11 +536,17 @@ impl FilesContext {
         let mapped_file = MappedFile::from_existing_file(file)?;
         Ok(mapped_file)
     }
+}
 
-    pub fn clear(&self) -> Result<()> {
-        std::fs::remove_file(&self.cells_path)?;
-        std::fs::remove_file(&self.hashes_path)?;
-        Ok(())
+impl Drop for FilesContext {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.cells_path) {
+            tracing::error!(file = ?self.cells_path, "failed to remove file: {e}");
+        }
+
+        if let Err(e) = std::fs::remove_file(&self.hashes_path) {
+            tracing::error!(file = ?self.cells_path, "failed to remove file: {e}");
+        }
     }
 }
 
