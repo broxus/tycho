@@ -13,7 +13,7 @@ path = "examples/network_node.rs"
 # crates.io deps
 ahash = "0.8"
 anyhow = "1.0"
-base64 = "0.21"
+base64 = "0.22"
 bytes = { version = "1.0", features = ["serde"] }
 castaway = "0.2"
 dashmap = "5.4"
