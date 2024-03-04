@@ -2049,7 +2049,7 @@ dependencies = [
  "quinn",
  "rand",
  "rcgen",
- "ring 0.16.20",
+ "ring 0.17.8",
  "rustls",
  "rustls-webpki",
  "serde",
