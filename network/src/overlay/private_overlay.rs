@@ -176,9 +176,21 @@ pub struct PrivateOverlayEntries {
 }
 
 impl PrivateOverlayEntries {
-    /// Returns an iterator over the entries.
+    /// Returns an iterator over the entry ids.
+    ///
+    /// The order is not random, but is not defined.
     pub fn iter(&self) -> std::slice::Iter<'_, PeerId> {
         self.data.iter()
+    }
+
+    /// Returns an iterator over the entries.
+    ///
+    /// The order is not random, but is not defined.
+    pub fn iter_with_resolved(&self) -> PrivateOverlayEntriesIter<'_> {
+        PrivateOverlayEntriesIter {
+            inner: self.peer_id_to_index.iter(),
+            entries: self,
+        }
     }
 
     /// Returns one random peer, or `None` if set is empty.
@@ -375,6 +387,30 @@ impl PrivateOverlayEntries {
                 .expect("inconsistent resolved data state");
             entry.resolved_data_index = Some(index);
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct PrivateOverlayEntriesIter<'a> {
+    inner: hash_map::Iter<'a, PeerId, PrivateOverlayEntryIndices>,
+    entries: &'a PrivateOverlayEntries,
+}
+
+impl<'a> Iterator for PrivateOverlayEntriesIter<'a> {
+    type Item = (&'a PeerId, Option<&'a KnownPeerHandle>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (peer_id, link) = self.inner.next()?;
+        let handle = link
+            .resolved_data_index
+            .map(|index| &self.entries.resolved_peers[index]);
+
+        Some((peer_id, handle))
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
     }
 }
 

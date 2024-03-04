@@ -1,12 +1,16 @@
 pub use self::router::{Routable, Router, RouterBuilder};
 pub use self::traits::NetworkExt;
-use crate::PeerInfo;
-use std::sync::Arc;
+
+#[cfg(test)]
+pub use self::test::make_peer_info_stub;
 
 use crate::types::PeerId;
 
 mod router;
 mod traits;
+
+#[cfg(test)]
+mod test;
 
 pub(crate) mod tl;
 
@@ -49,15 +53,4 @@ where
         return false;
     };
     public_key.verify(data, signature)
-}
-
-#[cfg(test)]
-pub fn make_peer_info_stub(id: PeerId) -> Arc<PeerInfo> {
-    Arc::new(PeerInfo {
-        id,
-        address_list: Default::default(),
-        created_at: 0,
-        expires_at: u32::MAX,
-        signature: Box::new([0; 64]),
-    })
 }

@@ -24,8 +24,8 @@ use crate::util::{NetworkExt, Routable};
 pub use self::config::OverlayConfig;
 pub use self::overlay_id::OverlayId;
 pub use self::private_overlay::{
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesReadGuard,
-    PrivateOverlayEntriesWriteGuard,
+    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesIter,
+    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
 };
 pub use self::public_overlay::{
     PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
@@ -491,6 +491,8 @@ impl OverlayServiceInner {
     ) -> Result<()> {
         use crate::proto::dht;
 
+        const EXPIRATION_OFFSET: u32 = 120;
+
         let overlay = if let Some(overlay) = self.private_overlays.get(overlay_id) {
             overlay.value().clone()
         } else {
@@ -500,13 +502,17 @@ impl OverlayServiceInner {
 
         let semaphore = Arc::new(Semaphore::new(self.config.max_parallel_resolver_requests));
         let mut futures = FuturesUnordered::new();
-        let known_peers = network.known_peers();
+
         {
             let entries = overlay.read_entries();
-            for peer_id in entries.iter() {
-                // TODO: check ttl
-                if known_peers.contains(peer_id) {
-                    continue;
+
+            let now = now_sec();
+            for (peer_id, handle) in entries.iter_with_resolved() {
+                if let Some(handle) = handle {
+                    if !handle.peer_info().is_expired(now + EXPIRATION_OFFSET) {
+                        // Skip non-expired resolved items
+                        continue;
+                    }
                 }
 
                 let peer_id = *peer_id;
@@ -529,16 +535,16 @@ impl OverlayServiceInner {
             let info = match res {
                 Ok(info) if info.is_valid(now) => info,
                 Ok(_) => {
-                    tracing::debug!(%peer_id, "received invalid peer info");
+                    tracing::debug!(%peer_id, "received an invalid peer info");
                     continue;
                 }
                 Err(e) => {
-                    tracing::warn!(%peer_id, "failed to resolve peer info: {e:?}");
+                    tracing::warn!(%peer_id, "failed to resolve a peer info: {e:?}");
                     continue;
                 }
             };
 
-            match known_peers.insert(Arc::new(info), true) {
+            match network.known_peers().insert(Arc::new(info), true) {
                 Ok(handle) => {
                     overlay.write_entries().set_resolved(&peer_id, Some(handle));
                 }

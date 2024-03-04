@@ -1,8 +1,8 @@
 pub use self::overlay::{
     OverlayConfig, OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesReadGuard,
-    PrivateOverlayEntriesWriteGuard, PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries,
-    PublicOverlayEntriesReadGuard,
+    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesIter,
+    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PublicOverlay,
+    PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
 };
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
