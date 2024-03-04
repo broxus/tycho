@@ -61,7 +61,7 @@ where
 
     loop {
         match peer_events.recv().await {
-            Ok(PeerEvent::NewPeer(new_peer_id)) if &new_peer_id == peer_id => {
+            Ok(PeerEvent::NewPeer(new_peer_id)) if new_peer_id == peer_id => {
                 if let Some(peer) = network.peer(peer_id) {
                     return f.call(&peer, request).await;
                 }

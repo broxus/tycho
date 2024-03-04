@@ -17,7 +17,6 @@ use tycho_util::time::now_sec;
 struct Node {
     network: Network,
     private_overlay: PrivateOverlay,
-    known_peer_handles: Vec<KnownPeerHandle>,
 }
 
 impl Node {
@@ -44,7 +43,6 @@ impl Node {
         Self {
             network,
             private_overlay,
-            known_peer_handles: Vec::new(),
         }
     }
 
@@ -92,14 +90,16 @@ fn make_network(node_count: usize) -> Vec<Node> {
         let mut private_overlay_entries = node.private_overlay.write_entries();
 
         for info in &bootstrap_info {
+            if info.id == node.network.peer_id() {
+                continue;
+            }
+
             let handle = node
                 .network
                 .known_peers()
                 .insert(info.clone(), false)
                 .unwrap();
-            node.known_peer_handles.push(handle);
-
-            private_overlay_entries.insert(&info.id);
+            private_overlay_entries.insert(&info.id, Some(handle));
         }
     }
 

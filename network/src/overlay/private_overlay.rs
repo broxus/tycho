@@ -10,7 +10,7 @@ use rand::Rng;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::network::Network;
+use crate::network::{KnownPeerHandle, Network};
 use crate::overlay::OverlayId;
 use crate::proto::overlay::rpc;
 use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
@@ -53,9 +53,10 @@ impl PrivateOverlayBuilder {
         let mut entries = PrivateOverlayEntries {
             peer_id_to_index: Default::default(),
             data: Default::default(),
+            resolved_peers: Default::default(),
         };
         for peer_id in self.entries {
-            entries.insert(&peer_id);
+            entries.insert(&peer_id, None);
         }
 
         PrivateOverlay {
@@ -166,9 +167,12 @@ struct Inner {
     request_prefix: Box<[u8]>,
 }
 
+// NOTE: `#[derive(Default)]` is missing to prevent construction outside the
+// crate.
 pub struct PrivateOverlayEntries {
-    peer_id_to_index: FastHashMap<PeerId, usize>,
+    peer_id_to_index: FastHashMap<PeerId, PrivateOverlayEntryIndices>,
     data: Vec<PeerId>,
+    resolved_peers: Vec<KnownPeerHandle>,
 }
 
 impl PrivateOverlayEntries {
@@ -185,6 +189,15 @@ impl PrivateOverlayEntries {
         self.data.choose(rng)
     }
 
+    /// Returns one random resolved peer handle, or `None` if no resolved peers
+    /// are present.
+    pub fn choose_resolved<R>(&self, rng: &mut R) -> Option<&KnownPeerHandle>
+    where
+        R: Rng + ?Sized,
+    {
+        self.resolved_peers.choose(rng)
+    }
+
     /// Chooses `n` entries from the set, without repetition,
     /// and in random order.
     pub fn choose_multiple<R>(
@@ -198,24 +211,122 @@ impl PrivateOverlayEntries {
         self.data.choose_multiple(rng, n)
     }
 
+    /// Chooses `n` resolved entries from the set, without repetition,
+    /// and in random order.
+    pub fn choose_multiple_resolved<R>(
+        &self,
+        rng: &mut R,
+        n: usize,
+    ) -> rand::seq::SliceChooseIter<'_, [KnownPeerHandle], KnownPeerHandle>
+    where
+        R: Rng + ?Sized,
+    {
+        self.resolved_peers.choose_multiple(rng, n)
+    }
+
+    /// Clears the set, removing all entries.
+    pub fn clear(&mut self) {
+        self.peer_id_to_index.clear();
+        self.data.clear();
+        self.resolved_peers.clear();
+    }
+
+    /// Returns `true` if the set contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Returns the number of elements in the set, also referred to as its 'length'.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
     /// Returns true if the set contains the specified peer id.
     pub fn contains(&self, peer_id: &PeerId) -> bool {
         self.peer_id_to_index.contains_key(peer_id)
     }
 
+    /// Returns the resolved peer handle for the specified peer id, if it exists.
+    pub fn get_resolved(&self, peer_id: &PeerId) -> Option<&KnownPeerHandle> {
+        self.peer_id_to_index.get(peer_id).and_then(|link| {
+            link.resolved_data_index
+                .map(|index| &self.resolved_peers[index])
+        })
+    }
+
     /// Adds a peer id to the set.
     ///
     /// Returns whether the value was newly inserted.
-    pub fn insert(&mut self, peer_id: &PeerId) -> bool {
+    pub fn insert(&mut self, peer_id: &PeerId, handle: Option<KnownPeerHandle>) -> bool {
         match self.peer_id_to_index.entry(*peer_id) {
             // No entry for the peer_id, insert a new one
             hash_map::Entry::Vacant(entry) => {
-                entry.insert(self.data.len());
+                entry.insert(PrivateOverlayEntryIndices {
+                    data_index: self.data.len(),
+                    resolved_data_index: handle.is_some().then_some(self.resolved_peers.len()),
+                });
                 self.data.push(*peer_id);
+                if let Some(handle) = handle {
+                    self.resolved_peers.push(handle);
+                }
                 true
             }
             // Entry for the peer_id exists, do nothing
-            hash_map::Entry::Occupied(_) => false,
+            hash_map::Entry::Occupied(mut entry) => {
+                match (handle, entry.get().resolved_data_index) {
+                    // No resolved handle, but a new one is provided
+                    (None, None) => {}
+                    // Remove existing resolved handle
+                    (None, Some(index)) => {
+                        entry.get_mut().resolved_data_index = None;
+                        self.resolved_peers.swap_remove(index);
+                        self.fix_resolved_data_index(index);
+                    }
+                    // Insert a new resolved handle
+                    (Some(handle), None) => {
+                        entry.get_mut().resolved_data_index = Some(self.resolved_peers.len());
+                        self.resolved_peers.push(handle);
+                    }
+                    // Replace existing resolved handle
+                    (Some(handle), Some(index)) => {
+                        self.resolved_peers[index] = handle;
+                    }
+                }
+
+                false
+            }
+        }
+    }
+
+    /// Updates the resolved peer handle for the specified peer id.
+    ///
+    /// Returns whether the value was updated.
+    pub fn set_resolved(&mut self, peer_id: &PeerId, handle: Option<KnownPeerHandle>) -> bool {
+        match self.peer_id_to_index.get_mut(peer_id) {
+            Some(link) => {
+                match (handle, link.resolved_data_index) {
+                    // No resolved handle, but a new one is provided
+                    (None, None) => {}
+                    // Remove existing resolved handle
+                    (None, Some(index)) => {
+                        link.resolved_data_index = None;
+                        self.resolved_peers.swap_remove(index);
+                        self.fix_resolved_data_index(index);
+                    }
+                    // Insert a new resolved handle
+                    (Some(handle), None) => {
+                        link.resolved_data_index = Some(self.resolved_peers.len());
+                        self.resolved_peers.push(handle);
+                    }
+                    // Replace existing resolved handle
+                    (Some(handle), Some(index)) => {
+                        self.resolved_peers[index] = handle;
+                    }
+                }
+
+                true
+            }
+            None => false,
         }
     }
 
@@ -223,22 +334,47 @@ impl PrivateOverlayEntries {
     ///
     /// Returns whether the value was present in the set.
     pub fn remove(&mut self, peer_id: &PeerId) -> bool {
-        let Some(index) = self.peer_id_to_index.remove(peer_id) else {
+        let Some(link) = self.peer_id_to_index.remove(peer_id) else {
             return false;
         };
 
         // Remove the entry from the data vector
-        self.data.swap_remove(index);
+        self.data.swap_remove(link.data_index);
+        self.fix_data_index(link.data_index);
 
-        // Update the swapped entry's index
-        let entry = self
-            .peer_id_to_index
-            .get_mut(&self.data[index])
-            .expect("inconsistent state");
-        *entry = index;
+        if let Some(index) = link.resolved_data_index {
+            // Remove the entry from the resolved peers vector
+            self.resolved_peers.swap_remove(index);
+            self.fix_resolved_data_index(index);
+        }
 
         true
     }
+
+    fn fix_data_index(&mut self, index: usize) {
+        if index < self.data.len() {
+            let entry = self
+                .peer_id_to_index
+                .get_mut(&self.data[index])
+                .expect("inconsistent data state");
+            entry.data_index = index;
+        }
+    }
+
+    fn fix_resolved_data_index(&mut self, index: usize) {
+        if index < self.resolved_peers.len() {
+            let entry = self
+                .peer_id_to_index
+                .get_mut(&self.resolved_peers[index].peer_info().id)
+                .expect("inconsistent resolved data state");
+            entry.resolved_data_index = Some(index);
+        }
+    }
+}
+
+struct PrivateOverlayEntryIndices {
+    data_index: usize,
+    resolved_data_index: Option<usize>,
 }
 
 pub struct PrivateOverlayEntriesWriteGuard<'a> {
@@ -271,5 +407,61 @@ impl std::ops::Deref for PrivateOverlayEntriesReadGuard<'_> {
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.entries
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entries_container_is_set() {
+        let mut entries = PrivateOverlayEntries {
+            peer_id_to_index: Default::default(),
+            data: Default::default(),
+            resolved_peers: Default::default(),
+        };
+        assert!(entries.is_empty());
+        assert_eq!(entries.len(), 0);
+
+        let peer_id = rand::random();
+        assert!(entries.insert(&peer_id, None));
+
+        assert!(!entries.is_empty());
+        assert_eq!(entries.len(), 1);
+
+        assert!(!entries.insert(&peer_id, None));
+        assert_eq!(entries.len(), 1);
+
+        entries.clear();
+        assert!(entries.is_empty());
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn remove_from_entries_container() {
+        let mut entries = PrivateOverlayEntries {
+            peer_id_to_index: Default::default(),
+            data: Default::default(),
+            resolved_peers: Default::default(),
+        };
+
+        let peer_ids = std::array::from_fn::<PeerId, 10, _>(|_| rand::random());
+        for (i, peer_id) in peer_ids.iter().enumerate() {
+            assert!(entries.insert(peer_id, None));
+            assert_eq!(entries.len(), i + 1);
+            assert_eq!(entries.data.len(), i + 1);
+        }
+
+        for peer_id in &peer_ids {
+            assert!(entries.remove(peer_id));
+
+            assert!(!entries.data.contains(peer_id));
+            for (index, data) in entries.data.iter().enumerate() {
+                assert_eq!(entries.peer_id_to_index[data].data_index, index);
+            }
+        }
+
+        assert!(entries.is_empty());
     }
 }

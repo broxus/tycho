@@ -190,7 +190,7 @@ impl ConnectionManager {
                 let affinity = value.compute_affinity();
 
                 (affinity == PeerAffinity::High
-                    && &peer_info.id != self.endpoint.peer_id()
+                    && peer_info.id != self.endpoint.peer_id()
                     && !self.active_peers.contains(&peer_info.id)
                     && !self.pending_dials.contains_key(&peer_info.id)
                     && self

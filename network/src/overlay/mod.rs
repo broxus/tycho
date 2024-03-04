@@ -524,13 +524,26 @@ impl OverlayServiceInner {
         };
 
         while let Some((peer_id, res)) = futures.next().await {
-            match res {
-                Ok(info) => {
-                    let handle = known_peers.insert(Arc::new(info), true);
-                    todo!("SAVE HANDLE SOMEWHERE");
+            let now = now_sec();
+
+            let info = match res {
+                Ok(info) if info.is_valid(now) => info,
+                Ok(_) => {
+                    tracing::debug!(%peer_id, "received invalid peer info");
+                    continue;
                 }
                 Err(e) => {
                     tracing::warn!(%peer_id, "failed to resolve peer info: {e:?}");
+                    continue;
+                }
+            };
+
+            match known_peers.insert(Arc::new(info), true) {
+                Ok(handle) => {
+                    overlay.write_entries().set_resolved(&peer_id, Some(handle));
+                }
+                Err(e) => {
+                    tracing::debug!(%peer_id, "failed to insert a new peer info: {e:?}");
                 }
             }
         }
