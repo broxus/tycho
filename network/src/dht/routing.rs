@@ -238,26 +238,17 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use crate::util::make_peer_info_stub;
 
     const MAX_K: usize = 20;
-
-    fn make_node(id: PeerId) -> Arc<PeerInfo> {
-        Arc::new(PeerInfo {
-            id,
-            address_list: Default::default(),
-            created_at: 0,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        })
-    }
 
     #[test]
     fn buckets_are_sets() {
         let mut table = RoutingTable::new(rand::random());
 
         let peer = rand::random();
-        assert!(table.add(make_node(peer), MAX_K, &Duration::MAX, Some));
-        assert!(table.add(make_node(peer), MAX_K, &Duration::MAX, Some)); // returns true because the node was updated
+        assert!(table.add(make_peer_info_stub(peer), MAX_K, &Duration::MAX, Some));
+        assert!(table.add(make_peer_info_stub(peer), MAX_K, &Duration::MAX, Some)); // returns true because the node was updated
         assert_eq!(table.len(), 1);
     }
 
@@ -266,7 +257,7 @@ mod tests {
         let local_id = rand::random();
         let mut table = RoutingTable::new(local_id);
 
-        assert!(!table.add(make_node(local_id), MAX_K, &Duration::MAX, Some));
+        assert!(!table.add(make_peer_info_stub(local_id), MAX_K, &Duration::MAX, Some));
         assert!(table.is_empty());
     }
 
@@ -277,9 +268,9 @@ mod tests {
         let mut bucket = Bucket::with_capacity(k);
 
         for _ in 0..k {
-            assert!(bucket.insert(make_node(rand::random()), k, &timeout, Some));
+            assert!(bucket.insert(make_peer_info_stub(rand::random()), k, &timeout, Some));
         }
-        assert!(!bucket.insert(make_node(rand::random()), k, &timeout, Some));
+        assert!(!bucket.insert(make_peer_info_stub(rand::random()), k, &timeout, Some));
     }
 
     #[test]
@@ -398,7 +389,7 @@ mod tests {
 
         let mut table = RoutingTable::new(local_id);
         for id in ids {
-            table.add(make_node(id), MAX_K, &Duration::MAX, Some);
+            table.add(make_peer_info_stub(id), MAX_K, &Duration::MAX, Some);
         }
 
         {

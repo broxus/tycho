@@ -852,22 +852,13 @@ pub enum KnownPeersError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_node(id: PeerId) -> Arc<PeerInfo> {
-        Arc::new(PeerInfo {
-            id,
-            address_list: Default::default(),
-            created_at: 0,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        })
-    }
+    use crate::util::make_peer_info_stub;
 
     #[test]
     fn remove_from_cache_on_drop_works() {
         let peers = KnownPeers::new();
 
-        let peer_info = make_node(rand::random());
+        let peer_info = make_peer_info_stub(rand::random());
         let handle = peers.insert(peer_info.clone(), false).unwrap();
         assert!(peers.contains(&peer_info.id));
         assert!(!peers.is_banned(&peer_info.id));
@@ -914,7 +905,7 @@ mod tests {
     fn with_affinity_after_simple() {
         let peers = KnownPeers::new();
 
-        let peer_info = make_node(rand::random());
+        let peer_info = make_peer_info_stub(rand::random());
         let handle_simple = peers.insert(peer_info.clone(), false).unwrap();
         assert!(peers.contains(&peer_info.id));
         assert_eq!(
@@ -946,7 +937,7 @@ mod tests {
     fn with_affinity_before_simple() {
         let peers = KnownPeers::new();
 
-        let peer_info = make_node(rand::random());
+        let peer_info = make_peer_info_stub(rand::random());
         let handle_with_affinity = peers.insert(peer_info.clone(), true).unwrap();
         assert!(peers.contains(&peer_info.id));
         assert_eq!(peers.get_affinity(&peer_info.id), Some(PeerAffinity::High));
@@ -972,7 +963,7 @@ mod tests {
     fn ban_while_handle_exists() {
         let peers = KnownPeers::new();
 
-        let peer_info = make_node(rand::random());
+        let peer_info = make_peer_info_stub(rand::random());
         let handle = peers.insert(peer_info.clone(), false).unwrap();
         assert!(peers.contains(&peer_info.id));
         assert_eq!(handle.max_affinity(), PeerAffinity::Allowed);

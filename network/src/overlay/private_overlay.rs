@@ -304,6 +304,12 @@ impl PrivateOverlayEntries {
     pub fn set_resolved(&mut self, peer_id: &PeerId, handle: Option<KnownPeerHandle>) -> bool {
         match self.peer_id_to_index.get_mut(peer_id) {
             Some(link) => {
+                if let Some(handle) = &handle {
+                    if handle.peer_info().id != peer_id {
+                        return false;
+                    }
+                }
+
                 match (handle, link.resolved_data_index) {
                     // No resolved handle, but a new one is provided
                     (None, None) => {}
@@ -412,6 +418,9 @@ impl std::ops::Deref for PrivateOverlayEntriesReadGuard<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::network::KnownPeers;
+    use crate::util::make_peer_info_stub;
+
     use super::*;
 
     #[test]
@@ -463,5 +472,81 @@ mod tests {
         }
 
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn resolved_peers_in_entries_container() {
+        let known_peers = KnownPeers::new();
+
+        let mut entries = PrivateOverlayEntries {
+            peer_id_to_index: Default::default(),
+            data: Default::default(),
+            resolved_peers: Default::default(),
+        };
+
+        let peer_info = std::array::from_fn::<_, 10, _>(|_| make_peer_info_stub(rand::random()));
+        for (i, peer_info) in peer_info.iter().enumerate() {
+            let handle =
+                (i % 2 == 0).then(|| known_peers.insert(peer_info.clone(), false).unwrap());
+
+            assert!(entries.insert(&peer_info.id, handle));
+            assert_eq!(entries.len(), i + 1);
+            assert_eq!(entries.data.len(), i + 1);
+            assert_eq!(entries.resolved_peers.len(), (i / 2) + 1);
+        }
+        assert_eq!(entries.resolved_peers.len(), 5);
+
+        // Remove resolved info for the 0th item
+        assert!(entries.set_resolved(&peer_info[0].id, None));
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.data.len(), 10);
+        assert_eq!(entries.resolved_peers.len(), 4);
+
+        // Add resolved info for the 1st item
+        assert!(entries.set_resolved(
+            &peer_info[1].id,
+            Some(known_peers.insert(peer_info[1].clone(), false).unwrap())
+        ));
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.data.len(), 10);
+        assert_eq!(entries.resolved_peers.len(), 5);
+
+        // Remove resolved info for the 1st item
+        assert!(entries.set_resolved(&peer_info[1].id, None));
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.data.len(), 10);
+        assert_eq!(entries.resolved_peers.len(), 4);
+
+        // Try to set invalid handle for an existing item
+        assert!(!entries.set_resolved(
+            &peer_info[2].id,
+            Some(
+                known_peers
+                    .insert(make_peer_info_stub(rand::random()), false)
+                    .unwrap()
+            )
+        ));
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.data.len(), 10);
+        assert_eq!(entries.resolved_peers.len(), 4);
+
+        // Try to remove handle for the non-existing item
+        assert!(!entries.set_resolved(&rand::random(), None));
+
+        // Try to set handle for the non-existing item
+        let peer_id = rand::random();
+        assert!(!entries.set_resolved(
+            &peer_id,
+            Some(
+                known_peers
+                    .insert(make_peer_info_stub(peer_id), false)
+                    .unwrap()
+            )
+        ));
+
+        // Final state check
+        assert_eq!(entries.len(), 10);
+        assert_eq!(entries.data.len(), 10);
+        assert_eq!(entries.resolved_peers.len(), 4);
     }
 }
