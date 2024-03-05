@@ -19,7 +19,6 @@ use tycho_block_util::block::*;
 use tycho_block_util::state::*;
 
 mod cell_storage;
-mod cell_writer;
 mod entries_buffer;
 mod replace_transaction;
 mod shard_state_reader;

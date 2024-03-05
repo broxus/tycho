@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,8 +10,8 @@ pub use mapped_file::MappedFile;
 mod mapped_file;
 
 pub struct FileDb {
-    pub file: File,
-    pub path: PathBuf,
+    file: File,
+    path: PathBuf,
 }
 
 impl FileDb {
@@ -25,7 +25,7 @@ impl FileDb {
             .truncate(true)
             .read(true)
             .open(&path)
-            .context("Failed to create file")?;
+            .context(format!("Failed to create file {:?}", path.as_ref()))?;
 
         Ok(Self {
             file,
@@ -46,5 +46,25 @@ impl FileDb {
     pub fn flush(&mut self) -> Result<()> {
         self.file.flush()?;
         Ok(())
+    }
+
+    pub fn seek(&mut self, pos: SeekFrom) -> Result<()> {
+        self.file.seek(pos)?;
+        Ok(())
+    }
+
+    pub fn file(&self) -> &File {
+        &self.file
+    }
+
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let bytes = self.file.read(buf)?;
+        Ok(bytes)
+    }
+}
+
+impl Into<File> for FileDb {
+    fn into(self) -> File {
+        self.file
     }
 }

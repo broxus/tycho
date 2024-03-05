@@ -1,5 +1,6 @@
 use std::fs;
-use std::path::PathBuf;
+use std::io::SeekFrom;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -11,10 +12,8 @@ use tokio::time::Instant;
 
 use crate::db::Db;
 use crate::store::BlockHandleStorage;
-
-use self::cell_writer::*;
-
-mod cell_writer;
+use crate::utils::CellWriter;
+use crate::FileDb;
 
 const KEY_BLOCK_UTIME_STEP: u32 = 86400;
 
@@ -26,13 +25,13 @@ pub struct PersistentStateStorage {
 }
 
 impl PersistentStateStorage {
-    pub async fn new(
+    pub fn new(
         file_db_path: PathBuf,
         db: Arc<Db>,
         block_handle_storage: Arc<BlockHandleStorage>,
     ) -> Result<Self> {
         let dir = file_db_path.join("states");
-        tokio::fs::create_dir_all(&dir).await?;
+        fs::create_dir_all(&dir)?;
         let is_cancelled = Arc::new(Default::default());
 
         Ok(Self {
@@ -45,34 +44,34 @@ impl PersistentStateStorage {
 
     pub async fn save_state(
         &self,
+        mc_block_id: &BlockId,
         block_id: &BlockId,
-        master_block_id: &BlockId,
-        state_root_hash: &HashBytes,
+        root_hash: &HashBytes,
     ) -> Result<()> {
         let block_id = block_id.clone();
-        let master_block_id = master_block_id.clone();
-        let state_root_hash = *state_root_hash;
+        let root_hash = *root_hash;
         let db = self.db.clone();
-        let base_path = self.storage_path.clone();
-        let is_cancelled = self.is_cancelled.clone();
+        let is_cancelled = Some(self.is_cancelled.clone());
+        let base_path = self.get_state_file_path(&mc_block_id, &block_id);
 
         tokio::task::spawn_blocking(move || {
             let cell_writer = CellWriter::new(&db, &base_path);
-            match cell_writer.write(&master_block_id, &block_id, &state_root_hash, is_cancelled) {
-                Ok(path) => {
+            match cell_writer.write(&root_hash.0, is_cancelled) {
+                Ok(()) => {
                     tracing::info!(
                         block_id = %block_id,
-                        path = %path.display(),
-                        "Successfully wrote persistent state to a file",
+                        "successfully wrote persistent state to a file",
                     );
                 }
                 Err(e) => {
                     tracing::error!(
                         block_id = %block_id,
-                        "Writing persistent state failed. Err: {e:?}"
+                        "writing persistent state failed: {e:?}"
                     );
 
-                    CellWriter::clear_temp(&base_path, &master_block_id, &block_id);
+                    if let Err(e) = cell_writer.remove(&root_hash.0) {
+                        tracing::error!(%block_id, "{e}")
+                    }
                 }
             }
         })
@@ -87,15 +86,11 @@ impl PersistentStateStorage {
         offset: u64,
         size: u64,
     ) -> Option<Vec<u8>> {
-        use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-
         // TODO: cache file handles
-        let mut file = tokio::fs::File::open(self.get_state_file_path(mc_block_id, block_id))
-            .await
-            .ok()?;
+        let mut file_db = FileDb::open(self.get_state_file_path(mc_block_id, block_id)).ok()?;
 
-        if let Err(e) = file.seek(SeekFrom::Start(offset)).await {
-            tracing::error!("Failed to seek state file offset. Err: {e:?}");
+        if let Err(e) = file_db.seek(SeekFrom::Start(offset)) {
+            tracing::error!("failed to seek state file offset: {e:?}");
             return None;
         }
 
@@ -103,15 +98,15 @@ impl PersistentStateStorage {
         let mut result = BytesMut::with_capacity(size as usize);
         let now = Instant::now();
         loop {
-            match file.read_buf(&mut result).await {
+            match file_db.read(&mut result) {
                 Ok(bytes_read) => {
-                    tracing::debug!("Reading state file. Bytes read: {}", bytes_read);
+                    tracing::debug!(bytes_read, "reading state file");
                     if bytes_read == 0 || bytes_read == size as usize {
                         break;
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to read state file. Err: {e:?}");
+                    tracing::error!("failed to read state file. Err: {e:?}");
                     return None;
                 }
             }
@@ -134,14 +129,17 @@ impl PersistentStateStorage {
         let dir_path = mc_block.seqno.to_string();
         let path = self.storage_path.join(dir_path);
         if !path.exists() {
-            tracing::info!(mc_block = %mc_block, "Creating persistent state directory");
+            tracing::info!(mc_block = %mc_block, "creating persistent state directory");
             fs::create_dir(path)?;
         }
         Ok(())
     }
 
     fn get_state_file_path(&self, mc_block_id: &BlockId, block_id: &BlockId) -> PathBuf {
-        CellWriter::make_pss_path(&self.storage_path, mc_block_id, block_id)
+        self.storage_path
+            .clone()
+            .join(mc_block_id.seqno.to_string())
+            .join(block_id.root_hash.to_string())
     }
 
     pub fn cancel(&self) {
@@ -149,7 +147,7 @@ impl PersistentStateStorage {
     }
 
     pub async fn clear_old_persistent_states(&self) -> Result<()> {
-        tracing::info!("Started clearing old persistent state directories");
+        tracing::info!("started clearing old persistent state directories");
         let start = Instant::now();
 
         // Keep 2 days of states + 1 state before
@@ -178,7 +176,7 @@ impl PersistentStateStorage {
 
         tracing::info!(
             elapsed = %humantime::format_duration(start.elapsed()),
-            "Clearing old persistent state directories completed"
+            "clearing old persistent state directories completed"
         );
 
         Ok(())
@@ -210,16 +208,16 @@ impl PersistentStateStorage {
         }
 
         for dir in directories_to_remove {
-            tracing::info!(dir = %dir.display(), "Removing an old persistent state directory");
+            tracing::info!(dir = %dir.display(), "removing an old persistent state directory");
             if let Err(e) = fs::remove_dir_all(&dir) {
-                tracing::error!(dir = %dir.display(), "Failed to remove an old persistent state: {e:?}");
+                tracing::error!(dir = %dir.display(), "failed to remove an old persistent state: {e:?}");
             }
         }
 
         for file in files_to_remove {
-            tracing::info!(file = %file.display(), "Removing file");
+            tracing::info!(file = %file.display(), "removing file");
             if let Err(e) = fs::remove_file(&file) {
-                tracing::error!(file = %file.display(), "Failed to remove file: {e:?}");
+                tracing::error!(file = %file.display(), "failed to remove file: {e:?}");
             }
         }
 
