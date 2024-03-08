@@ -15,13 +15,13 @@ pub struct NodeStateStorage {
 }
 
 impl NodeStateStorage {
-    pub fn new(db: Arc<Db>) -> Result<Self> {
-        Ok(Self {
+    pub fn new(db: Arc<Db>) -> Self {
+        Self {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
             init_mc_block_id: (Default::default(), INIT_MC_BLOCK_ID),
             shards_client_mc_block_id: (Default::default(), SHARDS_CLIENT_MC_BLOCK_ID),
-        })
+        }
     }
 
     pub fn store_historical_sync_start(&self, id: &BlockId) -> Result<()> {

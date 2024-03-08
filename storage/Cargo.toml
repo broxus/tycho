@@ -36,5 +36,12 @@ weedb = "0.1.1"
 tycho-block-util = { path = "../block-util" }
 tycho-util = { path = "../util" }
 
+[dev-dependencies]
+base64 = "0.22.0"
+serde_json = "1.0.114"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-test = "0.2"
+
 [lints]
 workspace = true

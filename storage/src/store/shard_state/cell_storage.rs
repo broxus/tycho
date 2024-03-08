@@ -20,20 +20,20 @@ pub struct CellStorage {
 }
 
 impl CellStorage {
-    pub fn new(db: Arc<Db>, cache_size_bytes: u64) -> Result<Arc<Self>> {
+    pub fn new(db: Arc<Db>, cache_size_bytes: u64) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = RawCellsCache::new(cache_size_bytes);
 
-        Ok(Arc::new(Self {
+        Arc::new(Self {
             db,
             cells_cache,
             raw_cells_cache,
-        }))
+        })
     }
 
     pub fn store_cell(
         &self,
-        batch: &mut weedb::rocksdb::WriteBatch,
+        batch: &mut rocksdb::WriteBatch,
         root: Cell,
     ) -> Result<usize, CellStorageError> {
         struct CellWithRefs<'a> {

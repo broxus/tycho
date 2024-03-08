@@ -9,3 +9,6 @@ target/
 
 perf.data*
 .scratch
+
+.DS_Store
+storage/tmp/

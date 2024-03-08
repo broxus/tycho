@@ -13,8 +13,8 @@ pub struct BlockConnectionStorage {
 }
 
 impl BlockConnectionStorage {
-    pub fn new(db: Arc<Db>) -> Result<Self> {
-        Ok(Self { db })
+    pub fn new(db: Arc<Db>) -> Self {
+        Self { db }
     }
 
     pub fn store_connection(

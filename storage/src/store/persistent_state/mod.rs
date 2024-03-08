@@ -139,7 +139,6 @@ impl PersistentStateStorage {
         self.storage_path
             .clone()
             .join(mc_block_id.seqno.to_string())
-            .join(block_id.root_hash.to_string())
     }
 
     pub fn cancel(&self) {

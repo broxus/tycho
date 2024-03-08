@@ -46,7 +46,7 @@ impl ShardStateStorage {
         cache_size_bytes: u64,
     ) -> Result<Self> {
         let downloads_dir = prepare_file_db_dir(file_db_path, "downloads")?;
-        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes)?;
+        let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 
         let res = Self {
             db,

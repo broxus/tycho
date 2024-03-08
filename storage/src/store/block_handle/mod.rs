@@ -16,11 +16,11 @@ pub struct BlockHandleStorage {
 }
 
 impl BlockHandleStorage {
-    pub fn new(db: Arc<Db>) -> Result<Self> {
-        Ok(Self {
+    pub fn new(db: Arc<Db>) -> Self {
+        Self {
             db,
             cache: Arc::new(Default::default()),
-        })
+        }
     }
 
     pub fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<bool> {
