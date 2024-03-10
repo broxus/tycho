@@ -1,15 +1,19 @@
 use std::collections::{btree_map, BTreeMap, VecDeque};
 use std::num::{NonZeroU8, NonZeroUsize};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
+use std::task::{Context, Poll};
 
 use ahash::RandomState;
 use anyhow::{anyhow, Result};
-use tokio::task::JoinSet;
+use futures_util::future::BoxFuture;
+use futures_util::{Future, FutureExt};
+use tokio::task::{JoinHandle, JoinSet};
 use tycho_network::PeerId;
+use tycho_util::futures::Shared;
 use tycho_util::FastDashMap;
 
-use crate::engine::promise::Promise;
 use crate::models::point::{Digest, Point, Round, Signature};
 use crate::tasks::downloader::DownloadTask;
 
@@ -74,7 +78,7 @@ struct DagLocation {
     // only one of the point versions at current location
     // may become proven by the next round point(s) of a node;
     // even if we marked a proven point as invalid, consensus may override our decision
-    versions: BTreeMap<Digest, Promise<DagPoint>>,
+    versions: BTreeMap<Digest, DagPointFut>,
 }
 
 struct DagRound {
@@ -98,74 +102,130 @@ impl DagRound {
     }
 
     pub async fn valid_point(&self, node: &PeerId, digest: &Digest) -> Option<Arc<IndexedPoint>> {
-        let location = self.locations.get(node)?;
-        let promise = location.versions.get(digest)?;
-        let point = promise.get().await;
-        point.valid()
+        let point_fut = {
+            let location = self.locations.get(node)?;
+            location.versions.get(digest)?.clone()
+        };
+        point_fut.await.valid()
     }
 
-    pub async fn add(&mut self, point: Point) -> Result<DagPoint> {
+    pub fn add(&self, point: Point) -> Result<DagPointFut> {
         anyhow::ensure!(point.body.location.round == self.round, "wrong point round");
         anyhow::ensure!(point.is_integrity_ok(), "point integrity check failed");
 
-        let promise = match self
+        let mut location = self
             .locations
             .entry(point.body.location.author)
-            .or_default()
-            .versions
-            .entry(point.digest)
-        {
+            .or_default();
+
+        fn add_dependency(
+            round: &Arc<DagRound>,
+            node: &PeerId,
+            digest: &Digest,
+            dependencies: &mut JoinSet<DagPoint>,
+        ) {
+            let mut loc = round.locations.entry(*node).or_default();
+            let fut = loc
+                .versions
+                .entry(*digest)
+                .or_insert_with(|| DagPointFut::new(DownloadTask {}))
+                .clone();
+            dependencies.spawn(fut);
+        }
+
+        Ok(match location.versions.entry(point.digest) {
             btree_map::Entry::Occupied(entry) => entry.get().clone(),
             btree_map::Entry::Vacant(entry) => {
                 let mut dependencies = JoinSet::new();
                 if let Some(r_1) = self.prev.upgrade() {
-                    for (&node, &digest) in &point.body.includes {
-                        let mut loc = r_1.locations.entry(node).or_default();
-                        let promise = loc
-                            .versions
-                            .entry(digest)
-                            .or_insert(Promise::new(Box::pin(DownloadTask {})))
-                            .clone();
-                        dependencies.spawn(promise.into_value());
+                    for (node, digest) in &point.body.includes {
+                        add_dependency(&r_1, &node, &digest, &mut dependencies);
                     }
                     if let Some(r_2) = r_1.prev.upgrade() {
-                        for (&node, &digest) in &point.body.witness {
-                            let mut loc = r_2.locations.entry(node).or_default();
-                            let promise = loc
-                                .versions
-                                .entry(digest)
-                                .or_insert(Promise::new(Box::pin(DownloadTask {})))
-                                .clone();
-                            dependencies.spawn(promise.into_value());
+                        for (node, digest) in &point.body.witness {
+                            add_dependency(&r_2, &node, &digest, &mut dependencies);
                         }
                     };
                 };
 
-                let promise = Promise::new(async move {
+                let fut = DagPointFut::new(async move {
                     while let Some(res) = dependencies.join_next().await {
-                        let res = match res {
-                            Ok(value) => value,
+                        match res {
+                            Ok(value) if value.is_valid() => continue,
+                            Ok(_) => return DagPoint::Invalid(Arc::new(point)),
                             Err(e) => {
                                 if e.is_panic() {
                                     std::panic::resume_unwind(e.into_panic());
                                 }
                                 unreachable!();
                             }
-                        };
-
-                        if !res.is_valid() {
-                            return DagPoint::Invalid(Arc::new(point));
                         }
                     }
 
                     DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
                 });
 
-                entry.insert(promise).clone()
+                entry.insert(fut).clone()
             }
+        })
+    }
+}
+
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct DagPointFut {
+    inner: Shared<BoxFuture<'static, DagPoint>>,
+}
+
+impl DagPointFut {
+    fn new<F>(f: F) -> Self
+    where
+        F: Future<Output = DagPoint> + Send + 'static,
+    {
+        struct FutGuard {
+            handle: JoinHandle<DagPoint>,
+            complete: bool,
+        }
+
+        impl Drop for FutGuard {
+            fn drop(&mut self) {
+                if !self.complete {
+                    self.handle.abort();
+                }
+            }
+        }
+
+        let mut guard = FutGuard {
+            handle: tokio::spawn(f),
+            complete: false,
         };
 
-        Ok(promise.get().await)
+        Self {
+            inner: Shared::new(Box::pin(async move {
+                match (&mut guard.handle).await {
+                    Ok(value) => {
+                        guard.complete = true;
+                        value
+                    }
+                    Err(e) => {
+                        if e.is_panic() {
+                            std::panic::resume_unwind(e.into_panic());
+                        }
+                        unreachable!()
+                    }
+                }
+            })),
+        }
+    }
+}
+
+impl Future for DagPointFut {
+    type Output = DagPoint;
+
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let (value, _) = futures_util::ready!(self.inner.poll_unpin(cx));
+        Poll::Ready(value)
     }
 }
 
