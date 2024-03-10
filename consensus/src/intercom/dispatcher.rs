@@ -9,23 +9,32 @@ use tycho_network::{
     service_query_fn, Network, NetworkConfig, NetworkExt, Response, ServiceRequest, Version,
 };
 
-use crate::intercom::responses::*;
-use crate::models::{Location, Point, PointId, RoundId, Signature};
+use crate::models::point::{Location, Point, PointId, Round, Signature};
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BroadcastResponse {
+    // for requested point
+    pub signature: Signature,
+    // at the same round, if it was not skipped
+    pub signer_point: Option<Point>,
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PointResponse {
+    pub point: Option<Point>,
+}
+//PointLast(Option<Point>),
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PointsResponse {
+    pub vertices: Vec<Point>,
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MPRequest {
     // by author
     Broadcast { point: Point },
     Point { id: PointId },
-    // any point from the last author's round;
-    // 1/3+1 evidenced vertices determine current consensus round
-    // PointLast,
-    // unique point with known evidence
-    Vertex { id: Location },
-    // the next point by the same author
-    // that contains >=2F signatures for requested vertex
-    Evidence { vertex_id: Location },
-    Vertices { round: RoundId },
+    Points { round: Round },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -33,9 +42,7 @@ enum MPResponse {
     Broadcast(BroadcastResponse),
     Point(PointResponse),
     //PointLast(Option<Point>),
-    Vertex(VertexResponse),
-    Evidence(EvidenceResponse),
-    Vertices(VerticesResponse),
+    Points(PointsResponse),
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -98,10 +105,10 @@ impl Dispatcher {
         }
     }
 
-    pub async fn vertex(&self, id: Location, from: SocketAddr) -> Result<VertexResponse> {
+    pub async fn points(&self, round: Round, from: SocketAddr) -> Result<PointsResponse> {
         let request = tycho_network::Request {
             version: Version::V1,
-            body: Bytes::from(bincode::serialize(&MPRequest::Vertex { id })?),
+            body: Bytes::from(bincode::serialize(&MPRequest::Points { round })?),
         };
 
         let remote_peer = self.network.connect(from).await?;
@@ -109,43 +116,7 @@ impl Dispatcher {
         let response = self.network.query(&remote_peer, request).await?;
 
         match parse_response(&response.body)? {
-            MPResponse::Vertex(r) => Ok(r),
-            x => Err(anyhow!("wrong response")),
-        }
-    }
-
-    pub async fn evidence(
-        &self,
-        vertex_id: Location,
-        from: SocketAddr,
-    ) -> Result<EvidenceResponse> {
-        let request = tycho_network::Request {
-            version: Version::V1,
-            body: Bytes::from(bincode::serialize(&MPRequest::Evidence { vertex_id })?),
-        };
-
-        let remote_peer = self.network.connect(from).await?;
-
-        let response = self.network.query(&remote_peer, request).await?;
-
-        match parse_response(&response.body)? {
-            MPResponse::Evidence(r) => Ok(r),
-            x => Err(anyhow!("wrong response")),
-        }
-    }
-
-    pub async fn vertices(&self, round: RoundId, from: SocketAddr) -> Result<VerticesResponse> {
-        let request = tycho_network::Request {
-            version: Version::V1,
-            body: Bytes::from(bincode::serialize(&MPRequest::Vertices { round })?),
-        };
-
-        let remote_peer = self.network.connect(from).await?;
-
-        let response = self.network.query(&remote_peer, request).await?;
-
-        match parse_response(&response.body)? {
-            MPResponse::Vertices(r) => Ok(r),
+            MPResponse::Points(r) => Ok(r),
             x => Err(anyhow!("wrong response")),
         }
     }
@@ -171,35 +142,17 @@ impl DispatcherInner {
                 // 1.1 sigs for my block + 1.2 my next includes
                 // ?? + 3.1 ask last
                 MPResponse::Broadcast(BroadcastResponse {
-                    current_round: RoundId(0),
                     signature: Signature(Bytes::new()),
                     signer_point: None,
                 })
             }
             MPRequest::Point { id } => {
                 // 1.2 my next includes (merged with Broadcast flow)
-                MPResponse::Point(PointResponse {
-                    current_round: RoundId(0),
-                    point: None,
-                })
+                MPResponse::Point(PointResponse { point: None })
             }
-            MPRequest::Vertex { id } => {
-                // verification flow: downloader
-                MPResponse::Vertex(VertexResponse {
-                    current_round: RoundId(0),
-                    vertex: None,
-                })
-            }
-            MPRequest::Evidence { vertex_id } => {
-                // verification flow: downloader
-                MPResponse::Evidence(EvidenceResponse {
-                    current_round: RoundId(0),
-                    point: None,
-                })
-            }
-            MPRequest::Vertices { round } => {
-                // cold sync flow: downloader
-                MPResponse::Vertices(VerticesResponse {
+            MPRequest::Points { round } => {
+                // sync flow: downloader
+                MPResponse::Points(PointsResponse {
                     vertices: Vec::new(),
                 })
             }
@@ -207,7 +160,7 @@ impl DispatcherInner {
 
         Some(Response {
             version: Version::default(),
-            body: Bytes::from(match bincode::serialize(&response) {
+            body: Bytes::from(match bincode::serialize(&MPRemoteResult::Ok(response)) {
                 Ok(data) => data,
                 Err(e) => {
                     tracing::error!("failed to serialize response to {:?}: {e:?}", req.metadata);
@@ -251,8 +204,8 @@ mod tests {
                     body: Bytes::from("bites"),
                 },
             )
-            .await?;
-        let response = parse_response(&response.body);
+            .await
+            .and_then(|a| parse_response(&a.body));
 
         tracing::info!("response '{response:?}'");
 
@@ -266,9 +219,7 @@ mod tests {
         let node1 = Dispatcher::new()?;
         let node2 = Dispatcher::new()?;
 
-        let data = node1
-            .vertices(RoundId(0), node2.network.local_addr())
-            .await?;
+        let data = node1.points(Round(0), node2.network.local_addr()).await?;
 
         tracing::info!("response: '{data:?}'");
 

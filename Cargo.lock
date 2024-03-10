@@ -1953,11 +1953,16 @@ dependencies = [
 name = "tycho-consensus"
 version = "0.0.1"
 dependencies = [
+ "ahash",
  "anyhow",
  "bincode",
  "bytes",
+ "everscale-crypto",
  "futures-util",
+ "parking_lot",
  "serde",
+ "sha2",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-test",
