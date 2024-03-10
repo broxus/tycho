@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{btree_map, BTreeMap, VecDeque};
 use std::num::{NonZeroU8, NonZeroUsize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
@@ -104,57 +104,68 @@ impl DagRound {
         point.valid()
     }
 
-    pub async fn add(&mut self, point: Point) -> Result<Promise<DagPoint>> {
-        if point.body.location.round != self.round {
-            return Err(anyhow!("wrong point round"));
-        }
-        if !point.is_integrity_ok() {
-            return Err(anyhow!("point integrity check failed"));
-        }
+    pub async fn add(&mut self, point: Point) -> Result<DagPoint> {
+        anyhow::ensure!(point.body.location.round == self.round, "wrong point round");
+        anyhow::ensure!(point.is_integrity_ok(), "point integrity check failed");
 
-        let mut dependencies = JoinSet::new();
-        if let Some(r_1) = self.prev.upgrade() {
-            for (&node, &digest) in &point.body.includes {
-                let mut loc = r_1.locations.entry(node).or_default();
-                let promise = loc
-                    .versions
-                    .entry(digest)
-                    .or_insert(Promise::new(Box::pin(DownloadTask {})))
-                    .clone();
-                dependencies.spawn(async move { promise.get().await });
-            }
-            if let Some(r_2) = r_1.prev.upgrade() {
-                for (&node, &digest) in &point.body.witness {
-                    let mut loc = r_2.locations.entry(node).or_default();
-                    let promise = loc
-                        .versions
-                        .entry(digest)
-                        .or_insert(Promise::new(Box::pin(DownloadTask {})))
-                        .clone();
-                    dependencies.spawn(async move { promise.get().await });
-                }
-            };
-        };
-
-        Ok(Promise::new(async move {
-            while let Some(res) = dependencies.join_next().await {
-                let res = match res {
-                    Ok(value) => value,
-                    Err(e) => {
-                        if e.is_panic() {
-                            std::panic::resume_unwind(e.into_panic());
-                        }
-                        unreachable!();
+        let promise = match self
+            .locations
+            .entry(point.body.location.author)
+            .or_default()
+            .versions
+            .entry(point.digest)
+        {
+            btree_map::Entry::Occupied(entry) => entry.get().clone(),
+            btree_map::Entry::Vacant(entry) => {
+                let mut dependencies = JoinSet::new();
+                if let Some(r_1) = self.prev.upgrade() {
+                    for (&node, &digest) in &point.body.includes {
+                        let mut loc = r_1.locations.entry(node).or_default();
+                        let promise = loc
+                            .versions
+                            .entry(digest)
+                            .or_insert(Promise::new(Box::pin(DownloadTask {})))
+                            .clone();
+                        dependencies.spawn(promise.into_value());
                     }
+                    if let Some(r_2) = r_1.prev.upgrade() {
+                        for (&node, &digest) in &point.body.witness {
+                            let mut loc = r_2.locations.entry(node).or_default();
+                            let promise = loc
+                                .versions
+                                .entry(digest)
+                                .or_insert(Promise::new(Box::pin(DownloadTask {})))
+                                .clone();
+                            dependencies.spawn(promise.into_value());
+                        }
+                    };
                 };
 
-                if !res.is_valid() {
-                    return DagPoint::Invalid(Arc::new(point));
-                }
-            }
+                let promise = Promise::new(async move {
+                    while let Some(res) = dependencies.join_next().await {
+                        let res = match res {
+                            Ok(value) => value,
+                            Err(e) => {
+                                if e.is_panic() {
+                                    std::panic::resume_unwind(e.into_panic());
+                                }
+                                unreachable!();
+                            }
+                        };
 
-            DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
-        }))
+                        if !res.is_valid() {
+                            return DagPoint::Invalid(Arc::new(point));
+                        }
+                    }
+
+                    DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
+                });
+
+                entry.insert(promise).clone()
+            }
+        };
+
+        Ok(promise.get().await)
     }
 }
 

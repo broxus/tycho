@@ -81,4 +81,8 @@ where
 
         panic!("task panicked")
     }
+
+    pub async fn into_value(self) -> T {
+        self.get().await
+    }
 }

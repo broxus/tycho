@@ -1958,6 +1958,7 @@ dependencies = [
  "bincode",
  "bytes",
  "castaway",
+ "dashmap",
  "everscale-crypto",
  "futures-util",
  "parking_lot",

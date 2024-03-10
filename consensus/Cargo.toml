@@ -10,6 +10,7 @@ anyhow = "1.0"
 bincode = "1.3"
 bytes = { version = "1.0", features = ["serde"] }
 castaway = "0.2"
+dashmap = "5.4"
 everscale-crypto = "0.2"
 futures-util = { version = "0.3" }
 parking_lot = "0.12"
