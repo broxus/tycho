@@ -5,12 +5,12 @@ use std::sync::{Arc, OnceLock, Weak};
 
 use ahash::RandomState;
 use anyhow::{anyhow, Result};
-use futures_util::FutureExt;
-
+use tokio::task::JoinSet;
+use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use crate::engine::promise::Promise;
-use crate::models::point::{Digest, NodeId, Point, Round, Signature};
+use crate::models::point::{Digest, Point, Round, Signature};
 use crate::tasks::downloader::DownloadTask;
 
 pub struct IndexedPoint {
@@ -80,7 +80,7 @@ struct DagLocation {
 struct DagRound {
     round: Round,
     node_count: u8,
-    locations: FastDashMap<NodeId, DagLocation>,
+    locations: FastDashMap<PeerId, DagLocation>,
     prev: Weak<DagRound>,
 }
 
@@ -97,10 +97,10 @@ impl DagRound {
         }
     }
 
-    pub async fn valid_point(&self, node: &NodeId, digest: &Digest) -> Option<Arc<IndexedPoint>> {
+    pub async fn valid_point(&self, node: &PeerId, digest: &Digest) -> Option<Arc<IndexedPoint>> {
         let location = self.locations.get(node)?;
         let promise = location.versions.get(digest)?;
-        let point = promise.get().await.ok()?;
+        let point = promise.get().await;
         point.valid()
     }
 
@@ -111,64 +111,50 @@ impl DagRound {
         if !point.is_integrity_ok() {
             return Err(anyhow!("point integrity check failed"));
         }
-        let mut dependencies = vec![];
+
+        let mut dependencies = JoinSet::new();
         if let Some(r_1) = self.prev.upgrade() {
-            for (node, digest) in point.body.includes.clone() {
+            for (&node, &digest) in &point.body.includes {
                 let mut loc = r_1.locations.entry(node).or_default();
                 let promise = loc
                     .versions
                     .entry(digest)
                     .or_insert(Promise::new(Box::pin(DownloadTask {})))
                     .clone();
-                dependencies.push(promise);
+                dependencies.spawn(async move { promise.get().await });
             }
             if let Some(r_2) = r_1.prev.upgrade() {
-                for (node, digest) in point.body.witness.clone() {
+                for (&node, &digest) in &point.body.witness {
                     let mut loc = r_2.locations.entry(node).or_default();
                     let promise = loc
                         .versions
                         .entry(digest)
                         .or_insert(Promise::new(Box::pin(DownloadTask {})))
                         .clone();
-                    dependencies.push(promise);
+                    dependencies.spawn(async move { promise.get().await });
                 }
             };
         };
 
-        /*
-        Ok(Promise::new(|| {
-            Box::pin(async move {
-                let res: Result<Vec<_>, _> = join_all(dependencies.into_iter().map(|p| p.get()))
-                    .await
-                    .into_iter()
-                    .collect();
-                res.map(|deps| {
-                    if deps.iter().any(|point| !point.is_valid()) {
-                        DagPoint::Invalid(Arc::new(point))
-                    } else {
-                        DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
+        Ok(Promise::new(async move {
+            while let Some(res) = dependencies.join_next().await {
+                let res = match res {
+                    Ok(value) => value,
+                    Err(e) => {
+                        if e.is_panic() {
+                            std::panic::resume_unwind(e.into_panic());
+                        }
+                        unreachable!();
                     }
-                })
-            })
+                };
+
+                if !res.is_valid() {
+                    return DagPoint::Invalid(Arc::new(point));
+                }
+            }
+
+            DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
         }))
-        */
-        /*
-        let task = Box::pin({
-            try_join_all(dependencies.iter().map(|p| p.get())).map(|res| {
-                res.map(|deps| {
-                    if deps.iter().any(|point| !point.is_valid()) {
-                        DagPoint::Invalid(Arc::new(point))
-                    } else {
-                        DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
-                    }
-                })
-            })
-        })
-        .boxed();
-        Ok(Promise::new(task))
-        */
-        Ok(Promise::ready(DagPoint::NotExists))
-        // Ok(Promise::new(task)) // FIXME make fn sync
     }
 }
 

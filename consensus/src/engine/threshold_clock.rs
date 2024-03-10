@@ -1,9 +1,10 @@
+use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
-use crate::models::point::{NodeId, Round};
+use crate::models::point::Round;
 
 pub struct ThresholdClock {
     round: Round,
-    signatures_received: FastHashSet<NodeId>,
-    rejected: FastHashSet<NodeId>, // TODO reason
+    signatures_received: FastHashSet<PeerId>,
+    rejected: FastHashSet<PeerId>, // TODO reason
 }

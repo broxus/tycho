@@ -1,7 +1,9 @@
 use std::time::SystemTime;
+
+use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
-use crate::models::point::{NodeId, Point, Round};
+use crate::models::point::{Point, Round};
 
 // from latest block
 struct NodeInfo {
@@ -10,7 +12,7 @@ struct NodeInfo {
 }
 
 pub struct NeighbourWatch {
-    nodes: FastDashMap<NodeId, NodeInfo>,
+    nodes: FastDashMap<PeerId, NodeInfo>,
 }
 
 impl NeighbourWatch {

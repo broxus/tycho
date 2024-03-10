@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -10,26 +9,11 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Digest([u8; 32]);
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Signature(pub Bytes);
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct NodeId([u8; 32]);
-
-impl From<&PeerId> for NodeId {
-    fn from(value: &PeerId) -> Self {
-        NodeId(value.0)
-    }
-}
-
-impl From<&NodeId> for PeerId {
-    fn from(value: &NodeId) -> Self {
-        PeerId(value.0)
-    }
-}
 
 #[derive(Copy, Clone, Serialize, Deserialize, PartialOrd, PartialEq, Debug)]
 pub struct Round(pub u32);
@@ -43,7 +27,7 @@ impl Round {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Location {
     pub round: Round,
-    pub author: NodeId,
+    pub author: PeerId,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -59,7 +43,7 @@ pub struct PrevPoint {
     // pub round: Round,
     pub digest: Digest,
     // >= 2F witnesses, point author excluded
-    pub evidence: FastHashMap<NodeId, Signature>,
+    pub evidence: FastHashMap<PeerId, Signature>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -73,9 +57,9 @@ pub struct PointBody {
     // signed by author @ r-1 with some additional points just mentioned;
     // optionally includes author's own vertex (if exists).
     // BTree provides repeatable order on every node
-    pub includes: BTreeMap<NodeId, Digest>,
+    pub includes: BTreeMap<PeerId, Digest>,
     // >= 0 points @ r-2, signed by author @ r-1
-    pub witness: BTreeMap<NodeId, Digest>,
+    pub witness: BTreeMap<PeerId, Digest>,
     // the last known third point in a row by some leader;
     // defines author's current anchor
     pub last_commit_trigger: PointId,
@@ -89,7 +73,7 @@ pub struct PointBody {
 impl PointBody {
     pub fn wrap(self, secret: ExpandedSecretKey) -> Option<Point> {
         let body = bincode::serialize(&self).ok()?;
-        let pubkey = PeerId::from(&self.location.author).as_public_key()?;
+        let pubkey = self.location.author.as_public_key()?;
         let sig = secret.sign_raw(body.as_slice(), &pubkey);
         let mut hasher = Sha256::new();
         hasher.update(body.as_slice());
@@ -114,7 +98,7 @@ pub struct Point {
 
 impl Point {
     pub fn is_integrity_ok(&self) -> bool {
-        let pubkey = PeerId::from(&self.body.location.author).as_public_key();
+        let pubkey = self.body.location.author.as_public_key();
         let body = bincode::serialize(&self.body).ok();
         let sig: Result<[u8; 64], _> = self.signature.0.to_vec().try_into();
         if let Some(((pubkey, body), sig)) = pubkey.zip(body).zip(sig.ok()) {
