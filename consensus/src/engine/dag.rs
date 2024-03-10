@@ -209,7 +209,7 @@ impl Dag {
     }
 
     fn round_at(&self, round: Round) -> Option<Arc<DagRound>> {
-        self.rounds.get(self.index_of(round)?).map(|r| r.clone())
+        self.rounds.get(self.index_of(round)?).cloned()
     }
 
     fn index_of(&self, round: Round) -> Option<usize> {
@@ -241,17 +241,18 @@ impl Dag {
                 &anchor_proof.point.body.location.round.0
             ));
         };
-        _ = anchor_proof; // needed no more
 
         let Some(mut cur_includes_round) = anchor.point.body.location.round.prev() else {
             return Err(anyhow!("anchor proof @ 0 cannot exist"));
         };
 
-        let mut r_0 = anchor.point.body.includes.clone(); // points @ r+0
-        let mut r_1 = anchor.point.body.witness.clone(); // points @ r-1
-        let mut r_2 = BTreeMap::new(); // points @ r-2
-        let mut r_3 = BTreeMap::new(); // points @ r-3
-        _ = anchor; // anchor payload will be committed the next time
+        let mut r = [
+            anchor.point.body.includes.clone(), // points @ r+0
+            anchor.point.body.witness.clone(),  // points @ r-1
+            BTreeMap::new(),                    // points @ r-2
+            BTreeMap::new(),                    // points @ r-3
+        ];
+        drop(anchor); // anchor payload will be committed the next time
 
         let mut uncommitted = VecDeque::new();
 
@@ -260,21 +261,21 @@ impl Dag {
         while let Some((proof_round /* r+0 */, vertex_round /* r-1 */)) = self
             .round_at(cur_includes_round)
             .and_then(|cur| cur.prev.upgrade().map(|prev| (cur, prev)))
-            .filter(|_| !(r_0.is_empty() && r_1.is_empty() && r_2.is_empty() && r_3.is_empty()))
+            .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
             // take points @ r+0, and select their vertices @ r-1 for commit
             // the order is of NodeId (public key)
-            while let Some((node, digest)) = &r_0.pop_first() {
+            while let Some((node, digest)) = &r[0].pop_first() {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
                 // Any valid point among equivocated will do, as they include the same vertex.
                 if let Some(proof /* point @ r+0 */) = proof_round.valid_point(node, digest).await {
-                    if proof.is_committed.load(Ordering::Relaxed) {
+                    if proof.is_committed.load(Ordering::Acquire) {
                         continue;
                     }
                     let author = &proof.point.body.location.author;
-                    r_1.extend(proof.point.body.includes.clone()); // points @ r-1
-                    r_2.extend(proof.point.body.witness.clone()); // points @ r-2
+                    r[1].extend(proof.point.body.includes.clone()); // points @ r-1
+                    r[2].extend(proof.point.body.witness.clone()); // points @ r-2
                     let Some(digest) = proof.point.body.proof.as_ref().map(|a| &a.digest) else {
                         continue;
                     };
@@ -286,22 +287,19 @@ impl Dag {
                         .filter(|vertex| {
                             vertex
                                 .is_committed
-                                .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+                                .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
                                 .is_ok()
                         })
                     {
                         // vertex will be skipped in r_1 as committed
-                        r_2.extend(vertex.point.body.includes.clone()); // points @ r-2
-                        r_3.extend(vertex.point.body.witness.clone()); // points @ r-3
+                        r[2].extend(vertex.point.body.includes.clone()); // points @ r-2
+                        r[3].extend(vertex.point.body.witness.clone()); // points @ r-3
                         uncommitted.push_back(vertex); // LIFO
                     }
                 }
             }
             cur_includes_round = vertex_round.round; // next r+0
-            r_0 = r_1; // next r+0
-            r_1 = r_2; // next r-1
-            r_2 = r_3; // next r-2
-            r_3 = BTreeMap::new(); // next r-3
+            r.rotate_left(1);
         }
         Ok(uncommitted)
     }
