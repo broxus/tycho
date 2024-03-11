@@ -6,9 +6,11 @@ pub mod time;
 
 pub mod futures {
     pub use self::box_future_or_noop::BoxFutureOrNoop;
+    pub use self::join_task::JoinTask;
     pub use self::shared::{Shared, WeakShared};
 
     mod box_future_or_noop;
+    mod join_task;
     mod shared;
 }
 
