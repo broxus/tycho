@@ -1,17 +1,29 @@
-pub trait MempoolAdapter {
-    fn new() -> Self
-    where
-        Self: Sized;
+use std::sync::Arc;
+
+use anyhow::Result;
+use async_trait::async_trait;
+
+use crate::types::ShardStateStuff;
+
+// ADAPTER
+
+#[async_trait]
+pub trait MempoolAdapter: Send + Sync + 'static {
+    /// Schedule task to process new master block state (may perform gc or nodes rotation)
+    async fn enqueue_process_new_mc_block_state(
+        &self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()>;
 }
 
-#[derive(Clone)]
-pub struct MempoolAdapterStdImpl {}
+pub(crate) struct MempoolAdapterStdImpl {}
 
+#[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
-    fn new() -> Self
-    where
-        Self: Sized,
-    {
+    async fn enqueue_process_new_mc_block_state(
+        &self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()> {
         todo!()
     }
 }

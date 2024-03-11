@@ -4,12 +4,14 @@ use anyhow::{anyhow, Result};
 
 use crate::{
     collator::Collator,
+    mempool::MempoolAdapter,
     method_to_async_task_closure,
     msg_queue::{MessageQueueAdapter, QueueIterator},
     state_node::StateNodeAdapter,
     types::{
         ext_types::{BlockIdExt, ShardIdent, ValidatorSet},
-        BlockCandidate, CollationSessionInfo, CollatorSubset, ShardStateStuff, ValidatedBlock,
+        BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionInfo,
+        CollatorSubset, ShardStateStuff, ValidatedBlock,
     },
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
     validator::Validator,
@@ -18,42 +20,52 @@ use crate::{
 pub enum CollationProcessorTaskResult {
     Void,
 }
-pub(super) struct CollationProcessor<C, V, MQ, ST>
+pub(super) struct CollationProcessor<C, V, MQ, MP, ST>
 where
     C: Collator,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
+    MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
+    config: Arc<CollationConfig>,
+
     dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
+    mp_adapter: Arc<MP>,
     state_node_adapter: Arc<ST>,
+    mq_adapter: MQ,
+
     //TODO: possibly use V because manager may not need a ref to validator
     validator: Arc<V>,
 
-    mq_adapter: MQ,
     active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
     collation_sessions_to_finish: Vec<Arc<CollationSessionInfo>>,
     active_collators: HashMap<ShardIdent, C>,
     collators_to_stop: Vec<C>,
 }
 
-impl<C, V, MQ, ST> CollationProcessor<C, V, MQ, ST>
+impl<C, V, MQ, MP, ST> CollationProcessor<C, V, MQ, MP, ST>
 where
     C: Collator,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
+    MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
     pub fn new(
+        config: Arc<CollationConfig>,
         dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
+        mp_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         validator: Arc<V>,
     ) -> Self {
         Self {
+            config,
             dispatcher,
+            mp_adapter,
             state_node_adapter,
-            validator,
             mq_adapter: MQ::new(),
+            validator,
             active_collation_sessions: HashMap::new(),
             collation_sessions_to_finish: vec![],
             active_collators: HashMap::new(),
@@ -61,9 +73,20 @@ where
         }
     }
 
+    /// Return last master block chain time
+    fn last_mc_block_chain_time(&self) -> u64 {
+        todo!()
+    }
+
+    /// Update last master block chain time
+    fn update_last_mc_block_chain_time(&mut self, last_mc_block_chain_time: u64) {
+        todo!()
+    }
+
     /// Process new master block from blockchain:
-    /// 1. Update shards list and start collation sessions for each shard
-    /// 2. (TODO) Notify mempool about new master block
+    /// 1. Load block state
+    /// 2. Notify mempool about new master block
+    /// 3. Enqueue collation sessions refresh task
     pub async fn process_mc_block_from_bc(
         &self,
         mc_block_id: BlockIdExt,
@@ -71,9 +94,12 @@ where
         // request mc state for this master block
         let receiver = self.state_node_adapter.request_state(mc_block_id).await?;
 
-        // queue collation sessions refresh task when state received
+        // when state received execute master block processing routines
+        let mp_adapter = self.mp_adapter.clone();
         let dispatcher = self.dispatcher.clone();
         receiver.process_on_recv(|mc_state| async move {
+            Self::notify_mempool_about_mc_block(mp_adapter, mc_state.clone()).await?;
+
             dispatcher
                 .enqueue_task(method_to_async_task_closure!(
                     refresh_collation_sessions,
@@ -143,38 +169,102 @@ where
     }
 
     /// Process collated block candidate
-    /// 1. Schedule block validation
-    /// 2. (TODO) Store block info
-    /// 3. (TODO) Check if the master block interval elapsed (according to chain time) and schedule collation
-    /// 4. (TODO) If master block then update last master block chain time
-    /// 5. (TODO) Notify mempool about new master block (it may perform gc or node rotation)
-    /// 6. (TODO) Execute master block processing routines like for the block from bc
+    /// 1. Store block in a structure that allow to append signatures
+    /// 2. Schedule block validation
+    /// 3. Check if the master block interval elapsed (according to chain time) and schedule collation
+    /// 4. If master block then update last master block chain time
+    /// 5. Notify mempool about new master block (it may perform gc or nodes rotation)
+    /// 6. Execute master block processing routines like for the block from bc
     pub async fn process_block_candidate(
-        &self,
-        candidate: BlockCandidate,
+        &mut self,
+        collation_result: BlockCollationResult,
     ) -> Result<CollationProcessorTaskResult> {
         // find session related to this block by shard
         let session_info = self
             .active_collation_sessions
-            .get(candidate.shard_id())
+            .get(collation_result.candidate.shard_id())
             .ok_or(anyhow!(
                 "There is no active collation session for the shard that block belongs to"
-            ))?;
+            ))?
+            .clone();
 
-        // we need to send session info with the collators list to the validator
-        // to understand whom we must ask for signatures
+        let candidate_chain_time = collation_result.candidate.chain_time();
+        let candidate_id = collation_result.candidate.block_id().clone();
+
+        //TODO: remove this when the Validator interface is changed - get candidate to pass then to validator
+        let candidate = collation_result.candidate.clone();
+
+        self.store_candidate(collation_result.candidate)?;
 
         // send validation task to validator
+        // we need to send session info with the collators list to the validator
+        // to understand whom we must ask for signatures
         self.validator
-            .enqueue_candidate_validation(candidate, session_info.clone())
+            .enqueue_candidate_validation(
+                //TODO: pass only block id when the Validator interface is changed
+                candidate,
+                session_info,
+            )
             .await?;
+
+        // chek if master block min interval elapsed and it needs to collate new master block
+        if !candidate_id.shard_id.is_masterchain() {
+            if candidate_chain_time - self.last_mc_block_chain_time()
+                > self.config.mc_block_min_interval_ms
+            {
+                self.enqueue_mc_block_collation(Some(candidate_id.clone()))
+                    .await?;
+            }
+        } else {
+            // store last master block chain time
+            self.update_last_mc_block_chain_time(candidate_chain_time);
+        }
+
+        // execute master block processing routines
+        if candidate_id.shard_id.is_masterchain() {
+            let new_mc_state =
+                ShardStateStuff::from_state(candidate_id, collation_result.new_state)?;
+
+            Self::notify_mempool_about_mc_block(self.mp_adapter.clone(), new_mc_state.clone())
+                .await?;
+
+            self.dispatcher
+                .enqueue_task(method_to_async_task_closure!(
+                    refresh_collation_sessions,
+                    new_mc_state
+                ))
+                .await?;
+        }
 
         Ok(CollationProcessorTaskResult::Void)
     }
 
+    /// Send master state related to master block to mempool (it may perform gc or nodes rotation)
+    async fn notify_mempool_about_mc_block(
+        mp_adapter: Arc<MP>,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()> {
+        mp_adapter
+            .enqueue_process_new_mc_block_state(mc_state)
+            .await
+    }
+
+    /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation
+    async fn enqueue_mc_block_collation(
+        &self,
+        trigger_shard_block_id: Option<BlockIdExt>,
+    ) -> Result<()> {
+        //TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
+        //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
+        //      so we search for block from other shard (ShB) that includes the same anchor (An).
+        //      Or the first from previouses (An-x) that includes externals for that shard (ShB)
+        //      if all next including required ([An-x+1, An]) do not contain externals for shard (ShB).
+        todo!()
+    }
+
     /// Process validated block
     /// 1. Process invalid block (currently, just panic)
-    /// 2. (TODO) Update block info that it validated and valid
+    /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
     pub async fn process_validated_block(
         &mut self,
@@ -186,27 +276,42 @@ where
             panic!("Block has collected more than 1/3 invalid signatures! Unable to continue collation process!")
         }
 
+        let block_id = validated_block.id().clone();
+
+        // update block in cache with signatures info
+        self.store_block_validation_result(validated_block)?;
+
         // process valid block
-        if validated_block.is_master() {
-            self.process_valid_master_block(validated_block).await?;
+        if block_id.shard_id.is_masterchain() {
+            self.process_valid_master_block(block_id).await?;
         } else {
-            self.process_valid_shard_block(validated_block).await?;
+            self.process_valid_shard_block(block_id).await?;
         }
 
         Ok(CollationProcessorTaskResult::Void)
     }
 
     /// Process validated and valid master block
-    /// 1. (TODO) Check if all including shard blocks validated, return if not
-    /// 2. (TODO) Request these shard blocks from validator, send master and shard blocks to state node
+    /// 1. (TODO) Check if all included shard blocks validated, return if not
+    /// 2. (TODO) Send master and shard blocks to state node
     /// 3. (TODO) Commit msg queue diffs related to these shard and master blocks
-    async fn process_valid_master_block(&mut self, validated_block: ValidatedBlock) -> Result<()> {
+    async fn process_valid_master_block(&mut self, block_id: BlockIdExt) -> Result<()> {
         todo!()
     }
 
     /// Process validated and valid shard block
     /// 1. (TODO) Try find master block info and execute steps 1-3 from [`CollationProcessor::process_valid_master_block`]
-    async fn process_valid_shard_block(&mut self, validated_block: ValidatedBlock) -> Result<()> {
+    async fn process_valid_shard_block(&mut self, block_id: BlockIdExt) -> Result<()> {
+        todo!()
+    }
+
+    /// (TODO) Store block in a structure that allow to append signatures
+    fn store_candidate(&mut self, candidate: BlockCandidate) -> Result<()> {
+        todo!()
+    }
+
+    /// (TODO) Find block candidate in cache and append signatures info
+    fn store_block_validation_result(&mut self, validated_block: ValidatedBlock) -> Result<()> {
         todo!()
     }
 }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::types::ext_types::ShardIdent;
-use crate::types::BlockCandidate;
+use crate::types::BlockCollationResult;
 
 use super::types::WorkingState;
 
@@ -11,18 +11,19 @@ use super::types::WorkingState;
 #[async_trait]
 pub trait CollatorEventEmitter {
     /// When new shard or master block was collated
-    async fn on_block_candidat_event(&self, candidate: BlockCandidate);
+    async fn on_block_candidat_event(&self, collation_result: BlockCollationResult);
 }
 
 #[async_trait]
 pub trait CollatorEventListener: Send + Sync {
     /// Process new collated shard or master block
-    async fn on_block_candidat(&self, candidate: BlockCandidate) -> Result<()>;
+    async fn on_block_candidat(&self, collation_result: BlockCollationResult) -> Result<()>;
 }
 
 #[async_trait]
 pub trait Collator: Send + Sync + 'static {
-    async fn collate() -> Result<BlockCandidate>;
+    /// Produce new block, return created block + updated shard state, and update working state
+    async fn collate() -> Result<BlockCollationResult>;
 }
 
 pub(crate) struct CollatorStdImpl {
@@ -41,7 +42,7 @@ impl CollatorStdImpl {
 
 #[async_trait]
 impl Collator for CollatorStdImpl {
-    async fn collate() -> Result<BlockCandidate> {
+    async fn collate() -> Result<BlockCollationResult> {
         todo!()
     }
 }

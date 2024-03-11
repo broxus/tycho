@@ -1,13 +1,28 @@
+use std::sync::Arc;
+
+use anyhow::Result;
+
 use self::ext_types::{
-    BlockIdExt, BlockSignature, Cell, KeyId, McStateExtra, ShardIdent, ShardStateUnsplit,
-    ValidatorDescr, ValidatorSet,
+    Block, BlockIdExt, BlockProof, BlockSignature, Cell, KeyId, McStateExtra, ShardIdent,
+    ShardStateUnsplit, UInt256, ValidatorDescr, ValidatorSet,
 };
 
-pub struct CollationConfig {}
+pub struct CollationConfig {
+    pub mc_block_min_interval_ms: u64,
+}
+
+pub struct BlockCollationResult {
+    pub candidate: BlockCandidate,
+    pub new_state: ShardStateUnsplit,
+}
 
 #[derive(Clone)]
 pub struct BlockCandidate {
     block_id: BlockIdExt,
+    prev_blocks_ids: Vec<BlockIdExt>,
+    data: Vec<u8>,
+    collated_data: Vec<u8>,
+    collated_file_hash: UInt256,
 }
 impl BlockCandidate {
     pub fn block_id(&self) -> &BlockIdExt {
@@ -19,22 +34,45 @@ impl BlockCandidate {
     pub fn own_signature(&self) -> BlockSignature {
         todo!()
     }
+    pub fn chain_time(&self) -> u64 {
+        todo!()
+    }
 }
 
-pub struct ValidatedBlock {
-    block: BlockCandidate,
-    signatures: Vec<(KeyId, BlockSignature)>,
+pub struct BlockSignatures {
+    good_sigs: Vec<(KeyId, BlockSignature)>,
+    bad_sigs: Vec<(KeyId, BlockSignature)>,
 }
-impl ValidatedBlock {
+impl BlockSignatures {
     pub fn is_valid(&self) -> bool {
         todo!()
     }
-    pub fn is_master(&self) -> bool {
-        self.block.block_id.shard_id.is_masterchain()
+}
+
+pub struct ValidatedBlock {
+    block_id: BlockIdExt,
+    signatures: BlockSignatures,
+}
+impl ValidatedBlock {
+    pub fn id(&self) -> &BlockIdExt {
+        &self.block_id
+    }
+    pub fn is_valid(&self) -> bool {
+        self.signatures.is_valid()
     }
 }
 
-pub struct BlockStuff {}
+pub struct BlockStuff {
+    id: BlockIdExt,
+    block: Option<Block>,
+    // other stuff...
+}
+
+pub struct BlockProofStuff {
+    id: BlockIdExt,
+    proof: BlockProof,
+    // other stuff...
+}
 
 pub struct ShardStateStuff {
     block_id: BlockIdExt,
@@ -45,6 +83,9 @@ pub struct ShardStateStuff {
 impl ShardStateStuff {
     pub fn shard_id(&self) -> &ShardIdent {
         &self.block_id.shard_id
+    }
+    pub fn from_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
+        todo!()
     }
 }
 
@@ -102,6 +143,8 @@ pub(crate) mod ext_types {
                 todo!()
             }
         }
+        pub struct Block;
+        pub struct BlockProof;
         #[derive(Clone)]
         pub struct BlockIdExt {
             pub shard_id: ShardIdent,

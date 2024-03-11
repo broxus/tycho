@@ -23,7 +23,9 @@ fn test_create_manager() -> Result<()> {
     >;
     type CollationManagerStdImpl = CollationManagerStdImplGenST<StateNodeAdapterStdImpl>;
 
-    let config = CollationConfig {};
+    let config = CollationConfig {
+        mc_block_min_interval_ms: 2000,
+    };
     let mpool_adapter = MempoolAdapterStdImpl {};
     let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new();
 

@@ -98,7 +98,10 @@ where
     {
         tokio::spawn(async move {
             if let Ok(res) = self.try_recv().await {
-                process_callback(res).await;
+                if let Err(e) = process_callback(res).await {
+                    tracing::error!("Error processing task response: {e:?}");
+                    //TODO: may be unwind panic?
+                }
             }
         });
     }
