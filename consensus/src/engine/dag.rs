@@ -1,17 +1,15 @@
 use std::collections::{btree_map, BTreeMap, VecDeque};
 use std::num::{NonZeroU8, NonZeroUsize};
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::task::{Context, Poll};
 
 use ahash::RandomState;
 use anyhow::{anyhow, Result};
-use futures_util::future::BoxFuture;
-use futures_util::{Future, FutureExt};
-use tokio::task::{JoinHandle, JoinSet};
+use futures_util::FutureExt;
+use tokio::task::JoinSet;
+
 use tycho_network::PeerId;
-use tycho_util::futures::Shared;
+use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::FastDashMap;
 
 use crate::models::point::{Digest, Point, Round, Signature};
@@ -78,7 +76,7 @@ struct DagLocation {
     // only one of the point versions at current location
     // may become proven by the next round point(s) of a node;
     // even if we marked a proven point as invalid, consensus may override our decision
-    versions: BTreeMap<Digest, DagPointFut>,
+    versions: BTreeMap<Digest, Shared<JoinTask<DagPoint>>>,
 }
 
 struct DagRound {
@@ -106,10 +104,10 @@ impl DagRound {
             let location = self.locations.get(node)?;
             location.versions.get(digest)?.clone()
         };
-        point_fut.await.valid()
+        point_fut.await.0.valid()
     }
 
-    pub fn add(&self, point: Point) -> Result<DagPointFut> {
+    pub fn add(&self, point: Point) -> Result<Shared<JoinTask<DagPoint>>> {
         anyhow::ensure!(point.body.location.round == self.round, "wrong point round");
         anyhow::ensure!(point.is_integrity_ok(), "point integrity check failed");
 
@@ -128,9 +126,9 @@ impl DagRound {
             let fut = loc
                 .versions
                 .entry(*digest)
-                .or_insert_with(|| DagPointFut::new(DownloadTask {}))
+                .or_insert_with(|| Shared::new(JoinTask::new(DownloadTask {})))
                 .clone();
-            dependencies.spawn(fut);
+            dependencies.spawn(fut.map(|a| a.0));
         }
 
         Ok(match location.versions.entry(point.digest) {
@@ -148,7 +146,7 @@ impl DagRound {
                     };
                 };
 
-                let fut = DagPointFut::new(async move {
+                let fut = Shared::new(JoinTask::new(async move {
                     while let Some(res) = dependencies.join_next().await {
                         match res {
                             Ok(value) if value.is_valid() => continue,
@@ -163,69 +161,11 @@ impl DagRound {
                     }
 
                     DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
-                });
+                }));
 
                 entry.insert(fut).clone()
             }
         })
-    }
-}
-
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct DagPointFut {
-    inner: Shared<BoxFuture<'static, DagPoint>>,
-}
-
-impl DagPointFut {
-    fn new<F>(f: F) -> Self
-    where
-        F: Future<Output = DagPoint> + Send + 'static,
-    {
-        struct FutGuard {
-            handle: JoinHandle<DagPoint>,
-            complete: bool,
-        }
-
-        impl Drop for FutGuard {
-            fn drop(&mut self) {
-                if !self.complete {
-                    self.handle.abort();
-                }
-            }
-        }
-
-        let mut guard = FutGuard {
-            handle: tokio::spawn(f),
-            complete: false,
-        };
-
-        Self {
-            inner: Shared::new(Box::pin(async move {
-                match (&mut guard.handle).await {
-                    Ok(value) => {
-                        guard.complete = true;
-                        value
-                    }
-                    Err(e) => {
-                        if e.is_panic() {
-                            std::panic::resume_unwind(e.into_panic());
-                        }
-                        unreachable!()
-                    }
-                }
-            })),
-        }
-    }
-}
-
-impl Future for DagPointFut {
-    type Output = DagPoint;
-
-    #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let (value, _) = futures_util::ready!(self.inner.poll_unpin(cx));
-        Poll::Ready(value)
     }
 }
 
