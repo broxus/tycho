@@ -5,11 +5,10 @@ use std::time::Duration;
 use ahash::{HashMapExt, HashSetExt};
 use anyhow::Result;
 use bytes::Bytes;
-use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use tokio::sync::Semaphore;
-use tycho_util::futures::{Shared, WeakShared};
+use tycho_util::futures::{JoinTask, Shared, WeakShared};
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
@@ -20,20 +19,21 @@ use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
 
 pub struct QueryCache<R> {
-    cache: FastDashMap<[u8; 32], WeakSharedBoxedFut<R>>,
+    cache: FastDashMap<[u8; 32], WeakSpawnedFut<R>>,
 }
 
 impl<R> QueryCache<R> {
-    pub async fn run<F>(&self, target_id: &[u8; 32], f: F) -> R
+    pub async fn run<F, Fut>(&self, target_id: &[u8; 32], f: F) -> R
     where
-        R: Clone,
-        F: FnOnce() -> BoxFuture<'static, R>,
+        R: Clone + Send + 'static,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = R> + Send + 'static,
     {
         use dashmap::mapref::entry::Entry;
 
         let fut = match self.cache.entry(*target_id) {
             Entry::Vacant(entry) => {
-                let fut = Shared::new(f());
+                let fut = Shared::new(JoinTask::new(f()));
                 if let Some(weak) = fut.downgrade() {
                     entry.insert(weak);
                 }
@@ -43,7 +43,7 @@ impl<R> QueryCache<R> {
                 if let Some(fut) = entry.get().upgrade() {
                     fut
                 } else {
-                    let fut = Shared::new(f());
+                    let fut = Shared::new(JoinTask::new(f()));
                     match fut.downgrade() {
                         Some(weak) => entry.insert(weak),
                         None => entry.remove(),
@@ -53,15 +53,15 @@ impl<R> QueryCache<R> {
             }
         };
 
-        fn on_drop<R>(_key: &[u8; 32], value: &WeakSharedBoxedFut<R>) -> bool {
+        fn on_drop<R>(_key: &[u8; 32], value: &WeakSpawnedFut<R>) -> bool {
             value.strong_count() == 0
         }
 
         let (output, is_last) = {
             struct Guard<'a, R> {
                 target_id: &'a [u8; 32],
-                cache: &'a FastDashMap<[u8; 32], WeakSharedBoxedFut<R>>,
-                fut: Option<Shared<BoxFuture<'static, R>>>,
+                cache: &'a FastDashMap<[u8; 32], WeakSpawnedFut<R>>,
+                fut: Option<Shared<JoinTask<R>>>,
             }
 
             impl<R> Drop for Guard<'_, R> {
@@ -106,7 +106,7 @@ impl<R> Default for QueryCache<R> {
     }
 }
 
-type WeakSharedBoxedFut<T> = WeakShared<BoxFuture<'static, T>>;
+type WeakSpawnedFut<T> = WeakShared<JoinTask<T>>;
 
 pub struct Query {
     network: Network,
