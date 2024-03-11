@@ -1962,6 +1962,7 @@ dependencies = [
  "everscale-crypto",
  "futures-util",
  "parking_lot",
+ "rand",
  "serde",
  "sha2",
  "thiserror",

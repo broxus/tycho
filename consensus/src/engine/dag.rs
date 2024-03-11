@@ -323,7 +323,7 @@ impl Dag {
             BTreeMap::new(),                    // points @ r-2
             BTreeMap::new(),                    // points @ r-3
         ];
-        drop(anchor); // anchor payload will be committed the next time
+        _ = anchor; // anchor payload will be committed the next time
 
         let mut uncommitted = VecDeque::new();
 

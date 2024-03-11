@@ -33,6 +33,7 @@ ahash = "0.8"
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-test = "0.2"
+rand = "0.8"
 
 [lints]
 workspace = true

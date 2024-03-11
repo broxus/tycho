@@ -10,7 +10,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 #[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Digest([u8; 32]);
+pub struct Digest(pub [u8; 32]);
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Signature(pub Bytes);
