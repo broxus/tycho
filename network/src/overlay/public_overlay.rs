@@ -350,24 +350,6 @@ impl PublicOverlayEntries {
         }
     }
 
-    fn remove(&mut self, peer_id: &PeerId) -> bool {
-        let Some(index) = self.peer_id_to_index.remove(peer_id) else {
-            return false;
-        };
-
-        // Remove the entry from the data vector
-        self.data.swap_remove(index);
-
-        // Update the swapped entry's index
-        let entry = self
-            .peer_id_to_index
-            .get_mut(&self.data[index].peer_id)
-            .expect("inconsistent state");
-        *entry = index;
-
-        true
-    }
-
     fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut(&Arc<PublicEntry>) -> bool,

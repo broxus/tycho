@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use ahash::HashMap;
 use anyhow::Result;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, AsRaw};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -629,6 +629,36 @@ impl KnownPeers {
         peer_info: Arc<PeerInfo>,
         with_affinity: bool,
     ) -> Result<KnownPeerHandle, KnownPeersError> {
+        struct AffinityGuard<'a> {
+            inner: &'a KnownPeerInner,
+            decrease_on_drop: bool,
+        }
+
+        impl AffinityGuard<'_> {
+            fn increase_affinity_or_check_ban(&mut self, with_affinity: bool) -> bool {
+                let with_affinity = with_affinity && !self.decrease_on_drop;
+                let is_banned = if with_affinity {
+                    !self.inner.increase_affinity()
+                } else {
+                    self.inner.is_banned()
+                };
+
+                if !is_banned && with_affinity {
+                    self.decrease_on_drop = true;
+                }
+
+                is_banned
+            }
+        }
+
+        impl Drop for AffinityGuard<'_> {
+            fn drop(&mut self) {
+                if self.decrease_on_drop {
+                    self.inner.decrease_affinity();
+                }
+            }
+        }
+
         // TODO: add capacity limit for entries without affinity
         let inner = match self.0.entry(peer_info.id) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
@@ -640,23 +670,42 @@ impl KnownPeers {
                 KnownPeerState::Banned => return Err(KnownPeersError::PeerBanned),
                 KnownPeerState::Stored(item) => match item.upgrade() {
                     Some(inner) => {
-                        let created_at = inner.peer_info.load().created_at;
-                        if created_at > peer_info.created_at {
-                            return Err(KnownPeersError::OutdatedInfo);
+                        // Create a guard to restore the peer affinity in case of an error
+                        let mut guard = AffinityGuard {
+                            inner: &inner,
+                            decrease_on_drop: false,
+                        };
+
+                        let mut cur = inner.peer_info.load();
+                        loop {
+                            if guard.increase_affinity_or_check_ban(with_affinity) {
+                                // Do nothing for banned peers
+                                return Err(KnownPeersError::PeerBanned);
+                            }
+
+                            match cur.created_at.cmp(&peer_info.created_at) {
+                                // Do nothing for the same creation time
+                                // TODO: is `created_at` equality enough?
+                                std::cmp::Ordering::Equal => break,
+                                // Try to update peer info
+                                std::cmp::Ordering::Less => {
+                                    let prev =
+                                        inner.peer_info.compare_and_swap(&*cur, peer_info.clone());
+                                    if std::ptr::eq(cur.as_raw(), prev.as_raw()) {
+                                        break;
+                                    } else {
+                                        cur = prev;
+                                    }
+                                }
+                                // Don't allow an outdated data
+                                std::cmp::Ordering::Greater => {
+                                    return Err(KnownPeersError::OutdatedInfo)
+                                }
+                            }
                         }
 
-                        if with_affinity && !inner.increase_affinity()
-                            || !with_affinity && inner.is_banned()
-                        {
-                            // Do nothing for banned peers
-                            return Err(KnownPeersError::PeerBanned);
-                        }
-
-                        // TODO: is checking `created_at` enough for equality?
-                        if created_at != peer_info.created_at {
-                            inner.peer_info.swap(peer_info);
-                        }
-
+                        guard.decrease_on_drop = false;
+                        drop(guard);
                         inner
                     }
                     None => {
@@ -698,10 +747,7 @@ pub struct KnownPeerHandle(KnownPeerHandleState);
 
 impl KnownPeerHandle {
     pub fn peer_info(&self) -> arc_swap::Guard<Arc<PeerInfo>, arc_swap::DefaultStrategy> {
-        match &self.0 {
-            KnownPeerHandleState::Simple(data) => data.peer_info.load(),
-            KnownPeerHandleState::WithAffinity(data) => data.inner.peer_info.load(),
-        }
+        self.inner().peer_info.load()
     }
 
     pub fn load_peer_info(&self) -> Arc<PeerInfo> {
@@ -709,19 +755,44 @@ impl KnownPeerHandle {
     }
 
     pub fn is_banned(&self) -> bool {
-        let affinity = match &self.0 {
-            KnownPeerHandleState::Simple(data) => &data.affinity,
-            KnownPeerHandleState::WithAffinity(data) => &data.inner.affinity,
-        };
-        affinity.load(Ordering::Acquire) == AFFINITY_BANNED
+        self.inner().is_banned()
     }
 
     pub fn max_affinity(&self) -> PeerAffinity {
-        let inner = match &self.0 {
-            KnownPeerHandleState::Simple(data) => data,
-            KnownPeerHandleState::WithAffinity(data) => &data.inner,
-        };
-        inner.compute_affinity()
+        self.inner().compute_affinity()
+    }
+
+    pub fn update_peer_info(&self, peer_info: &Arc<PeerInfo>) -> Result<(), KnownPeersError> {
+        let inner = self.inner();
+
+        let mut cur = inner.peer_info.load();
+        loop {
+            if inner.is_banned() {
+                return Err(KnownPeersError::PeerBanned);
+            }
+
+            match cur.created_at.cmp(&peer_info.created_at) {
+                // Do nothing for the same creation time
+                // TODO: is `created_at` equality enough?
+                std::cmp::Ordering::Equal => return Ok(()),
+                // Try to update peer info
+                std::cmp::Ordering::Less => {
+                    let prev = inner.peer_info.compare_and_swap(&*cur, peer_info.clone());
+                    if std::ptr::eq(cur.as_raw(), prev.as_raw()) {
+                        return Ok(());
+                    } else {
+                        cur = prev;
+                    }
+                }
+                // Don't allow an outdated data
+                std::cmp::Ordering::Greater => return Err(KnownPeersError::OutdatedInfo),
+            }
+        }
+    }
+
+    pub fn ban(&self) -> bool {
+        let inner = self.inner();
+        inner.affinity.swap(AFFINITY_BANNED, Ordering::AcqRel) != AFFINITY_BANNED
     }
 
     pub fn downgrade(&self) -> WeakKnownPeerHandle {
@@ -733,6 +804,13 @@ impl KnownPeerHandle {
                 WeakKnownPeerHandleState::WithAffinity(Arc::downgrade(data))
             }
         })
+    }
+
+    fn inner(&self) -> &KnownPeerInner {
+        match &self.0 {
+            KnownPeerHandleState::Simple(data) => data.as_ref(),
+            KnownPeerHandleState::WithAffinity(data) => data.inner.as_ref(),
+        }
     }
 }
 
