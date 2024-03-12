@@ -7,6 +7,7 @@ use bytes::{Bytes, BytesMut};
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rand::seq::SliceRandom;
 use rand::Rng;
+use tokio::sync::broadcast;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -19,6 +20,7 @@ use crate::util::NetworkExt;
 pub struct PrivateOverlayBuilder {
     overlay_id: OverlayId,
     entries: FastHashSet<PeerId>,
+    entry_events_channel_size: usize,
     resolve_peers: bool,
 }
 
@@ -41,6 +43,14 @@ impl PrivateOverlayBuilder {
         self
     }
 
+    /// The capacity of entries set events.
+    ///
+    /// Default: 100.
+    pub fn with_entry_events_channel_size(mut self, entry_events_channel_size: usize) -> Self {
+        self.entry_events_channel_size = entry_events_channel_size;
+        self
+    }
+
     pub fn build<S>(self, service: S) -> PrivateOverlay
     where
         S: Send + Sync + 'static,
@@ -54,6 +64,7 @@ impl PrivateOverlayBuilder {
             peer_id_to_index: Default::default(),
             data: Default::default(),
             resolved_peers: Default::default(),
+            events_tx: broadcast::channel(self.entry_events_channel_size).0,
         };
         for peer_id in self.entries {
             entries.insert(&peer_id, None);
@@ -81,6 +92,7 @@ impl PrivateOverlay {
         PrivateOverlayBuilder {
             overlay_id,
             entries: Default::default(),
+            entry_events_channel_size: 100,
             resolve_peers: false,
         }
     }
@@ -173,9 +185,15 @@ pub struct PrivateOverlayEntries {
     peer_id_to_index: FastHashMap<PeerId, PrivateOverlayEntryIndices>,
     data: Vec<PeerId>,
     resolved_peers: Vec<KnownPeerHandle>,
+    events_tx: broadcast::Sender<PrivateOverlayEntriesEvent>,
 }
 
 impl PrivateOverlayEntries {
+    /// Subscribes to the set updates.
+    pub fn subscribe(&self) -> broadcast::Receiver<PrivateOverlayEntriesEvent> {
+        self.events_tx.subscribe()
+    }
+
     /// Returns an iterator over the entry ids.
     ///
     /// The order is not random, but is not defined.
@@ -277,34 +295,35 @@ impl PrivateOverlayEntries {
                     data_index: self.data.len(),
                     resolved_data_index: handle.is_some().then_some(self.resolved_peers.len()),
                 });
+
                 self.data.push(*peer_id);
                 if let Some(handle) = handle {
                     self.resolved_peers.push(handle);
                 }
+
+                _ = self
+                    .events_tx
+                    .send(PrivateOverlayEntriesEvent::Added(*peer_id));
+
                 true
             }
             // Entry for the peer_id exists, do nothing
             hash_map::Entry::Occupied(mut entry) => {
-                match (handle, entry.get().resolved_data_index) {
-                    // No resolved handle, but a new one is provided
-                    (None, None) => {}
-                    // Remove existing resolved handle
-                    (None, Some(index)) => {
-                        entry.get_mut().resolved_data_index = None;
-                        self.resolved_peers.swap_remove(index);
-                        self.fix_resolved_data_index(index);
+                if let Some(handle) = handle {
+                    match entry.get().resolved_data_index {
+                        // Replace an existing resolved handle
+                        Some(index) => self.resolved_peers[index] = handle,
+                        // Insert a new resolved handle
+                        None => {
+                            entry.get_mut().resolved_data_index = Some(self.resolved_peers.len());
+                            self.resolved_peers.push(handle);
+                        }
                     }
-                    // Insert a new resolved handle
-                    (Some(handle), None) => {
-                        entry.get_mut().resolved_data_index = Some(self.resolved_peers.len());
-                        self.resolved_peers.push(handle);
-                    }
-                    // Replace existing resolved handle
-                    (Some(handle), Some(index)) => {
-                        self.resolved_peers[index] = handle;
-                    }
-                }
 
+                    _ = self
+                        .events_tx
+                        .send(PrivateOverlayEntriesEvent::Resolved(*peer_id));
+                }
                 false
             }
         }
@@ -313,34 +332,25 @@ impl PrivateOverlayEntries {
     /// Updates the resolved peer handle for the specified peer id.
     ///
     /// Returns whether the value was updated.
-    pub fn set_resolved(&mut self, peer_id: &PeerId, handle: Option<KnownPeerHandle>) -> bool {
-        match self.peer_id_to_index.get_mut(peer_id) {
-            Some(link) => {
-                if let Some(handle) = &handle {
-                    if handle.peer_info().id != peer_id {
-                        return false;
-                    }
-                }
+    pub fn set_resolved(&mut self, handle: KnownPeerHandle) -> bool {
+        // NOTE: using a temp variable to prevent holding arcswap guard for too long
+        let peer_id = handle.peer_info().id;
 
-                match (handle, link.resolved_data_index) {
-                    // No resolved handle, but a new one is provided
-                    (None, None) => {}
-                    // Remove existing resolved handle
-                    (None, Some(index)) => {
-                        link.resolved_data_index = None;
-                        self.resolved_peers.swap_remove(index);
-                        self.fix_resolved_data_index(index);
-                    }
+        match self.peer_id_to_index.get_mut(&peer_id) {
+            Some(link) => {
+                match link.resolved_data_index {
+                    // Replace an existing resolved handle
+                    Some(index) => self.resolved_peers[index] = handle,
                     // Insert a new resolved handle
-                    (Some(handle), None) => {
+                    None => {
                         link.resolved_data_index = Some(self.resolved_peers.len());
                         self.resolved_peers.push(handle);
                     }
-                    // Replace existing resolved handle
-                    (Some(handle), Some(index)) => {
-                        self.resolved_peers[index] = handle;
-                    }
                 }
+
+                _ = self
+                    .events_tx
+                    .send(PrivateOverlayEntriesEvent::Resolved(peer_id));
 
                 true
             }
@@ -365,6 +375,10 @@ impl PrivateOverlayEntries {
             self.resolved_peers.swap_remove(index);
             self.fix_resolved_data_index(index);
         }
+
+        _ = self
+            .events_tx
+            .send(PrivateOverlayEntriesEvent::Removed(*peer_id));
 
         true
     }
@@ -452,6 +466,16 @@ impl std::ops::Deref for PrivateOverlayEntriesReadGuard<'_> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateOverlayEntriesEvent {
+    /// A new entry was inserted.
+    Added(PeerId),
+    /// An exising entry received a [`KnownPeerHandle`].
+    Resolved(PeerId),
+    /// An existing entry was removed.
+    Removed(PeerId),
+}
+
 #[cfg(test)]
 mod tests {
     use crate::network::KnownPeers;
@@ -465,6 +489,7 @@ mod tests {
             peer_id_to_index: Default::default(),
             data: Default::default(),
             resolved_peers: Default::default(),
+            events_tx: broadcast::channel(100).0,
         };
         assert!(entries.is_empty());
         assert_eq!(entries.len(), 0);
@@ -485,10 +510,13 @@ mod tests {
 
     #[test]
     fn remove_from_entries_container() {
+        let (events_tx, mut events_rx) = broadcast::channel(100);
+
         let mut entries = PrivateOverlayEntries {
             peer_id_to_index: Default::default(),
             data: Default::default(),
             resolved_peers: Default::default(),
+            events_tx,
         };
 
         let peer_ids = std::array::from_fn::<PeerId, 10, _>(|_| rand::random());
@@ -496,10 +524,18 @@ mod tests {
             assert!(entries.insert(peer_id, None));
             assert_eq!(entries.len(), i + 1);
             assert_eq!(entries.data.len(), i + 1);
+            assert_eq!(
+                events_rx.try_recv().unwrap(),
+                PrivateOverlayEntriesEvent::Added(*peer_id)
+            );
         }
 
         for peer_id in &peer_ids {
             assert!(entries.remove(peer_id));
+            assert_eq!(
+                events_rx.try_recv().unwrap(),
+                PrivateOverlayEntriesEvent::Removed(*peer_id)
+            );
 
             assert!(!entries.data.contains(peer_id));
             for (index, data) in entries.data.iter().enumerate() {
@@ -508,16 +544,22 @@ mod tests {
         }
 
         assert!(entries.is_empty());
+
+        assert!(!entries.remove(&rand::random()));
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[test]
     fn resolved_peers_in_entries_container() {
         let known_peers = KnownPeers::new();
 
+        let (events_tx, mut events_rx) = broadcast::channel(100);
+
         let mut entries = PrivateOverlayEntries {
             peer_id_to_index: Default::default(),
             data: Default::default(),
             resolved_peers: Default::default(),
+            events_tx,
         };
 
         let peer_info = std::array::from_fn::<_, 10, _>(|_| make_peer_info_stub(rand::random()));
@@ -529,60 +571,35 @@ mod tests {
             assert_eq!(entries.len(), i + 1);
             assert_eq!(entries.data.len(), i + 1);
             assert_eq!(entries.resolved_peers.len(), (i / 2) + 1);
+
+            assert_eq!(
+                events_rx.try_recv().unwrap(),
+                PrivateOverlayEntriesEvent::Added(peer_info.id)
+            );
         }
         assert_eq!(entries.resolved_peers.len(), 5);
 
-        // Remove resolved info for the 0th item
-        assert!(entries.set_resolved(&peer_info[0].id, None));
-        assert_eq!(entries.len(), 10);
-        assert_eq!(entries.data.len(), 10);
-        assert_eq!(entries.resolved_peers.len(), 4);
-
         // Add resolved info for the 1st item
-        assert!(entries.set_resolved(
-            &peer_info[1].id,
-            Some(known_peers.insert(peer_info[1].clone(), false).unwrap())
-        ));
+        assert!(entries.set_resolved(known_peers.insert(peer_info[1].clone(), false).unwrap()));
         assert_eq!(entries.len(), 10);
         assert_eq!(entries.data.len(), 10);
-        assert_eq!(entries.resolved_peers.len(), 5);
-
-        // Remove resolved info for the 1st item
-        assert!(entries.set_resolved(&peer_info[1].id, None));
-        assert_eq!(entries.len(), 10);
-        assert_eq!(entries.data.len(), 10);
-        assert_eq!(entries.resolved_peers.len(), 4);
-
-        // Try to set invalid handle for an existing item
-        assert!(!entries.set_resolved(
-            &peer_info[2].id,
-            Some(
-                known_peers
-                    .insert(make_peer_info_stub(rand::random()), false)
-                    .unwrap()
-            )
-        ));
-        assert_eq!(entries.len(), 10);
-        assert_eq!(entries.data.len(), 10);
-        assert_eq!(entries.resolved_peers.len(), 4);
-
-        // Try to remove handle for the non-existing item
-        assert!(!entries.set_resolved(&rand::random(), None));
+        assert_eq!(entries.resolved_peers.len(), 6);
+        assert_eq!(
+            events_rx.try_recv().unwrap(),
+            PrivateOverlayEntriesEvent::Resolved(peer_info[1].id)
+        );
 
         // Try to set handle for the non-existing item
-        let peer_id = rand::random();
         assert!(!entries.set_resolved(
-            &peer_id,
-            Some(
-                known_peers
-                    .insert(make_peer_info_stub(peer_id), false)
-                    .unwrap()
-            )
+            known_peers
+                .insert(make_peer_info_stub(rand::random()), false)
+                .unwrap()
         ));
+        assert!(events_rx.try_recv().is_err());
 
         // Final state check
         assert_eq!(entries.len(), 10);
         assert_eq!(entries.data.len(), 10);
-        assert_eq!(entries.resolved_peers.len(), 4);
+        assert_eq!(entries.resolved_peers.len(), 6);
     }
 }

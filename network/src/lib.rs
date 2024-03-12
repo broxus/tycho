@@ -1,8 +1,8 @@
 pub use self::overlay::{
     OverlayConfig, OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesIter,
-    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PublicOverlay,
-    PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
+    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
+    PrivateOverlayEntriesIter, PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
+    PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
 };
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
@@ -11,7 +11,8 @@ pub use dht::{
 };
 pub use network::{
     ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,
-    NetworkConfig, Peer, QuicConfig, RecvStream, SendStream, WeakActivePeers, WeakNetwork,
+    NetworkConfig, Peer, QuicConfig, RecvStream, SendStream, WeakActivePeers, WeakKnownPeerHandle,
+    WeakNetwork,
 };
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, BoxCloneService,
