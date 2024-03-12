@@ -24,8 +24,8 @@ use crate::util::{NetworkExt, Routable};
 pub use self::config::OverlayConfig;
 pub use self::overlay_id::OverlayId;
 pub use self::private_overlay::{
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesIter,
-    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
+    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
+    PrivateOverlayEntriesIter, PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
 };
 pub use self::public_overlay::{
     PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
@@ -533,7 +533,7 @@ impl OverlayServiceInner {
             let now = now_sec();
 
             let info = match res {
-                Ok(info) if info.is_valid(now) => info,
+                Ok(info) if info.is_valid(now) && info.id == peer_id => info,
                 Ok(_) => {
                     tracing::debug!(%peer_id, "received an invalid peer info");
                     continue;
@@ -546,7 +546,7 @@ impl OverlayServiceInner {
 
             match network.known_peers().insert(Arc::new(info), true) {
                 Ok(handle) => {
-                    overlay.write_entries().set_resolved(&peer_id, Some(handle));
+                    overlay.write_entries().set_resolved(handle);
                 }
                 Err(e) => {
                     tracing::debug!(%peer_id, "failed to insert a new peer info: {e:?}");

@@ -9,8 +9,8 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    Address, KnownPeerHandle, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay,
-    Request, Response, Router, Service, ServiceRequest,
+    Address, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay, Request,
+    Response, Router, Service, ServiceRequest,
 };
 use tycho_util::time::now_sec;
 

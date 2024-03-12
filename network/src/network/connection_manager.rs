@@ -727,10 +727,10 @@ impl KnownPeerHandle {
     pub fn downgrade(&self) -> WeakKnownPeerHandle {
         WeakKnownPeerHandle(match &self.0 {
             KnownPeerHandleState::Simple(data) => {
-                WeakKnownPeerHandleState::Simple(Arc::downgrade(&*data))
+                WeakKnownPeerHandleState::Simple(Arc::downgrade(data))
             }
             KnownPeerHandleState::WithAffinity(data) => {
-                WeakKnownPeerHandleState::WithAffinity(Arc::downgrade(&*data))
+                WeakKnownPeerHandleState::WithAffinity(Arc::downgrade(data))
             }
         })
     }
