@@ -723,6 +723,17 @@ impl KnownPeerHandle {
         };
         inner.compute_affinity()
     }
+
+    pub fn downgrade(&self) -> WeakKnownPeerHandle {
+        WeakKnownPeerHandle(match &self.0 {
+            KnownPeerHandleState::Simple(data) => {
+                WeakKnownPeerHandleState::Simple(Arc::downgrade(&*data))
+            }
+            KnownPeerHandleState::WithAffinity(data) => {
+                WeakKnownPeerHandleState::WithAffinity(Arc::downgrade(&*data))
+            }
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -763,6 +774,41 @@ impl Drop for KnownPeerHandleState {
             if let Some(peers) = inner.weak_known_peers.upgrade() {
                 peers.remove(&inner.peer_info.load().id);
             }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct WeakKnownPeerHandle(WeakKnownPeerHandleState);
+
+impl WeakKnownPeerHandle {
+    pub fn upgrade(&self) -> Option<KnownPeerHandle> {
+        Some(KnownPeerHandle(match &self.0 {
+            WeakKnownPeerHandleState::Simple(weak) => {
+                KnownPeerHandleState::Simple(ManuallyDrop::new(weak.upgrade()?))
+            }
+            WeakKnownPeerHandleState::WithAffinity(weak) => {
+                KnownPeerHandleState::WithAffinity(ManuallyDrop::new(weak.upgrade()?))
+            }
+        }))
+    }
+}
+
+#[derive(Clone)]
+enum WeakKnownPeerHandleState {
+    Simple(Weak<KnownPeerInner>),
+    WithAffinity(Weak<KnownPeerHandleWithAffinity>),
+}
+
+impl Eq for WeakKnownPeerHandleState {}
+impl PartialEq for WeakKnownPeerHandleState {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Simple(left), Self::Simple(right)) => Weak::ptr_eq(left, right),
+            (Self::WithAffinity(left), Self::WithAffinity(right)) => Weak::ptr_eq(left, right),
+            _ => false,
         }
     }
 }
