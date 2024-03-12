@@ -4,18 +4,21 @@ use anyhow::{anyhow, Result};
 
 use crate::{
     collator::Collator,
+    manager::{block_operations::build_block_stuff_for_sync, types::SendSyncStatus},
     mempool::MempoolAdapter,
     method_to_async_task_closure,
-    msg_queue::{MessageQueueAdapter, QueueIterator},
+    msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
     types::{
-        ext_types::{BlockIdExt, ShardIdent, ValidatorSet},
+        ext_types::{BlockHashId, BlockIdExt, ShardIdent, ValidatorSet},
         BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionInfo,
         CollatorSubset, ShardStateStuff, ValidatedBlock,
     },
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
     validator::Validator,
 };
+
+use super::types::{BlockCandidateContainer, BlockCandidateToSend, McBlockSubgraphToSend};
 
 pub enum CollationProcessorTaskResult {
     Void,
@@ -33,7 +36,7 @@ where
     dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
     mp_adapter: Arc<MP>,
     state_node_adapter: Arc<ST>,
-    mq_adapter: MQ,
+    mq_adapter: Arc<MQ>,
 
     //TODO: possibly use V because manager may not need a ref to validator
     validator: Arc<V>,
@@ -64,7 +67,7 @@ where
             dispatcher,
             mp_adapter,
             state_node_adapter,
-            mq_adapter: MQ::new(),
+            mq_adapter: Arc::new(MQ::new()),
             validator,
             active_collation_sessions: HashMap::new(),
             collation_sessions_to_finish: vec![],
@@ -283,26 +286,12 @@ where
 
         // process valid block
         if block_id.shard_id.is_masterchain() {
-            self.process_valid_master_block(block_id).await?;
+            self.process_valid_master_block(&block_id).await?;
         } else {
-            self.process_valid_shard_block(block_id).await?;
+            self.process_valid_shard_block(&block_id).await?;
         }
 
         Ok(CollationProcessorTaskResult::Void)
-    }
-
-    /// Process validated and valid master block
-    /// 1. (TODO) Check if all included shard blocks validated, return if not
-    /// 2. (TODO) Send master and shard blocks to state node
-    /// 3. (TODO) Commit msg queue diffs related to these shard and master blocks
-    async fn process_valid_master_block(&mut self, block_id: BlockIdExt) -> Result<()> {
-        todo!()
-    }
-
-    /// Process validated and valid shard block
-    /// 1. (TODO) Try find master block info and execute steps 1-3 from [`CollationProcessor::process_valid_master_block`]
-    async fn process_valid_shard_block(&mut self, block_id: BlockIdExt) -> Result<()> {
-        todo!()
     }
 
     /// (TODO) Store block in a structure that allow to append signatures
@@ -310,8 +299,154 @@ where
         todo!()
     }
 
-    /// (TODO) Find block candidate in cache and append signatures info
-    fn store_block_validation_result(&mut self, validated_block: ValidatedBlock) -> Result<()> {
+    /// (TODO) Find block candidate in cache, append signatures info and return updated
+    fn store_block_validation_result(
+        &mut self,
+        validated_block: ValidatedBlock,
+    ) -> Result<&BlockCandidateContainer> {
         todo!()
+    }
+
+    /// (TODO) Remove block entries from cache and compact cache
+    async fn cleanup_blocks_from_cache(
+        &mut self,
+        blocks_keys: Vec<BlockHashId>,
+    ) -> Result<CollationProcessorTaskResult> {
+        todo!()
+    }
+
+    /// (TODO) Find and restore block entries in cache
+    async fn restore_blocks_in_cache(
+        &mut self,
+        blocks_to_restore: Vec<BlockCandidateToSend>,
+    ) -> Result<CollationProcessorTaskResult> {
+        todo!()
+    }
+
+    /// Process validated and valid master block
+    /// 1. Check if all included shard blocks validated, return if not
+    /// 2. Send master and shard blocks to state node to sync
+    async fn process_valid_master_block(&mut self, block_id: &BlockIdExt) -> Result<()> {
+        // extract master block with all shard blocks if valid, and process them
+        if let Some(mc_block_subgraph_set) = self.extract_mc_block_subgraph_if_valid(block_id) {
+            let mut blocks_to_send = mc_block_subgraph_set.shard_blocks;
+            blocks_to_send.reverse();
+            blocks_to_send.push(mc_block_subgraph_set.mc_block);
+
+            // spawn async task to send all shard and master blocks
+            tokio::spawn({
+                let dispatcher = self.dispatcher.clone();
+                let mq_adapter = self.mq_adapter.clone();
+                let state_node_adapter = self.state_node_adapter.clone();
+                async move {
+                    Self::send_blocks_to_sync(
+                        dispatcher,
+                        mq_adapter,
+                        state_node_adapter,
+                        blocks_to_send,
+                    )
+                    .await
+                }
+            });
+        }
+        Ok(())
+    }
+
+    /// Process validated and valid shard block
+    /// 1. (TODO) Try find master block info and execute [`CollationProcessor::process_valid_master_block`]
+    async fn process_valid_shard_block(&mut self, block_id: &BlockIdExt) -> Result<()> {
+        todo!()
+        // if let Some(mc_block_container) = self.travers_to_containing_mc_block_if_exists(block_id) {
+        //     todo!()
+        // }
+        // Ok(())
+    }
+
+    /// (TODO) Find all shard blocks that form master block subgraph.
+    /// Then extract and return them if all are valid
+    fn extract_mc_block_subgraph_if_valid(
+        &mut self,
+        block_id: &BlockIdExt,
+    ) -> Option<McBlockSubgraphToSend> {
+        // 1. Find current master block
+        // 2. Find prev master block
+        // 3. By the top shard blocks info find shard blocks of current master block
+        // 4. Recursively find prev shard blocks until the end or top shard blocks of prev master reached
+        // 5. If master block and all shard blocks valid the extrac them from entries and return
+        todo!()
+    }
+
+    /// 1. Send shard blocks and master to sync to state node
+    /// 2. Commit msg queue diffs related to these shard and master blocks
+    /// 3. Clean up sent blocks entries from cache
+    /// 4. Return all blocks to cache if got error (separate task will try to resend further)
+    /// 5. Return `Error` if it seems to be unrecoverable
+    async fn send_blocks_to_sync(
+        dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
+        mq_adapter: Arc<MQ>,
+        state_node_adapter: Arc<ST>,
+        blocks_to_send: Vec<BlockCandidateToSend>,
+    ) -> Result<()> {
+        //TODO: it is better to send each block separately, but it will be more tricky to handle the correct cleanup
+
+        // extract already synced blocks that were validated by existing blocks in the state
+        // send other blocks to sync
+        let mut should_restore_blocks_in_cache = false;
+        let mut sent_blocks = vec![];
+        for block_to_send in blocks_to_send.iter() {
+            match block_to_send.send_sync_status {
+                SendSyncStatus::Sent | SendSyncStatus::Synced => sent_blocks.push(block_to_send),
+                _ => {
+                    let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
+                    //TODO: handle and log error
+                    if let Err(err) = state_node_adapter.accept_block(block_for_sync).await {
+                        should_restore_blocks_in_cache = true;
+                        break;
+                    } else {
+                        sent_blocks.push(block_to_send);
+                    }
+                }
+            }
+        }
+
+        if !should_restore_blocks_in_cache {
+            // commit queue diffs for each block
+            for &sent_block in sent_blocks.iter() {
+                //TODO: handle and log error
+                if let Err(err) = mq_adapter
+                    .commit_diff(sent_block.entry.candidate.block_id().clone())
+                    .await
+                {
+                    should_restore_blocks_in_cache = true;
+                    break;
+                }
+            }
+
+            // do not clenup blocks if msg queue diffs commit was unsuccessful
+            if !should_restore_blocks_in_cache {
+                let sent_blocks_keys = sent_blocks
+                    .iter()
+                    .map(|b| b.entry.key.clone())
+                    .collect::<Vec<_>>();
+                dispatcher
+                    .enqueue_task(method_to_async_task_closure!(
+                        cleanup_blocks_from_cache,
+                        sent_blocks_keys
+                    ))
+                    .await?;
+            }
+        }
+
+        if should_restore_blocks_in_cache {
+            // queue blocks restore task
+            dispatcher
+                .enqueue_task(method_to_async_task_closure!(
+                    restore_blocks_in_cache,
+                    blocks_to_send
+                ))
+                .await?;
+        }
+
+        Ok(())
     }
 }

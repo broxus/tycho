@@ -17,7 +17,7 @@ pub struct BlockCollationResult {
 }
 
 #[derive(Clone)]
-pub struct BlockCandidate {
+pub(crate) struct BlockCandidate {
     block_id: BlockIdExt,
     prev_blocks_ids: Vec<BlockIdExt>,
     data: Vec<u8>,
@@ -72,6 +72,12 @@ pub struct BlockProofStuff {
     id: BlockIdExt,
     proof: BlockProof,
     // other stuff...
+}
+
+pub struct BlockStuffForSync {
+    pub block_stuff: BlockStuff,
+    pub signatures: BlockSignatures,
+    pub prev_blocks_ids: Vec<BlockIdExt>,
 }
 
 pub struct ShardStateStuff {
@@ -143,6 +149,8 @@ pub(crate) mod ext_types {
                 todo!()
             }
         }
+        #[derive(Clone)]
+        pub struct BlockHashId;
         pub struct Block;
         pub struct BlockProof;
         #[derive(Clone)]

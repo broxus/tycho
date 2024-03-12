@@ -34,10 +34,10 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     where
         QI: QueueIterator;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&mut self, diff: QueueDiff) -> Result<()>;
+    async fn apply_diff(&self, diff: QueueDiff) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    async fn commit_diff(&mut self, diff_id: BlockIdExt) -> Result<Option<()>>;
+    async fn commit_diff(&self, diff_id: BlockIdExt) -> Result<Option<()>>;
 }
 
 pub(crate) struct MessageQueueAdapterStdImpl<MQ>
@@ -64,10 +64,10 @@ where
     {
         todo!()
     }
-    async fn apply_diff(&mut self, diff: QueueDiff) -> Result<()> {
+    async fn apply_diff(&self, diff: QueueDiff) -> Result<()> {
         todo!()
     }
-    async fn commit_diff(&mut self, diff_id: BlockIdExt) -> Result<Option<()>> {
+    async fn commit_diff(&self, diff_id: BlockIdExt) -> Result<Option<()>> {
         todo!()
     }
 }

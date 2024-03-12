@@ -7,7 +7,7 @@ use crate::{
     impl_enum_try_into, method_to_async_task_closure,
     types::{
         ext_types::{BlockHandle, BlockIdExt},
-        BlockStuff, ShardStateStuff,
+        BlockStuff, BlockStuffForSync, ShardStateStuff,
     },
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE},
@@ -72,7 +72,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
         &self,
         block_id: BlockIdExt,
     ) -> Result<StateNodeTaskResponseReceiver<Option<Arc<BlockStuff>>>>;
-    async fn accept_block(&mut self, block: BlockStuff) -> Result<Arc<BlockHandle>>;
+    async fn accept_block(&self, block: BlockStuffForSync) -> Result<Arc<BlockHandle>>;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -127,7 +127,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         Ok(StateNodeTaskResponseReceiver::create(receiver))
     }
-    async fn accept_block(&mut self, block: BlockStuff) -> Result<Arc<BlockHandle>> {
+    async fn accept_block(&self, block: BlockStuffForSync) -> Result<Arc<BlockHandle>> {
         self.dispatcher
             .execute_task(method_to_async_task_closure!(accept_block, block))
             .await
@@ -166,7 +166,7 @@ impl StateNodeProcessor {
     async fn get_block(&self, block_id: BlockIdExt) -> Result<StateNodeTaskResult> {
         todo!()
     }
-    async fn accept_block(&mut self, block: BlockStuff) -> Result<StateNodeTaskResult> {
+    async fn accept_block(&mut self, block: BlockStuffForSync) -> Result<StateNodeTaskResult> {
         todo!()
     }
 }
