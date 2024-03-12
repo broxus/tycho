@@ -1,3 +1,2 @@
 mod dispatcher;
-mod receiver;
-mod uploader;
+mod overlay_client;

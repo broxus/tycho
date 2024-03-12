@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
@@ -7,11 +8,12 @@ use everscale_crypto::ed25519;
 use serde::{Deserialize, Serialize};
 
 use tycho_network::{
-    Network, OverlayId, OverlayService, PeerId, PrivateOverlay, Response, Router, Service,
-    ServiceRequest, Version,
+    DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService, PeerId,
+    PrivateOverlay, Response, Router, Service, ServiceRequest, Version,
 };
 use tycho_util::futures::BoxFutureOrNoop;
 
+use crate::intercom::overlay_client::OverlayClient;
 use crate::models::point::{Location, Point, PointId, Round, Signature};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -45,25 +47,55 @@ struct PointResponse {
 }
 
 pub struct Dispatcher {
+    pub overlay_client: OverlayClient,
+    pub dht_client: DhtClient,
     network: Network,
-    private_overlay: PrivateOverlay,
 }
 
 impl Dispatcher {
     const PRIVATE_OVERLAY_ID: OverlayId = OverlayId(*b"ac87b6945b4f6f736963f7f65d025943");
 
-    pub fn new<T: ToSocketAddrs>(socket_addr: T, key: &ed25519::SecretKey) -> Self {
+    pub fn new<T: ToSocketAddrs>(
+        socket_addr: T,
+        key: &ed25519::SecretKey,
+        all_peers: &Vec<PeerId>,
+    ) -> Self {
         let keypair = ed25519::KeyPair::from(key);
         let local_id = PeerId::from(keypair.public_key);
 
+        // TODO receive configured services from general node,
+        //  move current setup to test below as it provides acceptable timing
+
+        let (dht_client_builder, dht_service) = DhtService::builder(local_id)
+            .with_config(DhtConfig {
+                local_info_announce_period: Duration::from_secs(1),
+                max_local_info_announce_period_jitter: Duration::from_secs(1),
+                routing_table_refresh_period: Duration::from_secs(1),
+                max_routing_table_refresh_period_jitter: Duration::from_secs(1),
+                ..Default::default()
+            })
+            .build();
+
         let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
+            .resolve_peers(true)
+            .with_entries(all_peers)
             .build(Responder(Arc::new(ResponderInner {})));
 
         let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_private_overlay(&private_overlay)
+            .with_config(OverlayConfig {
+                private_overlay_peer_resolve_period: Duration::from_secs(1),
+                private_overlay_peer_resolve_max_jitter: Duration::from_secs(1),
+                ..Default::default()
+            })
+            .with_dht_service(dht_service.clone())
             .build();
 
-        let router = Router::builder().route(overlay_service).build();
+        overlay_service.try_add_private_overlay(&private_overlay);
+
+        let router = Router::builder()
+            .route(dht_service)
+            .route(overlay_service)
+            .build();
 
         let network = Network::builder()
             .with_private_key(key.to_bytes())
@@ -71,16 +103,21 @@ impl Dispatcher {
             .build(socket_addr, router)
             .unwrap();
 
+        let dht_client = dht_client_builder.build(network.clone());
+
         overlay_tasks.spawn(network.clone());
 
+        let overlay_client = OverlayClient::new(all_peers.len(), private_overlay, local_id);
+
         Self {
+            overlay_client,
+            dht_client,
             network,
-            private_overlay,
         }
     }
 
     pub async fn broadcast(&self, node: &PeerId, point: Point) -> Result<BroadcastResponse> {
-        // TODO: move MPRequest et al to TL - will need not copy Point
+        // TODO: move MPRequest et al to TL - won't need to copy Point
         let response = self.query(node, &MPRequest::Broadcast { point }).await?;
         match Self::parse_response(node, &response.body)? {
             MPResponse::Broadcast(r) => Ok(r),
@@ -102,7 +139,8 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(data)?),
         };
 
-        self.private_overlay
+        self.overlay_client
+            .overlay
             .query(&self.network, node, request)
             .await
     }
@@ -152,7 +190,7 @@ impl ResponderInner {
             Ok(body) => body,
             Err(e) => {
                 tracing::error!("unexpected request from {:?}: {e:?}", req.metadata.peer_id);
-                // NOTE: malformed request is a reason to ignore it
+                // malformed request is a reason to ignore it
                 return None;
             }
         };
@@ -211,46 +249,48 @@ mod tests {
         node_info
     }
 
-    fn make_network(node_count: usize) -> Vec<Dispatcher> {
+    async fn make_network(node_count: usize) -> Vec<Dispatcher> {
         let keys = (0..node_count)
             .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
             .collect::<Vec<_>>();
 
+        let all_peers = keys
+            .iter()
+            .map(|s| PeerId::from(ed25519::KeyPair::from(s).public_key))
+            .collect::<Vec<_>>();
+
         let mut nodes = keys
             .iter()
-            .map(|k| Dispatcher::new((Ipv4Addr::LOCALHOST, 0), k))
+            .map(|s| Dispatcher::new((Ipv4Addr::LOCALHOST, 0), s, &all_peers))
             .collect::<Vec<_>>();
 
         let bootstrap_info = std::iter::zip(&keys, &nodes)
             .map(|(key, node)| Arc::new(make_peer_info(key, node.network.local_addr().into())))
             .collect::<Vec<_>>();
 
-        for node in &mut nodes {
-            let mut private_overlay_entries = node.private_overlay.write_entries();
-
+        for node in nodes.first() {
             for info in &bootstrap_info {
                 if info.id == node.network.peer_id() {
                     continue;
                 }
-
-                let handle = node
-                    .network
-                    .known_peers()
-                    .insert(info.clone(), false)
-                    .unwrap();
-                private_overlay_entries.insert(&info.id, Some(handle));
+                node.dht_client.add_peer(info.clone()).unwrap();
             }
+        }
+
+        for node in &nodes {
+            node.overlay_client.wait_for_peers(node_count - 1).await;
+            tracing::info!("found peers for {}", node.network.peer_id());
         }
 
         nodes
     }
 
     #[tokio::test]
-    #[tracing_test::traced_test]
     async fn dispatcher_works() -> Result<()> {
+        tracing_subscriber::fmt::try_init().ok();
         tracing::info!("dispatcher_works");
 
-        let nodes = make_network(2);
+        let nodes = make_network(3).await;
 
         let point_id = PointId {
             location: crate::models::point::Location {

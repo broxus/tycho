@@ -1968,7 +1968,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-test",
+ "tracing-subscriber",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
