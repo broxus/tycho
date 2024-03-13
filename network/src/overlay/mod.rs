@@ -33,6 +33,7 @@ pub use self::public_overlay::{
 
 mod config;
 mod overlay_id;
+mod peer_resolver;
 mod private_overlay;
 mod public_overlay;
 
