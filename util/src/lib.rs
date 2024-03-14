@@ -14,6 +14,12 @@ pub mod futures {
     mod shared;
 }
 
+pub mod sync {
+    pub use self::priority_semaphore::{Acquire, AcquireError, PrioritySemaphore, TryAcquireError};
+
+    mod priority_semaphore;
+}
+
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 pub type FastDashSet<K> = dashmap::DashSet<K, ahash::RandomState>;
 pub type FastHashMap<K, V> = HashMap<K, V, ahash::RandomState>;
