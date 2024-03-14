@@ -1,15 +1,17 @@
-//! Based on https://github.com/tokio-rs/tokio/blob/e37bd6385430620f850a644d58945ace541afb6e/tokio/src/sync/batch_semaphore.rs#L550
+//! See <https://github.com/tokio-rs/tokio/blob/c9273f1aee9927b16ee3a789a382c99ad600c8b6/tokio/src/sync/batch_semaphore.rs>.
 
 use std::cell::UnsafeCell;
 use std::marker::PhantomPinned;
-use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
 use futures_util::Future;
+
+use crate::util::linked_list::{Link, LinkedList, Pointers};
+use crate::util::wake_list::WakeList;
 
 pub struct PrioritySemaphore {
     waiters: Mutex<Waitlist>,
@@ -56,7 +58,7 @@ impl PrioritySemaphore {
     }
 
     pub fn close(&self) {
-        fn clear_queue(queue: &mut LinkedList) {
+        fn clear_queue(queue: &mut LinkedList<Waiter, <Waiter as Link>::Target>) {
             while let Some(mut waiter) = queue.pop_back() {
                 let waker = unsafe { (*waiter.as_mut().waker.get()).take() };
                 if let Some(waker) = waker {
@@ -78,7 +80,53 @@ impl PrioritySemaphore {
         self.permits.load(Ordering::Acquire) & Self::CLOSED == Self::CLOSED
     }
 
-    pub fn try_acquire(&self, num_permits: usize) -> Result<(), TryAcquireError> {
+    pub fn try_acquire(&self) -> Result<SemaphorePermit<'_>, TryAcquireError> {
+        self.try_acquire_impl(1).map(|()| SemaphorePermit {
+            semaphore: self,
+            permits: 1,
+        })
+    }
+
+    pub fn try_acquire_owned(self: Arc<Self>) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        self.try_acquire_impl(1).map(|()| OwnedSemaphorePermit {
+            semaphore: self,
+            permits: 1,
+        })
+    }
+
+    pub async fn acquire(&self, priority: bool) -> Result<SemaphorePermit<'_>, AcquireError> {
+        match self.acquire_impl(1, priority).await {
+            Ok(()) => Ok(SemaphorePermit {
+                semaphore: self,
+                permits: 1,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn acquire_owned(
+        self: Arc<Self>,
+        priority: bool,
+    ) -> Result<OwnedSemaphorePermit, AcquireError> {
+        match self.acquire_impl(1, priority).await {
+            Ok(()) => Ok(OwnedSemaphorePermit {
+                semaphore: self,
+                permits: 1,
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn add_permits(&self, n: usize) {
+        if n == 0 {
+            return;
+        }
+
+        // Assign permits to the wait queue
+        self.add_permits_locked(n, self.waiters.lock().unwrap());
+    }
+
+    fn try_acquire_impl(&self, num_permits: usize) -> Result<(), TryAcquireError> {
         assert!(
             num_permits <= Self::MAX_PERMITS,
             "a semaphore may not have more than MAX_PERMITS permits ({})",
@@ -110,7 +158,7 @@ impl PrioritySemaphore {
         }
     }
 
-    pub fn acquire(&self, num_permits: usize, priority: bool) -> Acquire<'_> {
+    fn acquire_impl(&self, num_permits: usize, priority: bool) -> Acquire<'_> {
         Acquire::new(self, num_permits, priority)
     }
 
@@ -259,7 +307,7 @@ impl PrioritySemaphore {
 
         // Otherwise, register the waker & enqueue the node.
         {
-            // Safety: the wait list is locked, so we may modify the waker.
+            // SAFETY: the wait list is locked, so we may modify the waker.
             let waker = unsafe { &mut *node.waker.get() };
 
             // Do we need to register the new waker?
@@ -287,7 +335,33 @@ impl PrioritySemaphore {
     }
 }
 
-pub struct Acquire<'a> {
+#[must_use]
+#[clippy::has_significant_drop]
+pub struct SemaphorePermit<'a> {
+    semaphore: &'a PrioritySemaphore,
+    permits: u32,
+}
+
+impl Drop for SemaphorePermit<'_> {
+    fn drop(&mut self) {
+        self.semaphore.add_permits(self.permits as usize);
+    }
+}
+
+#[must_use]
+#[clippy::has_significant_drop]
+pub struct OwnedSemaphorePermit {
+    semaphore: Arc<PrioritySemaphore>,
+    permits: u32,
+}
+
+impl Drop for OwnedSemaphorePermit {
+    fn drop(&mut self) {
+        self.semaphore.add_permits(self.permits as usize);
+    }
+}
+
+struct Acquire<'a> {
     node: Waiter,
     semaphore: &'a PrioritySemaphore,
     num_permits: usize,
@@ -311,7 +385,7 @@ impl<'a> Acquire<'a> {
     ) -> (Pin<&mut Waiter>, &PrioritySemaphore, usize, &mut bool, bool) {
         fn is_unpin<T: Unpin>() {}
         unsafe {
-            // Safety: all fields other than `node` are `Unpin`
+            // SAFETY: all fields other than `node` are `Unpin`
 
             is_unpin::<&PrioritySemaphore>();
             is_unpin::<&mut bool>();
@@ -338,7 +412,7 @@ impl Drop for Acquire<'_> {
         let mut waiters = self.semaphore.waiters.lock().unwrap();
 
         let node = NonNull::from(&mut self.node);
-        // Safety: we have locked the wait list.
+        // SAFETY: we have locked the wait list.
         unsafe { waiters.queue_mut(self.priority).remove(node) };
 
         let acquired_permits = self.num_permits - self.node.state.load(Ordering::Acquire);
@@ -348,7 +422,7 @@ impl Drop for Acquire<'_> {
     }
 }
 
-// Safety: the `Acquire` future is not `Sync` automatically because it contains
+// SAFETY: the `Acquire` future is not `Sync` automatically because it contains
 // a `Waiter`, which, in turn, contains an `UnsafeCell`. However, the
 // `UnsafeCell` is only accessed when the future is borrowed mutably (either in
 // `poll` or in `drop`). Therefore, it is safe (although not particularly
@@ -393,127 +467,18 @@ pub enum TryAcquireError {
 }
 
 struct Waitlist {
-    ordinary_queue: LinkedList,
-    priority_queue: LinkedList,
+    ordinary_queue: LinkedList<Waiter, <Waiter as Link>::Target>,
+    priority_queue: LinkedList<Waiter, <Waiter as Link>::Target>,
     closed: bool,
 }
 
 impl Waitlist {
-    fn queue_mut(&mut self, priority: bool) -> &mut LinkedList {
+    fn queue_mut(&mut self, priority: bool) -> &mut LinkedList<Waiter, <Waiter as Link>::Target> {
         if priority {
             &mut self.priority_queue
         } else {
             &mut self.ordinary_queue
         }
-    }
-}
-
-#[derive(Default)]
-struct LinkedList {
-    head: Option<NonNull<Waiter>>,
-    tail: Option<NonNull<Waiter>>,
-}
-
-unsafe impl Send for LinkedList {}
-unsafe impl Sync for LinkedList {}
-
-impl LinkedList {
-    const fn new() -> Self {
-        Self {
-            head: None,
-            tail: None,
-        }
-    }
-
-    fn last(&self) -> Option<&Waiter> {
-        let tail = self.tail.as_ref()?;
-        unsafe { Some(&*tail.as_ptr()) }
-    }
-
-    fn push_front(&mut self, ptr: NonNull<Waiter>) {
-        unsafe {
-            Waiter::addr_of_pointers(ptr).as_mut().set_next(self.head);
-            Waiter::addr_of_pointers(ptr).as_mut().set_prev(None);
-
-            if let Some(head) = self.head {
-                Waiter::addr_of_pointers(head).as_mut().set_prev(Some(ptr));
-            }
-
-            self.head = Some(ptr);
-
-            if self.tail.is_none() {
-                self.tail = Some(ptr);
-            }
-        }
-    }
-
-    fn pop_back(&mut self) -> Option<NonNull<Waiter>> {
-        unsafe {
-            let last = self.tail?;
-            self.tail = Waiter::addr_of_pointers(last).as_ref().get_prev();
-
-            if let Some(prev) = Waiter::addr_of_pointers(last).as_ref().get_prev() {
-                Waiter::addr_of_pointers(prev).as_mut().set_next(None);
-            } else {
-                self.head = None;
-            }
-
-            Waiter::addr_of_pointers(last).as_mut().set_prev(None);
-            Waiter::addr_of_pointers(last).as_mut().set_next(None);
-
-            Some(last)
-        }
-    }
-
-    /// Removes the specified node from the list
-    ///
-    /// # Safety
-    ///
-    /// The caller **must** ensure that exactly one of the following is true:
-    /// - `node` is currently contained by `self`,
-    /// - `node` is not contained by any list,
-    /// - `node` is currently contained by some other `GuardedLinkedList` **and**
-    ///   the caller has an exclusive access to that list. This condition is
-    ///   used by the linked list in `sync::Notify`.
-    unsafe fn remove(&mut self, node: NonNull<Waiter>) -> Option<NonNull<Waiter>> {
-        if let Some(prev) = Waiter::addr_of_pointers(node).as_ref().get_prev() {
-            debug_assert_eq!(
-                Waiter::addr_of_pointers(prev).as_ref().get_next(),
-                Some(node)
-            );
-
-            Waiter::addr_of_pointers(prev)
-                .as_mut()
-                .set_next(Waiter::addr_of_pointers(node).as_ref().get_next());
-        } else {
-            if self.head != Some(node) {
-                return None;
-            }
-
-            self.head = Waiter::addr_of_pointers(node).as_ref().get_next();
-        }
-
-        if let Some(next) = Waiter::addr_of_pointers(node).as_ref().get_next() {
-            debug_assert_eq!(
-                Waiter::addr_of_pointers(next).as_ref().get_prev(),
-                Some(node)
-            );
-            Waiter::addr_of_pointers(next)
-                .as_mut()
-                .set_prev(Waiter::addr_of_pointers(node).as_ref().get_prev());
-        } else {
-            // This might be the last item in the list
-            if self.tail != Some(node) {
-                return None;
-            }
-
-            self.tail = Waiter::addr_of_pointers(node).as_ref().get_prev();
-        }
-
-        Waiter::addr_of_pointers(node).as_mut().set_next(None);
-        Waiter::addr_of_pointers(node).as_mut().set_prev(None);
-
-        Some(node)
     }
 }
 
@@ -562,112 +527,105 @@ impl Waiter {
     }
 }
 
-struct Pointers<T> {
-    inner: UnsafeCell<PointersInner<T>>,
-}
+unsafe impl Link for Waiter {
+    type Handle = NonNull<Self>;
+    type Target = Self;
 
-impl<T> Pointers<T> {
-    fn new() -> Self {
-        Self {
-            inner: UnsafeCell::new(PointersInner {
-                _prev: None,
-                _next: None,
-                _pin: PhantomPinned,
-            }),
-        }
+    #[inline]
+    fn as_raw(handle: &Self::Handle) -> NonNull<Self::Target> {
+        *handle
     }
 
-    fn get_prev(&self) -> Option<NonNull<T>> {
-        // SAFETY: prev is the first field in PointersInner, which is #[repr(C)].
-        unsafe {
-            let inner = self.inner.get();
-            let prev = inner as *const Option<NonNull<T>>;
-            std::ptr::read(prev)
-        }
+    #[inline]
+    unsafe fn from_raw(ptr: NonNull<Self::Target>) -> Self::Handle {
+        ptr
     }
 
-    fn get_next(&self) -> Option<NonNull<T>> {
-        // SAFETY: next is the second field in PointersInner, which is #[repr(C)].
-        unsafe {
-            let inner = self.inner.get();
-            let prev = inner as *const Option<NonNull<T>>;
-            let next = prev.add(1);
-            std::ptr::read(next)
-        }
-    }
-
-    fn set_prev(&mut self, value: Option<NonNull<T>>) {
-        // SAFETY: prev is the first field in PointersInner, which is #[repr(C)].
-        unsafe {
-            let inner = self.inner.get();
-            let prev = inner as *mut Option<NonNull<T>>;
-            std::ptr::write(prev, value);
-        }
-    }
-
-    fn set_next(&mut self, value: Option<NonNull<T>>) {
-        // SAFETY: next is the second field in PointersInner, which is #[repr(C)].
-        unsafe {
-            let inner = self.inner.get();
-            let prev = inner as *mut Option<NonNull<T>>;
-            let next = prev.add(1);
-            std::ptr::write(next, value);
-        }
+    #[inline]
+    unsafe fn pointers(target: NonNull<Self::Target>) -> NonNull<Pointers<Self::Target>> {
+        Self::addr_of_pointers(target)
     }
 }
 
-#[repr(C)]
-struct PointersInner<T> {
-    _prev: Option<NonNull<T>>,
-    _next: Option<NonNull<T>>,
-    _pin: PhantomPinned,
-}
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
 
-struct WakeList {
-    inner: [MaybeUninit<Waker>; NUM_WAKERS],
-    curr: usize,
-}
+    use super::*;
 
-impl WakeList {
-    fn new() -> Self {
-        const UNINIT_WAKER: MaybeUninit<Waker> = MaybeUninit::uninit();
+    #[tokio::test(flavor = "multi_thread")]
+    async fn priority_semaphore_works() {
+        let permits = Arc::new(PrioritySemaphore::new(1));
 
-        Self {
-            inner: [UNINIT_WAKER; NUM_WAKERS],
-            curr: 0,
+        let flag = Arc::new(AtomicBool::new(false));
+
+        tokio::spawn({
+            let permits = permits.clone();
+            async move {
+                println!("BACKGROUND BEFORE");
+                let _guard = permits.acquire(false).await.unwrap();
+                println!("BACKGROUND AFTER");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                println!("BACKGROUND FINISH");
+            }
+        });
+
+        tokio::time::sleep(Duration::from_micros(10)).await;
+
+        // Spawn an ordinary task that acquires a permit.
+        let ordinary_task = tokio::spawn({
+            let permits = permits.clone();
+            let flag = flag.clone();
+            async move {
+                println!("ORDINARY BEFORE");
+                let _guard = permits.acquire(false).await.unwrap();
+                println!("ORDINARY AFTER");
+                // Flag must be fired by the priority task after the permit is acquired.
+                assert!(flag.load(Ordering::Acquire));
+            }
+        });
+
+        tokio::time::sleep(Duration::from_micros(10)).await;
+
+        let priority_task = tokio::spawn({
+            let permits = permits;
+            let flag = flag.clone();
+            async move {
+                println!("PRIORITY BEFORE");
+                let _guard = permits.acquire(true).await.unwrap();
+                println!("PRIORITY");
+                flag.store(true, Ordering::Release);
+            }
+        });
+
+        ordinary_task.await.unwrap();
+        priority_task.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn priority_semaphore_is_fair() {
+        let permits = Arc::new(PrioritySemaphore::new(10));
+
+        let flag = AtomicBool::new(false);
+        tokio::join!(
+            non_cooperative_task(permits, &flag),
+            poor_little_task(&flag),
+        );
+    }
+
+    async fn non_cooperative_task(permits: Arc<PrioritySemaphore>, flag: &AtomicBool) {
+        while !flag.load(Ordering::Acquire) {
+            let _permit = permits.acquire(false).await.unwrap();
+
+            // NOTE: This yield is necessary to allow the other task to run.
+            tokio::task::yield_now().await;
         }
     }
 
-    fn can_push(&self) -> bool {
-        self.curr < NUM_WAKERS
-    }
-
-    fn push(&mut self, val: Waker) {
-        debug_assert!(self.can_push());
-
-        self.inner[self.curr] = MaybeUninit::new(val);
-        self.curr += 1;
-    }
-
-    fn wake_all(&mut self) {
-        assert!(self.curr <= NUM_WAKERS);
-        while self.curr > 0 {
-            self.curr -= 1;
-            // SAFETY: The first `curr` elements of `WakeList` are initialized, so by decrementing
-            // `curr`, we can take ownership of the last item.
-            let waker = unsafe { std::ptr::read(self.inner[self.curr].as_mut_ptr()) };
-            waker.wake();
-        }
+    async fn poor_little_task(flag: &AtomicBool) {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        flag.store(true, Ordering::Release);
     }
 }
-
-impl Drop for WakeList {
-    fn drop(&mut self) {
-        let slice =
-            std::ptr::slice_from_raw_parts_mut(self.inner.as_mut_ptr().cast::<Waker>(), self.curr);
-        // SAFETY: The first `curr` elements are initialized, so we can drop them.
-        unsafe { std::ptr::drop_in_place(slice) };
-    }
-}
-
-const NUM_WAKERS: usize = 32;

@@ -15,10 +15,15 @@ humantime = "2"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
-tokio = { version = "1", default-features = false, features = ["time", "sync"] }
+tokio = { version = "1", default-features = false, features = ["time", "sync", "rt"] }
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = ["time", "sync", "rt-multi-thread", "macros"] }
+tokio = { version = "1", default-features = false, features = [
+    "time",
+    "sync",
+    "rt-multi-thread",
+    "macros",
+] }
 
 [lints]
 workspace = true
