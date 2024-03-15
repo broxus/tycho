@@ -2,6 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
+use everscale_types::models::{BlockId, ShardIdent};
+use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
+
 use crate::{
     collator::Collator,
     manager::{block_operations::build_block_stuff_for_sync, types::SendSyncStatus},
@@ -10,22 +13,27 @@ use crate::{
     msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
     types::{
-        ext_types::{BlockHashId, BlockIdExt, ShardIdent, ValidatorSet},
-        BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionInfo,
-        CollatorSubset, ShardStateStuff, ValidatedBlock,
+        ext_types::{BlockHashId, BlockIdExt},
+        BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
+        CollationSessionInfo, ValidatedBlock,
     },
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
     validator::Validator,
 };
 
-use super::types::{BlockCandidateContainer, BlockCandidateToSend, McBlockSubgraphToSend};
+use super::{
+    block_operations::find_us_in_collators_set,
+    types::{
+        BlockCandidateContainer, BlockCandidateToSend, McBlockSubgraphToSend, ShardStateStuffExt,
+    },
+};
 
 pub enum CollationProcessorTaskResult {
     Void,
 }
 pub(super) struct CollationProcessor<C, V, MQ, MP, ST>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -42,14 +50,14 @@ where
     validator: Arc<V>,
 
     active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
-    collation_sessions_to_finish: Vec<Arc<CollationSessionInfo>>,
+    collation_sessions_to_finish: HashMap<CollationSessionId, Arc<CollationSessionInfo>>,
     active_collators: HashMap<ShardIdent, C>,
-    collators_to_stop: Vec<C>,
+    collators_to_stop: HashMap<CollationSessionId, C>,
 }
 
 impl<C, V, MQ, MP, ST> CollationProcessor<C, V, MQ, MP, ST>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -70,9 +78,9 @@ where
             mq_adapter: Arc::new(MQ::new()),
             validator,
             active_collation_sessions: HashMap::new(),
-            collation_sessions_to_finish: vec![],
+            collation_sessions_to_finish: HashMap::new(),
             active_collators: HashMap::new(),
-            collators_to_stop: vec![],
+            collators_to_stop: HashMap::new(),
         }
     }
 
@@ -136,39 +144,154 @@ where
         self.process_mc_block_from_bc(last_mc_block_id).await
     }
 
-    /// Get shards info from the state, then start new or update existing
-    /// collation sessions for these shards.
-    /// Every collation session runs internal async collation process.
-    #[deprecated(note = "should replace stub")]
+    /// Get shards info from the master state,
+    /// then start missing sessions for these shards, or refresh existing.
+    /// For each shard run collation process if current node is included in collators subset.
     pub async fn refresh_collation_sessions(
         &mut self,
         mc_state: Arc<ShardStateStuff>,
     ) -> Result<CollationProcessorTaskResult> {
-        // get shards info
+        let mc_extra = mc_state.state_extra()?;
 
-        // for each shard start a new session if it does not exist,
-        // run collator for each new active session if we are on the list of session collators,
-        // queue to finish outdated sessions,
-        // queue to stop collators of merged shards
-        let session_next_seq_no = 1;
-        let full_shard_id = ShardIdent::new_full(0);
-        let session_info = CollationSessionInfo::new(
-            session_next_seq_no,
-            CollatorSubset::create(ValidatorSet {}, &full_shard_id, session_next_seq_no),
-        );
-        let session_info = Arc::new(session_info);
-
-        if let Some(prev_session_info) = self
-            .active_collation_sessions
-            .insert(full_shard_id, session_info.clone())
-        {
-            self.collation_sessions_to_finish.push(prev_session_info);
+        // get new shards info from updated master state
+        let mut new_shards = HashMap::new();
+        new_shards.insert(ShardIdent::MASTERCHAIN, vec![*mc_state.block_id()]);
+        for shard in mc_extra.shards.iter() {
+            let (shard_id, descr) = shard?;
+            let top_block = BlockId {
+                shard: shard_id,
+                seqno: descr.seqno,
+                root_hash: descr.root_hash,
+                file_hash: descr.file_hash,
+            };
+            //TODO: consider split and merge
+            new_shards.insert(shard_id, vec![top_block]);
         }
 
-        todo!()
+        // find out the actual collation session seqno from master state
+        let new_session_seqno = mc_extra.validator_info.catchain_seqno;
+
+        // we need full validators set to define the subset for each session and to check if current node should collate
+        let full_validators_set = mc_state.config_params()?.get_current_validator_set()?;
+
+        // compare with active sessions and detect new sessions to start and outdated sessions to finish
+        let mut sessions_to_keep = HashMap::new();
+        let mut sessions_to_start = vec![];
+        let mut to_finish_sessions = HashMap::new();
+        let mut to_stop_collators = HashMap::new();
+        for shard_info in new_shards {
+            if let Some(existing_session) =
+                self.active_collation_sessions.remove_entry(&shard_info.0)
+            {
+                if existing_session.1.seqno() >= new_session_seqno {
+                    sessions_to_keep.insert(shard_info.0, existing_session.1);
+                } else {
+                    sessions_to_start.push(shard_info);
+                    to_finish_sessions
+                        .insert((existing_session.0, new_session_seqno), existing_session.1);
+                }
+            } else {
+                sessions_to_start.push(shard_info);
+            }
+        }
+
+        // if we still have some active sessions that do not match with new shards
+        // then we need to finish them and stop their collators
+        for current_active_session in self.active_collation_sessions.drain() {
+            to_finish_sessions.insert(
+                (current_active_session.0, new_session_seqno),
+                current_active_session.1,
+            );
+            if let Some(collator) = self.active_collators.remove(&current_active_session.0) {
+                to_stop_collators.insert((current_active_session.0, new_session_seqno), collator);
+            }
+        }
+
+        // store existing sessions that we should keep
+        self.active_collation_sessions = sessions_to_keep;
+
+        // we may have sessions to finish, collators to stop, and sessions to start
+        // additionally we may have some active collators
+        // for each new session we should check if current node should collate,
+        // then stop collators if should not, otherwise start missing collators
+        let cc_config = mc_extra.config.get_catchain_config()?;
+        for (shard_id, prev_blocks_ids) in sessions_to_start {
+            let (subset, hash_short) = full_validators_set
+                .compute_subset(shard_id, &cc_config, new_session_seqno)
+                .ok_or(anyhow!(
+                    "Error calculating subset of collators for the session (shard_id = {}, seqno = {})",
+                    shard_id,
+                    new_session_seqno,
+                ))?;
+
+            if let Some(_local_pubkey) = find_us_in_collators_set(&self.config, &subset) {
+                self.active_collators.entry(shard_id).or_insert_with(|| {
+                    C::start(
+                        self.dispatcher.clone(),
+                        self.mq_adapter.clone(),
+                        self.state_node_adapter.clone(),
+                        shard_id,
+                        prev_blocks_ids,
+                    )
+                });
+            } else if let Some(collator) = self.active_collators.remove(&shard_id) {
+                to_stop_collators.insert((shard_id, new_session_seqno), collator);
+            }
+
+            self.active_collation_sessions.insert(
+                shard_id,
+                Arc::new(CollationSessionInfo::new(
+                    new_session_seqno,
+                    ValidatorSubsetInfo {
+                        validators: subset,
+                        short_hash: hash_short,
+                    },
+                )),
+            );
+        }
+
+        // enqueue outdated sessions finish tasks
+        for (finish_key, session_info) in to_finish_sessions {
+            self.collation_sessions_to_finish
+                .insert(finish_key, session_info.clone());
+            self.dispatcher
+                .enqueue_task(method_to_async_task_closure!(
+                    finish_collation_session,
+                    session_info,
+                    finish_key
+                ))
+                .await?;
+        }
+
+        // equeue dangling collators stop tasks
+        for (stop_key, collator) in to_stop_collators {
+            collator.equeue_stop(stop_key).await?;
+            self.collators_to_stop.insert(stop_key, collator);
+        }
+
+        Ok(CollationProcessorTaskResult::Void)
 
         // finally we will have initialized `active_collation_sessions` and `active_collators`
         // which run async block collations processes
+    }
+
+    /// Execute collation session finalization routines
+    pub async fn finish_collation_session(
+        &mut self,
+        _session_info: Arc<CollationSessionInfo>,
+        finish_key: CollationSessionId,
+    ) -> Result<CollationProcessorTaskResult> {
+        self.collation_sessions_to_finish.remove(&finish_key);
+        Ok(CollationProcessorTaskResult::Void)
+    }
+
+    /// Remove stopped collator from cache
+    pub async fn process_collator_stopped(
+        &mut self,
+        stop_key: CollationSessionId,
+    ) -> Result<CollationProcessorTaskResult> {
+        self.collators_to_stop.remove(&stop_key);
+        Ok(CollationProcessorTaskResult::Void)
     }
 
     /// Process collated block candidate

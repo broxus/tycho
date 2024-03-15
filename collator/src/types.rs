@@ -1,13 +1,14 @@
-use std::sync::Arc;
+use everscale_crypto::ed25519::KeyPair;
+use everscale_types::models::ShardIdent;
 
-use anyhow::Result;
+use tycho_block_util::block::ValidatorSubsetInfo;
 
 use self::ext_types::{
-    Block, BlockIdExt, BlockProof, BlockSignature, Cell, KeyId, McStateExtra, ShardIdent,
-    ShardStateUnsplit, UInt256, ValidatorDescr, ValidatorSet,
+    Block, BlockIdExt, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256,
 };
 
 pub struct CollationConfig {
+    pub key_pair: KeyPair,
     pub mc_block_min_interval_ms: u64,
 }
 
@@ -80,75 +81,35 @@ pub struct BlockStuffForSync {
     pub prev_blocks_ids: Vec<BlockIdExt>,
 }
 
-pub struct ShardStateStuff {
-    block_id: BlockIdExt,
-    shard_state: Option<ShardStateUnsplit>,
-    shard_state_extra: Option<McStateExtra>,
-    root_cell: Cell,
-}
-impl ShardStateStuff {
-    pub fn shard_id(&self) -> &ShardIdent {
-        &self.block_id.shard_id
-    }
-    pub fn from_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
-        todo!()
-    }
-}
+/// (ShardIdent, seqno)
+pub type CollationSessionId = (ShardIdent, u32);
 
 pub struct CollationSessionInfo {
     /// Sequence number of the collation session
-    seq_no: u32,
-    collators: CollatorSubset,
+    seqno: u32,
+    collators: ValidatorSubsetInfo,
 }
 impl CollationSessionInfo {
-    pub fn new(seq_no: u32, collators: CollatorSubset) -> Self {
-        Self { seq_no, collators }
+    pub fn new(seqno: u32, collators: ValidatorSubsetInfo) -> Self {
+        Self { seqno, collators }
     }
-    pub fn collators(&self) -> &CollatorSubset {
+    pub fn seqno(&self) -> u32 {
+        self.seqno
+    }
+    pub fn collators(&self) -> &ValidatorSubsetInfo {
         &self.collators
-    }
-}
-
-pub struct CollatorSubset {
-    /// The list of collators in the subset
-    subset: Vec<ValidatorDescr>,
-    /// Hash from collators subset list
-    hash_short: u32,
-}
-impl CollatorSubset {
-    #[deprecated(note = "should replace stub")]
-    pub fn create(full_set: ValidatorSet, shard_id: &ShardIdent, seq_no: u32) -> Self {
-        CollatorSubset {
-            subset: vec![],
-            hash_short: 0,
-        }
-    }
-    pub fn subset_iterator<'a>(&'a self) -> core::slice::Iter<'a, ValidatorDescr> {
-        self.subset.iter()
     }
 }
 
 pub(crate) mod ext_types {
     pub use stubs::*;
     pub mod stubs {
+        use everscale_types::{cell::HashBytes, models::ShardIdent};
+
         pub struct KeyId([u8; 32]);
         pub struct BlockSignature(pub Vec<u8>);
         #[derive(Clone)]
         pub struct UInt256([u8; 32]);
-
-        #[derive(Clone, PartialEq, Eq, Hash)]
-        pub struct ShardIdent;
-        impl ShardIdent {
-            pub const fn new_full(workchain: u32) -> Self {
-                Self {}
-            }
-            pub const fn masterchain() -> Self {
-                Self {}
-            }
-            pub fn is_masterchain(&self) -> bool {
-                todo!()
-            }
-        }
         #[derive(Clone)]
         pub struct BlockHashId;
         pub struct Block;
@@ -157,8 +118,23 @@ pub(crate) mod ext_types {
         pub struct BlockIdExt {
             pub shard_id: ShardIdent,
             pub seq_no: u32,
-            pub root_hash: UInt256,
-            pub file_hash: UInt256,
+            pub root_hash: HashBytes,
+            pub file_hash: HashBytes,
+        }
+        impl BlockIdExt {
+            pub const fn with_params(
+                shard_id: ShardIdent,
+                seq_no: u32,
+                root_hash: HashBytes,
+                file_hash: HashBytes,
+            ) -> Self {
+                BlockIdExt {
+                    shard_id,
+                    seq_no,
+                    root_hash,
+                    file_hash,
+                }
+            }
         }
         pub struct ShardAccounts;
         pub struct Cell;

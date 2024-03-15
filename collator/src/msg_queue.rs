@@ -1,9 +1,14 @@
 use anyhow::Result;
+use async_trait::async_trait;
+
+use everscale_types::models::ShardIdent;
+
+use crate::types::ext_types::BlockIdExt;
 
 // TYPES
 
 mod type_stubs {
-    use crate::types::ext_types::ShardIdent;
+    use everscale_types::models::ShardIdent;
 
     pub trait Queue {
         fn new(base_shard: ShardIdent) -> Self;
@@ -19,10 +24,7 @@ mod type_stubs {
     impl QueueIterator for QueueIteratorImpl {}
     pub struct QueueDiff;
 }
-use async_trait::async_trait;
 pub use type_stubs::*;
-
-use crate::types::ext_types::{BlockIdExt, ShardIdent};
 
 // ADAPTER
 

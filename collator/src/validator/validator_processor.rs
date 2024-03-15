@@ -3,11 +3,13 @@ use std::{future::Future, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 
+use everscale_types::models::{ShardIdent, ValidatorDescription};
+
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
     types::{
-        ext_types::{BlockIdExt, BlockSignature, ShardIdent, ValidatorDescr, ValidatorId},
+        ext_types::{BlockIdExt, BlockSignature, ValidatorDescr, ValidatorId},
         BlockCandidate, BlockStuff, CollationSessionInfo, ValidatedBlock,
     },
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
@@ -94,7 +96,7 @@ where
         candidate: BlockCandidate,
         session_info: Arc<CollationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
-        for collator_descr in session_info.collators().subset_iterator() {
+        for collator_descr in session_info.collators().validators.iter() {
             let dispatcher = self.get_dispatcher();
             let candidate = candidate.clone();
             Self::request_cadidate_signature_from_neighbor(
@@ -184,7 +186,7 @@ pub(crate) trait ValidatorProcessorSpecific<ST>: Sized {
     /// Request signature from neighbor collator and run callback when receive response.
     /// Send own signature so neighbor can use it to validate his own candidate
     async fn request_cadidate_signature_from_neighbor<Fut>(
-        collator_descr: &ValidatorDescr,
+        collator_descr: &ValidatorDescription,
         shard_id: ShardIdent,
         seq_no: u32,
         own_signature: BlockSignature,
@@ -269,7 +271,7 @@ where
     }
 
     async fn request_cadidate_signature_from_neighbor<Fut>(
-        collator_descr: &ValidatorDescr,
+        collator_descr: &ValidatorDescription,
         shard_id: ShardIdent,
         seq_no: u32,
         own_signature: BlockSignature,

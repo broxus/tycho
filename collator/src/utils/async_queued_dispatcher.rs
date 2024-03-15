@@ -57,12 +57,26 @@ where
             .map_err(|_err| anyhow!("dispatcher queue receiver dropped"))
     }
 
+    fn _enqueue_task_blocking(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
+        self.tasks_queue
+            .blocking_send(task)
+            .map_err(|_err| anyhow!("dispatcher queue receiver dropped"))
+    }
+
     pub async fn enqueue_task(
         &self,
         task_fn: impl FnOnce(W) -> Pin<Box<dyn Future<Output = (W, Result<R>)> + Send>> + Send + 'static,
     ) -> Result<()> {
         let task = AsyncTaskDesc::<W, R>::create(Box::new(task_fn));
         self._enqueue_task(task).await
+    }
+
+    pub fn enqueue_task_blocking(
+        &self,
+        task_fn: impl FnOnce(W) -> Pin<Box<dyn Future<Output = (W, Result<R>)> + Send>> + Send + 'static,
+    ) -> Result<()> {
+        let task = AsyncTaskDesc::<W, R>::create(Box::new(task_fn));
+        self._enqueue_task_blocking(task)
     }
 
     pub async fn enqueue_task_with_responder(

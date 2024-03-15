@@ -1,8 +1,8 @@
 use anyhow::Result;
 
 use crate::{
-    collator::CollatorStdImpl,
-    manager::{self, CollationManager, CollationManagerGenImpl},
+    collator::{collator_processor::CollatorProcessorStdImpl, CollatorStdImpl},
+    manager::{CollationManager, CollationManagerGenImpl},
     mempool::MempoolAdapterStdImpl,
     msg_queue::{MessageQueueAdapterStdImpl, QueueImpl},
     state_node::{
@@ -14,16 +14,20 @@ use crate::{
 
 #[test]
 fn test_create_manager() -> Result<()> {
-    type CollationManagerStdImplGenST<ST> = CollationManagerGenImpl<
-        CollatorStdImpl,
+    type CollationManagerStdImplGenST<MQ, ST> = CollationManagerGenImpl<
+        CollatorStdImpl<CollatorProcessorStdImpl<MQ, ST>, MQ, ST>,
         ValidatorStdImpl<ValidatorProcessorStdImpl<ST>, ST>,
-        MessageQueueAdapterStdImpl<QueueImpl>,
+        MQ,
         MempoolAdapterStdImpl,
         ST,
     >;
-    type CollationManagerStdImpl = CollationManagerStdImplGenST<StateNodeAdapterStdImpl>;
+    type CollationManagerStdImpl = CollationManagerStdImplGenST<
+        MessageQueueAdapterStdImpl<QueueImpl>,
+        StateNodeAdapterStdImpl,
+    >;
 
     let config = CollationConfig {
+        key_pair: everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng()),
         mc_block_min_interval_ms: 2000,
     };
     let mpool_adapter = MempoolAdapterStdImpl {};

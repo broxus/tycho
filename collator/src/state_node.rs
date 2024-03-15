@@ -3,11 +3,13 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
+use tycho_block_util::state::ShardStateStuff;
+
 use crate::{
     impl_enum_try_into, method_to_async_task_closure,
     types::{
         ext_types::{BlockHandle, BlockIdExt},
-        BlockStuff, BlockStuffForSync, ShardStateStuff,
+        BlockStuff, BlockStuffForSync,
     },
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE},

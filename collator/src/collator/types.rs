@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
-use crate::types::{
-    ext_types::{
-        BlockIdExt, Cell, CurrencyCollection, McStateExtra, ShardAccounts, ShardStateUnsplit,
-    },
-    ShardStateStuff,
-};
+use tycho_block_util::state::ShardStateStuff;
+
+use crate::types::ext_types::{BlockIdExt, Cell, CurrencyCollection, McStateExtra, ShardAccounts};
 
 /*
 В текущем коллаторе перед коллацией блока импортируется:

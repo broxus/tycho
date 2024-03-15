@@ -2018,8 +2018,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "everscale-crypto",
+ "everscale-types",
+ "rand",
  "tokio",
  "tracing",
+ "tycho-block-util",
  "tycho-consensus",
  "tycho-core",
  "tycho-storage",

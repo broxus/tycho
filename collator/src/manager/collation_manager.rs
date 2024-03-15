@@ -1,30 +1,26 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::collation_processor::{CollationProcessor, CollationProcessorTaskResult};
-
 use crate::{
-    collator::{Collator, CollatorEventListener, CollatorStdImpl},
-    mempool::{MempoolAdapter, MempoolAdapterStdImpl},
+    collator::{Collator, CollatorEventListener},
+    mempool::MempoolAdapter,
     method_to_async_task_closure,
-    msg_queue::{
-        MessageQueueAdapter, MessageQueueAdapterStdImpl, QueueIterator, QueueIteratorImpl,
-    },
-    state_node::{
-        StateNodeAdapter, StateNodeAdapterBuilder, StateNodeAdapterStdImpl, StateNodeEventListener,
-    },
+    msg_queue::MessageQueueAdapter,
+    state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
     types::{
-        ext_types::{BlockIdExt, ShardIdent},
-        BlockCollationResult, CollationConfig, CollatorSubset, ShardStateStuff, ValidatedBlock,
+        ext_types::BlockIdExt, BlockCollationResult, CollationConfig, CollationSessionId,
+        ValidatedBlock,
     },
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
-    validator::{self, Validator, ValidatorEventListener, ValidatorStdImpl},
+    validator::{Validator, ValidatorEventListener},
 };
+
+use super::collation_processor::{CollationProcessor, CollationProcessorTaskResult};
 
 /// Controls the whole collation process.
 /// Monitors state sync, receives ext msgs from mempool,
@@ -34,7 +30,7 @@ use crate::{
 #[async_trait]
 pub trait CollationManager<C, V, MQ, MP, ST>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -51,7 +47,7 @@ where
 /// Generic implementation of [`CollationManager`]
 pub struct CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -75,7 +71,7 @@ where
 impl<C, V, MQ, MP, ST> CollationManager<C, V, MQ, MP, ST>
     for CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -151,7 +147,7 @@ where
 impl<C, V, MQ, MP, ST> StateNodeEventListener
     for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -170,16 +166,23 @@ where
 impl<C, V, MQ, MP, ST> CollatorEventListener
     for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn on_block_candidat(&self, collation_result: BlockCollationResult) -> Result<()> {
+    async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             process_block_candidate,
             collation_result
+        ))
+        .await
+    }
+    async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
+        self.enqueue_task(method_to_async_task_closure!(
+            process_collator_stopped,
+            stop_key
         ))
         .await
     }
@@ -189,7 +192,7 @@ where
 impl<C, V, MQ, MP, ST> ValidatorEventListener
     for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
 where
-    C: Collator,
+    C: Collator<MQ, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,

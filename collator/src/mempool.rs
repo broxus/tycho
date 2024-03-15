@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::types::ShardStateStuff;
+use tycho_block_util::state::ShardStateStuff;
 
 // ADAPTER
 
