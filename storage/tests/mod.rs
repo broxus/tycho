@@ -1,16 +1,12 @@
-use std::path::Path;
-use std::str::FromStr;
-use std::time::Duration;
-
 use anyhow::{anyhow, Result};
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bytesize::ByteSize;
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::cell::{Cell, DynCell, HashBytes};
 use everscale_types::models::{BlockId, ShardIdent, ShardState};
 use serde::{Deserialize, Deserializer};
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
 
 #[derive(Clone)]
@@ -22,28 +18,9 @@ struct ShardStateCombined {
 impl ShardStateCombined {
     fn from_file(path: impl AsRef<str>) -> Result<Self> {
         let bytes = std::fs::read(path.as_ref())?;
-        let cell = Boc::decode(bytes)?;
+        let cell = Boc::decode(&bytes)?;
         let state = cell.parse()?;
         Ok(Self { cell, state })
-    }
-
-    fn short_id(&self) -> ShardShortId {
-        match &self.state {
-            ShardState::Unsplit(s) => ShardShortId::Unsplit {
-                seqno: s.seqno,
-                shard_ident: s.shard_ident,
-            },
-            ShardState::Split(s) => {
-                let left = s.left.load().unwrap();
-                let right = s.right.load().unwrap();
-                ShardShortId::Split {
-                    left_seqno: left.seqno,
-                    left_shard_ident: left.shard_ident,
-                    right_seqno: right.seqno,
-                    right_shard_ident: right.shard_ident,
-                }
-            }
-        }
     }
 
     fn gen_utime(&self) -> Option<u32> {
@@ -56,39 +33,7 @@ impl ShardStateCombined {
     fn min_ref_mc_seqno(&self) -> Option<u32> {
         match &self.state {
             ShardState::Unsplit(s) => Some(s.min_ref_mc_seqno),
-            ShardState::Split(s) => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum ShardShortId {
-    Unsplit {
-        seqno: u32,
-        shard_ident: ShardIdent,
-    },
-    Split {
-        left_seqno: u32,
-        left_shard_ident: ShardIdent,
-        right_seqno: u32,
-        right_shard_ident: ShardIdent,
-    },
-}
-
-impl ShardShortId {
-    pub fn shard_ident(&self) -> ShardIdent {
-        match self {
-            ShardShortId::Unsplit { shard_ident, .. } => *shard_ident,
-            ShardShortId::Split {
-                left_shard_ident, ..
-            } => *left_shard_ident,
-        }
-    }
-
-    pub fn seqno(&self) -> u32 {
-        match self {
-            ShardShortId::Unsplit { seqno, .. } => *seqno,
-            ShardShortId::Split { left_seqno, .. } => *left_seqno,
+            ShardState::Split(_) => None,
         }
     }
 }
@@ -191,80 +136,130 @@ impl TryFrom<GlobalConfigJson> for GlobalConfig {
     }
 }
 
-#[tokio::test]
-async fn storage_init() {
-    tracing_subscriber::fmt::try_init().ok();
-    tracing::info!("connect_new_node_to_bootstrap");
+fn compare_cells(orig_cell: &DynCell, stored_cell: &DynCell) {
+    assert_eq!(orig_cell.repr_hash(), stored_cell.repr_hash());
 
-    let root_path = Path::new("tmp");
+    let l = orig_cell.descriptor();
+    let r = stored_cell.descriptor();
+
+    assert_eq!(l.d1, r.d1);
+    assert_eq!(l.d2, r.d2);
+    assert_eq!(orig_cell.data(), stored_cell.data());
+
+    for (orig_cell, stored_cell) in std::iter::zip(orig_cell.references(), stored_cell.references())
+    {
+        compare_cells(orig_cell, stored_cell);
+    }
+}
+
+#[tokio::test]
+async fn persistent_storage_everscale() -> Result<()> {
+    tracing_subscriber::fmt::try_init().ok();
+
+    let tmp_dir = tempfile::tempdir()?;
+    let root_path = tmp_dir.path();
+
+    // Init rocksdb
     let db_options = DbOptions {
         rocksdb_lru_capacity: ByteSize::kb(1024),
         cells_cache_size: ByteSize::kb(1024),
     };
-    let db = Db::open(root_path.join("db_storage"), db_options).unwrap();
+    let db = Db::open(root_path.join("db_storage"), db_options)?;
 
+    // Init storage
     let storage = Storage::new(
         db,
         root_path.join("file_storage"),
         db_options.cells_cache_size.as_u64(),
-    )
-    .unwrap();
+    )?;
     assert!(storage.node_state().load_init_mc_block_id().is_err());
 
     // Read zerostate
-    let zero_state = ShardStateCombined::from_file("tests/everscale_zerostate.boc").unwrap();
+    let zero_state_raw = ShardStateCombined::from_file("tests/everscale_zerostate.boc")?;
 
     // Read global config
-    let global_config = GlobalConfig::from_file("tests/global-config.json").unwrap();
+    let global_config = GlobalConfig::from_file("tests/global-config.json")?;
 
     // Write zerostate to db
-    let (handle, _) = storage
-        .block_handle_storage()
-        .create_or_load_handle(
-            &global_config.block_id,
-            BlockMetaData::zero_state(zero_state.gen_utime().unwrap()),
-        )
-        .unwrap();
+    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
+        &global_config.block_id,
+        BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap()),
+    )?;
 
-    let state = ShardStateStuff::new(
+    let zerostate = ShardStateStuff::new(
         global_config.block_id,
-        zero_state.cell.clone(),
+        zero_state_raw.cell.clone(),
         storage.shard_state_storage().min_ref_mc_state(),
-    )
-    .unwrap();
+    )?;
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &state)
-        .await
-        .unwrap();
+        .store_state(&handle, &zerostate)
+        .await?;
 
+    // Check seqno
     let min_ref_mc_state = storage.shard_state_storage().min_ref_mc_state();
-    assert_eq!(min_ref_mc_state.seqno(), zero_state.min_ref_mc_seqno());
+    assert_eq!(min_ref_mc_state.seqno(), zero_state_raw.min_ref_mc_seqno());
 
-    // Write persistent state
+    // Load zerostate from db
+    let loaded_state = storage
+        .shard_state_storage()
+        .load_state(zerostate.block_id())
+        .await?;
+
+    assert_eq!(zerostate.state(), loaded_state.state());
+    assert_eq!(zerostate.block_id(), loaded_state.block_id());
+    assert_eq!(zerostate.root_cell(), loaded_state.root_cell());
+
+    compare_cells(
+        zerostate.root_cell().as_ref(),
+        loaded_state.root_cell().as_ref(),
+    );
+
+    // Write persistent state to file
     let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
     assert!(persistent_state_keeper.current().is_none());
 
     storage
         .persistent_state_storage()
-        .prepare_persistent_states_dir(&state.block_id())
-        .unwrap();
+        .prepare_persistent_states_dir(&zerostate.block_id())?;
 
     storage
         .persistent_state_storage()
         .save_state(
-            &state.block_id(),
-            &state.block_id(),
-            zero_state.cell.repr_hash(),
+            &zerostate.block_id(),
+            &zerostate.block_id(),
+            zero_state_raw.cell.repr_hash(),
+        )
+        .await?;
+
+    // Check if state exists
+    let exist = storage
+        .persistent_state_storage()
+        .state_exists(&zerostate.block_id(), &zerostate.block_id());
+    assert_eq!(exist, true);
+
+    // Read persistent state
+    let offset = 0u64;
+    let max_size = 1_000_000u64;
+
+    let persistent_state_storage = storage.persistent_state_storage();
+    let persistent_state_data = persistent_state_storage
+        .read_state_part(
+            &zerostate.block_id(),
+            &zerostate.block_id(),
+            offset,
+            max_size,
         )
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Check state
+    let cell = Boc::decode(&persistent_state_data)?;
+    assert_eq!(&cell, zerostate.root_cell());
 
-    //println!("{:?}", zero_state.state);
-    //println!("{:?}", global_config);
+    // Clear files for test
+    tmp_dir.close()?;
 
-    //std::fs::remove_dir_all(root_path).unwrap()
+    Ok(())
 }

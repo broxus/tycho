@@ -1,19 +1,20 @@
 use std::fs;
-use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
 use tokio::time::Instant;
 
 use crate::db::Db;
 use crate::store::BlockHandleStorage;
-use crate::utils::CellWriter;
 use crate::FileDb;
+
+mod cell_writer;
 
 const KEY_BLOCK_UTIME_STEP: u32 = 86400;
 
@@ -55,7 +56,7 @@ impl PersistentStateStorage {
         let base_path = self.get_state_file_path(&mc_block_id, &block_id);
 
         tokio::task::spawn_blocking(move || {
-            let cell_writer = CellWriter::new(&db, &base_path);
+            let cell_writer = cell_writer::CellWriter::new(&db, &base_path);
             match cell_writer.write(&root_hash.0, is_cancelled) {
                 Ok(()) => {
                     tracing::info!(
@@ -69,7 +70,7 @@ impl PersistentStateStorage {
                         "writing persistent state failed: {e:?}"
                     );
 
-                    if let Err(e) = cell_writer.remove(&root_hash.0) {
+                    if let Err(e) = cell_writer.remove() {
                         tracing::error!(%block_id, "{e}")
                     }
                 }
@@ -85,39 +86,49 @@ impl PersistentStateStorage {
         block_id: &BlockId,
         offset: u64,
         size: u64,
-    ) -> Option<Vec<u8>> {
-        // TODO: cache file handles
-        let mut file_db = FileDb::open(self.get_state_file_path(mc_block_id, block_id)).ok()?;
+    ) -> Option<Bytes> {
+        let path = self.get_state_file_path(mc_block_id, block_id);
 
-        if let Err(e) = file_db.seek(SeekFrom::Start(offset)) {
-            tracing::error!("failed to seek state file offset: {e:?}");
-            return None;
-        }
+        tokio::task::spawn_blocking(move || {
+            // TODO: cache file handles
+            let mut file_db = FileDb::new(path, fs::OpenOptions::new().read(true)).ok()?;
 
-        // SAFETY: size must be checked
-        let mut result = BytesMut::with_capacity(size as usize);
-        let now = Instant::now();
-        loop {
-            match file_db.read(&mut result) {
-                Ok(bytes_read) => {
-                    tracing::debug!(bytes_read, "reading state file");
-                    if bytes_read == 0 || bytes_read == size as usize {
-                        break;
+            if let Err(e) = file_db.seek(SeekFrom::Start(offset)) {
+                tracing::error!("failed to seek state file offset: {e:?}");
+                return None;
+            }
+
+            let mut buf_reader = BufReader::new(file_db.file());
+
+            let mut result = BytesMut::zeroed(size as usize);
+            let mut result_cursor = 0;
+
+            let now = Instant::now();
+            loop {
+                match buf_reader.read(&mut result[result_cursor..]) {
+                    Ok(bytes_read) => {
+                        tracing::info!("Reading state file. Bytes read: {}", bytes_read);
+                        if bytes_read == 0 || bytes_read == size as usize {
+                            break;
+                        }
+                        result_cursor += bytes_read;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read state file. Err: {e:?}");
+                        return None;
                     }
                 }
-                Err(e) => {
-                    tracing::error!("failed to read state file. Err: {e:?}");
-                    return None;
-                }
             }
-        }
-        tracing::info!(
-            "Finished reading buffer after: {} ms",
-            now.elapsed().as_millis()
-        );
+            tracing::info!(
+                "Finished reading buffer after: {} ms",
+                now.elapsed().as_millis()
+            );
 
-        // TODO: use `Bytes`
-        Some(result.to_vec())
+            Some(result.freeze())
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     pub fn state_exists(&self, mc_block_id: &BlockId, block_id: &BlockId) -> bool {
@@ -139,6 +150,7 @@ impl PersistentStateStorage {
         self.storage_path
             .clone()
             .join(mc_block_id.seqno.to_string())
+            .join(block_id.root_hash.to_string())
     }
 
     pub fn cancel(&self) {

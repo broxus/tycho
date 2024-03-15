@@ -30,6 +30,8 @@ impl PersistentStateKeeper {
     }
 
     pub fn update(&self, block_handle: &Arc<BlockHandle>) -> Result<()> {
+        println!("UPDATE");
+
         if !self.initialized.load(Ordering::Acquire) {
             let prev_persistent_key_block = self
                 .block_handle_storage

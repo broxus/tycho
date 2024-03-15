@@ -4,7 +4,6 @@ use std::thread::available_parallelism;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
-use serde::{Deserialize, Serialize};
 use weedb::{Caches, WeeDb};
 
 pub use weedb::Stats as RocksdbStats;

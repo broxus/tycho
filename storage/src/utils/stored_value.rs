@@ -4,7 +4,6 @@ use smallvec::SmallVec;
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
-use tokio::io::AsyncReadExt;
 use tycho_util::byte_reader::ByteOrderRead;
 
 /// A trait for writing or reading data from a stack-allocated buffer

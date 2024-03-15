@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use everscale_types::cell::CellDescriptor;
 use smallvec::SmallVec;
 
 use tycho_util::FastHashMap;
@@ -29,8 +30,13 @@ impl<'a> CellWriter<'a> {
     #[allow(unused)]
     pub fn write(&self, root_hash: &[u8; 32], is_cancelled: Option<Arc<AtomicBool>>) -> Result<()> {
         // Open target file in advance to get the error immediately (if any)
-        let file_path = self.base_path.join(hex::encode(root_hash));
-        let file_db = FileDb::open(file_path)?;
+        let file_db = FileDb::new(
+            self.base_path,
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true),
+        )?;
 
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
@@ -99,13 +105,13 @@ impl<'a> CellWriter<'a> {
                 .file
                 .read_exact(&mut cell_buffer[..cell_size as usize])?;
 
-            let d1 = cell_buffer[0];
-            let d2 = cell_buffer[1];
-            let ref_count = (d1 & 7) as usize;
-            let data_size = ((d2 >> 1) + (d2 & 1 != 0) as u8) as usize;
+            let descriptor = CellDescriptor {
+                d1: cell_buffer[0],
+                d2: cell_buffer[1],
+            };
 
-            let ref_offset = 2 + data_size;
-            for r in 0..ref_count {
+            let ref_offset = 2 + descriptor.byte_len() as usize;
+            for r in 0..descriptor.reference_count() as usize {
                 let ref_offset = ref_offset + r * REF_SIZE;
                 let slice = &mut cell_buffer[ref_offset..ref_offset + REF_SIZE];
 
@@ -121,11 +127,10 @@ impl<'a> CellWriter<'a> {
         Ok(())
     }
 
-    pub fn remove(&self, root_hash: &[u8; 32]) -> Result<()> {
-        let file_path = self.base_path.join(hex::encode(root_hash));
-        fs::remove_file(&file_path).context(format!(
+    pub fn remove(&self) -> Result<()> {
+        fs::remove_file(&self.base_path).context(format!(
             "Failed to remove persistent state file {:?}",
-            file_path
+            self.base_path
         ))
     }
 }
@@ -150,18 +155,21 @@ fn write_rev_cells<P: AsRef<Path>>(
 
     struct LoadedCell {
         hash: [u8; 32],
-        d1: u8,
-        d2: u8,
+        descriptor: CellDescriptor,
         data: SmallVec<[u8; 128]>,
         indices: SmallVec<[u32; 4]>,
     }
 
-    let file_path = base_path
-        .as_ref()
-        .join(hex::encode(root_hash))
-        .with_extension("temp");
+    let file_path = base_path.as_ref().with_extension("temp");
 
-    let file_db = FileDb::open(&file_path)?;
+    let file_db = FileDb::new(
+        &file_path,
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )?;
     let remove_on_drop = RemoveOnDrop(file_path);
 
     let raw = db.raw().as_ref();
@@ -197,12 +205,17 @@ fn write_rev_cells<P: AsRef<Path>>(
                     .get_pinned_cf_opt(&cf, hash, read_options)?
                     .ok_or(CellWriterError::CellNotFound)?;
 
-                let value = value.as_ref();
+                let value = match crate::refcount::strip_refcount(value.as_ref()) {
+                    Some(bytes) => bytes,
+                    None => {
+                        return Err(CellWriterError::CellNotFound.into());
+                    }
+                };
                 if value.is_empty() {
                     return Err(CellWriterError::InvalidCell.into());
                 }
 
-                let (d1, d2, data) = deserialize_cell(&value[1..], &mut references_buffer)
+                let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
                     .ok_or(CellWriterError::InvalidCell)?;
 
                 let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
@@ -242,8 +255,7 @@ fn write_rev_cells<P: AsRef<Path>>(
                     index,
                     StackItem::Loaded(LoadedCell {
                         hash,
-                        d1,
-                        d2,
+                        descriptor,
                         data: SmallVec::from_slice(data),
                         indices: reference_indices,
                     }),
@@ -283,7 +295,7 @@ fn write_rev_cells<P: AsRef<Path>>(
                 cell_sizes.push(cell_size as u8);
                 total_size += cell_size as u64;
 
-                temp_file_buffer.write_all(&[loaded.d1, loaded.d2])?;
+                temp_file_buffer.write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
                 temp_file_buffer.write_all(&loaded.data)?;
                 for index in loaded.indices {
                     let index = remap.get(&index).with_context(|| {
@@ -309,56 +321,30 @@ fn write_rev_cells<P: AsRef<Path>>(
 fn deserialize_cell<'a>(
     value: &'a [u8],
     references_buffer: &mut SmallVec<[[u8; 32]; 4]>,
-) -> Option<(u8, u8, &'a [u8])> {
+) -> Option<(CellDescriptor, &'a [u8])> {
     let mut index = Index {
         value_len: value.len(),
         offset: 0,
     };
 
-    index.require(3)?;
-    let cell_type = value[*index];
-    index.advance(1);
-    let bit_length = u16::from_le_bytes((&value[*index..*index + 2]).try_into().unwrap());
+    index.require(4)?;
+    let mut descriptor = CellDescriptor::new([value[*index], value[*index + 1]]);
+    descriptor.d1 &= !CellDescriptor::STORE_HASHES_MASK;
+
+    index.advance(2);
+    let bit_length = u16::from_le_bytes([value[*index], value[*index + 1]]);
     index.advance(2);
 
-    let d2 = (((bit_length >> 2) as u8) & !0b1) | ((bit_length % 8 != 0) as u8);
-
-    // TODO: Replace with `(big_length + 7) / 8`
-    let data_len = ((d2 >> 1) + u8::from(d2 & 1 != 0)) as usize;
+    let data_len = descriptor.byte_len() as usize;
     index.require(data_len)?;
     let data = &value[*index..*index + data_len];
+    index.advance(data_len);
 
-    // NOTE: additional byte is required here due to internal structure
-    index.advance(((bit_length + 8) / 8) as usize);
+    assert_eq!((bit_length as usize + 7) / 8, data_len);
 
-    index.require(1)?;
-    let level_mask = value[*index];
-    // skip store_hashes
-    index.advance(2);
+    index.advance((32 + 2) * descriptor.hash_count() as usize);
 
-    index.require(2)?;
-    let has_hashes = value[*index];
-    index.advance(1);
-    if has_hashes != 0 {
-        let count = value[*index];
-        index.advance(1 + (count * 32) as usize);
-    }
-
-    index.require(2)?;
-    let has_depths = value[*index];
-    index.advance(1);
-    if has_depths != 0 {
-        let count = value[*index];
-        index.advance(1 + (count * 2) as usize);
-    }
-
-    index.require(1)?;
-    let reference_count = value[*index];
-    index.advance(1);
-
-    let d1 = reference_count | (((cell_type != 0x01) as u8) << 3) | (level_mask << 5);
-
-    for _ in 0..reference_count {
+    for _ in 0..descriptor.reference_count() {
         index.require(32)?;
         let mut hash = [0; 32];
         hash.copy_from_slice(&value[*index..*index + 32]);
@@ -366,7 +352,7 @@ fn deserialize_cell<'a>(
         index.advance(32);
     }
 
-    Some((d1, d2, data))
+    Some((descriptor, data))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -411,7 +397,7 @@ struct Index {
 impl Index {
     #[inline(always)]
     fn require(&self, len: usize) -> Option<()> {
-        if self.offset + len < self.value_len {
+        if self.offset + len <= self.value_len {
             Some(())
         } else {
             None

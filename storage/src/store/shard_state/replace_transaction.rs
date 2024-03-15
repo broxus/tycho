@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,7 +13,6 @@ use crate::db::*;
 use crate::utils::*;
 
 use tycho_block_util::state::*;
-use tycho_block_util::*;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
 
@@ -61,8 +59,6 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         packet: Vec<u8>,
         progress_bar: &mut ProgressBar,
     ) -> Result<bool> {
-        use std::io::Write;
-
         let cells_file = self.file_ctx.cells_file()?;
 
         self.reader.set_next_packet(packet);
@@ -120,7 +116,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         Ok(true)
     }
 
-    pub async fn finalize(
+    pub fn finalize(
         mut self,
         block_id: BlockId,
         progress_bar: &mut ProgressBar,
@@ -214,7 +210,6 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             }
 
             progress_bar.set_progress((total_size - file_pos) as u64);
-            tokio::task::yield_now().await;
         }
 
         if batch_len > 0 {
@@ -253,7 +248,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         &self,
         ctx: &mut FinalizationContext<'_>,
         cell_index: u32,
-        mut cell: RawCell<'_>,
+        cell: RawCell<'_>,
     ) -> Result<()> {
         use sha2::{Digest, Sha256};
 
@@ -310,6 +305,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         };
 
         let mut max_depths = [0u16; 4];
+        let mut temp_descriptor = cell.descriptor;
         for i in 0..hash_count {
             let mut hasher = Sha256::new();
 
@@ -319,9 +315,9 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 LevelMask::from_level(i)
             };
 
-            cell.descriptor.d1 &= !(CellDescriptor::LEVEL_MASK | CellDescriptor::STORE_HASHES_MASK);
-            cell.descriptor.d1 |= u8::from(level_mask) << 5;
-            hasher.update([cell.descriptor.d1, cell.descriptor.d2]);
+            temp_descriptor.d1 &= !(CellDescriptor::LEVEL_MASK | CellDescriptor::STORE_HASHES_MASK);
+            temp_descriptor.d1 |= u8::from(level_mask) << 5;
+            hasher.update([temp_descriptor.d1, temp_descriptor.d2]);
 
             if i == 0 {
                 hasher.update(cell.data);
@@ -503,7 +499,14 @@ impl FilesContext {
         let cells_path = root_path.as_ref().join(format!("state_cells_{block_id}"));
         let hashes_path = root_path.as_ref().join(format!("state_hashes_{block_id}"));
 
-        let cells_file = Some(FileDb::open(&cells_path)?);
+        let cells_file = Some(FileDb::new(
+            &cells_path,
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .read(true),
+        )?);
 
         Ok(Self {
             cells_file,

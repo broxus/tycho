@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -7,6 +6,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
+use tycho_block_util::block::*;
+use tycho_block_util::state::*;
 
 use self::cell_storage::*;
 use self::replace_transaction::ShardStateReplaceTransaction;
@@ -14,9 +15,6 @@ use self::replace_transaction::ShardStateReplaceTransaction;
 use crate::db::*;
 use crate::utils::*;
 use crate::{models::BlockHandle, BlockHandleStorage, BlockStorage};
-
-use tycho_block_util::block::*;
-use tycho_block_util::state::*;
 
 mod cell_storage;
 mod entries_buffer;

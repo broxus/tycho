@@ -197,6 +197,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "base64"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9475866fec1451be56a3c2400fd081ff546538961565ccb5b7142cbd22bc7a51"
+
+[[package]]
 name = "base64ct"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -692,6 +698,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "exponential-backoff"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47f78d87d930eee4b5686a2ab032de499c72bd1e954b84262bb03492a0f932cd"
+dependencies = [
+ "rand",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1133,7 +1148,7 @@ version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b8fcc794035347fb64beda2d3b462595dd2753e3f268d89c5aae77e8cf2c310"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "serde",
 ]
 
@@ -1450,7 +1465,7 @@ checksum = "86b83b8b9847f9bf95ef68afb0b8e6cdb80f498442f5179a29fad448fcc1eaea"
 dependencies = [
  "aho-corasick",
  "memchr",
- "regex-syntax 0.8.3",
+ "regex-syntax 0.8.2",
 ]
 
 [[package]]
@@ -1949,9 +1964,9 @@ dependencies = [
 
 [[package]]
 name = "tl-proto-proc"
-version = "0.4.3"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3f51de4865e0618b187c2b790c137de938d01fe5510116b959387b6133c20ac"
+checksum = "5a3eaf6822a3ce34a40564dd3078a915d35c3c5fd1f6b3d81eab991e6d00a0fb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2184,7 +2199,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "argh",
- "base64",
+ "base64 0.21.7",
  "bytes",
  "castaway",
  "dashmap",
@@ -2257,6 +2272,7 @@ dependencies = [
  "sha2",
  "smallvec",
  "sysinfo",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

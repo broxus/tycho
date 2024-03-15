@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
@@ -17,7 +18,14 @@ impl MappedFile {
     where
         P: AsRef<Path>,
     {
-        let file_db = FileDb::open(path)?;
+        let file_db = FileDb::new(
+            path,
+            fs::OpenOptions::new()
+                .write(true)
+                .read(true)
+                .truncate(true)
+                .create(true),
+        )?;
         file_db.file.set_len(length as u64)?;
 
         Self::from_existing_file(file_db)

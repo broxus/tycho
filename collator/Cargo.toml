@@ -10,7 +10,7 @@ description = "A collator node."
 # local deps
 tycho-core = { path = "../core", version = "=0.0.1" }
 tycho-consensus = { path = "../consensus", version = "=0.0.1" }
-tycho-storage = { path = "../storage", version = "=0.1.0" }
+tycho-storage = { path = "../storage", version = "=0.0.1" }
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [lints]

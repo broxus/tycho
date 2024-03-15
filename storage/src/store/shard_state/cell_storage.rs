@@ -427,6 +427,7 @@ impl StorageCell {
         target.extend_from_slice(&[descriptor.d1, descriptor.d2]);
         target.extend_from_slice(&cell.bit_len().to_le_bytes());
         target.extend_from_slice(cell.data());
+        assert_eq!(cell.data().len(), descriptor.byte_len() as usize);
 
         for i in 0..descriptor.hash_count() {
             target.extend_from_slice(cell.hash(i).as_array());
@@ -616,7 +617,6 @@ impl CellImpl for StorageCell {
 
 impl Drop for StorageCell {
     fn drop(&mut self) {
-        println!("DROPPING");
         self.cell_storage.drop_cell(DynCell::repr_hash(self));
         for i in 0..4 {
             let state = self.reference_states[i].load(Ordering::Acquire);
