@@ -7,7 +7,6 @@ use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
 
 use crate::{
     collator::Collator,
-    manager::{block_operations::build_block_stuff_for_sync, types::SendSyncStatus},
     mempool::MempoolAdapter,
     method_to_async_task_closure,
     msg_queue::MessageQueueAdapter,
@@ -22,10 +21,11 @@ use crate::{
 };
 
 use super::{
-    block_operations::find_us_in_collators_set,
     types::{
-        BlockCandidateContainer, BlockCandidateToSend, McBlockSubgraphToSend, ShardStateStuffExt,
+        BlockCandidateContainer, BlockCandidateToSend, McBlockSubgraphToSend, SendSyncStatus,
+        ShardStateStuffExt,
     },
+    utils::{build_block_stuff_for_sync, find_us_in_collators_set},
 };
 
 pub enum CollationProcessorTaskResult {
