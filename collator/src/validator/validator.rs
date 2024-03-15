@@ -3,13 +3,15 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use everscale_types::models::BlockId;
+
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
     types::CollationSessionInfo,
-    types::{BlockCandidate, ValidatedBlock},
+    types::ValidatedBlock,
     utils::async_queued_dispatcher::{
-        AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE,
+        AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
     },
 };
 
@@ -36,11 +38,14 @@ pub trait Validator<ST>: Send + Sync + 'static
 where
     ST: StateNodeAdapter,
 {
-    fn create(listener: Arc<dyn ValidatorEventListener>, state_node_adapter: Arc<ST>) -> Self;
+    fn create(
+        listener: Arc<dyn ValidatorEventListener>,
+        state_node_adapter: Arc<ST>, /*, overlay_adapter: Arc<OA> */
+    ) -> Self;
     /// Enqueue block candidate validation task
     async fn enqueue_candidate_validation(
         &self,
-        candidate: BlockCandidate,
+        candidate: BlockId,
         session_info: Arc<CollationSessionInfo>,
     ) -> Result<()>;
 }
@@ -50,6 +55,7 @@ pub(crate) struct ValidatorStdImpl<W, ST>
 where
     W: ValidatorProcessor<ST>,
     ST: StateNodeAdapter,
+    // OA: OverlayAdapter,
 {
     _marker_state_node_adapter: std::marker::PhantomData<ST>,
     dispatcher: Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>,
@@ -60,11 +66,15 @@ impl<W, ST> Validator<ST> for ValidatorStdImpl<W, ST>
 where
     W: ValidatorProcessor<ST>,
     ST: StateNodeAdapter,
+    // OA: OverlayAdapter
 {
-    fn create(listener: Arc<dyn ValidatorEventListener>, state_node_adapter: Arc<ST>) -> Self {
+    fn create(
+        listener: Arc<dyn ValidatorEventListener>,
+        state_node_adapter: Arc<ST>, /*, overlay_adapter: Arc<OA>*/
+    ) -> Self {
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDART_DISPATCHER_QUEUE_BUFFER_SIZE);
+            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         // create validation processor and run dispatcher for own tasks queue
@@ -80,7 +90,7 @@ where
 
     async fn enqueue_candidate_validation(
         &self,
-        candidate: BlockCandidate,
+        candidate: BlockId,
         session_info: Arc<CollationSessionInfo>,
     ) -> Result<()> {
         self.dispatcher

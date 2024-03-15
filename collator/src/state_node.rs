@@ -3,16 +3,15 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
+use everscale_types::models::BlockId;
+
 use tycho_block_util::state::ShardStateStuff;
 
 use crate::{
     impl_enum_try_into, method_to_async_task_closure,
-    types::{
-        ext_types::{BlockHandle, BlockIdExt},
-        BlockStuff, BlockStuffForSync,
-    },
+    types::{ext_types::BlockHandle, BlockStuff, BlockStuffForSync},
     utils::{
-        async_queued_dispatcher::{AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE},
+        async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         task_descr::TaskResponseReceiver,
     },
 };
@@ -50,13 +49,13 @@ where
 #[async_trait]
 pub trait StateNodeEventEmitter {
     /// When new masterchain block received from blockchain
-    async fn on_mc_block_event(&self, mc_block_id: BlockIdExt);
+    async fn on_mc_block_event(&self, mc_block_id: BlockId);
 }
 
 #[async_trait]
 pub trait StateNodeEventListener: Send + Sync {
     /// Process new received masterchain block from blockchain
-    async fn on_mc_block(&self, mc_block_id: BlockIdExt) -> Result<()>;
+    async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()>;
 }
 
 // ADAPTER
@@ -64,15 +63,15 @@ pub trait StateNodeEventListener: Send + Sync {
 #[async_trait]
 pub trait StateNodeAdapter: Send + Sync + 'static {
     fn create(listener: Arc<dyn StateNodeEventListener>) -> Self;
-    async fn get_last_applied_mc_block_id(&self) -> Result<BlockIdExt>;
+    async fn get_last_applied_mc_block_id(&self) -> Result<BlockId>;
     async fn request_state(
         &self,
-        block_id: BlockIdExt,
+        block_id: BlockId,
     ) -> Result<StateNodeTaskResponseReceiver<Arc<ShardStateStuff>>>;
-    async fn get_block(&self, block_id: BlockIdExt) -> Result<Option<Arc<BlockStuff>>>;
+    async fn get_block(&self, block_id: BlockId) -> Result<Option<Arc<BlockStuff>>>;
     async fn request_block(
         &self,
-        block_id: BlockIdExt,
+        block_id: BlockId,
     ) -> Result<StateNodeTaskResponseReceiver<Option<Arc<BlockStuff>>>>;
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<Arc<BlockHandle>>;
 }
@@ -84,7 +83,7 @@ pub struct StateNodeAdapterStdImpl {
 
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
-    async fn get_last_applied_mc_block_id(&self) -> Result<BlockIdExt> {
+    async fn get_last_applied_mc_block_id(&self) -> Result<BlockId> {
         self.dispatcher
             .execute_task(method_to_async_task_closure!(get_last_applied_mc_block_id,))
             .await
@@ -95,7 +94,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             listener: listener.clone(),
         };
         let dispatcher =
-            AsyncQueuedDispatcher::create(processor, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE);
+            AsyncQueuedDispatcher::create(processor, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         Self {
             dispatcher: Arc::new(dispatcher),
             listener,
@@ -103,7 +102,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
     async fn request_state(
         &self,
-        block_id: BlockIdExt,
+        block_id: BlockId,
     ) -> Result<StateNodeTaskResponseReceiver<Arc<ShardStateStuff>>> {
         let receiver = self
             .dispatcher
@@ -112,7 +111,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         Ok(StateNodeTaskResponseReceiver::create(receiver))
     }
-    async fn get_block(&self, block_id: BlockIdExt) -> Result<Option<Arc<BlockStuff>>> {
+    async fn get_block(&self, block_id: BlockId) -> Result<Option<Arc<BlockStuff>>> {
         self.dispatcher
             .execute_task(method_to_async_task_closure!(get_block, block_id))
             .await
@@ -120,7 +119,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
     async fn request_block(
         &self,
-        block_id: BlockIdExt,
+        block_id: BlockId,
     ) -> Result<StateNodeTaskResponseReceiver<Option<Arc<BlockStuff>>>> {
         let receiver = self
             .dispatcher
@@ -145,13 +144,13 @@ struct StateNodeProcessor {
 
 pub enum StateNodeTaskResult {
     Void,
-    BlockId(BlockIdExt),
+    BlockId(BlockId),
     ShardState(Arc<ShardStateStuff>),
     Block(Option<Arc<BlockStuff>>),
     BlockHandle(Arc<BlockHandle>),
 }
 
-impl_enum_try_into!(StateNodeTaskResult, BlockId, BlockIdExt);
+impl_enum_try_into!(StateNodeTaskResult, BlockId, BlockId);
 impl_enum_try_into!(StateNodeTaskResult, ShardState, Arc<ShardStateStuff>);
 impl_enum_try_into!(StateNodeTaskResult, Block, Option<Arc<BlockStuff>>);
 impl_enum_try_into!(StateNodeTaskResult, BlockHandle, Arc<BlockHandle>);
@@ -162,10 +161,10 @@ impl StateNodeProcessor {
     async fn get_last_applied_mc_block_id(&self) -> Result<StateNodeTaskResult> {
         todo!()
     }
-    async fn get_state(&self, block_id: BlockIdExt) -> Result<StateNodeTaskResult> {
+    async fn get_state(&self, block_id: BlockId) -> Result<StateNodeTaskResult> {
         todo!()
     }
-    async fn get_block(&self, block_id: BlockIdExt) -> Result<StateNodeTaskResult> {
+    async fn get_block(&self, block_id: BlockId) -> Result<StateNodeTaskResult> {
         todo!()
     }
     async fn accept_block(&mut self, block: BlockStuffForSync) -> Result<StateNodeTaskResult> {

@@ -12,9 +12,8 @@ use crate::{
     msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
     types::{
-        ext_types::{BlockHashId, BlockIdExt},
-        BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-        CollationSessionInfo, ValidatedBlock,
+        ext_types::BlockHashId, BlockCandidate, BlockCollationResult, CollationConfig,
+        CollationSessionId, CollationSessionInfo, ValidatedBlock,
     },
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
     validator::Validator,
@@ -100,7 +99,7 @@ where
     /// 3. Enqueue collation sessions refresh task
     pub async fn process_mc_block_from_bc(
         &self,
-        mc_block_id: BlockIdExt,
+        mc_block_id: BlockId,
     ) -> Result<CollationProcessorTaskResult> {
         // request mc state for this master block
         let receiver = self.state_node_adapter.request_state(mc_block_id).await?;
@@ -328,18 +327,17 @@ where
         self.validator
             .enqueue_candidate_validation(
                 //TODO: pass only block id when the Validator interface is changed
-                candidate,
+                *candidate.block_id(),
                 session_info,
             )
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block
-        if !candidate_id.shard_id.is_masterchain() {
+        if !candidate_id.shard.is_masterchain() {
             if candidate_chain_time - self.last_mc_block_chain_time()
                 > self.config.mc_block_min_interval_ms
             {
-                self.enqueue_mc_block_collation(Some(candidate_id.clone()))
-                    .await?;
+                self.enqueue_mc_block_collation(Some(candidate_id)).await?;
             }
         } else {
             // store last master block chain time
@@ -347,7 +345,7 @@ where
         }
 
         // execute master block processing routines
-        if candidate_id.shard_id.is_masterchain() {
+        if candidate_id.shard.is_masterchain() {
             let new_mc_state =
                 ShardStateStuff::from_state(candidate_id, collation_result.new_state)?;
 
@@ -378,7 +376,7 @@ where
     /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation
     async fn enqueue_mc_block_collation(
         &self,
-        trigger_shard_block_id: Option<BlockIdExt>,
+        trigger_shard_block_id: Option<BlockId>,
     ) -> Result<()> {
         //TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
         //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
@@ -402,13 +400,13 @@ where
             panic!("Block has collected more than 1/3 invalid signatures! Unable to continue collation process!")
         }
 
-        let block_id = validated_block.id().clone();
+        let block_id = *validated_block.id();
 
         // update block in cache with signatures info
         self.store_block_validation_result(validated_block)?;
 
         // process valid block
-        if block_id.shard_id.is_masterchain() {
+        if block_id.shard.is_masterchain() {
             self.process_valid_master_block(&block_id).await?;
         } else {
             self.process_valid_shard_block(&block_id).await?;
@@ -449,7 +447,7 @@ where
     /// Process validated and valid master block
     /// 1. Check if all included shard blocks validated, return if not
     /// 2. Send master and shard blocks to state node to sync
-    async fn process_valid_master_block(&mut self, block_id: &BlockIdExt) -> Result<()> {
+    async fn process_valid_master_block(&mut self, block_id: &BlockId) -> Result<()> {
         // extract master block with all shard blocks if valid, and process them
         if let Some(mc_block_subgraph_set) = self.extract_mc_block_subgraph_if_valid(block_id) {
             let mut blocks_to_send = mc_block_subgraph_set.shard_blocks;
@@ -477,7 +475,7 @@ where
 
     /// Process validated and valid shard block
     /// 1. (TODO) Try find master block info and execute [`CollationProcessor::process_valid_master_block`]
-    async fn process_valid_shard_block(&mut self, block_id: &BlockIdExt) -> Result<()> {
+    async fn process_valid_shard_block(&mut self, block_id: &BlockId) -> Result<()> {
         todo!()
         // if let Some(mc_block_container) = self.travers_to_containing_mc_block_if_exists(block_id) {
         //     todo!()
@@ -489,7 +487,7 @@ where
     /// Then extract and return them if all are valid
     fn extract_mc_block_subgraph_if_valid(
         &mut self,
-        block_id: &BlockIdExt,
+        block_id: &BlockId,
     ) -> Option<McBlockSubgraphToSend> {
         // 1. Find current master block
         // 2. Find prev master block

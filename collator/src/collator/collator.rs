@@ -11,7 +11,7 @@ use crate::{
     state_node::StateNodeAdapter,
     types::{BlockCollationResult, CollationSessionId},
     utils::async_queued_dispatcher::{
-        AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE,
+        AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
     },
 };
 
@@ -79,7 +79,7 @@ where
     ) -> Self {
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDART_DISPATCHER_QUEUE_BUFFER_SIZE);
+            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         // create processor and run dispatcher for own tasks queue

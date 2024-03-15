@@ -1,11 +1,9 @@
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::ShardIdent;
+use everscale_types::models::{BlockId, ShardIdent};
 
 use tycho_block_util::block::ValidatorSubsetInfo;
 
-use self::ext_types::{
-    Block, BlockIdExt, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256,
-};
+use self::ext_types::{Block, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256};
 
 pub struct CollationConfig {
     pub key_pair: KeyPair,
@@ -19,18 +17,18 @@ pub struct BlockCollationResult {
 
 #[derive(Clone)]
 pub(crate) struct BlockCandidate {
-    block_id: BlockIdExt,
-    prev_blocks_ids: Vec<BlockIdExt>,
+    block_id: BlockId,
+    prev_blocks_ids: Vec<BlockId>,
     data: Vec<u8>,
     collated_data: Vec<u8>,
     collated_file_hash: UInt256,
 }
 impl BlockCandidate {
-    pub fn block_id(&self) -> &BlockIdExt {
+    pub fn block_id(&self) -> &BlockId {
         &self.block_id
     }
     pub fn shard_id(&self) -> &ShardIdent {
-        &self.block_id.shard_id
+        &self.block_id.shard
     }
     pub fn own_signature(&self) -> BlockSignature {
         todo!()
@@ -51,11 +49,11 @@ impl BlockSignatures {
 }
 
 pub struct ValidatedBlock {
-    block_id: BlockIdExt,
+    block_id: BlockId,
     signatures: BlockSignatures,
 }
 impl ValidatedBlock {
-    pub fn id(&self) -> &BlockIdExt {
+    pub fn id(&self) -> &BlockId {
         &self.block_id
     }
     pub fn is_valid(&self) -> bool {
@@ -64,13 +62,13 @@ impl ValidatedBlock {
 }
 
 pub struct BlockStuff {
-    id: BlockIdExt,
+    id: BlockId,
     block: Option<Block>,
     // other stuff...
 }
 
 pub struct BlockProofStuff {
-    id: BlockIdExt,
+    id: BlockId,
     proof: BlockProof,
     // other stuff...
 }
@@ -78,7 +76,7 @@ pub struct BlockProofStuff {
 pub struct BlockStuffForSync {
     pub block_stuff: BlockStuff,
     pub signatures: BlockSignatures,
-    pub prev_blocks_ids: Vec<BlockIdExt>,
+    pub prev_blocks_ids: Vec<BlockId>,
 }
 
 /// (ShardIdent, seqno)
@@ -115,27 +113,6 @@ pub(crate) mod ext_types {
         pub struct Block;
         pub struct BlockProof;
         #[derive(Clone)]
-        pub struct BlockIdExt {
-            pub shard_id: ShardIdent,
-            pub seq_no: u32,
-            pub root_hash: HashBytes,
-            pub file_hash: HashBytes,
-        }
-        impl BlockIdExt {
-            pub const fn with_params(
-                shard_id: ShardIdent,
-                seq_no: u32,
-                root_hash: HashBytes,
-                file_hash: HashBytes,
-            ) -> Self {
-                BlockIdExt {
-                    shard_id,
-                    seq_no,
-                    root_hash,
-                    file_hash,
-                }
-            }
-        }
         pub struct ShardAccounts;
         pub struct Cell;
         pub struct CurrencyCollection;

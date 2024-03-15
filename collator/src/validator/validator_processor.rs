@@ -3,15 +3,12 @@ use std::{future::Future, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 
-use everscale_types::models::{ShardIdent, ValidatorDescription};
+use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescription};
 
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
-    types::{
-        ext_types::{BlockIdExt, BlockSignature, ValidatorDescr, ValidatorId},
-        BlockCandidate, BlockStuff, CollationSessionInfo, ValidatedBlock,
-    },
+    types::{BlockStuff, CollationSessionInfo, ValidatedBlock},
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
 };
 
@@ -22,10 +19,6 @@ use super::{ValidatorEventEmitter, ValidatorEventListener};
 pub enum ValidatorTaskResult {
     Void,
 }
-
-//impl_enum_try_into!(ValidatorTaskResult, $variant, $T);
-
-//type ValidatorTaskResponseReceiver<T> = TaskResponseReceiver<ValidatorTaskResult, T>;
 
 #[allow(private_bounds)]
 #[async_trait]
@@ -44,10 +37,12 @@ where
 
     fn get_state_node_adapter(&self) -> Arc<ST>;
 
+    // fn get_network_adapter(&self) -> Arc<NA>;
+
     /// Start block candidate validation process
     async fn start_candidate_validation(
         &self,
-        cadidate: BlockCandidate,
+        candidate_id: BlockId,
         session_info: Arc<CollationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
         //TODO: we may received candidate signatures before with signature requests from neighbor collators
@@ -56,7 +51,7 @@ where
         // possibly we are slow and 2/3+1 fast nodes already signed this block
         let receiver = self
             .get_state_node_adapter()
-            .request_block(cadidate.block_id().clone())
+            .request_block(candidate_id)
             .await?;
 
         let dispatcher = self.get_dispatcher();
@@ -67,7 +62,7 @@ where
                     .clone()
                     .enqueue_task(method_to_async_task_closure!(
                         validate_candidate_by_block_from_bc,
-                        cadidate,
+                        candidate_id,
                         block_from_bc
                     ))
                     .await;
@@ -77,7 +72,8 @@ where
                 dispatcher
                     .enqueue_task(method_to_async_task_closure!(
                         request_candidate_signatures,
-                        cadidate,
+                        candidate_id,
+                        Signature::default(),
                         session_info
                     ))
                     .await;
@@ -89,28 +85,36 @@ where
         Ok(ValidatorTaskResult::Void)
     }
 
+    async fn stop_candidate_validation(
+        &self,
+        candidate_id: BlockId,
+    ) -> Result<ValidatorTaskResult> {
+        Ok(ValidatorTaskResult::Void)
+    }
+
     /// Send signature request to each neighbor passing callback closure
     /// that queue signatures responses processing
     async fn request_candidate_signatures(
         &mut self,
-        candidate: BlockCandidate,
+        candidate_id: BlockId,
+        own_signature: Signature,
         session_info: Arc<CollationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
         for collator_descr in session_info.collators().validators.iter() {
             let dispatcher = self.get_dispatcher();
-            let candidate = candidate.clone();
+            let candidate_id = candidate_id;
             Self::request_cadidate_signature_from_neighbor(
                 collator_descr,
-                candidate.block_id().shard_id.clone(),
-                candidate.block_id().seq_no,
-                candidate.own_signature(),
-                |collator_id, his_signature| async move {
+                candidate_id.shard,
+                candidate_id.seqno,
+                own_signature,
+                move |collator_descr, his_signature| async move {
                     dispatcher
                         .enqueue_task(method_to_async_task_closure!(
                             process_candidate_signature_response,
-                            collator_id,
+                            collator_descr,
                             his_signature,
-                            candidate
+                            candidate_id
                         ))
                         .await
                 },
@@ -122,12 +126,12 @@ where
 
     async fn process_candidate_signature_response(
         &mut self,
-        collator_id: ValidatorId,
-        his_signature: BlockSignature,
-        candidate: BlockCandidate,
+        collator_id: ValidatorDescription,
+        his_signature: Signature,
+        candidate_id: BlockId,
     ) -> Result<ValidatorTaskResult> {
         // skip signature if candidate already validated (does not matter if it valid or not)
-        if self.is_candidate_validated(candidate.block_id()) {
+        if self.is_candidate_validated(&candidate_id) {
             return Ok(ValidatorTaskResult::Void);
         }
 
@@ -141,26 +145,30 @@ where
         };
 
         // check signature and update candidate score
-        let signature_is_valid = Self::check_signature(&candidate, &his_signature, neighbor)?;
-        let neighbor_id = neighbor.id();
-        self.update_candidate_score(candidate, signature_is_valid, his_signature, neighbor_id)
-            .await?;
+        let signature_is_valid = Self::check_signature(&candidate_id, &his_signature, neighbor)?;
+        self.update_candidate_score(
+            candidate_id,
+            signature_is_valid,
+            his_signature,
+            neighbor.clone(),
+        )
+        .await?;
 
         Ok(ValidatorTaskResult::Void)
     }
 
     async fn update_candidate_score(
         &mut self,
-        candidate: BlockCandidate,
+        candidate_id: BlockId,
         signature_is_valid: bool,
-        his_signature: BlockSignature,
-        neighbor_id: ValidatorId,
+        his_signature: Signature,
+        neighbor: ValidatorDescription,
     ) -> Result<()> {
         if let Some(validated_block) = self.append_candidate_signature_and_return_if_validated(
-            candidate,
+            candidate_id,
             signature_is_valid,
             his_signature,
-            neighbor_id,
+            neighbor,
         ) {
             self.on_block_validated_event(validated_block).await?;
         }
@@ -174,12 +182,12 @@ where
 #[async_trait]
 pub(crate) trait ValidatorProcessorSpecific<ST>: Sized {
     /// Find a neighbor info by id in local sessions info
-    fn find_neighbor(&mut self, neighbor_id: &ValidatorId) -> Option<&ValidatorDescr>;
+    fn find_neighbor(&self, neighbor: &ValidatorDescription) -> Option<&ValidatorDescription>;
 
     /// Use signatures of existing block from blockchain to validate candidate
     async fn validate_candidate_by_block_from_bc(
         &mut self,
-        cadidate: BlockCandidate,
+        candidate_id: BlockId,
         block_from_bc: Arc<BlockStuff>,
     ) -> Result<ValidatorTaskResult>;
 
@@ -189,26 +197,26 @@ pub(crate) trait ValidatorProcessorSpecific<ST>: Sized {
         collator_descr: &ValidatorDescription,
         shard_id: ShardIdent,
         seq_no: u32,
-        own_signature: BlockSignature,
-        callback: impl FnOnce(ValidatorId, BlockSignature) -> Fut + Send + 'static,
+        own_signature: Signature,
+        callback: impl FnOnce(ValidatorDescription, Signature) -> Fut + Send + 'static,
     ) -> Result<()>
     where
         Fut: Future<Output = Result<()>> + Send;
 
     fn check_signature(
-        candidate: &BlockCandidate,
-        his_signature: &BlockSignature,
-        neighbor: &ValidatorDescr,
+        candidate_id: &BlockId,
+        his_signature: &Signature,
+        neighbor: &ValidatorDescription,
     ) -> Result<bool>;
 
-    fn is_candidate_validated(&self, block_id: &BlockIdExt) -> bool;
+    fn is_candidate_validated(&self, block_id: &BlockId) -> bool;
 
     fn append_candidate_signature_and_return_if_validated(
         &mut self,
-        cadidate: BlockCandidate,
+        candidate_id: BlockId,
         signature_is_valid: bool,
-        his_signature: BlockSignature,
-        neighbor_id: ValidatorId,
+        his_signature: Signature,
+        neighbor: ValidatorDescription,
     ) -> Option<ValidatedBlock>;
 }
 
@@ -218,6 +226,7 @@ where
 {
     dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
     listener: Arc<dyn ValidatorEventListener>,
+    // signatures: RwLock<HashMap<BlockId, HashMap<ValidatorDescription, Signature>>>,
     state_node_adapter: Arc<ST>,
 }
 
@@ -264,7 +273,7 @@ where
 {
     async fn validate_candidate_by_block_from_bc(
         &mut self,
-        cadidate: BlockCandidate,
+        candidate_id: BlockId,
         block_from_bc: Arc<BlockStuff>,
     ) -> Result<ValidatorTaskResult> {
         todo!()
@@ -274,8 +283,8 @@ where
         collator_descr: &ValidatorDescription,
         shard_id: ShardIdent,
         seq_no: u32,
-        own_signature: BlockSignature,
-        callback: impl FnOnce(ValidatorId, BlockSignature) -> Fut + Send + 'static,
+        own_signature: Signature,
+        callback: impl FnOnce(ValidatorDescription, Signature) -> Fut + Send + 'static,
     ) -> Result<()>
     where
         Fut: Future<Output = Result<()>> + Send,
@@ -283,28 +292,28 @@ where
         todo!()
     }
 
-    fn find_neighbor(&mut self, neighbor_id: &ValidatorId) -> Option<&ValidatorDescr> {
+    fn find_neighbor(&self, neighbor: &ValidatorDescription) -> Option<&ValidatorDescription> {
         todo!()
     }
 
     fn check_signature(
-        candidate: &BlockCandidate,
-        his_signature: &BlockSignature,
-        neighbor: &ValidatorDescr,
+        candidate_id: &BlockId,
+        his_signature: &Signature,
+        neighbor: &ValidatorDescription,
     ) -> Result<bool> {
         todo!()
     }
 
-    fn is_candidate_validated(&self, block_id: &BlockIdExt) -> bool {
+    fn is_candidate_validated(&self, block_id: &BlockId) -> bool {
         todo!()
     }
 
     fn append_candidate_signature_and_return_if_validated(
         &mut self,
-        cadidate: BlockCandidate,
+        candidateid: BlockId,
         signature_is_valid: bool,
-        his_signature: BlockSignature,
-        neighbor_id: ValidatorId,
+        his_signature: Signature,
+        neighbor: ValidatorDescription,
     ) -> Option<ValidatedBlock> {
         todo!()
     }

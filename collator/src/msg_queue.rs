@@ -1,9 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use everscale_types::models::ShardIdent;
-
-use crate::types::ext_types::BlockIdExt;
+use everscale_types::models::{BlockId, ShardIdent};
 
 // TYPES
 
@@ -39,7 +37,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn apply_diff(&self, diff: QueueDiff) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    async fn commit_diff(&self, diff_id: BlockIdExt) -> Result<Option<()>>;
+    async fn commit_diff(&self, diff_id: BlockId) -> Result<Option<()>>;
 }
 
 pub(crate) struct MessageQueueAdapterStdImpl<MQ>
@@ -69,7 +67,7 @@ where
     async fn apply_diff(&self, diff: QueueDiff) -> Result<()> {
         todo!()
     }
-    async fn commit_diff(&self, diff_id: BlockIdExt) -> Result<Option<()>> {
+    async fn commit_diff(&self, diff_id: BlockId) -> Result<Option<()>> {
         todo!()
     }
 }

@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use everscale_types::models::BlockId;
+
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::types::ext_types::{BlockIdExt, Cell, CurrencyCollection, McStateExtra, ShardAccounts};
+use crate::types::ext_types::{Cell, CurrencyCollection, McStateExtra, ShardAccounts};
 
 /*
 В текущем коллаторе перед коллацией блока импортируется:
@@ -22,7 +24,7 @@ prev_ext_blocks_refs - ссылки на предыдущие шард блок�
 
 Что входит в стейт шарды
 ShardStateStuff {
-    block_id: BlockIdExt,
+    block_id: BlockId,
     shard_state: Option<ShardStateUnsplit>,
     out_msg_queue: Option<ShardStateUnsplit>,
     out_msg_queue_for: i32,
@@ -34,7 +36,7 @@ ShardStateStuff {
 pub struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
-    prev_key_block: Option<BlockIdExt>,
+    prev_key_block: Option<BlockId>,
     state: Arc<ShardStateStuff>
 }
 pub struct PrevData {
@@ -87,7 +89,7 @@ pub struct WorkingState {
 pub struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
-    prev_key_block: Option<BlockIdExt>,
+    prev_key_block: Option<BlockId>,
     state: Arc<ShardStateStuff>,
 }
 

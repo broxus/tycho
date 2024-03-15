@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_types::models::BlockId;
 
 use crate::{
     collator::{Collator, CollatorEventListener},
@@ -9,12 +10,9 @@ use crate::{
     method_to_async_task_closure,
     msg_queue::MessageQueueAdapter,
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
-    types::{
-        ext_types::BlockIdExt, BlockCollationResult, CollationConfig, CollationSessionId,
-        ValidatedBlock,
-    },
+    types::{BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock},
     utils::{
-        async_queued_dispatcher::{AsyncQueuedDispatcher, STANDART_DISPATCHER_QUEUE_BUFFER_SIZE},
+        async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
     validator::{Validator, ValidatorEventListener},
@@ -86,7 +84,7 @@ where
 
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDART_DISPATCHER_QUEUE_BUFFER_SIZE);
+            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         //TODO: build mempool adapter and start its tasks queue
@@ -153,7 +151,7 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn on_mc_block(&self, mc_block_id: BlockIdExt) -> Result<()> {
+    async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             process_mc_block_from_bc,
             mc_block_id

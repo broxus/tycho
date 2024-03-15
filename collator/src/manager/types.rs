@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use everscale_types::models::BlockId;
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::types::ext_types::{BlockHashId, BlockIdExt, ShardStateUnsplit};
+use crate::types::ext_types::{BlockHashId, ShardStateUnsplit};
 use crate::types::{BlockCandidate, BlockSignatures};
 
 pub struct BlockCandidateEntry {
@@ -72,10 +73,10 @@ pub struct McBlockSubgraphToSend {
 }
 
 pub(in crate::manager) trait ShardStateStuffExt {
-    fn from_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Arc<Self>>;
+    fn from_state(block_id: BlockId, shard_state: ShardStateUnsplit) -> Result<Arc<Self>>;
 }
 impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(block_id: BlockIdExt, shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
+    fn from_state(block_id: BlockId, shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
         todo!()
     }
 }
