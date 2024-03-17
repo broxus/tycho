@@ -9,22 +9,25 @@ use sha2::{Digest as Sha2Digest, Sha256};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Digest(pub [u8; 32]);
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Signature(pub Bytes);
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialOrd, PartialEq, Debug)]
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Round(pub u32);
 
 impl Round {
-    pub fn prev(&self) -> Option<Round> {
-        self.0.checked_sub(1).map(Round)
+    pub fn prev(&self) -> Round {
+        self.0
+            .checked_sub(1)
+            .map(Round)
+            .unwrap_or_else(|| panic!("DAG round number overflow, fix dag initial configuration"))
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Location {
     pub round: Round,
     pub author: PeerId,
@@ -97,18 +100,35 @@ pub struct Point {
 }
 
 impl Point {
+    pub fn id(&self) -> PointId {
+        PointId {
+            location: self.body.location.clone(),
+            digest: self.digest.clone(),
+        }
+    }
+
+    /// Failed integrity means the point may be created by someone else.
+    /// blame every dependent point author and the sender of this point,
+    /// do not use the author from point's body
     pub fn is_integrity_ok(&self) -> bool {
         let pubkey = self.body.location.author.as_public_key();
         let body = bincode::serialize(&self.body).ok();
         let sig: Result<[u8; 64], _> = self.signature.0.to_vec().try_into();
-        if let Some(((pubkey, body), sig)) = pubkey.zip(body).zip(sig.ok()) {
-            let mut hasher = Sha256::new();
-            hasher.update(body.as_slice());
-            hasher.update(sig.as_slice());
-            let digest = Digest(hasher.finalize().into());
-            pubkey.verify_raw(body.as_slice(), &sig) && digest == self.digest
-        } else {
-            false
-        }
+        let Some(((pubkey, body), sig)) = pubkey.zip(body).zip(sig.ok()) else {
+            return false;
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_slice());
+        hasher.update(sig.as_slice());
+        let digest = Digest(hasher.finalize().into());
+        pubkey.verify_raw(body.as_slice(), &sig) && digest == self.digest
+    }
+
+    /// blame author and every dependent point's author
+    pub fn is_well_formed(&self) -> bool {
+        let author = &self.body.location.author;
+        let prev_included = self.body.includes.get(&author);
+        let prev_proven = self.body.proof.as_ref().map(|p| &p.digest);
+        prev_included == prev_proven
     }
 }

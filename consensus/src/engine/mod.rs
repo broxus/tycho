@@ -1,4 +1,5 @@
 pub mod dag;
-mod neighbour_watch;
-mod node_schedule;
+pub mod neighbour_watch;
+pub mod peer_schedule;
 pub mod threshold_clock;
+pub mod verifier;

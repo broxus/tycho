@@ -6,21 +6,20 @@ use std::sync::{Arc, OnceLock, Weak};
 use ahash::RandomState;
 use anyhow::{anyhow, Result};
 use futures_util::FutureExt;
-use tokio::task::JoinSet;
 
 use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::FastDashMap;
 
-use crate::models::point::{Digest, Point, Round, Signature};
-use crate::tasks::downloader::DownloadTask;
+use crate::engine::verifier::Verifier;
+use crate::models::point::{Digest, Point, PointId, Round, Signature};
 
 pub struct IndexedPoint {
-    point: Point,
+    pub point: Point,
     // proof_for: Option<Weak<IndexedPoint>>,
     // includes: Vec<Weak<IndexedPoint>>,
     // witness: Vec<Weak<IndexedPoint>>,
-    is_committed: AtomicBool,
+    pub is_committed: AtomicBool,
 }
 
 impl IndexedPoint {
@@ -34,31 +33,36 @@ impl IndexedPoint {
 
 #[derive(Clone)]
 pub enum DagPoint {
-    /* Downloading,              // -> Validating | Invalid | Unknown */
-    /* Validating(Arc<Point>),   // -> Valid | Invalid */
-    Valid(Arc<IndexedPoint>), // needed to blame equivocation or graph connectivity violations
-    Invalid(Arc<Point>),      // invalidates dependent point; needed to blame equivocation
-    NotExists,                // invalidates dependent point; blame with caution
+    // valid, needed to blame equivocation or graph connectivity violations
+    Trusted(Arc<IndexedPoint>),
+    // is a valid container, but we doubt author's fairness at the moment of validating;
+    // we do not sign such point, but others may include it without consequences;
+    // consensus will decide whether to sign its proof or not; we shall ban the author
+    Suspicious(Arc<IndexedPoint>),
+    Invalid(Arc<Point>), // invalidates dependent point; needed to blame equivocation
+    NotExists(Arc<PointId>), // invalidates dependent point; blame author of dependent point
 }
 
 impl DagPoint {
     pub fn is_valid(&self) -> bool {
         match self {
-            DagPoint::Valid(_) => true,
+            DagPoint::Trusted(_) => true,
+            DagPoint::Suspicious(_) => true,
             _ => false,
         }
     }
 
     pub fn valid(&self) -> Option<Arc<IndexedPoint>> {
         match self {
-            DagPoint::Valid(point) => Some(point.clone()),
+            DagPoint::Trusted(point) => Some(point.clone()),
+            DagPoint::Suspicious(point) => Some(point.clone()),
             _ => None,
         }
     }
 }
 
 #[derive(Default)]
-struct DagLocation {
+pub struct DagLocation {
     // one of the points at current location
     // was proven by the next point of a node;
     // even if we marked this point as invalid, consensus may override our decision
@@ -68,22 +72,17 @@ struct DagLocation {
     // other (equivocated) points may be received as includes, witnesses or a proven vertex;
     // we have to include signed points as dependencies in our next block
     signed_by_me: OnceLock<(Digest, Round, Signature)>,
-    // if we rejected to sign previous point,
-    // we require a node to skip the current round;
-    // if we require to skip after responding with a signature -
-    // our node cannot invalidate a block retrospectively
-    no_points_expected: AtomicBool,
     // only one of the point versions at current location
     // may become proven by the next round point(s) of a node;
     // even if we marked a proven point as invalid, consensus may override our decision
-    versions: BTreeMap<Digest, Shared<JoinTask<DagPoint>>>,
+    pub versions: BTreeMap<Digest, Shared<JoinTask<DagPoint>>>,
 }
 
-struct DagRound {
-    round: Round,
+pub struct DagRound {
+    pub round: Round,
     node_count: u8,
-    locations: FastDashMap<PeerId, DagLocation>,
-    prev: Weak<DagRound>,
+    pub locations: FastDashMap<PeerId, DagLocation>,
+    pub prev: Weak<DagRound>,
 }
 
 impl DagRound {
@@ -107,65 +106,33 @@ impl DagRound {
         point_fut.await.0.valid()
     }
 
-    pub fn add(&self, point: Point) -> Result<Shared<JoinTask<DagPoint>>> {
-        anyhow::ensure!(point.body.location.round == self.round, "wrong point round");
-        anyhow::ensure!(point.is_integrity_ok(), "point integrity check failed");
+    pub fn add(&self, point: Box<Point>, verifier: &Verifier) -> Shared<JoinTask<DagPoint>> {
+        if &point.body.location.round != &self.round {
+            panic! {"Coding error: dag round mismatches point round"}
+        }
 
         let mut location = self
             .locations
             .entry(point.body.location.author)
             .or_default();
 
-        fn add_dependency(
-            round: &Arc<DagRound>,
-            node: &PeerId,
-            digest: &Digest,
-            dependencies: &mut JoinSet<DagPoint>,
-        ) {
-            let mut loc = round.locations.entry(*node).or_default();
-            let fut = loc
-                .versions
-                .entry(*digest)
-                .or_insert_with(|| Shared::new(JoinTask::new(DownloadTask {})))
-                .clone();
-            dependencies.spawn(fut.map(|a| a.0));
-        }
-
-        Ok(match location.versions.entry(point.digest) {
+        match location.versions.entry(point.digest.clone()) {
             btree_map::Entry::Occupied(entry) => entry.get().clone(),
-            btree_map::Entry::Vacant(entry) => {
-                let mut dependencies = JoinSet::new();
-                if let Some(r_1) = self.prev.upgrade() {
-                    for (node, digest) in &point.body.includes {
-                        add_dependency(&r_1, &node, &digest, &mut dependencies);
-                    }
-                    if let Some(r_2) = r_1.prev.upgrade() {
-                        for (node, digest) in &point.body.witness {
-                            add_dependency(&r_2, &node, &digest, &mut dependencies);
-                        }
-                    };
-                };
-
-                let fut = Shared::new(JoinTask::new(async move {
-                    while let Some(res) = dependencies.join_next().await {
-                        match res {
-                            Ok(value) if value.is_valid() => continue,
-                            Ok(_) => return DagPoint::Invalid(Arc::new(point)),
-                            Err(e) => {
-                                if e.is_panic() {
-                                    std::panic::resume_unwind(e.into_panic());
-                                }
-                                unreachable!();
-                            }
-                        }
-                    }
-
-                    DagPoint::Valid(Arc::new(IndexedPoint::new(point)))
-                }));
-
-                entry.insert(fut).clone()
-            }
-        })
+            btree_map::Entry::Vacant(entry) => entry
+                .insert(Shared::new(verifier.verify(&self, point)))
+                .clone(),
+        }
+        // Todo calling site may return signature only for Trusted point
+        // Detected point equivocation does not invalidate the point, it just
+        //   prevents us (as a fair actor) from returning our signature to the author.
+        // Such a point may be included in our next "includes" or "witnesses",
+        //   but neither its inclusion nor omitting is required: as we don't
+        //   return our signature, our dependencies cannot be validated against it.
+        // Equally, we immediately stop communicating with the equivocating node,
+        //   without invalidating any of its points (no matter historical or future).
+        // The proof for equivocated point cannot be signed
+        //   as we've banned the author on network layer.
+        // Anyway, no more than one of equivocated points may become a vertex.
     }
 }
 
@@ -232,7 +199,7 @@ impl Dag {
 
     pub async fn vertex_by(&self, proof: &IndexedPoint) -> Option<Arc<IndexedPoint>> {
         let digest = &proof.point.body.proof.as_ref()?.digest;
-        let round = proof.point.body.location.round.prev()?;
+        let round = proof.point.body.location.round.prev();
         let dag_round = self.round_at(round)?;
         dag_round
             .valid_point(&proof.point.body.location.author, digest)
@@ -253,9 +220,7 @@ impl Dag {
             ));
         };
 
-        let Some(mut cur_includes_round) = anchor.point.body.location.round.prev() else {
-            return Err(anyhow!("anchor proof @ 0 cannot exist"));
-        };
+        let mut cur_includes_round = anchor.point.body.location.round.prev(); /* r+0 */
 
         let mut r = [
             anchor.point.body.includes.clone(), // points @ r+0

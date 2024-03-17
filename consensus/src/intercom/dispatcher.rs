@@ -12,8 +12,8 @@ use tycho_network::{
     PrivateOverlay, Response, Router, Service, ServiceRequest, Version,
 };
 use tycho_util::futures::BoxFutureOrNoop;
+use tycho_util::FastHashSet;
 
-use crate::intercom::overlay_client::OverlayClient;
 use crate::models::point::{Location, Point, PointId, Round, Signature};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -47,7 +47,7 @@ struct PointResponse {
 }
 
 pub struct Dispatcher {
-    pub overlay_client: OverlayClient,
+    pub overlay: PrivateOverlay,
     pub dht_client: DhtClient,
     network: Network,
 }
@@ -107,10 +107,8 @@ impl Dispatcher {
 
         overlay_tasks.spawn(network.clone());
 
-        let overlay_client = OverlayClient::new(all_peers.len(), private_overlay, local_id);
-
         Self {
-            overlay_client,
+            overlay: private_overlay,
             dht_client,
             network,
         }
@@ -139,10 +137,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(data)?),
         };
 
-        self.overlay_client
-            .overlay
-            .query(&self.network, node, request)
-            .await
+        self.overlay.query(&self.network, node, request).await
     }
 
     fn parse_response(node: &PeerId, body: &Bytes) -> Result<MPResponse> {
@@ -226,6 +221,7 @@ impl ResponderInner {
 
 #[cfg(test)]
 mod tests {
+    use crate::engine::peer_schedule::PeerSchedule;
     use tycho_network::{Address, PeerInfo};
     use tycho_util::time::now_sec;
 
@@ -268,7 +264,11 @@ mod tests {
             .map(|(key, node)| Arc::new(make_peer_info(key, node.network.local_addr().into())))
             .collect::<Vec<_>>();
 
-        for node in nodes.first() {
+        let schedules = std::iter::zip(&all_peers, &nodes)
+            .map(|(peer_id, node)| PeerSchedule::new(Round(0), &all_peers, &node.overlay, peer_id))
+            .collect::<Vec<_>>();
+
+        if let Some(node) = nodes.first() {
             for info in &bootstrap_info {
                 if info.id == node.network.peer_id() {
                     continue;
@@ -277,9 +277,10 @@ mod tests {
             }
         }
 
-        for node in &nodes {
-            node.overlay_client.wait_for_peers(node_count - 1).await;
-            tracing::info!("found peers for {}", node.network.peer_id());
+        let all_peers = FastHashSet::from_iter(all_peers.into_iter());
+        for sch in &schedules {
+            sch.wait_for_peers(Round(1), node_count - 1).await;
+            tracing::info!("found peers for {}", sch.local_id);
         }
 
         nodes

@@ -33,7 +33,7 @@ impl NeighbourWatch {
                 valid = e.round < round
                     && e.time < time
                     // node either skipped a round, or provided evidences for prev block
-                    && round.prev().map_or(e.round.0 + 1 < round.0, |prev| e.round <= prev);
+                    && e.round <= round.prev();
                 if e.round < round {
                     (*e).round = round
                 };
