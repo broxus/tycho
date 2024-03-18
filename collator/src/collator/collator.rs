@@ -20,7 +20,7 @@ use super::collator_processor::CollatorProcessor;
 // EVENTS EMITTER AMD LISTENER
 
 #[async_trait]
-pub trait CollatorEventEmitter {
+pub(crate) trait CollatorEventEmitter {
     /// When new shard or master block was collated
     async fn on_block_candidate_event(&self, collation_result: BlockCollationResult) -> Result<()>;
     /// When collator was stopped
@@ -28,7 +28,7 @@ pub trait CollatorEventEmitter {
 }
 
 #[async_trait]
-pub trait CollatorEventListener: Send + Sync {
+pub(crate) trait CollatorEventListener: Send + Sync {
     /// Process new collated shard or master block
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()>;
     /// Process collator stopped event
@@ -38,7 +38,7 @@ pub trait CollatorEventListener: Send + Sync {
 // COLLATOR
 
 #[async_trait]
-pub trait Collator<MQ, ST>: Send + Sync + 'static {
+pub(crate) trait Collator<MQ, ST>: Send + Sync + 'static {
     /// Create collator, start its tasks queue, and equeue first initialization task
     fn start(
         listener: Arc<dyn CollatorEventListener>,
@@ -53,6 +53,7 @@ pub trait Collator<MQ, ST>: Send + Sync + 'static {
     async fn collate() -> Result<BlockCollationResult>;
 }
 
+#[allow(private_bounds)]
 pub(crate) struct CollatorStdImpl<W, MQ, ST>
 where
     W: CollatorProcessor<MQ, ST>,

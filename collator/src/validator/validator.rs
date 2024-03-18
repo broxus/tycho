@@ -8,8 +8,7 @@ use everscale_types::models::BlockId;
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
-    types::CollationSessionInfo,
-    types::ValidatedBlock,
+    types::{CollationSessionInfo, ValidatedBlock},
     utils::async_queued_dispatcher::{
         AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
     },
@@ -20,13 +19,13 @@ use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 // EVENTS EMITTER AMD LISTENER
 
 #[async_trait]
-pub trait ValidatorEventEmitter {
+pub(crate) trait ValidatorEventEmitter {
     /// When shard or master block was validated by validator
     async fn on_block_validated_event(&self, validated_block: ValidatedBlock) -> Result<()>;
 }
 
 #[async_trait]
-pub trait ValidatorEventListener: Send + Sync {
+pub(crate) trait ValidatorEventListener: Send + Sync {
     /// Process validated shard or master block
     async fn on_block_validated(&self, validated_block: ValidatedBlock) -> Result<()>;
 }
@@ -34,7 +33,7 @@ pub trait ValidatorEventListener: Send + Sync {
 // ADAPTER
 
 #[async_trait]
-pub trait Validator<ST>: Send + Sync + 'static
+pub(crate) trait Validator<ST>: Send + Sync + 'static
 where
     ST: StateNodeAdapter,
 {

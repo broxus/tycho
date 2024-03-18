@@ -19,6 +19,7 @@ use crate::{
 
 // BUILDER
 
+#[allow(private_bounds, private_interfaces)]
 pub trait StateNodeAdapterBuilder<T>
 where
     T: StateNodeAdapter,
@@ -31,6 +32,7 @@ pub struct StateNodeAdapterBuilderStdImpl<T> {
     _marker_adapter: std::marker::PhantomData<T>,
 }
 
+#[allow(private_bounds, private_interfaces)]
 impl<T> StateNodeAdapterBuilder<T> for StateNodeAdapterBuilderStdImpl<T>
 where
     T: StateNodeAdapter,
@@ -48,13 +50,13 @@ where
 // EVENTS EMITTER AMD LISTENER
 
 #[async_trait]
-pub trait StateNodeEventEmitter {
+pub(crate) trait StateNodeEventEmitter {
     /// When new masterchain block received from blockchain
     async fn on_mc_block_event(&self, mc_block_id: BlockId);
 }
 
 #[async_trait]
-pub trait StateNodeEventListener: Send + Sync {
+pub(crate) trait StateNodeEventListener: Send + Sync {
     /// Process new received masterchain block from blockchain
     async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()>;
 }
@@ -62,7 +64,7 @@ pub trait StateNodeEventListener: Send + Sync {
 // ADAPTER
 
 #[async_trait]
-pub trait StateNodeAdapter: Send + Sync + 'static {
+pub(crate) trait StateNodeAdapter: Send + Sync + 'static {
     fn create(listener: Arc<dyn StateNodeEventListener>) -> Self;
     async fn get_last_applied_mc_block_id(&self) -> Result<BlockId>;
     async fn request_state(
@@ -143,7 +145,7 @@ struct StateNodeProcessor {
     listener: Arc<dyn StateNodeEventListener>,
 }
 
-pub enum StateNodeTaskResult {
+pub(crate) enum StateNodeTaskResult {
     Void,
     BlockId(BlockId),
     ShardState(Arc<ShardStateStuff>),

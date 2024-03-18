@@ -30,7 +30,7 @@ use super::{
     utils::{build_block_stuff_for_sync, find_us_in_collators_set},
 };
 
-pub enum CollationProcessorTaskResult {
+pub(crate) enum CollationProcessorTaskResult {
     Void,
 }
 pub(super) struct CollationProcessor<C, V, MQ, MP, ST>

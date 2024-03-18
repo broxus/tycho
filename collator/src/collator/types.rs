@@ -82,19 +82,19 @@ PrevData и CollatorData передаются в execute. Там берется 
 из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
 */
 
-pub struct WorkingState {
+pub(super) struct WorkingState {
     mc_data: McData,
     prev_shard_data: PrevData,
 }
 
-pub struct McData {
+pub(super) struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
     prev_key_block: Option<BlockId>,
     state: Arc<ShardStateStuff>,
 }
 
-pub struct PrevData {
+pub(super) struct PrevData {
     observable_states: Vec<Arc<ShardStateStuff>>,
     observable_accounts: ShardAccounts,
     pure_state_root: Cell,
@@ -106,6 +106,6 @@ pub struct PrevData {
     underload_history: u64,
 }
 
-pub struct BlockCollationData {
+pub(super) struct BlockCollationData {
     block_descr: Arc<String>,
 }

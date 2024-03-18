@@ -5,17 +5,23 @@ use async_trait::async_trait;
 use everscale_types::models::BlockId;
 
 use crate::{
-    collator::{Collator, CollatorEventListener},
+    collator::{
+        collator_processor::CollatorProcessorStdImpl, Collator, CollatorEventListener,
+        CollatorStdImpl,
+    },
     mempool::MempoolAdapter,
     method_to_async_task_closure,
-    msg_queue::MessageQueueAdapter,
+    msg_queue::{MessageQueueAdapter, MessageQueueAdapterStdImpl, QueueImpl},
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
     types::{BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock},
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
-    validator::{Validator, ValidatorEventListener},
+    validator::{
+        validator_processor::ValidatorProcessorStdImpl, Validator, ValidatorEventListener,
+        ValidatorStdImpl,
+    },
 };
 
 use super::collation_processor::{CollationProcessor, CollationProcessorTaskResult};
@@ -25,12 +31,9 @@ use super::collation_processor::{CollationProcessor, CollationProcessorTaskResul
 /// runs collators to produce blocks,
 /// executes blocks validation, sends signed blocks
 /// to state node to update local sync state and broadcast.
-#[async_trait]
-pub trait CollationManager<C, V, MQ, MP, ST>
+#[allow(private_bounds)]
+pub trait CollationManager<MP, ST>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST>,
-    MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
@@ -43,7 +46,7 @@ where
 }
 
 /// Generic implementation of [`CollationManager`]
-pub struct CollationManagerGenImpl<C, V, MQ, MP, ST>
+pub(crate) struct CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
     V: Validator<ST>,
@@ -53,21 +56,31 @@ where
 {
     config: Arc<CollationConfig>,
 
-    _marker_collator: std::marker::PhantomData<C>,
-    _marker_validator: std::marker::PhantomData<V>,
-    _marker_mq_adapter: std::marker::PhantomData<MQ>,
-
-    mempool_adapter: Arc<MP>,
-    state_node_adapter: Arc<ST>,
-
     dispatcher: Arc<
         AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>,
     >,
 }
 
-#[async_trait]
-impl<C, V, MQ, MP, ST> CollationManager<C, V, MQ, MP, ST>
-    for CollationManagerGenImpl<C, V, MQ, MP, ST>
+#[allow(private_bounds)]
+pub fn create_std_manager<MP, ST>(
+    config: CollationConfig,
+    mpool_adapter: MP,
+    state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+) -> impl CollationManager<MP, ST>
+where
+    MP: MempoolAdapter,
+    ST: StateNodeAdapter,
+{
+    CollationManagerGenImpl::<
+        CollatorStdImpl<CollatorProcessorStdImpl<_, _>, _, _>,
+        ValidatorStdImpl<ValidatorProcessorStdImpl<_>, _>,
+        MessageQueueAdapterStdImpl<QueueImpl>,
+        MP,
+        ST,
+    >::create(config, mpool_adapter, state_adapter_builder)
+}
+
+impl<C, V, MQ, MP, ST> CollationManager<MP, ST> for CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
     V: Validator<ST>,
@@ -112,11 +125,6 @@ where
         // create manager instance
         let mgr = Self {
             config,
-            _marker_collator: std::marker::PhantomData,
-            _marker_validator: std::marker::PhantomData,
-            _marker_mq_adapter: std::marker::PhantomData,
-            mempool_adapter,
-            state_node_adapter,
             dispatcher: dispatcher.clone(),
         };
 

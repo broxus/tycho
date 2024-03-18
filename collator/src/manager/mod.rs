@@ -1,5 +1,5 @@
 mod collation_manager;
-pub mod collation_processor;
+mod collation_processor;
 mod types;
 mod utils;
 

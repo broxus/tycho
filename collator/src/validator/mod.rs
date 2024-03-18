@@ -2,4 +2,4 @@
 mod validator;
 pub mod validator_processor;
 
-pub(crate) use validator::*;
+pub use validator::*;

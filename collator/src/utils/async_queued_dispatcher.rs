@@ -29,7 +29,7 @@ where
         (dispatcher, receiver)
     }
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
-        let h = tokio::spawn(async move {
+        tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
                 let (task, responder) = task.extract();
                 let future = task(worker);

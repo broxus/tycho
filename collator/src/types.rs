@@ -36,7 +36,7 @@ impl BlockCandidate {
     }
 }
 
-pub struct BlockSignatures {
+pub(crate) struct BlockSignatures {
     good_sigs: Vec<(HashBytes, Signature)>,
     bad_sigs: Vec<(HashBytes, Signature)>,
 }
@@ -46,7 +46,7 @@ impl BlockSignatures {
     }
 }
 
-pub struct ValidatedBlock {
+pub(crate) struct ValidatedBlock {
     block_id: BlockId,
     signatures: BlockSignatures,
 }
@@ -59,16 +59,16 @@ impl ValidatedBlock {
     }
 }
 
-pub struct BlockStuffForSync {
+pub(crate) struct BlockStuffForSync {
     pub block_stuff: BlockStuff,
     pub signatures: BlockSignatures,
     pub prev_blocks_ids: Vec<BlockId>,
 }
 
 /// (ShardIdent, seqno)
-pub type CollationSessionId = (ShardIdent, u32);
+pub(crate) type CollationSessionId = (ShardIdent, u32);
 
-pub struct CollationSessionInfo {
+pub(crate) struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,

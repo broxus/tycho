@@ -182,7 +182,7 @@ where
 /// Trait declares functions that need specific implementation.
 /// For test purposes you can re-implement only this trait.
 #[async_trait]
-pub(crate) trait ValidatorProcessorSpecific<ST>: Sized {
+pub(super) trait ValidatorProcessorSpecific<ST>: Sized {
     /// Find a neighbor info by id in local sessions info
     fn find_neighbor(&self, neighbor: &ValidatorDescription) -> Option<&ValidatorDescription>;
 

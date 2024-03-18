@@ -27,7 +27,7 @@ pub use type_stubs::*;
 // ADAPTER
 
 #[async_trait]
-pub trait MessageQueueAdapter: Send + Sync + 'static {
+pub(crate) trait MessageQueueAdapter: Send + Sync + 'static {
     fn new() -> Self;
     /// Create iterator for specified shard and return it
     async fn get_iterator<QI>(&self, shard_id: ShardIdent) -> Result<QI>
