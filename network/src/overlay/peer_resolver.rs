@@ -1,72 +1,49 @@
-use std::collections::{hash_map, BTreeMap};
-use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use exponential_backoff::Backoff;
-use futures_util::future::{select, Either};
-use tokio::sync::{Notify, Semaphore};
-use tokio::task::JoinSet;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
-use tycho_util::{FastDashMap, FastHashMap};
+use tycho_util::FastDashMap;
 
 use crate::dht::DhtService;
-use crate::network::{KnownPeerHandle, Network, WeakKnownPeerHandle, WeakNetwork};
+use crate::network::{KnownPeerHandle, KnownPeersError, Network, PeerBannedError, WeakNetwork};
 use crate::proto::dht;
 use crate::types::{PeerId, PeerInfo};
 
 pub struct PeerResolver {
-    tasks: FastDashMap<PeerId, Weak<JoinTask<()>>>,
+    tasks: FastDashMap<PeerId, Weak<PeerResolverHandleInner>>,
     shared: Arc<PeerResolverShared>,
 }
 
 impl PeerResolver {
-    pub fn insert(&self, handle: &KnownPeerHandle) -> PeerResolverHandle {
+    pub fn insert(&self, peer_id: &PeerId) -> PeerResolverHandle {
         use dashmap::mapref::entry::Entry;
 
-        match self.tasks.entry(handle.peer_info().id) {
+        match self.tasks.entry(*peer_id) {
             Entry::Vacant(entry) => {
-                let inner = self.spawn(handle);
-                entry.insert(Arc::downgrade(&inner));
-                PeerResolverHandle { inner }
+                let handle = self.shared.make_resolver_handle(peer_id);
+                entry.insert(Arc::downgrade(&handle.inner));
+                handle
             }
             Entry::Occupied(mut entry) => match entry.get().upgrade() {
                 Some(inner) => PeerResolverHandle { inner },
                 None => {
-                    let inner = self.spawn(handle);
-                    entry.insert(Arc::downgrade(&inner));
-                    PeerResolverHandle { inner }
+                    let handle = self.shared.make_resolver_handle(peer_id);
+                    entry.insert(Arc::downgrade(&handle.inner));
+                    handle
                 }
             },
         }
-    }
-
-    fn spawn(&self, handle: &KnownPeerHandle) -> Arc<JoinTask<()>> {
-        let weak = handle.downgrade();
-        let shared = self.shared.clone();
-        Arc::new(JoinTask::new(async move {
-            loop {
-                let Some(weak) = weak.upgrade() else {
-                    return;
-                };
-
-                let mut backoff =
-                    Backoff::new(10, Duration::from_millis(100), Duration::from_secs(10));
-                backoff.set_jitter(0.1);
-
-                for duration in &backoff {
-                    tokio::time::sleep(duration).await;
-                }
-            }
-        }))
     }
 }
 
 struct PeerResolverShared {
     weak_network: WeakNetwork,
     dht_service: DhtService,
+    min_ttl_sec: u32,
+    update_before_sec: u32,
     fast_retry_count: u32,
     min_retry_interval: Duration,
     max_retry_interval: Duration,
@@ -74,35 +51,89 @@ struct PeerResolverShared {
 }
 
 impl PeerResolverShared {
-    async fn make_resolver_handle(self: &Arc<Self>, peer_id: &PeerId) -> PeerResolverHandle {
+    fn make_resolver_handle(self: &Arc<Self>, peer_id: &PeerId) -> PeerResolverHandle {
         let handle = match self.weak_network.upgrade() {
             Some(handle) => handle.known_peers().make_handle(peer_id, false),
-            None => return PeerResolverHandle::noop(),
+            None => return PeerResolverHandle::noop(peer_id),
         };
 
-        let mut next_update_at = handle.as_ref().map(|handle| handle.peer_info().expires_at);
+        let next_update_at = handle
+            .as_ref()
+            .map(|handle| self.compute_update_at(&handle.peer_info()));
 
         let data = Arc::new(PeerResolverHandleData {
+            peer_id: *peer_id,
             handle: Mutex::new(handle),
             is_stale: AtomicBool::new(false),
         });
 
-        PeerResolverHandle(Arc::new(PeerResolverHandleInner {
-            task: JoinTask::new({
-                let peer_id = *peer_id;
-                let shared = self.clone();
-                let handle = handle.clone();
-                let data = data.clone();
-                async move {
-                    if !is_resolved {
-                        let peer_info = shared.resolve_peer(&peer_id, &data.is_stale).await;
-                    }
-                }
+        PeerResolverHandle {
+            inner: Arc::new(PeerResolverHandleInner {
+                task: JoinTask::new(self.clone().run_task(data.clone(), next_update_at)),
+                data,
             }),
-            data,
-        }))
+        }
     }
 
+    async fn run_task(
+        self: Arc<Self>,
+        data: Arc<PeerResolverHandleData>,
+        mut next_update_at: Option<u32>,
+    ) {
+        tracing::trace!(peer_id = %data.peer_id, "peer resolver task started");
+
+        // TODO: Select between the loop body and `KnownPeers` update event.
+        loop {
+            // Wait if needed.
+            if let Some(update_at) = next_update_at {
+                let update_at = std::time::UNIX_EPOCH + Duration::from_secs(update_at as u64);
+                let now = std::time::SystemTime::now();
+                if let Ok(remaining) = update_at.duration_since(now) {
+                    tokio::time::sleep(remaining).await;
+                }
+            }
+
+            // Start resolving peer.
+            match self.resolve_peer(&data.peer_id, &data.is_stale).await {
+                Some((network, peer_info)) => {
+                    let mut handle = data.handle.lock().unwrap();
+
+                    let peer_info_guard;
+                    let peer_info = match &*handle {
+                        // TODO: Force write into known peers to keep the handle in it?
+                        Some(handle) => match handle.update_peer_info(&peer_info) {
+                            Ok(()) => peer_info.as_ref(),
+                            Err(KnownPeersError::OutdatedInfo) => {
+                                peer_info_guard = handle.peer_info();
+                                peer_info_guard.as_ref()
+                            }
+                            // TODO: Allow resuming task after ban?
+                            Err(KnownPeersError::PeerBanned(PeerBannedError)) => break,
+                        },
+                        None => match network
+                            .known_peers()
+                            .insert_allow_outdated(peer_info, false)
+                        {
+                            Ok(new_handle) => {
+                                peer_info_guard = handle.insert(new_handle).peer_info();
+                                peer_info_guard.as_ref()
+                            }
+                            // TODO: Allow resuming task after ban?
+                            Err(PeerBannedError) => break,
+                        },
+                    };
+
+                    next_update_at = Some(self.compute_update_at(peer_info));
+                }
+                None => break,
+            }
+        }
+
+        tracing::trace!(peer_id = %data.peer_id, "peer resolver task finished");
+    }
+
+    /// Returns a verified peer info with the strong reference to the network.
+    /// Or `None` if network no longer exists.
     async fn resolve_peer(
         &self,
         peer_id: &PeerId,
@@ -194,34 +225,48 @@ impl PeerResolverShared {
             tokio::time::sleep(interval).await;
         }
     }
+
+    fn compute_update_at(&self, peer_info: &PeerInfo) -> u32 {
+        let real_ttl = peer_info
+            .expires_at
+            .saturating_sub(self.update_before_sec)
+            .saturating_sub(peer_info.created_at);
+
+        let adjusted_ttl = std::cmp::max(real_ttl, self.min_ttl_sec);
+        peer_info.created_at.saturating_add(adjusted_ttl)
+    }
 }
 
 #[derive(Clone)]
-pub struct PeerResolverHandle(Arc<PeerResolverHandleInner>);
+#[repr(transparent)]
+pub struct PeerResolverHandle {
+    inner: Arc<PeerResolverHandleInner>,
+}
 
 impl PeerResolverHandle {
-    fn noop() -> Self {
-        static HANDLE: OnceLock<PeerResolverHandle> = OnceLock::new();
-        HANDLE
-            .get_or_init(|| {
-                PeerResolverHandle(Arc::new(PeerResolverHandleInner {
-                    task: JoinTask::new(std::future::ready(())),
-                    data: Default::default(),
-                }))
-            })
-            .clone()
+    fn noop(peer_id: &PeerId) -> Self {
+        PeerResolverHandle {
+            inner: Arc::new(PeerResolverHandleInner {
+                task: JoinTask::new(std::future::ready(())),
+                data: Arc::new(PeerResolverHandleData {
+                    peer_id: *peer_id,
+                    handle: Mutex::new(None),
+                    is_stale: AtomicBool::new(false),
+                }),
+            }),
+        }
     }
 
     pub fn is_resolved(&self) -> bool {
-        self.0.data.handle.lock().unwrap().is_some()
+        self.inner.data.handle.lock().unwrap().is_some()
     }
 
     pub fn load_handle(&self) -> Option<KnownPeerHandle> {
-        self.0.data.handle.lock().unwrap().clone()
+        self.inner.data.handle.lock().unwrap().clone()
     }
 
     pub fn is_stale(&self) -> bool {
-        self.0.data.is_stale.load(Ordering::Acquire)
+        self.inner.data.is_stale.load(Ordering::Acquire)
     }
 }
 
@@ -230,8 +275,8 @@ struct PeerResolverHandleInner {
     data: Arc<PeerResolverHandleData>,
 }
 
-#[derive(Default)]
 struct PeerResolverHandleData {
+    peer_id: PeerId,
     handle: Mutex<Option<KnownPeerHandle>>,
     is_stale: AtomicBool,
 }

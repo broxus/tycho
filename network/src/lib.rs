@@ -11,8 +11,8 @@ pub use dht::{
 };
 pub use network::{
     ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,
-    NetworkConfig, Peer, QuicConfig, RecvStream, SendStream, WeakActivePeers, WeakKnownPeerHandle,
-    WeakNetwork,
+    NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream, WeakActivePeers,
+    WeakKnownPeerHandle, WeakNetwork,
 };
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, BoxCloneService,
