@@ -1,9 +1,9 @@
 mod collator;
 pub mod manager;
-mod mempool;
+pub mod mempool;
 mod msg_queue;
-mod state_node;
-mod types;
+pub mod state_node;
+pub mod types;
 mod utils;
 mod validator;
 

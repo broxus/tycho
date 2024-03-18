@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use everscale_types::models::BlockId;
+use everscale_types::{
+    cell::Cell,
+    models::{BlockId, CurrencyCollection, McStateExtra, ShardAccounts},
+};
 
 use tycho_block_util::state::ShardStateStuff;
-
-use crate::types::ext_types::{Cell, CurrencyCollection, McStateExtra, ShardAccounts};
 
 /*
 В текущем коллаторе перед коллацией блока импортируется:

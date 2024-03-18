@@ -2,7 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::{
+    cell::HashBytes,
+    models::{BlockId, ShardIdent},
+};
 use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
 
 use crate::{
@@ -12,8 +15,8 @@ use crate::{
     msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
     types::{
-        ext_types::BlockHashId, BlockCandidate, BlockCollationResult, CollationConfig,
-        CollationSessionId, CollationSessionInfo, ValidatedBlock,
+        BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
+        CollationSessionInfo, ValidatedBlock,
     },
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
     validator::Validator,
@@ -325,11 +328,7 @@ where
         // we need to send session info with the collators list to the validator
         // to understand whom we must ask for signatures
         self.validator
-            .enqueue_candidate_validation(
-                //TODO: pass only block id when the Validator interface is changed
-                *candidate.block_id(),
-                session_info,
-            )
+            .enqueue_candidate_validation(*candidate.block_id(), session_info)
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block
@@ -431,7 +430,7 @@ where
     /// (TODO) Remove block entries from cache and compact cache
     async fn cleanup_blocks_from_cache(
         &mut self,
-        blocks_keys: Vec<BlockHashId>,
+        blocks_keys: Vec<HashBytes>,
     ) -> Result<CollationProcessorTaskResult> {
         todo!()
     }

@@ -5,11 +5,12 @@ use async_trait::async_trait;
 
 use everscale_types::models::BlockId;
 
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
 
+use crate::types::ext_types::BlockHandle;
 use crate::{
     impl_enum_try_into, method_to_async_task_closure,
-    types::{ext_types::BlockHandle, BlockStuff, BlockStuffForSync},
+    types::BlockStuffForSync,
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         task_descr::TaskResponseReceiver,

@@ -5,10 +5,12 @@ use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescription};
 
+use tycho_block_util::block::BlockStuff;
+
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
-    types::{BlockStuff, CollationSessionInfo, ValidatedBlock},
+    types::{CollationSessionInfo, ValidatedBlock},
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
 };
 

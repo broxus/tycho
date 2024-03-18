@@ -1,16 +1,17 @@
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::{
+    cell::HashBytes,
+    models::{BlockId, ShardIdent, ShardStateUnsplit, Signature},
+};
 
-use tycho_block_util::block::ValidatorSubsetInfo;
-
-use self::ext_types::{Block, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256};
+use tycho_block_util::block::{BlockStuff, ValidatorSubsetInfo};
 
 pub struct CollationConfig {
     pub key_pair: KeyPair,
     pub mc_block_min_interval_ms: u64,
 }
 
-pub struct BlockCollationResult {
+pub(crate) struct BlockCollationResult {
     pub candidate: BlockCandidate,
     pub new_state: ShardStateUnsplit,
 }
@@ -21,7 +22,7 @@ pub(crate) struct BlockCandidate {
     prev_blocks_ids: Vec<BlockId>,
     data: Vec<u8>,
     collated_data: Vec<u8>,
-    collated_file_hash: UInt256,
+    collated_file_hash: HashBytes,
 }
 impl BlockCandidate {
     pub fn block_id(&self) -> &BlockId {
@@ -30,17 +31,14 @@ impl BlockCandidate {
     pub fn shard_id(&self) -> &ShardIdent {
         &self.block_id.shard
     }
-    pub fn own_signature(&self) -> BlockSignature {
-        todo!()
-    }
     pub fn chain_time(&self) -> u64 {
         todo!()
     }
 }
 
 pub struct BlockSignatures {
-    good_sigs: Vec<(KeyId, BlockSignature)>,
-    bad_sigs: Vec<(KeyId, BlockSignature)>,
+    good_sigs: Vec<(HashBytes, Signature)>,
+    bad_sigs: Vec<(HashBytes, Signature)>,
 }
 impl BlockSignatures {
     pub fn is_valid(&self) -> bool {
@@ -59,18 +57,6 @@ impl ValidatedBlock {
     pub fn is_valid(&self) -> bool {
         self.signatures.is_valid()
     }
-}
-
-pub struct BlockStuff {
-    id: BlockId,
-    block: Option<Block>,
-    // other stuff...
-}
-
-pub struct BlockProofStuff {
-    id: BlockId,
-    proof: BlockProof,
-    // other stuff...
 }
 
 pub struct BlockStuffForSync {
@@ -102,31 +88,6 @@ impl CollationSessionInfo {
 pub(crate) mod ext_types {
     pub use stubs::*;
     pub mod stubs {
-        use everscale_types::{cell::HashBytes, models::ShardIdent};
-
-        pub struct KeyId([u8; 32]);
-        pub struct BlockSignature(pub Vec<u8>);
-        #[derive(Clone)]
-        pub struct UInt256([u8; 32]);
-        #[derive(Clone)]
-        pub struct BlockHashId;
-        pub struct Block;
-        pub struct BlockProof;
-        #[derive(Clone)]
-        pub struct ShardAccounts;
-        pub struct Cell;
-        pub struct CurrencyCollection;
-        pub struct ShardStateUnsplit;
-        pub struct McStateExtra;
         pub struct BlockHandle;
-
-        pub struct ValidatorId;
-        pub struct ValidatorDescr;
-        impl ValidatorDescr {
-            pub fn id(&self) -> ValidatorId {
-                todo!()
-            }
-        }
-        pub struct ValidatorSet;
     }
 }
