@@ -12,7 +12,7 @@ hex = "0.4.3"
 parking_lot = "0.12.1"
 sha2 = "0.10.8"
 smallvec = "1.13"
-thiserror = "1.0.57"
+thiserror = "1.0.58"
 
 # local deps
 tycho-util = { path = "../util" }
