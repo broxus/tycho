@@ -624,6 +624,27 @@ impl KnownPeers {
         }
     }
 
+    pub fn make_handle(&self, peer_id: &PeerId, with_affinity: bool) -> Option<KnownPeerHandle> {
+        let inner = match self.0.get(peer_id)?.value() {
+            KnownPeerState::Stored(item) => {
+                let inner = item.upgrade()?;
+                if with_affinity && !inner.increase_affinity() {
+                    return None;
+                }
+                inner
+            }
+            KnownPeerState::Banned => return None,
+        };
+
+        Some(KnownPeerHandle(if with_affinity {
+            KnownPeerHandleState::WithAffinity(ManuallyDrop::new(Arc::new(
+                KnownPeerHandleWithAffinity { inner },
+            )))
+        } else {
+            KnownPeerHandleState::Simple(ManuallyDrop::new(inner))
+        }))
+    }
+
     pub fn insert(
         &self,
         peer_info: Arc<PeerInfo>,

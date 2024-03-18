@@ -613,6 +613,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "exponential-backoff"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47f78d87d930eee4b5686a2ab032de499c72bd1e954b84262bb03492a0f932cd"
+dependencies = [
+ "rand",
+]
+
+[[package]]
 name = "fastrand"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1990,6 +1999,7 @@ dependencies = [
  "dashmap",
  "ed25519",
  "everscale-crypto",
+ "exponential-backoff",
  "futures-util",
  "hex",
  "moka",
