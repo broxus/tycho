@@ -1,3 +1,4 @@
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -12,25 +13,102 @@ use crate::network::{KnownPeerHandle, KnownPeersError, Network, PeerBannedError,
 use crate::proto::dht;
 use crate::types::{PeerId, PeerInfo};
 
-pub struct PeerResolver {
-    tasks: FastDashMap<PeerId, Weak<PeerResolverHandleInner>>,
-    shared: Arc<PeerResolverShared>,
+pub(crate) struct PeerResolverBuilder {
+    inner: PeerResolverInner,
+}
+
+impl PeerResolverBuilder {
+    /// Minimal time-to-live for the resolved peer info.
+    ///
+    /// Default: 600 seconds.
+    pub fn with_min_ttl_sec(mut self, ttl_sec: u32) -> Self {
+        self.inner.min_ttl_sec = ttl_sec;
+        self
+    }
+
+    /// Time before the expiration when the peer info should be updated.
+    ///
+    /// Default: 1200 seconds.
+    pub fn with_update_before_sec(mut self, update_before_sec: u32) -> Self {
+        self.inner.update_before_sec = update_before_sec;
+        self
+    }
+
+    /// Number of fast retries before switching to the stale retry interval.
+    ///
+    /// Default: 10.
+    pub fn with_fast_retry_count(mut self, fast_retry_count: u32) -> Self {
+        self.inner.fast_retry_count = fast_retry_count;
+        self
+    }
+
+    /// Minimal interval between the fast retries.
+    ///
+    /// Default: 1 second.
+    pub fn with_min_retry_interval(mut self, min_retry_interval: Duration) -> Self {
+        self.inner.min_retry_interval = min_retry_interval;
+        self
+    }
+
+    /// Maximal interval between the fast retries.
+    ///
+    /// Default: 120 seconds.
+    pub fn with_max_retry_interval(mut self, max_retry_interval: Duration) -> Self {
+        self.inner.max_retry_interval = max_retry_interval;
+        self
+    }
+
+    /// Interval between the stale retries.
+    ///
+    /// Default: 600 seconds.
+    pub fn with_stale_retry_interval(mut self, stale_retry_interval: Duration) -> Self {
+        self.inner.stale_retry_interval = stale_retry_interval;
+        self
+    }
+
+    pub fn build(self) -> PeerResolver {
+        PeerResolver {
+            inner: Arc::new(self.inner),
+        }
+    }
+}
+
+pub(crate) struct PeerResolver {
+    inner: Arc<PeerResolverInner>,
 }
 
 impl PeerResolver {
+    pub fn builder(network: &Network, dht_service: DhtService) -> PeerResolverBuilder {
+        PeerResolverBuilder {
+            inner: PeerResolverInner {
+                weak_network: Network::downgrade(network),
+                dht_service,
+                tasks: Default::default(),
+                min_ttl_sec: 600,
+                update_before_sec: 1200,
+                fast_retry_count: 10,
+                min_retry_interval: Duration::from_secs(1),
+                max_retry_interval: Duration::from_secs(120),
+                stale_retry_interval: Duration::from_secs(600),
+            },
+        }
+    }
+
     pub fn insert(&self, peer_id: &PeerId) -> PeerResolverHandle {
         use dashmap::mapref::entry::Entry;
 
-        match self.tasks.entry(*peer_id) {
+        match self.inner.tasks.entry(*peer_id) {
             Entry::Vacant(entry) => {
-                let handle = self.shared.make_resolver_handle(peer_id);
+                let handle = self.inner.make_resolver_handle(peer_id);
                 entry.insert(Arc::downgrade(&handle.inner));
                 handle
             }
             Entry::Occupied(mut entry) => match entry.get().upgrade() {
-                Some(inner) => PeerResolverHandle { inner },
+                Some(inner) => PeerResolverHandle {
+                    inner: ManuallyDrop::new(inner),
+                },
                 None => {
-                    let handle = self.shared.make_resolver_handle(peer_id);
+                    let handle = self.inner.make_resolver_handle(peer_id);
                     entry.insert(Arc::downgrade(&handle.inner));
                     handle
                 }
@@ -39,9 +117,10 @@ impl PeerResolver {
     }
 }
 
-struct PeerResolverShared {
+struct PeerResolverInner {
     weak_network: WeakNetwork,
     dht_service: DhtService,
+    tasks: FastDashMap<PeerId, Weak<PeerResolverHandleInner>>,
     min_ttl_sec: u32,
     update_before_sec: u32,
     fast_retry_count: u32,
@@ -50,13 +129,22 @@ struct PeerResolverShared {
     stale_retry_interval: Duration,
 }
 
-impl PeerResolverShared {
+impl PeerResolverInner {
     fn make_resolver_handle(self: &Arc<Self>, peer_id: &PeerId) -> PeerResolverHandle {
         let handle = match self.weak_network.upgrade() {
             Some(handle) => handle.known_peers().make_handle(peer_id, false),
-            None => return PeerResolverHandle::noop(peer_id),
+            None => {
+                return PeerResolverHandle::new(
+                    JoinTask::new(futures_util::future::ready(())),
+                    Arc::new(PeerResolverHandleData {
+                        peer_id: *peer_id,
+                        handle: Mutex::new(None),
+                        is_stale: AtomicBool::new(false),
+                    }),
+                    self,
+                );
+            }
         };
-
         let next_update_at = handle
             .as_ref()
             .map(|handle| self.compute_update_at(&handle.peer_info()));
@@ -67,12 +155,11 @@ impl PeerResolverShared {
             is_stale: AtomicBool::new(false),
         });
 
-        PeerResolverHandle {
-            inner: Arc::new(PeerResolverHandleInner {
-                task: JoinTask::new(self.clone().run_task(data.clone(), next_update_at)),
-                data,
-            }),
-        }
+        PeerResolverHandle::new(
+            JoinTask::new(self.clone().run_task(data.clone(), next_update_at)),
+            data,
+            self,
+        )
     }
 
     async fn run_task(
@@ -239,21 +326,22 @@ impl PeerResolverShared {
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct PeerResolverHandle {
-    inner: Arc<PeerResolverHandleInner>,
+pub(crate) struct PeerResolverHandle {
+    inner: ManuallyDrop<Arc<PeerResolverHandleInner>>,
 }
 
 impl PeerResolverHandle {
-    fn noop(peer_id: &PeerId) -> Self {
-        PeerResolverHandle {
-            inner: Arc::new(PeerResolverHandleInner {
-                task: JoinTask::new(std::future::ready(())),
-                data: Arc::new(PeerResolverHandleData {
-                    peer_id: *peer_id,
-                    handle: Mutex::new(None),
-                    is_stale: AtomicBool::new(false),
-                }),
-            }),
+    fn new(
+        task: JoinTask<()>,
+        data: Arc<PeerResolverHandleData>,
+        resolver: &Arc<PeerResolverInner>,
+    ) -> Self {
+        Self {
+            inner: ManuallyDrop::new(Arc::new(PeerResolverHandleInner {
+                task,
+                data,
+                resolver: Arc::downgrade(resolver),
+            })),
         }
     }
 
@@ -270,9 +358,29 @@ impl PeerResolverHandle {
     }
 }
 
+impl Drop for PeerResolverHandle {
+    fn drop(&mut self) {
+        // SAFETY: inner value is dropped only once
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+
+        // Remove this entry from the resolver if it was the last strong reference.
+        if let Some(inner) = Arc::into_inner(inner) {
+            // NOTE: At this point an `Arc` was dropped, so the `Weak` in the resolver
+            // addresses only the remaining references.
+
+            if let Some(resolver) = inner.resolver.upgrade() {
+                resolver
+                    .tasks
+                    .remove_if(&inner.data.peer_id, |_, value| value.strong_count() == 0);
+            }
+        }
+    }
+}
+
 struct PeerResolverHandleInner {
     task: JoinTask<()>,
     data: Arc<PeerResolverHandleData>,
+    resolver: Weak<PeerResolverInner>,
 }
 
 struct PeerResolverHandleData {
