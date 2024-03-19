@@ -317,10 +317,7 @@ where
             .clone();
 
         let candidate_chain_time = collation_result.candidate.chain_time();
-        let candidate_id = collation_result.candidate.block_id().clone();
-
-        //TODO: remove this when the Validator interface is changed - get candidate to pass then to validator
-        let candidate = collation_result.candidate.clone();
+        let candidate_id = *collation_result.candidate.block_id();
 
         self.store_candidate(collation_result.candidate)?;
 
@@ -328,7 +325,7 @@ where
         // we need to send session info with the collators list to the validator
         // to understand whom we must ask for signatures
         self.validator
-            .enqueue_candidate_validation(*candidate.block_id(), session_info)
+            .enqueue_candidate_validation(candidate_id, session_info)
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block
@@ -381,7 +378,7 @@ where
         //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
         //      so we search for block from other shard (ShB) that includes the same anchor (An).
         //      Or the first from previouses (An-x) that includes externals for that shard (ShB)
-        //      if all next including required ([An-x+1, An]) do not contain externals for shard (ShB).
+        //      if all next including required one ([An-x+1, An]) do not contain externals for shard (ShB).
         todo!()
     }
 
