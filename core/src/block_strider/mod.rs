@@ -97,8 +97,9 @@ where
             let master_id = master_block.id();
             tracing::debug!(id=?master_id, "Fetched next master block");
             let extra = master_block.block().load_extra()?;
-            dbg!(&extra);
-            let mc_extra = extra.load_custom()?.context("not a master block")?;
+            let mc_extra = extra
+                .load_custom()?
+                .with_context(|| format!("failed to load custom for block: {:?}", master_id))?;
             let shard_hashes = mc_extra.shards.latest_blocks();
             // todo: is order important?
             let mut futures = FuturesOrdered::new();
@@ -291,9 +292,11 @@ mod test {
     #[tokio::test]
     async fn test_block_strider() {
         tycho_util::init_logger();
-        let provider = TestBlockProvider::new(10);
+        let provider = TestBlockProvider::new(3);
+        provider.validate();
+
         let subscriber = PrintSubscriber;
-        let state = InMemoryBlockStriderState::default();
+        let state = InMemoryBlockStriderState::new(provider.first_master_block());
 
         let strider = BlockStrider::builder()
             .with_state(state)

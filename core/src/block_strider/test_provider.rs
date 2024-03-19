@@ -22,11 +22,11 @@ impl BlockProvider for TestBlockProvider {
         let next_id = self
             .master_blocks
             .iter()
-            .find(|id| id.shard == prev_block_id.shard && id.seqno == prev_block_id.seqno + 1);
+            .find(|id| id.seqno == prev_block_id.seqno + 1);
         futures_util::future::ready(next_id.and_then(|id| {
             self.blocks
                 .get(id)
-                .map(|b| Ok(BlockStuff::with_block(id.clone(), b.clone())))
+                .map(|b| Ok(BlockStuff::with_block(*id, b.clone())))
         }))
     }
 
@@ -34,7 +34,7 @@ impl BlockProvider for TestBlockProvider {
         futures_util::future::ready(
             self.blocks
                 .get(id)
-                .map(|b| Ok(BlockStuff::with_block(id.clone(), b.clone()))),
+                .map(|b| Ok(BlockStuff::with_block(*id, b.clone()))),
         )
     }
 }
@@ -50,6 +50,19 @@ impl TestBlockProvider {
         Self {
             blocks,
             master_blocks,
+        }
+    }
+
+    pub fn first_master_block(&self) -> BlockId {
+        *self.master_blocks.first().unwrap()
+    }
+
+    pub fn validate(&self) {
+        for master in &self.master_blocks {
+            tracing::info!("Loading extra for block {:?}", master);
+            let block = self.blocks.get(master).unwrap();
+            let extra = block.load_extra().unwrap();
+            extra.load_custom().unwrap().expect("validation failed");
         }
     }
 }
