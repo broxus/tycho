@@ -38,7 +38,7 @@ impl Node {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        overlay_tasks.spawn(network.clone());
+        overlay_tasks.spawn(&network);
 
         Self {
             network,

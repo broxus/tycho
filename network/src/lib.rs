@@ -6,8 +6,8 @@ pub use self::overlay::{
 };
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
-    xor_distance, DhtClient, DhtClientBuilder, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder,
-    DhtService, DhtServiceBuilder, FindValueError, OverlayValueMerger, StorageError,
+    xor_distance, DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder, DhtService,
+    DhtServiceBackgroundTasks, DhtServiceBuilder, FindValueError, OverlayValueMerger, StorageError,
 };
 pub use network::{
     ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,
@@ -56,15 +56,18 @@ mod tests {
         let public_overlay = PublicOverlay::builder(rand::random())
             .build(service_message_fn(|_| futures_util::future::ready(())));
 
-        let (dht_client, dht) = DhtService::builder(peer_id).build();
+        let (dht_tasks, dht_service) = DhtService::builder(peer_id).build();
 
         let (overlay_tasks, overlay_service) = OverlayService::builder(peer_id)
-            .with_dht_service(dht.clone())
+            .with_dht_service(dht_service.clone())
             .with_private_overlay(&private_overlay)
             .with_public_overlay(&public_overlay)
             .build();
 
-        let router = Router::builder().route(dht).route(overlay_service).build();
+        let router = Router::builder()
+            .route(dht_service)
+            .route(overlay_service)
+            .build();
 
         let network = Network::builder()
             .with_random_private_key()
@@ -72,7 +75,7 @@ mod tests {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        let _dht_client = dht_client.build(network.clone());
-        overlay_tasks.spawn(network);
+        dht_tasks.spawn(&network);
+        overlay_tasks.spawn(&network);
     }
 }

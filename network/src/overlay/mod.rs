@@ -43,9 +43,9 @@ pub struct OverlayServiceBackgroundTasks {
 }
 
 impl OverlayServiceBackgroundTasks {
-    pub fn spawn(self, network: Network) {
+    pub fn spawn(self, network: &Network) {
         self.inner
-            .start_background_tasks(Network::downgrade(&network), self.dht);
+            .start_background_tasks(Network::downgrade(network), self.dht);
     }
 }
 
@@ -141,12 +141,12 @@ impl OverlayService {
         }
     }
 
-    pub fn try_add_private_overlay(&self, overlay: &PrivateOverlay) -> bool {
-        self.0.try_add_private_overlay(overlay)
+    pub fn add_private_overlay(&self, overlay: &PrivateOverlay) -> bool {
+        self.0.add_private_overlay(overlay)
     }
 
-    pub fn try_add_public_overlay(&self, overlay: &PublicOverlay) -> bool {
-        self.0.try_add_public_overlay(overlay)
+    pub fn add_public_overlay(&self, overlay: &PublicOverlay) -> bool {
+        self.0.add_public_overlay(overlay)
     }
 }
 
@@ -656,7 +656,7 @@ impl OverlayServiceInner {
         }
     }
 
-    pub fn try_add_private_overlay(&self, overlay: &PrivateOverlay) -> bool {
+    pub fn add_private_overlay(&self, overlay: &PrivateOverlay) -> bool {
         use dashmap::mapref::entry::Entry;
 
         if self.public_overlays.contains_key(overlay.overlay_id()) {
@@ -665,13 +665,14 @@ impl OverlayServiceInner {
         match self.private_overlays.entry(*overlay.overlay_id()) {
             Entry::Vacant(entry) => {
                 entry.insert(overlay.clone());
+                self.private_overlays_changed.notify_waiters();
                 true
             }
             Entry::Occupied(_) => false,
         }
     }
 
-    pub fn try_add_public_overlay(&self, overlay: &PublicOverlay) -> bool {
+    pub fn add_public_overlay(&self, overlay: &PublicOverlay) -> bool {
         use dashmap::mapref::entry::Entry;
 
         if self.private_overlays.contains_key(overlay.overlay_id()) {

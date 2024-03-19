@@ -31,30 +31,6 @@ mod query;
 mod routing;
 mod storage;
 
-pub struct DhtClientBuilder {
-    inner: Arc<DhtInner>,
-    disable_background_tasks: bool,
-}
-
-impl DhtClientBuilder {
-    pub fn disable_background_tasks(mut self) -> Self {
-        self.disable_background_tasks = true;
-        self
-    }
-
-    pub fn build(self, network: Network) -> DhtClient {
-        if !self.disable_background_tasks {
-            self.inner
-                .start_background_tasks(Network::downgrade(&network));
-        }
-
-        DhtClient {
-            inner: self.inner,
-            network,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct DhtClient {
     inner: Arc<DhtInner>,
@@ -240,6 +216,17 @@ impl<'a> std::ops::DerefMut for DhtQueryWithDataBuilder<'a> {
     }
 }
 
+pub struct DhtServiceBackgroundTasks {
+    inner: Arc<DhtInner>,
+}
+
+impl DhtServiceBackgroundTasks {
+    pub fn spawn(self, network: &Network) {
+        self.inner
+            .start_background_tasks(Network::downgrade(network));
+    }
+}
+
 pub struct DhtServiceBuilder {
     local_id: PeerId,
     config: Option<DhtConfig>,
@@ -257,7 +244,7 @@ impl DhtServiceBuilder {
         self
     }
 
-    pub fn build(self) -> (DhtClientBuilder, DhtService) {
+    pub fn build(self) -> (DhtServiceBackgroundTasks, DhtService) {
         let config = self.config.unwrap_or_default();
 
         let storage = {
@@ -288,12 +275,11 @@ impl DhtServiceBuilder {
             find_value_queries: Default::default(),
         });
 
-        let client_builder = DhtClientBuilder {
+        let background_tasks = DhtServiceBackgroundTasks {
             inner: inner.clone(),
-            disable_background_tasks: false,
         };
 
-        (client_builder, DhtService(inner))
+        (background_tasks, DhtService(inner))
     }
 }
 

@@ -1,9 +1,10 @@
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use exponential_backoff::Backoff;
+use tokio::sync::{Notify, Semaphore};
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 use tycho_util::FastDashMap;
@@ -13,8 +14,8 @@ use crate::network::{KnownPeerHandle, KnownPeersError, Network, PeerBannedError,
 use crate::proto::dht;
 use crate::types::{PeerId, PeerInfo};
 
-pub(crate) struct PeerResolverBuilder {
-    inner: PeerResolverInner,
+pub struct PeerResolverBuilder {
+    inner: PeerResolverConfig,
 }
 
 impl PeerResolverBuilder {
@@ -67,30 +68,51 @@ impl PeerResolverBuilder {
     }
 
     pub fn build(self) -> PeerResolver {
-        PeerResolver {
-            inner: Arc::new(self.inner),
+        // PeerResolver {
+        //     inner: Arc::new(PeerResolverInner {
+        //         weak_network: (),
+        //         dht_service: (),
+        //         config: Default::default(),
+        //         tasks: Default::default(),
+        //         semaphore: (),
+        //     }),
+        // }
+        todo!()
+    }
+}
+
+struct PeerResolverConfig {
+    max_parallel_resolve_requests: usize,
+    min_ttl_sec: u32,
+    update_before_sec: u32,
+    fast_retry_count: u32,
+    min_retry_interval: Duration,
+    max_retry_interval: Duration,
+    stale_retry_interval: Duration,
+}
+
+impl Default for PeerResolverConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel_resolve_requests: 100,
+            min_ttl_sec: 600,
+            update_before_sec: 1200,
+            fast_retry_count: 10,
+            min_retry_interval: Duration::from_secs(1),
+            max_retry_interval: Duration::from_secs(120),
+            stale_retry_interval: Duration::from_secs(600),
         }
     }
 }
 
-pub(crate) struct PeerResolver {
+pub struct PeerResolver {
     inner: Arc<PeerResolverInner>,
 }
 
 impl PeerResolver {
-    pub fn builder(network: &Network, dht_service: DhtService) -> PeerResolverBuilder {
+    pub fn builder() -> PeerResolverBuilder {
         PeerResolverBuilder {
-            inner: PeerResolverInner {
-                weak_network: Network::downgrade(network),
-                dht_service,
-                tasks: Default::default(),
-                min_ttl_sec: 600,
-                update_before_sec: 1200,
-                fast_retry_count: 10,
-                min_retry_interval: Duration::from_secs(1),
-                max_retry_interval: Duration::from_secs(120),
-                stale_retry_interval: Duration::from_secs(600),
-            },
+            inner: Default::default(),
         }
     }
 
@@ -120,13 +142,9 @@ impl PeerResolver {
 struct PeerResolverInner {
     weak_network: WeakNetwork,
     dht_service: DhtService,
+    config: PeerResolverConfig,
     tasks: FastDashMap<PeerId, Weak<PeerResolverHandleInner>>,
-    min_ttl_sec: u32,
-    update_before_sec: u32,
-    fast_retry_count: u32,
-    min_retry_interval: Duration,
-    max_retry_interval: Duration,
-    stale_retry_interval: Duration,
+    semaphore: Semaphore,
 }
 
 impl PeerResolverInner {
@@ -136,11 +154,7 @@ impl PeerResolverInner {
             None => {
                 return PeerResolverHandle::new(
                     JoinTask::new(futures_util::future::ready(())),
-                    Arc::new(PeerResolverHandleData {
-                        peer_id: *peer_id,
-                        handle: Mutex::new(None),
-                        is_stale: AtomicBool::new(false),
-                    }),
+                    Arc::new(PeerResolverHandleData::new(peer_id, None)),
                     self,
                 );
             }
@@ -149,11 +163,7 @@ impl PeerResolverInner {
             .as_ref()
             .map(|handle| self.compute_update_at(&handle.peer_info()));
 
-        let data = Arc::new(PeerResolverHandleData {
-            peer_id: *peer_id,
-            handle: Mutex::new(handle),
-            is_stale: AtomicBool::new(false),
-        });
+        let data = Arc::new(PeerResolverHandleData::new(peer_id, handle));
 
         PeerResolverHandle::new(
             JoinTask::new(self.clone().run_task(data.clone(), next_update_at)),
@@ -181,7 +191,7 @@ impl PeerResolverInner {
             }
 
             // Start resolving peer.
-            match self.resolve_peer(&data.peer_id, &data.is_stale).await {
+            match self.resolve_peer(&data).await {
                 Some((network, peer_info)) => {
                     let mut handle = data.handle.lock().unwrap();
 
@@ -203,6 +213,7 @@ impl PeerResolverInner {
                         {
                             Ok(new_handle) => {
                                 peer_info_guard = handle.insert(new_handle).peer_info();
+                                data.mark_resolved();
                                 peer_info_guard.as_ref()
                             }
                             // TODO: Allow resuming task after ban?
@@ -223,12 +234,11 @@ impl PeerResolverInner {
     /// Or `None` if network no longer exists.
     async fn resolve_peer(
         &self,
-        peer_id: &PeerId,
-        is_stale: &AtomicBool,
+        data: &PeerResolverHandleData,
     ) -> Option<(Network, Arc<PeerInfo>)> {
         struct Iter<'a> {
             backoff: Option<exponential_backoff::Iter<'a>>,
-            is_stale: &'a AtomicBool,
+            data: &'a PeerResolverHandleData,
             stale_retry_interval: &'a Duration,
         }
 
@@ -245,7 +255,7 @@ impl PeerResolverInner {
                             // Set `is_stale` flag on last attempt and continue wih only
                             // the `stale_retry_interval` for all subsequent iterations.
                             None => {
-                                self.is_stale.store(true, Ordering::Release);
+                                self.data.set_stale(true);
                                 self.backoff = None;
                             }
                         },
@@ -257,41 +267,44 @@ impl PeerResolverInner {
         }
 
         let backoff = Backoff::new(
-            self.fast_retry_count,
-            self.min_retry_interval,
-            Some(self.max_retry_interval),
+            self.config.fast_retry_count,
+            self.config.min_retry_interval,
+            Some(self.config.max_retry_interval),
         );
         let mut iter = Iter {
             backoff: Some(backoff.iter()),
-            is_stale,
-            stale_retry_interval: &self.stale_retry_interval,
+            data,
+            stale_retry_interval: &self.config.stale_retry_interval,
         };
 
         // "Fast" path
         let mut attempts = 0usize;
         loop {
             attempts += 1;
-            let is_stale = attempts > self.fast_retry_count as usize;
+            let is_stale = attempts > self.config.fast_retry_count as usize;
 
             // NOTE: Acquire network ref only during the operation.
             {
                 let network = self.weak_network.upgrade()?;
                 let dht_client = self.dht_service.make_client(network.clone());
 
-                let res = dht_client
-                    .entry(dht::PeerValueKeyName::NodeInfo)
-                    .find_value::<PeerInfo>(peer_id)
-                    .await;
+                let res = {
+                    let _permit = self.semaphore.acquire().await.unwrap();
+                    dht_client
+                        .entry(dht::PeerValueKeyName::NodeInfo)
+                        .find_value::<PeerInfo>(&data.peer_id)
+                        .await
+                };
 
                 let now = now_sec();
                 match res {
                     // TODO: Should we move signature check into the `spawn_blocking`?
-                    Ok(peer_info) if peer_info.id == peer_id && peer_info.is_valid(now) => {
+                    Ok(peer_info) if peer_info.id == data.peer_id && peer_info.is_valid(now) => {
                         return Some((network, Arc::new(peer_info)));
                     }
                     Ok(_) => {
                         tracing::trace!(
-                            %peer_id,
+                            peer_id = %data.peer_id,
                             attempts,
                             is_stale,
                             "received an invalid peer info",
@@ -299,7 +312,7 @@ impl PeerResolverInner {
                     }
                     Err(e) => {
                         tracing::trace!(
-                            %peer_id,
+                            peer_id = %data.peer_id,
                             attempts,
                             is_stale,
                             "failed to resolve a peer info: {e:?}",
@@ -316,17 +329,17 @@ impl PeerResolverInner {
     fn compute_update_at(&self, peer_info: &PeerInfo) -> u32 {
         let real_ttl = peer_info
             .expires_at
-            .saturating_sub(self.update_before_sec)
+            .saturating_sub(self.config.update_before_sec)
             .saturating_sub(peer_info.created_at);
 
-        let adjusted_ttl = std::cmp::max(real_ttl, self.min_ttl_sec);
+        let adjusted_ttl = std::cmp::max(real_ttl, self.config.min_ttl_sec);
         peer_info.created_at.saturating_add(adjusted_ttl)
     }
 }
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub(crate) struct PeerResolverHandle {
+pub struct PeerResolverHandle {
     inner: ManuallyDrop<Arc<PeerResolverHandleInner>>,
 }
 
@@ -345,16 +358,26 @@ impl PeerResolverHandle {
         }
     }
 
-    pub fn is_resolved(&self) -> bool {
-        self.inner.data.handle.lock().unwrap().is_some()
-    }
-
     pub fn load_handle(&self) -> Option<KnownPeerHandle> {
         self.inner.data.handle.lock().unwrap().clone()
     }
 
     pub fn is_stale(&self) -> bool {
-        self.inner.data.is_stale.load(Ordering::Acquire)
+        self.inner.data.flags.load(Ordering::Acquire) & STALE_FLAG != 0
+    }
+
+    pub fn is_resolved(&self) -> bool {
+        self.inner.data.flags.load(Ordering::Acquire) & RESOLVED_FLAG != 0
+    }
+
+    pub async fn wait_resolved(&self) -> KnownPeerHandle {
+        loop {
+            let resolved = self.inner.data.notify_resolved.notified();
+            if let Some(load_handle) = self.load_handle() {
+                break load_handle;
+            }
+            resolved.await;
+        }
     }
 }
 
@@ -386,5 +409,43 @@ struct PeerResolverHandleInner {
 struct PeerResolverHandleData {
     peer_id: PeerId,
     handle: Mutex<Option<KnownPeerHandle>>,
-    is_stale: AtomicBool,
+    flags: AtomicU32,
+    notify_resolved: Notify,
 }
+
+impl PeerResolverHandleData {
+    fn new(peer_id: &PeerId, handle: Option<KnownPeerHandle>) -> Self {
+        let flags = AtomicU32::new(if handle.is_some() { RESOLVED_FLAG } else { 0 });
+
+        Self {
+            peer_id: *peer_id,
+            handle: Mutex::new(handle),
+            flags,
+            notify_resolved: Notify::new(),
+        }
+    }
+
+    fn mark_resolved(&self) {
+        self.flags.fetch_or(RESOLVED_FLAG, Ordering::Release);
+        self.notify_resolved.notify_waiters();
+    }
+
+    fn is_resolved(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & RESOLVED_FLAG != 0
+    }
+
+    fn set_stale(&self, stale: bool) {
+        if stale {
+            self.flags.fetch_or(STALE_FLAG, Ordering::Release);
+        } else {
+            self.flags.fetch_and(!STALE_FLAG, Ordering::Release);
+        }
+    }
+
+    fn is_stale(&self) -> bool {
+        self.flags.load(Ordering::Acquire) & STALE_FLAG != 0
+    }
+}
+
+const STALE_FLAG: u32 = 0b1;
+const RESOLVED_FLAG: u32 = 0b10;
