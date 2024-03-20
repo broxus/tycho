@@ -24,9 +24,11 @@ use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest}
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
+pub use self::peer_resolver::{PeerResolver, PeerResolverBuilder, PeerResolverHandle};
 pub use self::storage::{OverlayValueMerger, StorageError};
 
 mod config;
+mod peer_resolver;
 mod query;
 mod routing;
 mod storage;
@@ -38,8 +40,14 @@ pub struct DhtClient {
 }
 
 impl DhtClient {
+    #[inline]
     pub fn network(&self) -> &Network {
         &self.network
+    }
+
+    #[inline]
+    pub fn service(&self) -> &DhtService {
+        DhtService::wrap(&self.inner)
     }
 
     pub fn add_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
@@ -284,9 +292,16 @@ impl DhtServiceBuilder {
 }
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct DhtService(Arc<DhtInner>);
 
 impl DhtService {
+    #[inline]
+    fn wrap(inner: &Arc<DhtInner>) -> &Self {
+        // SAFETY: `DhtService` has the same memory layout as `Arc<DhtInner>`.
+        unsafe { &*(inner as *const Arc<DhtInner>).cast::<Self>() }
+    }
+
     pub fn builder(local_id: PeerId) -> DhtServiceBuilder {
         DhtServiceBuilder {
             local_id,
@@ -300,6 +315,10 @@ impl DhtService {
             inner: self.0.clone(),
             network,
         }
+    }
+
+    pub fn make_peer_resolver(&self) -> PeerResolverBuilder {
+        PeerResolver::builder(self.clone())
     }
 }
 

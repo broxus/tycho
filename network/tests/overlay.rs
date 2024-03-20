@@ -9,14 +9,15 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    Address, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay, Request,
-    Response, Router, Service, ServiceRequest,
+    Address, KnownPeerHandle, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay,
+    Request, Response, Router, Service, ServiceRequest,
 };
 use tycho_util::time::now_sec;
 
 struct Node {
     network: Network,
     private_overlay: PrivateOverlay,
+    known_peer_handles: Vec<KnownPeerHandle>,
 }
 
 impl Node {
@@ -24,13 +25,9 @@ impl Node {
         let keypair = ed25519::KeyPair::from(key);
         let local_id = PeerId::from(keypair.public_key);
 
-        let private_overlay = PrivateOverlay::builder(PRIVATE_OVERLAY_ID).build(PingPongService);
+        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id).build();
 
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_private_overlay(&private_overlay)
-            .build();
-
-        let router = Router::builder().route(overlay_service).build();
+        let router = Router::builder().route(overlay_service.clone()).build();
 
         let network = Network::builder()
             .with_private_key(key.to_bytes())
@@ -40,9 +37,13 @@ impl Node {
 
         overlay_tasks.spawn(&network);
 
+        let private_overlay = PrivateOverlay::builder(PRIVATE_OVERLAY_ID).build(PingPongService);
+        overlay_service.add_private_overlay(&private_overlay);
+
         Self {
             network,
             private_overlay,
+            known_peer_handles: Vec::new(),
         }
     }
 
@@ -94,12 +95,14 @@ fn make_network(node_count: usize) -> Vec<Node> {
                 continue;
             }
 
-            let handle = node
-                .network
-                .known_peers()
-                .insert(info.clone(), false)
-                .unwrap();
-            private_overlay_entries.insert(&info.id, Some(handle));
+            node.known_peer_handles.push(
+                node.network
+                    .known_peers()
+                    .insert(info.clone(), false)
+                    .unwrap(),
+            );
+
+            private_overlay_entries.insert(&info.id);
         }
     }
 

@@ -764,6 +764,66 @@ impl KnownPeerHandle {
         inner.affinity.swap(AFFINITY_BANNED, Ordering::AcqRel) != AFFINITY_BANNED
     }
 
+    pub fn increase_affinity(&mut self) -> bool {
+        match &mut self.0 {
+            KnownPeerHandleState::Simple(inner) => {
+                // NOTE: Handle will be updated even if the peer is banned.
+                inner.increase_affinity();
+
+                // SAFETY: Inner value was not dropped.
+                let inner = unsafe { ManuallyDrop::take(inner) };
+
+                // Replace the old state with the new one, ensuring that the old state
+                // is not dropped (because we took the value out of it).
+                let prev_state = std::mem::replace(
+                    &mut self.0,
+                    KnownPeerHandleState::WithAffinity(ManuallyDrop::new(Arc::new(
+                        KnownPeerHandleWithAffinity { inner },
+                    ))),
+                );
+
+                // Forget the old state to avoid dropping it.
+                #[allow(clippy::mem_forget)]
+                std::mem::forget(prev_state);
+
+                true
+            }
+            KnownPeerHandleState::WithAffinity(_) => false,
+        }
+    }
+
+    pub fn decrease_affinity(&mut self) -> bool {
+        match &mut self.0 {
+            KnownPeerHandleState::Simple(_) => false,
+            KnownPeerHandleState::WithAffinity(inner) => {
+                // NOTE: Handle will be updated even if the peer is banned.
+                inner.inner.decrease_affinity();
+
+                // SAFETY: Inner value was not dropped.
+                let inner = unsafe { ManuallyDrop::take(inner) };
+
+                // Get `KnownPeerInner` out of the wrapper.
+                let inner = match Arc::try_unwrap(inner) {
+                    Ok(KnownPeerHandleWithAffinity { inner }) => inner,
+                    Err(inner) => inner.inner.clone(),
+                };
+
+                // Replace the old state with the new one, ensuring that the old state
+                // is not dropped (because we took the value out of it).
+                let prev_state = std::mem::replace(
+                    &mut self.0,
+                    KnownPeerHandleState::Simple(ManuallyDrop::new(inner)),
+                );
+
+                // Forget the old state to avoid dropping it.
+                #[allow(clippy::mem_forget)]
+                std::mem::forget(prev_state);
+
+                true
+            }
+        }
+    }
+
     pub fn downgrade(&self) -> WeakKnownPeerHandle {
         WeakKnownPeerHandle(match &self.0 {
             KnownPeerHandleState::Simple(data) => {

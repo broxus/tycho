@@ -1,13 +1,14 @@
 pub use self::overlay::{
     OverlayConfig, OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
     PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
-    PrivateOverlayEntriesIter, PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
-    PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
+    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PublicOverlay,
+    PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
 };
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
     xor_distance, DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder, DhtService,
-    DhtServiceBackgroundTasks, DhtServiceBuilder, FindValueError, OverlayValueMerger, StorageError,
+    DhtServiceBackgroundTasks, DhtServiceBuilder, FindValueError, OverlayValueMerger, PeerResolver,
+    PeerResolverBuilder, PeerResolverHandle, StorageError,
 };
 pub use network::{
     ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,
@@ -50,23 +51,15 @@ mod tests {
         let keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
         let peer_id: PeerId = keypair.public_key.into();
 
-        let private_overlay = PrivateOverlay::builder(rand::random())
-            .build(service_message_fn(|_| futures_util::future::ready(())));
-
-        let public_overlay = PublicOverlay::builder(rand::random())
-            .build(service_message_fn(|_| futures_util::future::ready(())));
-
         let (dht_tasks, dht_service) = DhtService::builder(peer_id).build();
 
         let (overlay_tasks, overlay_service) = OverlayService::builder(peer_id)
             .with_dht_service(dht_service.clone())
-            .with_private_overlay(&private_overlay)
-            .with_public_overlay(&public_overlay)
             .build();
 
         let router = Router::builder()
-            .route(dht_service)
-            .route(overlay_service)
+            .route(dht_service.clone())
+            .route(overlay_service.clone())
             .build();
 
         let network = Network::builder()
@@ -77,5 +70,17 @@ mod tests {
 
         dht_tasks.spawn(&network);
         overlay_tasks.spawn(&network);
+
+        let peer_resolver = dht_service.make_peer_resolver().build(&network);
+
+        let private_overlay = PrivateOverlay::builder(rand::random())
+            .with_peer_resolver(peer_resolver)
+            .build(service_message_fn(|_| futures_util::future::ready(())));
+
+        let public_overlay = PublicOverlay::builder(rand::random())
+            .build(service_message_fn(|_| futures_util::future::ready(())));
+
+        overlay_service.add_private_overlay(&private_overlay);
+        overlay_service.add_public_overlay(&public_overlay);
     }
 }

@@ -16,6 +16,7 @@ use crate::types::{PeerId, PeerInfo};
 
 pub struct PeerResolverBuilder {
     inner: PeerResolverConfig,
+    dht_service: DhtService,
 }
 
 impl PeerResolverBuilder {
@@ -67,17 +68,18 @@ impl PeerResolverBuilder {
         self
     }
 
-    pub fn build(self) -> PeerResolver {
-        // PeerResolver {
-        //     inner: Arc::new(PeerResolverInner {
-        //         weak_network: (),
-        //         dht_service: (),
-        //         config: Default::default(),
-        //         tasks: Default::default(),
-        //         semaphore: (),
-        //     }),
-        // }
-        todo!()
+    pub fn build(self, network: &Network) -> PeerResolver {
+        let semaphore = Semaphore::new(self.inner.max_parallel_resolve_requests);
+
+        PeerResolver {
+            inner: Arc::new(PeerResolverInner {
+                weak_network: Network::downgrade(network),
+                dht_service: self.dht_service,
+                config: Default::default(),
+                tasks: Default::default(),
+                semaphore,
+            }),
+        }
     }
 }
 
@@ -105,18 +107,21 @@ impl Default for PeerResolverConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct PeerResolver {
     inner: Arc<PeerResolverInner>,
 }
 
 impl PeerResolver {
-    pub fn builder() -> PeerResolverBuilder {
+    pub(crate) fn builder(dht_service: DhtService) -> PeerResolverBuilder {
         PeerResolverBuilder {
             inner: Default::default(),
+            dht_service,
         }
     }
 
-    pub fn insert(&self, peer_id: &PeerId) -> PeerResolverHandle {
+    // TODO: Use affinity flag to increase the handle affinity.
+    pub fn insert(&self, peer_id: &PeerId, _with_affinity: bool) -> PeerResolverHandle {
         use dashmap::mapref::entry::Entry;
 
         match self.inner.tasks.entry(*peer_id) {
@@ -152,11 +157,7 @@ impl PeerResolverInner {
         let handle = match self.weak_network.upgrade() {
             Some(handle) => handle.known_peers().make_handle(peer_id, false),
             None => {
-                return PeerResolverHandle::new(
-                    JoinTask::new(futures_util::future::ready(())),
-                    Arc::new(PeerResolverHandleData::new(peer_id, None)),
-                    self,
-                );
+                return PeerResolverHandle::new_noop(peer_id);
             }
         };
         let next_update_at = handle
@@ -351,9 +352,19 @@ impl PeerResolverHandle {
     ) -> Self {
         Self {
             inner: ManuallyDrop::new(Arc::new(PeerResolverHandleInner {
-                task,
+                _task: Some(task),
                 data,
                 resolver: Arc::downgrade(resolver),
+            })),
+        }
+    }
+
+    pub fn new_noop(peer_id: &PeerId) -> Self {
+        Self {
+            inner: ManuallyDrop::new(Arc::new(PeerResolverHandleInner {
+                _task: None,
+                data: Arc::new(PeerResolverHandleData::new(peer_id, None)),
+                resolver: Weak::new(),
             })),
         }
     }
@@ -363,11 +374,11 @@ impl PeerResolverHandle {
     }
 
     pub fn is_stale(&self) -> bool {
-        self.inner.data.flags.load(Ordering::Acquire) & STALE_FLAG != 0
+        self.inner.data.is_stale()
     }
 
     pub fn is_resolved(&self) -> bool {
-        self.inner.data.flags.load(Ordering::Acquire) & RESOLVED_FLAG != 0
+        self.inner.data.is_resolved()
     }
 
     pub async fn wait_resolved(&self) -> KnownPeerHandle {
@@ -401,7 +412,7 @@ impl Drop for PeerResolverHandle {
 }
 
 struct PeerResolverHandleInner {
-    task: JoinTask<()>,
+    _task: Option<JoinTask<()>>,
     data: Arc<PeerResolverHandleData>,
     resolver: Weak<PeerResolverInner>,
 }
