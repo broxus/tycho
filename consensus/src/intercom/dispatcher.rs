@@ -221,10 +221,11 @@ impl ResponderInner {
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::peer_schedule::PeerSchedule;
     use tycho_network::{Address, PeerInfo};
     use tycho_util::time::now_sec;
 
+    use crate::engine::node_count::NodeCount;
+    use crate::engine::peer_schedule::PeerSchedule;
     use crate::models::point::Digest;
 
     use super::*;
@@ -279,7 +280,8 @@ mod tests {
 
         let all_peers = FastHashSet::from_iter(all_peers.into_iter());
         for sch in &schedules {
-            sch.wait_for_peers(Round(1), node_count - 1).await;
+            sch.wait_for_peers(Round(1), NodeCount::new(node_count).majority_except_me())
+                .await;
             tracing::info!("found peers for {}", sch.local_id);
         }
 

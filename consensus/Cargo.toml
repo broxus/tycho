@@ -14,6 +14,8 @@ dashmap = "5.4"
 everscale-crypto = "0.2"
 futures-util = { version = "0.3" }
 parking_lot = "0.12"
+rand = { version = "0.8" }
+rand_pcg = { version = "0.3" }
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt"] }
@@ -31,7 +33,6 @@ thiserror = "1.0"
 ahash = "0.8"
 
 [dev-dependencies]
-rand = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

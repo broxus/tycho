@@ -10,6 +10,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesEvent};
 use tycho_util::FastHashMap;
 
+use crate::engine::node_count::NodeCount;
 use crate::models::point::Round;
 
 /*
@@ -24,7 +25,6 @@ use crate::models::point::Round;
 */
 #[derive(Clone)]
 pub struct PeerSchedule {
-    // TODO pub leader_schedule:
     // FIXME determine if our local_id is in next epoch
     inner: Arc<Mutex<PeerScheduleInner>>,
     overlay: PrivateOverlay,
@@ -56,11 +56,11 @@ impl PeerSchedule {
     // * which nodes are in the validator set during the round of interest
     // * which nodes are able to connect at the moment
     /// TODO replace bool with AtomicBool? use Arc<FastDashMap>? to return map with auto refresh
-    pub async fn wait_for_peers(&self, round: Round, node_count: usize) {
+    pub async fn wait_for_peers(&self, round: Round, node_count: NodeCount) {
         let mut rx = self.overlay.read_entries().subscribe();
         let mut peers = (*self.peers_for(round)).clone();
         let mut count = peers.iter().filter(|(_, &is_resolved)| is_resolved).count();
-        while count < node_count {
+        while count < node_count.into() {
             match rx.recv().await {
                 Ok(PrivateOverlayEntriesEvent::Resolved(peer_id)) if peer_id != self.local_id => {
                     if let Some(resolved) = peers.get_mut(&peer_id) {

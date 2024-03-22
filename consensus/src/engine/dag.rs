@@ -1,16 +1,18 @@
 use std::collections::{btree_map, BTreeMap, VecDeque};
-use std::num::{NonZeroU8, NonZeroUsize};
+use std::num::NonZeroU8;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use ahash::RandomState;
-use anyhow::{anyhow, Result};
 use futures_util::FutureExt;
+use rand::{Rng, SeedableRng};
 
 use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::FastDashMap;
 
+use crate::engine::node_count::NodeCount;
+use crate::engine::peer_schedule::PeerSchedule;
 use crate::engine::verifier::Verifier;
 use crate::models::point::{Digest, Point, PointId, Round, Signature};
 
@@ -33,7 +35,7 @@ impl IndexedPoint {
 
 #[derive(Clone)]
 pub enum DagPoint {
-    // valid, needed to blame equivocation or graph connectivity violations
+    // valid without demur, needed to blame equivocation or graph connectivity violations
     Trusted(Arc<IndexedPoint>),
     // is a valid container, but we doubt author's fairness at the moment of validating;
     // we do not sign such point, but others may include it without consequences;
@@ -78,23 +80,60 @@ pub struct DagLocation {
     pub versions: BTreeMap<Digest, Shared<JoinTask<DagPoint>>>,
 }
 
+pub enum AnchorStage {
+    Candidate(PeerId),
+    Proof(PeerId),
+    Trigger(PeerId),
+}
+
+impl AnchorStage {
+    pub fn of(round: Round, peer_schedule: &PeerSchedule) -> Option<Self> {
+        const WAVE_SIZE: u32 = 4;
+        let anchor_candidate_round = (round.0 / WAVE_SIZE) * WAVE_SIZE + 1;
+
+        let [leader_peers, current_peers] =
+            peer_schedule.peers_for_array([Round(anchor_candidate_round), round]);
+        // reproducible global coin
+        let leader_index = rand_pcg::Pcg32::seed_from_u64(anchor_candidate_round as u64)
+            .gen_range(0..leader_peers.len());
+        let Some(leader) = leader_peers
+            .iter()
+            .nth(leader_index)
+            .map(|(peer_id, _)| peer_id)
+        else {
+            panic!("Fatal: selecting a leader from an empty validator set")
+        };
+        if !current_peers.contains_key(leader) {
+            return None;
+        };
+        match round.0 % WAVE_SIZE {
+            0 => None, // both genesis and trailing (proof inclusion) round
+            1 => Some(AnchorStage::Candidate(leader.clone())),
+            2 => Some(AnchorStage::Proof(leader.clone())),
+            3 => Some(AnchorStage::Trigger(leader.clone())),
+            _ => unreachable!(),
+        }
+    }
+}
+
 pub struct DagRound {
     pub round: Round,
-    node_count: u8,
+    node_count: NodeCount,
+    pub anchor_stage: Option<AnchorStage>,
     pub locations: FastDashMap<PeerId, DagLocation>,
     pub prev: Weak<DagRound>,
 }
 
 impl DagRound {
-    fn new(round: Round, node_count: NonZeroU8, prev: Option<&Arc<DagRound>>) -> Self {
+    fn new(round: Round, peer_schedule: &PeerSchedule, prev: Option<Weak<DagRound>>) -> Self {
+        let peers = peer_schedule.peers_for(round);
+        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), RandomState::new());
         Self {
             round,
-            node_count: ((node_count.get() + 2) / 3) * 3 + 1, // 3F+1
-            locations: FastDashMap::with_capacity_and_hasher(
-                node_count.get() as usize,
-                RandomState::new(),
-            ),
-            prev: prev.map_or(Weak::new(), |a| Arc::downgrade(a)),
+            node_count: NodeCount::new(peers.len()),
+            anchor_stage: AnchorStage::of(round, peer_schedule),
+            locations,
+            prev: prev.unwrap_or_else(|| Weak::new()),
         }
     }
 
@@ -106,7 +145,11 @@ impl DagRound {
         point_fut.await.0.valid()
     }
 
-    pub fn add(&self, point: Box<Point>, verifier: &Verifier) -> Shared<JoinTask<DagPoint>> {
+    pub fn add(
+        self: Arc<Self>,
+        point: Box<Point>,
+        peer_schedule: &PeerSchedule,
+    ) -> Shared<JoinTask<DagPoint>> {
         if &point.body.location.round != &self.round {
             panic! {"Coding error: dag round mismatches point round"}
         }
@@ -119,88 +162,59 @@ impl DagRound {
         match location.versions.entry(point.digest.clone()) {
             btree_map::Entry::Occupied(entry) => entry.get().clone(),
             btree_map::Entry::Vacant(entry) => entry
-                .insert(Shared::new(verifier.verify(&self, point)))
+                .insert(Shared::new(Verifier::verify(
+                    self.clone(),
+                    point,
+                    peer_schedule,
+                )))
                 .clone(),
         }
-        // Todo calling site may return signature only for Trusted point
-        // Detected point equivocation does not invalidate the point, it just
-        //   prevents us (as a fair actor) from returning our signature to the author.
-        // Such a point may be included in our next "includes" or "witnesses",
-        //   but neither its inclusion nor omitting is required: as we don't
-        //   return our signature, our dependencies cannot be validated against it.
-        // Equally, we immediately stop communicating with the equivocating node,
-        //   without invalidating any of its points (no matter historical or future).
-        // The proof for equivocated point cannot be signed
-        //   as we've banned the author on network layer.
-        // Anyway, no more than one of equivocated points may become a vertex.
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum DagError {
-    #[error("Dag empty")]
-    Empty,
-    #[error("Point not in dag")]
-    PointNotInDag,
-    #[error("Round not in dag")]
-    RoundNotInDag,
-}
 pub struct Dag {
     current: Round,
     // from the oldest to the current round; newer ones are in the future
-    rounds: VecDeque<Arc<DagRound>>, // TODO VecDeque<Promise<Arc<DagRound>>> for sync
+    rounds: BTreeMap<Round, Arc<DagRound>>,
+    peer_schedule: PeerSchedule,
 }
 
 impl Dag {
-    pub fn new(round: Round, node_count: NonZeroU8) -> Self {
+    pub fn new(round: Round, peer_schedule: PeerSchedule) -> Self {
         Self {
             current: round,
-            rounds: VecDeque::from([Arc::new(DagRound::new(round, node_count, None))]),
+            rounds: BTreeMap::from([(round, Arc::new(DagRound::new(round, &peer_schedule, None)))]),
+            peer_schedule,
         }
     }
 
     // TODO new point is checked against the dag only if it has valid sig, time and round
     // TODO download from neighbours
-    pub fn fill_up_to(&mut self, round: Round, node_count: NonZeroU8) -> Result<()> {
-        match self.rounds.front().map(|f| f.round) {
+    pub fn fill_up_to(&mut self, round: Round) {
+        match self.rounds.last_key_value().map(|(k, v)| k) {
             None => unreachable!("DAG empty"),
-            Some(front) => {
-                for round in front.0..round.0 {
-                    self.rounds.push_front(Arc::new(DagRound::new(
-                        Round(round + 1),
-                        node_count,
-                        self.rounds.front(),
-                    )))
+            Some(last) => {
+                for round in (last.0..round.0).into_iter().map(|i| Round(i + 1)) {
+                    let prev = self.rounds.last_key_value().map(|(_, v)| Arc::downgrade(v));
+                    self.rounds.entry(round).or_insert_with(|| {
+                        Arc::new(DagRound::new(round, &self.peer_schedule, prev))
+                    });
                 }
-                Ok(())
             }
         }
     }
 
-    pub fn drop_tail(&mut self, anchor_at: Round, dag_depth: NonZeroUsize) {
-        if let Some(tail) = self
-            .index_of(anchor_at)
-            .and_then(|a| a.checked_sub(dag_depth.get()))
-        {
-            self.rounds.drain(0..tail);
+    // TODO the next "little anchor candidate that could" must have at least full dag depth
+    pub fn drop_tail(&mut self, anchor_at: Round, dag_depth: NonZeroU8) {
+        if let Some(tail) = anchor_at.0.checked_sub(dag_depth.get() as u32) {
+            self.rounds = self.rounds.split_off(&Round(tail));
         };
-    }
-
-    fn round_at(&self, round: Round) -> Option<Arc<DagRound>> {
-        self.rounds.get(self.index_of(round)?).cloned()
-    }
-
-    fn index_of(&self, round: Round) -> Option<usize> {
-        match self.rounds.back().map(|b| b.round) {
-            Some(back) if back <= round => Some((round.0 - back.0) as usize),
-            _ => None,
-        }
     }
 
     pub async fn vertex_by(&self, proof: &IndexedPoint) -> Option<Arc<IndexedPoint>> {
         let digest = &proof.point.body.proof.as_ref()?.digest;
         let round = proof.point.body.location.round.prev();
-        let dag_round = self.round_at(round)?;
+        let dag_round = self.rounds.get(&round)?;
         dag_round
             .valid_point(&proof.point.body.location.author, digest)
             .await
@@ -209,16 +223,24 @@ impl Dag {
     // @return historically ordered vertices (back to front is older to newer)
     pub async fn gather_uncommitted(
         &self,
-        anchor_proof: &IndexedPoint,
+        anchor_trigger: &IndexedPoint,
         // dag_depth: usize,
-    ) -> Result<VecDeque<Arc<IndexedPoint>>> {
+    ) -> VecDeque<Arc<IndexedPoint>> {
         // anchor must be a vertex @ r+1, proven with point @ r+2
-        let Some(anchor) = self.vertex_by(&anchor_proof).await else {
-            return Err(anyhow!(
-                "anchor proof @ {} not in dag",
-                &anchor_proof.point.body.location.round.0
-            ));
+        let Some(anchor_proof) = self.vertex_by(&anchor_trigger).await else {
+            panic!(
+                "Coding error: anchor trigger @ {} is not in DAG",
+                &anchor_trigger.point.body.location.round.0
+            );
         };
+        _ = anchor_trigger; // no more needed for commit
+        let Some(anchor) = self.vertex_by(&anchor_proof).await else {
+            panic!(
+                "Coding error: anchor proof @ {} is not in DAG",
+                &anchor_proof.point.body.location.round.0
+            );
+        };
+        _ = anchor_proof; // no more needed for commit
 
         let mut cur_includes_round = anchor.point.body.location.round.prev(); /* r+0 */
 
@@ -235,7 +257,8 @@ impl Dag {
         // TODO visited rounds count must be equal to dag depth:
         //  read/download non-existent rounds and drop too old ones
         while let Some((proof_round /* r+0 */, vertex_round /* r-1 */)) = self
-            .round_at(cur_includes_round)
+            .rounds
+            .get(&cur_includes_round)
             .and_then(|cur| cur.prev.upgrade().map(|prev| (cur, prev)))
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
@@ -277,6 +300,6 @@ impl Dag {
             cur_includes_round = vertex_round.round; // next r+0
             r.rotate_left(1);
         }
-        Ok(uncommitted)
+        uncommitted
     }
 }
