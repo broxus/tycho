@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::{
     cell::HashBytes,
-    models::{BlockId, ShardIdent, ShardStateUnsplit, Signature},
+    models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature},
 };
 
 use tycho_block_util::block::{BlockStuff, ValidatorSubsetInfo};
@@ -82,6 +84,20 @@ impl CollationSessionInfo {
     }
     pub fn collators(&self) -> &ValidatorSubsetInfo {
         &self.collators
+    }
+}
+
+pub(crate) struct MessageContainer {
+    id_hash: HashBytes,
+    pub message: Arc<OwnedMessage>,
+}
+impl MessageContainer {
+    pub fn from_message(message: Arc<OwnedMessage>) -> Self {
+        let id_hash = *message.body.0.repr_hash();
+        Self { id_hash, message }
+    }
+    pub fn id_hash(&self) -> &HashBytes {
+        &self.id_hash
     }
 }
 

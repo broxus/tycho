@@ -10,7 +10,7 @@ use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
 
 use crate::{
     collator::Collator,
-    mempool::MempoolAdapter,
+    mempool::{MempoolAdapter, MempoolAnchor},
     method_to_async_task_closure,
     msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
@@ -35,7 +35,7 @@ pub(crate) enum CollationProcessorTaskResult {
 }
 pub(super) struct CollationProcessor<C, V, MQ, MP, ST>
 where
-    C: Collator<MQ, ST>,
+    C: Collator<MQ, MP, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -44,7 +44,7 @@ where
     config: Arc<CollationConfig>,
 
     dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
-    mp_adapter: Arc<MP>,
+    mpool_adapter: Arc<MP>,
     state_node_adapter: Arc<ST>,
     mq_adapter: Arc<MQ>,
 
@@ -59,7 +59,7 @@ where
 
 impl<C, V, MQ, MP, ST> CollationProcessor<C, V, MQ, MP, ST>
 where
-    C: Collator<MQ, ST>,
+    C: Collator<MQ, MP, ST>,
     V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
@@ -68,14 +68,14 @@ where
     pub fn new(
         config: Arc<CollationConfig>,
         dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
-        mp_adapter: Arc<MP>,
+        mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         validator: Arc<V>,
     ) -> Self {
         Self {
             config,
             dispatcher,
-            mp_adapter,
+            mpool_adapter,
             state_node_adapter,
             mq_adapter: Arc::new(MQ::new()),
             validator,
@@ -91,9 +91,28 @@ where
         todo!()
     }
 
+    fn last_processed_mc_block_id(&self) -> Option<&BlockId> {
+        todo!()
+    }
+
+    fn set_last_processed_mc_block_id(&self, block_id: BlockId) {
+        todo!()
+    }
+
     /// Update last master block chain time
     fn update_last_mc_block_chain_time(&mut self, last_mc_block_chain_time: u64) {
         todo!()
+    }
+
+    /// (TODO) Check sync status between mempool and blockchain state
+    /// and pause collation when we are far behind other nodesб
+    /// jusct sync blcoks from blockchain
+    pub async fn process_new_anchor_from_mempool(
+        &mut self,
+        anchor: Arc<MempoolAnchor>,
+    ) -> Result<CollationProcessorTaskResult> {
+        //TODO: make real implementation, currently does nothing
+        Ok(CollationProcessorTaskResult::Void)
     }
 
     /// Process new master block from blockchain:
@@ -104,14 +123,20 @@ where
         &self,
         mc_block_id: BlockId,
     ) -> Result<CollationProcessorTaskResult> {
+        // check if we should skip this master block from the blockchain
+        // because it is not far ahead of last collated by ourselves
+        if !self.should_process_mc_block_from_bc(mc_block_id) {
+            return Ok(CollationProcessorTaskResult::Void);
+        }
+
         // request mc state for this master block
         let receiver = self.state_node_adapter.request_state(mc_block_id).await?;
 
         // when state received execute master block processing routines
-        let mp_adapter = self.mp_adapter.clone();
+        let mpool_adapter = self.mpool_adapter.clone();
         let dispatcher = self.dispatcher.clone();
         receiver.process_on_recv(|mc_state| async move {
-            Self::notify_mempool_about_mc_block(mp_adapter, mc_state.clone()).await?;
+            Self::notify_mempool_about_mc_block(mpool_adapter, mc_state.clone()).await?;
 
             dispatcher
                 .enqueue_task(method_to_async_task_closure!(
@@ -122,6 +147,10 @@ where
         });
 
         Ok(CollationProcessorTaskResult::Void)
+    }
+
+    fn should_process_mc_block_from_bc(&self, mc_block_id: BlockId) -> bool {
+        todo!()
     }
 
     /// Check if collation sessions initialized and try to force refresh them if they not.
@@ -153,12 +182,37 @@ where
         &mut self,
         mc_state: Arc<ShardStateStuff>,
     ) -> Result<CollationProcessorTaskResult> {
-        let mc_extra = mc_state.state_extra()?;
+        //TODO: Possibly we have already updated collation sessions for this master block,
+        //      because we may have collated it by ourselves before receiving it from the blockchain
+        //      or because we have received it from the blockchain before we collated it
+        //
+        //      It may be a situation when we have received new master block from the blockchain
+        //      before we have collated it by ourselves, we can stop current block collations,
+        //      update working state in active collators and then continue to collate.
+        //      But this can produce a significant overhead for the little bit slower node
+        //      because some 2/3f+1 nodes will always be little bit faster.
+        //      So we should reset active collators only when master block from the blockchain is
+        //      notably ahead of last collated by ourselves
+        //
+        //      So we will:
+        //      1. Check if we should process master block from the blockchain in `process_mc_block_from_bc`
+        //      2. Skip refreshing sessions if this master was processed by any chance
+
+        // do not re-process this master block if it is lower then last processed or equal to it
+        let processing_mc_block_id = *mc_state.block_id();
+        let last_processed_mc_block_id_opt = self.last_processed_mc_block_id();
+        if matches!(last_processed_mc_block_id_opt, Some(last_processed_mc_block_id) if processing_mc_block_id.seqno < last_processed_mc_block_id.seqno
+        || &processing_mc_block_id == last_processed_mc_block_id)
+        {
+            return Ok(CollationProcessorTaskResult::Void);
+        }
+
+        let mc_state_extra = mc_state.state_extra()?;
 
         // get new shards info from updated master state
         let mut new_shards = HashMap::new();
-        new_shards.insert(ShardIdent::MASTERCHAIN, vec![*mc_state.block_id()]);
-        for shard in mc_extra.shards.iter() {
+        new_shards.insert(ShardIdent::MASTERCHAIN, vec![processing_mc_block_id]);
+        for shard in mc_state_extra.shards.iter() {
             let (shard_id, descr) = shard?;
             let top_block = BlockId {
                 shard: shard_id,
@@ -171,7 +225,7 @@ where
         }
 
         // find out the actual collation session seqno from master state
-        let new_session_seqno = mc_extra.validator_info.catchain_seqno;
+        let new_session_seqno = mc_state_extra.validator_info.catchain_seqno;
 
         // we need full validators set to define the subset for each session and to check if current node should collate
         let full_validators_set = mc_state.config_params()?.get_current_validator_set()?;
@@ -216,7 +270,7 @@ where
         // additionally we may have some active collators
         // for each new session we should check if current node should collate,
         // then stop collators if should not, otherwise start missing collators
-        let cc_config = mc_extra.config.get_catchain_config()?;
+        let cc_config = mc_state_extra.config.get_catchain_config()?;
         for (shard_id, prev_blocks_ids) in sessions_to_start {
             let (subset, hash_short) = full_validators_set
                 .compute_subset(shard_id, &cc_config, new_session_seqno)
@@ -231,9 +285,11 @@ where
                     C::start(
                         self.dispatcher.clone(),
                         self.mq_adapter.clone(),
+                        self.mpool_adapter.clone(),
                         self.state_node_adapter.clone(),
                         shard_id,
                         prev_blocks_ids,
+                        mc_state.clone(),
                     )
                 });
             } else if let Some(collator) = self.active_collators.remove(&shard_id) {
@@ -270,6 +326,9 @@ where
             collator.equeue_stop(stop_key).await?;
             self.collators_to_stop.insert(stop_key, collator);
         }
+
+        // store last processed master block id to avoid to process it again
+        self.set_last_processed_mc_block_id(processing_mc_block_id);
 
         Ok(CollationProcessorTaskResult::Void)
 
@@ -330,9 +389,10 @@ where
 
         // chek if master block min interval elapsed and it needs to collate new master block
         if !candidate_id.shard.is_masterchain() {
-            if candidate_chain_time - self.last_mc_block_chain_time()
-                > self.config.mc_block_min_interval_ms
-            {
+            if self.update_last_collated_chain_time_and_check_mc_block_interval(
+                candidate_id.shard,
+                candidate_chain_time,
+            ) {
                 self.enqueue_mc_block_collation(Some(candidate_id)).await?;
             }
         } else {
@@ -345,7 +405,7 @@ where
             let new_mc_state =
                 ShardStateStuff::from_state(candidate_id, collation_result.new_state)?;
 
-            Self::notify_mempool_about_mc_block(self.mp_adapter.clone(), new_mc_state.clone())
+            Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), new_mc_state.clone())
                 .await?;
 
             self.dispatcher
@@ -361,12 +421,52 @@ where
 
     /// Send master state related to master block to mempool (it may perform gc or nodes rotation)
     async fn notify_mempool_about_mc_block(
-        mp_adapter: Arc<MP>,
+        mpool_adapter: Arc<MP>,
         mc_state: Arc<ShardStateStuff>,
     ) -> Result<()> {
-        mp_adapter
+        //TODO: in current implementation CollationProcessor should not notify mempool
+        //      about one master block more than once, but better to handle repeated request here or at mempool
+        mpool_adapter
             .enqueue_process_new_mc_block_state(mc_state)
             .await
+    }
+
+    /// 1. Store last collated chain time from anchor and check if master block interval elapsed in each shard
+    /// 2. If true, schedule master block collation
+    pub async fn process_empty_skipped_anchor(
+        &mut self,
+        shard_id: ShardIdent,
+        anchor: Arc<MempoolAnchor>,
+    ) -> Result<CollationProcessorTaskResult> {
+        if self.update_last_collated_chain_time_and_check_mc_block_interval(
+            shard_id,
+            anchor.chain_time(),
+        ) {
+            self.enqueue_mc_block_collation(None).await?;
+        }
+        Ok(CollationProcessorTaskResult::Void)
+    }
+
+    /// 1. (TODO) Store last collated chain time from anchor
+    /// 2. (TODO) Check if master block interval elapsed in each shard
+    fn update_last_collated_chain_time_and_check_mc_block_interval(
+        &mut self,
+        shard_id: ShardIdent,
+        chain_time: u64,
+    ) -> bool {
+        //TODO: idea is to store for each shard each chain time and related shard block
+        //      that elapsed master block interval. So we will have a list of such chain times.
+        //      Then we can collate master block if interval elapsed in all shards.
+        //      We should take max chain time among first that elapsed the masterblock interval in each shard
+        //      then we take shard blocks which chain time less then determined max
+
+        todo!();
+
+        //TODO: replace this stub check
+        let check =
+            (chain_time - self.last_mc_block_chain_time()) > self.config.mc_block_min_interval_ms;
+
+        check
     }
 
     /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation

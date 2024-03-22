@@ -6,6 +6,8 @@ use everscale_types::models::{BlockId, ShardIdent};
 // TYPES
 
 mod type_stubs {
+    use std::sync::Arc;
+
     use everscale_types::models::ShardIdent;
 
     pub trait Queue {
@@ -17,10 +19,38 @@ mod type_stubs {
             Self {}
         }
     }
-    pub trait QueueIterator: Sized {}
+    pub trait QueueIterator {}
     pub struct QueueIteratorImpl;
     impl QueueIterator for QueueIteratorImpl {}
     pub struct QueueDiff;
+
+    pub struct IterItem {
+        pub message: Arc<EnqueuedMessage>,
+        pub is_new: bool,
+    }
+
+    pub type Lt = u64;
+    pub type MessageHash = UInt256;
+
+    pub struct EnqueuedMessage {
+        pub created_lt: Lt,
+        pub enqueued_lt: Lt,
+        pub hash: MessageHash,
+        pub env: MessageEnvelope,
+    }
+
+    #[derive(Hash)]
+    pub struct MessageEnvelope {
+        pub message: MessageContent,
+        pub from_contract: Address,
+        pub to_contract: Address,
+    }
+
+    pub type Address = String;
+    pub type UInt256 = String;
+
+    #[derive(Hash)]
+    pub struct MessageContent {}
 }
 pub use type_stubs::*;
 

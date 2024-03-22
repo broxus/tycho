@@ -86,12 +86,6 @@ pub struct StateNodeAdapterStdImpl {
 
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
-    async fn get_last_applied_mc_block_id(&self) -> Result<BlockId> {
-        self.dispatcher
-            .execute_task(method_to_async_task_closure!(get_last_applied_mc_block_id,))
-            .await
-            .and_then(|res| res.try_into())
-    }
     fn create(listener: Arc<dyn StateNodeEventListener>) -> Self {
         let processor = StateNodeProcessor {
             listener: listener.clone(),
@@ -103,6 +97,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             listener,
         }
     }
+
+    async fn get_last_applied_mc_block_id(&self) -> Result<BlockId> {
+        self.dispatcher
+            .execute_task(method_to_async_task_closure!(get_last_applied_mc_block_id,))
+            .await
+            .and_then(|res| res.try_into())
+    }
+
     async fn request_state(
         &self,
         block_id: BlockId,
@@ -114,12 +116,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         Ok(StateNodeTaskResponseReceiver::create(receiver))
     }
+
     async fn get_block(&self, block_id: BlockId) -> Result<Option<Arc<BlockStuff>>> {
         self.dispatcher
             .execute_task(method_to_async_task_closure!(get_block, block_id))
             .await
             .and_then(|res| res.try_into())
     }
+
     async fn request_block(
         &self,
         block_id: BlockId,
@@ -131,6 +135,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         Ok(StateNodeTaskResponseReceiver::create(receiver))
     }
+
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<Arc<BlockHandle>> {
         self.dispatcher
             .execute_task(method_to_async_task_closure!(accept_block, block))

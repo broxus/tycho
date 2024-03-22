@@ -3,26 +3,31 @@ use anyhow::Result;
 use crate::{
     collator::{collator_processor::CollatorProcessorStdImpl, CollatorStdImpl},
     manager::{CollationManager, CollationManagerGenImpl},
-    mempool::MempoolAdapterStdImpl,
-    msg_queue::{MessageQueueAdapterStdImpl, QueueImpl},
+    mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
+    msg_queue::{MessageQueueAdapterStdImpl, QueueImpl, QueueIteratorImpl},
     state_node::{
         StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeAdapterStdImpl,
     },
+    tests::try_init_test_tracing,
     types::CollationConfig,
     validator::{validator_processor::ValidatorProcessorStdImpl, ValidatorStdImpl},
 };
 
-#[test]
-fn test_create_manager() -> Result<()> {
-    type CollationManagerStdImplGenST<MQ, ST> = CollationManagerGenImpl<
-        CollatorStdImpl<CollatorProcessorStdImpl<MQ, ST>, MQ, ST>,
+#[tokio::test]
+async fn test_collation_process_on_stubs() {
+    try_init_test_tracing();
+
+    type CollationManagerStdImplGenST<MQ, QI, MP, ST> = CollationManagerGenImpl<
+        CollatorStdImpl<CollatorProcessorStdImpl<MQ, QI, MP, ST>, MQ, MP, ST>,
         ValidatorStdImpl<ValidatorProcessorStdImpl<ST>, ST>,
         MQ,
-        MempoolAdapterStdImpl,
+        MP,
         ST,
     >;
     type CollationManagerStdImpl = CollationManagerStdImplGenST<
         MessageQueueAdapterStdImpl<QueueImpl>,
+        QueueIteratorImpl,
+        MempoolAdapterStdImpl,
         StateNodeAdapterStdImpl,
     >;
 
@@ -30,11 +35,18 @@ fn test_create_manager() -> Result<()> {
         key_pair: everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng()),
         mc_block_min_interval_ms: 2000,
     };
-    let mpool_adapter = MempoolAdapterStdImpl {};
+    let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::new();
     let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new();
 
-    let _manager =
-        CollationManagerStdImpl::create(config, mpool_adapter, state_node_adapter_builder);
+    tracing::info!("Trying to start CollationManager");
 
-    Ok(())
+    let _manager =
+        CollationManagerStdImpl::create(config, mpool_adapter_builder, state_node_adapter_builder);
+
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            println!();
+            println!("Ctrl-C received, shutting down the test");
+        }
+    }
 }

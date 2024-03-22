@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
+use anyhow::Result;
+
 use everscale_types::{
     cell::Cell,
-    models::{BlockId, CurrencyCollection, McStateExtra, ShardAccounts},
+    models::{BlockId, CurrencyCollection, McStateExtra, ShardAccounts, ShardIdent},
 };
 
 use tycho_block_util::state::ShardStateStuff;
@@ -92,6 +94,35 @@ pub(super) struct McData {
     prev_key_block_seqno: u32,
     prev_key_block: Option<BlockId>,
     state: Arc<ShardStateStuff>,
+}
+impl McData {
+    pub fn new(mc_state: Arc<ShardStateStuff>) -> Result<Self> {
+        let mc_state_extra = mc_state.state_extra()?;
+
+        // prev key block
+        let (prev_key_block_seqno, prev_key_block) = if mc_state_extra.after_key_block {
+            (mc_state.block_id().seqno, Some(*mc_state.block_id()))
+        } else if let Some(block_ref) = mc_state_extra.last_key_block.as_ref() {
+            (
+                block_ref.seqno,
+                Some(BlockId {
+                    shard: ShardIdent::MASTERCHAIN,
+                    seqno: block_ref.seqno,
+                    root_hash: block_ref.root_hash,
+                    file_hash: block_ref.file_hash,
+                }),
+            )
+        } else {
+            (0, None)
+        };
+
+        Ok(Self {
+            mc_state_extra: mc_state_extra.clone(),
+            prev_key_block,
+            prev_key_block_seqno,
+            state: mc_state,
+        })
+    }
 }
 
 pub(super) struct PrevData {
