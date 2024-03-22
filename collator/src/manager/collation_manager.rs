@@ -24,7 +24,7 @@ use crate::{
     },
 };
 
-use super::collation_processor::{CollationProcessor, CollationProcessorTaskResult};
+use super::collation_processor::CollationProcessor;
 
 /// Controls the whole collation process.
 /// Monitors state sync,
@@ -56,9 +56,7 @@ where
 {
     config: Arc<CollationConfig>,
 
-    dispatcher: Arc<
-        AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>,
-    >,
+    dispatcher: Arc<AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>>,
 }
 
 #[allow(private_bounds)]
@@ -152,7 +150,7 @@ where
 
 #[async_trait]
 impl<C, V, MQ, MP, ST> MempoolEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
     C: Collator<MQ, MP, ST>,
     V: Validator<ST>,
@@ -171,7 +169,7 @@ where
 
 #[async_trait]
 impl<C, V, MQ, MP, ST> StateNodeEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
     C: Collator<MQ, MP, ST>,
     V: Validator<ST>,
@@ -190,7 +188,7 @@ where
 
 #[async_trait]
 impl<C, V, MQ, MP, ST> CollatorEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
     C: Collator<MQ, MP, ST>,
     V: Validator<ST>,
@@ -228,7 +226,7 @@ where
 
 #[async_trait]
 impl<C, V, MQ, MP, ST> ValidatorEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
     C: Collator<MQ, MP, ST>,
     V: Validator<ST>,

@@ -30,9 +30,6 @@ use super::{
     utils::{build_block_stuff_for_sync, find_us_in_collators_set},
 };
 
-pub(crate) enum CollationProcessorTaskResult {
-    Void,
-}
 pub(super) struct CollationProcessor<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, MP, ST>,
@@ -43,7 +40,7 @@ where
 {
     config: Arc<CollationConfig>,
 
-    dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
+    dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
     mpool_adapter: Arc<MP>,
     state_node_adapter: Arc<ST>,
     mq_adapter: Arc<MQ>,
@@ -67,7 +64,7 @@ where
 {
     pub fn new(
         config: Arc<CollationConfig>,
-        dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
+        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
         mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         validator: Arc<V>,
@@ -110,23 +107,20 @@ where
     pub async fn process_new_anchor_from_mempool(
         &mut self,
         anchor: Arc<MempoolAnchor>,
-    ) -> Result<CollationProcessorTaskResult> {
+    ) -> Result<()> {
         //TODO: make real implementation, currently does nothing
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     /// Process new master block from blockchain:
     /// 1. Load block state
     /// 2. Notify mempool about new master block
     /// 3. Enqueue collation sessions refresh task
-    pub async fn process_mc_block_from_bc(
-        &self,
-        mc_block_id: BlockId,
-    ) -> Result<CollationProcessorTaskResult> {
+    pub async fn process_mc_block_from_bc(&self, mc_block_id: BlockId) -> Result<()> {
         // check if we should skip this master block from the blockchain
         // because it is not far ahead of last collated by ourselves
         if !self.should_process_mc_block_from_bc(mc_block_id) {
-            return Ok(CollationProcessorTaskResult::Void);
+            return Ok(());
         }
 
         // request mc state for this master block
@@ -146,7 +140,7 @@ where
                 .await
         });
 
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     fn should_process_mc_block_from_bc(&self, mc_block_id: BlockId) -> bool {
@@ -158,11 +152,11 @@ where
     /// zerostate load and won't fire `[StateNodeListener::on_mc_block_event()]` for the 1 block.
     /// Also when whole network was restarted then nobody will produce next master block and we need
     /// to start collation sessions based on the actual state
-    pub async fn check_refresh_collation_sessions(&self) -> Result<CollationProcessorTaskResult> {
+    pub async fn check_refresh_collation_sessions(&self) -> Result<()> {
         // the sessions list is not enpty so the collation process was already started from
         // actual state or incoming master block from blockchain
         if !self.active_collation_sessions.is_empty() {
-            return Ok(CollationProcessorTaskResult::Void);
+            return Ok(());
         }
 
         // here we will wait for last applied master block then process it
@@ -181,7 +175,7 @@ where
     pub async fn refresh_collation_sessions(
         &mut self,
         mc_state: Arc<ShardStateStuff>,
-    ) -> Result<CollationProcessorTaskResult> {
+    ) -> Result<()> {
         //TODO: Possibly we have already updated collation sessions for this master block,
         //      because we may have collated it by ourselves before receiving it from the blockchain
         //      or because we have received it from the blockchain before we collated it
@@ -204,7 +198,7 @@ where
         if matches!(last_processed_mc_block_id_opt, Some(last_processed_mc_block_id) if processing_mc_block_id.seqno < last_processed_mc_block_id.seqno
         || &processing_mc_block_id == last_processed_mc_block_id)
         {
-            return Ok(CollationProcessorTaskResult::Void);
+            return Ok(());
         }
 
         let mc_state_extra = mc_state.state_extra()?;
@@ -330,7 +324,7 @@ where
         // store last processed master block id to avoid to process it again
         self.set_last_processed_mc_block_id(processing_mc_block_id);
 
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
 
         // finally we will have initialized `active_collation_sessions` and `active_collators`
         // which run async block collations processes
@@ -341,18 +335,15 @@ where
         &mut self,
         _session_info: Arc<CollationSessionInfo>,
         finish_key: CollationSessionId,
-    ) -> Result<CollationProcessorTaskResult> {
+    ) -> Result<()> {
         self.collation_sessions_to_finish.remove(&finish_key);
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     /// Remove stopped collator from cache
-    pub async fn process_collator_stopped(
-        &mut self,
-        stop_key: CollationSessionId,
-    ) -> Result<CollationProcessorTaskResult> {
+    pub async fn process_collator_stopped(&mut self, stop_key: CollationSessionId) -> Result<()> {
         self.collators_to_stop.remove(&stop_key);
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     /// Process collated block candidate
@@ -365,7 +356,7 @@ where
     pub async fn process_block_candidate(
         &mut self,
         collation_result: BlockCollationResult,
-    ) -> Result<CollationProcessorTaskResult> {
+    ) -> Result<()> {
         // find session related to this block by shard
         let session_info = self
             .active_collation_sessions
@@ -416,7 +407,7 @@ where
                 .await?;
         }
 
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     /// Send master state related to master block to mempool (it may perform gc or nodes rotation)
@@ -437,14 +428,14 @@ where
         &mut self,
         shard_id: ShardIdent,
         anchor: Arc<MempoolAnchor>,
-    ) -> Result<CollationProcessorTaskResult> {
+    ) -> Result<()> {
         if self.update_last_collated_chain_time_and_check_mc_block_interval(
             shard_id,
             anchor.chain_time(),
         ) {
             self.enqueue_mc_block_collation(None).await?;
         }
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     /// 1. (TODO) Store last collated chain time from anchor
@@ -486,10 +477,7 @@ where
     /// 1. Process invalid block (currently, just panic)
     /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
-    pub async fn process_validated_block(
-        &mut self,
-        validated_block: ValidatedBlock,
-    ) -> Result<CollationProcessorTaskResult> {
+    pub async fn process_validated_block(&mut self, validated_block: ValidatedBlock) -> Result<()> {
         // execute required actions if block invalid
         if !validated_block.is_valid() {
             //TODO: implement more graceful reaction on invalid block
@@ -508,7 +496,7 @@ where
             self.process_valid_shard_block(&block_id).await?;
         }
 
-        Ok(CollationProcessorTaskResult::Void)
+        Ok(())
     }
 
     /// (TODO) Store block in a structure that allow to append signatures
@@ -525,10 +513,7 @@ where
     }
 
     /// (TODO) Remove block entries from cache and compact cache
-    async fn cleanup_blocks_from_cache(
-        &mut self,
-        blocks_keys: Vec<HashBytes>,
-    ) -> Result<CollationProcessorTaskResult> {
+    async fn cleanup_blocks_from_cache(&mut self, blocks_keys: Vec<HashBytes>) -> Result<()> {
         todo!()
     }
 
@@ -536,7 +521,7 @@ where
     async fn restore_blocks_in_cache(
         &mut self,
         blocks_to_restore: Vec<BlockCandidateToSend>,
-    ) -> Result<CollationProcessorTaskResult> {
+    ) -> Result<()> {
         todo!()
     }
 
@@ -599,7 +584,7 @@ where
     /// 4. Return all blocks to cache if got error (separate task will try to resend further)
     /// 5. Return `Error` if it seems to be unrecoverable
     async fn send_blocks_to_sync(
-        dispatcher: Arc<AsyncQueuedDispatcher<Self, CollationProcessorTaskResult>>,
+        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
         mq_adapter: Arc<MQ>,
         state_node_adapter: Arc<ST>,
         blocks_to_send: Vec<BlockCandidateToSend>,
