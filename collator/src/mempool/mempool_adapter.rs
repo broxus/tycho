@@ -8,72 +8,7 @@ use async_trait::async_trait;
 
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::types::MessageContainer;
-
-// TYPES
-
-type MempoolAnchorId = u32;
-
-pub(crate) struct MempoolAnchor {
-    id: MempoolAnchorId,
-    chain_time: u64,
-    externals: Vec<Arc<MessageContainer>>,
-}
-impl MempoolAnchor {
-    pub fn new(
-        id: MempoolAnchorId,
-        chain_time: u64,
-        externals: Vec<Arc<MessageContainer>>,
-    ) -> Self {
-        Self {
-            id,
-            chain_time,
-            externals,
-        }
-    }
-    pub fn id(&self) -> MempoolAnchorId {
-        self.id
-    }
-    pub fn chain_time(&self) -> u64 {
-        self.chain_time
-    }
-    pub fn has_externals(&self) -> bool {
-        !self.externals.is_empty()
-    }
-    pub fn externals_iterator(
-        &self,
-        from_idx: usize,
-    ) -> impl Iterator<Item = Arc<MessageContainer>> + '_ {
-        self.externals.iter().skip(from_idx).cloned()
-    }
-}
-
-// BUILDER
-
-#[allow(private_interfaces)]
-pub trait MempoolAdapterBuilder<T> {
-    fn new() -> Self;
-    fn build(self, listener: Arc<dyn MempoolEventListener>) -> T;
-}
-
-pub struct MempoolAdapterBuilderStdImpl<T> {
-    _marker_adapter: std::marker::PhantomData<T>,
-}
-
-#[allow(private_interfaces)]
-impl<T> MempoolAdapterBuilder<T> for MempoolAdapterBuilderStdImpl<T>
-where
-    T: MempoolAdapter,
-{
-    fn new() -> Self {
-        Self {
-            _marker_adapter: std::marker::PhantomData,
-        }
-    }
-    fn build(self, listener: Arc<dyn MempoolEventListener>) -> T {
-        T::create(listener)
-    }
-}
+use super::types::{MempoolAnchor, MempoolAnchorId};
 
 // EVENTS EMITTER AMD LISTENER
 
