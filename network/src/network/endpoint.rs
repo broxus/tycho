@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::network::config::EndpointConfig;
-use crate::network::connection::Connection;
+use crate::network::connection::{parse_peer_identity, Connection};
 use crate::types::{Address, Direction, PeerId};
 
 pub(crate) struct Endpoint {
@@ -72,16 +72,11 @@ impl Endpoint {
         }
     }
 
-    /// Connect to a remote endpoint using the endpoint configuration.
-    pub fn connect(&self, address: Address) -> Result<Connecting> {
-        self.connect_with_client_config(self.config.quinn_client_config.clone(), address)
-    }
-
     /// Connect to a remote endpoint expecting it to have the provided peer id.
     pub fn connect_with_expected_id(
         &self,
         address: Address,
-        peer_id: PeerId,
+        peer_id: &PeerId,
     ) -> Result<Connecting> {
         let config = self.config.make_client_config_for_peer_id(peer_id)?;
         self.connect_with_client_config(config, address)
@@ -152,6 +147,35 @@ impl Connecting {
             origin: Direction::Outbound,
         }
     }
+
+    pub fn remote_address(&self) -> SocketAddr {
+        self.inner.remote_address()
+    }
+
+    pub fn into_0rtt(self) -> Into0RttResult {
+        match self.inner.into_0rtt() {
+            Ok((c, accepted)) => match c.peer_identity() {
+                Some(identity) => match parse_peer_identity(identity) {
+                    Ok(peer_id) => Into0RttResult::Established(
+                        Connection::with_peer_id(c, self.origin, peer_id),
+                        accepted,
+                    ),
+                    Err(e) => Into0RttResult::InvalidConnection(e),
+                },
+                None => {
+                    return Into0RttResult::WithoutIdentity(ConnectingFallback {
+                        inner: Some(c),
+                        accepted,
+                        origin: self.origin,
+                    });
+                }
+            },
+            Err(inner) => Into0RttResult::Unavailable(Self {
+                inner,
+                origin: self.origin,
+            }),
+        }
+    }
 }
 
 impl Future for Connecting {
@@ -164,4 +188,41 @@ impl Future for Connecting {
                 .map_err(|e| anyhow::anyhow!("failed establishing {} connection: {e}", self.origin))
         })
     }
+}
+
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub(crate) struct ConnectingFallback {
+    inner: Option<quinn::Connection>,
+    accepted: quinn::ZeroRttAccepted,
+    origin: Direction,
+}
+
+impl Drop for ConnectingFallback {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.close(0u8.into(), b"cancelled");
+        }
+    }
+}
+
+impl Future for ConnectingFallback {
+    type Output = Result<Connection>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.accepted).poll(cx).map(|_| {
+            Connection::new(
+                self.inner
+                    .take()
+                    .expect("future must not be polled after completion"),
+                self.origin,
+            )
+        })
+    }
+}
+
+pub(crate) enum Into0RttResult {
+    Established(Connection, quinn::ZeroRttAccepted),
+    WithoutIdentity(ConnectingFallback),
+    InvalidConnection(anyhow::Error),
+    Unavailable(#[allow(unused)] Connecting),
 }

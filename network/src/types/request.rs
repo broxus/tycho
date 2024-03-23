@@ -51,7 +51,7 @@ impl<'de> Deserialize<'de> for Version {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Request {
     pub version: Version,
     #[serde(with = "serde_body")]

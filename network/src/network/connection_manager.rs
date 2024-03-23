@@ -1,3 +1,4 @@
+use std::collections::hash_map;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -7,12 +8,12 @@ use ahash::HashMap;
 use anyhow::Result;
 use arc_swap::{ArcSwap, AsRaw};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::network::config::NetworkConfig;
 use crate::network::connection::Connection;
-use crate::network::endpoint::{Connecting, Endpoint};
+use crate::network::endpoint::{Connecting, Endpoint, Into0RttResult};
 use crate::network::request_handler::InboundRequestHandler;
 use crate::network::wire::handshake;
 use crate::types::{
@@ -22,7 +23,7 @@ use crate::types::{
 
 #[derive(Debug)]
 pub(crate) enum ConnectionManagerRequest {
-    Connect(Address, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
+    Connect(Address, PeerId, CallbackTx),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -32,10 +33,12 @@ pub(crate) struct ConnectionManager {
 
     mailbox: mpsc::Receiver<ConnectionManagerRequest>,
 
+    pending_connection_callbacks: FastHashMap<Address, PendingConnectionCallbacks>,
+    pending_partial_connections: JoinSet<Option<PartialConnection>>,
     pending_connections: JoinSet<ConnectingOutput>,
     connection_handlers: JoinSet<()>,
 
-    pending_dials: FastHashMap<PeerId, oneshot::Receiver<Result<PeerId>>>,
+    pending_dials: FastHashMap<PeerId, CallbackRx>,
     dial_backoff_states: HashMap<PeerId, DialBackoffState>,
 
     active_peers: ActivePeers,
@@ -43,6 +46,9 @@ pub(crate) struct ConnectionManager {
 
     service: BoxCloneService<ServiceRequest, Response>,
 }
+
+type CallbackTx = oneshot::Sender<Result<PeerId, Arc<anyhow::Error>>>;
+type CallbackRx = oneshot::Receiver<Result<PeerId, Arc<anyhow::Error>>>;
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
@@ -63,6 +69,8 @@ impl ConnectionManager {
             config,
             endpoint,
             mailbox,
+            pending_connection_callbacks: Default::default(),
+            pending_partial_connections: Default::default(),
             pending_connections: Default::default(),
             connection_handlers: Default::default(),
             pending_dials: Default::default(),
@@ -94,7 +102,7 @@ impl ConnectionManager {
 
                     match request {
                         ConnectionManagerRequest::Connect(address, peer_id, callback) => {
-                            self.handle_connect_request(address, peer_id, callback);
+                            self.handle_connect_request(address, &peer_id, callback);
                         }
                         ConnectionManagerRequest::Shutdown(oneshot) => {
                             shutdown_notifier = Some(oneshot);
@@ -108,8 +116,21 @@ impl ConnectionManager {
                     }
                 }
                 Some(connecting_output) = self.pending_connections.join_next() => {
+                    match connecting_output {
+                        Ok(connecting) => self.handle_connecting_result(connecting),
+                        Err(e) => {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
+                            continue;
+                        }
+                    }
+                }
+                Some(partial_connection) = self.pending_partial_connections.join_next() => {
                     // NOTE: unwrap here is to propagate panic from the spawned future
-                    self.handle_connecting_result(connecting_output.unwrap());
+                    if let Some(PartialConnection { connection, timeout_at }) = partial_connection.unwrap() {
+                        self.handle_incoming_impl(connection, None, timeout_at);
+                    }
                 }
                 Some(connection_handler_output) = self.connection_handlers.join_next() => {
                     // NOTE: unwrap here is to propagate panic from the spawned future
@@ -129,6 +150,7 @@ impl ConnectionManager {
 
     async fn shutdown(mut self) {
         self.endpoint.close();
+        self.pending_partial_connections.shutdown().await;
         self.pending_connections.shutdown().await;
 
         while self.connection_handlers.join_next().await.is_some() {}
@@ -211,93 +233,235 @@ impl ConnectionManager {
                 .expect("address list must have at least one item");
 
             let (tx, rx) = oneshot::channel();
-            self.dial_peer(address, Some(peer_info.id), tx);
+            self.dial_peer(address, &peer_info.id, tx);
             self.pending_dials.insert(peer_info.id, rx);
         }
     }
 
-    fn handle_connect_request(
-        &mut self,
-        address: Address,
-        peer_id: Option<PeerId>,
-        callback: oneshot::Sender<Result<PeerId>>,
-    ) {
+    fn handle_connect_request(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
         self.dial_peer(address, peer_id, callback);
     }
 
     fn handle_incoming(&mut self, connecting: Connecting) {
-        async fn handle_incoming_task(
-            connecting: Connecting,
-            config: Arc<NetworkConfig>,
-            active_peers: ActivePeers,
-            known_peers: KnownPeers,
-        ) -> ConnectingOutput {
-            let fut = async {
-                let connection = connecting.await?;
+        let remote_addr = connecting.remote_address();
+        tracing::trace!(
+            local_id = %self.endpoint.peer_id(),
+            %remote_addr,
+            "received an incoming connection",
+        );
 
-                match known_peers.get_affinity(connection.peer_id()) {
-                    Some(PeerAffinity::High | PeerAffinity::Allowed) => {}
-                    Some(PeerAffinity::Never) => {
-                        anyhow::bail!(
-                            "rejecting connection from peer {} due to PeerAffinity::Never",
-                            connection.peer_id(),
-                        );
-                    }
-                    _ => {
-                        if let Some(limit) = config.max_concurrent_connections {
-                            anyhow::ensure!(
-                                active_peers.len() < limit,
-                                "rejecting connection from peer {} dut too many concurrent connections",
-                                connection.peer_id(),
+        // Split incoming connection into 0.5-RTT and 1-RTT parts.
+        match connecting.into_0rtt() {
+            Into0RttResult::Established(connection, accepted) => {
+                let timeout_at = Instant::now() + self.config.connect_timeout;
+                self.handle_incoming_impl(connection, Some(accepted), timeout_at);
+            }
+            Into0RttResult::WithoutIdentity(partial_connection) => {
+                tracing::debug!("connection identity is not available yet");
+
+                let timeout_at = Instant::now() + self.config.connect_timeout;
+                self.pending_partial_connections.spawn(async move {
+                    match tokio::time::timeout_at(timeout_at.into(), partial_connection).await {
+                        Ok(Ok(connection)) => Some(PartialConnection {
+                            connection,
+                            timeout_at,
+                        }),
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                %remote_addr,
+                                "failed to establish an incoming connection: {e:?}",
                             );
+                            None
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %remote_addr,
+                                "incoming connection timed out",
+                            );
+                            None
                         }
                     }
-                }
+                });
+            }
+            Into0RttResult::InvalidConnection(e) => {
+                // TODO: Lower log level to trace/debug?
+                tracing::warn!(%remote_addr, "invalid incoming connection: {e:?}");
+                return;
+            }
+            Into0RttResult::Unavailable(_) => unreachable!(
+                "BUG: For incoming connections, a 0.5-RTT connection must \
+                always be successfully constructed."
+            ),
+        };
+    }
 
-                handshake(connection).await
+    fn handle_incoming_impl(
+        &mut self,
+        connection: Connection,
+        accepted: Option<quinn::ZeroRttAccepted>,
+        timeout_at: Instant,
+    ) {
+        async fn handle_incoming_task(
+            seqno: u32,
+            connection: ConnectionClosedOnDrop,
+            accepted: Option<quinn::ZeroRttAccepted>,
+            timeout_at: Instant,
+        ) -> ConnectingOutput {
+            let target_peer_id = *connection.peer_id();
+            let target_address = connection.remote_address().into();
+            let fut = async {
+                if let Some(accepted) = accepted {
+                    // NOTE: `bool` output of this future is meaningless for servers.
+                    accepted.await;
+                }
+                handshake(&connection).await
             };
 
-            let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
+            let connecting_result = tokio::time::timeout_at(timeout_at.into(), fut)
                 .await
                 .map_err(Into::into)
-                .and_then(std::convert::identity);
+                .and_then(std::convert::identity)
+                .map_err(Arc::new)
+                .map(|_| connection.disarm());
 
             ConnectingOutput {
-                connecting_result,
-                callback: None,
-                target_address: None,
-                target_peer_id: None,
+                seqno,
+                drop_result: true,
+                connecting_result: ManuallyDrop::new(connecting_result),
+                target_address,
+                target_peer_id,
             }
         }
 
-        tracing::trace!("received new incoming connection");
+        let remote_addr = connection.remote_address();
 
-        self.pending_connections.spawn(handle_incoming_task(
-            connecting,
-            self.config.clone(),
-            self.active_peers.clone(),
-            self.known_peers.clone(),
-        ));
+        // Check if the peer is allowed before doing anything else.
+        match self.known_peers.get_affinity(connection.peer_id()) {
+            Some(PeerAffinity::High | PeerAffinity::Allowed) => {}
+            Some(PeerAffinity::Never) => {
+                // TODO: Lower log level to trace/debug?
+                tracing::warn!(
+                    %remote_addr,
+                    peer_id = %connection.peer_id(),
+                    "rejecting connection due to PeerAffinity::Never",
+                );
+                return;
+            }
+            _ => {
+                if matches!(
+                    self.config.max_concurrent_connections,
+                    Some(limit) if self.active_peers.len() >= limit
+                ) {
+                    // TODO: Lower log level to trace/debug?
+                    tracing::warn!(
+                        %remote_addr,
+                        peer_id = %connection.peer_id(),
+                        "rejecting connection due too many concurrent connections",
+                    );
+                    return;
+                }
+            }
+        }
+
+        let entry = match self.pending_connection_callbacks.entry(remote_addr.into()) {
+            hash_map::Entry::Vacant(entry) => Some(entry.insert(PendingConnectionCallbacks {
+                last_seqno: 0,
+                origin: Direction::Inbound,
+                callbacks: Default::default(),
+                abort_handle: None,
+            })),
+            hash_map::Entry::Occupied(entry) => {
+                let entry = entry.into_mut();
+
+                // Check if the incoming connection is a simultaneous dial.
+                if simultaneous_dial_tie_breaking(
+                    self.endpoint.peer_id(),
+                    connection.peer_id(),
+                    entry.origin,
+                    Direction::Inbound,
+                ) {
+                    // New connection wins the tie, abort the old one and spawn a new task.
+                    tracing::debug!(
+                        %remote_addr,
+                        peer_id = %connection.peer_id(),
+                        "cancelling old connection to mitigate simultaneous dial",
+                    );
+
+                    entry.origin = Direction::Inbound;
+                    entry.last_seqno += 1;
+                    if let Some(handle) = entry.abort_handle.take() {
+                        handle.abort();
+                    }
+                    Some(entry)
+                } else {
+                    // Old connection wins the tie, gracefully close the new one.
+                    tracing::debug!(
+                        %remote_addr,
+                        peer_id = %connection.peer_id(),
+                        "cancelling new connection to mitigate simultaneous dial",
+                    );
+
+                    connection.close();
+                    None
+                }
+            }
+        };
+
+        if let Some(entry) = entry {
+            entry.abort_handle = Some(self.pending_connections.spawn(handle_incoming_task(
+                entry.last_seqno,
+                ConnectionClosedOnDrop::new(connection),
+                accepted,
+                timeout_at,
+            )));
+        }
     }
 
-    fn handle_connecting_result(&mut self, res: ConnectingOutput) {
-        match res.connecting_result {
+    fn handle_connecting_result(&mut self, mut res: ConnectingOutput) {
+        // Check seqno first to drop outdated results.
+        {
+            let entry = self
+                .pending_connection_callbacks
+                .get(&res.target_address)
+                .expect("Connection tasks must be tracked");
+
+            if entry.last_seqno != res.seqno {
+                tracing::debug!(
+                    target_address = %res.target_address,
+                    target_peer_id = ?res.target_peer_id,
+                    "connection result is outdated"
+                );
+                return;
+            }
+        }
+
+        let callbacks = self
+            .pending_connection_callbacks
+            .remove(&res.target_address)
+            .expect("Connection tasks must be tracked")
+            .callbacks;
+
+        res.drop_result = false;
+        // SAFETY: `drop_result` is set to `false`.
+        match unsafe { ManuallyDrop::take(&mut res.connecting_result) } {
             Ok(connection) => {
                 let peer_id = *connection.peer_id();
                 tracing::debug!(%peer_id, "new connection");
                 self.add_peer(connection);
-                if let Some(callback) = res.callback {
+
+                for callback in callbacks {
                     _ = callback.send(Ok(peer_id));
                 }
             }
             Err(e) => {
                 tracing::debug!(
-                    target_address = ?res.target_address,
+                    target_address = %res.target_address,
                     target_peer_id = ?res.target_peer_id,
                     "connection failed: {e:?}"
                 );
-                if let Some(callback) = res.callback {
-                    _ = callback.send(Err(e));
+
+                for callback in callbacks {
+                    _ = callback.send(Err(e.clone()));
                 }
             }
         }
@@ -316,57 +480,170 @@ impl ConnectionManager {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(peer_id = ?peer_id, address = %address))]
-    fn dial_peer(
-        &mut self,
-        address: Address,
-        peer_id: Option<PeerId>,
-        callback: oneshot::Sender<Result<PeerId>>,
-    ) {
+    fn dial_peer(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
         async fn dial_peer_task(
+            seqno: u32,
             connecting: Result<Connecting>,
             address: Address,
-            peer_id: Option<PeerId>,
-            callback: oneshot::Sender<Result<PeerId>>,
+            peer_id: PeerId,
             config: Arc<NetworkConfig>,
         ) -> ConnectingOutput {
             let fut = async {
-                let connection = connecting?.await?;
-                handshake(connection).await
+                let connection = ConnectionClosedOnDrop::new(connecting?.await?);
+                handshake(&connection).await?;
+                Ok(connection)
             };
 
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
                 .await
                 .map_err(Into::into)
-                .and_then(std::convert::identity);
+                .and_then(std::convert::identity)
+                .map_err(Arc::new)
+                .map(ConnectionClosedOnDrop::disarm);
 
             ConnectingOutput {
-                connecting_result,
-                callback: Some(callback),
-                target_address: Some(address),
+                seqno,
+                drop_result: true,
+                connecting_result: ManuallyDrop::new(connecting_result),
+                target_address: address,
                 target_peer_id: peer_id,
             }
         }
 
-        let target_address = address.clone();
-        let connecting = match peer_id {
-            None => self.endpoint.connect(address),
-            Some(peer_id) => self.endpoint.connect_with_expected_id(address, peer_id),
+        tracing::info!(
+            local_id = %self.endpoint.peer_id(),
+            %peer_id,
+            remote_addr = %address,
+            "connecting to peer",
+        );
+
+        let entry = match self.pending_connection_callbacks.entry(address.clone()) {
+            hash_map::Entry::Vacant(entry) => Some(entry.insert(PendingConnectionCallbacks {
+                last_seqno: 0,
+                origin: Direction::Outbound,
+                callbacks: vec![callback],
+                abort_handle: None,
+            })),
+            hash_map::Entry::Occupied(entry) => {
+                let entry = entry.into_mut();
+
+                // Add the callback to the existing entry.
+                entry.callbacks.push(callback);
+
+                // Check if the outgoing connection is a simultaneous dial.
+                if simultaneous_dial_tie_breaking(
+                    self.endpoint.peer_id(),
+                    peer_id,
+                    entry.origin,
+                    Direction::Outbound,
+                ) {
+                    // New connection wins the tie, abort the old one and spawn a new task.
+                    tracing::debug!(
+                        remote_addr = %address,
+                        %peer_id,
+                        "cancelling old connection to mitigate simultaneous dial",
+                    );
+
+                    entry.origin = Direction::Outbound;
+                    entry.last_seqno += 1;
+                    if let Some(handle) = entry.abort_handle.take() {
+                        handle.abort();
+                    }
+                    Some(entry)
+                } else {
+                    // Old connection wins the tie, gracefully close the new one.
+                    tracing::debug!(
+                        remote_addr = %address,
+                        %peer_id,
+                        "cancelling new connection to mitigate simultaneous dial",
+                    );
+                    None
+                }
+            }
         };
-        self.pending_connections.spawn(dial_peer_task(
-            connecting,
-            target_address,
-            peer_id,
-            callback,
-            self.config.clone(),
-        ));
+
+        if let Some(entry) = entry {
+            let target_address = address.clone();
+            let connecting = self
+                .endpoint
+                .connect_with_expected_id(address.clone(), peer_id);
+            self.pending_connections.spawn(dial_peer_task(
+                entry.last_seqno,
+                connecting,
+                target_address,
+                *peer_id,
+                self.config.clone(),
+            ));
+        }
     }
 }
 
+struct PendingConnectionCallbacks {
+    last_seqno: u32,
+    origin: Direction,
+    callbacks: Vec<CallbackTx>,
+    abort_handle: Option<AbortHandle>,
+}
+
+struct PartialConnection {
+    connection: Connection,
+    timeout_at: Instant,
+}
+
 struct ConnectingOutput {
-    connecting_result: Result<Connection>,
-    callback: Option<oneshot::Sender<Result<PeerId>>>,
-    target_address: Option<Address>,
-    target_peer_id: Option<PeerId>,
+    seqno: u32,
+    drop_result: bool,
+    connecting_result: ManuallyDrop<Result<Connection, Arc<anyhow::Error>>>,
+    target_address: Address,
+    target_peer_id: PeerId,
+}
+
+impl Drop for ConnectingOutput {
+    fn drop(&mut self) {
+        if self.drop_result {
+            // SAFETY: `drop_result` is set to `true` only when the result is not used.
+            unsafe { ManuallyDrop::drop(&mut self.connecting_result) };
+        }
+    }
+}
+
+struct ConnectionClosedOnDrop {
+    connection: ManuallyDrop<Connection>,
+    close_on_drop: bool,
+}
+
+impl ConnectionClosedOnDrop {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection: ManuallyDrop::new(connection),
+            close_on_drop: true,
+        }
+    }
+
+    fn disarm(mut self) -> Connection {
+        self.close_on_drop = false;
+        // SAFETY: `drop` will not be called.
+        unsafe { ManuallyDrop::take(&mut self.connection) }
+    }
+}
+
+impl std::ops::Deref for ConnectionClosedOnDrop {
+    type Target = Connection;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &*self.connection
+    }
+}
+
+impl Drop for ConnectionClosedOnDrop {
+    fn drop(&mut self) {
+        if self.close_on_drop {
+            // SAFETY: `disarm` was not called.
+            let connection = unsafe { ManuallyDrop::take(&mut self.connection) };
+            connection.close();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -484,21 +761,21 @@ impl ActivePeersInner {
     fn add(&self, local_id: &PeerId, new_connection: Connection) -> Option<Connection> {
         use dashmap::mapref::entry::Entry;
 
-        let remote_id = new_connection.peer_id();
-        match self.connections.entry(*remote_id) {
+        let peer_id = new_connection.peer_id();
+        match self.connections.entry(*peer_id) {
             Entry::Occupied(mut entry) => {
                 if simultaneous_dial_tie_breaking(
                     local_id,
-                    remote_id,
+                    peer_id,
                     entry.get().origin(),
                     new_connection.origin(),
                 ) {
-                    tracing::debug!(%remote_id, "closing old connection to mitigate simultaneous dial");
+                    tracing::debug!(%peer_id, "closing old connection to mitigate simultaneous dial");
                     let old_connection = entry.insert(new_connection.clone());
                     old_connection.close();
-                    self.send_event(PeerEvent::LostPeer(*remote_id, DisconnectReason::Requested));
+                    self.send_event(PeerEvent::LostPeer(*peer_id, DisconnectReason::Requested));
                 } else {
-                    tracing::debug!(%remote_id, "closing new connection to mitigate simultaneous dial");
+                    tracing::debug!(%peer_id, "closing new connection to mitigate simultaneous dial");
                     new_connection.close();
                     return None;
                 }
@@ -509,7 +786,7 @@ impl ActivePeersInner {
             }
         }
 
-        self.send_event(PeerEvent::NewPeer(*remote_id));
+        self.send_event(PeerEvent::NewPeer(*peer_id));
         Some(new_connection)
     }
 
@@ -551,7 +828,7 @@ impl ActivePeersInner {
 
 fn simultaneous_dial_tie_breaking(
     local_id: &PeerId,
-    remote_id: &PeerId,
+    peer_id: &PeerId,
     old_origin: Direction,
     new_origin: Direction,
 ) -> bool {
@@ -559,8 +836,8 @@ fn simultaneous_dial_tie_breaking(
         (Direction::Inbound, Direction::Inbound) | (Direction::Outbound, Direction::Outbound) => {
             true
         }
-        (Direction::Inbound, Direction::Outbound) => remote_id < local_id,
-        (Direction::Outbound, Direction::Inbound) => local_id < remote_id,
+        (Direction::Inbound, Direction::Outbound) => peer_id < local_id,
+        (Direction::Outbound, Direction::Inbound) => local_id < peer_id,
     }
 }
 

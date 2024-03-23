@@ -50,10 +50,10 @@ pub(crate) struct CertVerifierWithPeerId {
 }
 
 impl CertVerifierWithPeerId {
-    pub fn new(service_name: String, peer_id: PeerId) -> Self {
+    pub fn new(service_name: String, peer_id: &PeerId) -> Self {
         Self {
             inner: CertVerifier::from(service_name),
-            peer_id,
+            peer_id: *peer_id,
         }
     }
 }
