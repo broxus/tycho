@@ -8,36 +8,122 @@ use bytes::Bytes;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use tokio::sync::Semaphore;
+use tycho_util::futures::{JoinTask, Shared, WeakShared};
 use tycho_util::time::now_sec;
-use tycho_util::{FastHashMap, FastHashSet};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
-use crate::dht::routing::{RoutingTable, RoutingTableSource};
+use crate::dht::routing::{HandlesRoutingTable, SimpleRoutingTable};
 use crate::network::Network;
 use crate::proto::dht::{rpc, NodeResponse, Value, ValueRef, ValueResponse};
 use crate::types::{PeerId, PeerInfo, Request};
 use crate::util::NetworkExt;
 
+pub struct QueryCache<R> {
+    cache: FastDashMap<[u8; 32], WeakSpawnedFut<R>>,
+}
+
+impl<R> QueryCache<R> {
+    pub async fn run<F, Fut>(&self, target_id: &[u8; 32], f: F) -> R
+    where
+        R: Clone + Send + 'static,
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = R> + Send + 'static,
+    {
+        use dashmap::mapref::entry::Entry;
+
+        let fut = match self.cache.entry(*target_id) {
+            Entry::Vacant(entry) => {
+                let fut = Shared::new(JoinTask::new(f()));
+                if let Some(weak) = fut.downgrade() {
+                    entry.insert(weak);
+                }
+                fut
+            }
+            Entry::Occupied(mut entry) => {
+                if let Some(fut) = entry.get().upgrade() {
+                    fut
+                } else {
+                    let fut = Shared::new(JoinTask::new(f()));
+                    match fut.downgrade() {
+                        Some(weak) => entry.insert(weak),
+                        None => entry.remove(),
+                    };
+                    fut
+                }
+            }
+        };
+
+        fn on_drop<R>(_key: &[u8; 32], value: &WeakSpawnedFut<R>) -> bool {
+            value.strong_count() == 0
+        }
+
+        let (output, is_last) = {
+            struct Guard<'a, R> {
+                target_id: &'a [u8; 32],
+                cache: &'a FastDashMap<[u8; 32], WeakSpawnedFut<R>>,
+                fut: Option<Shared<JoinTask<R>>>,
+            }
+
+            impl<R> Drop for Guard<'_, R> {
+                fn drop(&mut self) {
+                    // Remove value from cache if we consumed the last future instance
+                    if self.fut.take().map(Shared::consume).unwrap_or_default() {
+                        self.cache.remove_if(self.target_id, on_drop);
+                    }
+                }
+            }
+
+            // Wrap future into guard to remove it from cache event it was cancelled
+            let mut guard = Guard {
+                target_id,
+                cache: &self.cache,
+                fut: None,
+            };
+            let fut = guard.fut.insert(fut);
+
+            // Await future.
+            // If `Shared` future is not polled to `Complete` state,
+            // the guard will try to consume it and remove from cache
+            // if it was the last instance.
+            fut.await
+        };
+
+        // TODO: add ttl and force others to make a request for a fresh data
+        if is_last {
+            // Remove value from cache if we consumed the last future instance
+            self.cache.remove_if(target_id, on_drop);
+        }
+
+        output
+    }
+}
+
+impl<R> Default for QueryCache<R> {
+    fn default() -> Self {
+        Self {
+            cache: Default::default(),
+        }
+    }
+}
+
+type WeakSpawnedFut<T> = WeakShared<JoinTask<T>>;
+
 pub struct Query {
     network: Network,
-    candidates: RoutingTable,
+    candidates: SimpleRoutingTable,
     max_k: usize,
 }
 
 impl Query {
     pub fn new(
         network: Network,
-        routing_table: &RoutingTable,
+        routing_table: &HandlesRoutingTable,
         target_id: &[u8; 32],
         max_k: usize,
     ) -> Self {
-        let mut candidates = RoutingTable::new(PeerId(*target_id));
+        let mut candidates = SimpleRoutingTable::new(PeerId(*target_id));
         routing_table.visit_closest(target_id, max_k, |node| {
-            candidates.add(
-                node.clone(),
-                max_k,
-                &Duration::MAX,
-                RoutingTableSource::Trusted,
-            );
+            candidates.add(node.load_peer_info(), max_k, &Duration::MAX, Some);
         });
 
         Self {
@@ -217,8 +303,7 @@ impl Query {
 
             // Insert a new entry
             if visited.insert(node.id) {
-                self.candidates
-                    .add(node, max_k, &Duration::MAX, RoutingTableSource::Trusted);
+                self.candidates.add(node, max_k, &Duration::MAX, Some);
                 has_new = true;
             }
         }
@@ -244,8 +329,7 @@ impl Query {
                 // Insert a new entry
                 hash_map::Entry::Vacant(entry) => {
                     let node = entry.insert(node).clone();
-                    self.candidates
-                        .add(node, max_k, &Duration::MAX, RoutingTableSource::Trusted);
+                    self.candidates.add(node, max_k, &Duration::MAX, Some);
                     has_new = true;
                 }
                 // Try to replace an old entry
@@ -299,7 +383,7 @@ pub struct StoreValue<F = ()> {
 impl StoreValue<()> {
     pub fn new(
         network: Network,
-        routing_table: &RoutingTable,
+        routing_table: &HandlesRoutingTable,
         value: ValueRef<'_>,
         max_k: usize,
         local_peer_info: Option<&PeerInfo>,
@@ -321,7 +405,7 @@ impl StoreValue<()> {
         routing_table.visit_closest(&key_hash, max_k, |node| {
             futures.push(Self::visit(
                 network.clone(),
-                node.clone(),
+                node.load_peer_info(),
                 request_body.clone(),
                 semaphore.clone(),
             ));

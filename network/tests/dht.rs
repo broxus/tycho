@@ -23,9 +23,9 @@ impl Node {
     fn new(key: &ed25519::SecretKey) -> Self {
         let keypair = ed25519::KeyPair::from(key);
 
-        let (dht_client, dht) = DhtService::builder(keypair.public_key.into()).build();
+        let (dht_tasks, dht_service) = DhtService::builder(keypair.public_key.into()).build();
 
-        let router = Router::builder().route(dht).build();
+        let router = Router::builder().route(dht_service.clone()).build();
 
         let network = Network::builder()
             .with_private_key(key.to_bytes())
@@ -33,7 +33,9 @@ impl Node {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        let dht = dht_client.build(network.clone());
+        dht_tasks.spawn(&network);
+
+        let dht = dht_service.make_client(network.clone());
 
         Self { network, dht }
     }

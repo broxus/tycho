@@ -1,9 +1,29 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-pub mod futures;
 pub mod serde_helpers;
 pub mod time;
+
+pub mod futures {
+    pub use self::box_future_or_noop::BoxFutureOrNoop;
+    pub use self::join_task::JoinTask;
+    pub use self::shared::{Shared, WeakShared};
+
+    mod box_future_or_noop;
+    mod join_task;
+    mod shared;
+}
+
+pub mod sync {
+    pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
+
+    mod priority_semaphore;
+}
+
+mod util {
+    pub(crate) mod linked_list;
+    pub(crate) mod wake_list;
+}
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 pub type FastDashSet<K> = dashmap::DashSet<K, ahash::RandomState>;

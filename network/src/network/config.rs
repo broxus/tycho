@@ -50,6 +50,9 @@ pub struct NetworkConfig {
     /// Default: 1 minute.
     #[serde(with = "serde_helpers::humantime")]
     pub shutdown_idle_timeout: Duration,
+
+    /// Default: no.
+    pub enable_0rtt: bool,
 }
 
 impl Default for NetworkConfig {
@@ -66,6 +69,7 @@ impl Default for NetworkConfig {
             max_concurrent_connections: None,
             active_peers_event_channel_capacity: 128,
             shutdown_idle_timeout: Duration::from_secs(60),
+            enable_0rtt: false,
         }
     }
 }
@@ -135,9 +139,9 @@ pub(crate) struct EndpointConfig {
     pub client_cert: rustls::Certificate,
     pub pkcs8_der: rustls::PrivateKey,
     pub quinn_server_config: quinn::ServerConfig,
-    pub quinn_client_config: quinn::ClientConfig,
     pub transport_config: Arc<quinn::TransportConfig>,
     pub quinn_endpoint_config: quinn::EndpointConfig,
+    pub enable_early_data: bool,
 }
 
 impl EndpointConfig {
@@ -148,14 +152,19 @@ impl EndpointConfig {
         }
     }
 
-    pub fn make_client_config_for_peer_id(&self, peer_id: PeerId) -> Result<quinn::ClientConfig> {
-        let client_config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
+    pub fn make_client_config_for_peer_id(&self, peer_id: &PeerId) -> Result<quinn::ClientConfig> {
+        let mut client_config = rustls::ClientConfig::builder()
+            .with_cipher_suites(DEFAULT_CIPHER_SUITES)
+            .with_kx_groups(DEFAULT_KX_GROUPS)
+            .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
+            .unwrap()
             .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(
                 self.service_name.clone(),
                 peer_id,
             )))
             .with_client_auth_cert(vec![self.client_cert.clone()], self.pkcs8_der.clone())?;
+
+        client_config.enable_early_data = self.enable_early_data;
 
         let mut client = quinn::ClientConfig::new(Arc::new(client_config));
         client.transport_config(self.transport_config.clone());
@@ -170,10 +179,16 @@ pub(crate) struct EndpointConfigBuilder<MandatoryFields = (String, [u8; 32])> {
 
 #[derive(Default)]
 struct EndpointConfigBuilderFields {
+    enable_0rtt: bool,
     transport_config: Option<quinn::TransportConfig>,
 }
 
 impl<MandatoryFields> EndpointConfigBuilder<MandatoryFields> {
+    pub fn with_0rtt_enabled(mut self, enable_0rtt: bool) -> Self {
+        self.optional_fields.enable_0rtt = enable_0rtt;
+        self
+    }
+
     pub fn with_transport_config(mut self, transport_config: quinn::TransportConfig) -> Self {
         self.optional_fields.transport_config = Some(transport_config);
         self
@@ -221,12 +236,6 @@ impl EndpointConfigBuilder {
             generate_cert(&keypair, &service_name).context("Failed to generate a certificate")?;
 
         let cert_verifier = Arc::new(CertVerifier::from(service_name.clone()));
-        let quinn_client_config = make_client_config(
-            cert.clone(),
-            pkcs8_der.clone(),
-            cert_verifier.clone(),
-            transport_config.clone(),
-        )?;
 
         let quinn_server_config = make_server_config(
             &service_name,
@@ -234,6 +243,7 @@ impl EndpointConfigBuilder {
             cert.clone(),
             cert_verifier,
             transport_config.clone(),
+            self.optional_fields.enable_0rtt,
         )?;
 
         let peer_id = peer_id_from_certificate(&cert)?;
@@ -244,27 +254,11 @@ impl EndpointConfigBuilder {
             client_cert: cert,
             pkcs8_der,
             quinn_server_config,
-            quinn_client_config,
             transport_config,
             quinn_endpoint_config,
+            enable_early_data: self.optional_fields.enable_0rtt,
         })
     }
-}
-
-fn make_client_config(
-    cert: rustls::Certificate,
-    pkcs8_der: rustls::PrivateKey,
-    cert_verifier: Arc<CertVerifier>,
-    transport_config: Arc<quinn::TransportConfig>,
-) -> Result<quinn::ClientConfig> {
-    let client_config = rustls::ClientConfig::builder()
-        .with_safe_defaults()
-        .with_custom_certificate_verifier(cert_verifier)
-        .with_client_auth_cert(vec![cert], pkcs8_der)?;
-
-    let mut client = quinn::ClientConfig::new(Arc::new(client_config));
-    client.transport_config(transport_config);
-    Ok(client)
 }
 
 fn make_server_config(
@@ -273,6 +267,7 @@ fn make_server_config(
     cert: rustls::Certificate,
     cert_verifier: Arc<CertVerifier>,
     transport_config: Arc<quinn::TransportConfig>,
+    enable_0rtt: bool,
 ) -> Result<quinn::ServerConfig> {
     let mut server_cert_resolver = rustls::server::ResolvesServerCertUsingSni::new();
 
@@ -280,10 +275,20 @@ fn make_server_config(
     let certified_key = rustls::sign::CertifiedKey::new(vec![cert], key);
     server_cert_resolver.add(service_name, certified_key)?;
 
-    let server_crypto = rustls::ServerConfig::builder()
-        .with_safe_defaults()
+    let mut server_crypto = rustls::ServerConfig::builder()
+        .with_cipher_suites(DEFAULT_CIPHER_SUITES)
+        .with_kx_groups(DEFAULT_KX_GROUPS)
+        .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
+        .unwrap()
         .with_client_cert_verifier(cert_verifier)
         .with_cert_resolver(Arc::new(server_cert_resolver));
+
+    if enable_0rtt {
+        server_crypto.max_early_data_size = u32::MAX;
+
+        // TODO: Should we enable this?
+        // server_crypto.send_half_rtt_data = true;
+    }
 
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
     server.transport = transport_config;
@@ -302,3 +307,11 @@ fn compute_reset_key(private_key: &[u8; 32]) -> ring::hmac::Key {
 
     ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key)
 }
+
+static DEFAULT_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
+    rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+];
+static DEFAULT_KX_GROUPS: &[&rustls::SupportedKxGroup] = &[&rustls::kx_group::X25519];
+static DEFAULT_PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];

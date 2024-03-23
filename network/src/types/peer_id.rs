@@ -107,6 +107,20 @@ impl From<ed25519::PublicKey> for PeerId {
     }
 }
 
+impl PartialEq<&PeerId> for PeerId {
+    #[inline]
+    fn eq(&self, other: &&PeerId) -> bool {
+        self == *other
+    }
+}
+
+impl PartialEq<PeerId> for &PeerId {
+    #[inline]
+    fn eq(&self, other: &PeerId) -> bool {
+        *self == other
+    }
+}
+
 impl std::ops::BitXor for PeerId {
     type Output = PeerId;
 

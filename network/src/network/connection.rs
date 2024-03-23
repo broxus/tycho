@@ -19,14 +19,18 @@ pub struct Connection {
 impl Connection {
     pub fn new(inner: quinn::Connection, origin: Direction) -> Result<Self> {
         let peer_id = extract_peer_id(&inner)?;
-        Ok(Self {
+        Ok(Self::with_peer_id(inner, origin, peer_id))
+    }
+
+    pub fn with_peer_id(inner: quinn::Connection, origin: Direction, peer_id: PeerId) -> Self {
+        Self {
             request_meta: Arc::new(InboundRequestMeta {
                 peer_id,
                 origin,
                 remote_address: inner.remote_address(),
             }),
             inner,
-        })
+        }
     }
 
     pub fn request_meta(&self) -> &Arc<InboundRequestMeta> {
@@ -177,7 +181,7 @@ impl tokio::io::AsyncRead for RecvStream {
     }
 }
 
-fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
+pub(crate) fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
     let certificate = connection
         .peer_identity()
         .and_then(|identity| identity.downcast::<Vec<rustls::Certificate>>().ok())
@@ -185,4 +189,32 @@ fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
         .context("No certificate found in the connection")?;
 
     peer_id_from_certificate(&certificate).map_err(Into::into)
+}
+
+pub(crate) fn parse_peer_identity(identity: Box<dyn std::any::Any>) -> Result<PeerId> {
+    let certificate = identity
+        .downcast::<Vec<rustls::Certificate>>()
+        .ok()
+        .and_then(|certificates| certificates.into_iter().next())
+        .context("No certificate found in the connection")?;
+
+    peer_id_from_certificate(&certificate).map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parse_cert() {
+        let peer_id =
+            PeerId::from_str("7a6e86f44d5bd83093ba658fadccffbeb2878bb2e30db7b92e237e21eef77e07")
+                .unwrap();
+
+        let certificate = rustls::Certificate(b"0\x81\xd80\x81\x8b\xa0\x03\x02\x01\x02\x02\x15\0\xa0\xd7\x8e\xa8\xf2\xfe\xd8\x10\xeb3\x90\x19br\x91S`\x01\xe0)0\x05\x06\x03+ep0\00 \x17\r750101000000Z\x18\x0f40960101000000Z0\00*0\x05\x06\x03+ep\x03!\0zn\x86\xf4M[\xd80\x93\xbae\x8f\xad\xcc\xff\xbe\xb2\x87\x8b\xb2\xe3\r\xb7\xb9.#~!\xee\xf7~\x07\xa3\x140\x120\x10\x06\x03U\x1d\x11\x04\t0\x07\x82\x05tycho0\x05\x06\x03+ep\x03A\0\xe3s-\xaf\xbd\xac\x81\xbc\x82\x8a\x83\xf8\xa3\xe3\xcb\x118\xa8g\xef_M\x99*\x7f\xed\x1bQ=\x9f\xf1\xc4%q\xa9g\xfa\x0f\x12R\x84LH\xff\x99\xa7bH\xfc\xbdb\xbcY\xc5C\x11\xc5\x91\x8dn#\xe2\x9b\x05".to_vec());
+        let parsed_peer_id = peer_id_from_certificate(&certificate).unwrap();
+
+        assert_eq!(peer_id, parsed_peer_id);
+    }
 }

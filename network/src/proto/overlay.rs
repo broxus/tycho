@@ -30,6 +30,14 @@ pub struct PublicEntry {
     pub signature: Box<[u8; 64]>,
 }
 
+impl PublicEntry {
+    pub fn is_expired(&self, at: u32, ttl_sec: u32) -> bool {
+        const CLOCK_THRESHOLD: u32 = 1;
+
+        self.created_at > at + CLOCK_THRESHOLD || self.created_at.saturating_add(ttl_sec) < at
+    }
+}
+
 /// A list of public overlay entries.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
