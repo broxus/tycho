@@ -1817,9 +1817,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tl-proto"
-version = "0.4.4"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3418163db528cc2324ed7bc9d52aa3ca7a8f73d685f8b21b319d2a08ee4b36d3"
+checksum = "d4da430e55186abb18b4d1457a23eb0765af0dee66a9f741d652d6eaa476a8d7"
 dependencies = [
  "bytes",
  "digest",
@@ -1831,9 +1831,9 @@ dependencies = [
 
 [[package]]
 name = "tl-proto-proc"
-version = "0.4.3"
+version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3f51de4865e0618b187c2b790c137de938d01fe5510116b959387b6133c20ac"
+checksum = "5a3eaf6822a3ce34a40564dd3078a915d35c3c5fd1f6b3d81eab991e6d00a0fb"
 dependencies = [
  "proc-macro2",
  "quote",
