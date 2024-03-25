@@ -12,6 +12,7 @@ use rand::Rng;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastDashSet, FastHashMap};
 
+use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
 use crate::overlay::OverlayId;
 use crate::proto::overlay::{rpc, PublicEntry, PublicEntryToSign};
@@ -23,6 +24,7 @@ pub struct PublicOverlayBuilder {
     min_capacity: usize,
     entry_ttl: Duration,
     banned_peer_ids: FastDashSet<PeerId>,
+    peer_resolver: Option<PeerResolver>,
 }
 
 impl PublicOverlayBuilder {
@@ -44,6 +46,7 @@ impl PublicOverlayBuilder {
         self
     }
 
+    /// Banned peers that will not be ignored by the overlay.
     pub fn with_banned_peers<I>(mut self, banned_peers: I) -> Self
     where
         I: IntoIterator,
@@ -51,6 +54,14 @@ impl PublicOverlayBuilder {
     {
         self.banned_peer_ids
             .extend(banned_peers.into_iter().map(|id| *id.borrow()));
+        self
+    }
+
+    /// Whether to resolve peers with the provided resolver.
+    ///
+    /// Does not resolve peers by default.
+    pub fn with_peer_resolver(mut self, peer_resolver: PeerResolver) -> Self {
+        self.peer_resolver = Some(peer_resolver);
         self
     }
 
@@ -93,6 +104,7 @@ impl PublicOverlay {
             min_capacity: 100,
             entry_ttl: Duration::from_secs(3600),
             banned_peer_ids: Default::default(),
+            peer_resolver: None,
         }
     }
 
@@ -259,9 +271,9 @@ impl PublicOverlay {
         let this = self.inner.as_ref();
 
         let mut entries = this.entries.write();
-        entries.retain(|entry| {
-            !entry.is_expired(now, this.entry_ttl_sec)
-                && !this.banned_peer_ids.contains(&entry.peer_id)
+        entries.retain(|item| {
+            !item.entry.is_expired(now, this.entry_ttl_sec)
+                && !this.banned_peer_ids.contains(&item.entry.peer_id)
         });
     }
 
@@ -298,13 +310,14 @@ struct Inner {
 #[derive(Default)]
 pub struct PublicOverlayEntries {
     peer_id_to_index: FastHashMap<PeerId, usize>,
-    data: Vec<Arc<PublicEntry>>,
+    data: Vec<PublicOverlayEntryData>,
+    peer_resolver: Option<PeerResolver>,
 }
 
 impl PublicOverlayEntries {
     /// Returns a reference to one random element of the slice,
     /// or `None` if the slice is empty.
-    pub fn choose<R>(&self, rng: &mut R) -> Option<&Arc<PublicEntry>>
+    pub fn choose<R>(&self, rng: &mut R) -> Option<&PublicOverlayEntryData>
     where
         R: Rng + ?Sized,
     {
@@ -317,7 +330,7 @@ impl PublicOverlayEntries {
         &self,
         rng: &mut R,
         n: usize,
-    ) -> rand::seq::SliceChooseIter<'_, [Arc<PublicEntry>], Arc<PublicEntry>>
+    ) -> rand::seq::SliceChooseIter<'_, [PublicOverlayEntryData], PublicOverlayEntryData>
     where
         R: Rng + ?Sized,
     {
@@ -329,57 +342,55 @@ impl PublicOverlayEntries {
             // No entry for the peer_id, insert a new one
             hash_map::Entry::Vacant(entry) => {
                 entry.insert(self.data.len());
-                self.data.push(Arc::new(item.clone()));
+
+                let resolver_handle = self.peer_resolver.as_ref().map_or_else(
+                    || PeerResolverHandle::new_noop(&item.peer_id),
+                    |resolver| resolver.insert(&item.peer_id, false),
+                );
+
+                self.data.push(PublicOverlayEntryData {
+                    entry: Arc::new(item.clone()),
+                    resolver_handle,
+                });
+
                 true
             }
             // Entry for the peer_id exists, update it if the new item is newer
             hash_map::Entry::Occupied(entry) => {
                 let index = *entry.get();
                 let existing = &mut self.data[index];
-                if existing.created_at >= item.created_at {
+                if existing.entry.created_at >= item.created_at {
                     return false;
                 }
 
                 // Try to reuse the existing Arc if possible
-                match Arc::get_mut(existing) {
+                match Arc::get_mut(&mut existing.entry) {
                     Some(existing) => existing.clone_from(item),
-                    None => self.data[index] = Arc::new(item.clone()),
+                    None => self.data[index].entry = Arc::new(item.clone()),
                 }
                 true
             }
         }
     }
 
-    fn remove(&mut self, peer_id: &PeerId) -> bool {
-        let Some(index) = self.peer_id_to_index.remove(peer_id) else {
-            return false;
-        };
-
-        // Remove the entry from the data vector
-        self.data.swap_remove(index);
-
-        // Update the swapped entry's index
-        let entry = self
-            .peer_id_to_index
-            .get_mut(&self.data[index].peer_id)
-            .expect("inconsistent state");
-        *entry = index;
-
-        true
-    }
-
     fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(&Arc<PublicEntry>) -> bool,
+        F: FnMut(&PublicOverlayEntryData) -> bool,
     {
-        self.data.retain(|entry| {
-            let keep = f(entry);
+        self.data.retain(|item| {
+            let keep = f(item);
             if !keep {
-                self.peer_id_to_index.remove(&entry.peer_id);
+                self.peer_id_to_index.remove(&item.entry.peer_id);
             }
             keep
         });
     }
+}
+
+#[derive(Clone)]
+pub struct PublicOverlayEntryData {
+    pub entry: Arc<PublicEntry>,
+    pub resolver_handle: PeerResolverHandle,
 }
 
 pub struct PublicOverlayEntriesReadGuard<'a> {

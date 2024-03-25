@@ -22,6 +22,10 @@ impl<T> JoinTask<T> {
             completed: false,
         }
     }
+
+    pub fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
 }
 
 impl<T> Drop for JoinTask<T> {

@@ -1,3 +1,4 @@
+use std::collections::hash_map;
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -5,14 +6,14 @@ use std::time::{Duration, Instant};
 
 use ahash::HashMap;
 use anyhow::Result;
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, AsRaw};
 use tokio::sync::{broadcast, mpsc, oneshot};
-use tokio::task::JoinSet;
+use tokio::task::{AbortHandle, JoinSet};
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::network::config::NetworkConfig;
 use crate::network::connection::Connection;
-use crate::network::endpoint::{Connecting, Endpoint};
+use crate::network::endpoint::{Connecting, Endpoint, Into0RttResult};
 use crate::network::request_handler::InboundRequestHandler;
 use crate::network::wire::handshake;
 use crate::types::{
@@ -22,7 +23,7 @@ use crate::types::{
 
 #[derive(Debug)]
 pub(crate) enum ConnectionManagerRequest {
-    Connect(Address, Option<PeerId>, oneshot::Sender<Result<PeerId>>),
+    Connect(Address, PeerId, CallbackTx),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -32,10 +33,12 @@ pub(crate) struct ConnectionManager {
 
     mailbox: mpsc::Receiver<ConnectionManagerRequest>,
 
+    pending_connection_callbacks: FastHashMap<Address, PendingConnectionCallbacks>,
+    pending_partial_connections: JoinSet<Option<PartialConnection>>,
     pending_connections: JoinSet<ConnectingOutput>,
     connection_handlers: JoinSet<()>,
 
-    pending_dials: FastHashMap<PeerId, oneshot::Receiver<Result<PeerId>>>,
+    pending_dials: FastHashMap<PeerId, CallbackRx>,
     dial_backoff_states: HashMap<PeerId, DialBackoffState>,
 
     active_peers: ActivePeers,
@@ -43,6 +46,9 @@ pub(crate) struct ConnectionManager {
 
     service: BoxCloneService<ServiceRequest, Response>,
 }
+
+type CallbackTx = oneshot::Sender<Result<PeerId, Arc<anyhow::Error>>>;
+type CallbackRx = oneshot::Receiver<Result<PeerId, Arc<anyhow::Error>>>;
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
@@ -63,6 +69,8 @@ impl ConnectionManager {
             config,
             endpoint,
             mailbox,
+            pending_connection_callbacks: Default::default(),
+            pending_partial_connections: Default::default(),
             pending_connections: Default::default(),
             connection_handlers: Default::default(),
             pending_dials: Default::default(),
@@ -94,7 +102,7 @@ impl ConnectionManager {
 
                     match request {
                         ConnectionManagerRequest::Connect(address, peer_id, callback) => {
-                            self.handle_connect_request(address, peer_id, callback);
+                            self.handle_connect_request(address, &peer_id, callback);
                         }
                         ConnectionManagerRequest::Shutdown(oneshot) => {
                             shutdown_notifier = Some(oneshot);
@@ -108,8 +116,21 @@ impl ConnectionManager {
                     }
                 }
                 Some(connecting_output) = self.pending_connections.join_next() => {
+                    match connecting_output {
+                        Ok(connecting) => self.handle_connecting_result(connecting),
+                        Err(e) => {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
+                            continue;
+                        }
+                    }
+                }
+                Some(partial_connection) = self.pending_partial_connections.join_next() => {
                     // NOTE: unwrap here is to propagate panic from the spawned future
-                    self.handle_connecting_result(connecting_output.unwrap());
+                    if let Some(PartialConnection { connection, timeout_at }) = partial_connection.unwrap() {
+                        self.handle_incoming_impl(connection, None, timeout_at);
+                    }
                 }
                 Some(connection_handler_output) = self.connection_handlers.join_next() => {
                     // NOTE: unwrap here is to propagate panic from the spawned future
@@ -129,6 +150,7 @@ impl ConnectionManager {
 
     async fn shutdown(mut self) {
         self.endpoint.close();
+        self.pending_partial_connections.shutdown().await;
         self.pending_connections.shutdown().await;
 
         while self.connection_handlers.join_next().await.is_some() {}
@@ -211,93 +233,234 @@ impl ConnectionManager {
                 .expect("address list must have at least one item");
 
             let (tx, rx) = oneshot::channel();
-            self.dial_peer(address, Some(peer_info.id), tx);
+            self.dial_peer(address, &peer_info.id, tx);
             self.pending_dials.insert(peer_info.id, rx);
         }
     }
 
-    fn handle_connect_request(
-        &mut self,
-        address: Address,
-        peer_id: Option<PeerId>,
-        callback: oneshot::Sender<Result<PeerId>>,
-    ) {
+    fn handle_connect_request(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
         self.dial_peer(address, peer_id, callback);
     }
 
     fn handle_incoming(&mut self, connecting: Connecting) {
-        async fn handle_incoming_task(
-            connecting: Connecting,
-            config: Arc<NetworkConfig>,
-            active_peers: ActivePeers,
-            known_peers: KnownPeers,
-        ) -> ConnectingOutput {
-            let fut = async {
-                let connection = connecting.await?;
+        let remote_addr = connecting.remote_address();
+        tracing::trace!(
+            local_id = %self.endpoint.peer_id(),
+            %remote_addr,
+            "received an incoming connection",
+        );
 
-                match known_peers.get_affinity(connection.peer_id()) {
-                    Some(PeerAffinity::High | PeerAffinity::Allowed) => {}
-                    Some(PeerAffinity::Never) => {
-                        anyhow::bail!(
-                            "rejecting connection from peer {} due to PeerAffinity::Never",
-                            connection.peer_id(),
-                        );
-                    }
-                    _ => {
-                        if let Some(limit) = config.max_concurrent_connections {
-                            anyhow::ensure!(
-                                active_peers.len() < limit,
-                                "rejecting connection from peer {} dut too many concurrent connections",
-                                connection.peer_id(),
+        // Split incoming connection into 0.5-RTT and 1-RTT parts.
+        match connecting.into_0rtt() {
+            Into0RttResult::Established(connection, accepted) => {
+                let timeout_at = Instant::now() + self.config.connect_timeout;
+                self.handle_incoming_impl(connection, Some(accepted), timeout_at);
+            }
+            Into0RttResult::WithoutIdentity(partial_connection) => {
+                tracing::debug!("connection identity is not available yet");
+
+                let timeout_at = Instant::now() + self.config.connect_timeout;
+                self.pending_partial_connections.spawn(async move {
+                    match tokio::time::timeout_at(timeout_at.into(), partial_connection).await {
+                        Ok(Ok(connection)) => Some(PartialConnection {
+                            connection,
+                            timeout_at,
+                        }),
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                %remote_addr,
+                                "failed to establish an incoming connection: {e:?}",
                             );
+                            None
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %remote_addr,
+                                "incoming connection timed out",
+                            );
+                            None
                         }
                     }
-                }
+                });
+            }
+            Into0RttResult::InvalidConnection(e) => {
+                // TODO: Lower log level to trace/debug?
+                tracing::warn!(%remote_addr, "invalid incoming connection: {e:?}");
+            }
+            Into0RttResult::Unavailable(_) => unreachable!(
+                "BUG: For incoming connections, a 0.5-RTT connection must \
+                always be successfully constructed."
+            ),
+        };
+    }
 
-                handshake(connection).await
+    fn handle_incoming_impl(
+        &mut self,
+        connection: Connection,
+        accepted: Option<quinn::ZeroRttAccepted>,
+        timeout_at: Instant,
+    ) {
+        async fn handle_incoming_task(
+            seqno: u32,
+            connection: ConnectionClosedOnDrop,
+            accepted: Option<quinn::ZeroRttAccepted>,
+            timeout_at: Instant,
+        ) -> ConnectingOutput {
+            let target_peer_id = *connection.peer_id();
+            let target_address = connection.remote_address().into();
+            let fut = async {
+                if let Some(accepted) = accepted {
+                    // NOTE: `bool` output of this future is meaningless for servers.
+                    accepted.await;
+                }
+                handshake(&connection).await
             };
 
-            let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
+            let connecting_result = tokio::time::timeout_at(timeout_at.into(), fut)
                 .await
                 .map_err(Into::into)
-                .and_then(std::convert::identity);
+                .and_then(std::convert::identity)
+                .map_err(Arc::new)
+                .map(|_| connection.disarm());
 
             ConnectingOutput {
-                connecting_result,
-                callback: None,
-                target_address: None,
-                target_peer_id: None,
+                seqno,
+                drop_result: true,
+                connecting_result: ManuallyDrop::new(connecting_result),
+                target_address,
+                target_peer_id,
             }
         }
 
-        tracing::trace!("received new incoming connection");
+        let remote_addr = connection.remote_address();
 
-        self.pending_connections.spawn(handle_incoming_task(
-            connecting,
-            self.config.clone(),
-            self.active_peers.clone(),
-            self.known_peers.clone(),
-        ));
+        // Check if the peer is allowed before doing anything else.
+        match self.known_peers.get_affinity(connection.peer_id()) {
+            Some(PeerAffinity::High | PeerAffinity::Allowed) => {}
+            Some(PeerAffinity::Never) => {
+                // TODO: Lower log level to trace/debug?
+                tracing::warn!(
+                    %remote_addr,
+                    peer_id = %connection.peer_id(),
+                    "rejecting connection due to PeerAffinity::Never",
+                );
+                return;
+            }
+            _ => {
+                if matches!(
+                    self.config.max_concurrent_connections,
+                    Some(limit) if self.active_peers.len() >= limit
+                ) {
+                    // TODO: Lower log level to trace/debug?
+                    tracing::warn!(
+                        %remote_addr,
+                        peer_id = %connection.peer_id(),
+                        "rejecting connection due too many concurrent connections",
+                    );
+                    return;
+                }
+            }
+        }
+
+        let entry = match self.pending_connection_callbacks.entry(remote_addr.into()) {
+            hash_map::Entry::Vacant(entry) => Some(entry.insert(PendingConnectionCallbacks {
+                last_seqno: 0,
+                origin: Direction::Inbound,
+                callbacks: Default::default(),
+                abort_handle: None,
+            })),
+            hash_map::Entry::Occupied(entry) => {
+                let entry = entry.into_mut();
+
+                // Check if the incoming connection is a simultaneous dial.
+                if simultaneous_dial_tie_breaking(
+                    self.endpoint.peer_id(),
+                    connection.peer_id(),
+                    entry.origin,
+                    Direction::Inbound,
+                ) {
+                    // New connection wins the tie, abort the old one and spawn a new task.
+                    tracing::debug!(
+                        %remote_addr,
+                        peer_id = %connection.peer_id(),
+                        "cancelling old connection to mitigate simultaneous dial",
+                    );
+
+                    entry.origin = Direction::Inbound;
+                    entry.last_seqno += 1;
+                    if let Some(handle) = entry.abort_handle.take() {
+                        handle.abort();
+                    }
+                    Some(entry)
+                } else {
+                    // Old connection wins the tie, gracefully close the new one.
+                    tracing::debug!(
+                        %remote_addr,
+                        peer_id = %connection.peer_id(),
+                        "cancelling new connection to mitigate simultaneous dial",
+                    );
+
+                    connection.close();
+                    None
+                }
+            }
+        };
+
+        if let Some(entry) = entry {
+            entry.abort_handle = Some(self.pending_connections.spawn(handle_incoming_task(
+                entry.last_seqno,
+                ConnectionClosedOnDrop::new(connection),
+                accepted,
+                timeout_at,
+            )));
+        }
     }
 
-    fn handle_connecting_result(&mut self, res: ConnectingOutput) {
-        match res.connecting_result {
+    fn handle_connecting_result(&mut self, mut res: ConnectingOutput) {
+        // Check seqno first to drop outdated results.
+        {
+            let entry = self
+                .pending_connection_callbacks
+                .get(&res.target_address)
+                .expect("Connection tasks must be tracked");
+
+            if entry.last_seqno != res.seqno {
+                tracing::debug!(
+                    target_address = %res.target_address,
+                    target_peer_id = ?res.target_peer_id,
+                    "connection result is outdated"
+                );
+                return;
+            }
+        }
+
+        let callbacks = self
+            .pending_connection_callbacks
+            .remove(&res.target_address)
+            .expect("Connection tasks must be tracked")
+            .callbacks;
+
+        res.drop_result = false;
+        // SAFETY: `drop_result` is set to `false`.
+        match unsafe { ManuallyDrop::take(&mut res.connecting_result) } {
             Ok(connection) => {
                 let peer_id = *connection.peer_id();
                 tracing::debug!(%peer_id, "new connection");
                 self.add_peer(connection);
-                if let Some(callback) = res.callback {
+
+                for callback in callbacks {
                     _ = callback.send(Ok(peer_id));
                 }
             }
             Err(e) => {
                 tracing::debug!(
-                    target_address = ?res.target_address,
+                    target_address = %res.target_address,
                     target_peer_id = ?res.target_peer_id,
                     "connection failed: {e:?}"
                 );
-                if let Some(callback) = res.callback {
-                    _ = callback.send(Err(e));
+
+                for callback in callbacks {
+                    _ = callback.send(Err(e.clone()));
                 }
             }
         }
@@ -316,57 +479,170 @@ impl ConnectionManager {
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(peer_id = ?peer_id, address = %address))]
-    fn dial_peer(
-        &mut self,
-        address: Address,
-        peer_id: Option<PeerId>,
-        callback: oneshot::Sender<Result<PeerId>>,
-    ) {
+    fn dial_peer(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
         async fn dial_peer_task(
+            seqno: u32,
             connecting: Result<Connecting>,
             address: Address,
-            peer_id: Option<PeerId>,
-            callback: oneshot::Sender<Result<PeerId>>,
+            peer_id: PeerId,
             config: Arc<NetworkConfig>,
         ) -> ConnectingOutput {
             let fut = async {
-                let connection = connecting?.await?;
-                handshake(connection).await
+                let connection = ConnectionClosedOnDrop::new(connecting?.await?);
+                handshake(&connection).await?;
+                Ok(connection)
             };
 
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
                 .await
                 .map_err(Into::into)
-                .and_then(std::convert::identity);
+                .and_then(std::convert::identity)
+                .map_err(Arc::new)
+                .map(ConnectionClosedOnDrop::disarm);
 
             ConnectingOutput {
-                connecting_result,
-                callback: Some(callback),
-                target_address: Some(address),
+                seqno,
+                drop_result: true,
+                connecting_result: ManuallyDrop::new(connecting_result),
+                target_address: address,
                 target_peer_id: peer_id,
             }
         }
 
-        let target_address = address.clone();
-        let connecting = match peer_id {
-            None => self.endpoint.connect(address),
-            Some(peer_id) => self.endpoint.connect_with_expected_id(address, peer_id),
+        tracing::info!(
+            local_id = %self.endpoint.peer_id(),
+            %peer_id,
+            remote_addr = %address,
+            "connecting to peer",
+        );
+
+        let entry = match self.pending_connection_callbacks.entry(address.clone()) {
+            hash_map::Entry::Vacant(entry) => Some(entry.insert(PendingConnectionCallbacks {
+                last_seqno: 0,
+                origin: Direction::Outbound,
+                callbacks: vec![callback],
+                abort_handle: None,
+            })),
+            hash_map::Entry::Occupied(entry) => {
+                let entry = entry.into_mut();
+
+                // Add the callback to the existing entry.
+                entry.callbacks.push(callback);
+
+                // Check if the outgoing connection is a simultaneous dial.
+                if simultaneous_dial_tie_breaking(
+                    self.endpoint.peer_id(),
+                    peer_id,
+                    entry.origin,
+                    Direction::Outbound,
+                ) {
+                    // New connection wins the tie, abort the old one and spawn a new task.
+                    tracing::debug!(
+                        remote_addr = %address,
+                        %peer_id,
+                        "cancelling old connection to mitigate simultaneous dial",
+                    );
+
+                    entry.origin = Direction::Outbound;
+                    entry.last_seqno += 1;
+                    if let Some(handle) = entry.abort_handle.take() {
+                        handle.abort();
+                    }
+                    Some(entry)
+                } else {
+                    // Old connection wins the tie, gracefully close the new one.
+                    tracing::debug!(
+                        remote_addr = %address,
+                        %peer_id,
+                        "cancelling new connection to mitigate simultaneous dial",
+                    );
+                    None
+                }
+            }
         };
-        self.pending_connections.spawn(dial_peer_task(
-            connecting,
-            target_address,
-            peer_id,
-            callback,
-            self.config.clone(),
-        ));
+
+        if let Some(entry) = entry {
+            let target_address = address.clone();
+            let connecting = self
+                .endpoint
+                .connect_with_expected_id(address.clone(), peer_id);
+            self.pending_connections.spawn(dial_peer_task(
+                entry.last_seqno,
+                connecting,
+                target_address,
+                *peer_id,
+                self.config.clone(),
+            ));
+        }
     }
 }
 
+struct PendingConnectionCallbacks {
+    last_seqno: u32,
+    origin: Direction,
+    callbacks: Vec<CallbackTx>,
+    abort_handle: Option<AbortHandle>,
+}
+
+struct PartialConnection {
+    connection: Connection,
+    timeout_at: Instant,
+}
+
 struct ConnectingOutput {
-    connecting_result: Result<Connection>,
-    callback: Option<oneshot::Sender<Result<PeerId>>>,
-    target_address: Option<Address>,
-    target_peer_id: Option<PeerId>,
+    seqno: u32,
+    drop_result: bool,
+    connecting_result: ManuallyDrop<Result<Connection, Arc<anyhow::Error>>>,
+    target_address: Address,
+    target_peer_id: PeerId,
+}
+
+impl Drop for ConnectingOutput {
+    fn drop(&mut self) {
+        if self.drop_result {
+            // SAFETY: `drop_result` is set to `true` only when the result is not used.
+            unsafe { ManuallyDrop::drop(&mut self.connecting_result) };
+        }
+    }
+}
+
+struct ConnectionClosedOnDrop {
+    connection: ManuallyDrop<Connection>,
+    close_on_drop: bool,
+}
+
+impl ConnectionClosedOnDrop {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection: ManuallyDrop::new(connection),
+            close_on_drop: true,
+        }
+    }
+
+    fn disarm(mut self) -> Connection {
+        self.close_on_drop = false;
+        // SAFETY: `drop` will not be called.
+        unsafe { ManuallyDrop::take(&mut self.connection) }
+    }
+}
+
+impl std::ops::Deref for ConnectionClosedOnDrop {
+    type Target = Connection;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+impl Drop for ConnectionClosedOnDrop {
+    fn drop(&mut self) {
+        if self.close_on_drop {
+            // SAFETY: `disarm` was not called.
+            let connection = unsafe { ManuallyDrop::take(&mut self.connection) };
+            connection.close();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -484,21 +760,21 @@ impl ActivePeersInner {
     fn add(&self, local_id: &PeerId, new_connection: Connection) -> Option<Connection> {
         use dashmap::mapref::entry::Entry;
 
-        let remote_id = new_connection.peer_id();
-        match self.connections.entry(*remote_id) {
+        let peer_id = new_connection.peer_id();
+        match self.connections.entry(*peer_id) {
             Entry::Occupied(mut entry) => {
                 if simultaneous_dial_tie_breaking(
                     local_id,
-                    remote_id,
+                    peer_id,
                     entry.get().origin(),
                     new_connection.origin(),
                 ) {
-                    tracing::debug!(%remote_id, "closing old connection to mitigate simultaneous dial");
+                    tracing::debug!(%peer_id, "closing old connection to mitigate simultaneous dial");
                     let old_connection = entry.insert(new_connection.clone());
                     old_connection.close();
-                    self.send_event(PeerEvent::LostPeer(*remote_id, DisconnectReason::Requested));
+                    self.send_event(PeerEvent::LostPeer(*peer_id, DisconnectReason::Requested));
                 } else {
-                    tracing::debug!(%remote_id, "closing new connection to mitigate simultaneous dial");
+                    tracing::debug!(%peer_id, "closing new connection to mitigate simultaneous dial");
                     new_connection.close();
                     return None;
                 }
@@ -509,7 +785,7 @@ impl ActivePeersInner {
             }
         }
 
-        self.send_event(PeerEvent::NewPeer(*remote_id));
+        self.send_event(PeerEvent::NewPeer(*peer_id));
         Some(new_connection)
     }
 
@@ -551,7 +827,7 @@ impl ActivePeersInner {
 
 fn simultaneous_dial_tie_breaking(
     local_id: &PeerId,
-    remote_id: &PeerId,
+    peer_id: &PeerId,
     old_origin: Direction,
     new_origin: Direction,
 ) -> bool {
@@ -559,8 +835,8 @@ fn simultaneous_dial_tie_breaking(
         (Direction::Inbound, Direction::Inbound) | (Direction::Outbound, Direction::Outbound) => {
             true
         }
-        (Direction::Inbound, Direction::Outbound) => remote_id < local_id,
-        (Direction::Outbound, Direction::Inbound) => local_id < remote_id,
+        (Direction::Inbound, Direction::Outbound) => peer_id < local_id,
+        (Direction::Outbound, Direction::Inbound) => local_id < peer_id,
     }
 }
 
@@ -624,6 +900,23 @@ impl KnownPeers {
         }
     }
 
+    pub fn make_handle(&self, peer_id: &PeerId, with_affinity: bool) -> Option<KnownPeerHandle> {
+        let inner = match self.0.get(peer_id)?.value() {
+            KnownPeerState::Stored(item) => {
+                let inner = item.upgrade()?;
+                if with_affinity && !inner.increase_affinity() {
+                    return None;
+                }
+                inner
+            }
+            KnownPeerState::Banned => return None,
+        };
+
+        Some(KnownPeerHandle::from_inner(inner, with_affinity))
+    }
+
+    /// Inserts a new handle only if the provided info is not outdated
+    /// and the peer is not banned.
     pub fn insert(
         &self,
         peer_info: Arc<PeerInfo>,
@@ -637,26 +930,43 @@ impl KnownPeers {
                 inner
             }
             dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
-                KnownPeerState::Banned => return Err(KnownPeersError::PeerBanned),
+                KnownPeerState::Banned => return Err(KnownPeersError::from(PeerBannedError)),
+                KnownPeerState::Stored(item) => match item.upgrade() {
+                    Some(inner) => match inner.try_update_peer_info(&peer_info, with_affinity)? {
+                        true => inner,
+                        false => return Err(KnownPeersError::OutdatedInfo),
+                    },
+                    None => {
+                        let inner = KnownPeerInner::new(peer_info, with_affinity, &self.0);
+                        *item = Arc::downgrade(&inner);
+                        inner
+                    }
+                },
+            },
+        };
+
+        Ok(KnownPeerHandle::from_inner(inner, with_affinity))
+    }
+
+    /// Same as [`KnownPeers::insert`], but ignores outdated info.
+    pub fn insert_allow_outdated(
+        &self,
+        peer_info: Arc<PeerInfo>,
+        with_affinity: bool,
+    ) -> Result<KnownPeerHandle, PeerBannedError> {
+        // TODO: add capacity limit for entries without affinity
+        let inner = match self.0.entry(peer_info.id) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let inner = KnownPeerInner::new(peer_info, with_affinity, &self.0);
+                entry.insert(KnownPeerState::Stored(Arc::downgrade(&inner)));
+                inner
+            }
+            dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
+                KnownPeerState::Banned => return Err(PeerBannedError),
                 KnownPeerState::Stored(item) => match item.upgrade() {
                     Some(inner) => {
-                        let created_at = inner.peer_info.load().created_at;
-                        if created_at > peer_info.created_at {
-                            return Err(KnownPeersError::OutdatedInfo);
-                        }
-
-                        if with_affinity && !inner.increase_affinity()
-                            || !with_affinity && inner.is_banned()
-                        {
-                            // Do nothing for banned peers
-                            return Err(KnownPeersError::PeerBanned);
-                        }
-
-                        // TODO: is checking `created_at` enough for equality?
-                        if created_at != peer_info.created_at {
-                            inner.peer_info.swap(peer_info);
-                        }
-
+                        // NOTE: Outdated info is ignored here.
+                        inner.try_update_peer_info(&peer_info, with_affinity)?;
                         inner
                     }
                     None => {
@@ -668,13 +978,7 @@ impl KnownPeers {
             },
         };
 
-        Ok(KnownPeerHandle(if with_affinity {
-            KnownPeerHandleState::WithAffinity(ManuallyDrop::new(Arc::new(
-                KnownPeerHandleWithAffinity { inner },
-            )))
-        } else {
-            KnownPeerHandleState::Simple(ManuallyDrop::new(inner))
-        }))
+        Ok(KnownPeerHandle::from_inner(inner, with_affinity))
     }
 }
 
@@ -697,11 +1001,18 @@ impl KnownPeerState {
 pub struct KnownPeerHandle(KnownPeerHandleState);
 
 impl KnownPeerHandle {
+    fn from_inner(inner: Arc<KnownPeerInner>, with_affinity: bool) -> Self {
+        KnownPeerHandle(if with_affinity {
+            KnownPeerHandleState::WithAffinity(ManuallyDrop::new(Arc::new(
+                KnownPeerHandleWithAffinity { inner },
+            )))
+        } else {
+            KnownPeerHandleState::Simple(ManuallyDrop::new(inner))
+        })
+    }
+
     pub fn peer_info(&self) -> arc_swap::Guard<Arc<PeerInfo>, arc_swap::DefaultStrategy> {
-        match &self.0 {
-            KnownPeerHandleState::Simple(data) => data.peer_info.load(),
-            KnownPeerHandleState::WithAffinity(data) => data.inner.peer_info.load(),
-        }
+        self.inner().peer_info.load()
     }
 
     pub fn load_peer_info(&self) -> Arc<PeerInfo> {
@@ -709,19 +1020,84 @@ impl KnownPeerHandle {
     }
 
     pub fn is_banned(&self) -> bool {
-        let affinity = match &self.0 {
-            KnownPeerHandleState::Simple(data) => &data.affinity,
-            KnownPeerHandleState::WithAffinity(data) => &data.inner.affinity,
-        };
-        affinity.load(Ordering::Acquire) == AFFINITY_BANNED
+        self.inner().is_banned()
     }
 
     pub fn max_affinity(&self) -> PeerAffinity {
-        let inner = match &self.0 {
-            KnownPeerHandleState::Simple(data) => data,
-            KnownPeerHandleState::WithAffinity(data) => &data.inner,
-        };
-        inner.compute_affinity()
+        self.inner().compute_affinity()
+    }
+
+    pub fn update_peer_info(&self, peer_info: &Arc<PeerInfo>) -> Result<(), KnownPeersError> {
+        match self.inner().try_update_peer_info(peer_info, false) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(KnownPeersError::OutdatedInfo),
+            Err(e) => Err(KnownPeersError::PeerBanned(e)),
+        }
+    }
+
+    pub fn ban(&self) -> bool {
+        let inner = self.inner();
+        inner.affinity.swap(AFFINITY_BANNED, Ordering::AcqRel) != AFFINITY_BANNED
+    }
+
+    pub fn increase_affinity(&mut self) -> bool {
+        match &mut self.0 {
+            KnownPeerHandleState::Simple(inner) => {
+                // NOTE: Handle will be updated even if the peer is banned.
+                inner.increase_affinity();
+
+                // SAFETY: Inner value was not dropped.
+                let inner = unsafe { ManuallyDrop::take(inner) };
+
+                // Replace the old state with the new one, ensuring that the old state
+                // is not dropped (because we took the value out of it).
+                let prev_state = std::mem::replace(
+                    &mut self.0,
+                    KnownPeerHandleState::WithAffinity(ManuallyDrop::new(Arc::new(
+                        KnownPeerHandleWithAffinity { inner },
+                    ))),
+                );
+
+                // Forget the old state to avoid dropping it.
+                #[allow(clippy::mem_forget)]
+                std::mem::forget(prev_state);
+
+                true
+            }
+            KnownPeerHandleState::WithAffinity(_) => false,
+        }
+    }
+
+    pub fn decrease_affinity(&mut self) -> bool {
+        match &mut self.0 {
+            KnownPeerHandleState::Simple(_) => false,
+            KnownPeerHandleState::WithAffinity(inner) => {
+                // NOTE: Handle will be updated even if the peer is banned.
+                inner.inner.decrease_affinity();
+
+                // SAFETY: Inner value was not dropped.
+                let inner = unsafe { ManuallyDrop::take(inner) };
+
+                // Get `KnownPeerInner` out of the wrapper.
+                let inner = match Arc::try_unwrap(inner) {
+                    Ok(KnownPeerHandleWithAffinity { inner }) => inner,
+                    Err(inner) => inner.inner.clone(),
+                };
+
+                // Replace the old state with the new one, ensuring that the old state
+                // is not dropped (because we took the value out of it).
+                let prev_state = std::mem::replace(
+                    &mut self.0,
+                    KnownPeerHandleState::Simple(ManuallyDrop::new(inner)),
+                );
+
+                // Forget the old state to avoid dropping it.
+                #[allow(clippy::mem_forget)]
+                std::mem::forget(prev_state);
+
+                true
+            }
+        }
     }
 
     pub fn downgrade(&self) -> WeakKnownPeerHandle {
@@ -733,6 +1109,13 @@ impl KnownPeerHandle {
                 WeakKnownPeerHandleState::WithAffinity(Arc::downgrade(data))
             }
         })
+    }
+
+    fn inner(&self) -> &KnownPeerInner {
+        match &self.0 {
+            KnownPeerHandleState::Simple(data) => data.as_ref(),
+            KnownPeerHandleState::WithAffinity(data) => data.inner.as_ref(),
+        }
     }
 }
 
@@ -883,17 +1266,91 @@ impl KnownPeerInner {
 
         false
     }
+
+    fn try_update_peer_info(
+        &self,
+        peer_info: &Arc<PeerInfo>,
+        with_affinity: bool,
+    ) -> Result<bool, PeerBannedError> {
+        struct AffinityGuard<'a> {
+            inner: &'a KnownPeerInner,
+            decrease_on_drop: bool,
+        }
+
+        impl AffinityGuard<'_> {
+            fn increase_affinity_or_check_ban(&mut self, with_affinity: bool) -> bool {
+                let with_affinity = with_affinity && !self.decrease_on_drop;
+                let is_banned = if with_affinity {
+                    !self.inner.increase_affinity()
+                } else {
+                    self.inner.is_banned()
+                };
+
+                if !is_banned && with_affinity {
+                    self.decrease_on_drop = true;
+                }
+
+                is_banned
+            }
+        }
+
+        impl Drop for AffinityGuard<'_> {
+            fn drop(&mut self) {
+                if self.decrease_on_drop {
+                    self.inner.decrease_affinity();
+                }
+            }
+        }
+
+        // Create a guard to restore the peer affinity in case of an error
+        let mut guard = AffinityGuard {
+            inner: self,
+            decrease_on_drop: false,
+        };
+
+        let mut cur = self.peer_info.load();
+        let updated = loop {
+            if guard.increase_affinity_or_check_ban(with_affinity) {
+                // Do nothing for banned peers
+                return Err(PeerBannedError);
+            }
+
+            match cur.created_at.cmp(&peer_info.created_at) {
+                // Do nothing for the same creation time
+                // TODO: is `created_at` equality enough?
+                std::cmp::Ordering::Equal => break true,
+                // Try to update peer info
+                std::cmp::Ordering::Less => {
+                    let prev = self.peer_info.compare_and_swap(&*cur, peer_info.clone());
+                    if std::ptr::eq(cur.as_raw(), prev.as_raw()) {
+                        break true;
+                    } else {
+                        cur = prev;
+                    }
+                }
+                // Allow an outdated data
+                std::cmp::Ordering::Greater => break false,
+            }
+        };
+
+        guard.decrease_on_drop = false;
+        Ok(updated)
+    }
 }
 
 const AFFINITY_BANNED: usize = usize::MAX;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KnownPeersError {
-    #[error("peer is banned")]
-    PeerBanned,
+    #[error(transparent)]
+    PeerBanned(#[from] PeerBannedError),
     #[error("provided peer info is outdated")]
     OutdatedInfo,
 }
+
+#[derive(Debug, Copy, Clone, thiserror::Error)]
+#[error("peer is banned")]
+pub struct PeerBannedError;
 
 #[cfg(test)]
 mod tests {

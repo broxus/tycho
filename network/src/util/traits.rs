@@ -53,7 +53,7 @@ where
                 .cloned()
                 .expect("address list must have at least one item");
 
-            network.connect_with_peer_id(address, peer_id).await?;
+            network.connect(address, peer_id).await?;
         }
         // Error otherwise
         None => anyhow::bail!("trying to interact with an unknown peer: {peer_id}"),

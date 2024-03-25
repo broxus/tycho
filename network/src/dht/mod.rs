@@ -24,36 +24,14 @@ use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest}
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
+pub use self::peer_resolver::{PeerResolver, PeerResolverBuilder, PeerResolverHandle};
 pub use self::storage::{OverlayValueMerger, StorageError};
 
 mod config;
+mod peer_resolver;
 mod query;
 mod routing;
 mod storage;
-
-pub struct DhtClientBuilder {
-    inner: Arc<DhtInner>,
-    disable_background_tasks: bool,
-}
-
-impl DhtClientBuilder {
-    pub fn disable_background_tasks(mut self) -> Self {
-        self.disable_background_tasks = true;
-        self
-    }
-
-    pub fn build(self, network: Network) -> DhtClient {
-        if !self.disable_background_tasks {
-            self.inner
-                .start_background_tasks(Network::downgrade(&network));
-        }
-
-        DhtClient {
-            inner: self.inner,
-            network,
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct DhtClient {
@@ -62,8 +40,14 @@ pub struct DhtClient {
 }
 
 impl DhtClient {
+    #[inline]
     pub fn network(&self) -> &Network {
         &self.network
+    }
+
+    #[inline]
+    pub fn service(&self) -> &DhtService {
+        DhtService::wrap(&self.inner)
     }
 
     pub fn add_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
@@ -240,6 +224,17 @@ impl<'a> std::ops::DerefMut for DhtQueryWithDataBuilder<'a> {
     }
 }
 
+pub struct DhtServiceBackgroundTasks {
+    inner: Arc<DhtInner>,
+}
+
+impl DhtServiceBackgroundTasks {
+    pub fn spawn(self, network: &Network) {
+        self.inner
+            .start_background_tasks(Network::downgrade(network));
+    }
+}
+
 pub struct DhtServiceBuilder {
     local_id: PeerId,
     config: Option<DhtConfig>,
@@ -257,7 +252,7 @@ impl DhtServiceBuilder {
         self
     }
 
-    pub fn build(self) -> (DhtClientBuilder, DhtService) {
+    pub fn build(self) -> (DhtServiceBackgroundTasks, DhtService) {
         let config = self.config.unwrap_or_default();
 
         let storage = {
@@ -288,19 +283,25 @@ impl DhtServiceBuilder {
             find_value_queries: Default::default(),
         });
 
-        let client_builder = DhtClientBuilder {
+        let background_tasks = DhtServiceBackgroundTasks {
             inner: inner.clone(),
-            disable_background_tasks: false,
         };
 
-        (client_builder, DhtService(inner))
+        (background_tasks, DhtService(inner))
     }
 }
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct DhtService(Arc<DhtInner>);
 
 impl DhtService {
+    #[inline]
+    fn wrap(inner: &Arc<DhtInner>) -> &Self {
+        // SAFETY: `DhtService` has the same memory layout as `Arc<DhtInner>`.
+        unsafe { &*(inner as *const Arc<DhtInner>).cast::<Self>() }
+    }
+
     pub fn builder(local_id: PeerId) -> DhtServiceBuilder {
         DhtServiceBuilder {
             local_id,
@@ -314,6 +315,10 @@ impl DhtService {
             inner: self.0.clone(),
             network,
         }
+    }
+
+    pub fn make_peer_resolver(&self) -> PeerResolverBuilder {
+        PeerResolver::builder(self.clone())
     }
 }
 
