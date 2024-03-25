@@ -12,7 +12,7 @@ pub struct DownloadTask {
 impl Future for DownloadTask {
     type Output = DagPoint;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         todo!()
     }
 }

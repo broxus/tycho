@@ -1,14 +1,16 @@
 use std::array;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use ahash::RandomState;
+use futures_util::StreamExt;
 use parking_lot::Mutex;
+use rand::prelude::IteratorRandom;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::task::AbortHandle;
 
 use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesEvent};
-use tycho_util::FastHashMap;
 
 use crate::engine::node_count::NodeCount;
 use crate::models::point::Round;
@@ -23,10 +25,21 @@ use crate::models::point::Round;
     for the anchor chain to be committed by majority and for new nodes to gather data.
     The switch will occur for validator sets as a whole, at a single leaderless round.
 */
+#[derive(Clone, PartialEq, Debug)]
+pub enum PeerState {
+    Added,    // not yet ready to connect
+    Resolved, // ready to connect
+    Removed,  // will not be added again
+}
+
 #[derive(Clone)]
 pub struct PeerSchedule {
     // FIXME determine if our local_id is in next epoch
     inner: Arc<Mutex<PeerScheduleInner>>,
+    // Note: connection to self is always "Added"
+    // Note: updates are Resolved or Removed, sent single time
+    updates: broadcast::Sender<(PeerId, PeerState)>,
+    abort_resolve_peers: Arc<Mutex<Option<AbortHandle>>>,
     overlay: PrivateOverlay,
     pub local_id: PeerId, // FIXME move into schedule when it starts to change with new epoch
 }
@@ -38,6 +51,7 @@ impl PeerSchedule {
         overlay: &PrivateOverlay,
         local_id: &PeerId,
     ) -> Self {
+        let (updates, _) = broadcast::channel(10);
         let mut current_peers = current_peers.clone();
         current_peers.retain(|p| p != local_id);
         let this = Self {
@@ -46,8 +60,11 @@ impl PeerSchedule {
                 &current_peers,
             ))),
             overlay: overlay.clone(),
+            updates,
+            abort_resolve_peers: Default::default(),
             local_id: local_id.clone(),
         };
+        this.respawn_resolve_task();
         tokio::spawn(this.clone().listen());
         this
     }
@@ -57,25 +74,27 @@ impl PeerSchedule {
     // * which nodes are able to connect at the moment
     /// TODO replace bool with AtomicBool? use Arc<FastDashMap>? to return map with auto refresh
     pub async fn wait_for_peers(&self, round: Round, node_count: NodeCount) {
-        let mut rx = self.overlay.read_entries().subscribe();
+        let mut rx = self.updates.subscribe();
         let mut peers = (*self.peers_for(round)).clone();
-        let mut count = peers.iter().filter(|(_, &is_resolved)| is_resolved).count();
+        let mut count = peers
+            .iter()
+            .filter(|(_, state)| **state == PeerState::Resolved)
+            .count();
         while count < node_count.into() {
             match rx.recv().await {
-                Ok(PrivateOverlayEntriesEvent::Resolved(peer_id)) if peer_id != self.local_id => {
-                    if let Some(resolved) = peers.get_mut(&peer_id) {
-                        if !*resolved {
-                            count += 1;
+                Ok((peer_id, new_state)) if peer_id != self.local_id => {
+                    if let Some(state) = peers.get_mut(&peer_id) {
+                        match (&state, &new_state) {
+                            (PeerState::Added, PeerState::Removed) => count -= 1,
+                            (PeerState::Resolved, PeerState::Removed) => count -= 1,
+                            (PeerState::Added, PeerState::Resolved) => count += 1,
+                            (PeerState::Removed, PeerState::Resolved) => {
+                                count += 1; // should not occur
+                                tracing::warn!("peer {peer_id} is resolved after being removed")
+                            }
+                            (_, _) => {}
                         }
-                        *resolved = true;
-                    }
-                }
-                Ok(PrivateOverlayEntriesEvent::Removed(peer_id)) if peer_id != self.local_id => {
-                    if let Some(resolved) = peers.get_mut(&peer_id) {
-                        if *resolved {
-                            count -= 1;
-                        }
-                        *resolved = false;
+                        *state = new_state;
                     }
                 }
                 _ => {}
@@ -83,25 +102,25 @@ impl PeerSchedule {
         }
     }
 
-    pub fn peers_for(&self, round: Round) -> Arc<BTreeMap<PeerId, bool>> {
-        let mut inner = self.inner.lock();
+    pub fn peers_for(&self, round: Round) -> Arc<BTreeMap<PeerId, PeerState>> {
+        let inner = self.inner.lock();
         inner.peers_for_index_plus_one(inner.index_plus_one(round))
     }
 
     pub fn peers_for_array<const N: usize>(
         &self,
         rounds: [Round; N],
-    ) -> [Arc<BTreeMap<PeerId, bool>>; N] {
-        let mut inner = self.inner.lock();
+    ) -> [Arc<BTreeMap<PeerId, PeerState>>; N] {
+        let inner = self.inner.lock();
         array::from_fn(|i| inner.peers_for_index_plus_one(inner.index_plus_one(rounds[i])))
     }
 
     /// does not return empty maps
-    pub fn peers_for_range(&self, rounds: Range<Round>) -> Vec<Arc<BTreeMap<PeerId, bool>>> {
+    pub fn peers_for_range(&self, rounds: Range<Round>) -> Vec<Arc<BTreeMap<PeerId, PeerState>>> {
         if rounds.end <= rounds.start {
             return vec![];
         }
-        let mut inner = self.inner.lock();
+        let inner = self.inner.lock();
         let mut first = inner.index_plus_one(rounds.start);
         let last = inner.index_plus_one(rounds.end.prev());
         if 0 == first && first < last {
@@ -149,47 +168,95 @@ impl PeerSchedule {
     }
 
     pub fn set_next_peers(&self, peers: &Vec<PeerId>) {
+        let mut all_peers = BTreeMap::new();
         let mut inner = self.inner.lock();
-        let next = inner.peers_resolved[2].as_ref();
+        for i in 0..inner.peers_resolved.len() {
+            all_peers.extend(inner.peers_resolved[i].iter());
+        }
         let old = peers
             .iter()
-            .filter_map(|p| next.get(p).map(|b| (p.clone(), *b)))
+            .filter_map(|peer_id| {
+                all_peers
+                    .get(peer_id)
+                    .map(|&state| (peer_id.clone(), state.clone()))
+            })
             .collect::<Vec<_>>();
-        let mut next = Arc::make_mut(&mut inner.peers_resolved[2]);
+        let next = Arc::make_mut(&mut inner.peers_resolved[2]);
         next.clear();
-        next.extend(peers.clone().into_iter().map(|a| (a, false)));
+        next.extend(peers.clone().into_iter().map(|a| (a, PeerState::Added)));
         next.extend(old);
     }
 
     /// Returns [true] if update was successfully applied
-    fn set_resolved(&self, node: &PeerId, resolved: bool) -> bool {
+    fn set_resolved(&self, peer_id: &PeerId, resolved: bool) -> bool {
         let mut is_applied = false;
-        let mut inner = self.inner.lock();
-        for i in 0..inner.peers_resolved.len() {
-            let Some(b) = Arc::make_mut(&mut inner.peers_resolved[i]).get_mut(node) else {
-                continue;
-            };
-            *b = resolved;
-            is_applied = true;
+        let new_state = if resolved {
+            PeerState::Resolved
+        } else {
+            PeerState::Removed
+        };
+        {
+            let mut inner = self.inner.lock();
+            for i in 0..inner.peers_resolved.len() {
+                let Some(b) = Arc::make_mut(&mut inner.peers_resolved[i]).get_mut(peer_id) else {
+                    continue;
+                };
+                if *b != new_state {
+                    *b = new_state.clone();
+                    is_applied = true;
+                }
+            }
+        }
+        if is_applied {
+            _ = self.updates.send((peer_id.clone(), new_state));
         }
         is_applied
+    }
+
+    fn respawn_resolve_task(&self) {
+        let mut fut = futures_util::stream::FuturesUnordered::new();
+        {
+            let entries = self.overlay.read_entries();
+            for entry in entries
+                .iter()
+                .choose_multiple(&mut rand::thread_rng(), entries.len())
+            {
+                // skip updates on self
+                if !(entry.peer_id == self.local_id || entry.resolver_handle.is_resolved()) {
+                    let handle = entry.resolver_handle.clone();
+                    fut.push(async move { handle.wait_resolved().await });
+                }
+            }
+        };
+        let new_abort_handle = if fut.is_empty() {
+            None
+        } else {
+            let this = self.clone();
+            let join = tokio::spawn(async move {
+                while let Some(known_peer_handle) = fut.next().await {
+                    _ = this.set_resolved(&known_peer_handle.peer_info().id, true);
+                }
+            });
+            Some(join.abort_handle())
+        };
+        let mut abort_resolve_handle = self.abort_resolve_peers.lock();
+        if let Some(old) = abort_resolve_handle.as_ref() {
+            old.abort();
+        };
+        *abort_resolve_handle = new_abort_handle;
     }
 
     async fn listen(self) {
         let mut rx = self.overlay.read_entries().subscribe();
         loop {
             match rx.recv().await {
-                Ok(ref event @ PrivateOverlayEntriesEvent::Resolved(node))
-                    if node != self.local_id =>
-                {
-                    if !self.set_resolved(&node, true) {
-                        tracing::debug!("Skipped {event:?}");
-                    }
-                }
                 Ok(ref event @ PrivateOverlayEntriesEvent::Removed(node))
                     if node != self.local_id =>
                 {
-                    if !self.set_resolved(&node, true) {
+                    if self.set_resolved(&node, false) {
+                        // respawn resolve task with fewer peers to await
+                        self.respawn_resolve_task();
+                    } else {
                         tracing::debug!("Skipped {event:?}");
                     }
                 }
@@ -213,11 +280,11 @@ impl PeerSchedule {
 
 pub struct PeerScheduleInner {
     // order to select leader by coin flip
-    peers_resolved: [Arc<BTreeMap<PeerId, bool>>; 3],
+    peers_resolved: [Arc<BTreeMap<PeerId, PeerState>>; 3],
     prev_epoch_start: Round,
     cur_epoch_start: Round,
     next_epoch_start: Option<Round>,
-    empty: Arc<BTreeMap<PeerId, bool>>,
+    empty: Arc<BTreeMap<PeerId, PeerState>>,
 }
 
 impl PeerScheduleInner {
@@ -225,7 +292,12 @@ impl PeerScheduleInner {
         Self {
             peers_resolved: [
                 Default::default(),
-                Arc::new(current_peers.iter().map(|p| (p.clone(), false)).collect()),
+                Arc::new(
+                    current_peers
+                        .iter()
+                        .map(|p| (p.clone(), PeerState::Added))
+                        .collect(),
+                ),
                 Default::default(),
             ],
             prev_epoch_start: Round(0),
@@ -247,7 +319,7 @@ impl PeerScheduleInner {
         }
     }
 
-    fn peers_for_index_plus_one(&self, index: u8) -> Arc<BTreeMap<PeerId, bool>> {
+    fn peers_for_index_plus_one(&self, index: u8) -> Arc<BTreeMap<PeerId, PeerState>> {
         match index {
             0 => self.empty.clone(),
             x if x <= 3 => self.peers_resolved[x as usize - 1].clone(),

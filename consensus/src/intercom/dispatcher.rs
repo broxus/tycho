@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,9 +12,8 @@ use tycho_network::{
     PrivateOverlay, Response, Router, Service, ServiceRequest, Version,
 };
 use tycho_util::futures::BoxFutureOrNoop;
-use tycho_util::FastHashSet;
 
-use crate::models::point::{Location, Point, PointId, Round, Signature};
+use crate::models::point::{Point, PointId, Round, Signature};
 
 #[derive(Serialize, Deserialize, Debug)]
 enum MPRequest {
@@ -35,14 +34,14 @@ enum MPResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct BroadcastResponse {
+pub struct BroadcastResponse {
     // for requested point
     pub signature: Signature,
     // at the same round, if it was not skipped
     pub signer_point: Option<Point>,
 }
 #[derive(Serialize, Deserialize, Debug)]
-struct PointResponse {
+pub struct PointResponse {
     pub point: Option<Point>,
 }
 
@@ -66,7 +65,7 @@ impl Dispatcher {
         // TODO receive configured services from general node,
         //  move current setup to test below as it provides acceptable timing
 
-        let (dht_client_builder, dht_service) = DhtService::builder(local_id)
+        let (dht_tasks, dht_service) = DhtService::builder(local_id)
             .with_config(DhtConfig {
                 local_info_announce_period: Duration::from_secs(1),
                 max_local_info_announce_period_jitter: Duration::from_secs(1),
@@ -76,25 +75,13 @@ impl Dispatcher {
             })
             .build();
 
-        let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
-            .resolve_peers(true)
-            .with_entries(all_peers)
-            .build(Responder(Arc::new(ResponderInner {})));
-
         let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_config(OverlayConfig {
-                private_overlay_peer_resolve_period: Duration::from_secs(1),
-                private_overlay_peer_resolve_max_jitter: Duration::from_secs(1),
-                ..Default::default()
-            })
             .with_dht_service(dht_service.clone())
             .build();
 
-        overlay_service.try_add_private_overlay(&private_overlay);
-
         let router = Router::builder()
-            .route(dht_service)
-            .route(overlay_service)
+            .route(dht_service.clone())
+            .route(overlay_service.clone())
             .build();
 
         let network = Network::builder()
@@ -103,13 +90,21 @@ impl Dispatcher {
             .build(socket_addr, router)
             .unwrap();
 
-        let dht_client = dht_client_builder.build(network.clone());
+        dht_tasks.spawn(&network);
+        overlay_tasks.spawn(&network);
 
-        overlay_tasks.spawn(network.clone());
+        let peer_resolver = dht_service.make_peer_resolver().build(&network); // network????
+
+        let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
+            .with_peer_resolver(peer_resolver)
+            .with_entries(all_peers)
+            .build(Responder(Arc::new(ResponderInner {})));
+
+        overlay_service.add_private_overlay(&private_overlay);
 
         Self {
             overlay: private_overlay,
-            dht_client,
+            dht_client: dht_service.make_client(network.clone()),
             network,
         }
     }
@@ -191,7 +186,7 @@ impl ResponderInner {
         };
 
         let response = match body {
-            MPRequest::Broadcast { point } => {
+            MPRequest::Broadcast { .. } => {
                 // 1.1 sigs for my block + 1.2 my next includes
                 // ?? + 3.1 ask last
                 MPResponse::Broadcast(BroadcastResponse {
@@ -199,7 +194,7 @@ impl ResponderInner {
                     signer_point: None,
                 })
             }
-            MPRequest::Point { id } => {
+            MPRequest::Point { .. } => {
                 // 1.2 my next includes (merged with Broadcast flow)
                 MPResponse::Point(PointResponse { point: None })
             }
@@ -256,7 +251,7 @@ mod tests {
             .map(|s| PeerId::from(ed25519::KeyPair::from(s).public_key))
             .collect::<Vec<_>>();
 
-        let mut nodes = keys
+        let nodes = keys
             .iter()
             .map(|s| Dispatcher::new((Ipv4Addr::LOCALHOST, 0), s, &all_peers))
             .collect::<Vec<_>>();
@@ -278,7 +273,7 @@ mod tests {
             }
         }
 
-        let all_peers = FastHashSet::from_iter(all_peers.into_iter());
+        // let all_peers = FastHashSet::from_iter(all_peers.into_iter());
         for sch in &schedules {
             sch.wait_for_peers(Round(1), NodeCount::new(node_count).majority_except_me())
                 .await;

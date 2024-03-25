@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use ahash::RandomState;
-use futures_util::FutureExt;
 use rand::{Rng, SeedableRng};
 
 use tycho_network::PeerId;
@@ -191,9 +190,9 @@ impl Dag {
     // TODO new point is checked against the dag only if it has valid sig, time and round
     // TODO download from neighbours
     pub fn fill_up_to(&mut self, round: Round) {
-        match self.rounds.last_key_value().map(|(k, v)| k) {
+        match self.rounds.last_key_value() {
             None => unreachable!("DAG empty"),
-            Some(last) => {
+            Some((last, _)) => {
                 for round in (last.0..round.0).into_iter().map(|i| Round(i + 1)) {
                     let prev = self.rounds.last_key_value().map(|(_, v)| Arc::downgrade(v));
                     self.rounds.entry(round).or_insert_with(|| {
