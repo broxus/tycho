@@ -224,11 +224,11 @@ impl Node {
     fn new(key: ed25519::SecretKey, address: Address, config: NodeConfig) -> Result<Self> {
         let keypair = everscale_crypto::ed25519::KeyPair::from(&key);
 
-        let (dht_client, dht) = DhtService::builder(keypair.public_key.into())
+        let (dht_tasks, dht_service) = DhtService::builder(keypair.public_key.into())
             .with_config(config.dht)
             .build();
 
-        let router = Router::builder().route(dht).build();
+        let router = Router::builder().route(dht_service.clone()).build();
 
         let network = Network::builder()
             .with_config(config.network)
@@ -236,7 +236,8 @@ impl Node {
             .with_service_name("test-service")
             .build(address, router)?;
 
-        let dht = dht_client.build(network.clone());
+        dht_tasks.spawn(&network);
+        let dht = dht_service.make_client(network.clone());
 
         Ok(Self { network, dht })
     }

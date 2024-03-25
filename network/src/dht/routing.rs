@@ -5,20 +5,18 @@ use std::time::{Duration, Instant};
 use tycho_util::time::now_sec;
 
 use crate::dht::{xor_distance, MAX_XOR_DISTANCE};
+use crate::network::KnownPeerHandle;
 use crate::types::{PeerId, PeerInfo};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RoutingTableSource {
-    Untrusted,
-    Trusted,
-}
+pub(crate) type SimpleRoutingTable = RoutingTable<Arc<PeerInfo>>;
+pub(crate) type HandlesRoutingTable = RoutingTable<KnownPeerHandle>;
 
-pub(crate) struct RoutingTable {
+pub(crate) struct RoutingTable<T> {
     pub local_id: PeerId,
-    pub buckets: BTreeMap<usize, Bucket>,
+    pub buckets: BTreeMap<usize, Bucket<T>>,
 }
 
-impl RoutingTable {
+impl<T> RoutingTable<T> {
     pub fn new(local_id: PeerId) -> Self {
         Self {
             local_id,
@@ -35,14 +33,13 @@ impl RoutingTable {
     pub fn len(&self) -> usize {
         self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
     }
+}
 
-    pub fn add(
-        &mut self,
-        peer: Arc<PeerInfo>,
-        max_k: usize,
-        node_ttl: &Duration,
-        source: RoutingTableSource,
-    ) -> bool {
+impl<T: AsPeerInfo> RoutingTable<T> {
+    pub fn add<F>(&mut self, peer: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration, f: F) -> bool
+    where
+        F: FnOnce(Arc<PeerInfo>) -> Option<T>,
+    {
         let distance = xor_distance(&self.local_id, &peer.id);
         if distance == 0 {
             return false;
@@ -51,7 +48,7 @@ impl RoutingTable {
         self.buckets
             .entry(distance)
             .or_insert_with(|| Bucket::with_capacity(max_k))
-            .insert(peer, max_k, node_ttl, source)
+            .insert(peer, max_k, node_ttl, f)
     }
 
     pub fn closest(&self, key: &[u8; 32], count: usize) -> Vec<Arc<PeerInfo>> {
@@ -72,7 +69,7 @@ impl RoutingTable {
 
             if let Some(bucket) = self.buckets.get(&i) {
                 for node in bucket.nodes.iter().take(remaining) {
-                    result.push(node.data.clone());
+                    result.push(node.data.load_peer_info());
                 }
             }
         }
@@ -82,7 +79,7 @@ impl RoutingTable {
 
     pub fn visit_closest<F>(&self, key: &[u8; 32], count: usize, mut f: F)
     where
-        F: FnMut(&Arc<PeerInfo>),
+        F: FnMut(&T),
     {
         if count == 0 {
             return;
@@ -109,53 +106,20 @@ impl RoutingTable {
     }
 }
 
-pub(crate) struct Bucket {
-    nodes: VecDeque<Node>,
+pub(crate) struct Bucket<T> {
+    nodes: VecDeque<Node<T>>,
 }
 
-impl Bucket {
+impl<T> Bucket<T> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             nodes: VecDeque::with_capacity(capacity),
         }
     }
 
-    fn insert(
-        &mut self,
-        node: Arc<PeerInfo>,
-        max_k: usize,
-        timeout: &Duration,
-        source: RoutingTableSource,
-    ) -> bool {
-        if let Some(index) = self
-            .nodes
-            .iter_mut()
-            .position(|item| item.data.id == node.id)
-        {
-            if source == RoutingTableSource::Untrusted {
-                let slot = &mut self.nodes[index];
-                // Do nothing if node info was not updated (by created_at field)
-                if node.created_at <= slot.data.created_at {
-                    return false;
-                }
-            }
-
-            self.nodes.remove(index);
-        } else if self.nodes.len() >= max_k {
-            if matches!(self.nodes.front(), Some(node) if node.is_expired(now_sec(), timeout)) {
-                self.nodes.pop_front();
-            } else {
-                return false;
-            }
-        }
-
-        self.nodes.push_back(Node::new(node));
-        true
-    }
-
     pub fn retain_nodes<F>(&mut self, f: F)
     where
-        F: FnMut(&Node) -> bool,
+        F: FnMut(&Node<T>) -> bool,
     {
         self.nodes.retain(f);
     }
@@ -165,21 +129,107 @@ impl Bucket {
     }
 }
 
-pub(crate) struct Node {
-    pub data: Arc<PeerInfo>,
+impl<T: AsPeerInfo> Bucket<T> {
+    fn insert<F>(
+        &mut self,
+        peer_info: Arc<PeerInfo>,
+        max_k: usize,
+        timeout: &Duration,
+        f: F,
+    ) -> bool
+    where
+        F: FnOnce(Arc<PeerInfo>) -> Option<T>,
+    {
+        let data = 'data: {
+            if let Some(index) = self
+                .nodes
+                .iter_mut()
+                .position(|item| item.data.as_peer_info().id == peer_info.id)
+            {
+                if let Some(data) = f(peer_info) {
+                    // Found node info with the same id, update it
+                    self.nodes.remove(index);
+                    break 'data data;
+                }
+            } else if self.nodes.len() >= max_k {
+                if matches!(self.nodes.front(), Some(node) if node.is_expired(now_sec(), timeout)) {
+                    if let Some(data) = f(peer_info) {
+                        // Found an expired node, replace it
+                        self.nodes.pop_front();
+                        break 'data data;
+                    }
+                }
+            } else if let Some(data) = f(peer_info) {
+                // Found an empty slot, insert the new node
+                break 'data data;
+            }
+
+            // No action was taken
+            return false;
+        };
+
+        self.nodes.push_back(Node::new(data));
+        true
+    }
+}
+
+pub(crate) struct Node<T> {
+    pub data: T,
     pub last_updated_at: Instant,
 }
 
-impl Node {
-    fn new(data: Arc<PeerInfo>) -> Self {
+impl<T> Node<T> {
+    fn new(data: T) -> Self {
         Self {
             data,
             last_updated_at: Instant::now(),
         }
     }
+}
 
+impl<T: AsPeerInfo> Node<T> {
     pub fn is_expired(&self, at: u32, timeout: &Duration) -> bool {
-        self.data.is_expired(at) || &self.last_updated_at.elapsed() >= timeout
+        self.data.as_peer_info().is_expired(at) || &self.last_updated_at.elapsed() >= timeout
+    }
+}
+
+pub(crate) trait AsPeerInfo {
+    type Guard<'a>: std::ops::Deref<Target = Arc<PeerInfo>>
+    where
+        Self: 'a;
+
+    fn as_peer_info(&self) -> Self::Guard<'_>;
+
+    fn load_peer_info(&self) -> Arc<PeerInfo>;
+}
+
+impl AsPeerInfo for Arc<PeerInfo> {
+    type Guard<'a> = &'a Arc<PeerInfo>;
+
+    #[inline]
+    fn as_peer_info(&self) -> Self::Guard<'_> {
+        self
+    }
+
+    #[inline]
+    fn load_peer_info(&self) -> Arc<PeerInfo> {
+        self.clone()
+    }
+}
+
+impl AsPeerInfo for KnownPeerHandle {
+    type Guard<'a> = arc_swap::Guard<Arc<PeerInfo>, arc_swap::DefaultStrategy>
+    where
+        Self: 'a;
+
+    #[inline]
+    fn as_peer_info(&self) -> Self::Guard<'_> {
+        self.peer_info()
+    }
+
+    #[inline]
+    fn load_peer_info(&self) -> Arc<PeerInfo> {
+        KnownPeerHandle::load_peer_info(self)
     }
 }
 
@@ -188,50 +238,26 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use crate::util::make_peer_info_stub;
 
     const MAX_K: usize = 20;
-
-    fn make_node(id: PeerId) -> Arc<PeerInfo> {
-        Arc::new(PeerInfo {
-            id,
-            address_list: Default::default(),
-            created_at: 0,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        })
-    }
 
     #[test]
     fn buckets_are_sets() {
         let mut table = RoutingTable::new(rand::random());
 
         let peer = rand::random();
-        assert!(table.add(
-            make_node(peer),
-            MAX_K,
-            &Duration::MAX,
-            RoutingTableSource::Trusted
-        ));
-        assert!(table.add(
-            make_node(peer),
-            MAX_K,
-            &Duration::MAX,
-            RoutingTableSource::Trusted
-        )); // returns true because the node was updated
+        assert!(table.add(make_peer_info_stub(peer), MAX_K, &Duration::MAX, Some));
+        assert!(table.add(make_peer_info_stub(peer), MAX_K, &Duration::MAX, Some)); // returns true because the node was updated
         assert_eq!(table.len(), 1);
     }
 
     #[test]
-    fn sould_not_add_seld() {
+    fn should_not_add_self() {
         let local_id = rand::random();
         let mut table = RoutingTable::new(local_id);
 
-        assert!(!table.add(
-            make_node(local_id),
-            MAX_K,
-            &Duration::MAX,
-            RoutingTableSource::Trusted
-        ));
+        assert!(!table.add(make_peer_info_stub(local_id), MAX_K, &Duration::MAX, Some));
         assert!(table.is_empty());
     }
 
@@ -242,19 +268,9 @@ mod tests {
         let mut bucket = Bucket::with_capacity(k);
 
         for _ in 0..k {
-            assert!(bucket.insert(
-                make_node(rand::random()),
-                k,
-                &timeout,
-                RoutingTableSource::Trusted
-            ));
+            assert!(bucket.insert(make_peer_info_stub(rand::random()), k, &timeout, Some));
         }
-        assert!(!bucket.insert(
-            make_node(rand::random()),
-            k,
-            &timeout,
-            RoutingTableSource::Trusted
-        ));
+        assert!(!bucket.insert(make_peer_info_stub(rand::random()), k, &timeout, Some));
     }
 
     #[test]
@@ -373,12 +389,7 @@ mod tests {
 
         let mut table = RoutingTable::new(local_id);
         for id in ids {
-            table.add(
-                make_node(id),
-                MAX_K,
-                &Duration::MAX,
-                RoutingTableSource::Trusted,
-            );
+            table.add(make_peer_info_stub(id), MAX_K, &Duration::MAX, Some);
         }
 
         {

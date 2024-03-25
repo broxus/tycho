@@ -3,7 +3,6 @@ use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
-use rand::Rng;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use self::config::EndpointConfig;
@@ -15,7 +14,10 @@ use crate::types::{
 
 pub use self::config::{NetworkConfig, QuicConfig};
 pub use self::connection::{Connection, RecvStream, SendStream};
-pub use self::connection_manager::{ActivePeers, KnownPeer, KnownPeers, WeakActivePeers};
+pub use self::connection_manager::{
+    ActivePeers, KnownPeerHandle, KnownPeers, KnownPeersError, PeerBannedError, WeakActivePeers,
+    WeakKnownPeerHandle,
+};
 pub use self::peer::Peer;
 
 mod config;
@@ -64,7 +66,7 @@ impl<T1> NetworkBuilder<(T1, ())> {
     }
 
     pub fn with_random_private_key(self) -> NetworkBuilder<(T1, [u8; 32])> {
-        self.with_private_key(rand::thread_rng().gen())
+        self.with_private_key(rand::random())
     }
 }
 
@@ -85,6 +87,7 @@ impl NetworkBuilder {
         let endpoint_config = EndpointConfig::builder()
             .with_service_name(service_name)
             .with_private_key(private_key)
+            .with_0rtt_enabled(config.enable_0rtt)
             .with_transport_config(quic_config.make_transport_config())
             .build()?;
 
@@ -198,18 +201,11 @@ impl Network {
         Ok(active_peers.subscribe())
     }
 
-    pub async fn connect<T>(&self, addr: T) -> Result<PeerId>
+    pub async fn connect<T>(&self, addr: T, peer_id: &PeerId) -> Result<PeerId>
     where
         T: Into<Address>,
     {
-        self.0.connect(addr.into(), None).await
-    }
-
-    pub async fn connect_with_peer_id<T>(&self, addr: T, peer_id: &PeerId) -> Result<PeerId>
-    where
-        T: Into<Address>,
-    {
-        self.0.connect(addr.into(), Some(peer_id)).await
+        self.0.connect(addr.into(), peer_id).await
     }
 
     pub fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
@@ -259,17 +255,19 @@ impl NetworkInner {
         &self.known_peers
     }
 
-    async fn connect(&self, addr: Address, peer_id: Option<&PeerId>) -> Result<PeerId> {
+    async fn connect(&self, addr: Address, peer_id: &PeerId) -> Result<PeerId> {
+        #[derive(thiserror::Error, Debug)]
+        #[error(transparent)]
+        struct ConnectionError(Arc<anyhow::Error>);
+
         let (tx, rx) = oneshot::channel();
         self.connection_manager_handle
-            .send(ConnectionManagerRequest::Connect(
-                addr,
-                peer_id.copied(),
-                tx,
-            ))
+            .send(ConnectionManagerRequest::Connect(addr, *peer_id, tx))
             .await
             .map_err(|_e| NetworkShutdownError)?;
-        rx.await?
+
+        let res = rx.await?;
+        res.map_err(|e| anyhow::Error::new(ConnectionError(e)))
     }
 
     fn disconnect(&self, peer_id: &PeerId) -> Result<()> {
@@ -309,7 +307,8 @@ mod tests {
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::types::{service_query_fn, BoxCloneService};
+    use crate::types::{service_query_fn, BoxCloneService, PeerInfo, Request};
+    use crate::util::NetworkExt;
 
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
         let handle = |request: ServiceRequest| async move {
@@ -323,32 +322,87 @@ mod tests {
         service_query_fn(handle).boxed_clone()
     }
 
-    #[tokio::test]
+    fn make_network(service_name: &str) -> Result<Network> {
+        Network::builder()
+            .with_config(NetworkConfig {
+                enable_0rtt: true,
+                ..Default::default()
+            })
+            .with_random_private_key()
+            .with_service_name(service_name)
+            .build("127.0.0.1:0", echo_service())
+    }
+
+    fn make_peer_info(network: &Network) -> Arc<PeerInfo> {
+        Arc::new(PeerInfo {
+            id: *network.peer_id(),
+            address_list: vec![network.local_addr().into()].into_boxed_slice(),
+            created_at: 0,
+            expires_at: u32::MAX,
+            signature: Box::new([0; 64]),
+        })
+    }
+
     #[traced_test]
-    async fn connection_manager_works() -> anyhow::Result<()> {
-        let peer1 = Network::builder()
-            .with_random_private_key()
-            .with_service_name("tycho")
-            .build("127.0.0.1:0", echo_service())?;
+    #[tokio::test]
+    async fn connection_manager_works() -> Result<()> {
+        let peer1 = make_network("tycho")?;
+        let peer2 = make_network("tycho")?;
+        let peer3 = make_network("not-tycho")?;
 
-        let peer2 = Network::builder()
-            .with_random_private_key()
-            .with_service_name("tycho")
-            .build("127.0.0.1:0", echo_service())?;
+        assert!(peer1
+            .connect(peer2.local_addr(), peer2.peer_id())
+            .await
+            .is_ok());
+        assert!(peer2
+            .connect(peer1.local_addr(), peer1.peer_id())
+            .await
+            .is_ok());
 
-        let peer3 = Network::builder()
-            .with_random_private_key()
-            .with_service_name("not-tycho")
-            .build("127.0.0.1:0", echo_service())?;
+        assert!(peer1
+            .connect(peer3.local_addr(), peer3.peer_id())
+            .await
+            .is_err());
+        assert!(peer2
+            .connect(peer3.local_addr(), peer3.peer_id())
+            .await
+            .is_err());
 
-        assert!(peer1.connect(peer2.local_addr()).await.is_ok());
-        assert!(peer2.connect(peer1.local_addr()).await.is_ok());
+        assert!(peer3
+            .connect(peer1.local_addr(), peer1.peer_id())
+            .await
+            .is_err());
+        assert!(peer3
+            .connect(peer2.local_addr(), peer2.peer_id())
+            .await
+            .is_err());
 
-        assert!(peer1.connect(peer3.local_addr()).await.is_err());
-        assert!(peer2.connect(peer3.local_addr()).await.is_err());
+        Ok(())
+    }
 
-        assert!(peer3.connect(peer1.local_addr()).await.is_err());
-        assert!(peer3.connect(peer2.local_addr()).await.is_err());
+    #[traced_test]
+    #[tokio::test]
+    async fn simultaneous_queries() -> Result<()> {
+        tracing_subscriber::fmt::try_init().ok();
+
+        for _ in 0..10 {
+            let peer1 = make_network("tycho")?;
+            let peer2 = make_network("tycho")?;
+
+            let _peer1_peer2_handle = peer1.known_peers().insert(make_peer_info(&peer2), false)?;
+            let _peer2_peer1_handle = peer2.known_peers().insert(make_peer_info(&peer1), false)?;
+
+            let req = Request {
+                version: Default::default(),
+                body: "hello".into(),
+            };
+            let peer1_fut = std::pin::pin!(peer1.query(peer2.peer_id(), req.clone()));
+            let peer2_fut = std::pin::pin!(peer2.query(peer1.peer_id(), req.clone()));
+
+            let (res1, res2) = futures_util::future::join(peer1_fut, peer2_fut).await;
+            assert_eq!(res1?.body, req.body);
+            assert_eq!(res2?.body, req.body);
+        }
 
         Ok(())
     }

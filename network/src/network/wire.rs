@@ -18,7 +18,7 @@ pub(crate) fn make_codec(config: &NetworkConfig) -> LengthDelimitedCodec {
     builder.length_field_length(4).big_endian().new_codec()
 }
 
-pub(crate) async fn handshake(connection: Connection) -> Result<Connection> {
+pub(crate) async fn handshake(connection: &Connection) -> Result<()> {
     match connection.origin() {
         Direction::Inbound => {
             let mut send_stream = connection.open_uni().await?;
@@ -30,7 +30,7 @@ pub(crate) async fn handshake(connection: Connection) -> Result<Connection> {
             recv_version(&mut recv_stream).await?;
         }
     }
-    Ok(connection)
+    Ok(())
 }
 
 pub(crate) async fn send_request<T: AsyncWrite + Unpin>(

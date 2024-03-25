@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::collections::hash_map;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
@@ -11,6 +12,7 @@ use rand::Rng;
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::{FastDashSet, FastHashMap};
 
+use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
 use crate::overlay::OverlayId;
 use crate::proto::overlay::{rpc, PublicEntry, PublicEntryToSign};
@@ -20,7 +22,9 @@ use crate::util::NetworkExt;
 pub struct PublicOverlayBuilder {
     overlay_id: OverlayId,
     min_capacity: usize,
+    entry_ttl: Duration,
     banned_peer_ids: FastDashSet<PeerId>,
+    peer_resolver: Option<PeerResolver>,
 }
 
 impl PublicOverlayBuilder {
@@ -34,6 +38,15 @@ impl PublicOverlayBuilder {
         self
     }
 
+    /// Time-to-live for each entry in the overlay.
+    ///
+    /// Default: 1 hour.
+    pub fn with_entry_ttl(mut self, entry_ttl: Duration) -> Self {
+        self.entry_ttl = entry_ttl;
+        self
+    }
+
+    /// Banned peers that will not be ignored by the overlay.
     pub fn with_banned_peers<I>(mut self, banned_peers: I) -> Self
     where
         I: IntoIterator,
@@ -41,6 +54,14 @@ impl PublicOverlayBuilder {
     {
         self.banned_peer_ids
             .extend(banned_peers.into_iter().map(|id| *id.borrow()));
+        self
+    }
+
+    /// Whether to resolve peers with the provided resolver.
+    ///
+    /// Does not resolve peers by default.
+    pub fn with_peer_resolver(mut self, peer_resolver: PeerResolver) -> Self {
+        self.peer_resolver = Some(peer_resolver);
         self
     }
 
@@ -53,10 +74,13 @@ impl PublicOverlayBuilder {
             overlay_id: self.overlay_id.as_bytes(),
         });
 
+        let entry_ttl_sec = self.entry_ttl.as_secs().try_into().unwrap_or(u32::MAX);
+
         PublicOverlay {
             inner: Arc::new(Inner {
                 overlay_id: self.overlay_id,
                 min_capacity: self.min_capacity,
+                entry_ttl_sec,
                 entries: RwLock::new(Default::default()),
                 entry_count: AtomicUsize::new(0),
                 banned_peer_ids: self.banned_peer_ids,
@@ -78,7 +102,9 @@ impl PublicOverlay {
         PublicOverlayBuilder {
             overlay_id,
             min_capacity: 100,
+            entry_ttl: Duration::from_secs(3600),
             banned_peer_ids: Default::default(),
+            peer_resolver: None,
         }
     }
 
@@ -148,7 +174,7 @@ impl PublicOverlay {
     /// Adds the given entries to the overlay.
     ///
     /// NOTE: Will deadlock if called while `PublicOverlayEntriesReadGuard` is held.
-    pub(crate) fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>]) {
+    pub(crate) fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>], now: u32) {
         if entries.is_empty() {
             return;
         }
@@ -179,11 +205,19 @@ impl PublicOverlay {
 
         // Prepare validation state
         let mut is_valid = vec![false; entries.len()];
-        let mut valid_count = 0;
+        let mut has_valid = false;
 
         // First pass: verify all entries
         for (entry, is_valid) in std::iter::zip(entries, is_valid.iter_mut()) {
+            if entry.is_expired(now, this.entry_ttl_sec)
+                || self.inner.banned_peer_ids.contains(&entry.peer_id)
+            {
+                // Skip expired or banned peers early
+                continue;
+            }
+
             let Some(pubkey) = entry.peer_id.as_public_key() else {
+                // Skip entries with invalid public keys
                 continue;
             };
 
@@ -195,15 +229,14 @@ impl PublicOverlay {
                 },
                 &entry.signature,
             ) {
+                // Skip entries with invalid signatures
                 continue;
             }
 
+            // NOTE: check all entries, even if we have more than `to_add`.
+            // We might need them if some are duplicates af known entries.
             *is_valid = true;
-            valid_count += 1;
-
-            if valid_count >= to_add {
-                break;
-            }
+            has_valid = true;
         }
 
         // Second pass: insert all valid entries (if any)
@@ -211,20 +244,37 @@ impl PublicOverlay {
         // NOTE: two passes are necessary because public key parsing and
         // signature verification can be expensive and we want to avoid
         // holding the lock for too long.
-        if valid_count > 0 {
+        let mut added = 0;
+        if has_valid {
             let mut stored = this.entries.write();
             for (entry, is_valid) in std::iter::zip(entries, is_valid) {
-                if is_valid {
-                    stored.insert(entry);
+                if !is_valid {
+                    continue;
+                }
+
+                added += stored.insert(entry) as usize;
+                if added >= to_add {
+                    break;
                 }
             }
         }
 
         // Rollback entries that were not valid and not inserted
-        if valid_count < to_add {
+        if added < to_add {
             this.entry_count
-                .fetch_sub(to_add - valid_count, Ordering::Release);
+                .fetch_sub(to_add - added, Ordering::Release);
         }
+    }
+
+    /// Removes all expired and banned entries from the overlay.
+    pub(crate) fn remove_invalid_entries(&self, now: u32) {
+        let this = self.inner.as_ref();
+
+        let mut entries = this.entries.write();
+        entries.retain(|item| {
+            !item.entry.is_expired(now, this.entry_ttl_sec)
+                && !this.banned_peer_ids.contains(&item.entry.peer_id)
+        });
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
@@ -249,6 +299,7 @@ impl std::fmt::Debug for PublicOverlay {
 struct Inner {
     overlay_id: OverlayId,
     min_capacity: usize,
+    entry_ttl_sec: u32,
     entries: RwLock<PublicOverlayEntries>,
     entry_count: AtomicUsize,
     banned_peer_ids: FastDashSet<PeerId>,
@@ -259,13 +310,14 @@ struct Inner {
 #[derive(Default)]
 pub struct PublicOverlayEntries {
     peer_id_to_index: FastHashMap<PeerId, usize>,
-    data: Vec<Arc<PublicEntry>>,
+    data: Vec<PublicOverlayEntryData>,
+    peer_resolver: Option<PeerResolver>,
 }
 
 impl PublicOverlayEntries {
     /// Returns a reference to one random element of the slice,
     /// or `None` if the slice is empty.
-    pub fn choose<R>(&self, rng: &mut R) -> Option<&Arc<PublicEntry>>
+    pub fn choose<R>(&self, rng: &mut R) -> Option<&PublicOverlayEntryData>
     where
         R: Rng + ?Sized,
     {
@@ -278,7 +330,7 @@ impl PublicOverlayEntries {
         &self,
         rng: &mut R,
         n: usize,
-    ) -> rand::seq::SliceChooseIter<'_, [Arc<PublicEntry>], Arc<PublicEntry>>
+    ) -> rand::seq::SliceChooseIter<'_, [PublicOverlayEntryData], PublicOverlayEntryData>
     where
         R: Rng + ?Sized,
     {
@@ -290,44 +342,55 @@ impl PublicOverlayEntries {
             // No entry for the peer_id, insert a new one
             hash_map::Entry::Vacant(entry) => {
                 entry.insert(self.data.len());
-                self.data.push(Arc::new(item.clone()));
+
+                let resolver_handle = self.peer_resolver.as_ref().map_or_else(
+                    || PeerResolverHandle::new_noop(&item.peer_id),
+                    |resolver| resolver.insert(&item.peer_id, false),
+                );
+
+                self.data.push(PublicOverlayEntryData {
+                    entry: Arc::new(item.clone()),
+                    resolver_handle,
+                });
+
                 true
             }
             // Entry for the peer_id exists, update it if the new item is newer
             hash_map::Entry::Occupied(entry) => {
                 let index = *entry.get();
                 let existing = &mut self.data[index];
-                if existing.created_at >= item.created_at {
+                if existing.entry.created_at >= item.created_at {
                     return false;
                 }
 
                 // Try to reuse the existing Arc if possible
-                match Arc::get_mut(existing) {
+                match Arc::get_mut(&mut existing.entry) {
                     Some(existing) => existing.clone_from(item),
-                    None => self.data[index] = Arc::new(item.clone()),
+                    None => self.data[index].entry = Arc::new(item.clone()),
                 }
                 true
             }
         }
     }
 
-    fn remove(&mut self, peer_id: &PeerId) -> bool {
-        let Some(index) = self.peer_id_to_index.remove(peer_id) else {
-            return false;
-        };
-
-        // Remove the entry from the data vector
-        self.data.swap_remove(index);
-
-        // Update the swapped entry's index
-        let entry = self
-            .peer_id_to_index
-            .get_mut(&self.data[index].peer_id)
-            .expect("inconsistent state");
-        *entry = index;
-
-        true
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&PublicOverlayEntryData) -> bool,
+    {
+        self.data.retain(|item| {
+            let keep = f(item);
+            if !keep {
+                self.peer_id_to_index.remove(&item.entry.peer_id);
+            }
+            keep
+        });
     }
+}
+
+#[derive(Clone)]
+pub struct PublicOverlayEntryData {
+    pub entry: Arc<PublicEntry>,
+    pub resolver_handle: PeerResolverHandle,
 }
 
 pub struct PublicOverlayEntriesReadGuard<'a> {
@@ -413,10 +476,10 @@ mod tests {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
 
-            overlay.add_untrusted_entries(&entries[..5]);
+            overlay.add_untrusted_entries(&entries[..5], now);
             assert_eq!(count_entries(&overlay), 5);
 
-            overlay.add_untrusted_entries(&entries[5..]);
+            overlay.add_untrusted_entries(&entries[5..], now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -424,7 +487,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -432,7 +495,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 20);
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -440,7 +503,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(0);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -450,7 +513,7 @@ mod tests {
             let entries = (0..10)
                 .map(|_| generate_invalid_public_entry(now))
                 .collect::<Vec<_>>();
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -469,7 +532,7 @@ mod tests {
                 generate_invalid_public_entry(now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 5);
         }
 
@@ -488,7 +551,7 @@ mod tests {
                 generate_public_entry(&overlay, now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&entries);
+            overlay.add_untrusted_entries(&entries, now);
             assert_eq!(count_entries(&overlay), 3);
         }
     }
@@ -504,7 +567,7 @@ mod tests {
             for entries in entries.chunks_exact(7 * 3) {
                 s.spawn(|| {
                     for entries in entries.chunks_exact(7) {
-                        overlay.add_untrusted_entries(entries);
+                        overlay.add_untrusted_entries(entries, now);
                     }
                 });
             }

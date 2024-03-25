@@ -9,7 +9,7 @@ use std::net::Ipv4Addr;
 use std::sync::Arc;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    Address, Network, OverlayId, OverlayService, PeerAffinity, PeerId, PeerInfo, PrivateOverlay,
+    Address, KnownPeerHandle, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay,
     Request, Response, Router, Service, ServiceRequest,
 };
 use tycho_util::time::now_sec;
@@ -17,6 +17,7 @@ use tycho_util::time::now_sec;
 struct Node {
     network: Network,
     private_overlay: PrivateOverlay,
+    known_peer_handles: Vec<KnownPeerHandle>,
 }
 
 impl Node {
@@ -24,13 +25,9 @@ impl Node {
         let keypair = ed25519::KeyPair::from(key);
         let local_id = PeerId::from(keypair.public_key);
 
-        let private_overlay = PrivateOverlay::builder(PRIVATE_OVERLAY_ID).build(PingPongService);
+        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id).build();
 
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_private_overlay(&private_overlay)
-            .build();
-
-        let router = Router::builder().route(overlay_service).build();
+        let router = Router::builder().route(overlay_service.clone()).build();
 
         let network = Network::builder()
             .with_private_key(key.to_bytes())
@@ -38,11 +35,15 @@ impl Node {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        overlay_tasks.spawn(network.clone());
+        overlay_tasks.spawn(&network);
+
+        let private_overlay = PrivateOverlay::builder(PRIVATE_OVERLAY_ID).build(PingPongService);
+        overlay_service.add_private_overlay(&private_overlay);
 
         Self {
             network,
             private_overlay,
+            known_peer_handles: Vec::new(),
         }
     }
 
@@ -80,19 +81,26 @@ fn make_network(node_count: usize) -> Vec<Node> {
         .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
         .collect::<Vec<_>>();
 
-    let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
+    let mut nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
 
     let bootstrap_info = std::iter::zip(&keys, &nodes)
         .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
         .collect::<Vec<_>>();
 
-    for node in &nodes {
+    for node in &mut nodes {
         let mut private_overlay_entries = node.private_overlay.write_entries();
 
         for info in &bootstrap_info {
-            node.network
-                .known_peers()
-                .insert(info.clone(), PeerAffinity::Allowed);
+            if info.id == node.network.peer_id() {
+                continue;
+            }
+
+            node.known_peer_handles.push(
+                node.network
+                    .known_peers()
+                    .insert(info.clone(), false)
+                    .unwrap(),
+            );
 
             private_overlay_entries.insert(&info.id);
         }
