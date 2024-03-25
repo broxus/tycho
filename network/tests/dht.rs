@@ -9,9 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use everscale_crypto::ed25519;
 use tl_proto::{TlRead, TlWrite};
-use tycho_network::{
-    proto, Address, DhtClient, DhtService, FindValueError, Network, PeerId, PeerInfo, Router,
-};
+use tycho_network::{proto, DhtClient, DhtService, FindValueError, Network, PeerInfo, Router};
 use tycho_util::time::now_sec;
 
 struct Node {
@@ -20,10 +18,11 @@ struct Node {
 }
 
 impl Node {
-    fn new(key: &ed25519::SecretKey) -> Self {
-        let keypair = ed25519::KeyPair::from(key);
+    fn with_random_key() -> Self {
+        let key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let local_id = ed25519::PublicKey::from(&key).into();
 
-        let (dht_tasks, dht_service) = DhtService::builder(keypair.public_key.into()).build();
+        let (dht_tasks, dht_service) = DhtService::builder(local_id).build();
 
         let router = Router::builder().route(dht_service.clone()).build();
 
@@ -35,38 +34,22 @@ impl Node {
 
         dht_tasks.spawn(&network);
 
-        let dht = dht_service.make_client(network.clone());
+        let dht = dht_service.make_client(&network);
 
         Self { network, dht }
-    }
-
-    fn make_peer_info(key: &ed25519::SecretKey, address: Address) -> PeerInfo {
-        let keypair = ed25519::KeyPair::from(key);
-        let peer_id = PeerId::from(keypair.public_key);
-
-        let now = now_sec();
-        let mut node_info = PeerInfo {
-            id: peer_id,
-            address_list: vec![address].into_boxed_slice(),
-            created_at: now,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        };
-        *node_info.signature = keypair.sign(&node_info);
-        node_info
     }
 }
 
 fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
-    let keys = (0..node_count)
-        .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
+    let nodes = (0..node_count)
+        .map(|_| Node::with_random_key())
         .collect::<Vec<_>>();
 
-    let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
-
-    let bootstrap_info = std::iter::zip(&keys, &nodes)
-        .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
+    let bootstrap_info = nodes
+        .iter()
+        .map(|node| Arc::new(node.network.sign_peer_info(0, u32::MAX)))
         .collect::<Vec<_>>();
+
     for node in &nodes {
         for info in &bootstrap_info {
             node.dht.add_peer(info.clone()).unwrap();
@@ -149,7 +132,7 @@ async fn connect_new_node_to_bootstrap() -> Result<()> {
 
     let (bootstrap_nodes, global_config) = make_network(5);
 
-    let node = Node::new(&ed25519::SecretKey::generate(&mut rand::thread_rng()));
+    let node = Node::with_random_key();
     for peer_info in &global_config {
         node.dht.add_peer(peer_info.clone())?;
     }

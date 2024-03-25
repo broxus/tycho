@@ -310,10 +310,10 @@ impl DhtService {
         }
     }
 
-    pub fn make_client(&self, network: Network) -> DhtClient {
+    pub fn make_client(&self, network: &Network) -> DhtClient {
         DhtClient {
             inner: self.0.clone(),
-            network,
+            network: network.clone(),
         }
     }
 
@@ -707,15 +707,7 @@ impl DhtInner {
     }
 
     fn make_local_peer_info(&self, network: &Network, now: u32) -> PeerInfo {
-        let mut peer_info = PeerInfo {
-            id: self.local_id,
-            address_list: vec![network.local_addr().into()].into_boxed_slice(),
-            created_at: now,
-            expires_at: now + self.config.max_peer_info_ttl.as_secs() as u32,
-            signature: Box::new([0; 64]),
-        };
-        *peer_info.signature = network.sign_tl(&peer_info);
-        peer_info
+        network.sign_peer_info(now, self.config.max_peer_info_ttl.as_secs() as u32)
     }
 
     fn try_handle_prefix<'a>(&self, req: &'a ServiceRequest) -> Result<(u32, &'a [u8])> {
