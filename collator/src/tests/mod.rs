@@ -7,7 +7,7 @@ pub fn try_init_test_tracing() {
         .with_writer(std::io::stdout)
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::TRACE.into())
                 .from_env_lossy(),
         )
         .with_file(false)

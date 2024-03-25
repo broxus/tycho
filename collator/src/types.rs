@@ -101,6 +101,15 @@ impl MessageContainer {
     }
 }
 
+pub(crate) trait MessageExt {
+    fn id_hash(&self) -> &HashBytes;
+}
+impl MessageExt for OwnedMessage {
+    fn id_hash(&self) -> &HashBytes {
+        self.body.0.repr_hash()
+    }
+}
+
 pub(crate) mod ext_types {
     pub use stubs::*;
     pub mod stubs {

@@ -2023,6 +2023,8 @@ dependencies = [
  "rand",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "tracing-test",
  "tycho-block-util",
  "tycho-consensus",
  "tycho-core",
