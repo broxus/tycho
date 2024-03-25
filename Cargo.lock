@@ -2051,7 +2051,6 @@ dependencies = [
  "tracing-subscriber",
  "tracing-test",
  "tycho-block-util",
- "tycho-consensus",
  "tycho-core",
  "tycho-storage",
  "tycho-util",
