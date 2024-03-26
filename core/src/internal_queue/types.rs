@@ -23,7 +23,7 @@ impl QueueDiff {
 // STUBS FOR EXTERNAL TYPES
 // further we should use types crate
 
-pub(super) mod ext_types_stubs {
+pub mod ext_types_stubs {
     use std::cmp::Ordering;
 
     pub type Lt = u64;

@@ -8,7 +8,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-trait Queue<SS, PS>
+pub trait Queue<SS, PS>
 where
     SS: StateSnapshot + 'static,
     PS: StateSnapshot + 'static,

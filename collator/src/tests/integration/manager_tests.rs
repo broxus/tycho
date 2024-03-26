@@ -4,7 +4,7 @@ use crate::{
     collator::{collator_processor::CollatorProcessorStdImpl, CollatorStdImpl},
     manager::{CollationManager, CollationManagerGenImpl},
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
-    msg_queue::{MessageQueueAdapterStdImpl, QueueImpl, QueueIteratorImpl},
+    msg_queue::{MessageQueueAdapterStdImpl, QueueIteratorImpl},
     state_node::{
         StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeAdapterStdImpl,
     },
@@ -25,7 +25,7 @@ async fn test_collation_process_on_stubs() {
         ST,
     >;
     type CollationManagerStdImpl = CollationManagerStdImplGenST<
-        MessageQueueAdapterStdImpl<QueueImpl>,
+        MessageQueueAdapterStdImpl,
         QueueIteratorImpl,
         MempoolAdapterStdImpl,
         StateNodeAdapterStdImpl,

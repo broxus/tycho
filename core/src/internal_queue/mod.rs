@@ -1,8 +1,8 @@
 pub mod error;
 pub mod iterator;
-mod persistent;
+pub mod persistent;
 pub mod queue;
-mod session;
+pub mod session;
 mod shard;
 mod snapshot;
-mod types;
+pub mod types;

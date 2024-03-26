@@ -616,7 +616,7 @@ where
             for &sent_block in sent_blocks.iter() {
                 //TODO: handle and log error
                 if let Err(err) = mq_adapter
-                    .commit_diff(sent_block.entry.candidate.block_id().clone())
+                    .commit_diff(&sent_block.entry.candidate.block_id().as_short_id())
                     .await
                 {
                     should_restore_blocks_in_cache = true;

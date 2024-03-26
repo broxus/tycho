@@ -1,7 +1,7 @@
 use everscale_types::models::ShardIdent;
 
 #[derive(Debug)]
-pub(crate) enum QueueError {
+pub enum QueueError {
     ShardNotFound(ShardIdent),
     Other(anyhow::Error),
 }

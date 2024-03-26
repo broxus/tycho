@@ -4,10 +4,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+
 use tycho_block_util::state::ShardStateStuff;
+use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
+use tycho_core::internal_queue::types::QueueDiff;
 
 use crate::mempool::MempoolAnchor;
-use crate::msg_queue::{EnqueuedMessage, IterItem, QueueDiff, QueueIterator};
+use crate::msg_queue::{IterItem, QueueIterator};
 use crate::{
     mempool::MempoolAdapter,
     method_to_async_task_closure,
@@ -221,7 +224,7 @@ where
     }
 
     async fn init_mq_iterator(&mut self) -> Result<()> {
-        let mq_iterator = self.mq_adapter.get_iterator(self.shard_id).await?;
+        let mq_iterator = self.mq_adapter.get_iterator(&self.shard_id).await?;
         self.mq_iterator = Some(mq_iterator);
         Ok(())
     }

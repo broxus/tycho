@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+
 use everscale_types::models::{BlockId, ShardIdent};
 
 use crate::{
@@ -11,7 +12,7 @@ use crate::{
     },
     mempool::{MempoolAdapter, MempoolAdapterBuilder, MempoolAnchor, MempoolEventListener},
     method_to_async_task_closure,
-    msg_queue::{MessageQueueAdapter, MessageQueueAdapterStdImpl, QueueImpl, QueueIteratorImpl},
+    msg_queue::{MessageQueueAdapter, MessageQueueAdapterStdImpl, QueueIteratorImpl},
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
     types::{BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock},
     utils::{
@@ -72,7 +73,7 @@ where
     CollationManagerGenImpl::<
         CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
         ValidatorStdImpl<ValidatorProcessorStdImpl<_>, _>,
-        MessageQueueAdapterStdImpl<QueueImpl>,
+        MessageQueueAdapterStdImpl,
         MP,
         ST,
     >::create(config, mpool_adapter_builder, state_adapter_builder)

@@ -1,1 +1,1 @@
-mod internal_queue;
+pub mod internal_queue;
