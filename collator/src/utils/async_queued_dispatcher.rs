@@ -2,6 +2,7 @@ use std::{future::Future, pin::Pin};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
+use tracing::debug;
 
 use super::task_descr::{TaskDesc, TaskResponder};
 
@@ -29,6 +30,7 @@ where
         (dispatcher, receiver)
     }
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
+        debug!("dispatcher run");
         let h = tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
                 let (task, responder) = task.extract();
@@ -38,6 +40,7 @@ where
                 worker = updated_worker;
                 let _ = responder.respond(res);
             }
+            debug!("dispatcher finished");
         });
     }
     pub fn create(worker: W, queue_buffer_size: usize) -> Self {
@@ -54,13 +57,13 @@ where
         self.tasks_queue
             .send(task)
             .await
-            .map_err(|_err| anyhow!("dispatcher queue receiver dropped"))
+            .map_err(|err| anyhow!("dispatcher queue receiver dropped {err:?}"))
     }
 
     fn _enqueue_task_blocking(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
         self.tasks_queue
             .blocking_send(task)
-            .map_err(|_err| anyhow!("dispatcher queue receiver dropped"))
+            .map_err(|err| anyhow!("dispatcher queue receiver dropped {err:?}"))
     }
 
     pub async fn enqueue_task(

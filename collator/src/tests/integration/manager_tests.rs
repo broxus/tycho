@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+use crate::validator::state::ValidationStateStdImpl;
 use crate::{
     collator::{collator_processor::CollatorProcessorStdImpl, CollatorStdImpl},
     manager::{CollationManager, CollationManagerGenImpl},
@@ -14,9 +15,9 @@ use crate::{
 
 #[test]
 fn test_create_manager() -> Result<()> {
-    type CollationManagerStdImplGenST<MQ, ST> = CollationManagerGenImpl<
+    type CollationManagerStdImplGenST<MQ, ST, VS> = CollationManagerGenImpl<
         CollatorStdImpl<CollatorProcessorStdImpl<MQ, ST>, MQ, ST>,
-        ValidatorStdImpl<ValidatorProcessorStdImpl<ST>, ST>,
+        ValidatorStdImpl<ValidatorProcessorStdImpl<ST, VS>, ST, VS>,
         MQ,
         MempoolAdapterStdImpl,
         ST,
@@ -24,6 +25,7 @@ fn test_create_manager() -> Result<()> {
     type CollationManagerStdImpl = CollationManagerStdImplGenST<
         MessageQueueAdapterStdImpl<QueueImpl>,
         StateNodeAdapterStdImpl,
+        ValidationStateStdImpl,
     >;
 
     let config = CollationConfig {
@@ -33,6 +35,7 @@ fn test_create_manager() -> Result<()> {
     let mpool_adapter = MempoolAdapterStdImpl {};
     let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new();
 
+    // state_node_adapter_builder.
     let _manager =
         CollationManagerStdImpl::create(config, mpool_adapter, state_node_adapter_builder);
 

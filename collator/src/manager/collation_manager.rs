@@ -1,9 +1,15 @@
-use std::sync::Arc;
+use std::net::Ipv4Addr;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_crypto::ed25519;
 use everscale_types::models::BlockId;
+use tycho_network::quinn::crypto::KeyPair;
+use tycho_network::{Network, OverlayService, PeerId, Router};
 
+use crate::types::ValidatorNetwork;
+use crate::validator::state::{ValidationState, ValidationStateStdImpl};
 use crate::{
     collator::{Collator, CollatorEventListener},
     mempool::MempoolAdapter,
@@ -29,7 +35,7 @@ use super::collation_processor::{CollationProcessor, CollationProcessorTaskResul
 pub trait CollationManager<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -46,7 +52,7 @@ where
 pub struct CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -70,7 +76,7 @@ impl<C, V, MQ, MP, ST> CollationManager<C, V, MQ, MP, ST>
     for CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -94,8 +100,33 @@ where
         let state_node_adapter = state_adapter_builder.build(dispatcher.clone());
         let state_node_adapter = Arc::new(state_node_adapter);
 
+        let validation_state = ValidationStateStdImpl::new();
+
+        // TODO init network
+        let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let keypair = ed25519::KeyPair::from(&random_secret_key);
+        let local_id = PeerId::from(keypair.public_key);
+        let (_, overlay_service) = OverlayService::builder(local_id).build();
+
+        let router = Router::builder().route(overlay_service.clone()).build();
+        let network = Network::builder()
+            .with_private_key(random_secret_key.to_bytes())
+            .with_service_name("test-service")
+            .build((Ipv4Addr::LOCALHOST, 0), router)
+            .unwrap();
+
+        let validator_network = ValidatorNetwork {
+            network,
+            overlay_service,
+        };
+
         // create validator and start its tasks queue
-        let validator = Validator::create(dispatcher.clone(), state_node_adapter.clone());
+        let validator = Validator::create(
+            dispatcher.clone(),
+            state_node_adapter.clone(),
+            validation_state,
+            validator_network,
+        );
         let validator = Arc::new(validator);
 
         // create collation processor that will use these adapters
@@ -146,7 +177,7 @@ impl<C, V, MQ, MP, ST> StateNodeEventListener
     for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -165,7 +196,7 @@ impl<C, V, MQ, MP, ST> CollatorEventListener
     for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -191,7 +222,7 @@ impl<C, V, MQ, MP, ST> ValidatorEventListener
     for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,

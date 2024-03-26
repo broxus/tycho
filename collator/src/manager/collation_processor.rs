@@ -1,10 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use anyhow::{anyhow, Result};
+use everscale_crypto::ed25519::KeyPair;
 
 use everscale_types::models::{BlockId, ShardIdent};
+use rand::{thread_rng, Rng};
 use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
 
+use crate::validator::state::ValidationStateStdImpl;
+use crate::validator::validator_processor::ValidatorProcessorStdImpl;
 use crate::{
     collator::Collator,
     mempool::MempoolAdapter,
@@ -33,7 +37,7 @@ pub enum CollationProcessorTaskResult {
 pub(super) struct CollationProcessor<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -57,7 +61,7 @@ where
 impl<C, V, MQ, MP, ST> CollationProcessor<C, V, MQ, MP, ST>
 where
     C: Collator<MQ, ST>,
-    V: Validator<ST>,
+    V: Validator<ST, ValidationStateStdImpl>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -237,6 +241,8 @@ where
                 to_stop_collators.insert((shard_id, new_session_seqno), collator);
             }
 
+            let mut rng = thread_rng();
+            let keypair = KeyPair::generate(&mut rng);
             self.active_collation_sessions.insert(
                 shard_id,
                 Arc::new(CollationSessionInfo::new(
@@ -245,6 +251,7 @@ where
                         validators: subset,
                         short_hash: hash_short,
                     },
+                    Some(keypair),
                 )),
             );
         }

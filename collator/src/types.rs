@@ -1,7 +1,10 @@
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_crypto::ed25519::{KeyPair, PublicKey};
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescription};
+use std::collections::HashMap;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
+use tycho_network::{Network, OverlayService};
 
 use self::ext_types::{Block, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256};
 
@@ -48,16 +51,36 @@ impl BlockSignatures {
     }
 }
 
+// pub struct ValidatedBlock {
+//     block_id: BlockId,
+//     signatures: BlockSignatures,
+// }
+
 pub struct ValidatedBlock {
-    block_id: BlockId,
-    signatures: BlockSignatures,
+    block: BlockId,
+    signatures: Vec<(HashBytes, Signature)>,
+    valid: bool,
 }
+
 impl ValidatedBlock {
-    pub fn id(&self) -> &BlockId {
-        &self.block_id
+    pub fn new(block: BlockId, signatures: Vec<(HashBytes, Signature)>, valid: bool) -> Self {
+        Self {
+            block,
+            signatures,
+            valid,
+        }
     }
+
+    pub fn id(&self) -> &BlockId {
+        &self.block
+    }
+
+    pub fn signatures(&self) -> &Vec<(HashBytes, Signature)> {
+        &self.signatures
+    }
+
     pub fn is_valid(&self) -> bool {
-        self.signatures.is_valid()
+        self.valid
     }
 }
 
@@ -86,10 +109,19 @@ pub struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,
+    current_collator_keypair: Option<KeyPair>,
 }
 impl CollationSessionInfo {
-    pub fn new(seqno: u32, collators: ValidatorSubsetInfo) -> Self {
-        Self { seqno, collators }
+    pub fn new(
+        seqno: u32,
+        collators: ValidatorSubsetInfo,
+        current_collator_keypair: Option<KeyPair>,
+    ) -> Self {
+        Self {
+            seqno,
+            collators,
+            current_collator_keypair,
+        }
     }
     pub fn seqno(&self) -> u32 {
         self.seqno
@@ -97,6 +129,18 @@ impl CollationSessionInfo {
     pub fn collators(&self) -> &ValidatorSubsetInfo {
         &self.collators
     }
+
+    pub fn current_collator_keypair(&self) -> Option<&KeyPair> {
+        self.current_collator_keypair.as_ref()
+    }
+
+    // pub fn sign(&self, data: &[u8]) -> Signature {
+    //     Signature(self.current_collator_keypair.sign(data))
+    // }
+    //
+    // pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
+    //     self.current_collator_keypair.public_key.verify(message, &signature.0)
+    // }
 }
 
 pub(crate) mod ext_types {
@@ -129,4 +173,10 @@ pub(crate) mod ext_types {
         }
         pub struct ValidatorSet;
     }
+}
+
+#[derive(Clone)]
+pub struct ValidatorNetwork {
+    pub network: Network,
+    pub overlay_service: OverlayService,
 }
