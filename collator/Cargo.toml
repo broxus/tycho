@@ -6,12 +6,29 @@ description = "A collator node."
 
 [dependencies]
 # crates.io deps
+anyhow = "1.0"
+async-trait = "^0.1.77"
+rand = "0.8"
+#serde = "1.0"
+#thiserror = "1"
+tl-proto = "0.4"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+
+everscale-types = "0.1.0-rc.6"
+everscale-crypto = "0.2.0"
 
 # local deps
 tycho-core = { path = "../core", version = "=0.0.1" }
 tycho-consensus = { path = "../consensus", version = "=0.0.1" }
+tycho-network = { path = "../network", version = "=0.0.1" }
 tycho-storage = { path = "../storage", version = "=0.0.1" }
 tycho-util = { path = "../util", version = "=0.0.1" }
+tycho-block-util = { path = "../block-util", version = "=0.0.1" }
+futures-util = "0.3.30"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tracing-subscriber = "0.3.18"
