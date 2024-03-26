@@ -15,9 +15,9 @@ pub enum PeerValueKeyName {
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
-pub enum OverlayValueKeyName {
-    #[tl(id = "dht.overlayValueKeyName.peersList")]
-    PeersList,
+pub enum MergedValueKeyName {
+    #[tl(id = "dht.mergedValueKeyName.publicOverlayEntries")]
+    PublicOverlayEntries,
 }
 
 /// Key for values that can only be updated by the owner.
@@ -53,35 +53,35 @@ impl PeerValueKeyRef<'_> {
     }
 }
 
-/// Key for overlay-managed values.
+/// Key for group-managed values.
 ///
-/// See [`OverlayValueKeyRef`] for the non-owned version of the struct.
+/// See [`MergedValueKeyRef`] for the non-owned version of the struct.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
-#[tl(boxed, id = "dht.overlayValueKey", scheme = "proto.tl")]
-pub struct OverlayValueKey {
+#[tl(boxed, id = "dht.mergedValueKey", scheme = "proto.tl")]
+pub struct MergedValueKey {
     /// Key name.
-    pub name: OverlayValueKeyName,
-    /// Overlay id.
-    pub overlay_id: [u8; 32],
+    pub name: MergedValueKeyName,
+    /// Group id.
+    pub group_id: [u8; 32],
 }
 
-/// Key for overlay-managed values.
+/// Key for group-managed values.
 ///
-/// See [`OverlayValueKey`] for the owned version of the struct.
+/// See [`MergedValueKey`] for the owned version of the struct.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
-#[tl(boxed, id = "dht.overlayValueKey", scheme = "proto.tl")]
-pub struct OverlayValueKeyRef<'tl> {
+#[tl(boxed, id = "dht.mergedValueKey", scheme = "proto.tl")]
+pub struct MergedValueKeyRef<'tl> {
     /// Key name.
-    pub name: OverlayValueKeyName,
-    /// Overlay id.
-    pub overlay_id: &'tl [u8; 32],
+    pub name: MergedValueKeyName,
+    /// Group id.
+    pub group_id: &'tl [u8; 32],
 }
 
-impl OverlayValueKeyRef<'_> {
-    pub fn as_owned(&self) -> OverlayValueKey {
-        OverlayValueKey {
+impl MergedValueKeyRef<'_> {
+    pub fn as_owned(&self) -> MergedValueKey {
+        MergedValueKey {
             name: self.name,
-            overlay_id: *self.overlay_id,
+            group_id: *self.group_id,
         }
     }
 }
@@ -131,37 +131,37 @@ impl PeerValueRef<'_> {
     }
 }
 
-/// Overlay-managed value.
+/// Group-managed value.
 ///
-/// See [`OverlayValueRef`] for the non-owned version of the struct.
+/// See [`MergedValueRef`] for the non-owned version of the struct.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
-#[tl(boxed, id = "dht.overlayValue", scheme = "proto.tl")]
-pub struct OverlayValue {
-    /// Overlay key.
-    pub key: OverlayValueKey,
+#[tl(boxed, id = "dht.mergedValue", scheme = "proto.tl")]
+pub struct MergedValue {
+    /// Key info.
+    pub key: MergedValueKey,
     /// Any data.
     pub data: Box<[u8]>,
     /// Unix timestamp up to which this value is valid.
     pub expires_at: u32,
 }
 
-/// Overlay-managed value.
+/// Group-managed value.
 ///
-/// See [`OverlayValue`] for the owned version of the struct.
+/// See [`MergedValue`] for the owned version of the struct.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
-#[tl(boxed, id = "dht.overlayValue", scheme = "proto.tl")]
-pub struct OverlayValueRef<'tl> {
-    /// Overlay key.
-    pub key: OverlayValueKeyRef<'tl>,
+#[tl(boxed, id = "dht.mergedValue", scheme = "proto.tl")]
+pub struct MergedValueRef<'tl> {
+    /// Key info.
+    pub key: MergedValueKeyRef<'tl>,
     /// Any data.
     pub data: &'tl [u8],
     /// Unix timestamp up to which this value is valid.
     pub expires_at: u32,
 }
 
-impl OverlayValueRef<'_> {
-    pub fn as_owned(&self) -> OverlayValue {
-        OverlayValue {
+impl MergedValueRef<'_> {
+    pub fn as_owned(&self) -> MergedValue {
+        MergedValue {
             key: self.key.as_owned(),
             data: Box::from(self.data),
             expires_at: self.expires_at,
@@ -176,8 +176,8 @@ impl OverlayValueRef<'_> {
 pub enum Value {
     /// Value with a known owner.
     Peer(PeerValue),
-    /// Overlay-managed value.
-    Overlay(OverlayValue),
+    /// Group-managed value.
+    Merged(MergedValue),
 }
 
 impl Value {
@@ -188,7 +188,7 @@ impl Value {
                     && key_hash == &tl_proto::hash(&value.key)
                     && check_peer_signature(&value.key.peer_id, &value.signature, value)
             }
-            Self::Overlay(value) => {
+            Self::Merged(value) => {
                 value.expires_at >= at && key_hash == &tl_proto::hash(&value.key)
             }
         }
@@ -197,7 +197,7 @@ impl Value {
     pub const fn expires_at(&self) -> u32 {
         match self {
             Self::Peer(value) => value.expires_at,
-            Self::Overlay(value) => value.expires_at,
+            Self::Merged(value) => value.expires_at,
         }
     }
 }
@@ -208,7 +208,7 @@ impl TlWrite for Value {
     fn max_size_hint(&self) -> usize {
         match self {
             Self::Peer(value) => value.max_size_hint(),
-            Self::Overlay(value) => value.max_size_hint(),
+            Self::Merged(value) => value.max_size_hint(),
         }
     }
 
@@ -218,7 +218,7 @@ impl TlWrite for Value {
     {
         match self {
             Self::Peer(value) => value.write_to(packet),
-            Self::Overlay(value) => value.write_to(packet),
+            Self::Merged(value) => value.write_to(packet),
         }
     }
 }
@@ -231,7 +231,7 @@ impl<'a> TlRead<'a> for Value {
         *offset -= 4;
         match id {
             PeerValue::TL_ID => PeerValue::read_from(packet, offset).map(Self::Peer),
-            OverlayValue::TL_ID => OverlayValue::read_from(packet, offset).map(Self::Overlay),
+            MergedValue::TL_ID => MergedValue::read_from(packet, offset).map(Self::Merged),
             _ => Err(tl_proto::TlError::UnknownConstructor),
         }
     }
@@ -244,8 +244,8 @@ impl<'a> TlRead<'a> for Value {
 pub enum ValueRef<'tl> {
     /// Value with a known owner.
     Peer(PeerValueRef<'tl>),
-    /// Overlay-managed value.
-    Overlay(OverlayValueRef<'tl>),
+    /// Group-managed value.
+    Merged(MergedValueRef<'tl>),
 }
 
 impl ValueRef<'_> {
@@ -256,7 +256,7 @@ impl ValueRef<'_> {
                     && key_hash == &tl_proto::hash(&value.key)
                     && check_peer_signature(value.key.peer_id, value.signature, value)
             }
-            Self::Overlay(value) => {
+            Self::Merged(value) => {
                 value.expires_at >= at && key_hash == &tl_proto::hash(&value.key)
             }
         }
@@ -265,7 +265,7 @@ impl ValueRef<'_> {
     pub const fn expires_at(&self) -> u32 {
         match self {
             Self::Peer(value) => value.expires_at,
-            Self::Overlay(value) => value.expires_at,
+            Self::Merged(value) => value.expires_at,
         }
     }
 }
@@ -276,7 +276,7 @@ impl TlWrite for ValueRef<'_> {
     fn max_size_hint(&self) -> usize {
         match self {
             Self::Peer(value) => value.max_size_hint(),
-            Self::Overlay(value) => value.max_size_hint(),
+            Self::Merged(value) => value.max_size_hint(),
         }
     }
 
@@ -286,7 +286,7 @@ impl TlWrite for ValueRef<'_> {
     {
         match self {
             Self::Peer(value) => value.write_to(packet),
-            Self::Overlay(value) => value.write_to(packet),
+            Self::Merged(value) => value.write_to(packet),
         }
     }
 }
@@ -299,7 +299,7 @@ impl<'a> TlRead<'a> for ValueRef<'a> {
         *offset -= 4;
         match id {
             PeerValue::TL_ID => PeerValueRef::read_from(packet, offset).map(Self::Peer),
-            OverlayValue::TL_ID => OverlayValueRef::read_from(packet, offset).map(Self::Overlay),
+            MergedValue::TL_ID => MergedValueRef::read_from(packet, offset).map(Self::Merged),
             _ => Err(tl_proto::TlError::UnknownConstructor),
         }
     }
@@ -407,7 +407,7 @@ pub mod rpc {
         pub value: ValueRef<'tl>,
     }
 
-    /// Search for `k` closest nodes.
+    /// Search for `k` the closest nodes.
     ///
     /// See [`NodeResponse`].
     #[derive(Debug, Clone, TlRead, TlWrite)]
@@ -419,7 +419,7 @@ pub mod rpc {
         pub k: u32,
     }
 
-    /// Search for a value if stored or `k` closest nodes.
+    /// Search for a value if stored or `k` the closest nodes.
     ///
     /// See [`ValueResponse`].
     #[derive(Debug, Clone, TlRead, TlWrite)]

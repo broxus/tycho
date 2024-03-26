@@ -507,10 +507,10 @@ impl OverlayServiceInner {
         };
 
         // Store entries in the DHT
-        let value = dht::ValueRef::Overlay(dht::OverlayValueRef {
-            key: dht::OverlayValueKeyRef {
-                name: dht::OverlayValueKeyName::PeersList,
-                overlay_id: overlay_id.as_bytes(),
+        let value = dht::ValueRef::Merged(dht::MergedValueRef {
+            key: dht::MergedValueKeyRef {
+                name: dht::MergedValueKeyName::PublicOverlayEntries,
+                group_id: overlay_id.as_bytes(),
             },
             data: &data,
             expires_at: now + DEFAULT_TTL,

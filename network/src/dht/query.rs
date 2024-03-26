@@ -390,7 +390,7 @@ impl StoreValue<()> {
     ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> {
         let key_hash = match &value {
             ValueRef::Peer(value) => tl_proto::hash(&value.key),
-            ValueRef::Overlay(value) => tl_proto::hash(&value.key),
+            ValueRef::Merged(value) => tl_proto::hash(&value.key),
         };
 
         let request_body = Bytes::from(match local_peer_info {

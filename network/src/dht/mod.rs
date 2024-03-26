@@ -25,7 +25,7 @@ use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
 pub use self::peer_resolver::{PeerResolver, PeerResolverBuilder, PeerResolverHandle};
-pub use self::storage::{OverlayValueMerger, StorageError};
+pub use self::storage::{StorageError, ValueMerger};
 
 mod config;
 mod peer_resolver;
@@ -102,7 +102,7 @@ impl<'a> DhtQueryBuilder<'a> {
                 Value::Peer(value) => {
                     tl_proto::deserialize(&value.data).map_err(FindValueError::InvalidData)
                 }
-                Value::Overlay(_) => Err(FindValueError::InvalidData(
+                Value::Merged(_) => Err(FindValueError::InvalidData(
                     tl_proto::TlError::UnknownConstructor,
                 )),
             },
@@ -123,7 +123,7 @@ impl<'a> DhtQueryBuilder<'a> {
             Some(value) => {
                 realloc_box_enum!(value, {
                     Value::Peer(value) => Box::new(value) => Ok(value),
-                    Value::Overlay(_) => Err(FindValueError::InvalidData(
+                    Value::Merged(_) => Err(FindValueError::InvalidData(
                         tl_proto::TlError::UnknownConstructor,
                     )),
                 })
@@ -238,17 +238,11 @@ impl DhtServiceBackgroundTasks {
 pub struct DhtServiceBuilder {
     local_id: PeerId,
     config: Option<DhtConfig>,
-    overlay_merger: Option<Arc<dyn OverlayValueMerger>>,
 }
 
 impl DhtServiceBuilder {
     pub fn with_config(mut self, config: DhtConfig) -> Self {
         self.config = Some(config);
-        self
-    }
-
-    pub fn with_overlay_value_merger<T: OverlayValueMerger>(mut self, merger: Arc<T>) -> Self {
-        self.overlay_merger = Some(merger);
         self
     }
 
@@ -262,10 +256,6 @@ impl DhtServiceBuilder {
 
             if let Some(time_to_idle) = config.storage_item_time_to_idle {
                 builder = builder.with_max_idle(time_to_idle);
-            }
-
-            if let Some(ref merger) = self.overlay_merger {
-                builder = builder.with_overlay_value_merger(merger);
             }
 
             builder.build()
@@ -306,7 +296,6 @@ impl DhtService {
         DhtServiceBuilder {
             local_id,
             config: None,
-            overlay_merger: None,
         }
     }
 
