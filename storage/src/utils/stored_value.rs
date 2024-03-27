@@ -165,7 +165,7 @@ impl StoredValue for BlockIdShort {
     }
 }
 
-/// Writes BlockIdExt in little-endian format
+/// Writes `BlockIdExt` in little-endian format
 pub fn write_block_id_le(block_id: &BlockId) -> [u8; 80] {
     let mut bytes = [0u8; 80];
     bytes[..4].copy_from_slice(&block_id.shard.workchain().to_le_bytes());
@@ -176,7 +176,7 @@ pub fn write_block_id_le(block_id: &BlockId) -> [u8; 80] {
     bytes
 }
 
-/// Reads BlockId in little-endian format
+/// Reads `BlockId` in little-endian format
 pub fn read_block_id_le(data: &[u8]) -> Option<BlockId> {
     if data.len() < 80 {
         return None;

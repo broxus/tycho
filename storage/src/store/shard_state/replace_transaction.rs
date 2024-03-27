@@ -101,7 +101,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
         if chunk_size > 0 {
             tracing::debug!(chunk_size, "creating chunk");
-            cells_file.write(&chunk_size.to_le_bytes())?;
+            let bytes = cells_file.write(&chunk_size.to_le_bytes())?;
+            tracing::trace!(bytes, "writing cells to file");
         }
 
         if self.cells_read < header.cell_count {
@@ -190,7 +191,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                self.finalize_cell(&mut ctx, cell_index as u32, cell)?;
+                ShardStateReplaceTransaction::finalize_cell(&mut ctx, cell_index as u32, cell)?;
 
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
@@ -227,7 +228,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         progress_bar.complete();
 
         // Load stored shard state
-        let result = match self.db.shard_states.get(shard_state_key)? {
+        match self.db.shard_states.get(shard_state_key)? {
             Some(root) => {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
@@ -239,13 +240,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 )?))
             }
             None => Err(ReplaceTransactionError::NotFound.into()),
-        };
-
-        result
+        }
     }
 
     fn finalize_cell(
-        &self,
         ctx: &mut FinalizationContext<'_>,
         cell_index: u32,
         cell: RawCell<'_>,
@@ -277,11 +275,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 cell.descriptor.level_mask()
             }
             CellType::LibraryReference => LevelMask::new(0),
-            CellType::MerkleProof => {
-                is_merkle_cell = true;
-                children_mask.virtualize(1)
-            }
-            CellType::MerkleUpdate => {
+            CellType::MerkleProof | CellType::MerkleUpdate => {
                 is_merkle_cell = true;
                 children_mask.virtualize(1)
             }

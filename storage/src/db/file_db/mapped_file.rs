@@ -78,7 +78,7 @@ impl MappedFile {
             (self.ptr as *const u8).add(offset),
             buffer.as_mut_ptr(),
             buffer.len(),
-        )
+        );
     }
 
     /// Copies buffer to the mapped memory
@@ -88,9 +88,9 @@ impl MappedFile {
     pub unsafe fn write_all_at(&self, offset: usize, buffer: &[u8]) {
         std::ptr::copy_nonoverlapping(
             buffer.as_ptr(),
-            (self.ptr as *mut u8).add(offset),
+            (self.ptr.cast::<u8>()).add(offset),
             buffer.len(),
-        )
+        );
     }
 }
 

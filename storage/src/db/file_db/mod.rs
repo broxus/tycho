@@ -53,8 +53,8 @@ impl Seek for FileDb {
     }
 }
 
-impl Into<File> for FileDb {
-    fn into(self) -> File {
-        self.file
+impl From<FileDb> for File {
+    fn from(val: FileDb) -> Self {
+        val.file
     }
 }

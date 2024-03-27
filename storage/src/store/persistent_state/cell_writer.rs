@@ -128,7 +128,7 @@ impl<'a> CellWriter<'a> {
     }
 
     pub fn remove(&self) -> Result<()> {
-        fs::remove_file(&self.base_path).context(format!(
+        fs::remove_file(self.base_path).context(format!(
             "Failed to remove persistent state file {:?}",
             self.base_path
         ))

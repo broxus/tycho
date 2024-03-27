@@ -49,11 +49,11 @@ impl PersistentStateStorage {
         block_id: &BlockId,
         root_hash: &HashBytes,
     ) -> Result<()> {
-        let block_id = block_id.clone();
+        let block_id = *block_id;
         let root_hash = *root_hash;
         let db = self.db.clone();
         let is_cancelled = Some(self.is_cancelled.clone());
-        let base_path = self.get_state_file_path(&mc_block_id, &block_id);
+        let base_path = self.get_state_file_path(mc_block_id, &block_id);
 
         tokio::task::spawn_blocking(move || {
             let cell_writer = cell_writer::CellWriter::new(&db, &base_path);
@@ -71,7 +71,7 @@ impl PersistentStateStorage {
                     );
 
                     if let Err(e) = cell_writer.remove() {
-                        tracing::error!(%block_id, "{e}")
+                        tracing::error!(%block_id, "{e}");
                     }
                 }
             }
