@@ -182,13 +182,11 @@ impl tokio::io::AsyncRead for RecvStream {
 }
 
 pub(crate) fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> {
-    let certificate = connection
-        .peer_identity()
-        .and_then(|identity| identity.downcast::<Vec<rustls::Certificate>>().ok())
-        .and_then(|certificates| certificates.into_iter().next())
-        .context("No certificate found in the connection")?;
-
-    peer_id_from_certificate(&certificate).map_err(Into::into)
+    parse_peer_identity(
+        connection
+            .peer_identity()
+            .context("No identity found in the connection")?,
+    )
 }
 
 pub(crate) fn parse_peer_identity(identity: Box<dyn std::any::Any>) -> Result<PeerId> {

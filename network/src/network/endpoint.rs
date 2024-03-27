@@ -208,12 +208,15 @@ impl Future for ConnectingFallback {
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         Pin::new(&mut self.accepted).poll(cx).map(|_| {
-            Connection::new(
-                self.inner
-                    .take()
-                    .expect("future must not be polled after completion"),
-                self.origin,
-            )
+            let c = self
+                .inner
+                .take()
+                .expect("future must not be polled after completion");
+
+            match c.close_reason() {
+                Some(e) => Err(e.into()),
+                None => Connection::new(c, self.origin),
+            }
         })
     }
 }

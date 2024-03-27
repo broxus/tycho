@@ -97,7 +97,7 @@ impl InboundRequestHandler {
                     }
                 },
                 Some(req) = inflight_requests.join_next() => match req {
-                    Ok(()) => tracing::trace!("requrest handler task completed"),
+                    Ok(()) => tracing::trace!("request handler task completed"),
                     Err(e) => {
                         if e.is_panic() {
                             std::panic::resume_unwind(e.into_panic());
@@ -141,7 +141,7 @@ impl UniStreamRequestHandler {
 
     async fn handle(self) {
         if let Err(e) = self.do_handle().await {
-            tracing::trace!("request handler task failed: {e:?}");
+            tracing::trace!("request handler task failed: {e}");
         }
     }
 
@@ -182,7 +182,7 @@ impl BiStreamRequestHandler {
 
     async fn handle(self) {
         if let Err(e) = self.do_handle().await {
-            tracing::trace!("request handler task failed: {e:?}");
+            tracing::trace!("request handler task failed: {e}");
         }
     }
 
