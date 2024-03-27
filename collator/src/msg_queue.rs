@@ -16,6 +16,8 @@ use tycho_core::internal_queue::{
 
 pub(crate) use tycho_core::internal_queue::iterator::{IterItem, QueueIterator, QueueIteratorImpl};
 
+use crate::utils::shard::SplitMergeAction;
+
 // TYPES
 
 type MsgQueueStdImpl =
@@ -26,6 +28,8 @@ type MsgQueueStdImpl =
 #[async_trait]
 pub(crate) trait MessageQueueAdapter: Send + Sync + 'static {
     fn new() -> Self;
+    /// Perform split and merge in the current queue state in accordance with the new shards set
+    async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()>;
     /// Create iterator for specified shard and return it
     async fn get_iterator<QI>(&self, shard_id: &ShardIdent) -> Result<QI>
     where
@@ -49,15 +53,41 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
             msg_queue: MsgQueueStdImpl::new(base_shard),
         }
     }
+
+    async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
+        for sma in split_merge_actions {
+            match sma {
+                SplitMergeAction::Split(shard_id) => {
+                    self.msg_queue.split_shard(&shard_id).await?;
+                    let (shard_l_id, shard_r_id) = shard_id
+                        .split()
+                        .expect("all split/merge actions should be valid there");
+                    tracing::trace!(
+                        "Shard {} splitted on {} and {} in message queue",
+                        shard_id,
+                        shard_l_id,
+                        shard_r_id
+                    );
+                }
+                SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
+                    // do nothing because current queue impl does not need to perform merges
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn get_iterator<QI>(&self, shard_id: &ShardIdent) -> Result<QI>
     where
         QI: QueueIterator,
     {
         todo!()
     }
+
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()> {
         todo!()
     }
+
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<()>> {
         todo!()
     }

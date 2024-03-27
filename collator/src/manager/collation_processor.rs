@@ -18,7 +18,7 @@ use crate::{
         BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
         CollationSessionInfo, ValidatedBlock,
     },
-    utils::async_queued_dispatcher::AsyncQueuedDispatcher,
+    utils::{async_queued_dispatcher::AsyncQueuedDispatcher, shard::calc_split_merge_actions},
     validator::Validator,
 };
 
@@ -204,8 +204,8 @@ where
         let mc_state_extra = mc_state.state_extra()?;
 
         // get new shards info from updated master state
-        let mut new_shards = HashMap::new();
-        new_shards.insert(ShardIdent::MASTERCHAIN, vec![processing_mc_block_id]);
+        let mut new_shards_info = HashMap::new();
+        new_shards_info.insert(ShardIdent::MASTERCHAIN, vec![processing_mc_block_id]);
         for shard in mc_state_extra.shards.iter() {
             let (shard_id, descr) = shard?;
             let top_block = BlockId {
@@ -215,8 +215,20 @@ where
                 file_hash: descr.file_hash,
             };
             //TODO: consider split and merge
-            new_shards.insert(shard_id, vec![top_block]);
+            new_shards_info.insert(shard_id, vec![top_block]);
         }
+
+        // update shards in msgs queue
+        let current_shards_ids = self.active_collation_sessions.keys().collect();
+        let new_shards_ids = new_shards_info.keys().collect();
+        tracing::trace!(
+            "Detecting split/merge actions to move from current shards {:?} to new shards {:?}...",
+            current_shards_ids,
+            new_shards_ids
+        );
+        let split_merge_actions = calc_split_merge_actions(current_shards_ids, new_shards_ids)?;
+        tracing::trace!("Detected split/merge actions: {:?}", split_merge_actions);
+        self.mq_adapter.update_shards(split_merge_actions).await?;
 
         // find out the actual collation session seqno from master state
         let new_session_seqno = mc_state_extra.validator_info.catchain_seqno;
@@ -229,7 +241,7 @@ where
         let mut sessions_to_start = vec![];
         let mut to_finish_sessions = HashMap::new();
         let mut to_stop_collators = HashMap::new();
-        for shard_info in new_shards {
+        for shard_info in new_shards_info {
             if let Some(existing_session) =
                 self.active_collation_sessions.remove_entry(&shard_info.0)
             {
