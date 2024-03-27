@@ -133,8 +133,14 @@ where
     ) -> BoxFuture<'a, Result<Vec<BlockId>>> {
         async move {
             let mut prev_shard_block_id = shard_block_id;
+
             while !self.state.is_traversed(&shard_block_id) {
+                if shard_block_id.seqno == 0 {
+                    break;
+                }
+
                 prev_shard_block_id = shard_block_id;
+
                 let block = self
                     .fetch_block(&shard_block_id)
                     .await
@@ -273,7 +279,7 @@ impl BlocksGraph {
                 state.commit_traversed(*block_id);
                 let next_block = self.connections.get(block_id);
                 if let Some(next_block) = next_block {
-                    next_blocks.push(*next_block.key());
+                    next_blocks.push(*next_block.value());
                 }
             }
             std::mem::swap(&mut next_blocks, &mut self.bottom_blocks);

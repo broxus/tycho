@@ -92,7 +92,7 @@ fn master_block(
     blocks: &mut HashMap<BlockId, Block>,
     master_ids: &mut Vec<BlockId>,
 ) {
-    let (block_ref, block_info) = block_info(prev_block_ref, seqno);
+    let (block_ref, block_info) = block_info(prev_block_ref, seqno, true);
     *prev_block_ref = PrevBlockRef::Single(block_ref.clone());
 
     let shard_block_ids = link_shard_blocks(prev_shard_block_ref, 2, blocks);
@@ -134,10 +134,10 @@ fn insert_block(
         value_flow: default_cc(),
         state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
         out_msg_queue_updates: None,
-        extra: extra(mc_extra),
+        extra: extra(mc_extra.clone()),
     };
     let id = BlockId {
-        shard: ShardIdent::default(),
+        shard: block_info.shard,
         seqno,
         root_hash: block_ref.root_hash,
         file_hash: block_ref.file_hash,
@@ -172,9 +172,8 @@ fn link_shard_blocks(
         }
     };
     let mut last_ref = None;
-    for seqno in starting_seqno..starting_seqno + chain_len {
-        let (block_ref, info) = block_info(prev_block_ref, seqno);
-
+    for seqno in starting_seqno + 1..starting_seqno + chain_len {
+        let (block_ref, info) = block_info(prev_block_ref, seqno, false);
         last_ref = Some((
             ShardIdent::BASECHAIN,
             ShardDescription {
@@ -223,7 +222,13 @@ fn default_cc() -> Lazy<ValueFlow> {
     .unwrap()
 }
 
-fn block_info(prev_block_ref: &PrevBlockRef, seqno: u32) -> (BlockRef, BlockInfo) {
+fn block_info(prev_block_ref: &PrevBlockRef, seqno: u32, is_mc: bool) -> (BlockRef, BlockInfo) {
+    let shard = if is_mc {
+        ShardIdent::MASTERCHAIN
+    } else {
+        ShardIdent::BASECHAIN
+    };
+
     let prev_block_ref = encode_ref(prev_block_ref.clone());
     let block_info = BlockInfo {
         version: 0,
@@ -236,7 +241,7 @@ fn block_info(prev_block_ref: &PrevBlockRef, seqno: u32) -> (BlockRef, BlockInfo
         flags: 0,
         seqno,
         vert_seqno: 0,
-        shard: Default::default(),
+        shard,
         gen_utime: 0,
         start_lt: 0,
         end_lt: 0,

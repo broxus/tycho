@@ -30,9 +30,12 @@ pub struct InMemoryBlockStriderState {
 #[cfg(test)]
 impl InMemoryBlockStriderState {
     pub fn new(id: BlockId) -> Self {
+        let mut traversed_blocks = tycho_util::FastDashSet::default();
+        traversed_blocks.insert(id);
+
         Self {
             last_traversed_master_block_id: Mutex::new(id),
-            traversed_blocks: tycho_util::FastDashSet::default(),
+            traversed_blocks,
         }
     }
 }
