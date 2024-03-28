@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::{mempool::MempoolAnchor, tests::try_init_test_tracing};
+use crate::{mempool::MempoolAnchor, test_utils::try_init_test_tracing};
 
 use super::{MempoolAdapter, MempoolAdapterStdImpl, MempoolEventListener};
 
@@ -23,7 +23,7 @@ impl MempoolEventListener for MempoolEventStubListener {
 
 #[tokio::test]
 async fn test_stub_anchors_generator() -> Result<()> {
-    try_init_test_tracing();
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
     let adapter = MempoolAdapterStdImpl::create(Arc::new(MempoolEventStubListener {}));
 
