@@ -4,6 +4,7 @@ pub mod mempool;
 mod msg_queue;
 pub mod state_node;
 pub mod test_utils;
+mod tracing_targets;
 pub mod types;
 mod utils;
 mod validator;

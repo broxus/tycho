@@ -7,27 +7,50 @@ use anyhow::Error;
 use tokio::sync::oneshot;
 
 pub struct TaskDesc<F: ?Sized, R> {
+    id: u64,
+    descr: String,
     closure: Box<F>,                      //closure for execution
     creation_time: std::time::SystemTime, //time of task creation
     responder: Option<oneshot::Sender<R>>,
 }
 
 impl<F: ?Sized, R> TaskDesc<F, R> {
-    pub fn create(closure: Box<F>) -> Self {
+    pub fn create(descr: &str, closure: Box<F>) -> Self {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         Self {
+            id,
+            descr: descr.into(),
             closure,
             creation_time: std::time::SystemTime::now(),
             responder: None,
         }
     }
-    pub fn create_with_responder(closure: Box<F>) -> (Self, oneshot::Receiver<R>) {
+    pub fn create_with_responder(descr: &str, closure: Box<F>) -> (Self, oneshot::Receiver<R>) {
         let (sender, receiver) = oneshot::channel::<R>();
-        let task_descr = Self {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let task = Self {
+            id,
+            descr: descr.into(),
             closure,
             creation_time: std::time::SystemTime::now(),
             responder: Some(sender),
         };
-        (task_descr, receiver)
+        (task, receiver)
+    }
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn descr(&self) -> &str {
+        &self.descr
+    }
+    pub fn get_descr(&self) -> String {
+        self.descr.clone()
     }
     pub fn extract(self) -> (Box<F>, Option<oneshot::Sender<R>>) {
         (self.closure, self.responder)
@@ -113,9 +136,12 @@ mod tests {
 
     #[test]
     fn void_task_without_responder() {
-        let task = TaskDesc::create(Box::new(|| {
-            println!("task executed");
-        }));
+        let task = TaskDesc::create(
+            "task descr",
+            Box::new(|| {
+                println!("task executed");
+            }),
+        );
 
         let task_fn = task.closure();
 
@@ -132,9 +158,12 @@ mod tests {
 
     #[tokio::test]
     async fn void_task_with_responder() {
-        let (task, receiver) = TaskDesc::create_with_responder(Box::new(|| {
-            println!("task executed");
-        }));
+        let (task, receiver) = TaskDesc::create_with_responder(
+            "task descr",
+            Box::new(|| {
+                println!("task executed");
+            }),
+        );
 
         let task_fn = task.closure();
 
@@ -156,10 +185,13 @@ mod tests {
 
     #[test]
     fn returning_task_without_responder() {
-        let task = TaskDesc::create(Box::new(|| {
-            println!("task executed");
-            String::from("task result")
-        }));
+        let task = TaskDesc::create(
+            "task descr",
+            Box::new(|| {
+                println!("task executed");
+                String::from("task result")
+            }),
+        );
 
         let task_fn = task.closure();
 
@@ -179,10 +211,13 @@ mod tests {
 
     #[tokio::test]
     async fn returning_task_with_responder() {
-        let (task, receiver) = TaskDesc::create_with_responder(Box::new(|| {
-            println!("task executed");
-            String::from("task result")
-        }));
+        let (task, receiver) = TaskDesc::create_with_responder(
+            "task descr",
+            Box::new(|| {
+                println!("task executed");
+                String::from("task result")
+            }),
+        );
 
         let task_fn = task.closure();
 
@@ -214,10 +249,13 @@ mod tests {
     #[tokio::test]
     async fn returning_task_with_responder_and_dropped_receiver() {
         let task = {
-            let (task, _receiver) = TaskDesc::create_with_responder(Box::new(|| {
-                println!("task executed");
-                String::from("task result")
-            }));
+            let (task, _receiver) = TaskDesc::create_with_responder(
+                "task descr",
+                Box::new(|| {
+                    println!("task executed");
+                    String::from("task result")
+                }),
+            );
             task
         };
 
@@ -248,10 +286,13 @@ mod tests {
 
     #[tokio::test]
     async fn async_void_task_with_responder() {
-        let (task, receiver) = TaskDesc::create_with_responder(Box::new(|| {
-            println!("task executed");
-            async_test_void_func()
-        }));
+        let (task, receiver) = TaskDesc::create_with_responder(
+            "task descr",
+            Box::new(|| {
+                println!("task executed");
+                async_test_void_func()
+            }),
+        );
 
         let task_fn = task.closure();
 
@@ -274,10 +315,13 @@ mod tests {
 
     #[tokio::test]
     async fn returning_void_task_with_responder() {
-        let (task, receiver) = TaskDesc::create_with_responder(Box::new(|| {
-            println!("task executed");
-            async_test_func()
-        }));
+        let (task, receiver) = TaskDesc::create_with_responder(
+            "task descr",
+            Box::new(|| {
+                println!("task executed");
+                async_test_func()
+            }),
+        );
 
         let task_fn = task.closure();
 
