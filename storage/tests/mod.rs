@@ -1,11 +1,10 @@
-use anyhow::{anyhow, Result};
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
+use std::str::FromStr;
+
+use anyhow::Result;
 use bytesize::ByteSize;
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, DynCell, HashBytes};
-use everscale_types::models::{BlockId, ShardIdent, ShardState};
-use serde::{Deserialize, Deserializer};
+use everscale_types::cell::{Cell, DynCell};
+use everscale_types::models::{BlockId, ShardState};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
 
@@ -35,104 +34,6 @@ impl ShardStateCombined {
             ShardState::Unsplit(s) => Some(s.min_ref_mc_seqno),
             ShardState::Split(_) => None,
         }
-    }
-}
-
-#[derive(Deserialize)]
-struct GlobalConfigJson {
-    validator: ValidatorJson,
-}
-
-#[derive(Deserialize)]
-struct ValidatorJson {
-    zero_state: BlockIdJson,
-}
-
-#[derive(Debug, Default)]
-pub struct BlockIdJson {
-    workchain: i32,
-    shard: u64,
-    seqno: u32,
-    root_hash: HashBytes,
-    file_hash: HashBytes,
-}
-
-impl<'de> Deserialize<'de> for BlockIdJson {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        #[derive(Deserialize)]
-        struct BlockIdJsonHelper {
-            workchain: i32,
-            shard: i64,
-            seqno: u32,
-            root_hash: String,
-            file_hash: String,
-        }
-
-        let BlockIdJsonHelper {
-            workchain,
-            shard,
-            seqno,
-            root_hash,
-            file_hash,
-        } = BlockIdJsonHelper::deserialize(deserializer)?;
-
-        let shard = shard as u64;
-
-        let mut result = Self {
-            workchain,
-            shard,
-            seqno,
-            ..Default::default()
-        };
-
-        result.root_hash =
-            HashBytes::from_slice(&BASE64_STANDARD.decode(root_hash).map_err(Error::custom)?);
-
-        result.file_hash =
-            HashBytes::from_slice(&BASE64_STANDARD.decode(file_hash).map_err(Error::custom)?);
-
-        Ok(result)
-    }
-}
-
-impl TryFrom<BlockIdJson> for BlockId {
-    type Error = anyhow::Error;
-
-    fn try_from(value: BlockIdJson) -> Result<Self, Self::Error> {
-        Ok(Self {
-            shard: ShardIdent::new(value.workchain, value.shard)
-                .ok_or(anyhow!("Invalid ShardIdent"))?,
-            seqno: value.seqno,
-            root_hash: value.root_hash,
-            file_hash: value.file_hash,
-        })
-    }
-}
-
-#[derive(Debug)]
-struct GlobalConfig {
-    block_id: BlockId,
-}
-
-impl GlobalConfig {
-    pub fn from_file(path: impl AsRef<str>) -> Result<Self> {
-        let data = std::fs::read_to_string(path.as_ref())?;
-        Ok(serde_json::from_str::<GlobalConfigJson>(&data)?.try_into()?)
-    }
-}
-
-impl TryFrom<GlobalConfigJson> for GlobalConfig {
-    type Error = anyhow::Error;
-
-    fn try_from(value: GlobalConfigJson) -> Result<Self, Self::Error> {
-        Ok(Self {
-            block_id: value.validator.zero_state.try_into()?,
-        })
     }
 }
 
@@ -177,17 +78,17 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Read zerostate
     let zero_state_raw = ShardStateCombined::from_file("tests/everscale_zerostate.boc")?;
 
-    // Read global config
-    let global_config = GlobalConfig::from_file("tests/global-config.json")?;
+    // Parse block id
+    let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
 
     // Write zerostate to db
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &global_config.block_id,
+        &block_id,
         BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap()),
     )?;
 
     let zerostate = ShardStateStuff::new(
-        global_config.block_id,
+        block_id,
         zero_state_raw.cell.clone(),
         storage.shard_state_storage().min_ref_mc_state(),
     )?;

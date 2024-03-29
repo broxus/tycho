@@ -5,7 +5,7 @@ use everscale_types::models::*;
 
 use crate::db::*;
 use crate::models::*;
-use crate::utils::*;
+use crate::util::*;
 
 /// Stores relations between blocks
 pub struct BlockConnectionStorage {

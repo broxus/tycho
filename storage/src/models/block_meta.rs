@@ -4,7 +4,7 @@ use anyhow::Result;
 use bytes::Buf;
 use everscale_types::models::BlockInfo;
 
-use crate::utils::{StoredValue, StoredValueBuffer};
+use crate::util::{StoredValue, StoredValueBuffer};
 
 #[derive(Debug, Copy, Clone)]
 pub struct BlockMetaData {
@@ -28,16 +28,6 @@ pub struct BriefBlockInfo {
     pub is_key_block: bool,
     pub gen_utime: u32,
     pub after_split: bool,
-}
-
-impl BriefBlockInfo {
-    pub fn with_mc_seqno(self, mc_seqno: u32) -> BlockMetaData {
-        BlockMetaData {
-            is_key_block: self.is_key_block,
-            gen_utime: self.gen_utime,
-            mc_ref_seqno: Some(mc_seqno),
-        }
-    }
 }
 
 impl From<&BlockInfo> for BriefBlockInfo {

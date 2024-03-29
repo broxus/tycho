@@ -8,7 +8,7 @@ use tycho_util::FastDashMap;
 
 use crate::db::*;
 use crate::models::*;
-use crate::utils::*;
+use crate::util::*;
 
 pub struct BlockHandleStorage {
     db: Arc<Db>,

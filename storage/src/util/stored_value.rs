@@ -4,7 +4,6 @@ use smallvec::SmallVec;
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
-use tycho_util::byte_reader::ByteOrderRead;
 
 /// A trait for writing or reading data from a stack-allocated buffer
 pub trait StoredValue {
@@ -104,8 +103,12 @@ impl StoredValue for BlockId {
 
         let shard = ShardIdent::deserialize(reader)?;
         let seqno = reader.get_u32();
-        let root_hash = HashBytes::from(reader.read_u256()?);
-        let file_hash = HashBytes::from(reader.read_u256()?);
+
+        let mut root_hash = HashBytes::default();
+        root_hash.0.copy_from_slice(&reader[..32]);
+        let mut file_hash = HashBytes::default();
+        file_hash.0.copy_from_slice(&reader[32..]);
+
         Ok(Self {
             shard,
             seqno,

@@ -1,5 +1,6 @@
+use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -10,7 +11,7 @@ use super::cell_storage::*;
 use super::entries_buffer::*;
 use super::shard_state_reader::*;
 use crate::db::*;
-use crate::utils::*;
+use crate::util::*;
 
 use tycho_block_util::state::*;
 use tycho_util::progress_bar::*;
@@ -27,17 +28,14 @@ pub struct ShardStateReplaceTransaction<'a> {
 }
 
 impl<'a> ShardStateReplaceTransaction<'a> {
-    pub fn new<P>(
+    pub fn new(
         db: &'a Db,
+        downloads_dir: &FileDb,
         cell_storage: &'a Arc<CellStorage>,
         min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
-        path: P,
         block_id: &BlockId,
-    ) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        let file_ctx = FilesContext::new(path, block_id)?;
+    ) -> Result<Self> {
+        let file_ctx = FilesContext::new(downloads_dir, block_id)?;
 
         Ok(Self {
             db,
@@ -475,14 +473,11 @@ impl<'a> FinalizationContext<'a> {
 struct FilesContext {
     cells_path: PathBuf,
     hashes_path: PathBuf,
-    cells_file: Option<FileDb>,
+    cells_file: Option<File>,
 }
 
 impl FilesContext {
-    pub fn new<P>(root_path: P, block_id: &BlockId) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
+    pub fn new(downloads_dir: &FileDb, block_id: &BlockId) -> Result<Self> {
         let block_id = format!(
             "({},{:016x},{})",
             block_id.shard.workchain(),
@@ -490,26 +485,25 @@ impl FilesContext {
             block_id.seqno
         );
 
-        let cells_path = root_path.as_ref().join(format!("state_cells_{block_id}"));
-        let hashes_path = root_path.as_ref().join(format!("state_hashes_{block_id}"));
+        let cells_file_name = format!("state_cells_{block_id}");
+        let hashes_file_name = format!("state_hashes_{block_id}");
 
-        let cells_file = Some(FileDb::new(
-            &cells_path,
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .read(true),
-        )?);
+        let cells_file = downloads_dir
+            .file(&cells_file_name)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .open()?;
 
         Ok(Self {
-            cells_file,
-            cells_path,
-            hashes_path,
+            cells_path: downloads_dir.path().join(cells_file_name),
+            hashes_path: downloads_dir.path().join(hashes_file_name),
+            cells_file: Some(cells_file),
         })
     }
 
-    pub fn cells_file(&mut self) -> Result<&mut FileDb> {
+    pub fn cells_file(&mut self) -> Result<&mut File> {
         match &mut self.cells_file {
             Some(file) => Ok(file),
             None => Err(FilesContextError::AlreadyFinalized.into()),

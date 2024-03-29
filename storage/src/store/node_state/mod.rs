@@ -5,7 +5,7 @@ use everscale_types::models::*;
 use parking_lot::Mutex;
 
 use crate::db::*;
-use crate::utils::*;
+use crate::util::*;
 
 pub struct NodeStateStorage {
     db: Arc<Db>,

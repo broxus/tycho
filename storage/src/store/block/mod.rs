@@ -17,7 +17,7 @@ use tycho_block_util::block::{
 };
 
 use crate::db::*;
-use crate::utils::*;
+use crate::util::*;
 use crate::{models::*, BlockHandleStorage, HandleCreationStatus};
 
 pub struct BlockStorage {

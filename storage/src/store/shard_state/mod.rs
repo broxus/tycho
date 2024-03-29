@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -13,7 +12,7 @@ use self::cell_storage::*;
 use self::replace_transaction::ShardStateReplaceTransaction;
 
 use crate::db::*;
-use crate::utils::*;
+use crate::util::*;
 use crate::{models::BlockHandle, BlockHandleStorage, BlockStorage};
 
 mod cell_storage;
@@ -21,13 +20,15 @@ mod entries_buffer;
 mod replace_transaction;
 mod shard_state_reader;
 
+const DOWNLOADS_DIR: &str = "downloads";
+
 pub struct ShardStateStorage {
     db: Arc<Db>,
+    downloads_dir: FileDb,
 
     block_handle_storage: Arc<BlockHandleStorage>,
     block_storage: Arc<BlockStorage>,
     cell_storage: Arc<CellStorage>,
-    downloads_dir: Arc<PathBuf>,
 
     gc_lock: tokio::sync::Mutex<()>,
     min_ref_mc_state: Arc<MinRefMcStateTracker>,
@@ -38,12 +39,14 @@ pub struct ShardStateStorage {
 impl ShardStateStorage {
     pub fn new(
         db: Arc<Db>,
+        files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
-        file_db_path: PathBuf,
         cache_size_bytes: u64,
     ) -> Result<Self> {
-        let downloads_dir = prepare_file_db_dir(file_db_path, "downloads")?;
+        let downloads_dir = files_dir.subdir(DOWNLOADS_DIR);
+        downloads_dir.ensure_exists()?;
+
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 
         let res = Self {
@@ -155,9 +158,9 @@ impl ShardStateStorage {
     pub fn begin_replace(&'_ self, block_id: &BlockId) -> Result<ShardStateReplaceTransaction<'_>> {
         ShardStateReplaceTransaction::new(
             &self.db,
+            &self.downloads_dir,
             &self.cell_storage,
             &self.min_ref_mc_state,
-            self.downloads_dir.as_ref(),
             block_id,
         )
     }
@@ -357,12 +360,6 @@ pub struct ShardStateStorageMetrics {
     pub storage_cell_max_live_count: usize,
     pub max_new_mc_cell_count: usize,
     pub max_new_sc_cell_count: usize,
-}
-
-fn prepare_file_db_dir(file_db_path: PathBuf, folder: &str) -> Result<Arc<PathBuf>> {
-    let dir = Arc::new(file_db_path.join(folder));
-    std::fs::create_dir_all(dir.as_ref())?;
-    Ok(dir)
 }
 
 #[derive(thiserror::Error, Debug)]

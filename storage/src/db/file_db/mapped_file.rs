@@ -1,41 +1,32 @@
-use std::fs;
+use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::Path;
-
-use anyhow::Result;
-
-use crate::FileDb;
 
 /// Memory buffer that is mapped to a file
 pub struct MappedFile {
-    file_db: FileDb,
+    file: File,
     length: usize,
     ptr: *mut libc::c_void,
 }
 
 impl MappedFile {
     /// Opens a file and maps it to memory. Resizes the file to `length` bytes.
-    pub fn new<P>(path: &P, length: usize) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        let file_db = FileDb::new(
-            path,
-            fs::OpenOptions::new()
-                .write(true)
-                .read(true)
-                .truncate(true)
-                .create(true),
-        )?;
-        file_db.file.set_len(length as u64)?;
+    pub fn new<P: AsRef<Path>>(path: P, length: usize) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .create(true)
+            .open(path)?;
 
-        Self::from_existing_file(file_db)
+        file.set_len(length as u64)?;
+
+        Self::from_existing_file(file)
     }
 
     /// Opens an existing file and maps it to memory
-    pub fn from_existing_file(file_db: FileDb) -> Result<Self> {
-        use std::os::unix::io::AsRawFd;
-
-        let length = file_db.file.metadata()?.len() as usize;
+    pub fn from_existing_file(file: File) -> std::io::Result<Self> {
+        let length = file.metadata()?.len() as usize;
 
         // SAFETY: File was opened successfully, file mode is RW, offset is aligned
         let ptr = unsafe {
@@ -44,24 +35,20 @@ impl MappedFile {
                 length,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED,
-                file_db.file.as_raw_fd(),
+                file.as_raw_fd(),
                 0,
             )
         };
 
         if ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error().into());
+            return Err(std::io::Error::last_os_error());
         }
 
         if unsafe { libc::madvise(ptr, length, libc::MADV_RANDOM) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            return Err(std::io::Error::last_os_error());
         }
 
-        Ok(Self {
-            file_db,
-            length,
-            ptr,
-        })
+        Ok(Self { file, length, ptr })
     }
 
     /// Mapped buffer length in bytes
@@ -102,8 +89,8 @@ impl Drop for MappedFile {
             panic!("failed to unmap file: {}", std::io::Error::last_os_error());
         }
 
-        let _ = self.file_db.file.set_len(0);
-        let _ = self.file_db.file.sync_all();
+        let _ = self.file.set_len(0);
+        let _ = self.file.sync_all();
     }
 }
 

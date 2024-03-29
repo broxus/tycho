@@ -1,46 +1,38 @@
 use std::collections::hash_map;
-use std::fs;
-use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::io::AsRawFd;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use everscale_types::cell::CellDescriptor;
+use everscale_types::cell::{CellDescriptor, HashBytes};
 use smallvec::SmallVec;
-
 use tycho_util::FastHashMap;
 
-use crate::db::Db;
-use crate::FileDb;
+use crate::db::{Db, FileDb, TempFile};
 
 pub struct CellWriter<'a> {
     db: &'a Db,
-    base_path: &'a Path,
+    states_dir: &'a FileDb,
+    block_root_hash: &'a HashBytes,
 }
 
 impl<'a> CellWriter<'a> {
     #[allow(unused)]
-    pub fn new(db: &'a Db, base_path: &'a Path) -> Self {
-        Self { db, base_path }
+    pub fn new(db: &'a Db, states_dir: &'a FileDb, block_root_hash: &'a HashBytes) -> Self {
+        Self {
+            db,
+            states_dir,
+            block_root_hash,
+        }
     }
 
     #[allow(unused)]
     pub fn write(&self, root_hash: &[u8; 32], is_cancelled: Option<Arc<AtomicBool>>) -> Result<()> {
-        // Open target file in advance to get the error immediately (if any)
-        let file_db = FileDb::new(
-            self.base_path,
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true),
-        )?;
-
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
-        let mut intermediate = write_rev_cells(self.db, self.base_path, root_hash, &is_cancelled)
+        let mut intermediate = self
+            .write_rev(root_hash, &is_cancelled)
             .context("Failed to write reversed cells data")?;
         tracing::info!("finished loading cells");
         let cell_count = intermediate.cell_sizes.len() as u32;
@@ -49,14 +41,22 @@ impl<'a> CellWriter<'a> {
         let offset_size =
             std::cmp::min(number_of_bytes_to_fit(intermediate.total_size), 8) as usize;
 
-        // Reserve space for the file
-        alloc_file(
-            file_db.file(),
-            22 + offset_size * (1 + cell_count as usize) + (intermediate.total_size as usize),
-        )?;
+        // Compute file size
+        let file_size =
+            22 + offset_size * (1 + cell_count as usize) + (intermediate.total_size as usize);
+
+        // Create states file
+        let mut file = self
+            .states_dir
+            .file(self.file_name())
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .prealloc(file_size)
+            .open()?;
 
         // Write cells data in BOC format
-        let mut buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN / 2, file_db.file());
+        let mut buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN / 2, file);
 
         // Header            | current len: 0
         let flags = 0b1000_0000u8 | (REF_SIZE as u8);
@@ -128,194 +128,194 @@ impl<'a> CellWriter<'a> {
     }
 
     pub fn remove(&self) -> Result<()> {
-        fs::remove_file(self.base_path).context(format!(
-            "Failed to remove persistent state file {:?}",
-            self.base_path
+        let file_name = self.file_name();
+        self.states_dir.remove_file(&file_name).context(format!(
+            "Failed to remove persistent state file {}",
+            self.states_dir.path().join(file_name).display()
         ))
+    }
+
+    fn write_rev(
+        &self,
+        root_hash: &[u8; 32],
+        is_cancelled: &Option<Arc<AtomicBool>>,
+    ) -> Result<IntermediateState> {
+        enum StackItem {
+            New([u8; 32]),
+            Loaded(LoadedCell),
+        }
+
+        struct LoadedCell {
+            hash: [u8; 32],
+            descriptor: CellDescriptor,
+            data: SmallVec<[u8; 128]>,
+            indices: SmallVec<[u32; 4]>,
+        }
+
+        let mut file = self
+            .states_dir
+            .file(self.file_name().with_extension("temp"))
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open_as_temp()?;
+
+        let raw = self.db.raw().as_ref();
+        let read_options = self.db.cells.read_config();
+        let cf = self.db.cells.cf();
+
+        let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
+
+        let mut indices = FastHashMap::default();
+        let mut remap = FastHashMap::default();
+        let mut cell_sizes = Vec::<u8>::with_capacity(FILE_BUFFER_LEN);
+        let mut stack = Vec::with_capacity(32);
+
+        let mut total_size = 0u64;
+        let mut iteration = 0u32;
+        let mut remap_index = 0u32;
+
+        stack.push((iteration, StackItem::New(*root_hash)));
+        indices.insert(*root_hash, (iteration, false));
+
+        let mut temp_file_buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN, &mut *file);
+
+        while let Some((index, data)) = stack.pop() {
+            if let Some(is_cancelled) = is_cancelled {
+                if iteration % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
+                    anyhow::bail!("Persistent state writing cancelled.")
+                }
+            }
+
+            match data {
+                StackItem::New(hash) => {
+                    let value = raw
+                        .get_pinned_cf_opt(&cf, hash, read_options)?
+                        .ok_or(CellWriterError::CellNotFound)?;
+
+                    let value = match crate::refcount::strip_refcount(value.as_ref()) {
+                        Some(bytes) => bytes,
+                        None => {
+                            return Err(CellWriterError::CellNotFound.into());
+                        }
+                    };
+                    if value.is_empty() {
+                        return Err(CellWriterError::InvalidCell.into());
+                    }
+
+                    let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
+                        .ok_or(CellWriterError::InvalidCell)?;
+
+                    let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
+
+                    let mut indices_buffer = [0; 4];
+                    let mut keys = [std::ptr::null(); 4];
+                    let mut preload_count = 0;
+
+                    for hash in &references_buffer {
+                        let index = match indices.entry(*hash) {
+                            hash_map::Entry::Vacant(entry) => {
+                                remap_index += 1;
+
+                                entry.insert((remap_index, false));
+
+                                indices_buffer[preload_count] = remap_index;
+                                keys[preload_count] = hash.as_ptr();
+                                preload_count += 1;
+
+                                remap_index
+                            }
+                            hash_map::Entry::Occupied(entry) => {
+                                let (remap_index, written) = *entry.get();
+                                if !written {
+                                    indices_buffer[preload_count] = remap_index;
+                                    keys[preload_count] = hash.as_ptr();
+                                    preload_count += 1;
+                                }
+                                remap_index
+                            }
+                        };
+
+                        reference_indices.push(index);
+                    }
+
+                    stack.push((
+                        index,
+                        StackItem::Loaded(LoadedCell {
+                            hash,
+                            descriptor,
+                            data: SmallVec::from_slice(data),
+                            indices: reference_indices,
+                        }),
+                    ));
+
+                    if preload_count > 0 {
+                        indices_buffer[..preload_count].reverse();
+                        keys[..preload_count].reverse();
+
+                        for i in 0..preload_count {
+                            let index = indices_buffer[i];
+                            let hash = unsafe { *keys[i].cast::<[u8; 32]>() };
+                            stack.push((index, StackItem::New(hash)));
+                        }
+                    }
+
+                    references_buffer.clear();
+                }
+                StackItem::Loaded(loaded) => {
+                    match remap.entry(index) {
+                        hash_map::Entry::Vacant(entry) => {
+                            entry.insert(iteration.to_be_bytes());
+                        }
+                        hash_map::Entry::Occupied(_) => continue,
+                    };
+
+                    if let Some((_, written)) = indices.get_mut(&loaded.hash) {
+                        *written = true;
+                    }
+
+                    iteration += 1;
+                    if iteration % 100000 == 0 {
+                        tracing::info!(iteration);
+                    }
+
+                    let cell_size = 2 + loaded.data.len() + loaded.indices.len() * REF_SIZE;
+                    cell_sizes.push(cell_size as u8);
+                    total_size += cell_size as u64;
+
+                    temp_file_buffer.write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
+                    temp_file_buffer.write_all(&loaded.data)?;
+                    for index in loaded.indices {
+                        let index = remap.get(&index).with_context(|| {
+                            format!("Child not found. Iteration {iteration}. Child {index}")
+                        })?;
+                        temp_file_buffer.write_all(index)?;
+                    }
+                }
+            }
+        }
+
+        drop(temp_file_buffer);
+
+        file.flush()?;
+
+        Ok(IntermediateState {
+            file,
+            cell_sizes,
+            total_size,
+        })
+    }
+
+    fn file_name(&self) -> PathBuf {
+        PathBuf::from(self.block_root_hash.to_string())
     }
 }
 
 struct IntermediateState {
-    file: File,
+    file: TempFile,
     cell_sizes: Vec<u8>,
     total_size: u64,
-    _remove_on_drop: RemoveOnDrop,
-}
-
-fn write_rev_cells<P: AsRef<Path>>(
-    db: &Db,
-    base_path: P,
-    root_hash: &[u8; 32],
-    is_cancelled: &Option<Arc<AtomicBool>>,
-) -> Result<IntermediateState> {
-    enum StackItem {
-        New([u8; 32]),
-        Loaded(LoadedCell),
-    }
-
-    struct LoadedCell {
-        hash: [u8; 32],
-        descriptor: CellDescriptor,
-        data: SmallVec<[u8; 128]>,
-        indices: SmallVec<[u32; 4]>,
-    }
-
-    let file_path = base_path.as_ref().with_extension("temp");
-
-    let file_db = FileDb::new(
-        &file_path,
-        fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true),
-    )?;
-    let remove_on_drop = RemoveOnDrop(file_path);
-
-    let raw = db.raw().as_ref();
-    let read_options = db.cells.read_config();
-    let cf = db.cells.cf();
-
-    let mut references_buffer = SmallVec::<[[u8; 32]; 4]>::with_capacity(4);
-
-    let mut indices = FastHashMap::default();
-    let mut remap = FastHashMap::default();
-    let mut cell_sizes = Vec::<u8>::with_capacity(FILE_BUFFER_LEN);
-    let mut stack = Vec::with_capacity(32);
-
-    let mut total_size = 0u64;
-    let mut iteration = 0u32;
-    let mut remap_index = 0u32;
-
-    stack.push((iteration, StackItem::New(*root_hash)));
-    indices.insert(*root_hash, (iteration, false));
-
-    let mut temp_file_buffer = std::io::BufWriter::with_capacity(FILE_BUFFER_LEN, file_db.into());
-
-    while let Some((index, data)) = stack.pop() {
-        if let Some(is_cancelled) = is_cancelled {
-            if iteration % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
-                anyhow::bail!("Persistent state writing cancelled.")
-            }
-        }
-
-        match data {
-            StackItem::New(hash) => {
-                let value = raw
-                    .get_pinned_cf_opt(&cf, hash, read_options)?
-                    .ok_or(CellWriterError::CellNotFound)?;
-
-                let value = match crate::refcount::strip_refcount(value.as_ref()) {
-                    Some(bytes) => bytes,
-                    None => {
-                        return Err(CellWriterError::CellNotFound.into());
-                    }
-                };
-                if value.is_empty() {
-                    return Err(CellWriterError::InvalidCell.into());
-                }
-
-                let (descriptor, data) = deserialize_cell(value, &mut references_buffer)
-                    .ok_or(CellWriterError::InvalidCell)?;
-
-                let mut reference_indices = SmallVec::with_capacity(references_buffer.len());
-
-                let mut indices_buffer = [0; 4];
-                let mut keys = [std::ptr::null(); 4];
-                let mut preload_count = 0;
-
-                for hash in &references_buffer {
-                    let index = match indices.entry(*hash) {
-                        hash_map::Entry::Vacant(entry) => {
-                            remap_index += 1;
-
-                            entry.insert((remap_index, false));
-
-                            indices_buffer[preload_count] = remap_index;
-                            keys[preload_count] = hash.as_ptr();
-                            preload_count += 1;
-
-                            remap_index
-                        }
-                        hash_map::Entry::Occupied(entry) => {
-                            let (remap_index, written) = *entry.get();
-                            if !written {
-                                indices_buffer[preload_count] = remap_index;
-                                keys[preload_count] = hash.as_ptr();
-                                preload_count += 1;
-                            }
-                            remap_index
-                        }
-                    };
-
-                    reference_indices.push(index);
-                }
-
-                stack.push((
-                    index,
-                    StackItem::Loaded(LoadedCell {
-                        hash,
-                        descriptor,
-                        data: SmallVec::from_slice(data),
-                        indices: reference_indices,
-                    }),
-                ));
-
-                if preload_count > 0 {
-                    indices_buffer[..preload_count].reverse();
-                    keys[..preload_count].reverse();
-
-                    for i in 0..preload_count {
-                        let index = indices_buffer[i];
-                        let hash = unsafe { *keys[i].cast::<[u8; 32]>() };
-                        stack.push((index, StackItem::New(hash)));
-                    }
-                }
-
-                references_buffer.clear();
-            }
-            StackItem::Loaded(loaded) => {
-                match remap.entry(index) {
-                    hash_map::Entry::Vacant(entry) => {
-                        entry.insert(iteration.to_be_bytes());
-                    }
-                    hash_map::Entry::Occupied(_) => continue,
-                };
-
-                if let Some((_, written)) = indices.get_mut(&loaded.hash) {
-                    *written = true;
-                }
-
-                iteration += 1;
-                if iteration % 100000 == 0 {
-                    tracing::info!(iteration);
-                }
-
-                let cell_size = 2 + loaded.data.len() + loaded.indices.len() * REF_SIZE;
-                cell_sizes.push(cell_size as u8);
-                total_size += cell_size as u64;
-
-                temp_file_buffer.write_all(&[loaded.descriptor.d1, loaded.descriptor.d2])?;
-                temp_file_buffer.write_all(&loaded.data)?;
-                for index in loaded.indices {
-                    let index = remap.get(&index).with_context(|| {
-                        format!("Child not found. Iteration {iteration}. Child {index}")
-                    })?;
-                    temp_file_buffer.write_all(index)?;
-                }
-            }
-        }
-    }
-
-    let mut file: File = temp_file_buffer.into_inner()?;
-    file.flush()?;
-
-    Ok(IntermediateState {
-        file,
-        cell_sizes,
-        total_size,
-        _remove_on_drop: remove_on_drop,
-    })
 }
 
 fn deserialize_cell<'a>(
@@ -355,38 +355,8 @@ fn deserialize_cell<'a>(
     Some((descriptor, data))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn alloc_file(file: &File, len: usize) -> std::io::Result<()> {
-    let res = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, len as i64) };
-    if res == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "macos")]
-pub fn alloc_file(file: &File, len: usize) -> std::io::Result<()> {
-    let res = unsafe { libc::ftruncate(file.as_raw_fd(), len as i64) };
-    if res < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 fn number_of_bytes_to_fit(l: u64) -> u32 {
     8 - l.leading_zeros() / 8
-}
-
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        if let Err(e) = fs::remove_file(&self.0) {
-            tracing::error!(path = %self.0.display(), "failed to remove file: {e:?}");
-        }
-    }
 }
 
 struct Index {

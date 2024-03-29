@@ -34,7 +34,7 @@ impl VersionProvider for NodeStateVersionProvider {
                 let slice = version.as_ref();
                 slice
                     .try_into()
-                    .map_err(|_| weedb::Error::InvalidDbVersion)
+                    .map_err(|_e| weedb::Error::InvalidDbVersion)
                     .map(Some)
             }
             None => Ok(None),

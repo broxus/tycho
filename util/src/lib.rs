@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
-pub mod byte_reader;
 pub mod progress_bar;
 pub mod serde_helpers;
 pub mod time;
