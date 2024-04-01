@@ -320,6 +320,10 @@ impl DhtService {
     pub fn make_peer_resolver(&self) -> PeerResolverBuilder {
         PeerResolver::builder(self.clone())
     }
+
+    pub fn has_peer(&self, peer_id: &PeerId) -> bool {
+        self.0.routing_table.lock().unwrap().contains(peer_id)
+    }
 }
 
 impl Service<ServiceRequest> for DhtService {
@@ -501,8 +505,16 @@ impl DhtInner {
                         }));
                     }
                     Action::AddPeer(peer_info) => {
-                        tracing::info!(peer_id = %peer_info.id, "received peer info");
-                        if let Err(e) = this.add_peer_info(&network, peer_info) {
+                        let peer_id = peer_info.id;
+                        let added = this.add_peer_info(&network, peer_info);
+                        tracing::debug!(
+                            local_id = %this.local_id,
+                            %peer_id,
+                            ?added,
+                            "received peer info",
+                        );
+
+                        if let Err(e) = added {
                             tracing::error!("failed to add peer to the routing table: {e:?}");
                         }
                     }
@@ -562,7 +574,7 @@ impl DhtInner {
             // or up to the last non-empty bucket (?).
             for (&distance, bucket) in routing_table.buckets.iter().take(MAX_BUCKETS) {
                 // TODO: Should we skip empty buckets?
-                if bucket.is_empty() || distance == MAX_XOR_DISTANCE {
+                if bucket.is_empty() || distance == 0 {
                     continue;
                 }
 

@@ -24,18 +24,25 @@ impl<T> RoutingTable<T> {
         }
     }
 
-    #[allow(unused)]
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.buckets.values().all(Bucket::is_empty)
     }
 
-    #[allow(unused)]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.buckets.values().map(|bucket| bucket.nodes.len()).sum()
     }
 }
 
 impl<T: AsPeerInfo> RoutingTable<T> {
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        let distance = xor_distance(&self.local_id, peer_id);
+        self.buckets
+            .get(&distance)
+            .map_or(false, |bucket| bucket.contains(peer_id))
+    }
+
     pub fn add<F>(&mut self, peer: Arc<PeerInfo>, max_k: usize, node_ttl: &Duration, f: F) -> bool
     where
         F: FnOnce(Arc<PeerInfo>) -> Option<T>,
@@ -106,6 +113,27 @@ impl<T: AsPeerInfo> RoutingTable<T> {
     }
 }
 
+impl<T: Clone> Clone for RoutingTable<T> {
+    fn clone(&self) -> Self {
+        Self {
+            local_id: self.local_id,
+            buckets: self.buckets.clone(),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for RoutingTable<T>
+where
+    T: AsPeerInfo,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoutingTable")
+            .field("local_id", &self.local_id)
+            .field("buckets", &self.buckets)
+            .finish()
+    }
+}
+
 pub(crate) struct Bucket<T> {
     nodes: VecDeque<Node<T>>,
 }
@@ -130,6 +158,12 @@ impl<T> Bucket<T> {
 }
 
 impl<T: AsPeerInfo> Bucket<T> {
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        self.nodes
+            .iter()
+            .any(|node| node.data.as_peer_info().id == *peer_id)
+    }
+
     fn insert<F>(
         &mut self,
         peer_info: Arc<PeerInfo>,
@@ -173,6 +207,25 @@ impl<T: AsPeerInfo> Bucket<T> {
     }
 }
 
+impl<T: Clone> Clone for Bucket<T> {
+    fn clone(&self) -> Self {
+        Self {
+            nodes: self.nodes.clone(),
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Bucket<T>
+where
+    T: AsPeerInfo,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Bucket")
+            .field("nodes", &self.nodes)
+            .finish()
+    }
+}
+
 pub(crate) struct Node<T> {
     pub data: T,
     pub last_updated_at: Instant,
@@ -190,6 +243,27 @@ impl<T> Node<T> {
 impl<T: AsPeerInfo> Node<T> {
     pub fn is_expired(&self, at: u32, timeout: &Duration) -> bool {
         self.data.as_peer_info().is_expired(at) || &self.last_updated_at.elapsed() >= timeout
+    }
+}
+
+impl<T: Clone> Clone for Node<T> {
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            last_updated_at: self.last_updated_at,
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Node<T>
+where
+    T: AsPeerInfo,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Node")
+            .field("peer_info", self.data.as_peer_info().as_ref())
+            .field("last_updated_at", &self.last_updated_at)
+            .finish()
     }
 }
 
@@ -241,6 +315,37 @@ mod tests {
     use crate::util::make_peer_info_stub;
 
     const MAX_K: usize = 20;
+
+    #[derive(Debug, Default)]
+    struct PeerState {
+        knows_about: usize,
+        known_by: usize,
+    }
+
+    impl PeerState {
+        fn compute_states<'a, I>(tables: I) -> BTreeMap<PeerId, PeerState>
+        where
+            I: Iterator<Item = &'a SimpleRoutingTable> + Clone + 'a,
+        {
+            let mut states = BTreeMap::<_, PeerState>::new();
+            for (i, left) in tables.clone().enumerate() {
+                for (j, right) in tables.clone().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+
+                    let left_id = left.local_id;
+                    let right_id = right.local_id;
+
+                    if left.contains(&right_id) {
+                        states.entry(left_id).or_default().knows_about += 1;
+                        states.entry(right_id).or_default().known_by += 1;
+                    }
+                }
+            }
+            states
+        }
+    }
 
     #[test]
     fn buckets_are_sets() {
@@ -471,6 +576,117 @@ mod tests {
                 .collect::<Vec<_>>();
             closest.sort();
             assert_eq!(closest, expected_closest_ids);
+        }
+    }
+
+    #[test]
+    fn everyone_can_know_about_everyone() {
+        let peer_info =
+            std::array::from_fn::<_, { MAX_K }, _>(|_| make_peer_info_stub(rand::random()));
+        let mut tables = peer_info
+            .iter()
+            .map(|peer_info| SimpleRoutingTable::new(peer_info.id))
+            .collect::<Vec<_>>();
+
+        for (i, left) in tables.iter_mut().enumerate() {
+            for (j, right) in peer_info.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+
+                left.add(right.clone(), MAX_K, &Duration::MAX, Some);
+            }
+        }
+
+        let states = PeerState::compute_states(tables.iter());
+
+        assert_eq!(states.len(), MAX_K);
+        for state in states.values() {
+            assert_eq!(state.knows_about, MAX_K - 1);
+            assert_eq!(state.known_by, MAX_K - 1);
+        }
+    }
+
+    #[test]
+    fn announces_are_distributed_properly() {
+        let peer_info =
+            std::array::from_fn::<_, { MAX_K }, _>(|_| make_peer_info_stub(rand::random()));
+        let mut tables = peer_info
+            .iter()
+            .map(|peer_info| (peer_info.id, SimpleRoutingTable::new(peer_info.id)))
+            .collect::<BTreeMap<_, _>>();
+
+        // Make sure everyone knows about the first node
+        for table in tables.values_mut() {
+            table.add(peer_info[0].clone(), MAX_K, &Duration::MAX, Some);
+        }
+
+        // Announce peer info (aka push)
+        for peer_info in &peer_info {
+            let key_hash = tl_proto::hash(crate::proto::dht::PeerValueKeyRef {
+                name: crate::proto::dht::PeerValueKeyName::NodeInfo,
+                peer_id: &peer_info.id,
+            });
+
+            let mut target_ids = Vec::new();
+            tables[&peer_info.id].visit_closest(&key_hash, 3, |node| {
+                target_ids.push(node.id);
+            });
+
+            for peer_id in &target_ids {
+                tables.get_mut(peer_id).unwrap().add(
+                    peer_info.clone(),
+                    MAX_K,
+                    &Duration::MAX,
+                    Some,
+                );
+            }
+        }
+
+        // Refresh routing tables (aka pull)
+        for peer_id in peer_info.iter().map(|info| &info.id) {
+            let mut random_ids = Vec::new();
+
+            for (&distance, bucket) in &tables[peer_id].buckets {
+                if bucket.is_empty() || distance == 0 {
+                    continue;
+                }
+
+                random_ids.push(crate::dht::random_key_at_distance(
+                    peer_id,
+                    distance,
+                    &mut rand::thread_rng(),
+                ));
+            }
+
+            for random_id in random_ids {
+                let key_hash = tl_proto::hash(crate::proto::dht::PeerValueKeyRef {
+                    name: crate::proto::dht::PeerValueKeyName::NodeInfo,
+                    peer_id: &random_id,
+                });
+
+                let mut target_ids = Vec::new();
+                tables[peer_id].visit_closest(&key_hash, 3, |node| {
+                    target_ids.push(node.id);
+                });
+
+                for target_peer_id in &target_ids {
+                    let response = tables[target_peer_id].closest(&key_hash, MAX_K);
+
+                    let table = tables.get_mut(peer_id).unwrap();
+                    for peer_info in response {
+                        table.add(peer_info.clone(), MAX_K, &Duration::MAX, Some);
+                    }
+                }
+            }
+        }
+
+        let states = PeerState::compute_states(tables.values());
+
+        assert_eq!(states.len(), MAX_K);
+        for state in states.values() {
+            assert_eq!(state.knows_about, MAX_K - 1);
+            assert_eq!(state.known_by, MAX_K - 1);
         }
     }
 }
