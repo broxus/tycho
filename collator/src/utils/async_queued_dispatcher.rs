@@ -3,6 +3,7 @@ use std::{future::Future, pin::Pin};
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
+use tracing::field::debug;
 
 use super::task_descr::{TaskDesc, TaskResponder};
 
@@ -33,12 +34,14 @@ where
         debug!("dispatcher run");
         let h = tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
+                debug!("TASK RECEIVED");
                 let (task, responder) = task.extract();
                 let future = task(worker);
                 let future = Box::pin(future);
                 let (updated_worker, res) = future.await;
                 worker = updated_worker;
                 let _ = responder.respond(res);
+                debug!("TASK PROCESSED")
             }
             debug!("dispatcher finished");
         });
@@ -54,6 +57,7 @@ where
     }
 
     async fn _enqueue_task(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
+        debug!("ENQUE TASK");
         self.tasks_queue
             .send(task)
             .await

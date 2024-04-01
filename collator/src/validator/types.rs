@@ -3,6 +3,7 @@ use anyhow::bail;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::{HashBytes, Store};
 use everscale_types::models::{BlockId, Signature, ValidatorDescription};
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
@@ -78,9 +79,7 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
 }
 
 /// Block candidate for validation
-#[derive(
-    Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd, TlRead, TlWrite,
-)]
+#[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd, TlRead, TlWrite)]
 pub struct BlockValidationCandidate {
     pub root_hash: [u8; 32],
     pub file_hash: [u8; 32],
@@ -108,4 +107,11 @@ impl BlockValidationCandidate {
 #[tl(boxed, id = 0x12341111)]
 pub struct OverlayNumber {
     pub session_seqno: u32,
+}
+
+#[derive(Eq, PartialEq, Debug)]
+pub enum ValidationResult {
+    Valid,
+    Invalid,
+    Insufficient,
 }

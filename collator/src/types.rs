@@ -4,7 +4,7 @@ use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescripti
 use std::collections::HashMap;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
-use tycho_network::{Network, OverlayService};
+use tycho_network::{DhtClient, Network, OverlayService, PeerResolver};
 
 use self::ext_types::{Block, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256};
 
@@ -177,6 +177,8 @@ pub(crate) mod ext_types {
 
 #[derive(Clone)]
 pub struct ValidatorNetwork {
-    pub network: Network,
+    // pub network: Network,
     pub overlay_service: OverlayService,
+    pub peer_resolver: PeerResolver,
+    pub dht_client: DhtClient,
 }

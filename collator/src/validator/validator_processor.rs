@@ -4,24 +4,31 @@ use std::sync::RwLock;
 use std::time::Duration;
 use std::{future::Future, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
+use everscale_crypto::tl::PublicKey;
 use everscale_types::boc::BocRepr;
 use everscale_types::cell::HashBytes;
 
-use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescription};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription};
 use futures_util::future::join_all;
-use tracing::{debug, trace};
+use log::info;
+use tl_proto::TlResult;
+use tokio::time::interval;
+use tracing::field::debug;
+use tracing::{debug, error, trace, warn};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Request};
 
+use crate::state_node::StateNodeTaskResult;
 use crate::types::{BlockCandidate, ValidatorNetwork};
+use crate::utils::task_descr::TaskResponseReceiver;
 use crate::validator::network::network_service::{NetworkService, SignaturesQuery};
-use crate::validator::state::{ValidationState, ValidationStateStdImpl};
+use crate::validator::state::{SessionInfo, ValidationState, ValidationStateStdImpl};
 use crate::validator::types::{
-    BlockValidationCandidate, OverlayNumber, ValidationSessionInfo, ValidatorInfo,
-    ValidatorInfoError,
+    BlockValidationCandidate, OverlayNumber, ValidationResult, ValidationSessionInfo,
+    ValidatorInfo, ValidatorInfoError,
 };
 use crate::{
     method_to_async_task_closure,
@@ -32,21 +39,22 @@ use crate::{
 
 use super::{ValidatorEventEmitter, ValidatorEventListener};
 
-// ADAPTER PROCESSOR
+type ValidatorStateTaskReceiver<T> = TaskResponseReceiver<ValidatorTaskResult, T>;
 
 #[derive(PartialEq, Debug)]
 pub enum ValidatorTaskResult {
     Void,
-    Signatures(Option<HashMap<HashBytes, Signature>>),
+    Signatures(HashMap<HashBytes, Signature>),
+    ValidationStatus(ValidationResult),
 }
 
 #[allow(private_bounds)]
 #[async_trait]
 pub trait ValidatorProcessor<ST, VS>:
-    ValidatorProcessorSpecific<ST, VS> + ValidatorEventEmitter + Sized + Send + Sync + 'static
-where
-    ST: StateNodeAdapter,
-    VS: ValidationState,
+ValidatorProcessorSpecific<ST, VS> + ValidatorEventEmitter + Sized + Send + Sync + 'static
+    where
+        ST: StateNodeAdapter,
+        VS: ValidationState,
 {
     fn new(
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
@@ -74,31 +82,49 @@ where
             .get_session(session.seqno)
             .is_none()
         {
-            // self.get_validation_state().get_session()
+            // Pre-fetch necessary data from `self.get_network()` outside of the longer-lived borrows
+            let (peer_resolver, local_peer_id) = {
+                let network = self.get_network();
+                // Clone or extract only the necessary parts to reduce the scope of the borrow
+                (
+                    network.clone().peer_resolver,
+                    network.dht_client.network().peer_id().0.clone(),
+                )
+            };
+
+            // Now `self.get_network()`'s borrow scope ends, allowing `self` to be mutably borrowed again
             let overlay_id = OverlayNumber {
                 session_seqno: session.seqno,
             };
             let overlay_id = OverlayId(tl_proto::hash(overlay_id));
             let network_service = NetworkService::new(self.get_dispatcher().clone());
-            let private_overlay = PrivateOverlay::builder(overlay_id).build(network_service);
-            // let overlay_writer = private_overlay.write_entries();
-            for validator in session.validators.values() {
-                private_overlay
-                    .write_entries()
-                    .insert(&PeerId(validator.public_key.to_bytes()));
-            }
+
+            let private_overlay = PrivateOverlay::builder(overlay_id)
+                .with_peer_resolver(peer_resolver)
+                .build(network_service);
+
             let overlay_added = self
                 .get_network()
                 .overlay_service
-                .try_add_private_overlay(&private_overlay);
-            debug!("OVERLAY ADDED {:?} {:?}", overlay_added,  overlay_id);
-            self.get_validation_state()
-                .add_session(session.clone(), private_overlay);
-            debug!("SESSION ADDED");
-            debug!("NETWORK CLOSED {:?}", self.get_network().network.is_closed());
-            debug!("KNOWS PEERS {:?}", self.get_network().network.known_peers().0.len());
-            // self.get_network().network.known_peers().0.len()
+                .add_private_overlay(&private_overlay);
 
+            debug!("OVERLAY ADDED {:?} {:?}", overlay_added, overlay_id);
+            self.get_validation_state()
+                .add_session(session.clone(), private_overlay.clone());
+            debug!("SESSION ADDED");
+            debug!(
+                "NETWORK CLOSED {:?}",
+                self.get_network().dht_client.network().is_closed()
+            );
+
+            let mut entries = private_overlay.write_entries();
+
+            for validator in session.validators.values() {
+                if &validator.public_key.to_bytes() == &local_peer_id {
+                    continue;
+                }
+                entries.insert(&PeerId(validator.public_key.to_bytes()));
+            }
         }
         Ok(ValidatorTaskResult::Void)
     }
@@ -138,39 +164,149 @@ where
         }
 
         if validators.len() == 0 {
-            debug!("No validators found, skip candidate validation");
+            warn!("No validators found, skip candidate validation");
             return Ok(ValidatorTaskResult::Void);
         }
 
-        let validation_session = Arc::new(ValidationSessionInfo {
-            seqno: session_info.seqno(),
-            validators,
-            current_validator_keypair,
-        });
+        // let validation_session = Arc::new(ValidationSessionInfo {
+        //     seqno: session_info.seqno(),
+        //     validators,
+        //     current_validator_keypair,
+        // });
 
-        let our_signature_for_block = sign_block(&current_validator_keypair, &candidate_id)?;
+        let session_seqno = session_info.seqno();
+        let session = self.get_validation_state().get_mut_session(session_seqno);
 
-        self.get_validation_state().add_signature(
-            session_info.seqno(),
-            candidate_id,
+
+        let session = match session {
+            None => {
+                error!("failed to start_candidate_validation. session not found");
+                panic!("failed to start_candidate_validation. session not found")
+            }
+            Some(session) => session
+        };
+
+
+        let our_signature = sign_block(&current_validator_keypair, &candidate_id)?;
+
+        session.add_block(session_info.seqno(), candidate_id.clone());
+
+        session.add_signature(
+            &candidate_id,
             HashBytes(current_validator_keypair.public_key.to_bytes()),
-            our_signature_for_block,
+            our_signature,
+            true,
         );
 
-        self.validate_candidate(candidate_id, validation_session)
-            .await
+        // let candidate_id_clone = candidate_id.clone();
+        // let validation_session_clone = validation_session.clone();
+
+        let dispatcher = self.get_dispatcher().clone();
+        let current_validator_pubkey = current_validator_keypair.public_key.clone();
+        // let seqno = session;
+        tokio::spawn(async move {
+            let mut retry_interval = interval(Duration::from_secs(1));
+            let max_retries = 100;
+            let mut attempts = 0;
+            let dispatcher_clone = dispatcher.clone();
+
+            loop {
+                // let validation_session_clone = validation_session.clone();
+                let dispatcher_clone = dispatcher_clone.clone();
+                let candidate_id_clone = candidate_id.clone();
+                // let validation_session_clone = validation_session.clone();
+                tokio::select! {
+                    _ = retry_interval.tick() => {
+                        attempts += 1;
+                                tokio::spawn(async move {
+
+                            let dispatcher_clone = dispatcher_clone.clone();
+                        let validation_status = dispatcher_clone.enqueue_task_with_responder(
+                                    method_to_async_task_closure!(
+                                        get_validation_status,
+                                    session_seqno,
+                                    &candidate_id.as_short_id())
+                                ).await;
+
+
+
+                       let validation_status = match validation_status {
+
+                            Ok(validation_status) => {
+                                    match validation_status.await{
+                                        Ok(validation_status) => validation_status,
+                                        Err(e) => {
+                                            error!(err = %e, "Failed to get validation status");
+                                            panic!("Failed to get validation status");
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!(err = %e, "Failed to get validation status");
+                                    panic!("Failed to get validation status");
+                                }
+                            };
+
+
+                        match validation_status {
+                            Ok(ValidatorTaskResult::ValidationStatus(validation_status)) => {
+                                if validation_status == ValidationResult::Valid || validation_status == ValidationResult::Invalid {
+                                    return;
+                                }
+                                    dispatcher_clone.enqueue_task(method_to_async_task_closure!(
+                                    validate_candidate,
+                                        candidate_id_clone.clone(),
+                                        session_seqno,
+                                        current_validator_pubkey.clone()
+
+                                )).await.expect("Failed to validate candidate");
+
+                            }
+                            Ok(_) => {}
+                            _ => {}
+                            }
+                        // if *stop_signal.borrow() {
+                        //     // If stop signal received, terminate validation
+                        //     debug!("Validation for block {:?} stopped by signal.", candidate_id);
+                        //     return Ok(ValidatorTaskResult::Void);
+                        // }
+
+                        // if let Err(e) = res {
+                        //     error!(err = %e, "Failed to run validate block candidate");
+                        // }
+
+                            });
+                        if attempts >= max_retries {
+                            debug!("Max retries reached without successful validation for block {:?}.", candidate_id);
+                            return ;
+                        }
+                    }
+                }
+            }
+        });
+        Ok(ValidatorTaskResult::Void)
     }
 
     async fn get_block_signatures(
         &mut self,
         session_seqno: u32,
-        block_validation_candidate: BlockValidationCandidate,
+        block_id_short: &BlockIdShort,
     ) -> Result<ValidatorTaskResult> {
-        let signatures = self
-            .get_validation_state()
-            .get_signatures(session_seqno, block_validation_candidate)
-            .cloned();
+        let session = self.get_validation_state().get_session(session_seqno).context("session not found")?;
+        let signatures = session
+            .get_valid_signatures(block_id_short);
         Ok(ValidatorTaskResult::Signatures(signatures))
+    }
+
+    async fn get_validation_status(
+        &mut self,
+        session_seqno: u32,
+        block_id_short: &BlockIdShort,
+    ) -> Result<ValidatorTaskResult> {
+        let session = self.get_validation_state().get_session(session_seqno).context("session not found")?;
+        let validation_status = session
+            .validation_status(block_id_short);
+        Ok(ValidatorTaskResult::ValidationStatus(validation_status))
     }
 
     async fn stop_candidate_validation(
@@ -185,216 +321,188 @@ where
         mc_state: Arc<ShardStateStuff>,
     ) -> Result<()>;
 
-    /// Send signature request to each neighbor passing callback closure
-    /// that queue signatures responses processing
-    // async fn request_candidate_signatures(
-    //     // dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
-    //     candidate_id: BlockId,
-    //     // own_signature: Signature,
-    //     session_info: Arc<ValidationSessionInfo>,
-    // ) -> Result<ValidatorTaskResult> {
-    //     let validators = self.get_validation_state().validators_without_signatures(session_info.seqno, candidate_id);
-    //
-    //     /// create tasks for each peer directly (without enqueue)
-    //     for validator in validators {
-    //
-    //             // Self::request_candidate_signature_from_neighbor(
-    //             //     &validator,
-    //             //     candidate_id
-    //             // );
-    //     }
-    //
-    //
-    //
-    //     Ok(ValidatorTaskResult::Void)
-    // }
-
     async fn process_candidate_signature_response(
         &mut self,
-        session: Arc<ValidationSessionInfo>,
-        signatures: SignaturesQuery,
-        candidate_id: BlockId,
+        session_seqno: u32,
+        block_id_short: BlockIdShort,
+        signatures: Vec<([u8; 32], [u8; 64])>,
     ) -> Result<ValidatorTaskResult> {
+
+        let session = self.get_validation_state().get_mut_session(session_seqno);
+
+        let session = match session {
+            None => {
+                info!("failed to process_candidate_signature_response. session not found");
+                return Ok(ValidatorTaskResult::Void);
+            }
+            Some(session) => session
+        };
+
         debug!("PROCESS RESPONSE SIGNATURE");
-        // skip signature if candidate already validated (does not matter if it valid or not)
-        let candidate = BlockValidationCandidate::from(candidate_id);
-        if self.get_validation_state().is_validated(session.seqno, &candidate) {
-            return Ok(ValidatorTaskResult::Void);
-        }
-
-        if signatures.block_validation_candidate != candidate {
-            panic!("Invalid block validation candidate");
-        }
-
-        debug!("SIGNATURES LENGTH = {:?}", signatures.signatures.len());
-        debug!("MY SESSION PUBKEY = {:?}", session.current_validator_keypair.public_key);
-        for signature in signatures.signatures {
-            let validator_id = HashBytes(signature.0);
-            let signature = Signature(signature.1);
-            let validator = session.validators.get(&validator_id).expect("validator not found");
-            debug!("SIGNATURE VALIDATOR PUBKEY = {:?}", validator.public_key);
-
-            let is_valid = validator.public_key.verify(candidate.to_bytes(), &signature.0);
-            debug!("SIGNATURE IS VALID {:?}", is_valid);
-            self.get_validation_state().add_signature(
-                session.seqno,
-                candidate_id,
-                validator_id,
-                signature,
-            );
-        }
-        if self.get_validation_state().is_validated(session.seqno, &candidate) {
-            debug!("BLOCK VALIDATED SUCCESSFULLY");
-            return Ok(ValidatorTaskResult::Void);
-        }
-
-
-
-        // get neighbor from local list
-        // let neighbor = match self.find_neighbor(&validator_info) {
-        //     Some(n) => n,
-        //     None => {
-        //         // skip signature if collator is unknown
-        //         return Ok(ValidatorTaskResult::Void);
+        // session.add_signature(
+        //     &block_id_short,
+        //     HashBytes(session.current_validator_keypair.public_key.to_bytes()),
+        //     Signature(signatures[0].1),
+        //     true,
+        // );
+        // let candidate = BlockValidationCandidate::from(candidate_id);
+        // if signatures.block_validation_candidate != candidate {
+        //     panic!("Invalid block validation candidate");
+        // }
+        // let validation_status = self
+        //     .get_validation_state()
+        //     .validation_status(session_id, &candidate);
+        //
+        // if validation_status == ValidationResult::Valid
+        //     || validation_status == ValidationResult::Invalid
+        // {
+        //     return Ok(ValidatorTaskResult::Void);
+        // }
+        //
+        // for signature in signatures.signatures {
+        //     let validator_id = HashBytes(signature.0);
+        //     let signature = Signature(signature.1);
+        //
+        //     let validator = session
+        //         .get_validation_session_info()
+        //         .get(&validator_id)
+        //         .context("validator not found")?;
+        //
+        //     let is_valid = validator
+        //         .public_key
+        //         .verify(candidate.to_bytes(), &signature.0);
+        //
+        //     self.get_validation_state().add_signature(
+        //         session_id,
+        //         candidate_id,
+        //         validator_id,
+        //         signature,
+        //         is_valid,
+        //     );
+        // }
+        // let validation_status = self
+        //     .get_validation_state()
+        //     .validation_status(session_id, &candidate);
+        //
+        // match validation_status {
+        //     ValidationResult::Valid => {
+        //         let signatures = self
+        //             .get_validation_state()
+        //             .get_valid_signatures(session_id, candidate);
+        //         let signatures = signatures.into_iter().map(|(k, v)| (k, v)).collect();
+        //         self.on_block_validated_event(ValidatedBlock::new(candidate_id, signatures, true))
+        //             .await?;
         //     }
-        // };
-
-        // check signature and update candidate score
-        // let signature_is_valid = Self::check_signature(&candidate_id, &his_signature, neighbor)?;
-        // // self.update_candidate_score(
-        // //     candidate_id,
-        // //     signature_is_valid,
-        // //     his_signature,
-        // //     neighbor.clone(),
-        // // )
-        // // .await?;
-
+        //     ValidationResult::Invalid => {
+        //         self.on_block_validated_event(ValidatedBlock::new(candidate_id, vec![], false))
+        //             .await?;
+        //     }
+        //     ValidationResult::Insufficient => {}
+        // }
         Ok(ValidatorTaskResult::Void)
-    }
-
-    async fn update_candidate_score(
-        &mut self,
-        candidate_id: BlockId,
-        signature_is_valid: bool,
-        his_signature: Signature,
-        neighbor: &ValidatorInfo,
-    ) -> Result<()> {
-        if let Some(validated_block) = self.append_candidate_signature_and_return_if_validated(
-            candidate_id,
-            signature_is_valid,
-            his_signature,
-            neighbor,
-        ) {
-            self.on_block_validated_event(validated_block).await?;
-        }
-
-        Ok(())
     }
 
     async fn validate_candidate(
         &self,
         candidate_id: BlockId,
-        session_info: Arc<ValidationSessionInfo>,
+        session_seqno: u32,
+        current_validator_pubkey: everscale_crypto::ed25519::PublicKey
+        // session_info: Arc<ValidationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
+
+
+        // let sessionx = self.get_validation_state_ref().get_session(session_seqno).ok_or(anyhow!("Session not found"))?;
+
+        let block_id_short = candidate_id.as_short_id();
+
+        let validation_state = self.get_validation_state_ref();
+        let session = validation_state.get_session(session_seqno).ok_or(anyhow!("Session not found"))?;
+        let dispatcher = self.get_dispatcher();
+
         let receiver = self
             .get_state_node_adapter()
             .request_block(candidate_id)
             .await?;
-        let validation_state = self.get_validation_state_ref();
 
-        let current_validator_pubkey = session_info.current_validator_keypair.public_key;
         let validators =
-            validation_state.validators_without_signatures(session_info.seqno, candidate_id);
-        let validation_session_info = validation_state
-            .get_session(session_info.seqno)
-            .unwrap()
-            .get_validation_session_info();
-        debug!("VALIDATORS WITHOUT SIGNATURES = {:?}", validators.len());
-        debug!(
-            "VALIDATORS TOTAL = {:?}",
-            validation_session_info.validators.len()
-        );
-        let private_overlay = validation_state
-            .get_session(session_info.seqno)
-            .unwrap()
+            session.validators_without_signatures(&block_id_short);
+
+        let private_overlay =session
             .get_overlay()
             .clone();
-        let current_signatures = validation_state
-            .get_signatures(session_info.seqno, candidate_id.into())
-            .cloned();
 
-        let dispatcher = self.get_dispatcher();
-        // let validators = self.get_validation_state_ref().validators_without_signatures(session_info.seqno, candidate_id);
+        let current_signatures =
+            session.get_valid_signatures(&candidate_id.as_short_id());
+
         let network = self.get_network().clone();
-        let validation_session_info_cloned = validation_session_info.clone();
-        let session_info_cloned = session_info.clone();
+        // let session_info_cloned = session_info.clone();
 
-        // tokio::spawn(async move {
-            if let Ok(Some(block_from_bc)) = receiver.try_recv().await {
-                debug!("Block some");
-
-                // if state node contains required block then schedule validation using it
-                dispatcher
+        tokio::spawn(async move {
+            if let Ok(Some(_)) = receiver.try_recv().await {
+                let result = dispatcher
                     .clone()
                     .enqueue_task(method_to_async_task_closure!(
                         validate_candidate_by_block_from_bc,
                         candidate_id
                     ))
                     .await;
+
+                if let Err(e) = result {
+                    error!(err = %e, "Failed to validate block by state");
+                    panic!("Failed to validate block by state")
+                }
             } else {
-                debug!("start validation by network");
-
-
-                let req = SignaturesQuery::create(session_info_cloned.clone().seqno, candidate_id.into(), current_signatures.as_ref());
+                let payload = SignaturesQuery::create(
+                    session_seqno,
+                    candidate_id.as_short_id(),
+                    &current_signatures,
+                );
 
                 for validator in validators {
-                    if validator.public_key != current_validator_pubkey.clone() {
-                        debug!("SEND REQUEST TO {:?} FROM {:?}", validator.public_key, current_validator_pubkey.clone() );
-                        let peer_available = network.network.known_peers().contains(&PeerId(validator.public_key.to_bytes()));
-                        if !peer_available {
-                            debug!("ERROR: PEER NOT AVAILABLE");
-                            continue;
-                        }
-
-                        let peer_present = private_overlay.read_entries().contains(&PeerId(validator.public_key.to_bytes()));
-                        if !peer_present {
-                            debug!("ERROR: PEER NOT PRESENT IN OVERLAY");
-                            continue;
-                        }
-
-                        debug!("network is closed {:?}", network.network.is_closed());
-                        let result = private_overlay
-                            .query(&network.network, &PeerId(validator.public_key.to_bytes()), Request::from_tl(req.clone()))
+                    if validator.public_key != current_validator_pubkey {
+                        debug!("send request");
+                        let response = private_overlay
+                            .query(
+                                &network.dht_client.network(),
+                                &PeerId(validator.public_key.to_bytes()),
+                                Request::from_tl(payload.clone()),
+                            )
                             .await;
-                            // .unwrap()
-                            // .parse_tl::<SignaturesQuery>().unwrap();
+                        debug!("request sent");
 
-                        debug!("network is closed2 {:?}", network.network.is_closed());
-
-
-                        // print respose error
-                        if let Err(e) = result {
-                            println!("ERROR: {:?}", e);
-                            continue;
+                        match response {
+                            Ok(response) => {
+                                let response = response.parse_tl::<SignaturesQuery>();
+                                debug!("Got response from network");
+                                match response {
+                                    Ok(signatures) => {
+                                        // let enqueue_task_result = dispatcher
+                                        //     .enqueue_task(method_to_async_task_closure!(
+                                        //         process_candidate_signature_response,
+                                        //         session_info.seqno,
+                                        //         signatures,
+                                        //         candidate_id
+                                        //     ))
+                                        //     .await;
+                                        //
+                                        // if let Err(e) = enqueue_task_result {
+                                        //     error!(err = %e, "Failed to enqueue task for processing signatures response");
+                                        // }
+                                    }
+                                    Err(e) => {
+                                        error!(err = %e, "Failed convert signatures response to SignaturesQuery");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!(err = %e, "Failed to get response from overlay");
+                            }
                         }
-                        // println!("GET RESPONSE FROM {:?} {:?}", validator.public_key, result);
-
-                    //     let s = session_info_cloned.clone();
-                    //     dispatcher.enqueue_task(method_to_async_task_closure!(
-                    //     process_candidate_signature_response,
-                    //         s,
-                    //         result,
-                    //         candidate_id
-                    // )).await.unwrap();
-                    //
                     }
                 }
-
                 //TODO: need to add a block waiting timeout and proceed to the signature request after it expires
             }
-        // });
-
-        // tokio::time::sleep(Duration::from_millis(1000)).await;
+        });
         Ok(ValidatorTaskResult::Void)
     }
 }
@@ -417,40 +525,12 @@ pub(crate) trait ValidatorProcessorSpecific<ST, VS>: Sized {
         &mut self,
         candidate_id: BlockId,
     ) -> Result<ValidatorTaskResult>;
-
-    /// Request signature from neighbor collator and run callback when receive response.
-    /// Send own signature so neighbor can use it to validate his own candidate
-    async fn request_candidate_signature_from_neighbor<Fut>(
-        validator_info: &ValidatorInfo,
-        shard_id: ShardIdent,
-        seq_no: u32,
-        own_signature: Signature,
-        callback: impl FnOnce(ValidatorInfo, Signature) -> Fut + Send + 'static,
-    ) -> Result<()>
-    where
-        Fut: Future<Output = Result<()>> + Send;
-
-    fn check_signature(
-        candidate_id: &BlockId,
-        his_signature: &Signature,
-        neighbor: &ValidatorInfo,
-    ) -> Result<bool>;
-
-    fn is_candidate_validated(&self, block_id: &BlockId) -> bool;
-
-    fn append_candidate_signature_and_return_if_validated(
-        &mut self,
-        candidate_id: BlockId,
-        signature_is_valid: bool,
-        his_signature: Signature,
-        neighbor: &ValidatorInfo,
-    ) -> Option<ValidatedBlock>;
 }
 
 pub(crate) struct ValidatorProcessorStdImpl<ST, VS>
-where
-    ST: StateNodeAdapter,
-    VS: ValidationState,
+    where
+        ST: StateNodeAdapter,
+        VS: ValidationState,
 {
     dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
     listener: Arc<dyn ValidatorEventListener>,
@@ -461,9 +541,9 @@ where
 
 #[async_trait]
 impl<ST, VS> ValidatorEventEmitter for ValidatorProcessorStdImpl<ST, VS>
-where
-    ST: StateNodeAdapter,
-    VS: ValidationState,
+    where
+        ST: StateNodeAdapter,
+        VS: ValidationState,
 {
     async fn on_block_validated_event(&self, validated_block: ValidatedBlock) -> Result<()> {
         self.listener.on_block_validated(validated_block).await
@@ -472,9 +552,9 @@ where
 
 #[async_trait]
 impl<ST, VS> ValidatorProcessor<ST, VS> for ValidatorProcessorStdImpl<ST, VS>
-where
-    ST: StateNodeAdapter,
-    VS: ValidationState,
+    where
+        ST: StateNodeAdapter,
+        VS: ValidationState,
 {
     fn new(
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
@@ -522,9 +602,9 @@ where
 
 #[async_trait]
 impl<ST, VS> ValidatorProcessorSpecific<ST, VS> for ValidatorProcessorStdImpl<ST, VS>
-where
-    ST: StateNodeAdapter,
-    VS: ValidationState,
+    where
+        ST: StateNodeAdapter,
+        VS: ValidationState,
 {
     async fn validate_candidate_by_block_from_bc(
         &mut self,
@@ -534,45 +614,6 @@ where
             .on_block_validated(ValidatedBlock::new(candidate_id, vec![], true))
             .await?;
         Ok(ValidatorTaskResult::Void)
-    }
-
-    async fn request_candidate_signature_from_neighbor<Fut>(
-        collator_descr: &ValidatorInfo,
-        shard_id: ShardIdent,
-        seq_no: u32,
-        own_signature: Signature,
-        callback: impl FnOnce(ValidatorInfo, Signature) -> Fut + Send + 'static,
-    ) -> Result<()>
-    where
-        Fut: Future<Output = Result<()>> + Send,
-    {
-        todo!()
-    }
-    //
-    // fn find_neighbor(&self, neighbor: &ValidatorInfo) -> Option<&ValidatorInfo> {
-    //     todo!()
-    // }
-
-    fn check_signature(
-        candidate_id: &BlockId,
-        his_signature: &Signature,
-        neighbor: &ValidatorInfo,
-    ) -> Result<bool> {
-        todo!()
-    }
-
-    fn is_candidate_validated(&self, block_id: &BlockId) -> bool {
-        todo!()
-    }
-
-    fn append_candidate_signature_and_return_if_validated(
-        &mut self,
-        candidateid: BlockId,
-        signature_is_valid: bool,
-        his_signature: Signature,
-        neighbor: &ValidatorInfo,
-    ) -> Option<ValidatedBlock> {
-        todo!()
     }
 }
 
@@ -585,9 +626,7 @@ mod tests {
     use rand::prelude::ThreadRng;
     use tokio::sync::Mutex;
     use tokio::test;
-    use tycho_block_util::block::ValidatorSubsetInfo;
 
-    // Test-specific listener that records validated blocks
     struct TestValidatorEventListener {
         validated_blocks: Mutex<Vec<ValidatedBlock>>,
     }

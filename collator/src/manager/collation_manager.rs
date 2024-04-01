@@ -1,12 +1,13 @@
 use std::net::Ipv4Addr;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519;
 use everscale_types::models::BlockId;
 use tycho_network::quinn::crypto::KeyPair;
-use tycho_network::{Network, OverlayService, PeerId, Router};
+use tycho_network::{DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
 
 use crate::types::ValidatorNetwork;
 use crate::validator::state::{ValidationState, ValidationStateStdImpl};
@@ -115,9 +116,24 @@ where
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
+        let (_, dht_service) = DhtService::builder(local_id)
+            .with_config(DhtConfig {
+                local_info_announce_period: Duration::from_secs(1),
+                max_local_info_announce_period_jitter: Duration::from_secs(1),
+                routing_table_refresh_period: Duration::from_secs(1),
+                max_routing_table_refresh_period_jitter: Duration::from_secs(1),
+                ..Default::default()
+            })
+            .build();
+
+        let dht_client = dht_service.make_client(&network);
+        let peer_resolver = dht_service.make_peer_resolver().build(&network);
+
         let validator_network = ValidatorNetwork {
-            network,
+            // network,
             overlay_service,
+            peer_resolver,
+            dht_client,
         };
 
         // create validator and start its tasks queue
