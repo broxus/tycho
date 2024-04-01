@@ -109,12 +109,21 @@ fn make_network(node_count: usize) -> Vec<Node> {
     nodes
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn private_overlays_accessible() -> Result<()> {
     tracing_subscriber::fmt::try_init().ok();
     tracing::info!("bootstrap_nodes_accessible");
 
-    let nodes = make_network(5);
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+
+        tracing::error!("{}", info);
+        std::io::stderr().flush().ok();
+        std::io::stdout().flush().ok();
+        std::process::exit(1);
+    }));
+
+    let nodes = make_network(20);
 
     for node in &nodes {
         let resolved = FuturesUnordered::new();

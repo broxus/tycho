@@ -541,7 +541,7 @@ impl DhtInner {
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
     async fn refresh_routing_table(&self, network: &Network) {
         const PARALLEL_QUERIES: usize = 3;
-        const MAX_DISTANCE: usize = 15;
+        const MAX_BUCKETS: usize = 15;
         const QUERY_DEPTH: usize = 3;
 
         // Prepare futures for each bucket
@@ -554,15 +554,15 @@ impl DhtInner {
 
             // Filter out expired nodes
             let now = now_sec();
-            for (_, bucket) in routing_table.buckets.range_mut(..=MAX_DISTANCE) {
+            for (_, bucket) in routing_table.buckets.iter_mut() {
                 bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_peer_info_ttl));
             }
 
             // Iterate over the first buckets up until some distance (`MAX_DISTANCE`)
             // or up to the last non-empty bucket (?).
-            for (&distance, bucket) in routing_table.buckets.range(..=MAX_DISTANCE).rev() {
+            for (&distance, bucket) in routing_table.buckets.iter().take(MAX_BUCKETS) {
                 // TODO: Should we skip empty buckets?
-                if bucket.is_empty() {
+                if bucket.is_empty() || distance == MAX_XOR_DISTANCE {
                     continue;
                 }
 
@@ -774,8 +774,19 @@ impl DhtInner {
 }
 
 fn random_key_at_distance(from: &PeerId, distance: usize, rng: &mut impl RngCore) -> PeerId {
+    let distance = MAX_XOR_DISTANCE - distance;
+
     let mut result = *from;
-    rng.fill_bytes(&mut result.0[distance..]);
+
+    let byte_offset = distance / 8;
+    rng.fill_bytes(&mut result.0[byte_offset..]);
+
+    let bit_offset = distance % 8;
+    if bit_offset != 0 {
+        let mask = 0xff >> bit_offset;
+        result.0[byte_offset] ^= (result.0[byte_offset] ^ from.0[byte_offset]) & !mask;
+    }
+
     result
 }
 
@@ -800,4 +811,21 @@ pub enum FindValueError {
     InvalidData(#[from] tl_proto::TlError),
     #[error("value not found")]
     NotFound,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proper_random_keys() {
+        let peer_id = rand::random();
+        let random_id = random_key_at_distance(&peer_id, 20, &mut rand::thread_rng());
+        println!("{peer_id}");
+        println!("{random_id}");
+
+        let distance = xor_distance(&peer_id, &random_id);
+        println!("{distance}");
+        assert!(distance <= 23);
+    }
 }

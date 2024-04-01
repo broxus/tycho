@@ -311,6 +311,12 @@ impl NetworkInner {
     }
 }
 
+impl Drop for NetworkInner {
+    fn drop(&mut self) {
+        tracing::debug!("network dropped");
+    }
+}
+
 #[derive(thiserror::Error, Debug)]
 #[error("network has been shutdown")]
 struct NetworkShutdownError;
