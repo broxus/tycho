@@ -7,6 +7,7 @@ use tycho_collator::{
     },
     test_utils::try_init_test_tracing,
     types::CollationConfig,
+    validator_test_impl::ValidatorProcessorTestImpl,
 };
 
 #[tokio::test]
@@ -15,7 +16,7 @@ async fn test_collation_process_on_stubs() {
 
     let config = CollationConfig {
         key_pair: everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng()),
-        mc_block_min_interval_ms: 2000,
+        mc_block_min_interval_ms: 5000,
     };
     let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
     let state_node_adapter_builder =
@@ -23,11 +24,11 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let _manager = tycho_collator::manager::create_std_manager(
-        config,
-        mpool_adapter_builder,
-        state_node_adapter_builder,
-    );
+    let _manager = tycho_collator::manager::create_std_manager_with_validator::<
+        _,
+        _,
+        ValidatorProcessorTestImpl<_>,
+    >(config, mpool_adapter_builder, state_node_adapter_builder);
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {

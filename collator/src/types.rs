@@ -25,8 +25,27 @@ pub(crate) struct BlockCandidate {
     data: Vec<u8>,
     collated_data: Vec<u8>,
     collated_file_hash: HashBytes,
+
+    chain_time: u64,
 }
 impl BlockCandidate {
+    pub fn new(
+        block_id: BlockId,
+        prev_blocks_ids: Vec<BlockId>,
+        data: Vec<u8>,
+        collated_data: Vec<u8>,
+        collated_file_hash: HashBytes,
+        chain_time: u64,
+    ) -> Self {
+        Self {
+            block_id,
+            prev_blocks_ids,
+            data,
+            collated_data,
+            collated_file_hash,
+            chain_time,
+        }
+    }
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
     }
@@ -34,17 +53,18 @@ impl BlockCandidate {
         &self.block_id.shard
     }
     pub fn chain_time(&self) -> u64 {
-        todo!()
+        self.chain_time
     }
 }
 
 pub(crate) struct BlockSignatures {
-    good_sigs: Vec<(HashBytes, Signature)>,
-    bad_sigs: Vec<(HashBytes, Signature)>,
+    pub good_sigs: Vec<(HashBytes, Signature)>,
+    pub bad_sigs: Vec<(HashBytes, Signature)>,
 }
 impl BlockSignatures {
     pub fn is_valid(&self) -> bool {
-        todo!()
+        //STUB: always valid
+        true
     }
 }
 
@@ -53,6 +73,12 @@ pub(crate) struct ValidatedBlock {
     signatures: BlockSignatures,
 }
 impl ValidatedBlock {
+    pub fn new(block_id: BlockId, signatures: BlockSignatures) -> Self {
+        Self {
+            block_id,
+            signatures,
+        }
+    }
     pub fn id(&self) -> &BlockId {
         &self.block_id
     }

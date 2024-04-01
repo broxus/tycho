@@ -16,7 +16,7 @@ use tycho_core::internal_queue::{
 
 pub(crate) use tycho_core::internal_queue::iterator::{IterItem, QueueIterator, QueueIteratorImpl};
 
-use crate::utils::shard::SplitMergeAction;
+use crate::{tracing_targets, utils::shard::SplitMergeAction};
 
 // TYPES
 
@@ -62,11 +62,12 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
                     let (shard_l_id, shard_r_id) = shard_id
                         .split()
                         .expect("all split/merge actions should be valid there");
-                    tracing::trace!(
+                    tracing::info!(
+                        target: tracing_targets::MQ_ADAPTER,
                         "Shard {} splitted on {} and {} in message queue",
                         shard_id,
                         shard_l_id,
-                        shard_r_id
+                        shard_r_id,
                     );
                 }
                 SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
@@ -74,6 +75,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
                 }
             }
         }
+        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updated shards in message queue");
         Ok(())
     }
 

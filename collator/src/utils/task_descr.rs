@@ -100,6 +100,7 @@ where
         }
     }
     pub async fn try_recv(self) -> anyhow::Result<T> {
+        //TODO: awaiting error and error in result are merged here, need to fix
         self.inner_receiver.await?.and_then(|res| res.try_into())
     }
 
@@ -115,16 +116,21 @@ where
     ///         .await
     /// });
     /// ```
-    pub fn process_on_recv<Fut>(self, process_callback: impl FnOnce(T) -> Fut + Send + 'static)
-    where
+    pub async fn process_on_recv<Fut>(
+        self,
+        process_callback: impl FnOnce(T) -> Fut + Send + 'static,
+    ) where
         Fut: Future<Output = anyhow::Result<()>> + Send,
     {
         tokio::spawn(async move {
-            if let Ok(res) = self.try_recv().await {
-                if let Err(e) = process_callback(res).await {
-                    tracing::error!("Error processing task response: {e:?}");
-                    //TODO: may be unwind panic?
+            match self.try_recv().await {
+                Ok(res) => {
+                    if let Err(e) = process_callback(res).await {
+                        tracing::error!("Error processing task response: {e:?}");
+                        //TODO: may be unwind panic?
+                    }
                 }
+                Err(err) => tracing::error!("Error in task response or on receiving: {err:?}"),
             }
         });
     }

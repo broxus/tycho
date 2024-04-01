@@ -10,6 +10,7 @@ use tycho_block_util::block::BlockStuff;
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
+    tracing_targets,
     types::{CollationSessionInfo, ValidatedBlock},
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
 };
@@ -24,7 +25,7 @@ pub enum ValidatorTaskResult {
 
 #[allow(private_bounds)]
 #[async_trait]
-pub(super) trait ValidatorProcessor<ST>:
+pub(crate) trait ValidatorProcessor<ST>:
     ValidatorProcessorSpecific<ST> + ValidatorEventEmitter + Sized + Send + Sync + 'static
 where
     ST: StateNodeAdapter,
@@ -47,8 +48,18 @@ where
         candidate_id: BlockId,
         session_info: Arc<CollationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
+        tracing::debug!(
+            target: tracing_targets::VALIDATOR,
+            "Validator (block: {}): validation started",
+            candidate_id.as_short_id(),
+        );
         //TODO: we may received candidate signatures before with signature requests from neighbor collators
 
+        tracing::debug!(
+            target: tracing_targets::VALIDATOR,
+            "Validator (block: {}): trying request block from state...",
+            candidate_id.as_short_id(),
+        );
         // first, try request already signed block from state node
         // possibly we are slow and 2/3+1 fast nodes already signed this block
         let receiver = self
@@ -69,6 +80,11 @@ where
                     ))
                     .await;
             } else {
+                tracing::debug!(
+                    target: tracing_targets::VALIDATOR,
+                    "Validator (block: {}): not found in state - will request signatures",
+                    candidate_id.as_short_id(),
+                );
                 // if state node does not contain such a block
                 // then request signatures from neighbor collators
                 dispatcher
@@ -104,7 +120,6 @@ where
     ) -> Result<ValidatorTaskResult> {
         for collator_descr in session_info.collators().validators.iter() {
             let dispatcher = self.get_dispatcher();
-            let candidate_id = candidate_id;
             Self::request_cadidate_signature_from_neighbor(
                 collator_descr,
                 candidate_id.shard,
@@ -122,32 +137,45 @@ where
                 },
             )
             .await?;
+            tracing::debug!(
+                target: tracing_targets::VALIDATOR,
+                "Validator (block: {}): signature requested from neighbor {}",
+                candidate_id.as_short_id(),
+                collator_descr.public_key,
+            );
         }
         Ok(ValidatorTaskResult::Void)
     }
 
     async fn process_candidate_signature_response(
         &mut self,
-        collator_id: ValidatorDescription,
+        collator_descr: ValidatorDescription,
         his_signature: Signature,
         candidate_id: BlockId,
     ) -> Result<ValidatorTaskResult> {
+        tracing::debug!(
+            target: tracing_targets::VALIDATOR,
+            "Validator (block: {}): processing signature response from neighbor {}...",
+            candidate_id.as_short_id(),
+            collator_descr.public_key,
+        );
+
         // skip signature if candidate already validated (does not matter if it valid or not)
         if self.is_candidate_validated(&candidate_id) {
+            tracing::debug!(
+                target: tracing_targets::VALIDATOR,
+                "Validator (block: {}): already validated - skipping signature response from neighbor {}...",
+                candidate_id.as_short_id(),
+                collator_descr.public_key,
+            );
             return Ok(ValidatorTaskResult::Void);
         }
 
-        // get neighbor from local list
-        let neighbor = match self.find_neighbor(&collator_id) {
-            Some(n) => n,
-            None => {
-                // skip signature if collator is unknown
-                return Ok(ValidatorTaskResult::Void);
-            }
-        };
+        //STUB: get neighbor from response
+        let neighbor = collator_descr;
 
         // check signature and update candidate score
-        let signature_is_valid = Self::check_signature(&candidate_id, &his_signature, neighbor)?;
+        let signature_is_valid = Self::check_signature(&candidate_id, &his_signature, &neighbor)?;
         self.update_candidate_score(
             candidate_id,
             signature_is_valid,
@@ -172,6 +200,11 @@ where
             his_signature,
             neighbor,
         ) {
+            tracing::debug!(
+                target: tracing_targets::VALIDATOR,
+                "Validator (block: {}): collected 2/3+1 signatures - sending validation result to collation mamanger...",
+                candidate_id.as_short_id(),
+            );
             self.on_block_validated_event(validated_block).await?;
         }
 
@@ -182,7 +215,7 @@ where
 /// Trait declares functions that need specific implementation.
 /// For test purposes you can re-implement only this trait.
 #[async_trait]
-pub(super) trait ValidatorProcessorSpecific<ST>: Sized {
+pub(crate) trait ValidatorProcessorSpecific<ST>: Sized {
     /// Find a neighbor info by id in local sessions info
     fn find_neighbor(&self, neighbor: &ValidatorDescription) -> Option<&ValidatorDescription>;
 
@@ -312,7 +345,7 @@ where
 
     fn append_candidate_signature_and_return_if_validated(
         &mut self,
-        candidateid: BlockId,
+        candidate_id: BlockId,
         signature_is_valid: bool,
         his_signature: Signature,
         neighbor: ValidatorDescription,

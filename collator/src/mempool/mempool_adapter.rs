@@ -13,6 +13,8 @@ use everscale_types::{
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
 
+use crate::tracing_targets;
+
 use super::types::{MempoolAnchor, MempoolAnchorId};
 
 #[cfg(test)]
@@ -77,6 +79,8 @@ pub struct MempoolAdapterStdImpl {
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
     fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
+
         //TODO: make real implementation, currently runs stub task
         //      that produces the repeating set of anchors
         let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
@@ -97,7 +101,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                             .write()
                             .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))
                             .unwrap();
-                        tracing::trace!(
+                        tracing::debug!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
                             "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
                             anchor.id(),
                             anchor.chain_time(),
@@ -109,6 +114,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 }
             }
         });
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Stub anchors generator started");
+
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
+
         Self {
             listener,
             _stub_anchors_cache: stub_anchors_cache,
@@ -120,9 +129,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         mc_state: Arc<ShardStateStuff>,
     ) -> Result<()> {
         //TODO: make real implementation, currently does nothing
-        tracing::trace!(
-            "New masterchain state (block_id: {}) processing enqueued to mempool",
-            mc_state.block_id()
+        tracing::info!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            "STUB: New masterchain state (block_id: {}) processing enqueued to mempool",
+            mc_state.block_id().as_short_id(),
         );
         Ok(())
     }
@@ -140,17 +150,19 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             anchors_cache_r.get(&anchor_id).cloned()
         };
         if res.is_some() {
-            tracing::info!("Requested anchor (id: {}) found in local cache", anchor_id);
+            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Requested anchor (id: {}) found in local cache", anchor_id);
         } else {
             tracing::info!(
+                target: tracing_targets::MEMPOOL_ADAPTER,
                 "Requested anchor (id: {}) was not found in local cache",
                 anchor_id
             );
-            tracing::trace!("Requesting anchor (id: {}) in mempool...", anchor_id);
+            tracing::trace!(target: tracing_targets::MEMPOOL_ADAPTER, "STUB: Requesting anchor (id: {}) in mempool...", anchor_id);
             let response_duration = tokio::time::Duration::from_millis(107);
             tokio::time::sleep(response_duration).await;
             tracing::info!(
-                "Requested anchor (id: {}) was not found in mempool (responded in {} ms)",
+                target: tracing_targets::MEMPOOL_ADAPTER,
+                "STUB: Requested anchor (id: {}) was not found in mempool (responded in {} ms)",
                 anchor_id,
                 response_duration.as_millis(),
             );
@@ -178,13 +190,15 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 if let Some((next_id, next)) = range.next() {
                     if stub_first_attempt {
                         tracing::info!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
                             "Found in cache next anchor (id: {}) after specified previous (id: {})",
                             next_id,
                             prev_anchor_id,
                         );
                     } else {
                         tracing::info!(
-                            "Returned next anchor (id: {}) after previous (id: {}) from mempool (responded in {} ms)",
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "STUB: Returned next anchor (id: {}) after previous (id: {}) from mempool (responded in {} ms)",
                             next_id,
                             prev_anchor_id,
                             request_timer.elapsed().as_millis(),
@@ -193,7 +207,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     return Ok(next.clone());
                 } else if stub_first_attempt {
                     tracing::info!(
-                        "There is no next anchor in cache after previous (id: {}). Requested it from mempool. Waiting...",
+                        target: tracing_targets::MEMPOOL_ADAPTER,
+                        "There is no next anchor in cache after previous (id: {}). STUB: Requested it from mempool. Waiting...",
                         prev_anchor_id
                     );
                 }

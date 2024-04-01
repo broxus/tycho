@@ -3,10 +3,14 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
-use everscale_types::models::BlockId;
+use everscale_types::boc::Boc;
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
 
+use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
 
+use crate::tracing_targets;
 use crate::types::ext_types::BlockHandle;
 use crate::{
     impl_enum_try_into, method_to_async_task_closure,
@@ -87,11 +91,17 @@ pub struct StateNodeAdapterStdImpl {
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
     fn create(listener: Arc<dyn StateNodeEventListener>) -> Self {
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Creating state node adapter...");
+
         let processor = StateNodeProcessor {
             listener: listener.clone(),
         };
         let dispatcher =
             AsyncQueuedDispatcher::create(processor, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
+        tracing::trace!(target: tracing_targets::STATE_NODE_ADAPTER, "Tasks queue dispatcher started");
+
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
+
         Self {
             dispatcher: Arc::new(dispatcher),
             listener,
@@ -167,15 +177,50 @@ type StateNodeTaskResponseReceiver<T> = TaskResponseReceiver<StateNodeTaskResult
 
 impl StateNodeProcessor {
     async fn get_last_applied_mc_block_id(&self) -> Result<StateNodeTaskResult> {
-        todo!()
+        //TODO: make real implementation
+
+        //STUB: return block 1
+        let stub_mc_block_id = BlockId {
+            shard: ShardIdent::new_full(-1),
+            seqno: 1,
+            root_hash: HashBytes::ZERO,
+            file_hash: HashBytes::ZERO,
+        };
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "STUB: returns stub last applied mc block ({})", stub_mc_block_id.as_short_id());
+        Ok(StateNodeTaskResult::BlockId(stub_mc_block_id))
     }
     async fn get_state(&self, block_id: BlockId) -> Result<StateNodeTaskResult> {
-        todo!()
+        //TODO: make real implementation
+        let cell = if block_id.is_masterchain() {
+            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "STUB: returns stub master state on block 2");
+            const BOC: &[u8] = include_bytes!("state_node/tests/data/test_state_2_master.boc");
+            Boc::decode(BOC)?
+        } else {
+            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "STUB: returns stub shard state on block 2");
+            const BOC: &[u8] = include_bytes!("state_node/tests/data/test_state_2_0:80.boc");
+            Boc::decode(BOC)?
+        };
+
+        let shard_state = cell.parse::<ShardStateUnsplit>()?;
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "state: {:?}", shard_state);
+
+        let fixed_stub_block_id = BlockId {
+            shard: shard_state.shard_ident,
+            seqno: shard_state.seqno,
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
+        };
+        let tracker = MinRefMcStateTracker::new();
+        let state_stuff = ShardStateStuff::new(fixed_stub_block_id, cell, &tracker)?;
+
+        Ok(StateNodeTaskResult::ShardState(Arc::new(state_stuff)))
     }
     async fn get_block(&self, block_id: BlockId) -> Result<StateNodeTaskResult> {
-        todo!()
+        //TODO: make real implementation
+        Ok(StateNodeTaskResult::Block(None))
     }
     async fn accept_block(&mut self, block: BlockStuffForSync) -> Result<StateNodeTaskResult> {
-        todo!()
+        //TODO: make real implementation
+        Ok(StateNodeTaskResult::BlockHandle(Arc::new(BlockHandle {})))
     }
 }

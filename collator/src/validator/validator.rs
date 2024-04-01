@@ -8,6 +8,7 @@ use everscale_types::models::BlockId;
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
+    tracing_targets,
     types::{CollationSessionInfo, ValidatedBlock},
     utils::async_queued_dispatcher::{
         AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
@@ -71,6 +72,8 @@ where
         listener: Arc<dyn ValidatorEventListener>,
         state_node_adapter: Arc<ST>, /*, overlay_adapter: Arc<OA>*/
     ) -> Self {
+        tracing::info!(target: tracing_targets::VALIDATOR, "Creating validator...");
+
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
             AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
@@ -79,6 +82,9 @@ where
         // create validation processor and run dispatcher for own tasks queue
         let processor = ValidatorProcessor::new(dispatcher.clone(), listener, state_node_adapter);
         AsyncQueuedDispatcher::run(processor, receiver);
+        tracing::trace!(target: tracing_targets::VALIDATOR, "Tasks queue dispatcher started");
+
+        tracing::info!(target: tracing_targets::VALIDATOR, "Validator created");
 
         // create validator instance
         Self {

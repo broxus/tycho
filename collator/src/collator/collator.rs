@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::state::ShardStateStuff;
 
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
     method_to_async_task_closure,
     msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
+    tracing_targets,
     types::{BlockCollationResult, CollationSessionId},
     utils::async_queued_dispatcher::{
         AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
@@ -56,13 +57,13 @@ pub(crate) trait CollatorEventListener: Send + Sync {
 #[async_trait]
 pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     /// Create collator, start its tasks queue, and equeue first initialization task
-    fn start(
+    async fn start(
         listener: Arc<dyn CollatorEventListener>,
         mq_adapter: Arc<MQ>,
         mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         shard_id: ShardIdent,
-        prev_block_ids: Vec<BlockId>,
+        prev_blocks_ids: Vec<BlockId>,
         mc_state: Arc<ShardStateStuff>,
     ) -> Self;
     /// Enqueue collator stop task
@@ -76,6 +77,8 @@ pub(crate) struct CollatorStdImpl<W, MQ, MP, ST>
 where
     W: CollatorProcessor<MQ, MP, ST>,
 {
+    collator_descr: Arc<String>,
+
     _marker_mq_adapter: std::marker::PhantomData<MQ>,
     _marker_mpool_adapter: std::marker::PhantomData<MP>,
     _marker_state_node_adapter: std::marker::PhantomData<ST>,
@@ -91,15 +94,23 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    fn start(
+    async fn start(
         listener: Arc<dyn CollatorEventListener>,
         mq_adapter: Arc<MQ>,
         mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         shard_id: ShardIdent,
-        prev_block_ids: Vec<BlockId>,
+        prev_blocks_ids: Vec<BlockId>,
         mc_state: Arc<ShardStateStuff>,
     ) -> Self {
+        let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
+        let next_block_id = BlockIdShort {
+            shard: shard_id,
+            seqno: max_prev_seqno + 1,
+        };
+        let collator_descr = Arc::new(format!("next block: {}", next_block_id));
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator ({}) starting...", collator_descr);
+
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
             AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
@@ -107,6 +118,7 @@ where
 
         // create processor and run dispatcher for own tasks queue
         let processor = W::new(
+            collator_descr.clone(),
             dispatcher.clone(),
             listener,
             mq_adapter,
@@ -115,9 +127,11 @@ where
             shard_id,
         );
         AsyncQueuedDispatcher::run(processor, receiver);
+        tracing::trace!(target: tracing_targets::COLLATOR, "Tasks queue dispatcher started");
 
         // create instance
         let res = Self {
+            collator_descr,
             _marker_mq_adapter: std::marker::PhantomData,
             _marker_mpool_adapter: std::marker::PhantomData,
             _marker_state_node_adapter: std::marker::PhantomData,
@@ -127,12 +141,16 @@ where
         // equeue first initialization task
         // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
         dispatcher
-            .enqueue_task_blocking(method_to_async_task_closure!(
+            .enqueue_task(method_to_async_task_closure!(
                 init,
-                prev_block_ids,
+                prev_blocks_ids,
                 mc_state
             ))
-            .expect("task receiver had to be not closed or dropped");
+            .await
+            .expect("task receiver had to be not closed or dropped here");
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator ({}) initialization task enqueued", res.collator_descr);
+
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator ({}) started", res.collator_descr);
 
         res
     }

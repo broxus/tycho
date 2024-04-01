@@ -14,14 +14,15 @@ use crate::{
     method_to_async_task_closure,
     msg_queue::{MessageQueueAdapter, MessageQueueAdapterStdImpl, QueueIteratorImpl},
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
+    tracing_targets,
     types::{BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock},
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
     validator::{
-        validator_processor::ValidatorProcessorStdImpl, Validator, ValidatorEventListener,
-        ValidatorStdImpl,
+        validator_processor::{ValidatorProcessor, ValidatorProcessorStdImpl},
+        Validator, ValidatorEventListener, ValidatorStdImpl,
     },
 };
 
@@ -78,6 +79,25 @@ where
         ST,
     >::create(config, mpool_adapter_builder, state_adapter_builder)
 }
+#[allow(private_bounds)]
+pub fn create_std_manager_with_validator<MP, ST, VP>(
+    config: CollationConfig,
+    mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
+    state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+) -> impl CollationManager<MP, ST>
+where
+    MP: MempoolAdapter,
+    ST: StateNodeAdapter,
+    VP: ValidatorProcessor<ST>,
+{
+    CollationManagerGenImpl::<
+        CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
+        ValidatorStdImpl<VP, _>,
+        MessageQueueAdapterStdImpl,
+        MP,
+        ST,
+    >::create(config, mpool_adapter_builder, state_adapter_builder)
+}
 
 impl<C, V, MQ, MP, ST> CollationManager<MP, ST> for CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
@@ -92,6 +112,8 @@ where
         mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
     ) -> Self {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
+
         let config = Arc::new(config);
 
         // create dispatcher for own async tasks queue
@@ -121,6 +143,7 @@ where
             validator,
         );
         AsyncQueuedDispatcher::run(processor, receiver);
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks queue dispatcher started");
 
         // create manager instance
         let mgr = Self {
@@ -143,6 +166,9 @@ where
             },
             "CollationProcessor::check_refresh_collation_sessions()".into(),
         );
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Action scheduled in 10s: CollationProcessor::check_refresh_collation_sessions()");
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");
 
         // return manager
         mgr

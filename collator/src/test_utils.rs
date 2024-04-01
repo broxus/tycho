@@ -8,10 +8,10 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
                 .with_default_directive(level_filter.into())
                 .from_env_lossy(),
         )
-        .with_file(false)
-        .with_line_number(false)
-        .with_target(false)
-        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(true)
+        //.with_thread_ids(true)
         .compact()
         .try_init()
         .ok();
