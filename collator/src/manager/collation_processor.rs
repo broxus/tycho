@@ -7,7 +7,7 @@ use anyhow::{anyhow, Result};
 
 use everscale_types::{
     cell::HashBytes,
-    models::{BlockId, ShardIdent, ValidatorSet},
+    models::{BlockId, ShardIdent, ValidatorDescription, ValidatorSet},
 };
 use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
 
@@ -376,9 +376,27 @@ where
                     new_session_seqno,
                 ))?;
 
+            //STUB: create subset with us and one dummy neighbor
+            let neighbor_keypair =
+                everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
+            let subset = vec![
+                ValidatorDescription {
+                    public_key: self.config.key_pair.public_key.to_bytes().into(),
+                    adnl_addr: Some(self.config.key_pair.public_key.to_bytes().into()),
+                    weight: 50,
+                    prev_total_weight: 50,
+                    mc_seqno_since: 0,
+                },
+                ValidatorDescription {
+                    public_key: neighbor_keypair.public_key.to_bytes().into(),
+                    adnl_addr: Some(neighbor_keypair.public_key.to_bytes().into()),
+                    weight: 50,
+                    prev_total_weight: 50,
+                    mc_seqno_since: 0,
+                },
+            ];
+
             let local_pubkey_opt = find_us_in_collators_set(&self.config, &subset);
-            //STUB: consider we always should collate
-            let local_pubkey_opt = local_pubkey_opt.or(Some(self.config.key_pair.public_key));
 
             if let Some(_local_pubkey) = local_pubkey_opt {
                 if let Entry::Vacant(entry) = self.active_collators.entry(shard_id) {
@@ -518,8 +536,9 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
+        let current_collator_pubkey = self.config.key_pair.public_key;
         self.validator
-            .enqueue_candidate_validation(candidate_id, session_info)
+            .enqueue_candidate_validation(candidate_id, session_info, current_collator_pubkey)
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block

@@ -3,6 +3,7 @@ use std::{future::Future, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescription};
 
 use tycho_block_util::block::BlockStuff;
@@ -47,6 +48,7 @@ where
         &self,
         candidate_id: BlockId,
         session_info: Arc<CollationSessionInfo>,
+        own_pubkey: PublicKey,
     ) -> Result<ValidatorTaskResult> {
         tracing::debug!(
             target: tracing_targets::VALIDATOR,
@@ -92,7 +94,8 @@ where
                         request_candidate_signatures,
                         candidate_id,
                         Signature::default(),
-                        session_info
+                        session_info,
+                        own_pubkey
                     ))
                     .await;
 
@@ -117,8 +120,14 @@ where
         candidate_id: BlockId,
         own_signature: Signature,
         session_info: Arc<CollationSessionInfo>,
+        own_pubkey: PublicKey,
     ) -> Result<ValidatorTaskResult> {
         for collator_descr in session_info.collators().validators.iter() {
+            if collator_descr.public_key == own_pubkey.to_bytes() {
+                // skip ourselves
+                continue;
+            }
+
             let dispatcher = self.get_dispatcher();
             Self::request_cadidate_signature_from_neighbor(
                 collator_descr,

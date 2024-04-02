@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::models::BlockId;
 
 use crate::{
@@ -47,6 +48,7 @@ where
         &self,
         candidate: BlockId,
         session_info: Arc<CollationSessionInfo>,
+        own_pubkey: PublicKey,
     ) -> Result<()>;
 }
 
@@ -97,12 +99,14 @@ where
         &self,
         candidate: BlockId,
         session_info: Arc<CollationSessionInfo>,
+        own_pubkey: PublicKey,
     ) -> Result<()> {
         self.dispatcher
             .enqueue_task(method_to_async_task_closure!(
                 start_candidate_validation,
                 candidate,
-                session_info
+                session_info,
+                own_pubkey
             ))
             .await
     }
