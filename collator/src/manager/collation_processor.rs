@@ -335,7 +335,8 @@ where
             .enqueue_candidate_validation(
                 //TODO: pass only block id when the Validator interface is changed
                 *candidate.block_id(),
-                session_info,
+                session_info.seqno(),
+                *session_info.current_collator_keypair().unwrap(),
             )
             .await?;
 

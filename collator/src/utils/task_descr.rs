@@ -81,7 +81,7 @@ where
     }
 
     /// Example:
-    /// ```
+    /// ```ignore
     /// let dispatcher = self.dispatcher.clone();
     /// receiver.process_on_recv(|res| async move {
     ///     dispatcher

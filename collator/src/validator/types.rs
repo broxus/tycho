@@ -1,14 +1,14 @@
-use crate::types::CollationSessionInfo;
-use anyhow::bail;
-use everscale_crypto::ed25519::{KeyPair, PublicKey};
-use everscale_types::cell::{HashBytes, Store};
-use everscale_types::models::{BlockId, Signature, ValidatorDescription};
-use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
+
+use anyhow::bail;
+use everscale_crypto::ed25519::{KeyPair, PublicKey};
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{BlockId, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
-use tycho_network::{Network, OverlayService};
+
+use crate::types::CollationSessionInfo;
 
 pub(crate) type ValidatorsMap = HashMap<[u8; 32], Arc<ValidatorInfo>>;
 

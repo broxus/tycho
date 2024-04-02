@@ -31,19 +31,15 @@ where
         (dispatcher, receiver)
     }
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
-        debug!("dispatcher run");
         let h = tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
-                debug!("TASK RECEIVED");
                 let (task, responder) = task.extract();
                 let future = task(worker);
                 let future = Box::pin(future);
                 let (updated_worker, res) = future.await;
                 worker = updated_worker;
                 let _ = responder.respond(res);
-                debug!("TASK PROCESSED")
             }
-            debug!("dispatcher finished");
         });
     }
     pub fn create(worker: W, queue_buffer_size: usize) -> Self {
@@ -57,7 +53,6 @@ where
     }
 
     async fn _enqueue_task(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
-        debug!("ENQUE TASK");
         self.tasks_queue
             .send(task)
             .await

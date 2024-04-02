@@ -51,11 +51,6 @@ impl BlockSignatures {
     }
 }
 
-// pub struct ValidatedBlock {
-//     block_id: BlockId,
-//     signatures: BlockSignatures,
-// }
-
 pub struct ValidatedBlock {
     block: BlockId,
     signatures: Vec<(HashBytes, Signature)>,
@@ -133,21 +128,11 @@ impl CollationSessionInfo {
     pub fn current_collator_keypair(&self) -> Option<&KeyPair> {
         self.current_collator_keypair.as_ref()
     }
-
-    // pub fn sign(&self, data: &[u8]) -> Signature {
-    //     Signature(self.current_collator_keypair.sign(data))
-    // }
-    //
-    // pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
-    //     self.current_collator_keypair.public_key.verify(message, &signature.0)
-    // }
 }
 
 pub(crate) mod ext_types {
     pub use stubs::*;
     pub mod stubs {
-        use everscale_types::{cell::HashBytes, models::ShardIdent};
-
         pub struct KeyId([u8; 32]);
         pub struct BlockSignature(pub Vec<u8>);
         #[derive(Clone)]
@@ -177,7 +162,6 @@ pub(crate) mod ext_types {
 
 #[derive(Clone)]
 pub struct ValidatorNetwork {
-    // pub network: Network,
     pub overlay_service: OverlayService,
     pub peer_resolver: PeerResolver,
     pub dht_client: DhtClient,

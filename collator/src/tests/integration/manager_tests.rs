@@ -13,8 +13,8 @@ use crate::{
     validator::{validator_processor::ValidatorProcessorStdImpl, ValidatorStdImpl},
 };
 
-#[test]
-fn test_create_manager() -> Result<()> {
+#[tokio::test]
+async fn test_create_manager() -> Result<()> {
     type CollationManagerStdImplGenST<MQ, ST, VS> = CollationManagerGenImpl<
         CollatorStdImpl<CollatorProcessorStdImpl<MQ, ST>, MQ, ST>,
         ValidatorStdImpl<ValidatorProcessorStdImpl<ST, VS>, ST, VS>,

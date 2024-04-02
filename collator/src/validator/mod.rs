@@ -1,3 +1,5 @@
+pub(crate) use validator::*;
+
 pub mod network;
 pub mod state;
 mod types;
@@ -5,4 +7,3 @@ mod types;
 mod validator;
 pub mod validator_processor;
 
-pub(crate) use validator::*;
