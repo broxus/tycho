@@ -5,9 +5,7 @@ use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use tycho_network::{
-    service_query_fn, Network, NetworkConfig, NetworkExt, Response, ServiceRequest, Version,
-};
+use tycho_network::{service_query_fn, Network, NetworkConfig, NetworkExt, Response, ServiceRequest, Version, PeerId};
 
 use crate::intercom::responses::*;
 use crate::models::{Location, Point, PointId, RoundId, Signature};
@@ -72,7 +70,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Broadcast { point })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, PeerId::wrap(&[0u8;32])).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -88,7 +86,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Point { id })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, PeerId::wrap(&[0u8;32])).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -104,7 +102,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Vertex { id })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from,  PeerId::wrap(&[0u8;32])).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -124,7 +122,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Evidence { vertex_id })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from,  PeerId::wrap(&[0u8;32])).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -140,7 +138,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Vertices { round })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, PeerId::wrap(&[0u8;32])).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 

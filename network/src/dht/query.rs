@@ -203,7 +203,7 @@ impl Query {
                 }
                 // Do nothing on error
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e:?}");
+                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e}");
                 }
                 // Do nothing on timeout
                 None => {
@@ -274,7 +274,7 @@ impl Query {
                 }
                 // Do nothing on error
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e:?}");
+                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e}");
                 }
                 // Do nothing on timeout
                 None => {
@@ -450,7 +450,7 @@ impl<T: Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> StoreValue<
                     tracing::debug!(peer_id = %node.id, "value stored");
                 }
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to store value: {e:?}");
+                    tracing::warn!(peer_id = %node.id, "failed to store value: {e}");
                 }
                 // Do nothing on timeout
                 None => {

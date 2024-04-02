@@ -12,10 +12,12 @@ dashmap = "5.4"
 futures-util = "0.3"
 hex = "0.4"
 humantime = "2"
+libc = "0.2"
 rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 tokio = { version = "1", default-features = false, features = ["time", "sync", "rt"] }
+tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = [

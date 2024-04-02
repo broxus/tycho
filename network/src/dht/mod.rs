@@ -320,6 +320,10 @@ impl DhtService {
     pub fn make_peer_resolver(&self) -> PeerResolverBuilder {
         PeerResolver::builder(self.clone())
     }
+
+    pub fn has_peer(&self, peer_id: &PeerId) -> bool {
+        self.0.routing_table.lock().unwrap().contains(peer_id)
+    }
 }
 
 impl Service<ServiceRequest> for DhtService {
@@ -338,7 +342,7 @@ impl Service<ServiceRequest> for DhtService {
         let (constructor, body) = match self.0.try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
-                tracing::debug!("failed to deserialize query: {e:?}");
+                tracing::debug!("failed to deserialize query: {e}");
                 return futures_util::future::ready(None);
             }
         };
@@ -362,7 +366,7 @@ impl Service<ServiceRequest> for DhtService {
                 self.0.handle_get_node_info().map(tl_proto::serialize)
             },
         }, e => {
-            tracing::debug!("failed to deserialize query: {e:?}");
+            tracing::debug!("failed to deserialize query: {e}");
             None
         });
 
@@ -382,7 +386,7 @@ impl Service<ServiceRequest> for DhtService {
         let (constructor, body) = match self.0.try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
-                tracing::debug!("failed to deserialize message: {e:?}");
+                tracing::debug!("failed to deserialize message: {e}");
                 return futures_util::future::ready(());
             }
         };
@@ -392,11 +396,11 @@ impl Service<ServiceRequest> for DhtService {
                 tracing::debug!("store");
 
                 if let Err(e) = self.0.handle_store(r) {
-                    tracing::debug!("failed to store value: {e:?}");
+                    tracing::debug!("failed to store value: {e}");
                 }
             }
         }, e => {
-            tracing::debug!("failed to deserialize message: {e:?}");
+            tracing::debug!("failed to deserialize message: {e}");
         });
 
         futures_util::future::ready(())
@@ -484,7 +488,7 @@ impl DhtInner {
                         refresh_peer_info_interval.reset();
 
                         if let Err(e) = this.announce_local_peer_info(&network).await {
-                            tracing::error!("failed to announce local DHT node info: {e:?}");
+                            tracing::error!("failed to announce local DHT node info: {e}");
                         }
                     }
                     Action::RefreshRoutingTable => {
@@ -501,9 +505,17 @@ impl DhtInner {
                         }));
                     }
                     Action::AddPeer(peer_info) => {
-                        tracing::info!(peer_id = %peer_info.id, "received peer info");
-                        if let Err(e) = this.add_peer_info(&network, peer_info) {
-                            tracing::error!("failed to add peer to the routing table: {e:?}");
+                        let peer_id = peer_info.id;
+                        let added = this.add_peer_info(&network, peer_info);
+                        tracing::debug!(
+                            local_id = %this.local_id,
+                            %peer_id,
+                            ?added,
+                            "received peer info",
+                        );
+
+                        if let Err(e) = added {
+                            tracing::error!("failed to add peer to the routing table: {e}");
                         }
                     }
                 }
@@ -558,14 +570,13 @@ impl DhtInner {
                 bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_peer_info_ttl));
             }
 
-            // Iterate over the first buckets up until some distance (`MAX_DISTANCE`)
-            // or up to the last non-empty bucket (?).
-            for (&distance, bucket) in routing_table.buckets.iter().take(MAX_BUCKETS) {
-                // TODO: Should we skip empty buckets?
-                if bucket.is_empty() || distance == MAX_XOR_DISTANCE {
-                    continue;
-                }
-
+            // Iterate over the first non-empty buckets (at most `MAX_BUCKETS`)
+            for (&distance, _) in routing_table
+                .buckets
+                .iter()
+                .filter(|(&distance, bucket)| distance > 0 && !bucket.is_empty())
+                .take(MAX_BUCKETS)
+            {
                 // Query the K closest nodes for a random ID at the specified distance from the local ID.
                 let random_id = random_key_at_distance(&routing_table.local_id, distance, rng);
                 let query = Query::new(
