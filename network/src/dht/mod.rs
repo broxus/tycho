@@ -324,6 +324,10 @@ impl DhtService {
     pub fn has_peer(&self, peer_id: &PeerId) -> bool {
         self.0.routing_table.lock().unwrap().contains(peer_id)
     }
+
+    pub fn store_value_locally(&self, value: ValueRef<'_>) -> Result<bool, StorageError> {
+        self.0.storage.insert(&value)
+    }
 }
 
 impl Service<ServiceRequest> for DhtService {

@@ -315,6 +315,14 @@ pub struct PublicOverlayEntries {
 }
 
 impl PublicOverlayEntries {
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
     /// Returns a reference to one random element of the slice,
     /// or `None` if the slice is empty.
     pub fn choose<R>(&self, rng: &mut R) -> Option<&PublicOverlayEntryData>
@@ -335,6 +343,18 @@ impl PublicOverlayEntries {
         R: Rng + ?Sized,
     {
         self.data.choose_multiple(rng, n)
+    }
+
+    /// Chooses all entries from the set, without repetition,
+    /// and in random order.
+    pub fn choose_all<R>(
+        &self,
+        rng: &mut R,
+    ) -> rand::seq::SliceChooseIter<'_, [PublicOverlayEntryData], PublicOverlayEntryData>
+    where
+        R: Rng + ?Sized,
+    {
+        self.data.choose_multiple(rng, self.data.len())
     }
 
     fn insert(&mut self, item: &PublicEntry) -> bool {
