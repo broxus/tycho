@@ -76,6 +76,7 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
 pub(crate) struct CollatorStdImpl<W, MQ, MP, ST>
 where
     W: CollatorProcessor<MQ, MP, ST>,
+    ST: StateNodeAdapter,
 {
     collator_descr: Arc<String>,
 

@@ -29,61 +29,55 @@ use super::{
 
 // COLLATOR PROCESSOR
 
-/// Trait declares functions that need specific implementation.
-/// For test purposes you can re-implement only this trait.
 #[async_trait]
-pub(super) trait CollatorProcessorSpecific<MQ, MP, ST>: Sized {
-    fn new(
-        collator_descr: Arc<String>,
-        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
-        listener: Arc<dyn CollatorEventListener>,
-        mq_adapter: Arc<MQ>,
-        mpool_adapter: Arc<MP>,
-        state_node_adapter: Arc<ST>,
-        shard_id: ShardIdent,
-    ) -> Self;
-
-    fn collator_descr(&self) -> &str;
-
-    fn shard_id(&self) -> &ShardIdent;
-
-    fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ()>>;
-
-    fn get_mq_adapter(&self) -> Arc<MQ>;
-
-    fn get_state_node_adapter(&self) -> Arc<ST>;
-
-    fn working_state(&self) -> &WorkingState;
-    fn set_working_state(&mut self, working_state: WorkingState);
-    fn update_working_state(&mut self, new_prev_block_id: BlockId) -> Result<()>;
-
-    async fn init_mq_iterator(&mut self) -> Result<()>;
-
-    fn mq_iterator_has_next(&self) -> bool;
-    fn mq_iterator_next(&mut self) -> Option<IterItem>;
-    fn mq_iterator_commit(&mut self);
-    fn mq_iterator_get_diff(&self, block_id_short: BlockIdShort) -> QueueDiff;
-    fn mq_iterator_add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
-
-    async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>>;
-    fn last_imported_anchor_id(&self) -> Option<&MempoolAnchorId>;
-    fn get_last_imported_anchor_chain_time(&self) -> u64;
-
-    /// TRUE - when exist imported anchors in cache and not all their externals were processed
-    fn has_pending_externals(&self) -> bool;
-    fn set_has_pending_externals(&mut self, value: bool);
-    /// (TODO) Should consider parallel processing for different accounts
-    fn get_next_external(&mut self) -> Option<Arc<OwnedMessage>>;
-}
-
-#[async_trait]
-pub(super) trait CollatorProcessor<MQ, MP, ST>: DoCollate<MQ, MP, ST> {
+pub(super) trait CollatorProcessor<MQ, MP, ST>: DoCollate<MQ, MP, ST>
+where
+    ST: StateNodeAdapter,
+{
     // Initialize collator working state then run collation
     async fn init(
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
         mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()>;
+    ) -> Result<()> {
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): processing...", self.collator_descr());
+
+        // init working state
+
+        // load states
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): loading initial shard state...", self.collator_descr());
+        let (mc_state, prev_states) = Self::load_init_states(
+            self.get_state_node_adapter(),
+            *self.shard_id(),
+            prev_blocks_ids.clone(),
+            mc_state,
+        )
+        .await?;
+
+        // build, validate and set working state
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): building working state...", self.collator_descr());
+        let working_state =
+            Self::build_and_validate_working_state(mc_state, prev_states, prev_blocks_ids.clone())?;
+        self.set_working_state(working_state);
+
+        //TODO: fix work with internals, currently do not init mq iterator because do not need to integrate mq
+        // init message queue iterator
+        //self.init_mq_iterator().await?;
+
+        // master block collations will be called by the collation manager directly
+
+        // enqueue collation attempt of next shard block
+        if !self.shard_id().is_masterchain() {
+            self.get_dispatcher()
+                .enqueue_task(method_to_async_task_closure!(try_collate,))
+                .await?;
+            tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): collation attempt enqueued", self.collator_descr());
+        }
+
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): finished", self.collator_descr());
+
+        Ok(())
+    }
 
     /// Load required initial states:
     /// master state + list of previous shard states
@@ -92,7 +86,31 @@ pub(super) trait CollatorProcessor<MQ, MP, ST>: DoCollate<MQ, MP, ST> {
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
         mc_state: Arc<ShardStateStuff>,
-    ) -> Result<(Arc<ShardStateStuff>, Vec<Arc<ShardStateStuff>>)>;
+    ) -> Result<(Arc<ShardStateStuff>, Vec<Arc<ShardStateStuff>>)> {
+        // if current shard is a masterchain then can take current master state
+        if shard_id.is_masterchain() {
+            return Ok((mc_state.clone(), vec![mc_state]));
+        }
+
+        // otherwise await prev states by prev block ids
+        let mut prev_states = vec![];
+        for prev_block_id in prev_blocks_ids {
+            // request state for prev block and wait for response
+            let state = state_node_adapter
+                .request_state(prev_block_id)
+                .await?
+                .try_recv()
+                .await?;
+            tracing::info!(
+                target: tracing_targets::COLLATOR,
+                "To init working state loaded prev shard state for prev_block_id {}",
+                prev_block_id.as_short_id(),
+            );
+            prev_states.push(state);
+        }
+
+        Ok((mc_state, prev_states))
+    }
 
     /// Build working state structure:
     /// * master state
@@ -211,6 +229,64 @@ pub(super) trait CollatorProcessor<MQ, MP, ST>: DoCollate<MQ, MP, ST> {
     }
 }
 
+#[async_trait]
+impl<MQ, QI, MP, ST> CollatorProcessor<MQ, MP, ST> for CollatorProcessorStdImpl<MQ, QI, MP, ST>
+where
+    MQ: MessageQueueAdapter,
+    QI: QueueIterator + Send + Sync + 'static,
+    MP: MempoolAdapter,
+    ST: StateNodeAdapter,
+{
+}
+
+/// Trait declares functions that need specific implementation.
+/// For test purposes you can re-implement only this trait.
+#[async_trait]
+pub(super) trait CollatorProcessorSpecific<MQ, MP, ST>: Sized {
+    fn new(
+        collator_descr: Arc<String>,
+        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
+        listener: Arc<dyn CollatorEventListener>,
+        mq_adapter: Arc<MQ>,
+        mpool_adapter: Arc<MP>,
+        state_node_adapter: Arc<ST>,
+        shard_id: ShardIdent,
+    ) -> Self;
+
+    fn collator_descr(&self) -> &str;
+
+    fn shard_id(&self) -> &ShardIdent;
+
+    fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ()>>;
+
+    fn get_mq_adapter(&self) -> Arc<MQ>;
+
+    fn get_state_node_adapter(&self) -> Arc<ST>;
+
+    fn working_state(&self) -> &WorkingState;
+    fn set_working_state(&mut self, working_state: WorkingState);
+    fn update_working_state(&mut self, new_prev_block_id: BlockId) -> Result<()>;
+
+    async fn init_mq_iterator(&mut self) -> Result<()>;
+
+    fn mq_iterator_has_next(&self) -> bool;
+    fn mq_iterator_next(&mut self) -> Option<IterItem>;
+    fn mq_iterator_commit(&mut self);
+    fn mq_iterator_get_diff(&self, block_id_short: BlockIdShort) -> QueueDiff;
+    fn mq_iterator_add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
+
+    async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>>;
+    fn last_imported_anchor_id(&self) -> Option<&MempoolAnchorId>;
+    fn get_last_imported_anchor_chain_time(&self) -> u64;
+
+    /// TRUE - when exist imported anchors in cache and not all their externals were processed
+    fn has_pending_externals(&self) -> bool;
+    fn set_has_pending_externals(&mut self, value: bool);
+
+    /// (TODO) Should consider parallel processing for different accounts
+    fn get_next_external(&mut self) -> Option<Arc<OwnedMessage>>;
+}
+
 pub(crate) struct CollatorProcessorStdImpl<MQ, QI, MP, ST> {
     collator_descr: Arc<String>,
     dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
@@ -238,33 +314,6 @@ pub(crate) struct CollatorProcessorStdImpl<MQ, QI, MP, ST> {
     ///
     /// Updated in the `get_next_external()` method
     has_pending_externals: bool,
-
-    pub(super) _stub_prev_block_id: Option<BlockId>,
-}
-
-#[async_trait]
-impl<MQ, QI, MP, ST> CollatorEventEmitter for CollatorProcessorStdImpl<MQ, QI, MP, ST>
-where
-    MQ: MessageQueueAdapter,
-    QI: QueueIterator + Send + Sync + 'static,
-    MP: MempoolAdapter,
-    ST: StateNodeAdapter,
-{
-    async fn on_skipped_empty_anchor_event(
-        &self,
-        shard_id: ShardIdent,
-        anchor: Arc<MempoolAnchor>,
-    ) -> Result<()> {
-        self.listener
-            .on_skipped_empty_anchor(shard_id, anchor)
-            .await
-    }
-    async fn on_block_candidate_event(&self, collation_result: BlockCollationResult) -> Result<()> {
-        self.listener.on_block_candidate(collation_result).await
-    }
-    async fn on_collator_stopped_event(&self, stop_key: CollationSessionId) -> Result<()> {
-        self.listener.on_collator_stopped(stop_key).await
-    }
 }
 
 #[async_trait]
@@ -302,8 +351,6 @@ where
 
             externals_read_upto: BTreeMap::new(),
             has_pending_externals: false,
-
-            _stub_prev_block_id: None,
         }
     }
 
@@ -443,88 +490,26 @@ where
 }
 
 #[async_trait]
-impl<MQ, QI, MP, ST> CollatorProcessor<MQ, MP, ST> for CollatorProcessorStdImpl<MQ, QI, MP, ST>
+impl<MQ, QI, MP, ST> CollatorEventEmitter for CollatorProcessorStdImpl<MQ, QI, MP, ST>
 where
     MQ: MessageQueueAdapter,
     QI: QueueIterator + Send + Sync + 'static,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn init(
-        &mut self,
-        prev_blocks_ids: Vec<BlockId>,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
-        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): processing...", self.collator_descr());
-
-        // init working state
-
-        // load states
-        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): loading initial shard state...", self.collator_descr());
-        let (mc_state, prev_states) = Self::load_init_states(
-            self.get_state_node_adapter(),
-            *self.shard_id(),
-            prev_blocks_ids.clone(),
-            mc_state,
-        )
-        .await?;
-
-        // build, validate and set working state
-        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): building working state...", self.collator_descr());
-        let working_state =
-            Self::build_and_validate_working_state(mc_state, prev_states, prev_blocks_ids.clone())?;
-        self.set_working_state(working_state);
-
-        //STUB: save prev block id to produce further correct collected block ids
-        self._stub_prev_block_id = prev_blocks_ids.first().copied();
-
-        //TODO: fix work with internals, currently do not init mq iterator because do not need to integrate mq
-        // init message queue iterator
-        //self.init_mq_iterator().await?;
-
-        // master block collations will be called by the collation manager directly
-
-        // enqueue collation attempt of next shard block
-        if !self.shard_id.is_masterchain() {
-            self.get_dispatcher()
-                .enqueue_task(method_to_async_task_closure!(try_collate,))
-                .await?;
-            tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): collation attempt enqueued", self.collator_descr());
-        }
-
-        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): finished", self.collator_descr());
-
-        Ok(())
-    }
-
-    async fn load_init_states(
-        state_node_adapter: Arc<ST>,
+    async fn on_skipped_empty_anchor_event(
+        &self,
         shard_id: ShardIdent,
-        prev_blocks_ids: Vec<BlockId>,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<(Arc<ShardStateStuff>, Vec<Arc<ShardStateStuff>>)> {
-        // if current shard is a masterchain then can take current master state
-        if shard_id.is_masterchain() {
-            return Ok((mc_state.clone(), vec![mc_state]));
-        }
-
-        // otherwise await prev states by prev block ids
-        let mut prev_states = vec![];
-        for prev_block_id in prev_blocks_ids {
-            // request state for prev block and wait for response
-            let state = state_node_adapter
-                .request_state(prev_block_id)
-                .await?
-                .try_recv()
-                .await?;
-            tracing::info!(
-                target: tracing_targets::COLLATOR,
-                "To init working state loaded prev shard state for prev_block_id {}",
-                prev_block_id.as_short_id(),
-            );
-            prev_states.push(state);
-        }
-
-        Ok((mc_state, prev_states))
+        anchor: Arc<MempoolAnchor>,
+    ) -> Result<()> {
+        self.listener
+            .on_skipped_empty_anchor(shard_id, anchor)
+            .await
+    }
+    async fn on_block_candidate_event(&self, collation_result: BlockCollationResult) -> Result<()> {
+        self.listener.on_block_candidate(collation_result).await
+    }
+    async fn on_collator_stopped_event(&self, stop_key: CollationSessionId) -> Result<()> {
+        self.listener.on_collator_stopped(stop_key).await
     }
 }
