@@ -199,8 +199,13 @@ where
 
         // queue collation if has internals or externals
         if has_internals || has_externals {
+            let next_chain_time = self.get_last_imported_anchor_chain_time();
             self.get_dispatcher()
-                .enqueue_task(method_to_async_task_closure!(do_collate,))
+                .enqueue_task(method_to_async_task_closure!(
+                    do_collate,
+                    next_chain_time,
+                    vec![]
+                ))
                 .await?;
             tracing::debug!(
                 target: tracing_targets::COLLATOR,

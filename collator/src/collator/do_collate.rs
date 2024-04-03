@@ -19,7 +19,11 @@ use super::{
 pub(super) trait DoCollate<MQ, MP, ST>:
     CollatorProcessorSpecific<MQ, MP, ST> + CollatorEventEmitter + Sized + Send + Sync + 'static
 {
-    async fn do_collate(&mut self) -> Result<()>;
+    async fn do_collate(
+        &mut self,
+        next_chain_time: u64,
+        top_shard_blocks_ids: Vec<BlockId>,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -30,12 +34,30 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn do_collate(&mut self) -> Result<()> {
+    async fn do_collate(
+        &mut self,
+        mut next_chain_time: u64,
+        top_shard_blocks_ids: Vec<BlockId>,
+    ) -> Result<()> {
         //TODO: make real implementation
+        let _tracing_top_shard_blocks_descr = if top_shard_blocks_ids.is_empty() {
+            "".to_string()
+        } else {
+            format!(
+                ", top_shard_blocks: {:?}",
+                top_shard_blocks_ids
+                    .iter()
+                    .map(|id| id.as_short_id().to_string())
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+            )
+        };
         tracing::trace!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): start collating block...",
+            "Collator ({}{}): next chain time: {}: start collating block...",
             self.collator_descr(),
+            _tracing_top_shard_blocks_descr,
+            next_chain_time,
         );
 
         //STUB: just remove fisrt anchor from cache
@@ -51,7 +73,6 @@ where
             root_hash: HashBytes::ZERO,
             file_hash: HashBytes::ZERO,
         };
-        let last_imported_anchor_chain_time = self.get_last_imported_anchor_chain_time();
         let new_state = self.working_state().prev_shard_data.pure_states()[0]
             .state()
             .clone();
@@ -59,19 +80,20 @@ where
             candidate: BlockCandidate::new(
                 collated_block_id,
                 prev_blocks_ids,
-                vec![],
+                top_shard_blocks_ids,
                 vec![],
                 vec![],
                 collated_block_id.file_hash,
-                last_imported_anchor_chain_time,
+                next_chain_time,
             ),
             new_state,
         };
         self.on_block_candidate_event(collation_result).await?;
         tracing::info!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): STUB: created and sent dummy block candidate...",
+            "Collator ({}{}): STUB: created and sent dummy block candidate...",
             self.collator_descr(),
+            _tracing_top_shard_blocks_descr,
         );
 
         self.update_working_state(collated_block_id)?;

@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, VecDeque},
+    collections::{hash_map::Entry, HashMap, VecDeque},
     sync::Arc,
 };
 
@@ -22,7 +22,7 @@ use crate::{
     state_node::StateNodeAdapter,
     tracing_targets,
     types::{
-        BlockCandidate, BlockCollationResult, BlockSignatures, CollationConfig, CollationSessionId,
+        BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
         CollationSessionInfo, ValidatedBlock,
     },
     utils::{async_queued_dispatcher::AsyncQueuedDispatcher, shard::calc_split_merge_actions},
@@ -57,8 +57,8 @@ where
 
     active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
     collation_sessions_to_finish: HashMap<CollationSessionId, Arc<CollationSessionInfo>>,
-    active_collators: HashMap<ShardIdent, C>,
-    collators_to_stop: HashMap<CollationSessionId, C>,
+    active_collators: HashMap<ShardIdent, Arc<C>>,
+    collators_to_stop: HashMap<CollationSessionId, Arc<C>>,
 
     blocks_cache: BlocksCache,
 
@@ -421,7 +421,7 @@ where
                         mc_state.clone(),
                     )
                     .await;
-                    entry.insert(collator);
+                    entry.insert(Arc::new(collator));
                 }
             } else if let Some(collator) = self.active_collators.remove(&shard_id) {
                 to_stop_collators.insert((shard_id, new_session_seqno), collator);
@@ -685,13 +685,40 @@ where
         None
     }
 
+    /// Find top shard blocks in cacche for the next master block collation
+    fn detect_top_shard_blocks_ids_for_mc_block(
+        &self,
+        _next_mc_block_chain_time: u64,
+        _trigger_shard_block_id: Option<BlockId>,
+    ) -> Vec<BlockId> {
+        //TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
+
+        //STUB: when we work with only one shard we can just get the last shard block
+        //      because collator manager will try run master block collation before
+        //      before processing any next candidate from the shard collator
+        //      because of dispatcher tasks queue
+        let res = self
+            .blocks_cache
+            .shards
+            .iter()
+            .filter_map(|(_, shard_cache)| shard_cache.last_key_value().map(|(_, v)| *v.block_id()))
+            .collect::<Vec<_>>();
+
+        res
+    }
+
     /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation
     async fn enqueue_mc_block_collation(
         &mut self,
         next_mc_block_chain_time: u64,
         trigger_shard_block_id: Option<BlockId>,
     ) -> Result<()> {
-        //TODO: make real impementation
+        //TODO: make real implementation
+
+        // get masterchain collator if exists
+        let Some(mc_collator) = self.active_collators.get(&ShardIdent::MASTERCHAIN).cloned() else {
+            bail!("Masterchain collator is not started yet!");
+        };
 
         //TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
         //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
@@ -699,18 +726,32 @@ where
         //      Or the first from previouses (An-x) that includes externals for that shard (ShB)
         //      if all next including required one ([An-x+1, An]) do not contain externals for shard (ShB).
 
+        let top_shard_blocks_ids = self.detect_top_shard_blocks_ids_for_mc_block(
+            next_mc_block_chain_time,
+            trigger_shard_block_id,
+        );
+
         //TODO: We should somehow collect externals for masterchain during the shard blocks collation
         //      or pull them directly when collating master
 
         self.set_next_mc_block_chain_time(next_mc_block_chain_time);
 
-        //STUB: just log that we equeued master block collation
+        let _tracing_top_shard_blocks_descr = top_shard_blocks_ids
+            .iter()
+            .map(|id| id.as_short_id().to_string())
+            .collect::<Vec<_>>();
+
+        mc_collator
+            .equeue_do_collate(next_mc_block_chain_time, top_shard_blocks_ids)
+            .await?;
+
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "STUB: Here the master block collation should be enqueued with `next_mc_block_chain_time`: {}. trigger_shard_block_id: {}",
+            "Master block collation enqueued (next_chain_time: {}, top_shard_blocks_ids: {:?})",
             next_mc_block_chain_time,
-            trigger_shard_block_id.map(|id| format!("{}", id.as_short_id())).unwrap_or_default(),
+            _tracing_top_shard_blocks_descr.as_slice(),
         );
+
         Ok(())
     }
 
@@ -798,11 +839,11 @@ where
                 );
             }
         } else {
-            let mut shard_cache = self
+            let shard_cache = self
                 .blocks_cache
                 .shards
                 .entry(block_container.key().shard)
-                .or_insert(BTreeMap::new());
+                .or_default();
             if let Some(_existing) =
                 shard_cache.insert(block_container.key().seqno, block_container)
             {

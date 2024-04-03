@@ -70,8 +70,12 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     ) -> Self;
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
-    /// Produce new block, return created block + updated shard state, and update working state
-    async fn collate() -> Result<BlockCollationResult>;
+    /// Enqueue new block collation
+    async fn equeue_do_collate(
+        &self,
+        next_chain_time: u64,
+        top_shard_blocks_ids: Vec<BlockId>,
+    ) -> Result<()>;
 }
 
 #[allow(private_bounds)]
@@ -162,7 +166,17 @@ where
         todo!()
     }
 
-    async fn collate() -> Result<BlockCollationResult> {
-        todo!()
+    async fn equeue_do_collate(
+        &self,
+        next_chain_time: u64,
+        top_shard_blocks_ids: Vec<BlockId>,
+    ) -> Result<()> {
+        self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(
+                do_collate,
+                next_chain_time,
+                top_shard_blocks_ids
+            ))
+            .await
     }
 }
