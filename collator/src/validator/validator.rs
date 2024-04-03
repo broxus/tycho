@@ -5,42 +5,41 @@ use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::BlockId;
 
+use crate::types::ValidatorNetwork;
+use crate::validator::state::{ValidationState, ValidationStateStdImpl};
+use crate::validator::types::ValidationSessionInfo;
 use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
+    tracing_targets,
     types::ValidatedBlock,
     utils::async_queued_dispatcher::{
         AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
     },
 };
-use crate::types::ValidatorNetwork;
-use crate::validator::state::ValidationState;
-use crate::validator::types::ValidationSessionInfo;
 
 use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 
 #[async_trait]
-pub trait ValidatorEventEmitter {
+pub(crate) trait ValidatorEventEmitter {
     /// When shard or master block was validated by validator
     async fn on_block_validated_event(&self, validated_block: ValidatedBlock) -> Result<()>;
 }
 
 #[async_trait]
-pub trait ValidatorEventListener: Send + Sync {
+pub(crate) trait ValidatorEventListener: Send + Sync {
     /// Process validated shard or master block
     async fn on_block_validated(&self, validated_block: ValidatedBlock) -> Result<()>;
 }
 
 #[async_trait]
-pub trait Validator<ST, VS>: Send + Sync + 'static
+pub trait Validator<ST>: Send + Sync + 'static
 where
     ST: StateNodeAdapter,
-    VS: ValidationState,
 {
     fn create(
         listener: Arc<dyn ValidatorEventListener>,
         state_node_adapter: Arc<ST>,
-        validation_state: VS,
         network: ValidatorNetwork,
     ) -> Self;
 
@@ -57,49 +56,44 @@ where
 }
 
 #[allow(private_bounds)]
-pub(crate) struct ValidatorStdImpl<W, ST, VS>
+pub(crate) struct ValidatorStdImpl<W, ST>
 where
-    W: ValidatorProcessor<ST, VS>,
+    W: ValidatorProcessor<ST>,
     ST: StateNodeAdapter,
-    VS: ValidationState,
 {
     _marker_state_node_adapter: std::marker::PhantomData<ST>,
-    _marker_validation_state: std::marker::PhantomData<VS>,
     dispatcher: Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>,
 }
 
 #[async_trait]
-impl<W, ST, VS> Validator<ST, VS> for ValidatorStdImpl<W, ST, VS>
+impl<W, ST> Validator<ST> for ValidatorStdImpl<W, ST>
 where
-    W: ValidatorProcessor<ST, VS>,
+    W: ValidatorProcessor<ST>,
     ST: StateNodeAdapter,
-    VS: ValidationState,
 {
     fn create(
         listener: Arc<dyn ValidatorEventListener>,
         state_node_adapter: Arc<ST>,
-        validation_state: VS,
         network: ValidatorNetwork,
     ) -> Self {
+        tracing::info!(target: tracing_targets::VALIDATOR, "Creating validator...");
+
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
             AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         // create validation processor and run dispatcher for own tasks queue
-        let processor = ValidatorProcessor::new(
-            dispatcher.clone(),
-            listener,
-            state_node_adapter,
-            validation_state,
-            network,
-        );
+        let processor =
+            ValidatorProcessor::new(dispatcher.clone(), listener, state_node_adapter, network);
         AsyncQueuedDispatcher::run(processor, receiver);
+        tracing::trace!(target: tracing_targets::VALIDATOR, "Tasks queue dispatcher started");
+
+        tracing::info!(target: tracing_targets::VALIDATOR, "Validator created");
 
         // create validator instance
         Self {
             _marker_state_node_adapter: std::marker::PhantomData,
-            _marker_validation_state: std::marker::PhantomData,
             dispatcher,
         }
     }
@@ -160,6 +154,7 @@ mod tests {
     use tycho_util::time::now_sec;
 
     use crate::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
+    use crate::test_utils::try_init_test_tracing;
     use crate::types::CollationSessionInfo;
     use crate::validator::network::network_service::NetworkService;
     use crate::validator::state::ValidationStateStdImpl;
@@ -337,10 +332,9 @@ mod tests {
             dht_client,
         };
 
-        let validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_, _>, _, _>::create(
+        let validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_>, _>::create(
             test_listener.clone(),
             state_node_adapter,
-            validation_state,
             validator_network,
         );
 
@@ -381,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validator_accept_block_by_network() -> Result<()> {
-        tracing_subscriber::fmt::init();
+        try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
 
         let network_nodes = make_network(10);
         let blocks_amount = 3; // Assuming you expect 3 validation per node.
@@ -405,10 +399,9 @@ mod tests {
                 dht_client: node.dht_client.clone(),
                 peer_resolver: node.peer_resolver.clone(),
             };
-            let validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_, _>, _, _>::create(
+            let validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_>, _>::create(
                 test_listener.clone(),
                 state_node_adapter,
-                validation_state,
                 network,
             );
             validators.push((validator, node));

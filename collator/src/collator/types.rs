@@ -1,10 +1,15 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use everscale_types::models::BlockId;
+use anyhow::Result;
 
-use tycho_block_util::state::ShardStateStuff;
+use everscale_types::{
+    cell::{Cell, UsageTree, UsageTreeMode},
+    models::{BlockId, CurrencyCollection, McStateExtra, ShardAccounts, ShardIdent},
+};
 
-use crate::types::ext_types::{Cell, CurrencyCollection, McStateExtra, ShardAccounts};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+
+use crate::mempool::MempoolAnchorId;
 
 /*
 В текущем коллаторе перед коллацией блока импортируется:
@@ -81,21 +86,63 @@ PrevData и CollatorData передаются в execute. Там берется 
 из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
 */
 
-pub struct WorkingState {
-    mc_data: McData,
-    prev_shard_data: PrevData,
+pub(super) struct WorkingState {
+    pub mc_data: McData,
+    pub prev_shard_data: PrevData,
+    pub usage_tree: UsageTree,
 }
 
-pub struct McData {
+pub(super) struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
     prev_key_block: Option<BlockId>,
     state: Arc<ShardStateStuff>,
 }
+impl McData {
+    pub fn new(mc_state: Arc<ShardStateStuff>) -> Result<Self> {
+        let mc_state_extra = mc_state.state_extra()?;
 
-pub struct PrevData {
+        // prev key block
+        let (prev_key_block_seqno, prev_key_block) = if mc_state_extra.after_key_block {
+            (mc_state.block_id().seqno, Some(*mc_state.block_id()))
+        } else if let Some(block_ref) = mc_state_extra.last_key_block.as_ref() {
+            (
+                block_ref.seqno,
+                Some(BlockId {
+                    shard: ShardIdent::MASTERCHAIN,
+                    seqno: block_ref.seqno,
+                    root_hash: block_ref.root_hash,
+                    file_hash: block_ref.file_hash,
+                }),
+            )
+        } else {
+            (0, None)
+        };
+
+        Ok(Self {
+            mc_state_extra: mc_state_extra.clone(),
+            prev_key_block,
+            prev_key_block_seqno,
+            state: mc_state,
+        })
+    }
+
+    pub fn state(&self) -> Arc<ShardStateStuff> {
+        self.state.clone()
+    }
+
+    pub fn mc_state_extra(&self) -> &McStateExtra {
+        &self.mc_state_extra
+    }
+}
+
+pub(super) struct PrevData {
     observable_states: Vec<Arc<ShardStateStuff>>,
     observable_accounts: ShardAccounts,
+
+    blocks_ids: Vec<BlockId>,
+
+    pure_states: Vec<Arc<ShardStateStuff>>,
     pure_state_root: Cell,
 
     gen_utime: u32,
@@ -103,8 +150,81 @@ pub struct PrevData {
     total_validator_fees: CurrencyCollection,
     overload_history: u64,
     underload_history: u64,
+
+    externals_processed_upto: BTreeMap<MempoolAnchorId, usize>,
+}
+impl PrevData {
+    pub fn build(
+        mc_data: &McData,
+        prev_states: &Vec<Arc<ShardStateStuff>>,
+        prev_blocks_ids: Vec<BlockId>,
+    ) -> Result<(Self, UsageTree)> {
+        //TODO: make real implementation
+        // refer to the old node impl:
+        //  Collator::prepare_data()
+        //  Collator::unpack_last_state()
+
+        let pure_prev_state_root = prev_states[0].root_cell();
+        let pure_prev_states = prev_states.clone();
+
+        let usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess);
+        let observable_root = usage_tree.track(pure_prev_state_root);
+        let tracker = MinRefMcStateTracker::new();
+        let observable_states = vec![Arc::new(ShardStateStuff::new(
+            *pure_prev_states[0].block_id(),
+            observable_root,
+            &tracker,
+        )?)];
+
+        let gen_utime = observable_states[0].state().gen_utime;
+        let gen_lt = observable_states[0].state().gen_lt;
+        let observable_accounts = observable_states[0].state().load_accounts()?;
+        let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
+        let overload_history = observable_states[0].state().overload_history;
+        let underload_history = observable_states[0].state().underload_history;
+
+        let prev_data = Self {
+            observable_states,
+            observable_accounts,
+
+            blocks_ids: prev_blocks_ids,
+
+            pure_states: pure_prev_states,
+            pure_state_root: pure_prev_state_root.clone(),
+
+            gen_utime,
+            gen_lt,
+            total_validator_fees,
+            overload_history,
+            underload_history,
+
+            externals_processed_upto: BTreeMap::new(),
+        };
+
+        Ok((prev_data, usage_tree))
+    }
+
+    pub fn update_state(&mut self, new_blocks_ids: Vec<BlockId>) -> Result<()> {
+        //TODO: make real implementation
+        //STUB: currently have stub signature and implementation
+        self.blocks_ids = new_blocks_ids;
+
+        Ok(())
+    }
+
+    pub fn blocks_ids(&self) -> &Vec<BlockId> {
+        &self.blocks_ids
+    }
+
+    pub fn pure_states(&self) -> &Vec<Arc<ShardStateStuff>> {
+        &self.pure_states
+    }
+
+    pub fn externals_processed_upto(&self) -> &BTreeMap<MempoolAnchorId, usize> {
+        &self.externals_processed_upto
+    }
 }
 
-pub struct BlockCollationData {
+pub(super) struct BlockCollationData {
     block_descr: Arc<String>,
 }

@@ -12,16 +12,15 @@ use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::state::ValidationState;
 use crate::validator::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 
-pub async fn handle_signatures_query<W, ST, VS>(
+pub async fn handle_signatures_query<W, ST>(
     dispatcher: &Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>,
     session_seqno: u32,
     block_id_short: BlockIdShort,
     signatures: Vec<([u8; 32], [u8; 64])>,
 ) -> Result<Option<Response>, anyhow::Error>
 where
-    W: ValidatorProcessor<ST, VS> + Send + Sync,
+    W: ValidatorProcessor<ST> + Send + Sync,
     ST: StateNodeAdapter + Send + Sync,
-    VS: ValidationState + Send + Sync,
 {
     let mut receiver = dispatcher
         .enqueue_task_with_responder(method_to_async_task_closure!(

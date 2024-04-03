@@ -1,11 +1,12 @@
 mod collator;
 pub mod manager;
-mod mempool;
+pub mod mempool;
 mod msg_queue;
-mod state_node;
-mod types;
+pub mod state_node;
+pub mod test_utils;
+mod tracing_targets;
+pub mod types;
 mod utils;
 mod validator;
 
-#[cfg(test)]
-mod tests;
+pub use validator::test_impl as validator_test_impl;

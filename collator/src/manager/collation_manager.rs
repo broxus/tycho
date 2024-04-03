@@ -5,38 +5,46 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519;
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, ShardIdent};
+use tycho_core::internal_queue::iterator::QueueIteratorImpl;
 use tycho_network::quinn::crypto::KeyPair;
 use tycho_network::{DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
 
 use crate::types::ValidatorNetwork;
 use crate::validator::state::{ValidationState, ValidationStateStdImpl};
 use crate::{
-    collator::{Collator, CollatorEventListener},
-    mempool::MempoolAdapter,
+    collator::{
+        collator_processor::CollatorProcessorStdImpl, Collator, CollatorEventListener,
+        CollatorStdImpl,
+    },
+    mempool::{MempoolAdapter, MempoolAdapterBuilder, MempoolAnchor, MempoolEventListener},
     method_to_async_task_closure,
-    msg_queue::MessageQueueAdapter,
+    msg_queue::{MessageQueueAdapter, MessageQueueAdapterStdImpl},
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
+    tracing_targets,
     types::{BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock},
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
-    validator::{Validator, ValidatorEventListener},
+    validator::{
+        validator_processor::{ValidatorProcessor, ValidatorProcessorStdImpl},
+        Validator, ValidatorEventListener, ValidatorStdImpl,
+    },
 };
 
-use super::collation_processor::{CollationProcessor, CollationProcessorTaskResult};
+use super::collation_processor::CollationProcessor;
 
 /// Controls the whole collation process.
-/// Monitors state sync, receives ext msgs from mempool,
+/// Monitors state sync,
 /// runs collators to produce blocks,
 /// executes blocks validation, sends signed blocks
 /// to state node to update local sync state and broadcast.
-#[async_trait]
-pub trait CollationManager<C, V, MQ, MP, ST>
+#[allow(private_bounds)]
+pub trait CollationManager<MP, ST, C, V, MQ>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST, ValidationStateStdImpl>,
+    C: Collator<MQ, MP, ST>,
+    V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -44,49 +52,82 @@ where
     /// Creates manager and starts all required async processes
     fn create(
         config: CollationConfig,
-        mpool_adapter: MP,
+        mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
     ) -> Self;
 }
 
 /// Generic implementation of [`CollationManager`]
-pub struct CollationManagerGenImpl<C, V, MQ, MP, ST>
+pub(crate) struct CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST, ValidationStateStdImpl>,
+    V: Validator<ST>,
+    C: Collator<MQ, MP, ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
     config: Arc<CollationConfig>,
 
-    _marker_collator: std::marker::PhantomData<C>,
-    _marker_validator: std::marker::PhantomData<V>,
-    _marker_mq_adapter: std::marker::PhantomData<MQ>,
-
-    mempool_adapter: Arc<MP>,
-    state_node_adapter: Arc<ST>,
-
-    dispatcher: Arc<
-        AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>,
-    >,
+    dispatcher: Arc<AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>>,
 }
 
-#[async_trait]
-impl<C, V, MQ, MP, ST> CollationManager<C, V, MQ, MP, ST>
+// #[allow(private_bounds)]
+// // pub fn create_std_manager<MP, ST>(
+// pub fn create_std_manager<MP, ST, C, V, MQ>(
+//     config: CollationConfig,
+//     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
+//     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+// ) -> impl CollationManager<MP, ST, C, V, MQ>
+// where
+//     C: Collator<MQ, MP, ST>,
+//     V: Validator<ST>,
+//     MP: MempoolAdapter,
+//     ST: StateNodeAdapter,
+// {
+//     CollationManagerGenImpl::<
+//         CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
+//         ValidatorStdImpl<ValidatorProcessorStdImpl<ST>, ST>,
+//         MessageQueueAdapterStdImpl,
+//         MP,
+//         ST,
+//     >::create(config, mpool_adapter_builder, state_adapter_builder)
+// }
+// #[allow(private_bounds)]
+// pub fn create_std_manager_with_validator<MP, ST, C, V, MQ>(
+//     config: CollationConfig,
+//     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
+//     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+// ) -> impl CollationManager<MP, ST, C, V, MQ>
+// where
+//     MP: MempoolAdapter,
+//     ST: StateNodeAdapter,
+//     V: ValidatorProcessor<ST>,
+// {
+//     CollationManagerGenImpl::<
+//         CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
+//         ValidatorStdImpl<V, _>,
+//         MessageQueueAdapterStdImpl,
+//         MP,
+//         ST,
+//     >::create(config, mpool_adapter_builder, state_adapter_builder)
+// }
+
+impl<C, V, MQ, MP, ST> CollationManager<MP, ST, C, V, MQ>
     for CollationManagerGenImpl<C, V, MQ, MP, ST>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST, ValidationStateStdImpl>,
+    C: Collator<MQ, MP, ST>,
+    V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
     fn create(
         config: CollationConfig,
-        mempool_adapter: MP,
+        mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
     ) -> Self {
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
+
         let config = Arc::new(config);
 
         // create dispatcher for own async tasks queue
@@ -94,10 +135,11 @@ where
             AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
-        //TODO: build mempool adapter and start its tasks queue
-        let mempool_adapter = Arc::new(mempool_adapter);
+        // build mempool adapter
+        let mpool_adapter = mpool_adapter_builder.build(dispatcher.clone());
+        let mpool_adapter = Arc::new(mpool_adapter);
 
-        // build state node adapter and start its tasks queue
+        // build state node adapter
         let state_node_adapter = state_adapter_builder.build(dispatcher.clone());
         let state_node_adapter = Arc::new(state_node_adapter);
 
@@ -140,30 +182,25 @@ where
         let validator = Validator::create(
             dispatcher.clone(),
             state_node_adapter.clone(),
-            validation_state,
             validator_network,
         );
         let validator = Arc::new(validator);
 
         // create collation processor that will use these adapters
-        // and run dispatcher for own tasks queue
+        // and run dispatcher for its own tasks queue
         let processor = CollationProcessor::new(
             config.clone(),
             dispatcher.clone(),
-            mempool_adapter.clone(),
+            mpool_adapter.clone(),
             state_node_adapter.clone(),
             validator,
         );
         AsyncQueuedDispatcher::run(processor, receiver);
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks queue dispatcher started");
 
         // create manager instance
         let mgr = Self {
             config,
-            _marker_collator: std::marker::PhantomData,
-            _marker_validator: std::marker::PhantomData,
-            _marker_mq_adapter: std::marker::PhantomData,
-            mempool_adapter,
-            state_node_adapter,
             dispatcher: dispatcher.clone(),
         };
 
@@ -183,17 +220,39 @@ where
             "CollationProcessor::check_refresh_collation_sessions()".into(),
         );
 
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Action scheduled in 10s: CollationProcessor::check_refresh_collation_sessions()");
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Collation manager created");
+
         // return manager
         mgr
     }
 }
 
 #[async_trait]
-impl<C, V, MQ, MP, ST> StateNodeEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+impl<C, V, MQ, MP, ST> MempoolEventListener
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST, ValidationStateStdImpl>,
+    C: Collator<MQ, MP, ST>,
+    V: Validator<ST>,
+    MQ: MessageQueueAdapter,
+    MP: MempoolAdapter,
+    ST: StateNodeAdapter,
+{
+    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()> {
+        self.enqueue_task(method_to_async_task_closure!(
+            process_new_anchor_from_mempool,
+            anchor
+        ))
+        .await
+    }
+}
+
+#[async_trait]
+impl<C, V, MQ, MP, ST> StateNodeEventListener
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
+where
+    C: Collator<MQ, MP, ST>,
+    V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
@@ -209,14 +268,26 @@ where
 
 #[async_trait]
 impl<C, V, MQ, MP, ST> CollatorEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST, ValidationStateStdImpl>,
+    C: Collator<MQ, MP, ST>,
+    V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
+    async fn on_skipped_empty_anchor(
+        &self,
+        shard_id: ShardIdent,
+        anchor: Arc<MempoolAnchor>,
+    ) -> Result<()> {
+        self.enqueue_task(method_to_async_task_closure!(
+            process_empty_skipped_anchor,
+            shard_id,
+            anchor
+        ))
+        .await
+    }
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             process_block_candidate,
@@ -235,10 +306,10 @@ where
 
 #[async_trait]
 impl<C, V, MQ, MP, ST> ValidatorEventListener
-    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, CollationProcessorTaskResult>
+    for AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>
 where
-    C: Collator<MQ, ST>,
-    V: Validator<ST, ValidationStateStdImpl>,
+    C: Collator<MQ, MP, ST>,
+    V: Validator<ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,

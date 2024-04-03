@@ -102,6 +102,10 @@ impl SessionInfo {
             .map(|(block, _)| block)
     }
 
+    pub(crate) fn blocks_count(&self) -> usize {
+        self.blocks_signatures.len()
+    }
+
     /// Determines the validation status of a block.
     pub fn validation_status(&self, block_id_short: &BlockIdShort) -> ValidationResult {
         if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {

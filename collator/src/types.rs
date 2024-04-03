@@ -1,19 +1,23 @@
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ShardIdent, Signature, ValidatorDescription};
+use everscale_types::models::{
+    BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature, ValidatorDescription,
+};
 use std::collections::HashMap;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_network::{DhtClient, Network, OverlayService, PeerResolver};
 
-use self::ext_types::{Block, BlockProof, BlockSignature, KeyId, ShardStateUnsplit, UInt256};
+use std::sync::Arc;
+
+use tycho_block_util::block::BlockStuff;
 
 pub struct CollationConfig {
     pub key_pair: KeyPair,
     pub mc_block_min_interval_ms: u64,
 }
 
-pub struct BlockCollationResult {
+pub(crate) struct BlockCollationResult {
     pub candidate: BlockCandidate,
     pub new_state: ShardStateUnsplit,
 }
@@ -24,30 +28,46 @@ pub(crate) struct BlockCandidate {
     prev_blocks_ids: Vec<BlockId>,
     data: Vec<u8>,
     collated_data: Vec<u8>,
-    collated_file_hash: UInt256,
+    collated_file_hash: HashBytes,
+    chain_time: u64,
 }
 impl BlockCandidate {
+    pub fn new(
+        block_id: BlockId,
+        prev_blocks_ids: Vec<BlockId>,
+        data: Vec<u8>,
+        collated_data: Vec<u8>,
+        collated_file_hash: HashBytes,
+        chain_time: u64,
+    ) -> Self {
+        Self {
+            block_id,
+            prev_blocks_ids,
+            data,
+            collated_data,
+            collated_file_hash,
+            chain_time,
+        }
+    }
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
     }
     pub fn shard_id(&self) -> &ShardIdent {
         &self.block_id.shard
     }
-    pub fn own_signature(&self) -> BlockSignature {
-        todo!()
-    }
     pub fn chain_time(&self) -> u64 {
-        todo!()
+        self.chain_time
     }
 }
 
-pub struct BlockSignatures {
-    good_sigs: Vec<(KeyId, BlockSignature)>,
-    bad_sigs: Vec<(KeyId, BlockSignature)>,
+pub(crate) struct BlockSignatures {
+    pub good_sigs: Vec<(HashBytes, Signature)>,
+    pub bad_sigs: Vec<(HashBytes, Signature)>,
 }
 impl BlockSignatures {
     pub fn is_valid(&self) -> bool {
-        todo!()
+        //STUB: always valid
+        true
     }
 }
 
@@ -79,28 +99,16 @@ impl ValidatedBlock {
     }
 }
 
-pub struct BlockStuff {
-    id: BlockId,
-    block: Option<Block>,
-    // other stuff...
-}
-
-pub struct BlockProofStuff {
-    id: BlockId,
-    proof: BlockProof,
-    // other stuff...
-}
-
-pub struct BlockStuffForSync {
+pub(crate) struct BlockStuffForSync {
     pub block_stuff: BlockStuff,
     pub signatures: BlockSignatures,
     pub prev_blocks_ids: Vec<BlockId>,
 }
 
 /// (ShardIdent, seqno)
-pub type CollationSessionId = (ShardIdent, u32);
+pub(crate) type CollationSessionId = (ShardIdent, u32);
 
-pub struct CollationSessionInfo {
+pub(crate) struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,
@@ -130,33 +138,26 @@ impl CollationSessionInfo {
     }
 }
 
-pub(crate) mod ext_types {
-    pub use stubs::*;
-    pub mod stubs {
-        pub struct KeyId([u8; 32]);
-        pub struct BlockSignature(pub Vec<u8>);
-        #[derive(Clone)]
-        pub struct UInt256([u8; 32]);
-        #[derive(Clone)]
-        pub struct BlockHashId;
-        pub struct Block;
-        pub struct BlockProof;
-        #[derive(Clone)]
-        pub struct ShardAccounts;
-        pub struct Cell;
-        pub struct CurrencyCollection;
-        pub struct ShardStateUnsplit;
-        pub struct McStateExtra;
-        pub struct BlockHandle;
+pub(crate) struct MessageContainer {
+    id_hash: HashBytes,
+    pub message: Arc<OwnedMessage>,
+}
+impl MessageContainer {
+    pub fn from_message(message: Arc<OwnedMessage>) -> Self {
+        let id_hash = *message.body.0.repr_hash();
+        Self { id_hash, message }
+    }
+    pub fn id_hash(&self) -> &HashBytes {
+        &self.id_hash
+    }
+}
 
-        pub struct ValidatorId;
-        pub struct ValidatorDescr;
-        impl ValidatorDescr {
-            pub fn id(&self) -> ValidatorId {
-                todo!()
-            }
-        }
-        pub struct ValidatorSet;
+pub(crate) trait MessageExt {
+    fn id_hash(&self) -> &HashBytes;
+}
+impl MessageExt for OwnedMessage {
+    fn id_hash(&self) -> &HashBytes {
+        self.body.0.repr_hash()
     }
 }
 

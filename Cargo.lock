@@ -2181,8 +2181,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tracing-test",
  "tycho-block-util",
- "tycho-consensus",
  "tycho-core",
  "tycho-network",
  "tycho-storage",
@@ -2211,6 +2211,9 @@ dependencies = [
 name = "tycho-core"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "everscale-types",
+ "tokio",
  "tycho-network",
  "tycho-storage",
  "tycho-util",

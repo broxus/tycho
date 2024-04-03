@@ -7,34 +7,32 @@ use std::sync::Arc;
 use futures_util::future::{self, FutureExt, Ready};
 use tracing::error;
 
-use tycho_network::{Response, Service, ServiceRequest};
 use tycho_network::__internal::tl_proto::{TlRead, TlWrite};
+use tycho_network::{Response, Service, ServiceRequest};
 
+use crate::validator::network::dto::SignaturesQuery;
+use crate::validator::network::handlers::handle_signatures_query;
 use crate::{
     state_node::StateNodeAdapter,
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
     validator::state::ValidationState,
     validator::validator_processor::{ValidatorProcessor, ValidatorTaskResult},
 };
-use crate::validator::network::dto::SignaturesQuery;
-use crate::validator::network::handlers::handle_signatures_query;
 
 #[derive(Clone)]
-pub struct NetworkService<W, ST, VS>
+pub struct NetworkService<W, ST>
 where
-    W: ValidatorProcessor<ST, VS> + Send + Sync,
+    W: ValidatorProcessor<ST> + Send + Sync,
     ST: StateNodeAdapter + Send + Sync,
-    VS: ValidationState + Send + Sync,
 {
     dispatcher: Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>,
-    _marker: PhantomData<(ST, VS)>,
+    _marker: PhantomData<ST>,
 }
 
-impl<W, ST, VS> NetworkService<W, ST, VS>
+impl<W, ST> NetworkService<W, ST>
 where
-    W: ValidatorProcessor<ST, VS> + Send + Sync,
+    W: ValidatorProcessor<ST> + Send + Sync,
     ST: StateNodeAdapter + Send + Sync,
-    VS: ValidationState + Send + Sync,
 {
     pub fn new(dispatcher: Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>) -> Self {
         Self {
@@ -48,11 +46,10 @@ where
 #[repr(transparent)]
 pub struct OverlayId(pub [u8; 32]);
 
-impl<W, ST, VS> Service<ServiceRequest> for NetworkService<W, ST, VS>
+impl<W, ST> Service<ServiceRequest> for NetworkService<W, ST>
 where
-    W: ValidatorProcessor<ST, VS> + Send + Sync,
+    W: ValidatorProcessor<ST> + Send + Sync,
     ST: StateNodeAdapter + Send + Sync,
-    VS: ValidationState + Send + Sync,
 {
     type QueryResponse = Response;
     type OnQueryFuture = Pin<Box<dyn Future<Output = Option<Self::QueryResponse>> + Send>>;

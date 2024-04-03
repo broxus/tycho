@@ -2,14 +2,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use everscale_types::models::BlockId;
+use everscale_types::{
+    cell::HashBytes,
+    models::{BlockId, ShardStateUnsplit},
+};
+
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::types::ext_types::{BlockHashId, ShardStateUnsplit};
 use crate::types::{BlockCandidate, BlockSignatures};
 
 pub struct BlockCandidateEntry {
-    pub key: BlockHashId,
+    pub key: HashBytes,
     pub candidate: BlockCandidate,
     pub signatures: BlockSignatures,
 }
@@ -34,13 +37,13 @@ pub struct BlockCandidateContainer {
     /// * Sent - block cadidate is already sent to sync
     pub send_sync_status: SendSyncStatus,
     /// Hash ids of 1 or 2 (in case of merge) previous blcoks in the shard or master chain
-    pub prev_blocks_keys: Vec<BlockHashId>,
+    pub prev_blocks_keys: Vec<HashBytes>,
     /// Hash ids of all top shard blocks of corresponding shard chains, included in current block.
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without a master.
-    pub top_shard_blocks_keys: Vec<BlockHashId>,
+    pub top_shard_blocks_keys: Vec<HashBytes>,
     /// Hash id of master block that includes current shard block in his subgraph
-    pub containing_mc_block: Option<BlockHashId>,
+    pub containing_mc_block: Option<HashBytes>,
 }
 impl BlockCandidateContainer {
     fn new(candidate: BlockCandidate) -> Self {
