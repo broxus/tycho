@@ -147,7 +147,7 @@ where
             let validated_block = ValidatedBlock::new(
                 candidate_id,
                 BlockSignatures {
-                    good_sigs: vec![],
+                    good_sigs: vec![(neighbor.public_key, his_signature)],
                     bad_sigs: vec![],
                 },
             );

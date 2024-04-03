@@ -61,6 +61,7 @@ where
                 prev_blocks_ids,
                 vec![],
                 vec![],
+                vec![],
                 collated_block_id.file_hash,
                 last_imported_anchor_chain_time,
             ),

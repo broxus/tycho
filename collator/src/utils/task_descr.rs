@@ -16,6 +16,7 @@ pub struct TaskDesc<F: ?Sized, R> {
 
 impl<F: ?Sized, R> TaskDesc<F, R> {
     pub fn create(descr: &str, closure: Box<F>) -> Self {
+        //TODO: better to use global atomic counter
         let id = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()

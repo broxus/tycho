@@ -22,6 +22,7 @@ use super::collator_processor::CollatorProcessor;
 
 // EVENTS EMITTER AMD LISTENER
 
+//TODO: remove all emitters
 #[async_trait]
 pub(crate) trait CollatorEventEmitter {
     /// When there are no internals and an empty anchor was received from mempool
@@ -56,6 +57,7 @@ pub(crate) trait CollatorEventListener: Send + Sync {
 
 #[async_trait]
 pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
+    //TODO: use factory that takes CollationManager and creates Collator impl
     /// Create collator, start its tasks queue, and equeue first initialization task
     async fn start(
         listener: Arc<dyn CollatorEventListener>,
