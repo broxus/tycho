@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::models::BlockId;
 
 use crate::types::ValidatorNetwork;
@@ -131,7 +132,7 @@ where
 
 #[cfg(test)]
 mod tests {
-
+    use std::collections::HashMap;
     use std::net::Ipv4Addr;
 
     use std::time::Duration;
@@ -151,7 +152,7 @@ mod tests {
 
     use crate::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
     use crate::test_utils::try_init_test_tracing;
-    use crate::types::CollationSessionInfo;
+    use crate::types::{BlockSignatures, CollationSessionInfo};
 
     use crate::validator::state::{ValidationState, ValidationStateStdImpl};
     use crate::validator::types::ValidationSessionInfo;
@@ -344,7 +345,7 @@ mod tests {
         let keypair = KeyPair::generate(&mut ThreadRng::default());
         let _collator_session_info = CollationSessionInfo::new(0, validators, Some(keypair));
         test_listener
-            .on_block_validated(ValidatedBlock::new(block, vec![], true))
+            .on_block_validated(ValidatedBlock::new(block, BlockSignatures::default(), true))
             .await?;
 
         let validated_blocks = test_listener.validated_blocks.lock().await;

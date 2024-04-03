@@ -101,7 +101,6 @@ where
     ) -> Result<ValidatorTaskResult> {
         todo!()
     }
-
     async fn process_candidate_signature_response(
         &mut self,
         _session_seqno: u32,

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
@@ -23,6 +24,7 @@ pub(crate) struct BlockCollationResult {
 pub(crate) struct BlockCandidate {
     block_id: BlockId,
     prev_blocks_ids: Vec<BlockId>,
+    top_shard_blocks_ids: Vec<BlockId>,
     data: Vec<u8>,
     collated_data: Vec<u8>,
     collated_file_hash: HashBytes,
@@ -32,6 +34,7 @@ impl BlockCandidate {
     pub fn new(
         block_id: BlockId,
         prev_blocks_ids: Vec<BlockId>,
+        top_shard_blocks_ids: Vec<BlockId>,
         data: Vec<u8>,
         collated_data: Vec<u8>,
         collated_file_hash: HashBytes,
@@ -40,6 +43,7 @@ impl BlockCandidate {
         Self {
             block_id,
             prev_blocks_ids,
+            top_shard_blocks_ids,
             data,
             collated_data,
             collated_file_hash,
@@ -55,27 +59,28 @@ impl BlockCandidate {
     pub fn chain_time(&self) -> u64 {
         self.chain_time
     }
+    pub fn prev_blocks_ids(&self) -> &[BlockId] {
+        &self.prev_blocks_ids
+    }
+    pub fn top_shard_blocks_ids(&self) -> &[BlockId] {
+        &self.top_shard_blocks_ids
+    }
 }
 
+#[derive(Default)]
 pub(crate) struct BlockSignatures {
-    pub good_sigs: Vec<(HashBytes, Signature)>,
-    pub bad_sigs: Vec<(HashBytes, Signature)>,
-}
-impl BlockSignatures {
-    pub fn is_valid(&self) -> bool {
-        //STUB: always valid
-        true
-    }
+    pub good_sigs: HashMap<HashBytes, Signature>,
+    pub bad_sigs: HashMap<HashBytes, Signature>,
 }
 
 pub struct ValidatedBlock {
     block: BlockId,
-    signatures: Vec<(HashBytes, Signature)>,
+    signatures: BlockSignatures,
     valid: bool,
 }
 
 impl ValidatedBlock {
-    pub fn new(block: BlockId, signatures: Vec<(HashBytes, Signature)>, valid: bool) -> Self {
+    pub fn new(block: BlockId, signatures: BlockSignatures, valid: bool) -> Self {
         Self {
             block,
             signatures,
@@ -87,12 +92,15 @@ impl ValidatedBlock {
         &self.block
     }
 
-    pub fn signatures(&self) -> &Vec<(HashBytes, Signature)> {
+    pub fn signatures(&self) -> &BlockSignatures {
         &self.signatures
     }
 
     pub fn is_valid(&self) -> bool {
         self.valid
+    }
+    pub fn extract_signatures(self) -> BlockSignatures {
+        self.signatures
     }
 }
 

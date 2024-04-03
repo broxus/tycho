@@ -195,6 +195,18 @@ impl SessionInfo {
         }
     }
 
+    /// Retrieves valid signatures for a block.
+    pub fn get_invalid_signatures(
+        &self,
+        block_id_short: &BlockIdShort,
+    ) -> HashMap<HashBytes, Signature> {
+        if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {
+            signature_maps.invalid_signatures.clone()
+        } else {
+            HashMap::new()
+        }
+    }
+
     /// Adds a signature for a block.
     pub fn add_signature(
         &mut self,

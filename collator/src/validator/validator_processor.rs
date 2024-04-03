@@ -14,8 +14,7 @@ use tracing::{debug, error, trace};
 
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
-
-use crate::types::{ValidatedBlock, ValidatorNetwork};
+use crate::types::{BlockSignatures, ValidatedBlock, ValidatorNetwork};
 
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::network_service::NetworkService;
@@ -360,11 +359,22 @@ where
                         .get_valid_signatures(&block_id_short)
                         .into_iter()
                         .collect::<Vec<_>>();
-                    self.on_block_validated_event(ValidatedBlock::new(block, signatures, true))
+
+                    let good_sigs = session.get_valid_signatures(&block_id_short);
+                    let bad_sigs = session.get_invalid_signatures(&block_id_short);
+
+                    let block_signatures = BlockSignatures{ good_sigs, bad_sigs };
+
+                    self.on_block_validated_event(ValidatedBlock::new(block, block_signatures, true))
                         .await?;
                 }
                 ValidationResult::Invalid => {
-                    self.on_block_validated_event(ValidatedBlock::new(block, vec![], false))
+                    let good_sigs = session.get_valid_signatures(&block_id_short);
+                    let bad_sigs = session.get_invalid_signatures(&block_id_short);
+
+                    let block_signatures = BlockSignatures{ good_sigs, bad_sigs };
+
+                    self.on_block_validated_event(ValidatedBlock::new(block, block_signatures, false))
                         .await?;
                 }
                 ValidationResult::Insufficient => {

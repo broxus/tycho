@@ -240,7 +240,7 @@ mod tests {
         let node1 = Dispatcher::new()?.network;
         let node2 = Dispatcher::new()?.network;
 
-        let peer2 = node1.connect(node2.local_addr()).await?;
+        let peer2 = node1.connect(node2.local_addr(), PeerId::wrap(&[0u8;32])).await?;
         let response = node1
             .query(
                 &peer2,
