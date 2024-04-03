@@ -7,8 +7,8 @@ pub use self::overlay::{
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
     xor_distance, DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryWithDataBuilder, DhtService,
-    DhtServiceBackgroundTasks, DhtServiceBuilder, FindValueError, PeerResolver,
-    PeerResolverBuilder, PeerResolverHandle, StorageError, ValueMerger,
+    DhtServiceBackgroundTasks, DhtServiceBuilder, DhtValueMerger, DhtValueSource, FindValueError,
+    PeerResolver, PeerResolverBuilder, PeerResolverHandle, StorageError,
 };
 pub use network::{
     ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,

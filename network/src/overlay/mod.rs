@@ -27,6 +27,7 @@ pub use self::public_overlay::{
 };
 
 mod config;
+mod entries_merger;
 mod overlay_id;
 mod private_overlay;
 mod public_overlay;
@@ -517,7 +518,7 @@ impl OverlayServiceInner {
         });
 
         // TODO: Store the value on other nodes as well?
-        dht_client.service().store_value_locally(value)?;
+        dht_client.service().store_value_locally(&value)?;
 
         Ok(())
     }

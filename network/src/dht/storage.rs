@@ -15,23 +15,30 @@ use crate::proto::dht::{MergedValue, MergedValueRef, PeerValueRef, ValueRef};
 type DhtCache<S> = Cache<StorageKeyId, StoredValue, S>;
 type DhtCacheBuilder<S> = CacheBuilder<StorageKeyId, StoredValue, DhtCache<S>>;
 
-pub trait ValueMerger: Send + Sync + 'static {
-    fn check_value(&self, new: &MergedValueRef<'_>) -> Result<(), StorageError>;
-    fn merge_value(&self, new: &MergedValueRef<'_>, stored: &mut MergedValue) -> bool;
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub enum DhtValueSource {
+    Local,
+    Remote,
 }
 
-impl ValueMerger for () {
-    fn check_value(&self, _new: &MergedValueRef<'_>) -> Result<(), StorageError> {
-        Err(StorageError::InvalidKey)
-    }
-    fn merge_value(&self, _new: &MergedValueRef<'_>, _stored: &mut MergedValue) -> bool {
-        false
-    }
+pub trait DhtValueMerger: Send + Sync + 'static {
+    fn check_value(
+        &self,
+        source: DhtValueSource,
+        new: &MergedValueRef<'_>,
+    ) -> Result<(), StorageError>;
+
+    fn merge_value(
+        &self,
+        source: DhtValueSource,
+        new: &MergedValueRef<'_>,
+        stored: &mut MergedValue,
+    ) -> bool;
 }
 
 pub(crate) struct StorageBuilder {
     cache_builder: DhtCacheBuilder<std::hash::RandomState>,
-    value_mergers: FastDashMap<[u8; 32], Arc<dyn ValueMerger>>,
+    value_mergers: FastDashMap<[u8; 32], Arc<dyn DhtValueMerger>>,
     max_ttl: Duration,
 }
 
@@ -69,7 +76,7 @@ impl StorageBuilder {
     pub fn with_value_merger(
         self,
         group_id: &[u8; 32],
-        value_merger: Arc<dyn ValueMerger>,
+        value_merger: Arc<dyn DhtValueMerger>,
     ) -> Self {
         self.value_mergers.insert(*group_id, value_merger);
         self
@@ -93,7 +100,7 @@ impl StorageBuilder {
 
 pub(crate) struct Storage {
     cache: DhtCache<ahash::RandomState>,
-    value_mergers: FastDashMap<[u8; 32], Arc<dyn ValueMerger>>,
+    value_mergers: FastDashMap<[u8; 32], Arc<dyn DhtValueMerger>>,
     max_ttl_sec: u32,
 }
 
@@ -102,12 +109,30 @@ impl Storage {
         StorageBuilder::default()
     }
 
+    pub fn insert_merger(
+        &self,
+        group_id: &[u8; 32],
+        merger: Arc<dyn DhtValueMerger>,
+    ) -> Option<Arc<dyn DhtValueMerger>> {
+        self.value_mergers.insert(*group_id, merger)
+    }
+
+    pub fn remove_merger(&self, group_id: &[u8; 32]) -> Option<Arc<dyn DhtValueMerger>> {
+        self.value_mergers
+            .remove(group_id)
+            .map(|(_, merger)| merger)
+    }
+
     pub fn get(&self, key: &[u8; 32]) -> Option<Bytes> {
         let stored_value = self.cache.get(key)?;
         (stored_value.expires_at > now_sec()).then_some(stored_value.data)
     }
 
-    pub fn insert(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
+    pub fn insert(
+        &self,
+        source: DhtValueSource,
+        value: &ValueRef<'_>,
+    ) -> Result<bool, StorageError> {
         match value.expires_at().checked_sub(now_sec()) {
             Some(0) | None => return Err(StorageError::ValueExpired),
             Some(remaining_ttl) if remaining_ttl > self.max_ttl_sec => {
@@ -118,7 +143,7 @@ impl Storage {
 
         match value {
             ValueRef::Peer(value) => self.insert_signed_value(value),
-            ValueRef::Merged(value) => self.insert_merged_value(value),
+            ValueRef::Merged(value) => self.insert_merged_value(source, value),
         }
     }
 
@@ -144,13 +169,17 @@ impl Storage {
             .is_fresh())
     }
 
-    fn insert_merged_value(&self, value: &MergedValueRef<'_>) -> Result<bool, StorageError> {
+    fn insert_merged_value(
+        &self,
+        source: DhtValueSource,
+        value: &MergedValueRef<'_>,
+    ) -> Result<bool, StorageError> {
         let merger = match self.value_mergers.get(value.key.group_id) {
             Some(merger) => merger.clone(),
             None => return Ok(false),
         };
 
-        merger.check_value(value)?;
+        merger.check_value(source, value)?;
 
         enum MergedValueCow<'a, 'b> {
             Borrowed(&'a MergedValueRef<'b>),
@@ -182,7 +211,7 @@ impl Storage {
                         return true;
                     };
 
-                    if merger.merge_value(value, &mut prev) {
+                    if merger.merge_value(source, value, &mut prev) {
                         *new_value.borrow_mut() = MergedValueCow::Owned(prev);
                         true
                     } else {
@@ -257,4 +286,6 @@ pub enum StorageError {
     InvalidSignature,
     #[error("value too big")]
     ValueTooBig,
+    #[error("invalid source")]
+    InvalidSource,
 }

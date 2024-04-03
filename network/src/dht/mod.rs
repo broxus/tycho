@@ -25,7 +25,7 @@ use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
 pub use self::peer_resolver::{PeerResolver, PeerResolverBuilder, PeerResolverHandle};
-pub use self::storage::{StorageError, ValueMerger};
+pub use self::storage::{DhtValueSource, StorageError, DhtValueMerger};
 
 mod config;
 mod peer_resolver;
@@ -174,20 +174,23 @@ impl DhtQueryWithDataBuilder<'_> {
         let dht = self.inner.inner;
         let network = self.inner.network;
 
-        let mut value = PeerValueRef {
-            key: PeerValueKeyRef {
-                name: self.inner.name,
-                peer_id: &dht.local_id,
-            },
-            data: &self.data,
-            expires_at: self.at.unwrap_or_else(now_sec) + self.ttl,
-            signature: &[0; 64],
-        };
+        let mut value = self.make_unsigned_value_ref();
         let signature = network.sign_tl(&value);
         value.signature = &signature;
 
-        dht.store_value(network, ValueRef::Peer(value), self.with_peer_info)
+        dht.store_value(network, &ValueRef::Peer(value), self.with_peer_info)
             .await
+    }
+
+    pub fn store_locally(&self) -> Result<bool, StorageError> {
+        let dht = self.inner.inner;
+        let network = self.inner.network;
+
+        let mut value = self.make_unsigned_value_ref();
+        let signature = network.sign_tl(&value);
+        value.signature = &signature;
+
+        dht.store_value_locally(&ValueRef::Peer(value))
     }
 
     pub fn into_signed_value(self) -> PeerValue {
@@ -205,6 +208,18 @@ impl DhtQueryWithDataBuilder<'_> {
         };
         *value.signature = network.sign_tl(&value);
         value
+    }
+
+    fn make_unsigned_value_ref(&self) -> PeerValueRef<'_> {
+        PeerValueRef {
+            key: PeerValueKeyRef {
+                name: self.inner.name,
+                peer_id: &self.inner.inner.local_id,
+            },
+            data: &self.data,
+            expires_at: self.at.unwrap_or_else(now_sec) + self.ttl,
+            signature: &[0; 64],
+        }
     }
 }
 
@@ -314,8 +329,20 @@ impl DhtService {
         self.0.routing_table.lock().unwrap().contains(peer_id)
     }
 
-    pub fn store_value_locally(&self, value: ValueRef<'_>) -> Result<bool, StorageError> {
-        self.0.storage.insert(&value)
+    pub fn store_value_locally(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
+        self.0.store_value_locally(value)
+    }
+
+    pub fn insert_merger(
+        &self,
+        group_id: &[u8; 32],
+        merger: Arc<dyn DhtValueMerger>,
+    ) -> Option<Arc<dyn DhtValueMerger>> {
+        self.0.storage.insert_merger(group_id, merger)
+    }
+
+    pub fn remove_merger(&self, group_id: &[u8; 32]) -> Option<Arc<dyn DhtValueMerger>> {
+        self.0.storage.remove_merger(group_id)
     }
 }
 
@@ -443,11 +470,11 @@ impl DhtInner {
             tokio::time::interval(self.config.local_info_refresh_period);
         let mut announce_peer_info_interval = shifted_interval(
             self.config.local_info_announce_period,
-            self.config.max_local_info_announce_period_jitter,
+            self.config.local_info_announce_period_max_jitter,
         );
         let mut refresh_routing_table_interval = shifted_interval(
             self.config.routing_table_refresh_period,
-            self.config.max_routing_table_refresh_period_jitter,
+            self.config.routing_table_refresh_period_max_jitter,
         );
 
         let mut announced_peers = self.announced_peers.subscribe();
@@ -540,7 +567,8 @@ impl DhtInner {
         let signature = network.sign_tl(&value);
         value.signature = &signature;
 
-        self.store_value(network, ValueRef::Peer(value), true).await
+        self.store_value(network, &ValueRef::Peer(value), true)
+            .await
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
@@ -648,10 +676,10 @@ impl DhtInner {
     async fn store_value(
         &self,
         network: &Network,
-        value: ValueRef<'_>,
+        value: &ValueRef<'_>,
         with_peer_info: bool,
     ) -> Result<()> {
-        self.storage.insert(&value)?;
+        self.storage.insert(DhtValueSource::Local, value)?;
 
         let local_peer_info = if with_peer_info {
             let mut node_info = self.local_peer_info.lock().unwrap();
@@ -675,6 +703,10 @@ impl DhtInner {
         // NOTE: expression is intentionally split to drop the routing table guard
         query.run().await;
         Ok(())
+    }
+
+    fn store_value_locally(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
+        self.storage.insert(DhtValueSource::Local, value)
     }
 
     fn add_peer_info(&self, network: &Network, peer_info: Arc<PeerInfo>) -> Result<bool> {
@@ -728,7 +760,7 @@ impl DhtInner {
                 peer_info.id == req.metadata.peer_id,
                 "suggested peer ID does not belong to the sender"
             );
-            self.announced_peers.send(peer_info).ok();
+            self.announced_peers.send(Arc::new(peer_info)).ok();
 
             body = &body[offset..];
             anyhow::ensure!(body.len() >= 4, tl_proto::TlError::UnexpectedEof);
@@ -741,7 +773,7 @@ impl DhtInner {
     }
 
     fn handle_store(&self, req: &rpc::StoreRef<'_>) -> Result<bool, StorageError> {
-        self.storage.insert(&req.value)
+        self.storage.insert(DhtValueSource::Remote, &req.value)
     }
 
     fn handle_find_node(&self, req: &rpc::FindNode) -> NodeResponse {

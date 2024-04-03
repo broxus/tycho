@@ -384,20 +384,21 @@ impl StoreValue<()> {
     pub fn new(
         network: Network,
         routing_table: &HandlesRoutingTable,
-        value: ValueRef<'_>,
+        value: &ValueRef<'_>,
         max_k: usize,
         local_peer_info: Option<&PeerInfo>,
     ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> {
-        let key_hash = match &value {
+        let key_hash = match value {
             ValueRef::Peer(value) => tl_proto::hash(&value.key),
             ValueRef::Merged(value) => tl_proto::hash(&value.key),
         };
 
         let request_body = Bytes::from(match local_peer_info {
-            Some(peer_info) => {
-                tl_proto::serialize((rpc::WithPeerInfoRef { peer_info }, rpc::StoreRef { value }))
-            }
-            None => tl_proto::serialize(rpc::StoreRef { value }),
+            Some(peer_info) => tl_proto::serialize((
+                rpc::WithPeerInfo::wrap(peer_info),
+                rpc::StoreRef::wrap(value),
+            )),
+            None => tl_proto::serialize(rpc::StoreRef::wrap(value)),
         });
 
         let semaphore = Arc::new(Semaphore::new(10));

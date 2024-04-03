@@ -378,22 +378,23 @@ pub mod rpc {
     /// Query wrapper with an announced peer info.
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "dht.withPeerInfo", scheme = "proto.tl")]
+    #[repr(transparent)]
     pub struct WithPeerInfo {
         /// A signed info of the sender.
-        pub peer_info: Arc<PeerInfo>,
+        pub peer_info: PeerInfo,
     }
 
-    /// Query wrapper with an announced peer info.
-    #[derive(Debug, Clone, TlWrite)]
-    #[tl(boxed, id = "dht.withPeerInfo", scheme = "proto.tl")]
-    pub struct WithPeerInfoRef<'tl> {
-        /// A signed info of the sender.
-        pub peer_info: &'tl PeerInfo,
+    impl WithPeerInfo {
+        pub fn wrap(value: &'_ PeerInfo) -> &'_ Self {
+            // SAFETY: `rpc::WithPeerInfo` has the same memory layout as `PeerInfo`.
+            unsafe { &*(value as *const PeerInfo).cast() }
+        }
     }
 
     /// Suggest a node to store that value.
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "dht.store", scheme = "proto.tl")]
+    #[repr(transparent)]
     pub struct Store {
         /// A value to store.
         pub value: Value,
@@ -402,9 +403,17 @@ pub mod rpc {
     /// Suggest a node to store that value.
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "dht.store", scheme = "proto.tl")]
+    #[repr(transparent)]
     pub struct StoreRef<'tl> {
         /// A value to store.
         pub value: ValueRef<'tl>,
+    }
+
+    impl<'tl> StoreRef<'tl> {
+        pub fn wrap<'a>(value: &'a ValueRef<'tl>) -> &'a Self {
+            // SAFETY: `rpc::StoreRef` has the same memory layout as `ValueRef`.
+            unsafe { &*(value as *const ValueRef<'tl>).cast() }
+        }
     }
 
     /// Search for `k` the closest nodes.
