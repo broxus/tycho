@@ -237,7 +237,7 @@ impl Node {
             .build(address, router)?;
 
         dht_tasks.spawn(&network);
-        let dht = dht_service.make_client(network.clone());
+        let dht = dht_service.make_client(&network);
 
         Ok(Self { network, dht })
     }

@@ -427,10 +427,10 @@ where
     fn mq_iterator_commit(&mut self) {
         todo!()
     }
-    fn mq_iterator_get_diff(&self, block_id_short: BlockIdShort) -> QueueDiff {
+    fn mq_iterator_get_diff(&self, _block_id_short: BlockIdShort) -> QueueDiff {
         todo!()
     }
-    fn mq_iterator_add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
+    fn mq_iterator_add_message(&mut self, _message: Arc<EnqueuedMessage>) -> Result<()> {
         todo!()
     }
 

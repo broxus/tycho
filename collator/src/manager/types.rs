@@ -104,7 +104,7 @@ impl BlockCandidateContainer {
     pub fn set_validation_result(&mut self, signatures: BlockSignatures) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;
-            self.is_valid = entry.signatures.is_valid();
+            self.is_valid = ???;
         }
     }
 
@@ -131,7 +131,7 @@ pub(in crate::manager) trait ShardStateStuffExt {
     fn from_state(block_id: BlockId, shard_state: ShardStateUnsplit) -> Result<Arc<Self>>;
 }
 impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(block_id: BlockId, shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
+    fn from_state(_block_id: BlockId, _shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
         todo!()
     }
 }

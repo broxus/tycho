@@ -310,15 +310,19 @@ impl DhtService {
         }
     }
 
-    pub fn make_client(&self, network: Network) -> DhtClient {
+    pub fn make_client(&self, network: &Network) -> DhtClient {
         DhtClient {
             inner: self.0.clone(),
-            network,
+            network: network.clone(),
         }
     }
 
     pub fn make_peer_resolver(&self) -> PeerResolverBuilder {
         PeerResolver::builder(self.clone())
+    }
+
+    pub fn has_peer(&self, peer_id: &PeerId) -> bool {
+        self.0.routing_table.lock().unwrap().contains(peer_id)
     }
 }
 
@@ -338,7 +342,7 @@ impl Service<ServiceRequest> for DhtService {
         let (constructor, body) = match self.0.try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
-                tracing::debug!("failed to deserialize query: {e:?}");
+                tracing::debug!("failed to deserialize query: {e}");
                 return futures_util::future::ready(None);
             }
         };
@@ -362,7 +366,7 @@ impl Service<ServiceRequest> for DhtService {
                 self.0.handle_get_node_info().map(tl_proto::serialize)
             },
         }, e => {
-            tracing::debug!("failed to deserialize query: {e:?}");
+            tracing::debug!("failed to deserialize query: {e}");
             None
         });
 
@@ -382,7 +386,7 @@ impl Service<ServiceRequest> for DhtService {
         let (constructor, body) = match self.0.try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
-                tracing::debug!("failed to deserialize message: {e:?}");
+                tracing::debug!("failed to deserialize message: {e}");
                 return futures_util::future::ready(());
             }
         };
@@ -392,11 +396,11 @@ impl Service<ServiceRequest> for DhtService {
                 tracing::debug!("store");
 
                 if let Err(e) = self.0.handle_store(r) {
-                    tracing::debug!("failed to store value: {e:?}");
+                    tracing::debug!("failed to store value: {e}");
                 }
             }
         }, e => {
-            tracing::debug!("failed to deserialize message: {e:?}");
+            tracing::debug!("failed to deserialize message: {e}");
         });
 
         futures_util::future::ready(())
@@ -484,7 +488,7 @@ impl DhtInner {
                         refresh_peer_info_interval.reset();
 
                         if let Err(e) = this.announce_local_peer_info(&network).await {
-                            tracing::error!("failed to announce local DHT node info: {e:?}");
+                            tracing::error!("failed to announce local DHT node info: {e}");
                         }
                     }
                     Action::RefreshRoutingTable => {
@@ -501,9 +505,17 @@ impl DhtInner {
                         }));
                     }
                     Action::AddPeer(peer_info) => {
-                        tracing::info!(peer_id = %peer_info.id, "received peer info");
-                        if let Err(e) = this.add_peer_info(&network, peer_info) {
-                            tracing::error!("failed to add peer to the routing table: {e:?}");
+                        let peer_id = peer_info.id;
+                        let added = this.add_peer_info(&network, peer_info);
+                        tracing::debug!(
+                            local_id = %this.local_id,
+                            %peer_id,
+                            ?added,
+                            "received peer info",
+                        );
+
+                        if let Err(e) = added {
+                            tracing::error!("failed to add peer to the routing table: {e}");
                         }
                     }
                 }
@@ -541,7 +553,7 @@ impl DhtInner {
     #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
     async fn refresh_routing_table(&self, network: &Network) {
         const PARALLEL_QUERIES: usize = 3;
-        const MAX_DISTANCE: usize = 15;
+        const MAX_BUCKETS: usize = 15;
         const QUERY_DEPTH: usize = 3;
 
         // Prepare futures for each bucket
@@ -554,18 +566,17 @@ impl DhtInner {
 
             // Filter out expired nodes
             let now = now_sec();
-            for (_, bucket) in routing_table.buckets.range_mut(..=MAX_DISTANCE) {
+            for (_, bucket) in routing_table.buckets.iter_mut() {
                 bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_peer_info_ttl));
             }
 
-            // Iterate over the first buckets up until some distance (`MAX_DISTANCE`)
-            // or up to the last non-empty bucket (?).
-            for (&distance, bucket) in routing_table.buckets.range(..=MAX_DISTANCE).rev() {
-                // TODO: Should we skip empty buckets?
-                if bucket.is_empty() {
-                    continue;
-                }
-
+            // Iterate over the first non-empty buckets (at most `MAX_BUCKETS`)
+            for (&distance, _) in routing_table
+                .buckets
+                .iter()
+                .filter(|(&distance, bucket)| distance > 0 && !bucket.is_empty())
+                .take(MAX_BUCKETS)
+            {
                 // Query the K closest nodes for a random ID at the specified distance from the local ID.
                 let random_id = random_key_at_distance(&routing_table.local_id, distance, rng);
                 let query = Query::new(
@@ -707,15 +718,7 @@ impl DhtInner {
     }
 
     fn make_local_peer_info(&self, network: &Network, now: u32) -> PeerInfo {
-        let mut peer_info = PeerInfo {
-            id: self.local_id,
-            address_list: vec![network.local_addr().into()].into_boxed_slice(),
-            created_at: now,
-            expires_at: now + self.config.max_peer_info_ttl.as_secs() as u32,
-            signature: Box::new([0; 64]),
-        };
-        *peer_info.signature = network.sign_tl(&peer_info);
-        peer_info
+        network.sign_peer_info(now, self.config.max_peer_info_ttl.as_secs() as u32)
     }
 
     fn try_handle_prefix<'a>(&self, req: &'a ServiceRequest) -> Result<(u32, &'a [u8])> {
@@ -782,8 +785,19 @@ impl DhtInner {
 }
 
 fn random_key_at_distance(from: &PeerId, distance: usize, rng: &mut impl RngCore) -> PeerId {
+    let distance = MAX_XOR_DISTANCE - distance;
+
     let mut result = *from;
-    rng.fill_bytes(&mut result.0[distance..]);
+
+    let byte_offset = distance / 8;
+    rng.fill_bytes(&mut result.0[byte_offset..]);
+
+    let bit_offset = distance % 8;
+    if bit_offset != 0 {
+        let mask = 0xff >> bit_offset;
+        result.0[byte_offset] ^= (result.0[byte_offset] ^ from.0[byte_offset]) & !mask;
+    }
+
     result
 }
 
@@ -808,4 +822,21 @@ pub enum FindValueError {
     InvalidData(#[from] tl_proto::TlError),
     #[error("value not found")]
     NotFound,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proper_random_keys() {
+        let peer_id = rand::random();
+        let random_id = random_key_at_distance(&peer_id, 20, &mut rand::thread_rng());
+        println!("{peer_id}");
+        println!("{random_id}");
+
+        let distance = xor_distance(&peer_id, &random_id);
+        println!("{distance}");
+        assert!(distance <= 23);
+    }
 }

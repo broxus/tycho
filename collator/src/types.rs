@@ -1,12 +1,14 @@
+use std::collections::HashMap;
+use everscale_crypto::ed25519::KeyPair;
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
+
+use tycho_block_util::block::ValidatorSubsetInfo;
+use tycho_network::{DhtClient, OverlayService, PeerResolver};
+
 use std::sync::Arc;
 
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::{
-    cell::HashBytes,
-    models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature},
-};
-
-use tycho_block_util::block::{BlockStuff, ValidatorSubsetInfo};
+use tycho_block_util::block::BlockStuff;
 
 pub struct CollationConfig {
     pub key_pair: KeyPair,
@@ -26,7 +28,6 @@ pub(crate) struct BlockCandidate {
     data: Vec<u8>,
     collated_data: Vec<u8>,
     collated_file_hash: HashBytes,
-
     chain_time: u64,
 }
 impl BlockCandidate {
@@ -68,32 +69,35 @@ impl BlockCandidate {
 
 #[derive(Default)]
 pub(crate) struct BlockSignatures {
-    pub good_sigs: Vec<(HashBytes, Signature)>,
-    pub bad_sigs: Vec<(HashBytes, Signature)>,
-}
-impl BlockSignatures {
-    pub fn is_valid(&self) -> bool {
-        //STUB: valid if just one good sign exists
-        !self.good_sigs.is_empty()
-    }
+    pub good_sigs: HashMap<HashBytes, Signature>,
+    pub bad_sigs: HashMap<HashBytes, Signature>,
 }
 
-pub(crate) struct ValidatedBlock {
-    block_id: BlockId,
+pub struct ValidatedBlock {
+    block: BlockId,
     signatures: BlockSignatures,
+    valid: bool,
 }
+
 impl ValidatedBlock {
-    pub fn new(block_id: BlockId, signatures: BlockSignatures) -> Self {
+    pub fn new(block: BlockId, signatures: BlockSignatures, valid: bool) -> Self {
         Self {
-            block_id,
+            block,
             signatures,
+            valid,
         }
     }
+
     pub fn id(&self) -> &BlockId {
-        &self.block_id
+        &self.block
     }
+
+    pub fn signatures(&self) -> &BlockSignatures {
+        &self.signatures
+    }
+
     pub fn is_valid(&self) -> bool {
-        self.signatures.is_valid()
+        self.valid
     }
     pub fn extract_signatures(self) -> BlockSignatures {
         self.signatures
@@ -106,23 +110,36 @@ pub(crate) struct BlockStuffForSync {
     pub prev_blocks_ids: Vec<BlockId>,
 }
 
-/// (ShardIdent, seqno)
+/// (`ShardIdent`, seqno)
 pub(crate) type CollationSessionId = (ShardIdent, u32);
 
 pub(crate) struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,
+    current_collator_keypair: Option<KeyPair>,
 }
 impl CollationSessionInfo {
-    pub fn new(seqno: u32, collators: ValidatorSubsetInfo) -> Self {
-        Self { seqno, collators }
+    pub fn new(
+        seqno: u32,
+        collators: ValidatorSubsetInfo,
+        current_collator_keypair: Option<KeyPair>,
+    ) -> Self {
+        Self {
+            seqno,
+            collators,
+            current_collator_keypair,
+        }
     }
     pub fn seqno(&self) -> u32 {
         self.seqno
     }
     pub fn collators(&self) -> &ValidatorSubsetInfo {
         &self.collators
+    }
+
+    pub fn current_collator_keypair(&self) -> Option<&KeyPair> {
+        self.current_collator_keypair.as_ref()
     }
 }
 
@@ -149,9 +166,9 @@ impl MessageExt for OwnedMessage {
     }
 }
 
-pub(crate) mod ext_types {
-    pub use stubs::*;
-    pub mod stubs {
-        pub struct BlockHandle;
-    }
+#[derive(Clone)]
+pub struct ValidatorNetwork {
+    pub overlay_service: OverlayService,
+    pub peer_resolver: PeerResolver,
+    pub dht_client: DhtClient,
 }

@@ -4,4 +4,4 @@ pub mod collator_processor;
 mod do_collate;
 mod types;
 
-pub use collator::*;
+pub(crate) use collator::*;

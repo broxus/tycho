@@ -1,29 +1,30 @@
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_crypto::ed25519::{KeyPair, PublicKey};
 
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription};
+use everscale_types::models::{BlockId, BlockIdShort};
 
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::state::ShardStateStuff;
 
+use crate::types::ValidatorNetwork;
+use crate::validator::types::ValidationSessionInfo;
 use crate::{
-    state_node::StateNodeAdapter,
-    tracing_targets,
-    types::{BlockSignatures, ValidatedBlock},
+    state_node::StateNodeAdapter, types::ValidatedBlock,
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
 };
 
 use super::{
-    validator_processor::{ValidatorProcessor, ValidatorProcessorSpecific, ValidatorTaskResult},
+    validator_processor::{ValidatorProcessor, ValidatorTaskResult},
     ValidatorEventEmitter, ValidatorEventListener,
 };
 
-pub struct ValidatorProcessorTestImpl<ST>
+pub(crate) struct ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
+    _dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
     listener: Arc<dyn ValidatorEventListener>,
     state_node_adapter: Arc<ST>,
 
@@ -45,116 +46,84 @@ impl<ST> ValidatorProcessor<ST> for ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
+    async fn enqueue_process_new_mc_block_state(
+        &self,
+        _mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()> {
+        todo!()
+    }
+
     fn new(
-        dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
+        _dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
         listener: Arc<dyn ValidatorEventListener>,
         state_node_adapter: Arc<ST>,
+        _network: ValidatorNetwork,
     ) -> Self {
         Self {
-            dispatcher,
+            _dispatcher,
             listener,
             state_node_adapter,
-
             _stub_candidates_cache: HashMap::new(),
         }
     }
 
-    fn get_state_node_adapter(&self) -> Arc<ST> {
-        self.state_node_adapter.clone()
-    }
-
-    fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>> {
-        self.dispatcher.clone()
-    }
-}
-
-#[async_trait]
-impl<ST> ValidatorProcessorSpecific<ST> for ValidatorProcessorTestImpl<ST>
-where
-    ST: StateNodeAdapter,
-{
-    async fn validate_candidate_by_block_from_bc(
+    async fn start_candidate_validation(
         &mut self,
-        candidate_id: BlockId,
-        block_from_bc: Arc<BlockStuff>,
+        _candidate_id: BlockId,
+        _session_seqno: u32,
+        _current_validator_keypair: KeyPair,
     ) -> Result<ValidatorTaskResult> {
         todo!()
     }
 
-    async fn request_cadidate_signature_from_neighbor<Fut>(
-        collator_descr: &ValidatorDescription,
-        shard_id: ShardIdent,
-        seq_no: u32,
-        own_signature: Signature,
-        callback: impl FnOnce(ValidatorDescription, Signature) -> Fut + Send + 'static,
-    ) -> Result<()>
-    where
-        Fut: Future<Output = Result<()>> + Send,
-    {
-        let candidate_id = BlockIdShort {
-            shard: shard_id,
-            seqno: seq_no,
-        };
-        tracing::debug!(
-            target: tracing_targets::VALIDATOR,
-            "Validator (block: {}): STUB: emulating signature request to neighbor {}",
-            candidate_id, collator_descr.public_key,
-        );
-        tokio::spawn({
-            let collator_descr = collator_descr.clone();
-            tokio::time::sleep(tokio::time::Duration::from_millis(45)).await;
-            async move {
-                callback(collator_descr, Signature::default())
-                    .await
-                    .unwrap();
-            }
-        });
-
-        Ok(())
-    }
-
-    fn find_neighbor(&self, neighbor: &ValidatorDescription) -> Option<&ValidatorDescription> {
+    fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>> {
         todo!()
     }
 
-    fn check_signature(
-        candidate_id: &BlockId,
-        his_signature: &Signature,
-        neighbor: &ValidatorDescription,
-    ) -> Result<bool> {
-        //STUB: always return true
-        Ok(true)
-    }
-
-    fn is_candidate_validated(&self, block_id: &BlockId) -> bool {
-        *self._stub_candidates_cache.get(block_id).unwrap_or(&false)
-    }
-
-    fn append_candidate_signature_and_return_if_validated(
+    async fn try_add_session(
         &mut self,
-        candidate_id: BlockId,
-        signature_is_valid: bool,
-        his_signature: Signature,
-        neighbor: ValidatorDescription,
-    ) -> Option<ValidatedBlock> {
-        //STUB: block is valid after a single valid signature
+        _session: Arc<ValidationSessionInfo>,
+    ) -> Result<ValidatorTaskResult> {
+        todo!()
+    }
 
-        self._stub_candidates_cache
-            .entry(candidate_id)
-            .or_insert(signature_is_valid);
+    async fn stop_candidate_validation(
+        &self,
+        _candidate_id: BlockId,
+    ) -> Result<ValidatorTaskResult> {
+        todo!()
+    }
 
-        if self.is_candidate_validated(&candidate_id) {
-            let validated_block = ValidatedBlock::new(
-                candidate_id,
-                BlockSignatures {
-                    good_sigs: vec![(neighbor.public_key, his_signature)],
-                    bad_sigs: vec![],
-                },
-            );
+    async fn get_block_signatures(
+        &mut self,
+        _session_seqno: u32,
+        _block_id_short: &BlockIdShort,
+    ) -> Result<ValidatorTaskResult> {
+        todo!()
+    }
+    async fn process_candidate_signature_response(
+        &mut self,
+        _session_seqno: u32,
+        _block_id_short: BlockIdShort,
+        _signatures: Vec<([u8; 32], [u8; 64])>,
+    ) -> Result<ValidatorTaskResult> {
+        todo!()
+    }
 
-            Some(validated_block)
-        } else {
-            None
-        }
+    async fn validate_candidate(
+        &mut self,
+        _candidate_id: BlockId,
+        _session_seqno: u32,
+        _current_validator_pubkey: PublicKey,
+    ) -> Result<ValidatorTaskResult> {
+        todo!()
+    }
+
+    async fn get_validation_status(
+        &mut self,
+        _session_seqno: u32,
+        _block_id_short: &BlockIdShort,
+    ) -> Result<ValidatorTaskResult> {
+        todo!()
     }
 }

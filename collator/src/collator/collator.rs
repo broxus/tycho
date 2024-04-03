@@ -158,7 +158,7 @@ where
         res
     }
 
-    async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()> {
+    async fn equeue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
         todo!()
     }
 

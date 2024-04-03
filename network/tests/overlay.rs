@@ -3,31 +3,49 @@
 //! RUST_LOG=info,tycho_network=trace
 //! ```
 
-use anyhow::Result;
-use everscale_crypto::ed25519;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
+
+use anyhow::Result;
+use everscale_crypto::ed25519;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    Address, KnownPeerHandle, Network, OverlayId, OverlayService, PeerId, PeerInfo, PrivateOverlay,
+    DhtClient, DhtConfig, DhtService, Network, OverlayId, OverlayService, PeerId, PrivateOverlay,
     Request, Response, Router, Service, ServiceRequest,
 };
-use tycho_util::time::now_sec;
 
 struct Node {
     network: Network,
     private_overlay: PrivateOverlay,
-    known_peer_handles: Vec<KnownPeerHandle>,
+    dht_client: DhtClient,
 }
 
 impl Node {
-    fn new(key: &ed25519::SecretKey) -> Self {
-        let keypair = ed25519::KeyPair::from(key);
-        let local_id = PeerId::from(keypair.public_key);
+    fn with_random_key() -> Self {
+        let key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let local_id = ed25519::PublicKey::from(&key).into();
 
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id).build();
+        let (dht_tasks, dht_service) = DhtService::builder(local_id)
+            .with_config(DhtConfig {
+                local_info_announce_period: Duration::from_secs(1),
+                max_local_info_announce_period_jitter: Duration::from_secs(1),
+                routing_table_refresh_period: Duration::from_secs(1),
+                max_routing_table_refresh_period_jitter: Duration::from_secs(1),
+                ..Default::default()
+            })
+            .build();
 
-        let router = Router::builder().route(overlay_service.clone()).build();
+        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
+            .with_dht_service(dht_service.clone())
+            .build();
+
+        let router = Router::builder()
+            .route(dht_service.clone())
+            .route(overlay_service.clone())
+            .build();
 
         let network = Network::builder()
             .with_private_key(key.to_bytes())
@@ -35,32 +53,22 @@ impl Node {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
+        dht_tasks.spawn(&network);
         overlay_tasks.spawn(&network);
 
-        let private_overlay = PrivateOverlay::builder(PRIVATE_OVERLAY_ID).build(PingPongService);
+        let dht_client = dht_service.make_client(&network);
+        let peer_resolver = dht_service.make_peer_resolver().build(&network);
+
+        let private_overlay = PrivateOverlay::builder(PRIVATE_OVERLAY_ID)
+            .with_peer_resolver(peer_resolver)
+            .build(PingPongService);
         overlay_service.add_private_overlay(&private_overlay);
 
         Self {
             network,
+            dht_client,
             private_overlay,
-            known_peer_handles: Vec::new(),
         }
-    }
-
-    fn make_peer_info(key: &ed25519::SecretKey, address: Address) -> PeerInfo {
-        let keypair = ed25519::KeyPair::from(key);
-        let peer_id = PeerId::from(keypair.public_key);
-
-        let now = now_sec();
-        let mut node_info = PeerInfo {
-            id: peer_id,
-            address_list: vec![address].into_boxed_slice(),
-            created_at: now,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        };
-        *node_info.signature = keypair.sign(&node_info);
-        node_info
     }
 
     async fn private_overlay_query<Q, A>(&self, peer_id: &PeerId, req: Q) -> Result<A>
@@ -77,44 +85,60 @@ impl Node {
 }
 
 fn make_network(node_count: usize) -> Vec<Node> {
-    let keys = (0..node_count)
-        .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
+    let nodes = (0..node_count)
+        .map(|_| Node::with_random_key())
         .collect::<Vec<_>>();
 
-    let mut nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
+    let common_peer_info = nodes.first().unwrap().network.sign_peer_info(0, u32::MAX);
 
-    let bootstrap_info = std::iter::zip(&keys, &nodes)
-        .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
-        .collect::<Vec<_>>();
+    for node in &nodes {
+        node.dht_client
+            .add_peer(Arc::new(common_peer_info.clone()))
+            .unwrap();
 
-    for node in &mut nodes {
         let mut private_overlay_entries = node.private_overlay.write_entries();
 
-        for info in &bootstrap_info {
-            if info.id == node.network.peer_id() {
+        for peer_id in nodes.iter().map(|node| node.network.peer_id()) {
+            if peer_id == node.network.peer_id() {
                 continue;
             }
-
-            node.known_peer_handles.push(
-                node.network
-                    .known_peers()
-                    .insert(info.clone(), false)
-                    .unwrap(),
-            );
-
-            private_overlay_entries.insert(&info.id);
+            private_overlay_entries.insert(peer_id);
         }
     }
 
     nodes
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn private_overlays_accessible() -> Result<()> {
     tracing_subscriber::fmt::try_init().ok();
     tracing::info!("bootstrap_nodes_accessible");
 
-    let nodes = make_network(5);
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+
+        tracing::error!("{}", info);
+        std::io::stderr().flush().ok();
+        std::io::stdout().flush().ok();
+        std::process::exit(1);
+    }));
+
+    let nodes = make_network(20);
+
+    for node in &nodes {
+        let resolved = FuturesUnordered::new();
+        for entry in node.private_overlay.read_entries().iter() {
+            let handle = entry.resolver_handle.clone();
+            resolved.push(async move { handle.wait_resolved().await });
+        }
+
+        // Ensure all entries are resolved.
+        resolved.collect::<Vec<_>>().await;
+        tracing::info!(
+            peer_id = %node.network.peer_id(),
+            "all entries resolved",
+        );
+    }
 
     for i in 0..nodes.len() {
         for j in 0..nodes.len() {

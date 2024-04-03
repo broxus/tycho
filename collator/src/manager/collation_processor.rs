@@ -3,6 +3,12 @@ use std::{
     sync::Arc,
 };
 
+use everscale_crypto::ed25519::KeyPair;
+
+use everscale_types::{
+    cell::HashBytes,
+};
+use rand::thread_rng;
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription, ValidatorSet};
@@ -126,7 +132,7 @@ where
     /// jusct sync blcoks from blockchain
     pub async fn process_new_anchor_from_mempool(
         &mut self,
-        anchor: Arc<MempoolAnchor>,
+        _anchor: Arc<MempoolAnchor>,
     ) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         Ok(())
@@ -421,6 +427,8 @@ where
                 to_stop_collators.insert((shard_id, new_session_seqno), collator);
             }
 
+            let mut rng = thread_rng();
+            let keypair = KeyPair::generate(&mut rng);
             self.active_collation_sessions.insert(
                 shard_id,
                 Arc::new(CollationSessionInfo::new(
@@ -429,6 +437,7 @@ where
                         validators: subset,
                         short_hash: hash_short,
                     },
+                    Some(keypair),
                 )),
             );
         }
@@ -536,9 +545,9 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        let current_collator_pubkey = self.config.key_pair.public_key;
+        let current_collator_keypair = self.config.key_pair;
         self.validator
-            .enqueue_candidate_validation(candidate_id, session_info, current_collator_pubkey)
+            .enqueue_candidate_validation(candidate_id, session_info.seqno(), current_collator_keypair)
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block
@@ -637,7 +646,7 @@ where
     /// 3. Return chain time for master block collation if interval expired
     fn update_last_collated_chain_time_and_check_mc_block_interval(
         &mut self,
-        shard_id: ShardIdent,
+        _shard_id: ShardIdent,
         chain_time: u64,
     ) -> Option<u64> {
         //TODO: make real implementation
@@ -877,7 +886,7 @@ where
     /// (TODO) Find and restore block entries in cache
     async fn restore_blocks_in_cache(
         &mut self,
-        blocks_to_restore: Vec<BlockCandidateToSend>,
+        _blocks_to_restore: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
         todo!()
     }
@@ -922,7 +931,6 @@ where
         Ok(())
     }
 
-    /// Process validated and valid shard block
     /// 1. Try find master block info and execute [`CollationProcessor::process_valid_master_block`]
     async fn process_valid_shard_block(&mut self, block_id: &BlockId) -> Result<()> {
         if let Some(mc_block_container) = self.find_containing_mc_block(block_id) {
@@ -976,7 +984,7 @@ where
                 _ => {
                     let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
                     //TODO: handle and log error
-                    if let Err(err) = state_node_adapter.accept_block(block_for_sync).await {
+                    if let Err(_err) = state_node_adapter.accept_block(block_for_sync).await {
                         should_restore_blocks_in_cache = true;
                         break;
                     } else {
@@ -990,7 +998,7 @@ where
             // commit queue diffs for each block
             for &sent_block in sent_blocks.iter() {
                 //TODO: handle and log error
-                if let Err(err) = mq_adapter
+                if let Err(_err) = mq_adapter
                     .commit_diff(&sent_block.entry.candidate.block_id().as_short_id())
                     .await
                 {

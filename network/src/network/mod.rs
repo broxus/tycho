@@ -9,7 +9,8 @@ use self::config::EndpointConfig;
 use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
 use self::endpoint::Endpoint;
 use crate::types::{
-    Address, DisconnectReason, PeerEvent, PeerId, Response, Service, ServiceExt, ServiceRequest,
+    Address, DisconnectReason, PeerEvent, PeerId, PeerInfo, Response, Service, ServiceExt,
+    ServiceRequest,
 };
 
 pub use self::config::{NetworkConfig, QuicConfig};
@@ -228,6 +229,18 @@ impl Network {
         self.0.keypair.sign_raw(data)
     }
 
+    pub fn sign_peer_info(&self, now: u32, ttl: u32) -> PeerInfo {
+        let mut res = PeerInfo {
+            id: *self.0.peer_id(),
+            address_list: vec![self.local_addr().into()].into_boxed_slice(),
+            created_at: now,
+            expires_at: now.saturating_add(ttl),
+            signature: Box::new([0; 64]),
+        };
+        *res.signature = self.sign_tl(&res);
+        res
+    }
+
     pub fn downgrade(this: &Self) -> WeakNetwork {
         WeakNetwork(Arc::downgrade(&this.0))
     }
@@ -295,6 +308,12 @@ impl NetworkInner {
 
     fn is_closed(&self) -> bool {
         self.connection_manager_handle.is_closed()
+    }
+}
+
+impl Drop for NetworkInner {
+    fn drop(&mut self) {
+        tracing::debug!("network dropped");
     }
 }
 
