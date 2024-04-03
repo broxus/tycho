@@ -155,7 +155,7 @@ pub(super) struct PrevData {
 }
 impl PrevData {
     pub fn build(
-        mc_data: &McData,
+        _mc_data: &McData,
         prev_states: &Vec<Arc<ShardStateStuff>>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<(Self, UsageTree)> {

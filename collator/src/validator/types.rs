@@ -6,6 +6,7 @@ use anyhow::bail;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ValidatorDescription};
+use log::error;
 use tl_proto::{TlRead, TlWrite};
 
 use crate::types::CollationSessionInfo;
@@ -48,7 +49,7 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
 
     fn try_from(session_info: Arc<CollationSessionInfo>) -> std::result::Result<Self, Self::Error> {
         let current_validator_keypair = match session_info.current_collator_keypair() {
-            Some(keypair) => keypair.clone(),
+            Some(keypair) => *keypair,
             None => {
                 bail!("Collator keypair is not set, skip candidate validation");
             }
@@ -65,7 +66,9 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
                         Arc::new(validator_info),
                     );
                 }
-                Err(_) => {}
+                Err(_) => {
+                    error!("invalid validator public key");
+                }
             }
         }
 
@@ -95,7 +98,7 @@ impl From<BlockId> for BlockValidationCandidate {
 }
 
 impl BlockValidationCandidate {
-    pub fn to_bytes(&self) -> [u8; 64] {
+    pub fn as_bytes(&self) -> [u8; 64] {
         let mut bytes = [0u8; 64];
         bytes[..32].copy_from_slice(&self.root_hash);
         bytes[32..].copy_from_slice(&self.file_hash);

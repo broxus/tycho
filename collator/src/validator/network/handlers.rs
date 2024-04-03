@@ -9,7 +9,7 @@ use crate::method_to_async_task_closure;
 use crate::state_node::StateNodeAdapter;
 use crate::utils::async_queued_dispatcher::AsyncQueuedDispatcher;
 use crate::validator::network::dto::SignaturesQuery;
-use crate::validator::state::ValidationState;
+
 use crate::validator::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 
 pub async fn handle_signatures_query<W, ST>(
@@ -22,7 +22,7 @@ where
     W: ValidatorProcessor<ST> + Send + Sync,
     ST: StateNodeAdapter + Send + Sync,
 {
-    let mut receiver = dispatcher
+    let receiver = dispatcher
         .enqueue_task_with_responder(method_to_async_task_closure!(
             get_block_signatures,
             session_seqno,
@@ -59,9 +59,9 @@ where
             };
             Ok(Some(Response::from_tl(response)))
         }
-        Ok(ValidatorTaskResult::Void) | Ok(ValidatorTaskResult::ValidationStatus(_)) => Err(
-            anyhow!("Invalid response type received from get_block_signatures."),
-        ),
+        Ok(ValidatorTaskResult::Void | ValidatorTaskResult::ValidationStatus(_)) => Err(anyhow!(
+            "Invalid response type received from get_block_signatures."
+        )),
         Err(e) => Err(anyhow!("Error processing task result: {:?}", e)),
     }
 }

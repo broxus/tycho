@@ -16,7 +16,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
 
 use crate::types::{ValidatedBlock, ValidatorNetwork};
-use crate::utils::task_descr::TaskResponseReceiver;
+
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::network_service::NetworkService;
 use crate::validator::state::{ValidationState, ValidationStateStdImpl};
@@ -90,12 +90,12 @@ where
 
     async fn validate_candidate_by_block_from_bc(
         &mut self,
-        candidate_id: BlockId,
+        _candidate_id: BlockId,
     ) -> Result<ValidatorTaskResult> {
-        todo!();
         // self.on_block_validated_event(ValidatedBlock::new(candidate_id, vec![], true))
         //     .await?;
-        Ok(ValidatorTaskResult::Void)
+        // Ok(ValidatorTaskResult::Void)
+        todo!();
     }
     async fn get_block_signatures(
         &mut self,
@@ -325,15 +325,15 @@ where
             .context("failed to process_candidate_signature_response. session not found")?;
 
         // Check if validation status is already determined
-        match session.validation_status(&block_id_short) {
-            ValidationResult::Valid | ValidationResult::Invalid => {
-                debug!(
-                    "Validation status is already set for block {:?}.",
-                    block_id_short
-                );
-                return Ok(ValidatorTaskResult::Void);
-            }
-            _ => {}
+        let validation_status = session.validation_status(&block_id_short);
+        if validation_status == ValidationResult::Valid
+            || validation_status == ValidationResult::Invalid
+        {
+            debug!(
+                "Validation status is already set for block {:?}.",
+                block_id_short
+            );
+            return Ok(ValidatorTaskResult::Void);
         }
 
         if let Some(block) = session.get_block(&block_id_short).cloned() {
@@ -349,7 +349,7 @@ where
                     .get(&validator_id)
                     .context("validator not found")?
                     .public_key
-                    .verify(block_validation_candidate.to_bytes(), &signature.0);
+                    .verify(block_validation_candidate.as_bytes(), &signature.0);
 
                 session.add_signature(&block, validator_id, signature, is_valid);
             }
@@ -428,7 +428,7 @@ where
 
         let network = self.network.clone();
 
-        let _ = tokio::spawn(async move {
+        tokio::spawn(async move {
             if let Ok(Some(_)) = receiver.try_recv().await {
                 let result = dispatcher
                     .clone()
@@ -454,7 +454,7 @@ where
                         trace!(target: tracing_targets::VALIDATOR, validator_pubkey=?validator.public_key.as_bytes(), "trying to send request for getting signatures from validator");
                         let response = private_overlay
                             .query(
-                                &network.dht_client.network(),
+                                network.dht_client.network(),
                                 &PeerId(validator.public_key.to_bytes()),
                                 Request::from_tl(payload.clone()),
                             )
@@ -509,6 +509,6 @@ where
 
 fn sign_block(key_pair: &KeyPair, block: &BlockId) -> Result<Signature> {
     let block_validation_candidate = BlockValidationCandidate::from(*block);
-    let signature = Signature(key_pair.sign(block_validation_candidate.to_bytes()));
+    let signature = Signature(key_pair.sign(block_validation_candidate.as_bytes()));
     Ok(signature)
 }

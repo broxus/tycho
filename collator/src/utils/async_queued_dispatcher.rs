@@ -2,8 +2,6 @@ use std::{future::Future, pin::Pin};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
-use tracing::debug;
-use tracing::field::debug;
 
 use crate::tracing_targets;
 

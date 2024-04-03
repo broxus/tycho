@@ -46,7 +46,7 @@ pub struct BlockCandidateContainer {
     pub containing_mc_block: Option<HashBytes>,
 }
 impl BlockCandidateContainer {
-    fn new(candidate: BlockCandidate) -> Self {
+    fn new(_candidate: BlockCandidate) -> Self {
         todo!()
     }
 
@@ -79,7 +79,7 @@ pub(in crate::manager) trait ShardStateStuffExt {
     fn from_state(block_id: BlockId, shard_state: ShardStateUnsplit) -> Result<Arc<Self>>;
 }
 impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(block_id: BlockId, shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
+    fn from_state(_block_id: BlockId, _shard_state: ShardStateUnsplit) -> Result<Arc<Self>> {
         todo!()
     }
 }

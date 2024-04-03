@@ -19,10 +19,7 @@ impl SignaturesQuery {
         block_header: BlockIdShort,
         current_signatures: &HashMap<HashBytes, Signature>,
     ) -> Self {
-        let signatures = current_signatures
-            .into_iter()
-            .map(|(k, v)| (k.0, v.0))
-            .collect();
+        let signatures = current_signatures.iter().map(|(k, v)| (k.0, v.0)).collect();
         Self {
             session_seqno,
             block_id_short: block_header,

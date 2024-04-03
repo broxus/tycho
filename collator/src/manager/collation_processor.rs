@@ -10,11 +10,9 @@ use everscale_types::{
     cell::HashBytes,
     models::{BlockId, ShardIdent, ValidatorSet},
 };
-use rand::{thread_rng, Rng};
+use rand::thread_rng;
 use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
 
-use crate::validator::state::ValidationStateStdImpl;
-use crate::validator::validator_processor::ValidatorProcessorStdImpl;
 use crate::{
     collator::Collator,
     mempool::{MempoolAdapter, MempoolAnchor},
@@ -130,7 +128,7 @@ where
     /// jusct sync blcoks from blockchain
     pub async fn process_new_anchor_from_mempool(
         &mut self,
-        anchor: Arc<MempoolAnchor>,
+        _anchor: Arc<MempoolAnchor>,
     ) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         Ok(())
@@ -633,7 +631,7 @@ where
     /// 3. Return chain time for master block collation if interval expired
     fn update_last_collated_chain_time_and_check_mc_block_interval(
         &mut self,
-        shard_id: ShardIdent,
+        _shard_id: ShardIdent,
         chain_time: u64,
     ) -> Option<u64> {
         //TODO: make real implementation
@@ -745,20 +743,20 @@ where
     /// (TODO) Find block candidate in cache, append signatures info and return updated
     fn store_block_validation_result(
         &mut self,
-        validated_block: ValidatedBlock,
+        _validated_block: ValidatedBlock,
     ) -> Result<&BlockCandidateContainer> {
         todo!()
     }
 
     /// (TODO) Remove block entries from cache and compact cache
-    async fn cleanup_blocks_from_cache(&mut self, blocks_keys: Vec<HashBytes>) -> Result<()> {
+    async fn cleanup_blocks_from_cache(&mut self, _blocks_keys: Vec<HashBytes>) -> Result<()> {
         todo!()
     }
 
     /// (TODO) Find and restore block entries in cache
     async fn restore_blocks_in_cache(
         &mut self,
-        blocks_to_restore: Vec<BlockCandidateToSend>,
+        _blocks_to_restore: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
         todo!()
     }
@@ -794,7 +792,7 @@ where
 
     /// Process validated and valid shard block
     /// 1. (TODO) Try find master block info and execute [`CollationProcessor::process_valid_master_block`]
-    async fn process_valid_shard_block(&mut self, block_id: &BlockId) -> Result<()> {
+    async fn process_valid_shard_block(&mut self, _block_id: &BlockId) -> Result<()> {
         todo!()
         // if let Some(mc_block_container) = self.travers_to_containing_mc_block_if_exists(block_id) {
         //     todo!()
@@ -806,7 +804,7 @@ where
     /// Then extract and return them if all are valid
     fn extract_mc_block_subgraph_if_valid(
         &mut self,
-        block_id: &BlockId,
+        _block_id: &BlockId,
     ) -> Option<McBlockSubgraphToSend> {
         // 1. Find current master block
         // 2. Find prev master block
@@ -839,7 +837,7 @@ where
                 _ => {
                     let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
                     //TODO: handle and log error
-                    if let Err(err) = state_node_adapter.accept_block(block_for_sync).await {
+                    if let Err(_err) = state_node_adapter.accept_block(block_for_sync).await {
                         should_restore_blocks_in_cache = true;
                         break;
                     } else {
@@ -853,7 +851,7 @@ where
             // commit queue diffs for each block
             for &sent_block in sent_blocks.iter() {
                 //TODO: handle and log error
-                if let Err(err) = mq_adapter
+                if let Err(_err) = mq_adapter
                     .commit_diff(&sent_block.entry.candidate.block_id().as_short_id())
                     .await
                 {
@@ -864,10 +862,7 @@ where
 
             // do not clenup blocks if msg queue diffs commit was unsuccessful
             if !should_restore_blocks_in_cache {
-                let sent_blocks_keys = sent_blocks
-                    .iter()
-                    .map(|b| b.entry.key.clone())
-                    .collect::<Vec<_>>();
+                let sent_blocks_keys = sent_blocks.iter().map(|b| b.entry.key).collect::<Vec<_>>();
                 dispatcher
                     .enqueue_task(method_to_async_task_closure!(
                         cleanup_blocks_from_cache,

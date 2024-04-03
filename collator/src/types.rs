@@ -1,12 +1,9 @@
-use everscale_crypto::ed25519::{KeyPair, PublicKey};
+use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{
-    BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature, ValidatorDescription,
-};
-use std::collections::HashMap;
+use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
 
 use tycho_block_util::block::ValidatorSubsetInfo;
-use tycho_network::{DhtClient, Network, OverlayService, PeerResolver};
+use tycho_network::{DhtClient, OverlayService, PeerResolver};
 
 use std::sync::Arc;
 
@@ -105,7 +102,7 @@ pub(crate) struct BlockStuffForSync {
     pub prev_blocks_ids: Vec<BlockId>,
 }
 
-/// (ShardIdent, seqno)
+/// (`ShardIdent`, seqno)
 pub(crate) type CollationSessionId = (ShardIdent, u32);
 
 pub(crate) struct CollationSessionInfo {

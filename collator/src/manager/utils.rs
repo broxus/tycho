@@ -7,7 +7,7 @@ use crate::types::{BlockStuffForSync, CollationConfig};
 use super::types::BlockCandidateEntry;
 
 pub fn build_block_stuff_for_sync(
-    block_candidate: &BlockCandidateEntry,
+    _block_candidate: &BlockCandidateEntry,
 ) -> Result<BlockStuffForSync> {
     todo!()
 }

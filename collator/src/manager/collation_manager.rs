@@ -1,25 +1,21 @@
 use std::net::Ipv4Addr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519;
 use everscale_types::models::{BlockId, ShardIdent};
-use tycho_core::internal_queue::iterator::QueueIteratorImpl;
-use tycho_network::quinn::crypto::KeyPair;
-use tycho_network::{DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
+
+use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
 
 use crate::types::ValidatorNetwork;
 use crate::validator::state::{ValidationState, ValidationStateStdImpl};
 use crate::{
-    collator::{
-        collator_processor::CollatorProcessorStdImpl, Collator, CollatorEventListener,
-        CollatorStdImpl,
-    },
+    collator::{Collator, CollatorEventListener},
     mempool::{MempoolAdapter, MempoolAdapterBuilder, MempoolAnchor, MempoolEventListener},
     method_to_async_task_closure,
-    msg_queue::{MessageQueueAdapter, MessageQueueAdapterStdImpl},
+    msg_queue::MessageQueueAdapter,
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
     tracing_targets,
     types::{BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock},
@@ -27,10 +23,7 @@ use crate::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
-    validator::{
-        validator_processor::{ValidatorProcessor, ValidatorProcessorStdImpl},
-        Validator, ValidatorEventListener, ValidatorStdImpl,
-    },
+    validator::{Validator, ValidatorEventListener},
 };
 
 use super::collation_processor::CollationProcessor;
@@ -143,7 +136,7 @@ where
         let state_node_adapter = state_adapter_builder.build(dispatcher.clone());
         let state_node_adapter = Arc::new(state_node_adapter);
 
-        let validation_state = ValidationStateStdImpl::new();
+        let _validation_state = ValidationStateStdImpl::new();
 
         // TODO init network
         let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());

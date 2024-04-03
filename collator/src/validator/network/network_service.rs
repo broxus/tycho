@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -15,7 +14,6 @@ use crate::validator::network::handlers::handle_signatures_query;
 use crate::{
     state_node::StateNodeAdapter,
     utils::async_queued_dispatcher::AsyncQueuedDispatcher,
-    validator::state::ValidationState,
     validator::validator_processor::{ValidatorProcessor, ValidatorTaskResult},
 };
 
@@ -63,12 +61,13 @@ where
 
         async move {
             match query_result {
-                Ok(query) => match query {
-                    SignaturesQuery {
+                Ok(query) => {
+                    let SignaturesQuery {
                         session_seqno,
                         block_id_short,
                         signatures,
-                    } => {
+                    } = query;
+                    {
                         match handle_signatures_query(
                             &dispatcher,
                             session_seqno,
@@ -84,7 +83,7 @@ where
                             }
                         }
                     }
-                },
+                }
                 Err(e) => {
                     error!("Error parsing query: {:?}", e);
                     None

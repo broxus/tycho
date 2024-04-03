@@ -77,7 +77,7 @@ impl SessionInfo {
                     .context("Validator not found in session")?;
                 let signature_is_valid = validator
                     .public_key
-                    .verify(candidate.to_bytes(), &signature.0);
+                    .verify(candidate.as_bytes(), &signature.0);
                 if let Some((_, signature_maps)) = self.blocks_signatures.get_mut(&block_header) {
                     if signature_is_valid {
                         signature_maps

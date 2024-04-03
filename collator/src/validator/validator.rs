@@ -6,7 +6,6 @@ use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::BlockId;
 
 use crate::types::ValidatorNetwork;
-use crate::validator::state::{ValidationState, ValidationStateStdImpl};
 use crate::validator::types::ValidationSessionInfo;
 use crate::{
     method_to_async_task_closure,
@@ -33,7 +32,7 @@ pub(crate) trait ValidatorEventListener: Send + Sync {
 }
 
 #[async_trait]
-pub trait Validator<ST>: Send + Sync + 'static
+pub(crate) trait Validator<ST>: Send + Sync + 'static
 where
     ST: StateNodeAdapter,
 {
@@ -132,34 +131,31 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+
     use std::net::Ipv4Addr;
-    use std::sync::RwLock;
+
     use std::time::Duration;
 
-    use anyhow::{anyhow, bail};
     use everscale_crypto::ed25519;
     use everscale_crypto::ed25519::KeyPair;
     use everscale_types::models::ValidatorDescription;
     use rand::prelude::ThreadRng;
     use tokio::sync::{Mutex, Notify};
-    use tokio::time::sleep;
-    use tracing::{debug, trace};
+
+    use tracing::debug;
 
     use tycho_block_util::block::ValidatorSubsetInfo;
     use tycho_network::{
-        Address, DhtClient, DhtConfig, DhtService, Network, OverlayId, OverlayService,
-        PeerAffinity, PeerId, PeerInfo, PeerResolver, PrivateOverlay, Request, Router,
+        DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
     };
-    use tycho_util::time::now_sec;
 
     use crate::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
     use crate::test_utils::try_init_test_tracing;
     use crate::types::CollationSessionInfo;
-    use crate::validator::network::network_service::NetworkService;
-    use crate::validator::state::ValidationStateStdImpl;
-    use crate::validator::types::{ValidationSessionInfo, ValidatorInfo, ValidatorInfoError};
-    use crate::validator::validator;
+
+    use crate::validator::state::{ValidationState, ValidationStateStdImpl};
+    use crate::validator::types::ValidationSessionInfo;
+
     use crate::validator::validator_processor::ValidatorProcessorStdImpl;
 
     use super::*;
@@ -203,7 +199,7 @@ mod tests {
 
     #[async_trait]
     impl StateNodeEventListener for TestValidatorEventListener {
-        async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()> {
+        async fn on_mc_block(&self, _mc_block_id: BlockId) -> Result<()> {
             unimplemented!("Not implemented");
         }
     }
@@ -260,28 +256,13 @@ mod tests {
                 peer_resolver,
             }
         }
-
-        fn make_peer_info(key: &ed25519::SecretKey, address: Address) -> PeerInfo {
-            let keypair = ed25519::KeyPair::from(key);
-            let peer_id = PeerId::from(keypair.public_key);
-            let now = now_sec();
-            let mut node_info = PeerInfo {
-                id: peer_id,
-                address_list: vec![address].into_boxed_slice(),
-                created_at: now,
-                expires_at: u32::MAX,
-                signature: Box::new([0; 64]),
-            };
-            *node_info.signature = keypair.sign(&node_info);
-            node_info
-        }
     }
 
     fn make_network(node_count: usize) -> Vec<Node> {
         let keys = (0..node_count)
             .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
             .collect::<Vec<_>>();
-        let nodes = keys.iter().map(|key| Node::new(key)).collect::<Vec<_>>();
+        let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
         let common_peer_info = nodes.first().unwrap().network.sign_peer_info(0, u32::MAX);
         for node in &nodes {
             node.dht_client
@@ -294,17 +275,17 @@ mod tests {
     #[tokio::test]
     async fn test_validator_accept_block_by_state() -> Result<()> {
         let test_listener = TestValidatorEventListener::new(1);
-        let state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
+        let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
         let state_node_adapter = Arc::new(StateNodeAdapterStdImpl::create(test_listener.clone()));
-        let validation_state = ValidationStateStdImpl::new();
+        let _validation_state = ValidationStateStdImpl::new();
 
         let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
         let keypair = ed25519::KeyPair::from(&random_secret_key);
         let local_id = PeerId::from(keypair.public_key);
-        let (_, overlay_service) = OverlayService::builder(local_id).build();
+        let (_, _overlay_service) = OverlayService::builder(local_id).build();
 
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id).build();
+        let (_overlay_tasks, overlay_service) = OverlayService::builder(local_id).build();
 
         let router = Router::builder().route(overlay_service.clone()).build();
         let network = Network::builder()
@@ -332,7 +313,7 @@ mod tests {
             dht_client,
         };
 
-        let validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_>, _>::create(
+        let _validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_>, _>::create(
             test_listener.clone(),
             state_node_adapter,
             validator_network,
@@ -361,7 +342,7 @@ mod tests {
             short_hash: 0,
         };
         let keypair = KeyPair::generate(&mut ThreadRng::default());
-        let collator_session_info = CollationSessionInfo::new(0, validators, Some(keypair));
+        let _collator_session_info = CollationSessionInfo::new(0, validators, Some(keypair));
         test_listener
             .on_block_validated(ValidatedBlock::new(block, vec![], true))
             .await?;
@@ -381,7 +362,7 @@ mod tests {
         let blocks_amount = 3; // Assuming you expect 3 validation per node.
 
         let expected_validations = network_nodes.len() as u32; // Expecting each node to validate
-        let test_listener = TestValidatorEventListener::new(expected_validations);
+        let _test_listener = TestValidatorEventListener::new(expected_validations);
 
         let mut validators = vec![];
         let mut listeners = vec![]; // Track listeners for later validati
@@ -393,7 +374,7 @@ mod tests {
 
             let state_node_adapter =
                 Arc::new(StateNodeAdapterStdImpl::create(test_listener.clone()));
-            let validation_state = ValidationStateStdImpl::new();
+            let _validation_state = ValidationStateStdImpl::new();
             let network = ValidatorNetwork {
                 overlay_service: node.overlay_service.clone(),
                 dht_client: node.dht_client.clone(),
@@ -408,9 +389,9 @@ mod tests {
         }
 
         let mut validators_descriptions = vec![];
-        for (validator, node) in &validators {
+        for (_validator, node) in &validators {
             let peer_id = node.network.peer_id();
-            let keypair = node.keypair.clone();
+            let _keypair = node.keypair;
             validators_descriptions.push(ValidatorDescription {
                 public_key: (*peer_id.as_bytes()).into(),
                 weight: 1,
@@ -430,7 +411,7 @@ mod tests {
             let collator_session_info = Arc::new(CollationSessionInfo::new(
                 1,
                 validators_subset_info.clone(),
-                Some(_node.keypair.clone()), // Ensure you use the node's keypair correctly here
+                Some(_node.keypair), // Ensure you use the node's keypair correctly here
             ));
             // Assuming this setup is correct and necessary for each validator
 
@@ -448,13 +429,13 @@ mod tests {
             let collator_session_info = Arc::new(CollationSessionInfo::new(
                 1,
                 validators_subset_info.clone(),
-                Some(_node.keypair.clone()), // Ensure you use the node's keypair correctly here
+                Some(_node.keypair), // Ensure you use the node's keypair correctly here
             ));
 
             for block in blocks.iter() {
                 validator
                     .enqueue_candidate_validation(
-                        block.clone(),
+                        *block,
                         collator_session_info.seqno(),
                         *collator_session_info.current_collator_keypair().unwrap(),
                     )

@@ -1,14 +1,4 @@
-use anyhow::Result;
-
-use tycho_collator::{
-    mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
-    state_node::{
-        StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeAdapterStdImpl,
-    },
-    test_utils::try_init_test_tracing,
-    types::CollationConfig,
-    validator_test_impl::ValidatorProcessorTestImpl,
-};
+use tycho_collator::{mempool::MempoolAdapterBuilder, state_node::StateNodeAdapterBuilder};
 
 #[tokio::test]
 async fn test_collation_process_on_stubs() {

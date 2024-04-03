@@ -14,7 +14,7 @@ use tycho_core::internal_queue::{
     types::QueueDiff,
 };
 
-pub(crate) use tycho_core::internal_queue::iterator::{IterItem, QueueIterator, QueueIteratorImpl};
+pub(crate) use tycho_core::internal_queue::iterator::{IterItem, QueueIterator};
 
 use crate::{tracing_targets, utils::shard::SplitMergeAction};
 
@@ -79,18 +79,18 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(())
     }
 
-    async fn get_iterator<QI>(&self, shard_id: &ShardIdent) -> Result<QI>
+    async fn get_iterator<QI>(&self, _shard_id: &ShardIdent) -> Result<QI>
     where
         QI: QueueIterator,
     {
         todo!()
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()> {
+    async fn apply_diff(&self, _diff: Arc<QueueDiff>) -> Result<()> {
         todo!()
     }
 
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<()>> {
+    async fn commit_diff(&self, _diff_id: &BlockIdShort) -> Result<Option<()>> {
         todo!()
     }
 }

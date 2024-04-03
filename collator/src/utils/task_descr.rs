@@ -1,9 +1,5 @@
-use std::{
-    future::{Future, IntoFuture},
-    pin::Pin,
-};
+use std::future::Future;
 
-use anyhow::Error;
 use tokio::sync::oneshot;
 
 pub struct TaskDesc<F: ?Sized, R> {
