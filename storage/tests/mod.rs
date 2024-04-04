@@ -17,7 +17,7 @@ struct ShardStateCombined {
 impl ShardStateCombined {
     fn from_file(path: impl AsRef<str>) -> Result<Self> {
         let bytes = std::fs::read(path.as_ref())?;
-        let cell = Boc::decode(&bytes)?;
+        let cell = Boc::decode(bytes)?;
         let state = cell.parse()?;
         Ok(Self { cell, state })
     }
@@ -123,13 +123,13 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     storage
         .persistent_state_storage()
-        .prepare_persistent_states_dir(&zerostate.block_id())?;
+        .prepare_persistent_states_dir(zerostate.block_id())?;
 
     storage
         .persistent_state_storage()
         .save_state(
-            &zerostate.block_id(),
-            &zerostate.block_id(),
+            zerostate.block_id(),
+            zerostate.block_id(),
             zero_state_raw.cell.repr_hash(),
         )
         .await?;
@@ -137,8 +137,8 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Check if state exists
     let exist = storage
         .persistent_state_storage()
-        .state_exists(&zerostate.block_id(), &zerostate.block_id());
-    assert_eq!(exist, true);
+        .state_exists(zerostate.block_id(), zerostate.block_id());
+    assert!(exist);
 
     // Read persistent state
     let offset = 0u64;
@@ -146,12 +146,7 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     let persistent_state_storage = storage.persistent_state_storage();
     let persistent_state_data = persistent_state_storage
-        .read_state_part(
-            &zerostate.block_id(),
-            &zerostate.block_id(),
-            offset,
-            max_size,
-        )
+        .read_state_part(zerostate.block_id(), zerostate.block_id(), offset, max_size)
         .await
         .unwrap();
 

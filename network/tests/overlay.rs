@@ -120,6 +120,7 @@ async fn private_overlays_accessible() -> Result<()> {
         tracing::error!("{}", info);
         std::io::stderr().flush().ok();
         std::io::stdout().flush().ok();
+        #[allow(clippy::exit)]
         std::process::exit(1);
     }));
 

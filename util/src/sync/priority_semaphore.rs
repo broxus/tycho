@@ -590,7 +590,6 @@ mod tests {
         tokio::time::sleep(Duration::from_micros(10)).await;
 
         let priority_task = tokio::spawn({
-            let permits = permits;
             let flag = flag.clone();
             async move {
                 println!("PRIORITY BEFORE");

@@ -77,6 +77,7 @@ impl HashesEntryWriter<'_> {
         self.0[12..20].copy_from_slice(&count.to_le_bytes());
     }
 
+    #[allow(dead_code)]
     pub fn get_tree_counters(&mut self) -> &[u8] {
         &self.0[4..20]
     }

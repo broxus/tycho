@@ -130,6 +130,7 @@ impl CmdRun {
 struct CmdGenKey {}
 
 impl CmdGenKey {
+    #[allow(clippy::unused_self)]
     fn run(self) -> Result<()> {
         let secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
         let public_key = ed25519::PublicKey::from(&secret_key);

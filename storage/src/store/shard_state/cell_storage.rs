@@ -658,6 +658,7 @@ impl StorageCellReferenceData {
 struct RawCellsCache(Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>);
 
 impl RawCellsCache {
+    #[allow(dead_code)]
     pub(crate) fn hit_ratio(&self) -> f64 {
         (if self.0.hits() > 0 {
             self.0.hits() as f64 / (self.0.hits() + self.0.misses()) as f64
@@ -748,6 +749,7 @@ impl RawCellsCache {
         }
     }
 
+    #[allow(dead_code)]
     fn get_raw_for_delete(
         &self,
         db: &Db,
@@ -796,6 +798,7 @@ impl RawCellsCache {
         }
     }
 
+    #[allow(dead_code)]
     fn remove_refs(&self, key: &HashBytes, refs: u32) {
         // NOTE: `peek` here is used to avoid affecting a "hotness" of the value
         if let Some(v) = self.0.peek(key) {

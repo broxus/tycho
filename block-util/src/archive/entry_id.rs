@@ -206,8 +206,8 @@ mod tests {
             file_hash: HashBytes(random()),
         };
 
-        check_package_id(ArchiveEntryId::Block(block_id.clone()));
-        check_package_id(ArchiveEntryId::Proof(block_id.clone()));
+        check_package_id(ArchiveEntryId::Block(block_id));
+        check_package_id(ArchiveEntryId::Proof(block_id));
         check_package_id(ArchiveEntryId::ProofLink(block_id));
     }
 }

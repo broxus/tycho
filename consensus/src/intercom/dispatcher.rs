@@ -72,7 +72,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Broadcast { point })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, todo!()).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -88,7 +88,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Point { id })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, todo!()).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -104,7 +104,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Vertex { id })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, todo!()).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -124,7 +124,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Evidence { vertex_id })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, todo!()).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -140,7 +140,7 @@ impl Dispatcher {
             body: Bytes::from(bincode::serialize(&MPRequest::Vertices { round })?),
         };
 
-        let remote_peer = self.network.connect(from).await?;
+        let remote_peer = self.network.connect(from, todo!()).await?;
 
         let response = self.network.query(&remote_peer, request).await?;
 
@@ -242,7 +242,7 @@ mod tests {
         let node1 = Dispatcher::new()?.network;
         let node2 = Dispatcher::new()?.network;
 
-        let peer2 = node1.connect(node2.local_addr()).await?;
+        let peer2 = node1.connect(node2.local_addr(), todo!()).await?;
         let response = node1
             .query(
                 &peer2,
