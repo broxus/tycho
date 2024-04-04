@@ -5,10 +5,6 @@ use std::{
 
 use everscale_crypto::ed25519::KeyPair;
 
-use everscale_types::{
-    cell::HashBytes,
-};
-use rand::thread_rng;
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription, ValidatorSet};
@@ -244,10 +240,7 @@ where
     /// Get shards info from the master state,
     /// then start missing sessions for these shards, or refresh existing.
     /// For each shard run collation process if current node is included in collators subset.
-    pub async fn refresh_collation_sessions(
-        &mut self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+    pub async fn refresh_collation_sessions(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
         //TODO: Possibly we have already updated collation sessions for this master block,
         //      because we may have collated it by ourselves before receiving it from the blockchain
         //      or because we have received it from the blockchain before we collated it
@@ -327,8 +320,7 @@ where
         let mut to_finish_sessions = HashMap::new();
         let mut to_stop_collators = HashMap::new();
         for shard_info in new_shards_info {
-            if let Some(existing_session) =
-                self.active_collation_sessions.remove_entry(&shard_info.0)
+            if let Some(existing_session) = self.active_collation_sessions.remove_entry(&shard_info.0)
             {
                 if existing_session.1.seqno() >= new_session_seqno {
                     sessions_to_keep.insert(shard_info.0, existing_session.1);
@@ -427,7 +419,7 @@ where
                 to_stop_collators.insert((shard_id, new_session_seqno), collator);
             }
 
-            let mut rng = thread_rng();
+            let mut rng = rand::thread_rng();
             let keypair = KeyPair::generate(&mut rng);
             self.active_collation_sessions.insert(
                 shard_id,
@@ -587,8 +579,7 @@ where
                 candidate_chain_time,
             );
 
-            let new_mc_state =
-                ShardStateStuff::from_state(candidate_id, collation_result.new_state)?;
+            let new_mc_state = ShardStateStuff::from_state(candidate_id, collation_result.new_state)?;
 
             Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), new_mc_state.clone())
                 .await?;
@@ -630,10 +621,7 @@ where
             anchor.id(),
         );
         if let Some(next_mc_block_chain_time) = self
-            .update_last_collated_chain_time_and_check_mc_block_interval(
-                shard_id,
-                anchor.chain_time(),
-            )
+            .update_last_collated_chain_time_and_check_mc_block_interval(shard_id, anchor.chain_time())
         {
             self.enqueue_mc_block_collation(next_mc_block_chain_time, None)
                 .await?;
@@ -844,9 +832,7 @@ where
                 .shards
                 .entry(block_container.key().shard)
                 .or_default();
-            if let Some(_existing) =
-                shard_cache.insert(block_container.key().seqno, block_container)
-            {
+            if let Some(_existing) = shard_cache.insert(block_container.key().seqno, block_container) {
                 bail!(
                     "Should not collate the same shard block ({}) again!",
                     candidate_id,
@@ -871,7 +857,10 @@ where
                 .get_mut(&block_id.shard)
                 .and_then(|shard_cache| shard_cache.get_mut(&block_id.seqno))
         } {
-            block_container.set_validation_result(validated_block.extract_signatures());
+            block_container.set_validation_result(
+                validated_block.is_valid(),
+                validated_block.extract_signatures(),
+            );
 
             Ok(block_container)
         } else {
@@ -880,10 +869,7 @@ where
     }
 
     /// Find shard block in cache and then get containing master block if link exists
-    fn find_containing_mc_block(
-        &self,
-        shard_block_id: &BlockId,
-    ) -> Option<&BlockCandidateContainer> {
+    fn find_containing_mc_block(&self, shard_block_id: &BlockId) -> Option<&BlockCandidateContainer> {
         //TODO: handle when master block link exist but there is not block itself
         if let Some(mc_block_key) = self
             .blocks_cache

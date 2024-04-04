@@ -101,10 +101,10 @@ impl BlockCandidateContainer {
     }
 
     /// Add signatures to containing block candidate entry and update `is_valid` flag
-    pub fn set_validation_result(&mut self, signatures: BlockSignatures) {
+    pub fn set_validation_result(&mut self, is_valid: bool, signatures: BlockSignatures) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;
-            self.is_valid = ???;
+            self.is_valid = is_valid;
         }
     }
 

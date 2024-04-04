@@ -4,11 +4,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 
-use everscale_types::models::{BlockId, BlockIdShort};
+use everscale_types::models::{BlockId, BlockIdShort, Signature};
 
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::types::ValidatorNetwork;
+use crate::tracing_targets;
+use crate::types::{BlockSignatures, ValidatorNetwork};
 use crate::validator::types::ValidationSessionInfo;
 use crate::{
     state_node::StateNodeAdapter, types::ValidatedBlock,
@@ -20,7 +21,7 @@ use super::{
     ValidatorEventEmitter, ValidatorEventListener,
 };
 
-pub(crate) struct ValidatorProcessorTestImpl<ST>
+pub struct ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
@@ -46,10 +47,7 @@ impl<ST> ValidatorProcessor<ST> for ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        _mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+    async fn enqueue_process_new_mc_block_state(&self, _mc_state: Arc<ShardStateStuff>) -> Result<()> {
         todo!()
     }
 
@@ -69,11 +67,30 @@ where
 
     async fn start_candidate_validation(
         &mut self,
-        _candidate_id: BlockId,
+        candidate_id: BlockId,
         _session_seqno: u32,
-        _current_validator_keypair: KeyPair,
+        current_validator_keypair: KeyPair,
     ) -> Result<ValidatorTaskResult> {
-        todo!()
+        let validated_block = ValidatedBlock::new(
+            candidate_id,
+            BlockSignatures {
+                good_sigs: [(
+                    current_validator_keypair.public_key.to_bytes().into(),
+                    Signature::default(),
+                )]
+                .into(),
+                bad_sigs: HashMap::new(),
+            },
+            true,
+        );
+        tracing::debug!(
+            target: tracing_targets::VALIDATOR,
+            "Validator (block: {}): STUB: emulated validation via signatures request",
+            candidate_id,
+        );
+        self.listener.on_block_validated(validated_block).await?;
+
+        Ok(ValidatorTaskResult::Void)
     }
 
     fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>> {
@@ -84,13 +101,11 @@ where
         &mut self,
         _session: Arc<ValidationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
-        todo!()
+        //STUB: do nothing
+        Ok(ValidatorTaskResult::Void)
     }
 
-    async fn stop_candidate_validation(
-        &self,
-        _candidate_id: BlockId,
-    ) -> Result<ValidatorTaskResult> {
+    async fn stop_candidate_validation(&self, _candidate_id: BlockId) -> Result<ValidatorTaskResult> {
         todo!()
     }
 

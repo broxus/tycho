@@ -1,1 +1,4 @@
 format_code_in_doc_comments = true
+struct_lit_width = 20
+struct_lit_single_line = true
+max_width = 103
