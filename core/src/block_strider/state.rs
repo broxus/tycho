@@ -1,5 +1,4 @@
 use everscale_types::models::BlockId;
-use parking_lot::Mutex;
 
 pub trait BlockStriderState: Send + Sync + 'static {
     fn load_last_traversed_master_block_id(&self) -> BlockId;
@@ -23,18 +22,18 @@ impl<T: BlockStriderState> BlockStriderState for Box<T> {
 
 #[cfg(test)]
 pub struct InMemoryBlockStriderState {
-    last_traversed_master_block_id: Mutex<BlockId>,
+    last_traversed_master_block_id: parking_lot::Mutex<BlockId>,
     traversed_blocks: tycho_util::FastDashSet<BlockId>,
 }
 
 #[cfg(test)]
 impl InMemoryBlockStriderState {
     pub fn new(id: BlockId) -> Self {
-        let mut traversed_blocks = tycho_util::FastDashSet::default();
+        let traversed_blocks = tycho_util::FastDashSet::default();
         traversed_blocks.insert(id);
 
         Self {
-            last_traversed_master_block_id: Mutex::new(id),
+            last_traversed_master_block_id: parking_lot::Mutex::new(id),
             traversed_blocks,
         }
     }
