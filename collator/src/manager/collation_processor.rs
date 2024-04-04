@@ -8,7 +8,10 @@ use everscale_crypto::ed25519::KeyPair;
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription, ValidatorSet};
-use tycho_block_util::{block::ValidatorSubsetInfo, state::ShardStateStuff};
+use tycho_block_util::{
+    block::ValidatorSubsetInfo,
+    state::{MinRefMcStateTracker, ShardStateStuff},
+};
 
 use crate::{
     collator::Collator,
@@ -57,6 +60,8 @@ where
     active_collators: HashMap<ShardIdent, Arc<C>>,
     collators_to_stop: HashMap<CollationSessionId, Arc<C>>,
 
+    state_tracker: MinRefMcStateTracker,
+
     blocks_cache: BlocksCache,
 
     last_processed_mc_block_id: Option<BlockId>,
@@ -88,6 +93,7 @@ where
             state_node_adapter,
             mq_adapter: Arc::new(MQ::new()),
             validator,
+            state_tracker: MinRefMcStateTracker::default(),
             active_collation_sessions: HashMap::new(),
             collation_sessions_to_finish: HashMap::new(),
             active_collators: HashMap::new(),
@@ -242,6 +248,12 @@ where
     /// then start missing sessions for these shards, or refresh existing.
     /// For each shard run collation process if current node is included in collators subset.
     pub async fn refresh_collation_sessions(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Trying to refresh collation sessions by mc state for block ({})...",
+            mc_state.block_id().as_short_id()
+        );
+
         //TODO: Possibly we have already updated collation sessions for this master block,
         //      because we may have collated it by ourselves before receiving it from the blockchain
         //      or because we have received it from the blockchain before we collated it
@@ -580,7 +592,11 @@ where
                 candidate_chain_time,
             );
 
-            let new_mc_state = ShardStateStuff::from_state(candidate_id, collation_result.new_state)?;
+            let new_mc_state = ShardStateStuff::from_state(
+                candidate_id,
+                collation_result.new_state,
+                &self.state_tracker,
+            )?;
 
             Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), new_mc_state.clone())
                 .await?;

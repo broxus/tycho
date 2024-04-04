@@ -1,6 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::{cell::HashBytes, models::BlockId};
+use everscale_types::{
+    cell::CellBuilder,
+    models::{BlockId, BlockIdShort},
+};
 
 use crate::{
     mempool::MempoolAdapter,
@@ -67,15 +70,27 @@ where
         //STUB: just send dummy block to collation manager
         let prev_blocks_ids = self.working_state().prev_shard_data.blocks_ids().clone();
         let prev_block_id = prev_blocks_ids[0];
-        let collated_block_id = BlockId {
+        let collated_block_id_short = BlockIdShort {
             shard: prev_block_id.shard,
             seqno: prev_block_id.seqno + 1,
-            root_hash: HashBytes::ZERO,
-            file_hash: HashBytes::ZERO,
         };
-        let new_state = self.working_state().prev_shard_data.pure_states()[0]
+        let mut builder = CellBuilder::new();
+        builder.store_bit(collated_block_id_short.shard.workchain().is_negative())?;
+        builder.store_u32(collated_block_id_short.shard.workchain().unsigned_abs())?;
+        builder.store_u64(collated_block_id_short.shard.prefix())?;
+        builder.store_u32(collated_block_id_short.seqno)?;
+        let cell = builder.build()?;
+        let hash = cell.repr_hash();
+        let collated_block_id = BlockId {
+            shard: collated_block_id_short.shard,
+            seqno: collated_block_id_short.seqno,
+            root_hash: *hash,
+            file_hash: *hash,
+        };
+        let mut new_state = self.working_state().prev_shard_data.pure_states()[0]
             .state()
             .clone();
+        new_state.seqno = collated_block_id.seqno;
         let collation_result = BlockCollationResult {
             candidate: BlockCandidate::new(
                 collated_block_id,

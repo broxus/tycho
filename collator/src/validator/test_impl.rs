@@ -79,7 +79,7 @@ where
         tracing::debug!(
             target: tracing_targets::VALIDATOR,
             "Validator (block: {}): STUB: emulated validation via signatures request",
-            candidate_id,
+            candidate_id.as_short_id(),
         );
         self.listener.on_block_validated(candidate_id, OnValidatedBlockEvent::Valid(BlockSignatures{signatures})).await?;
 
