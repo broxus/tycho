@@ -55,25 +55,28 @@ impl<F: ?Sized, R> TaskDesc<F, R> {
     pub fn closure(&self) -> &F {
         &self.closure
     }
-    pub fn respond(self, res: R) -> Option<()> {
+    pub fn respond(self, res: R) -> Option<R> {
         self.responder.respond(res)
     }
 }
 
 pub trait TaskResponder<R> {
-    fn respond(self, res: R) -> Option<()>;
+    /// Respond to receiver with result and return None.
+    /// Return Some(res) if no responder or receiver exist
+    fn respond(self, res: R) -> Option<R>;
 }
 impl<R> TaskResponder<R> for Option<oneshot::Sender<R>> {
-    fn respond(self, res: R) -> Option<()> {
+    fn respond(self, res: R) -> Option<R> {
         if let Some(responder) = self {
-            responder
-                .send(res)
-                .map_err(|_err| {
+            match responder.send(res) {
+                Ok(()) => None,
+                Err(res) => {
                     tracing::warn!("response receiver dropped");
-                })
-                .ok()
+                    Some(res)
+                }
+            }
         } else {
-            None
+            Some(res)
         }
     }
 }
@@ -113,10 +116,8 @@ where
     ///         .await
     /// });
     /// ```
-    pub async fn process_on_recv<Fut>(
-        self,
-        process_callback: impl FnOnce(T) -> Fut + Send + 'static,
-    ) where
+    pub async fn process_on_recv<Fut>(self, process_callback: impl FnOnce(T) -> Fut + Send + 'static)
+    where
         Fut: Future<Output = anyhow::Result<()>> + Send,
     {
         tokio::spawn(async move {
@@ -127,7 +128,7 @@ where
                         //TODO: may be unwind panic?
                     }
                 }
-                Err(err) => tracing::error!("Error in task response or on receiving: {err:?}"),
+                Err(err) => tracing::error!("Error in task result or on receiving: {err:?}"),
             }
         });
     }
@@ -154,8 +155,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_none(),
-            "task without responder should return None when call .respond()"
+            respond_res.is_some(),
+            "task without responder should return Some(()) when call .respond()"
         );
     }
 
@@ -176,8 +177,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_some(),
-            "task with responder should return Some(()) when call .respond()"
+            respond_res.is_none(),
+            "task with responder should return None when call .respond()"
         );
 
         let received_res = receiver.await;
@@ -207,8 +208,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_none(),
-            "task without responder should return None when call .respond()"
+            respond_res.is_some(),
+            "task without responder should return Some(res) when call .respond()"
         );
     }
 
@@ -235,8 +236,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_some(),
-            "task with responder should return Some(()) when call .respond()"
+            respond_res.is_none(),
+            "task with responder should return None when call .respond()"
         );
 
         let received_res = receiver.await;
@@ -273,8 +274,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_none(),
-            "task with responder should return None when call .respond() when receiver is dropped"
+            respond_res.is_some(),
+            "task with responder should return Some(res) when call .respond() when receiver is dropped"
         );
     }
 
@@ -306,8 +307,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_some(),
-            "task with responder should return Some(()) when call .respond()"
+            respond_res.is_none(),
+            "task with responder should return None when call .respond()"
         );
 
         let received_res = receiver.await;
@@ -339,8 +340,8 @@ mod tests {
         println!("resond_res: {respond_res:?}");
 
         assert!(
-            respond_res.is_some(),
-            "task with responder should return Some(()) when call .respond()"
+            respond_res.is_none(),
+            "task with responder should return None when call .respond()"
         );
 
         let received_res = receiver.await;

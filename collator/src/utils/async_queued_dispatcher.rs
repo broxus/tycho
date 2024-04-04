@@ -9,10 +9,8 @@ use super::task_descr::{TaskDesc, TaskResponder};
 
 pub const STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE: usize = 10;
 
-type AsyncTaskDesc<W, R> = TaskDesc<
-    dyn FnOnce(W) -> Pin<Box<dyn Future<Output = (W, Result<R>)> + Send>> + Send,
-    Result<R>,
->;
+type AsyncTaskDesc<W, R> =
+    TaskDesc<dyn FnOnce(W) -> Pin<Box<dyn Future<Output = (W, Result<R>)> + Send>> + Send, Result<R>>;
 
 pub struct AsyncQueuedDispatcher<W, R> {
     tasks_queue: mpsc::Sender<AsyncTaskDesc<W, R>>,
@@ -25,9 +23,7 @@ where
 {
     pub fn new(queue_buffer_size: usize) -> (Self, mpsc::Receiver<AsyncTaskDesc<W, R>>) {
         let (sender, receiver) = mpsc::channel::<AsyncTaskDesc<W, R>>(queue_buffer_size);
-        let dispatcher = Self {
-            tasks_queue: sender,
-        };
+        let dispatcher = Self { tasks_queue: sender };
         (dispatcher, receiver)
     }
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
@@ -47,7 +43,15 @@ where
                     "Task #{} ({}): executed", task_id, &task_descr,
                 );
                 worker = updated_worker;
-                if responder.respond(res).is_some() {
+                if let Some(res) = responder.respond(res) {
+                    // no responder, or no receiver can handle result, should panic if task result is Error
+                    if let Err(err) = res {
+                        panic!(
+                            "Task #{} ({}): result error! {:?}",
+                            task_id, &task_descr, err,
+                        )
+                    }
+                } else {
                     tracing::trace!(
                         target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
                         "Task #{} ({}): result responded", task_id, &task_descr,
@@ -61,9 +65,7 @@ where
 
         Self::run(worker, receiver);
 
-        Self {
-            tasks_queue: sender,
-        }
+        Self { tasks_queue: sender }
     }
 
     async fn _enqueue_task(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
