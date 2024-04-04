@@ -4,8 +4,9 @@ use std::{
 };
 
 use anyhow::Result;
+use everscale_types::cell::HashBytes;
 
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ShardStateUnsplit};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ShardStateUnsplit, Signature};
 
 use tycho_block_util::state::ShardStateStuff;
 
@@ -22,7 +23,7 @@ pub(super) struct BlocksCache {
 pub struct BlockCandidateEntry {
     pub key: BlockCacheKey,
     pub candidate: BlockCandidate,
-    pub signatures: BlockSignatures,
+    pub signatures: HashMap<HashBytes, Signature>,
 }
 
 pub enum SendSyncStatus {
@@ -62,7 +63,7 @@ impl BlockCandidateContainer {
         let entry = BlockCandidateEntry {
             key,
             candidate,
-            signatures: BlockSignatures::default(),
+            signatures: HashMap::default(),
         };
         Self {
             key,
@@ -101,7 +102,7 @@ impl BlockCandidateContainer {
     }
 
     /// Add signatures to containing block candidate entry and update `is_valid` flag
-    pub fn set_validation_result(&mut self, is_valid: bool, signatures: BlockSignatures) {
+    pub fn set_validation_result(&mut self, is_valid: bool, signatures: HashMap<HashBytes, Signature>) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;
             self.is_valid = is_valid;

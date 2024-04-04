@@ -19,11 +19,13 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
+    let node_network = tycho_collator::test_utils::create_node_network();
+
     let _manager = tycho_collator::manager::create_std_manager_with_validator::<
         _,
         _,
         ValidatorProcessorTestImpl<_>,
-    >(config, mpool_adapter_builder, state_node_adapter_builder);
+    >(config, mpool_adapter_builder, state_node_adapter_builder, node_network);
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {

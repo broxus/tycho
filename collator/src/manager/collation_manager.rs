@@ -31,6 +31,7 @@ use crate::{
     },
 };
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
+use crate::types::{NodeNetwork, OnValidatedBlockEvent};
 
 use super::collation_processor::CollationProcessor;
 
@@ -50,6 +51,7 @@ where
         config: CollationConfig,
         mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+        node_network: NodeNetwork
     ) -> Self;
 }
 
@@ -72,6 +74,7 @@ pub fn create_std_manager<MP, ST>(
     config: CollationConfig,
     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+    node_network: NodeNetwork
 ) -> impl CollationManager<MP, ST>
 where
     MP: MempoolAdapter,
@@ -83,13 +86,14 @@ where
         MessageQueueAdapterStdImpl,
         MP,
         ST,
-    >::create(config, mpool_adapter_builder, state_adapter_builder)
+    >::create(config, mpool_adapter_builder, state_adapter_builder, node_network)
 }
 #[allow(private_bounds)]
 pub fn create_std_manager_with_validator<MP, ST, V>(
     config: CollationConfig,
     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+    node_network: NodeNetwork
 ) -> impl CollationManager<MP, ST>
 where
     MP: MempoolAdapter,
@@ -102,7 +106,7 @@ where
         MessageQueueAdapterStdImpl,
         MP,
         ST,
-    >::create(config, mpool_adapter_builder, state_adapter_builder)
+    >::create(config, mpool_adapter_builder, state_adapter_builder, node_network)
 }
 
 impl<C, V, MQ, MP, ST> CollationManager<MP, ST> for CollationManagerGenImpl<C, V, MQ, MP, ST>
@@ -117,6 +121,7 @@ where
         config: CollationConfig,
         mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
+        node_network: NodeNetwork
     ) -> Self {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
@@ -134,48 +139,12 @@ where
         let state_node_adapter = state_adapter_builder.build(dispatcher.clone());
         let state_node_adapter = Arc::new(state_node_adapter);
 
-        let _validation_state = ValidationStateStdImpl::new();
-
-        // TODO init network
-        let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
-        let keypair = ed25519::KeyPair::from(&random_secret_key);
-        let local_id = PeerId::from(keypair.public_key);
-        let (_, overlay_service) = OverlayService::builder(local_id).build();
-
-        let router = Router::builder().route(overlay_service.clone()).build();
-        let network = Network::builder()
-            .with_private_key(random_secret_key.to_bytes())
-            .with_service_name("test-service")
-            .build((Ipv4Addr::LOCALHOST, 0), router)
-            .unwrap();
-
-        let (_, dht_service) = DhtService::builder(local_id)
-            .with_config(DhtConfig {
-                local_info_announce_period: Duration::from_secs(1),
-                max_local_info_announce_period_jitter: Duration::from_secs(1),
-                routing_table_refresh_period: Duration::from_secs(1),
-                max_routing_table_refresh_period_jitter: Duration::from_secs(1),
-                ..Default::default()
-            })
-            .build();
-
-        let dht_client = dht_service.make_client(&network);
-        let peer_resolver = dht_service.make_peer_resolver().build(&network);
-
-        let validator_network = ValidatorNetwork {
-            // network,
-            overlay_service,
-            peer_resolver,
-            dht_client,
-        };
-
         // create validator and start its tasks queue
-        let validator = Validator::create(
+        let validator = Arc::new(Validator::create(
             dispatcher.clone(),
             state_node_adapter.clone(),
-            validator_network,
-        );
-        let validator = Arc::new(validator);
+            node_network.into(),
+        ));
 
         // create collation processor that will use these adapters
         // and run dispatcher for its own tasks queue
@@ -305,10 +274,11 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn on_block_validated(&self, signed_block: ValidatedBlock) -> Result<()> {
+    async fn on_block_validated(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             process_validated_block,
-            signed_block
+            block_id,
+            event
         ))
         .await
     }
