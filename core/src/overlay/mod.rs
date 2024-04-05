@@ -1,5 +1,4 @@
-mod public_overlay_client;
-mod pinger;
-mod neighbours;
 mod neighbour;
-mod models;
+mod neighbours;
+mod pinger;
+mod public_overlay_client;
