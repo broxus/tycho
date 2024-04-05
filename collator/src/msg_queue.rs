@@ -91,6 +91,8 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     }
 
     async fn commit_diff(&self, _diff_id: &BlockIdShort) -> Result<Option<()>> {
-        todo!()
+        //TODO: make real implementation
+        //STUB: just return oks
+        Ok(Some(()))
     }
 }

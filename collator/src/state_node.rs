@@ -223,9 +223,14 @@ impl StateNodeProcessor {
         // Ok(StateNodeTaskResult::Block(Some(Arc::new(block_stuff))))
         Ok(StateNodeTaskResult::Block(None))
     }
-    async fn accept_block(&mut self, _block: BlockStuffForSync) -> Result<StateNodeTaskResult> {
+    async fn accept_block(&mut self, block: BlockStuffForSync) -> Result<StateNodeTaskResult> {
         //TODO: make real implementation
-        todo!("Fix required")
-        // Ok(StateNodeTaskResult::BlockHandle(Arc::new(BlockHandle{})))
+        //STUB: create dummy blcok handle
+        let handle = BlockHandle::with_values(
+            block.block_id,
+            Default::default(),
+            Arc::new(Default::default()),
+        );
+        Ok(StateNodeTaskResult::BlockHandle(Arc::new(handle)))
     }
 }

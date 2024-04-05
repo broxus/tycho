@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
+use std::collections::HashMap;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
@@ -70,7 +70,7 @@ impl BlockCandidate {
 pub enum OnValidatedBlockEvent {
     ValidByState,
     Invalid,
-    Valid(BlockSignatures)
+    Valid(BlockSignatures),
 }
 
 impl OnValidatedBlockEvent {
@@ -82,7 +82,7 @@ impl OnValidatedBlockEvent {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct BlockSignatures {
     pub signatures: HashMap<HashBytes, Signature>,
 }
@@ -119,8 +119,11 @@ impl ValidatedBlock {
 }
 
 pub(crate) struct BlockStuffForSync {
-    pub block_stuff: BlockStuff,
-    pub signatures: BlockSignatures,
+    //STUB: will not parse Block because candidate does not contain real block
+    //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
+    pub block_id: BlockId,
+    pub block_stuff: Option<BlockStuff>,
+    pub signatures: HashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,
 }
 

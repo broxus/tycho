@@ -3,11 +3,10 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::Result;
-use everscale_types::cell::HashBytes;
+use anyhow::{anyhow, bail, Result};
 
 use everscale_types::{
-    cell::{Cell, CellBuilder, CellFamily, Store},
+    cell::{Cell, CellBuilder, CellFamily, HashBytes, Store},
     models::{BlockId, BlockIdShort, ShardIdent, ShardStateUnsplit, Signature},
 };
 
@@ -113,6 +112,9 @@ impl BlockCandidateContainer {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;
             self.is_valid = is_valid;
+            if self.is_valid && self.block_id().is_masterchain() {
+                self.send_sync_status = SendSyncStatus::Ready;
+            }
         }
     }
 
@@ -122,6 +124,43 @@ impl BlockCandidateContainer {
 
     pub fn top_shard_blocks_keys(&self) -> &[BlockCacheKey] {
         &self.top_shard_blocks_keys
+    }
+
+    pub fn extract_entry_for_sending(&mut self) -> Result<BlockCandidateEntry> {
+        let entry = std::mem::take(&mut self.entry).ok_or_else(|| {
+            anyhow!(
+                "Block ({}) entry already extracted from cache for sending to sync",
+                self.block_id.as_short_id(),
+            )
+        })?;
+        self.send_sync_status = SendSyncStatus::Sending;
+        Ok(entry)
+    }
+
+    pub fn restore_entry(
+        &mut self,
+        entry: BlockCandidateEntry,
+        send_sync_status: SendSyncStatus,
+    ) -> Result<()> {
+        // if block was not sent or synced then return cache entry status to Ready
+        let new_send_sync_status = if matches!(
+            send_sync_status,
+            SendSyncStatus::Sent | SendSyncStatus::Synced
+        ) {
+            send_sync_status
+        } else {
+            SendSyncStatus::Ready
+        };
+        if self.entry.is_some() {
+            bail!(
+                "Block ({}) entry was not extracted before. Unable to restore!",
+                self.block_id.as_short_id(),
+            )
+        } else {
+            self.entry = Some(entry);
+            self.send_sync_status = new_send_sync_status;
+        }
+        Ok(())
     }
 }
 

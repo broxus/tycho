@@ -12,7 +12,7 @@ async fn test_collation_process_on_stubs() {
 
     let config = CollationConfig {
         key_pair: everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng()),
-        mc_block_min_interval_ms: 5000,
+        mc_block_min_interval_ms: 10000,
     };
     let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
     let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::<StateNodeAdapterStdImpl>::new();

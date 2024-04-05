@@ -807,7 +807,7 @@ where
         let candidate_id = *candidate.block_id();
         let block_container = BlockCandidateContainer::new(candidate);
         if candidate_id.shard.is_masterchain() {
-            // traverse through incliding shard blocks and update their link to the containing master block
+            // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container
                 .top_shard_blocks_keys()
                 .iter()
@@ -914,38 +914,138 @@ where
         }
     }
 
-    /// (TODO) Find all shard blocks that form master block subgraph.
+    /// Find all shard blocks that form master block subgraph.
     /// Then extract and return them if all are valid
     fn extract_mc_block_subgraph_if_valid(
         &mut self,
         block_id: &BlockId,
-    ) -> Option<McBlockSubgraphToSend> {
+    ) -> Result<Option<McBlockSubgraphToSend>> {
         // 1. Find current master block
-        // 2. Find prev master block
+        let mc_block_container = self
+            .blocks_cache
+            .master
+            .get_mut(&block_id.as_short_id())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Master block ({}) not found in cache!",
+                    block_id.as_short_id()
+                )
+            })?;
+        if !mc_block_container.is_valid() {
+            return Ok(None);
+        }
+        let mut subgraph = McBlockSubgraphToSend {
+            mc_block: BlockCandidateToSend {
+                entry: mc_block_container.extract_entry_for_sending()?,
+                send_sync_status: SendSyncStatus::Sending,
+            },
+            shard_blocks: vec![],
+        };
+
         // 3. By the top shard blocks info find shard blocks of current master block
         // 4. Recursively find prev shard blocks until the end or top shard blocks of prev master reached
-        // 5. If master block and all shard blocks valid the extrac them from entries and return
+        let mut prev_shard_blocks_keys = mc_block_container
+            .top_shard_blocks_keys()
+            .iter()
+            .cloned()
+            .collect::<VecDeque<_>>();
+        while let Some(prev_shard_block_key) = prev_shard_blocks_keys.pop_front() {
+            let shard_cache = self
+                .blocks_cache
+                .shards
+                .get_mut(&prev_shard_block_key.shard)
+                .ok_or_else(|| {
+                    anyhow!("Shard block ({}) not found in cache!", prev_shard_block_key)
+                })?;
+            if let Some(shard_block_container) = shard_cache.get_mut(&prev_shard_block_key.seqno) {
+                // if shard block included in current master block subgraph
+                if matches!(shard_block_container.containing_mc_block, Some(containing_mc_block_key) if &containing_mc_block_key == mc_block_container.key())
+                {
+                    // 5. If master block and all shard blocks valid the extract them from entries and return
+                    if !shard_block_container.is_valid() {
+                        return Ok(None);
+                    }
+                    subgraph.shard_blocks.push(BlockCandidateToSend {
+                        entry: shard_block_container.extract_entry_for_sending()?,
+                        send_sync_status: SendSyncStatus::Sending,
+                    });
+                    shard_block_container
+                        .prev_blocks_keys()
+                        .iter()
+                        .cloned()
+                        .for_each(|sub_prev| prev_shard_blocks_keys.push_back(sub_prev));
+                }
+            }
+        }
 
-        //STUB: always return None
+        let _tracing_shard_blocks_descr = subgraph
+            .shard_blocks
+            .iter()
+            .map(|sb| sb.entry.key.to_string())
+            .collect::<Vec<_>>();
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "STUB: Here master block ({}) subgraph should be extracted from cache",
+            "Extracted valid master block ({}) subgraph for sending to sync: {:?}",
             block_id.as_short_id(),
+            _tracing_shard_blocks_descr.as_slice(),
         );
-        None
+
+        Ok(Some(subgraph))
     }
 
-    /// (TODO) Remove block entries from cache and compact cache
+    /// Remove block entries from cache and compact cache
     async fn cleanup_blocks_from_cache(&mut self, blocks_keys: Vec<BlockCacheKey>) -> Result<()> {
-        todo!()
+        let _tracing_blocks_descr = blocks_keys
+            .iter()
+            .map(|key| key.to_string())
+            .collect::<Vec<_>>();
+        for block_key in blocks_keys {
+            if block_key.shard.is_masterchain() {
+                self.blocks_cache.master.remove(&block_key);
+            } else if let Some(shard_cache) = self.blocks_cache.shards.get_mut(&block_key.shard) {
+                shard_cache.remove(&block_key.seqno);
+            }
+        }
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Blocks cleaned up from cache: {:?}",
+            _tracing_blocks_descr.as_slice(),
+        );
+        Ok(())
     }
 
-    /// (TODO) Find and restore block entries in cache
+    /// Find and restore block entries in cache updating sync statuses
     async fn restore_blocks_in_cache(
         &mut self,
-        _blocks_to_restore: Vec<BlockCandidateToSend>,
+        blocks_to_restore: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
-        todo!()
+        let _tracing_blocks_descr = blocks_to_restore
+            .iter()
+            .map(|b| b.entry.key.to_string())
+            .collect::<Vec<_>>();
+        for block in blocks_to_restore {
+            // find block in cache
+            let block_container = if block.entry.key.shard.is_masterchain() {
+                self.blocks_cache
+                    .master
+                    .get_mut(&block.entry.key)
+                    .ok_or_else(|| anyhow!("Master block ({}) not found in cache!", block.entry.key))?
+            } else {
+                self.blocks_cache
+                    .shards
+                    .get_mut(&block.entry.key.shard)
+                    .and_then(|shard_cache| shard_cache.get_mut(&block.entry.key.seqno))
+                    .ok_or_else(|| anyhow!("Shard block ({}) not found in cache!", block.entry.key))?
+            };
+            // restore entry and update sync status
+            block_container.restore_entry(block.entry, block.send_sync_status)?;
+        }
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Blocks restored in cache: {:?}",
+            _tracing_blocks_descr.as_slice(),
+        );
+        Ok(())
     }
 
     /// Process validated and valid master block
@@ -958,13 +1058,13 @@ where
             block_id.as_short_id(),
         );
         // extract master block with all shard blocks if valid, and process them
-        if let Some(mc_block_subgraph_set) = self.extract_mc_block_subgraph_if_valid(block_id) {
-            let mut blocks_to_send = mc_block_subgraph_set.shard_blocks;
+        if let Some(mc_block_subgraph) = self.extract_mc_block_subgraph_if_valid(block_id)? {
+            let mut blocks_to_send = mc_block_subgraph.shard_blocks;
             blocks_to_send.reverse();
-            blocks_to_send.push(mc_block_subgraph_set.mc_block);
+            blocks_to_send.push(mc_block_subgraph.mc_block);
 
             // spawn async task to send all shard and master blocks
-            tokio::spawn({
+            let join_handle = tokio::spawn({
                 let dispatcher = self.dispatcher.clone();
                 let mq_adapter = self.mq_adapter.clone();
                 let state_node_adapter = self.state_node_adapter.clone();
@@ -978,6 +1078,8 @@ where
                     .await
                 }
             });
+            //TODO: make proper panic and error processing without waiting for spawned task
+            let _ = join_handle.await?;
         } else {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -1027,24 +1129,46 @@ where
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
         mq_adapter: Arc<MQ>,
         state_node_adapter: Arc<ST>,
-        blocks_to_send: Vec<BlockCandidateToSend>,
+        mut blocks_to_send: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
         //TODO: it is better to send each block separately, but it will be more tricky to handle the correct cleanup
 
-        // extract already synced blocks that were validated by existing blocks in the state
+        let _tracing_blocks_to_send_descr = blocks_to_send
+            .iter()
+            .map(|b| b.entry.key.to_string())
+            .collect::<Vec<_>>();
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Start sending blocks to sync: {:?}",
+            _tracing_blocks_to_send_descr.as_slice(),
+        );
+
+        // skip already synced blocks that were validated by existing blocks in the state
         // send other blocks to sync
         let mut should_restore_blocks_in_cache = false;
         let mut sent_blocks = vec![];
-        for block_to_send in blocks_to_send.iter() {
+        for block_to_send in blocks_to_send.iter_mut() {
             match block_to_send.send_sync_status {
                 SendSyncStatus::Sent | SendSyncStatus::Synced => sent_blocks.push(block_to_send),
                 _ => {
                     let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
-                    //TODO: handle and log error
-                    if let Err(_err) = state_node_adapter.accept_block(block_for_sync).await {
+                    //TODO: handle different errors types
+                    if let Err(err) = state_node_adapter.accept_block(block_for_sync).await {
+                        tracing::warn!(
+                            target: tracing_targets::COLLATION_MANAGER,
+                            "Block ({}) sync: was not accepted. err: {:?}",
+                            block_to_send.entry.candidate.block_id().as_short_id(),
+                            err,
+                        );
                         should_restore_blocks_in_cache = true;
                         break;
                     } else {
+                        tracing::debug!(
+                            target: tracing_targets::COLLATION_MANAGER,
+                            "Block ({}) sync: was successfully sent to sync",
+                            block_to_send.entry.candidate.block_id().as_short_id(),
+                        );
+                        block_to_send.send_sync_status = SendSyncStatus::Sent;
                         sent_blocks.push(block_to_send);
                     }
                 }
@@ -1053,20 +1177,41 @@ where
 
         if !should_restore_blocks_in_cache {
             // commit queue diffs for each block
-            for &sent_block in sent_blocks.iter() {
-                //TODO: handle and log error
-                if let Err(_err) = mq_adapter
+            for sent_block in sent_blocks.iter() {
+                //TODO: handle if diff does not exist
+                if let Err(err) = mq_adapter
                     .commit_diff(&sent_block.entry.candidate.block_id().as_short_id())
                     .await
                 {
+                    tracing::warn!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "Block ({}) sync: error committing message queue diff: {:?}",
+                        sent_block.entry.candidate.block_id().as_short_id(),
+                        err,
+                    );
                     should_restore_blocks_in_cache = true;
                     break;
+                } else {
+                    tracing::debug!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        "Block ({}) sync: message queue diff was committed",
+                        sent_block.entry.candidate.block_id().as_short_id(),
+                    );
                 }
             }
 
             // do not clenup blocks if msg queue diffs commit was unsuccessful
             if !should_restore_blocks_in_cache {
                 let sent_blocks_keys = sent_blocks.iter().map(|b| b.entry.key).collect::<Vec<_>>();
+                let _tracing_sent_blocks_descr = sent_blocks_keys
+                    .iter()
+                    .map(|key| key.to_string())
+                    .collect::<Vec<_>>();
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "All blocks were successfully sent to sync. Will cleanup them from cache: {:?}",
+                    _tracing_sent_blocks_descr.as_slice(),
+                );
                 dispatcher
                     .enqueue_task(method_to_async_task_closure!(
                         cleanup_blocks_from_cache,
@@ -1077,6 +1222,11 @@ where
         }
 
         if should_restore_blocks_in_cache {
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Not all blocks were sent to sync. Will restore all blocks in cache for one more sync attempt: {:?}",
+                _tracing_blocks_to_send_descr.as_slice(),
+            );
             // queue blocks restore task
             dispatcher
                 .enqueue_task(method_to_async_task_closure!(
@@ -1084,6 +1234,7 @@ where
                     blocks_to_send
                 ))
                 .await?;
+            //TODO: should implement resending for restored blocks
         }
 
         Ok(())
