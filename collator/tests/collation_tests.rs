@@ -1,6 +1,6 @@
 use tycho_collator::{
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
-    state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeAdapterStdImpl},
+    state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
     test_utils::try_init_test_tracing,
     types::CollationConfig,
     validator_test_impl::ValidatorProcessorTestImpl,
@@ -15,7 +15,7 @@ async fn test_collation_process_on_stubs() {
         mc_block_min_interval_ms: 10000,
     };
     let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
-    let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::<StateNodeAdapterStdImpl>::new();
+    let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new();
 
     tracing::info!("Trying to start CollationManager");
 
@@ -25,7 +25,12 @@ async fn test_collation_process_on_stubs() {
         _,
         _,
         ValidatorProcessorTestImpl<_>,
-    >(config, mpool_adapter_builder, state_node_adapter_builder, node_network);
+    >(
+        config,
+        mpool_adapter_builder,
+        state_node_adapter_builder,
+        node_network,
+    );
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {

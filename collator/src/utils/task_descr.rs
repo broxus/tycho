@@ -81,14 +81,61 @@ impl<R> TaskResponder<R> for Option<oneshot::Sender<R>> {
     }
 }
 
-pub struct TaskResponseReceiver<R, T>
+pub struct TaskResponseReceiver<R> {
+    inner_receiver: oneshot::Receiver<anyhow::Result<R>>,
+}
+impl<R> TaskResponseReceiver<R>
+where
+    R: Send + 'static,
+{
+    pub fn create(receiver: oneshot::Receiver<anyhow::Result<R>>) -> Self {
+        Self {
+            inner_receiver: receiver,
+        }
+    }
+    pub async fn try_recv(self) -> anyhow::Result<R> {
+        //TODO: awaiting error and error in result are merged here, need to fix
+        self.inner_receiver.await?
+    }
+
+    /// Example:
+    /// ```ignore
+    /// let dispatcher = self.dispatcher.clone();
+    /// receiver.process_on_recv(|res| async move {
+    ///     dispatcher
+    ///        .enqueue_task(method_to_async_task_closure!(
+    ///             refresh_collation_sessions,
+    ///             res
+    ///         ))
+    ///         .await
+    /// });
+    /// ```
+    pub async fn process_on_recv<Fut>(self, process_callback: impl FnOnce(R) -> Fut + Send + 'static)
+    where
+        Fut: Future<Output = anyhow::Result<()>> + Send,
+    {
+        tokio::spawn(async move {
+            match self.try_recv().await {
+                Ok(res) => {
+                    if let Err(e) = process_callback(res).await {
+                        tracing::error!("Error processing task response: {e:?}");
+                        //TODO: may be unwind panic?
+                    }
+                }
+                Err(err) => tracing::error!("Error in task result or on receiving: {err:?}"),
+            }
+        });
+    }
+}
+
+pub struct TaskResponseReceiverWithConvert<R, T>
 where
     T: TryFrom<R>,
 {
     _marker_t: std::marker::PhantomData<T>,
     inner_receiver: oneshot::Receiver<anyhow::Result<R>>,
 }
-impl<R, T> TaskResponseReceiver<R, T>
+impl<R, T> TaskResponseReceiverWithConvert<R, T>
 where
     R: Send + 'static,
     T: TryFrom<R, Error = anyhow::Error> + Send + 'static,

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_crypto::ed25519::PublicKey;
 use everscale_types::models::BlockId;
 
 use crate::types::{OnValidatedBlockEvent, ValidatorNetwork};
@@ -12,10 +11,7 @@ use crate::{
     method_to_async_task_closure,
     state_node::StateNodeAdapter,
     tracing_targets,
-    types::ValidatedBlock,
-    utils::async_queued_dispatcher::{
-        AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
-    },
+    utils::async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
 };
 
 use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
@@ -23,7 +19,11 @@ use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 #[async_trait]
 pub(crate) trait ValidatorEventEmitter {
     /// When shard or master block was validated by validator
-    async fn on_block_validated_event(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()>;
+    async fn on_block_validated_event(
+        &self,
+        block_id: BlockId,
+        event: OnValidatedBlockEvent,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -79,8 +79,7 @@ where
         tracing::info!(target: tracing_targets::VALIDATOR, "Creating validator...");
 
         // create dispatcher for own async tasks queue
-        let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
+        let (dispatcher, receiver) = AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         // create validation processor and run dispatcher for own tasks queue
@@ -150,7 +149,9 @@ mod tests {
         DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
     };
 
-    use crate::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
+    use crate::state_node::{
+        StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeEventListener,
+    };
     use crate::test_utils::try_init_test_tracing;
     use crate::types::{BlockSignatures, CollationSessionInfo};
 
@@ -189,7 +190,11 @@ mod tests {
 
     #[async_trait]
     impl ValidatorEventListener for TestValidatorEventListener {
-        async fn on_block_validated(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
+        async fn on_block_validated(
+            &self,
+            block_id: BlockId,
+            event: OnValidatedBlockEvent,
+        ) -> Result<()> {
             let mut validated_blocks = self.validated_blocks.lock().await;
             validated_blocks.push(block_id);
             self.increment_and_check().await;
@@ -278,7 +283,8 @@ mod tests {
         let test_listener = TestValidatorEventListener::new(1);
         let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
-        let state_node_adapter = Arc::new(StateNodeAdapterStdImpl::create(test_listener.clone()));
+        let state_node_adapter =
+            Arc::new(StateNodeAdapterBuilderStdImpl::new().build(test_listener.clone()));
         let _validation_state = ValidationStateStdImpl::new();
 
         let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
@@ -373,7 +379,7 @@ mod tests {
             listeners.push(test_listener.clone());
 
             let state_node_adapter =
-                Arc::new(StateNodeAdapterStdImpl::create(test_listener.clone()));
+                Arc::new(StateNodeAdapterBuilderStdImpl::new().build(test_listener.clone()));
             let _validation_state = ValidationStateStdImpl::new();
             let network = ValidatorNetwork {
                 overlay_service: node.overlay_service.clone(),
