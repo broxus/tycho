@@ -67,10 +67,24 @@ impl BlockCandidate {
     }
 }
 
+pub enum OnValidatedBlockEvent {
+    ValidByState,
+    Invalid,
+    Valid(BlockSignatures)
+}
+
+impl OnValidatedBlockEvent {
+    pub fn is_valid(&self) -> bool {
+        match self {
+            Self::ValidByState | Self::Valid(_) => true,
+            Self::Invalid => false,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct BlockSignatures {
-    pub good_sigs: HashMap<HashBytes, Signature>,
-    pub bad_sigs: HashMap<HashBytes, Signature>,
+    pub signatures: HashMap<HashBytes, Signature>,
 }
 
 pub struct ValidatedBlock {
@@ -168,6 +182,23 @@ impl MessageExt for OwnedMessage {
 
 #[derive(Clone)]
 pub struct ValidatorNetwork {
+    pub overlay_service: OverlayService,
+    pub peer_resolver: PeerResolver,
+    pub dht_client: DhtClient,
+}
+
+impl From<NodeNetwork> for ValidatorNetwork {
+    fn from(node_network: NodeNetwork) -> Self {
+        Self {
+            overlay_service: node_network.overlay_service,
+            peer_resolver: node_network.peer_resolver,
+            dht_client: node_network.dht_client,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct NodeNetwork {
     pub overlay_service: OverlayService,
     pub peer_resolver: PeerResolver,
     pub dht_client: DhtClient,

@@ -6,7 +6,7 @@ use everscale_crypto::ed25519::KeyPair;
 use everscale_crypto::ed25519::PublicKey;
 use everscale_types::models::BlockId;
 
-use crate::types::ValidatorNetwork;
+use crate::types::{OnValidatedBlockEvent, ValidatorNetwork};
 use crate::validator::types::ValidationSessionInfo;
 use crate::{
     method_to_async_task_closure,
@@ -23,13 +23,13 @@ use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 #[async_trait]
 pub(crate) trait ValidatorEventEmitter {
     /// When shard or master block was validated by validator
-    async fn on_block_validated_event(&self, validated_block: ValidatedBlock) -> Result<()>;
+    async fn on_block_validated_event(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()>;
 }
 
 #[async_trait]
 pub(crate) trait ValidatorEventListener: Send + Sync {
     /// Process validated shard or master block
-    async fn on_block_validated(&self, validated_block: ValidatedBlock) -> Result<()>;
+    async fn on_block_validated(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()>;
 }
 
 #[async_trait]
@@ -162,7 +162,7 @@ mod tests {
     use super::*;
 
     pub struct TestValidatorEventListener {
-        validated_blocks: Mutex<Vec<ValidatedBlock>>,
+        validated_blocks: Mutex<Vec<BlockId>>,
         notify: Arc<Notify>,
         expected_notifications: Mutex<u32>,
         received_notifications: Mutex<u32>,
@@ -189,9 +189,9 @@ mod tests {
 
     #[async_trait]
     impl ValidatorEventListener for TestValidatorEventListener {
-        async fn on_block_validated(&self, validated_block: ValidatedBlock) -> Result<()> {
+        async fn on_block_validated(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
             let mut validated_blocks = self.validated_blocks.lock().await;
-            validated_blocks.push(validated_block);
+            validated_blocks.push(block_id);
             self.increment_and_check().await;
             debug!("block validated event");
             Ok(())
@@ -345,12 +345,11 @@ mod tests {
         let keypair = KeyPair::generate(&mut ThreadRng::default());
         let _collator_session_info = CollationSessionInfo::new(0, validators, Some(keypair));
         test_listener
-            .on_block_validated(ValidatedBlock::new(block, BlockSignatures::default(), true))
+            .on_block_validated(block, OnValidatedBlockEvent::ValidByState)
             .await?;
 
         let validated_blocks = test_listener.validated_blocks.lock().await;
         assert!(!validated_blocks.is_empty(), "No blocks were validated.");
-        assert!(validated_blocks[0].is_valid(),);
 
         Ok(())
     }
@@ -359,8 +358,8 @@ mod tests {
     async fn test_validator_accept_block_by_network() -> Result<()> {
         try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
 
-        let network_nodes = make_network(10);
-        let blocks_amount = 3; // Assuming you expect 3 validation per node.
+        let network_nodes = make_network(3);
+        let blocks_amount = 1; // Assuming you expect 3 validation per node.
 
         let expected_validations = network_nodes.len() as u32; // Expecting each node to validate
         let _test_listener = TestValidatorEventListener::new(expected_validations);

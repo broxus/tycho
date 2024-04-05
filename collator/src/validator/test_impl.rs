@@ -9,7 +9,7 @@ use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tycho_block_util::state::ShardStateStuff;
 
 use crate::tracing_targets;
-use crate::types::{BlockSignatures, ValidatorNetwork};
+use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
 use crate::validator::types::ValidationSessionInfo;
 use crate::{
     state_node::StateNodeAdapter, types::ValidatedBlock,
@@ -37,8 +37,8 @@ impl<ST> ValidatorEventEmitter for ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    async fn on_block_validated_event(&self, validated_block: ValidatedBlock) -> Result<()> {
-        self.listener.on_block_validated(validated_block).await
+    async fn on_block_validated_event(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
+        self.listener.on_block_validated(block_id, event).await
     }
 }
 
@@ -71,24 +71,17 @@ where
         _session_seqno: u32,
         current_validator_keypair: KeyPair,
     ) -> Result<ValidatorTaskResult> {
-        let validated_block = ValidatedBlock::new(
-            candidate_id,
-            BlockSignatures {
-                good_sigs: [(
-                    current_validator_keypair.public_key.to_bytes().into(),
-                    Signature::default(),
-                )]
-                .into(),
-                bad_sigs: HashMap::new(),
-            },
-            true,
+        let mut signatures = HashMap::new();
+        signatures.insert(
+            current_validator_keypair.public_key.to_bytes().into(),
+            Signature::default(),
         );
         tracing::debug!(
             target: tracing_targets::VALIDATOR,
             "Validator (block: {}): STUB: emulated validation via signatures request",
             candidate_id,
         );
-        self.listener.on_block_validated(validated_block).await?;
+        self.listener.on_block_validated(candidate_id, OnValidatedBlockEvent::Valid(BlockSignatures{signatures})).await?;
 
         Ok(ValidatorTaskResult::Void)
     }

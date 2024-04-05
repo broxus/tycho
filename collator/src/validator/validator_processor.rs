@@ -14,7 +14,7 @@ use tracing::{debug, error, trace};
 
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
-use crate::types::{BlockSignatures, ValidatedBlock, ValidatorNetwork};
+use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatedBlock, ValidatorNetwork};
 
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::network_service::NetworkService;
@@ -131,8 +131,8 @@ impl<ST> ValidatorEventEmitter for ValidatorProcessorStdImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    async fn on_block_validated_event(&self, validated_block: ValidatedBlock) -> Result<()> {
-        self.listener.on_block_validated(validated_block).await
+    async fn on_block_validated_event(&self, block: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
+        self.listener.on_block_validated(block, event).await
     }
 }
 
@@ -226,13 +226,21 @@ where
             .ok_or_else(|| anyhow!("Failed to start candidate validation. Session not found"))?;
 
         let our_signature = sign_block(&current_validator_keypair, &candidate_id)?;
+        let current_validator_signature = HashBytes(current_validator_keypair.public_key.to_bytes());
         session.add_block(candidate_id)?;
-        session.add_signature(
-            &candidate_id,
-            HashBytes(current_validator_keypair.public_key.to_bytes()),
-            our_signature,
-            true,
-        );
+
+        let enqueue_task_result = self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(
+                                                process_candidate_signature_response,
+                                                session_seqno,
+                                                candidate_id.as_short_id(),
+                                                vec![(current_validator_signature.0, our_signature.0)]
+                                            ))
+            .await;
+
+        if let Err(e) = enqueue_task_result {
+            bail!("Failed to enqueue task for processing signatures response {e:?}");
+        }
 
         let dispatcher = self.get_dispatcher().clone();
         let current_validator_pubkey = current_validator_keypair.public_key;
@@ -267,6 +275,7 @@ where
                             Ok(receiver) => match receiver.await.unwrap() {
                                 Ok(ValidatorTaskResult::ValidationStatus(validation_status)) => {
                                     if validation_status == ValidationResult::Valid || validation_status == ValidationResult::Invalid {
+                                        trace!(target: tracing_targets::VALIDATOR, "Validation status is already set for block {:?}", cloned_candidate);
                                         break;
                                     }
 
@@ -355,26 +364,13 @@ where
 
             match session.validation_status(&block_id_short) {
                 ValidationResult::Valid => {
-                    let signatures = session
-                        .get_valid_signatures(&block_id_short)
-                        .into_iter()
-                        .collect::<Vec<_>>();
+                    let signatures = BlockSignatures{signatures: session.get_valid_signatures(&block_id_short)};
 
-                    let good_sigs = session.get_valid_signatures(&block_id_short);
-                    let bad_sigs = session.get_invalid_signatures(&block_id_short);
-
-                    let block_signatures = BlockSignatures{ good_sigs, bad_sigs };
-
-                    self.on_block_validated_event(ValidatedBlock::new(block, block_signatures, true))
+                    self.on_block_validated_event(block, OnValidatedBlockEvent::Valid(signatures))
                         .await?;
                 }
                 ValidationResult::Invalid => {
-                    let good_sigs = session.get_valid_signatures(&block_id_short);
-                    let bad_sigs = session.get_invalid_signatures(&block_id_short);
-
-                    let block_signatures = BlockSignatures{ good_sigs, bad_sigs };
-
-                    self.on_block_validated_event(ValidatedBlock::new(block, block_signatures, false))
+                    self.on_block_validated_event(block, OnValidatedBlockEvent::Invalid)
                         .await?;
                 }
                 ValidationResult::Insufficient => {

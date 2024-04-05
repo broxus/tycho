@@ -24,6 +24,7 @@ use crate::{
     utils::{async_queued_dispatcher::AsyncQueuedDispatcher, shard::calc_split_merge_actions},
     validator::Validator,
 };
+use crate::types::OnValidatedBlockEvent;
 
 use super::{
     types::{
@@ -747,21 +748,21 @@ where
     /// 1. Process invalid block (currently, just panic)
     /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
-    pub async fn process_validated_block(&mut self, validated_block: ValidatedBlock) -> Result<()> {
+    pub async fn process_validated_block(&mut self, block_id: BlockId, validation_result: OnValidatedBlockEvent) -> Result<()> {
+        let short_id = block_id.as_short_id();
+
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Start processing block validation result (id: {}, valid: {})...",
-            validated_block.id().as_short_id(),
-            validated_block.is_valid(),
+            "Start processing block validation result (id: {}, is_valid: {})...",
+            short_id,
+            validation_result.is_valid(),
         );
 
         // execute required actions if block invalid
-        if !validated_block.is_valid() {
+        if !validation_result.is_valid() {
             //TODO: implement more graceful reaction on invalid block
             panic!("Block has collected more than 1/3 invalid signatures! Unable to continue collation process!")
         }
-
-        let block_id = *validated_block.id();
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -769,7 +770,7 @@ where
             block_id.as_short_id(),
         );
         // update block in cache with signatures info
-        self.store_block_validation_result(validated_block)?;
+        self.store_block_validation_result(block_id, validation_result)?;
 
         // process valid block
         if block_id.shard.is_masterchain() {
@@ -846,9 +847,9 @@ where
     /// Find block candidate in cache, append signatures info and return updated
     fn store_block_validation_result(
         &mut self,
-        validated_block: ValidatedBlock,
+        block_id: BlockId,
+        validation_result: OnValidatedBlockEvent,
     ) -> Result<&BlockCandidateContainer> {
-        let block_id = validated_block.id();
         if let Some(block_container) = if block_id.is_masterchain() {
             self.blocks_cache.master.get_mut(&block_id.as_short_id())
         } else {
@@ -857,10 +858,23 @@ where
                 .get_mut(&block_id.shard)
                 .and_then(|shard_cache| shard_cache.get_mut(&block_id.seqno))
         } {
-            block_container.set_validation_result(
-                validated_block.is_valid(),
-                validated_block.extract_signatures(),
-            );
+
+            match validation_result {
+                OnValidatedBlockEvent::ValidByState => {
+                    unimplemented!()
+                }
+                OnValidatedBlockEvent::Invalid => {
+                    unimplemented!()
+                }
+                OnValidatedBlockEvent::Valid(ref signatures) => {
+                    block_container.set_validation_result(
+                        validation_result.is_valid(),
+                        signatures.signatures.clone(),
+                    );
+                }
+            }
+            // todo!("Append signatures to block container");
+
 
             Ok(block_container)
         } else {
