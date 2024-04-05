@@ -67,7 +67,7 @@ impl BlockCandidate {
     }
 }
 
-pub enum OnValidatedBlockEvent {
+pub(crate) enum OnValidatedBlockEvent {
     ValidByState,
     Invalid,
     Valid(BlockSignatures),

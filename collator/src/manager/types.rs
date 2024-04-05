@@ -65,7 +65,7 @@ impl BlockCandidateContainer {
         let entry = BlockCandidateEntry {
             key,
             candidate,
-            signatures: HashMap::default(),
+            signatures: Default::default(),
         };
         Self {
             key,
@@ -103,17 +103,27 @@ impl BlockCandidateContainer {
         self.is_valid
     }
 
-    /// Add signatures to containing block candidate entry and update `is_valid` flag
+    /// Add signatures to containing block candidate entry
+    /// or mark that it was already synced
+    /// and update `is_valid` flag
     pub fn set_validation_result(
         &mut self,
         is_valid: bool,
+        already_synced: bool,
         signatures: HashMap<HashBytes, Signature>,
     ) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;
             self.is_valid = is_valid;
-            if self.is_valid && self.block_id().is_masterchain() {
-                self.send_sync_status = SendSyncStatus::Ready;
+            if self.is_valid {
+                if already_synced {
+                    // already synced block is valid and won't be sent to sync again
+                    self.send_sync_status = SendSyncStatus::Synced;
+                } else if self.block_id().is_masterchain() {
+                    // master block is ready for when validated
+                    // but shard blocks should wait for master block
+                    self.send_sync_status = SendSyncStatus::Ready;
+                }
             }
         }
     }

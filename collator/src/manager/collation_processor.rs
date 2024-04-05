@@ -22,12 +22,11 @@ use crate::{
     tracing_targets,
     types::{
         BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-        CollationSessionInfo, ValidatedBlock,
+        CollationSessionInfo, OnValidatedBlockEvent,
     },
     utils::{async_queued_dispatcher::AsyncQueuedDispatcher, shard::calc_split_merge_actions},
     validator::Validator,
 };
-use crate::types::OnValidatedBlockEvent;
 
 use super::{
     types::{
@@ -764,7 +763,11 @@ where
     /// 1. Process invalid block (currently, just panic)
     /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
-    pub async fn process_validated_block(&mut self, block_id: BlockId, validation_result: OnValidatedBlockEvent) -> Result<()> {
+    pub async fn process_validated_block(
+        &mut self,
+        block_id: BlockId,
+        validation_result: OnValidatedBlockEvent,
+    ) -> Result<()> {
         let short_id = block_id.as_short_id();
 
         tracing::debug!(
@@ -874,23 +877,12 @@ where
                 .get_mut(&block_id.shard)
                 .and_then(|shard_cache| shard_cache.get_mut(&block_id.seqno))
         } {
-
-            match validation_result {
-                OnValidatedBlockEvent::ValidByState => {
-                    unimplemented!()
-                }
-                OnValidatedBlockEvent::Invalid => {
-                    unimplemented!()
-                }
-                OnValidatedBlockEvent::Valid(ref signatures) => {
-                    block_container.set_validation_result(
-                        validation_result.is_valid(),
-                        signatures.signatures.clone(),
-                    );
-                }
-            }
-            // todo!("Append signatures to block container");
-
+            let (is_valid, already_synced, signatures) = match validation_result {
+                OnValidatedBlockEvent::ValidByState => (true, true, Default::default()),
+                OnValidatedBlockEvent::Valid(bs) => (true, false, bs.signatures),
+                OnValidatedBlockEvent::Invalid => (false, false, Default::default()),
+            };
+            block_container.set_validation_result(is_valid, already_synced, signatures);
 
             Ok(block_container)
         } else {

@@ -1,8 +1,11 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
+
 use everscale_crypto::ed25519;
+
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
-use crate::types::{NodeNetwork, ValidatorNetwork};
+
+use crate::types::NodeNetwork;
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {
     use std::io::IsTerminal;

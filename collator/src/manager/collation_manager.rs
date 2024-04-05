@@ -1,9 +1,8 @@
-use std::{net::Ipv4Addr, sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-use everscale_crypto::ed25519;
 use everscale_types::models::{BlockId, ShardIdent};
 
 use tycho_core::internal_queue::iterator::QueueIteratorImpl;
@@ -18,20 +17,17 @@ use crate::{
     state_node::{StateNodeAdapter, StateNodeAdapterBuilder, StateNodeEventListener},
     tracing_targets,
     types::{
-        BlockCollationResult, CollationConfig, CollationSessionId, ValidatedBlock, ValidatorNetwork,
+        BlockCollationResult, CollationConfig, CollationSessionId, NodeNetwork, OnValidatedBlockEvent,
     },
     utils::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
     validator::{
-        state::{ValidationState, ValidationStateStdImpl},
         validator_processor::{ValidatorProcessor, ValidatorProcessorStdImpl},
         Validator, ValidatorEventListener, ValidatorStdImpl,
     },
 };
-use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
-use crate::types::{NodeNetwork, OnValidatedBlockEvent};
 
 use super::collation_processor::CollationProcessor;
 
@@ -51,7 +47,7 @@ where
         config: CollationConfig,
         mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
-        node_network: NodeNetwork
+        node_network: NodeNetwork,
     ) -> Self;
 }
 
@@ -74,7 +70,7 @@ pub fn create_std_manager<MP, ST>(
     config: CollationConfig,
     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
-    node_network: NodeNetwork
+    node_network: NodeNetwork,
 ) -> impl CollationManager<MP, ST>
 where
     MP: MempoolAdapter,
@@ -86,14 +82,19 @@ where
         MessageQueueAdapterStdImpl,
         MP,
         ST,
-    >::create(config, mpool_adapter_builder, state_adapter_builder, node_network)
+    >::create(
+        config,
+        mpool_adapter_builder,
+        state_adapter_builder,
+        node_network,
+    )
 }
 #[allow(private_bounds)]
 pub fn create_std_manager_with_validator<MP, ST, V>(
     config: CollationConfig,
     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
-    node_network: NodeNetwork
+    node_network: NodeNetwork,
 ) -> impl CollationManager<MP, ST>
 where
     MP: MempoolAdapter,
@@ -106,7 +107,12 @@ where
         MessageQueueAdapterStdImpl,
         MP,
         ST,
-    >::create(config, mpool_adapter_builder, state_adapter_builder, node_network)
+    >::create(
+        config,
+        mpool_adapter_builder,
+        state_adapter_builder,
+        node_network,
+    )
 }
 
 impl<C, V, MQ, MP, ST> CollationManager<MP, ST> for CollationManagerGenImpl<C, V, MQ, MP, ST>
@@ -121,7 +127,7 @@ where
         config: CollationConfig,
         mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
-        node_network: NodeNetwork
+        node_network: NodeNetwork,
     ) -> Self {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
