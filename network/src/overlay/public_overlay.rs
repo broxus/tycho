@@ -74,6 +74,12 @@ impl PublicOverlayBuilder {
             overlay_id: self.overlay_id.as_bytes(),
         });
 
+        let entries = PublicOverlayEntries {
+            peer_id_to_index: Default::default(),
+            data: Default::default(),
+            peer_resolver: self.peer_resolver,
+        };
+
         let entry_ttl_sec = self.entry_ttl.as_secs().try_into().unwrap_or(u32::MAX);
 
         PublicOverlay {
@@ -81,7 +87,7 @@ impl PublicOverlayBuilder {
                 overlay_id: self.overlay_id,
                 min_capacity: self.min_capacity,
                 entry_ttl_sec,
-                entries: RwLock::new(Default::default()),
+                entries: RwLock::new(entries),
                 entry_count: AtomicUsize::new(0),
                 banned_peer_ids: self.banned_peer_ids,
                 service: service.boxed(),
@@ -307,7 +313,6 @@ struct Inner {
     request_prefix: Box<[u8]>,
 }
 
-#[derive(Default)]
 pub struct PublicOverlayEntries {
     peer_id_to_index: FastHashMap<PeerId, usize>,
     data: Vec<PublicOverlayEntryData>,
@@ -315,6 +320,28 @@ pub struct PublicOverlayEntries {
 }
 
 impl PublicOverlayEntries {
+    /// Returns `true` if the set contains no elements.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Returns the number of elements in the set, also referred to as its 'length'.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Returns true if the set contains the specified peer id.
+    pub fn contains(&self, peer_id: &PeerId) -> bool {
+        self.peer_id_to_index.contains_key(peer_id)
+    }
+
+    /// Returns an iterator over the entries.
+    ///
+    /// The order is not random, but is not defined.
+    pub fn iter(&self) -> std::slice::Iter<'_, PublicOverlayEntryData> {
+        self.data.iter()
+    }
+
     /// Returns a reference to one random element of the slice,
     /// or `None` if the slice is empty.
     pub fn choose<R>(&self, rng: &mut R) -> Option<&PublicOverlayEntryData>
@@ -335,6 +362,18 @@ impl PublicOverlayEntries {
         R: Rng + ?Sized,
     {
         self.data.choose_multiple(rng, n)
+    }
+
+    /// Chooses all entries from the set, without repetition,
+    /// and in random order.
+    pub fn choose_all<R>(
+        &self,
+        rng: &mut R,
+    ) -> rand::seq::SliceChooseIter<'_, [PublicOverlayEntryData], PublicOverlayEntryData>
+    where
+        R: Rng + ?Sized,
+    {
+        self.data.choose_multiple(rng, self.data.len())
     }
 
     fn insert(&mut self, item: &PublicEntry) -> bool {

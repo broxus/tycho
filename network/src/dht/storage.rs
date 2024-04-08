@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -8,29 +8,37 @@ use moka::sync::{Cache, CacheBuilder};
 use moka::Expiry;
 use tl_proto::TlWrite;
 use tycho_util::time::now_sec;
+use tycho_util::FastDashMap;
 
-use crate::proto::dht::{OverlayValue, OverlayValueRef, PeerValueRef, ValueRef};
+use crate::proto::dht::{MergedValue, MergedValueRef, PeerValueRef, ValueRef};
 
 type DhtCache<S> = Cache<StorageKeyId, StoredValue, S>;
 type DhtCacheBuilder<S> = CacheBuilder<StorageKeyId, StoredValue, DhtCache<S>>;
 
-pub trait OverlayValueMerger: Send + Sync + 'static {
-    fn check_value(&self, new: &OverlayValueRef<'_>) -> Result<(), StorageError>;
-    fn merge_value(&self, new: &OverlayValueRef<'_>, stored: &mut OverlayValue) -> bool;
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+pub enum DhtValueSource {
+    Local,
+    Remote,
 }
 
-impl OverlayValueMerger for () {
-    fn check_value(&self, _new: &OverlayValueRef<'_>) -> Result<(), StorageError> {
-        Err(StorageError::InvalidKey)
-    }
-    fn merge_value(&self, _new: &OverlayValueRef<'_>, _stored: &mut OverlayValue) -> bool {
-        false
-    }
+pub trait DhtValueMerger: Send + Sync + 'static {
+    fn check_value(
+        &self,
+        source: DhtValueSource,
+        new: &MergedValueRef<'_>,
+    ) -> Result<(), StorageError>;
+
+    fn merge_value(
+        &self,
+        source: DhtValueSource,
+        new: &MergedValueRef<'_>,
+        stored: &mut MergedValue,
+    ) -> bool;
 }
 
 pub(crate) struct StorageBuilder {
     cache_builder: DhtCacheBuilder<std::hash::RandomState>,
-    overlay_value_merger: Weak<dyn OverlayValueMerger>,
+    value_mergers: FastDashMap<[u8; 32], Arc<dyn DhtValueMerger>>,
     max_ttl: Duration,
 }
 
@@ -38,7 +46,7 @@ impl Default for StorageBuilder {
     fn default() -> Self {
         Self {
             cache_builder: Default::default(),
-            overlay_value_merger: Weak::<()>::new(),
+            value_mergers: Default::default(),
             max_ttl: Duration::from_secs(3600),
         }
     }
@@ -59,13 +67,18 @@ impl StorageBuilder {
                 .weigher(weigher)
                 .expire_after(ValueExpiry)
                 .build_with_hasher(ahash::RandomState::default()),
-            overlay_value_merger: self.overlay_value_merger,
+            value_mergers: self.value_mergers,
             max_ttl_sec: self.max_ttl.as_secs().try_into().unwrap_or(u32::MAX),
         }
     }
 
-    pub fn with_overlay_value_merger(mut self, merger: &Arc<dyn OverlayValueMerger>) -> Self {
-        self.overlay_value_merger = Arc::downgrade(merger);
+    #[allow(unused)]
+    pub fn with_value_merger(
+        self,
+        group_id: &[u8; 32],
+        value_merger: Arc<dyn DhtValueMerger>,
+    ) -> Self {
+        self.value_mergers.insert(*group_id, value_merger);
         self
     }
 
@@ -87,7 +100,7 @@ impl StorageBuilder {
 
 pub(crate) struct Storage {
     cache: DhtCache<ahash::RandomState>,
-    overlay_value_merger: Weak<dyn OverlayValueMerger>,
+    value_mergers: FastDashMap<[u8; 32], Arc<dyn DhtValueMerger>>,
     max_ttl_sec: u32,
 }
 
@@ -96,12 +109,30 @@ impl Storage {
         StorageBuilder::default()
     }
 
+    pub fn insert_merger(
+        &self,
+        group_id: &[u8; 32],
+        merger: Arc<dyn DhtValueMerger>,
+    ) -> Option<Arc<dyn DhtValueMerger>> {
+        self.value_mergers.insert(*group_id, merger)
+    }
+
+    pub fn remove_merger(&self, group_id: &[u8; 32]) -> Option<Arc<dyn DhtValueMerger>> {
+        self.value_mergers
+            .remove(group_id)
+            .map(|(_, merger)| merger)
+    }
+
     pub fn get(&self, key: &[u8; 32]) -> Option<Bytes> {
         let stored_value = self.cache.get(key)?;
         (stored_value.expires_at > now_sec()).then_some(stored_value.data)
     }
 
-    pub fn insert(&self, value: &ValueRef<'_>) -> Result<bool, StorageError> {
+    pub fn insert(
+        &self,
+        source: DhtValueSource,
+        value: &ValueRef<'_>,
+    ) -> Result<bool, StorageError> {
         match value.expires_at().checked_sub(now_sec()) {
             Some(0) | None => return Err(StorageError::ValueExpired),
             Some(remaining_ttl) if remaining_ttl > self.max_ttl_sec => {
@@ -112,7 +143,7 @@ impl Storage {
 
         match value {
             ValueRef::Peer(value) => self.insert_signed_value(value),
-            ValueRef::Overlay(value) => self.insert_overlay_value(value),
+            ValueRef::Merged(value) => self.insert_merged_value(source, value),
         }
     }
 
@@ -138,19 +169,24 @@ impl Storage {
             .is_fresh())
     }
 
-    fn insert_overlay_value(&self, value: &OverlayValueRef<'_>) -> Result<bool, StorageError> {
-        let Some(merger) = self.overlay_value_merger.upgrade() else {
-            return Ok(false);
+    fn insert_merged_value(
+        &self,
+        source: DhtValueSource,
+        value: &MergedValueRef<'_>,
+    ) -> Result<bool, StorageError> {
+        let merger = match self.value_mergers.get(value.key.group_id) {
+            Some(merger) => merger.clone(),
+            None => return Ok(false),
         };
 
-        merger.check_value(value)?;
+        merger.check_value(source, value)?;
 
-        enum OverlayValueCow<'a, 'b> {
-            Borrowed(&'a OverlayValueRef<'b>),
-            Owned(OverlayValue),
+        enum MergedValueCow<'a, 'b> {
+            Borrowed(&'a MergedValueRef<'b>),
+            Owned(MergedValue),
         }
 
-        impl OverlayValueCow<'_, '_> {
+        impl MergedValueCow<'_, '_> {
             fn make_stored_value(&self) -> StoredValue {
                 match self {
                     Self::Borrowed(value) => StoredValue::new(*value, value.expires_at),
@@ -159,7 +195,7 @@ impl Storage {
             }
         }
 
-        let new_value = RefCell::new(OverlayValueCow::Borrowed(value));
+        let new_value = RefCell::new(MergedValueCow::Borrowed(value));
 
         Ok(self
             .cache
@@ -170,13 +206,13 @@ impl Storage {
                     value.make_stored_value()
                 },
                 |prev| {
-                    let Ok(mut prev) = tl_proto::deserialize::<OverlayValue>(&prev.data) else {
+                    let Ok(mut prev) = tl_proto::deserialize::<MergedValue>(&prev.data) else {
                         // Invalid values are always replaced with new values
                         return true;
                     };
 
-                    if merger.merge_value(value, &mut prev) {
-                        *new_value.borrow_mut() = OverlayValueCow::Owned(prev);
+                    if merger.merge_value(source, value, &mut prev) {
+                        *new_value.borrow_mut() = MergedValueCow::Owned(prev);
                         true
                     } else {
                         false
@@ -250,4 +286,6 @@ pub enum StorageError {
     InvalidSignature,
     #[error("value too big")]
     ValueTooBig,
+    #[error("invalid source")]
+    InvalidSource,
 }
