@@ -1,3 +1,4 @@
+use std::ops::Div;
 use std::sync::Arc;
 
 use tycho_network::{PeerId};
@@ -13,7 +14,7 @@ pub struct Neighbour(Arc<NeighbourState>);
 
 impl Neighbour {
     pub fn new(peer_id: PeerId, options: NeighbourOptions) -> Self {
-        let default_roundtrip_ms = truncate_roundtrip(options.default_roundtrip_ms);
+        let default_roundtrip_ms = truncate_time(options.default_roundtrip_ms);
         let stats = parking_lot::RwLock::new(TrackedStats::new(default_roundtrip_ms));
 
         let state = Arc::new(NeighbourState { peer_id, stats });
@@ -49,9 +50,10 @@ impl Neighbour {
         Some(roundtrip as u64)
     }
 
-    pub fn track_request(&self, roundtrip: u64, success: bool) {
-        let roundtrip = truncate_roundtrip(roundtrip);
-        self.0.stats.write().update(roundtrip, success)
+    pub fn track_request(&self, request_time: u64, roundtrip: u64, success: bool) {
+        let roundtrip = truncate_time(roundtrip);
+        let request_time = truncate_time(request_time);
+        self.0.stats.write().update(request_time, roundtrip, success)
     }
 }
 
@@ -82,6 +84,7 @@ struct TrackedStats {
     failed: u64,
     failed_requests_history: u64,
     roundtrip: PackedSmaBuffer,
+    request_time: PackedSmaBuffer,
     created: u32,
 }
 
@@ -96,6 +99,7 @@ impl TrackedStats {
             total: 0,
             failed: 0,
             failed_requests_history: 0,
+            request_time: PackedSmaBuffer(default_roundtrip_ms.div(2) as u64 ),
             roundtrip: PackedSmaBuffer(default_roundtrip_ms as u64),
             created: now_sec(),
         }
@@ -134,7 +138,7 @@ impl TrackedStats {
         (score >= Self::SCORE_THRESHOLD).then_some(score)
     }
 
-    fn update(&mut self, roundtrip: u16, success: bool) {
+    fn update(&mut self, request_time: u16, roundtrip: u16, success: bool) {
         const SUCCESS_REQUEST_SCORE: u8 = 8;
         const FAILED_REQUEST_PENALTY: u8 = 8;
 
@@ -151,8 +155,10 @@ impl TrackedStats {
         }
         self.total += 1;
 
-        let buffer =  &mut self.roundtrip;
-        buffer.add(roundtrip)
+        let roundtrip_buffer =  &mut self.roundtrip;
+        let request_time_buffer = &mut self.request_time;
+        roundtrip_buffer.add(roundtrip);
+        request_time_buffer.add(request_time);
     }
 }
 
@@ -183,6 +189,6 @@ impl PackedSmaBuffer {
     }
 }
 
-fn truncate_roundtrip(roundtrip: u64) -> u16 {
+fn truncate_time(roundtrip: u64) -> u16 {
     std::cmp::min(roundtrip, u16::MAX as u64) as u16
 }

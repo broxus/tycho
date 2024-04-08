@@ -3,9 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Error, Result};
-use tl_proto::{TlRead, TlWrite};
+use tl_proto::{Boxed, TlRead, TlWrite};
 
-use tycho_network::{NetworkExt, PeerId, PublicOverlay};
+use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
 use tycho_network::Network;
 
 use crate::overlay::neighbours::{NeighbourCollection, Neighbours};
@@ -13,10 +13,11 @@ use crate::proto::overlay::{Ping, Pong};
 
 
 trait OverlayClient {
-    async fn send<R: TlWrite>(&self, data: R) -> Result<()>;
+    async fn send<R>(&self, data: R) -> Result<()> where
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>;
 
-    async fn query<R, A>(&self, data: R) -> Result<Option<A>> where
-        R: TlWrite,
+    async fn query<R, A>(&self, data: R) -> Result<A> where
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: TlRead<'a>,;
 }
 
@@ -48,31 +49,24 @@ impl PublicOverlayClient {
             value: start_time
         };
 
-        let pong_res = self.0.overlay.query(&self.0.network, neighbour.peer_id(), ping.into()).await;
+
+        let pong_res = self.0.overlay.query(&self.0.network, neighbour.peer_id(), Request::from_tl(ping)).await;
 
         let end_time = tycho_util::time::now_millis();
 
-       let success=  match pong_res {
+       let (request_time, success) =  match pong_res {
             Ok(response) => {
                 let pong: Pong = response.parse_tl::<Pong>()?;
-
                 tracing::info!(peer_id = %neighbour.peer_id(), "Pong received", );
-
-
-                // Ok(NeighbourPingResult {
-                //     peer: *neighbour.peer_id(),
-                //     request_time: (pong.value - start_time) as u32,
-                //     rt_time: (end_time - start_time) as u32,
-                // })
-                true
+                (pong.value - start_time, true)
             }
             Err(e) => {
                 tracing::error!(peer_id = %neighbour.peer_id(), "Failed to received pong. Error: {e:?}");
-                false
+                (u64::MAX, false)
             }
         };
 
-        neighbour.track_request(end_time - start_time, success);
+        neighbour.track_request(request_time, end_time - start_time, success);
         self.0.neighbours.0.update_selection_index().await;
 
         Ok(())
@@ -82,25 +76,39 @@ impl PublicOverlayClient {
 }
 
 impl OverlayClient for PublicOverlayClient {
-    async fn send<R: TlWrite>(&self, data: R) -> Result<()> {
-        let Some(neighbour) = self.0.neighbours().choose().await else {
+    async fn send<R>(&self, data: R) -> Result<()>
+        where
+            R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        let Some(neighbour) = self.0.neighbours.0.choose().await else {
             tracing::error!("No neighbours found to send request");
             return Err(Error::msg("Failed to ping")); //TODO: proper error
         };
 
-        self.0.overlay.send(&self.0.network, neighbour.peer_id(), data).await
+        //let boxed = tl_proto::serialize(data);
+        self.0.overlay.send(&self.0.network, neighbour.peer_id(), Request::from_tl(data)).await?;
+        Ok(())
     }
 
-    async fn query<R, A>(&self, data: R) -> Result<Option<A>> where
-        R: TlWrite,
+    async fn query<R, A>(&self, data: R) -> Result<A> where
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: TlRead<'a>,
     {
-        let Some(neighbour) = self.0.neighbours().choose().await else {
+        let Some(neighbour) = self.0.neighbours.0.choose().await else {
             tracing::error!("No neighbours found to send request");
             return Err(Error::msg("Failed to ping")); //TODO: proper error
         };
 
-        self.0.overlay.query(&self.0.network, neighbour.peer_id(), data).await
+        let response_opt = self.0.overlay.query(&self.0.network, neighbour.peer_id(), Request::from_tl(data)).await;
+        match response_opt {
+            Ok(response) => {
+                Ok(response.parse_tl::<A>())
+            }
+            Err(e ) => {
+                tracing::error!(peer_id = %neighbour.peer_id(), "Failed to get response from peer. Err: {e:?}");
+                Err(e)
+            }
+        }
     }
 }
 
