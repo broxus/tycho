@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use crate::overlay::public_overlay_client::PublicOverlayClient;
 
 async fn ping_neighbours(client: PublicOverlayClient) {
@@ -6,6 +6,8 @@ async fn ping_neighbours(client: PublicOverlayClient) {
 
     loop {
         interval.tick().await;
-        let _ = client.ping_random_neighbour().await;
+        if let Err(e) = client.ping_random_neighbour().await {
+            tracing::error!("Failed to ping random neighbour. Error: {e:?}")
+        }
     }
 }
