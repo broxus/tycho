@@ -9,15 +9,18 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-# crates.io deps
-anyhow = "1.0"
-futures-util = "0.3"
-rand = "0.8.5"
-serde = { version = "1.0.197", features = ["derive"] }
-tracing = "0.1.40"
-parking_lot = "0.12.1"
-tokio = { version = "1", features = ["time"] }
-tl-proto = "0.4.6"
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+castaway = { workspace = true }
+everscale-types = { workspace = true }
+futures-util = { workspace = true }
+itertools = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+tl-proto = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
