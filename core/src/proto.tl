@@ -14,11 +14,7 @@ overlay.peerId key:int256 = overlay.PeerId;
 */
 overlay.ping
     value:long
-<<<<<<< HEAD
     = overlay.Ping;
-=======
-    = overlay.Ping
->>>>>>> b95f6ce (fix(overlay-client): update proto models for overlay client + misc fixes)
 
 /**
 * Public overlay pong model. Sending pong back to sender should follow receiving ping model
@@ -26,13 +22,7 @@ overlay.ping
 */
 overlay.pong
     value:long
-    = overlay.Pong
+    = overlay.Pong;
 
 
 ---functions---
-
-/**
-* Send Ping
-* @param ping    ping request
-*/
-overlay.sendPing

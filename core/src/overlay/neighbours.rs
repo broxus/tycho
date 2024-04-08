@@ -2,8 +2,6 @@ use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::seq::SliceRandom;
 use rand::Rng;
 
-use serde::{Deserialize, Serialize};
-use std::ops::Deref;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tycho_network::{OverlayId, PeerId};
