@@ -16,6 +16,9 @@ everscale-types = { workspace = true }
 futures-util = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 
