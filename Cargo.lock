@@ -2186,9 +2186,12 @@ dependencies = [
 name = "tycho-core"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "futures-util",
  "parking_lot",
  "rand",
  "serde",
+ "tl-proto",
  "tokio",
  "tracing",
  "tycho-network",

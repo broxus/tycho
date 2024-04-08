@@ -49,7 +49,7 @@ impl Neighbour {
         Some(roundtrip as u64)
     }
 
-    fn track_request(&self, roundtrip: u64, success: bool) {
+    pub fn track_request(&self, roundtrip: u64, success: bool) {
         let roundtrip = truncate_roundtrip(roundtrip);
         self.0.stats.write().update(roundtrip, success)
     }
