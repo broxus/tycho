@@ -9,6 +9,7 @@ use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::time::{now_sec, shifted_interval};
 use tycho_util::{FastDashMap, FastHashSet};
 
+use self::entries_merger::PublicOverlayEntriesMerger;
 use self::tasks_stream::TasksStream;
 use crate::dht::{DhtClient, DhtService};
 use crate::network::{KnownPeerHandle, Network, WeakNetwork};
@@ -72,6 +73,7 @@ impl OverlayServiceBuilder {
             public_overlays: Default::default(),
             public_overlays_changed: Arc::new(Notify::new()),
             private_overlays_changed: Arc::new(Notify::new()),
+            public_entries_merger: Arc::new(PublicOverlayEntriesMerger),
         });
 
         let background_tasks = OverlayServiceBackgroundTasks {
@@ -251,6 +253,7 @@ struct OverlayServiceInner {
     private_overlays: FastDashMap<OverlayId, PrivateOverlay>,
     public_overlays_changed: Arc<Notify>,
     private_overlays_changed: Arc<Notify>,
+    public_entries_merger: Arc<PublicOverlayEntriesMerger>,
 }
 
 impl OverlayServiceInner {
@@ -334,12 +337,29 @@ impl OverlayServiceInner {
                                 this.config.public_overlay_peer_exchange_max_jitter,
                             )
                         });
-                        store.rebuild(iter, |_| {
-                            shifted_interval(
-                                this.config.public_overlay_peer_store_period,
-                                this.config.public_overlay_peer_store_max_jitter,
-                            )
-                        });
+                        store.rebuild_ext(
+                            iter,
+                            |overlay_id| {
+                                // Insert merger for new overlays
+                                if let Some(dht) = &dht_service {
+                                    dht.insert_merger(
+                                        overlay_id.as_bytes(),
+                                        this.public_entries_merger.clone(),
+                                    );
+                                }
+
+                                shifted_interval(
+                                    this.config.public_overlay_peer_store_period,
+                                    this.config.public_overlay_peer_store_max_jitter,
+                                )
+                            },
+                            |overlay_id| {
+                                // Remove merger for removed overlays
+                                if let Some(dht) = &dht_service {
+                                    dht.remove_merger(overlay_id.as_bytes());
+                                }
+                            },
+                        );
                     }
                     Action::ExchangePublicOverlayEntries { overlay_id, tasks } => {
                         tasks.spawn(&overlay_id, move || async move {
@@ -408,7 +428,10 @@ impl OverlayServiceInner {
                     target_peer_handle = handle;
                     target_peer_id = target_peer_handle.load_peer_info().id;
                 }
-                None => anyhow::bail!("no resolved peers in the overlay to exchange entries with"),
+                None => {
+                    tracing::warn!("no resolved peers in the overlay to exchange entries with");
+                    return Ok(());
+                }
             }
 
             // Add additional random entries to the response.
@@ -481,7 +504,7 @@ impl OverlayServiceInner {
         };
 
         let now = now_sec();
-        let n = std::cmp::max(self.config.public_overlay_peer_store_max_entries, 1);
+        let mut n = std::cmp::max(self.config.public_overlay_peer_store_max_entries, 1);
 
         let data = {
             let rng = &mut rand::thread_rng();
@@ -503,6 +526,8 @@ impl OverlayServiceInner {
                     .map(|item| item.entry.clone()),
             );
 
+            n = entries.len();
+
             // Serialize entries
             tl_proto::serialize(&entries)
         };
@@ -520,6 +545,10 @@ impl OverlayServiceInner {
         // TODO: Store the value on other nodes as well?
         dht_client.service().store_value_locally(&value)?;
 
+        tracing::debug!(
+            count = n,
+            "stored public entries in the DHT",
+        );
         Ok(())
     }
 

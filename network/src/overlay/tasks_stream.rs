@@ -73,7 +73,18 @@ impl TasksStream {
         I: Iterator<Item = OverlayId>,
         for<'a> F: FnMut(&'a OverlayId) -> tokio::time::Interval,
     {
-        self.stream.rebuild(iter, f, |overlay_id| {
+        self.rebuild_ext(iter, f, |_| {})
+    }
+
+    pub fn rebuild_ext<I, F, R>(&mut self, iter: I, on_add: F, mut on_remove: R)
+    where
+        I: Iterator<Item = OverlayId>,
+        for<'a> F: FnMut(&'a OverlayId) -> tokio::time::Interval,
+        for<'a> R: FnMut(&'a OverlayId),
+    {
+        self.stream.rebuild(iter, on_add, |overlay_id| {
+            on_remove(overlay_id);
+
             if let Some((handle, _)) = self.handles.remove(overlay_id) {
                 tracing::debug!(task = self.name, %overlay_id, "task cancelled");
                 handle.abort();

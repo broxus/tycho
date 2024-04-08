@@ -6,8 +6,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
 use tycho_network::{DhtClient, Network, OverlayId, PeerId, PublicOverlay, Request};
 
 use self::common::{init_logger, NodeBase, Ping, PingPongService, Pong};
@@ -54,8 +52,6 @@ impl Node {
             .parse_tl::<A>()
             .map_err(Into::into)
     }
-
-    async fn discover_new_nodes(&self) -> Result<()> {}
 }
 
 fn make_network(node_count: usize) -> Vec<Node> {
@@ -81,20 +77,7 @@ async fn public_overlays_accessible() -> Result<()> {
 
     let nodes = make_network(20);
 
-    for node in &nodes {
-        let resolved = FuturesUnordered::new();
-        for entry in node.private_overlay.read_entries().iter() {
-            let handle = entry.resolver_handle.clone();
-            resolved.push(async move { handle.wait_resolved().await });
-        }
-
-        // Ensure all entries are resolved.
-        resolved.collect::<Vec<_>>().await;
-        tracing::info!(
-            peer_id = %node.network.peer_id(),
-            "all entries resolved",
-        );
-    }
+    futures_util::future::pending::<()>().await;
 
     for i in 0..nodes.len() {
         for j in 0..nodes.len() {
@@ -107,7 +90,7 @@ async fn public_overlays_accessible() -> Result<()> {
 
             let value = (i * 1000 + j) as u64;
             let Pong { value: received } = left
-                .private_overlay_query(right.network.peer_id(), Ping { value })
+                .public_overlay_query(right.network.peer_id(), Ping { value })
                 .await?;
             assert_eq!(received, value);
         }

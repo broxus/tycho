@@ -1,15 +1,18 @@
 use crate::dht::{DhtValueMerger, DhtValueSource, StorageError};
 use crate::proto::dht::{MergedValue, MergedValueRef};
 
-pub struct PublicOverlayEntriesMerger {}
+/// Allows only local values to be stored.
+/// Always overwrites the stored value with the new value.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PublicOverlayEntriesMerger;
 
 impl DhtValueMerger for PublicOverlayEntriesMerger {
     fn check_value(
         &self,
         source: DhtValueSource,
-        new: &MergedValueRef<'_>,
+        _: &MergedValueRef<'_>,
     ) -> Result<(), StorageError> {
-        if source != DhtValueSource::Remote {
+        if source != DhtValueSource::Local {
             return Err(StorageError::InvalidSource);
         }
 
@@ -22,6 +25,11 @@ impl DhtValueMerger for PublicOverlayEntriesMerger {
         new: &MergedValueRef<'_>,
         stored: &mut MergedValue,
     ) -> bool {
-        todo!()
+        if source != DhtValueSource::Local {
+            return false;
+        }
+
+        *stored = new.as_owned();
+        true
     }
 }
