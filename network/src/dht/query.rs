@@ -108,6 +108,13 @@ impl<R> Default for QueryCache<R> {
 
 type WeakSpawnedFut<T> = WeakShared<JoinTask<T>>;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DhtQueryMode {
+    #[default]
+    Closest,
+    Random,
+}
+
 pub struct Query {
     network: Network,
     candidates: SimpleRoutingTable,
@@ -120,9 +127,20 @@ impl Query {
         routing_table: &HandlesRoutingTable,
         target_id: &[u8; 32],
         max_k: usize,
+        mode: DhtQueryMode,
     ) -> Self {
         let mut candidates = SimpleRoutingTable::new(PeerId(*target_id));
-        routing_table.visit_closest(target_id, max_k, |node| {
+
+        let random_id;
+        let target_id_for_full = match mode {
+            DhtQueryMode::Closest => target_id,
+            DhtQueryMode::Random => {
+                random_id = rand::random();
+                &random_id
+            }
+        };
+
+        routing_table.visit_closest(target_id_for_full, max_k, |node| {
             candidates.add(node.load_peer_info(), max_k, &Duration::MAX, Some);
         });
 

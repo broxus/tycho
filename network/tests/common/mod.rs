@@ -84,6 +84,8 @@ pub fn make_fast_overlay_config() -> OverlayConfig {
         public_overlay_peer_store_max_jitter: Duration::from_secs(1),
         public_overlay_peer_exchange_period: Duration::from_secs(1),
         public_overlay_peer_exchange_max_jitter: Duration::from_secs(1),
+        public_overlay_peer_discovery_period: Duration::from_secs(1),
+        public_overlay_peer_discovery_max_jitter: Duration::from_secs(1),
         ..Default::default()
     }
 }

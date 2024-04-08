@@ -3,9 +3,13 @@
 //! RUST_LOG=info,tycho_network=trace
 //! ```
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
 use tycho_network::{DhtClient, Network, OverlayId, PeerId, PublicOverlay, Request};
 
 use self::common::{init_logger, NodeBase, Ping, PingPongService, Pong};
@@ -75,10 +79,70 @@ async fn public_overlays_accessible() -> Result<()> {
     init_logger();
     tracing::info!("public_overlays_accessible");
 
+    #[derive(Debug, Default)]
+    struct PeerState {
+        knows_about: usize,
+        known_by: usize,
+    }
+
     let nodes = make_network(20);
 
-    futures_util::future::pending::<()>().await;
+    tracing::info!("discovering nodes");
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
+        let mut peer_states = BTreeMap::<&PeerId, PeerState>::new();
+
+        for (i, left) in nodes.iter().enumerate() {
+            for (j, right) in nodes.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+
+                let left_id = left.network.peer_id();
+                let right_id = right.network.peer_id();
+
+                if left.public_overlay.read_entries().contains(right_id) {
+                    peer_states.entry(left_id).or_default().knows_about += 1;
+                    peer_states.entry(right_id).or_default().known_by += 1;
+                }
+            }
+        }
+
+        tracing::info!("{peer_states:#?}");
+
+        let total_filled = peer_states
+            .values()
+            .filter(|state| state.knows_about == nodes.len() - 1)
+            .count();
+
+        tracing::info!(
+            "peers with filled overlay: {} / {}",
+            total_filled,
+            nodes.len()
+        );
+        if total_filled == nodes.len() {
+            break;
+        }
+    }
+
+    tracing::info!("resolving entries...");
+    for node in &nodes {
+        let resolved = FuturesUnordered::new();
+        for entry in node.public_overlay.read_entries().iter() {
+            let handle = entry.resolver_handle.clone();
+            resolved.push(async move { handle.wait_resolved().await });
+        }
+
+        // Ensure all entries are resolved.
+        resolved.collect::<Vec<_>>().await;
+        tracing::info!(
+            peer_id = %node.network.peer_id(),
+            "all entries resolved",
+        );
+    }
+
+    tracing::info!("checking connectivity...");
     for i in 0..nodes.len() {
         for j in 0..nodes.len() {
             if i == j {
@@ -96,6 +160,7 @@ async fn public_overlays_accessible() -> Result<()> {
         }
     }
 
+    tracing::info!("done!");
     Ok(())
 }
 

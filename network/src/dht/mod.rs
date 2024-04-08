@@ -1,21 +1,17 @@
-use std::collections::hash_map;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
-use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
 use rand::RngCore;
 use tl_proto::TlRead;
-use tokio::sync::{broadcast, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::sync::broadcast;
 use tycho_util::realloc_box_enum;
-use tycho_util::time::{now_sec, shifted_interval};
+use tycho_util::time::now_sec;
 
 use self::query::{Query, QueryCache, StoreValue};
 use self::routing::HandlesRoutingTable;
 use self::storage::Storage;
-use crate::network::{Network, WeakNetwork};
+use crate::network::Network;
 use crate::proto::dht::{
     rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName,
     PeerValueKeyRef, PeerValueRef, Value, ValueRef, ValueResponseRaw,
@@ -25,8 +21,10 @@ use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
 pub use self::peer_resolver::{PeerResolver, PeerResolverBuilder, PeerResolverHandle};
-pub use self::storage::{DhtValueSource, StorageError, DhtValueMerger};
+pub use self::query::DhtQueryMode;
+pub use self::storage::{DhtValueMerger, DhtValueSource, StorageError};
 
+mod background_tasks;
 mod config;
 mod peer_resolver;
 mod query;
@@ -71,6 +69,13 @@ impl DhtClient {
             idx: 0,
         }
     }
+
+    /// Find a value by its key hash.
+    ///
+    /// This is quite a low-level method, so it is recommended to use [`DhtClient::entry`].
+    pub async fn find_value(&self, key_hash: &[u8; 32], mode: DhtQueryMode) -> Option<Box<Value>> {
+        self.inner.find_value(&self.network, key_hash, mode).await
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -97,7 +102,11 @@ impl<'a> DhtQueryBuilder<'a> {
             peer_id,
         });
 
-        match self.inner.find_value(self.network, &key_hash).await {
+        match self
+            .inner
+            .find_value(self.network, &key_hash, DhtQueryMode::Closest)
+            .await
+        {
             Some(value) => match value.as_ref() {
                 Value::Peer(value) => {
                     tl_proto::deserialize(&value.data).map_err(FindValueError::InvalidData)
@@ -119,7 +128,11 @@ impl<'a> DhtQueryBuilder<'a> {
             peer_id,
         });
 
-        match self.inner.find_value(self.network, &key_hash).await {
+        match self
+            .inner
+            .find_value(self.network, &key_hash, DhtQueryMode::Closest)
+            .await
+        {
             Some(value) => {
                 realloc_box_enum!(value, {
                     Value::Peer(value) => Box::new(value) => Ok(value),
@@ -458,206 +471,12 @@ struct DhtInner {
 }
 
 impl DhtInner {
-    fn start_background_tasks(self: &Arc<Self>, network: WeakNetwork) {
-        enum Action {
-            RefreshLocalPeerInfo,
-            AnnounceLocalPeerInfo,
-            RefreshRoutingTable,
-            AddPeer(Arc<PeerInfo>),
-        }
-
-        let mut refresh_peer_info_interval =
-            tokio::time::interval(self.config.local_info_refresh_period);
-        let mut announce_peer_info_interval = shifted_interval(
-            self.config.local_info_announce_period,
-            self.config.local_info_announce_period_max_jitter,
-        );
-        let mut refresh_routing_table_interval = shifted_interval(
-            self.config.routing_table_refresh_period,
-            self.config.routing_table_refresh_period_max_jitter,
-        );
-
-        let mut announced_peers = self.announced_peers.subscribe();
-
-        let this = Arc::downgrade(self);
-        tokio::spawn(async move {
-            tracing::debug!("background DHT loop started");
-
-            let mut prev_refresh_routing_table_fut = None::<JoinHandle<()>>;
-            loop {
-                let action = tokio::select! {
-                    _ = refresh_peer_info_interval.tick() => Action::RefreshLocalPeerInfo,
-                    _ = announce_peer_info_interval.tick() => Action::AnnounceLocalPeerInfo,
-                    _ = refresh_routing_table_interval.tick() => Action::RefreshRoutingTable,
-                    peer = announced_peers.recv() => match peer {
-                        Ok(peer) => Action::AddPeer(peer),
-                        Err(_) => continue,
-                    }
-                };
-
-                let (Some(this), Some(network)) = (this.upgrade(), network.upgrade()) else {
-                    break;
-                };
-
-                match action {
-                    Action::RefreshLocalPeerInfo => {
-                        this.refresh_local_peer_info(&network);
-                    }
-                    Action::AnnounceLocalPeerInfo => {
-                        // Peer info is always refreshed before announcing
-                        refresh_peer_info_interval.reset();
-
-                        if let Err(e) = this.announce_local_peer_info(&network).await {
-                            tracing::error!("failed to announce local DHT node info: {e}");
-                        }
-                    }
-                    Action::RefreshRoutingTable => {
-                        if let Some(fut) = prev_refresh_routing_table_fut.take() {
-                            if let Err(e) = fut.await {
-                                if e.is_panic() {
-                                    std::panic::resume_unwind(e.into_panic());
-                                }
-                            }
-                        }
-
-                        prev_refresh_routing_table_fut = Some(tokio::spawn(async move {
-                            this.refresh_routing_table(&network).await;
-                        }));
-                    }
-                    Action::AddPeer(peer_info) => {
-                        let peer_id = peer_info.id;
-                        let added = this.add_peer_info(&network, peer_info);
-                        tracing::debug!(
-                            local_id = %this.local_id,
-                            %peer_id,
-                            ?added,
-                            "received peer info",
-                        );
-
-                        if let Err(e) = added {
-                            tracing::error!("failed to add peer to the routing table: {e}");
-                        }
-                    }
-                }
-            }
-            tracing::debug!("background DHT loop finished");
-        });
-    }
-
-    fn refresh_local_peer_info(&self, network: &Network) {
-        let peer_info = self.make_local_peer_info(network, now_sec());
-        *self.local_peer_info.lock().unwrap() = Some(peer_info);
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
-    async fn announce_local_peer_info(&self, network: &Network) -> Result<()> {
-        let now = now_sec();
-        let data = {
-            let peer_info = self.make_local_peer_info(network, now);
-            let data = tl_proto::serialize(&peer_info);
-            *self.local_peer_info.lock().unwrap() = Some(peer_info);
-            data
-        };
-
-        let mut value = self.make_unsigned_peer_value(
-            PeerValueKeyName::NodeInfo,
-            &data,
-            now + self.config.max_peer_info_ttl.as_secs() as u32,
-        );
-        let signature = network.sign_tl(&value);
-        value.signature = &signature;
-
-        self.store_value(network, &ValueRef::Peer(value), true)
-            .await
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(local_id = %self.local_id))]
-    async fn refresh_routing_table(&self, network: &Network) {
-        const PARALLEL_QUERIES: usize = 3;
-        const MAX_BUCKETS: usize = 15;
-        const QUERY_DEPTH: usize = 3;
-
-        // Prepare futures for each bucket
-        let semaphore = Semaphore::new(PARALLEL_QUERIES);
-        let mut futures = FuturesUnordered::new();
-        {
-            let rng = &mut rand::thread_rng();
-
-            let mut routing_table = self.routing_table.lock().unwrap();
-
-            // Filter out expired nodes
-            let now = now_sec();
-            for (_, bucket) in routing_table.buckets.iter_mut() {
-                bucket.retain_nodes(|node| !node.is_expired(now, &self.config.max_peer_info_ttl));
-            }
-
-            // Iterate over the first non-empty buckets (at most `MAX_BUCKETS`)
-            for (&distance, _) in routing_table
-                .buckets
-                .iter()
-                .filter(|(&distance, bucket)| distance > 0 && !bucket.is_empty())
-                .take(MAX_BUCKETS)
-            {
-                // Query the K closest nodes for a random ID at the specified distance from the local ID.
-                let random_id = random_key_at_distance(&routing_table.local_id, distance, rng);
-                let query = Query::new(
-                    network.clone(),
-                    &routing_table,
-                    random_id.as_bytes(),
-                    self.config.max_k,
-                );
-
-                futures.push(async {
-                    let _permit = semaphore.acquire().await.unwrap();
-                    query.find_peers(Some(QUERY_DEPTH)).await
-                });
-            }
-        }
-
-        // Receive initial set of peers
-        let Some(mut peers) = futures.next().await else {
-            tracing::debug!("no new peers found");
-            return;
-        };
-
-        // Merge new peers into the result set
-        while let Some(new_peers) = futures.next().await {
-            for (peer_id, peer) in new_peers {
-                match peers.entry(peer_id) {
-                    // Just insert the peer if it's new
-                    hash_map::Entry::Vacant(entry) => {
-                        entry.insert(peer);
-                    }
-                    // Replace the peer if it's newer (by creation time)
-                    hash_map::Entry::Occupied(mut entry) => {
-                        if entry.get().created_at < peer.created_at {
-                            entry.insert(peer);
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut routing_table = self.routing_table.lock().unwrap();
-        let mut count = 0usize;
-        for peer in peers.into_values() {
-            if peer.id == self.local_id {
-                continue;
-            }
-
-            let is_new = routing_table.add(
-                peer.clone(),
-                self.config.max_k,
-                &self.config.max_peer_info_ttl,
-                |peer_info| network.known_peers().insert(peer_info, false).ok(),
-            );
-            count += is_new as usize;
-        }
-
-        tracing::debug!(count, "found new peers");
-    }
-
-    async fn find_value(&self, network: &Network, key_hash: &[u8; 32]) -> Option<Box<Value>> {
+    async fn find_value(
+        &self,
+        network: &Network,
+        key_hash: &[u8; 32],
+        mode: DhtQueryMode,
+    ) -> Option<Box<Value>> {
         self.find_value_queries
             .run(key_hash, || {
                 let query = Query::new(
@@ -665,6 +484,7 @@ impl DhtInner {
                     &self.routing_table.lock().unwrap(),
                     key_hash,
                     self.config.max_k,
+                    mode,
                 );
 
                 // NOTE: expression is intentionally split to drop the routing table guard
