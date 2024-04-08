@@ -28,8 +28,8 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
     type Error = ValidatorInfoError;
 
     fn try_from(value: &ValidatorDescription) -> Result<Self, Self::Error> {
-        let pubkey = PublicKey::from_bytes(value.public_key.0)
-            .ok_or(ValidatorInfoError::InvalidPublicKey)?;
+        let pubkey =
+            PublicKey::from_bytes(value.public_key.0).ok_or(ValidatorInfoError::InvalidPublicKey)?;
         Ok(Self {
             public_key: pubkey,
             weight: value.weight,
@@ -38,7 +38,7 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
     }
 }
 
-pub struct ValidationSessionInfo {
+pub(crate) struct ValidationSessionInfo {
     pub seqno: u32,
     pub validators: ValidatorsMap,
     pub current_validator_keypair: KeyPair,
@@ -83,7 +83,7 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
 
 /// Block candidate for validation
 #[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd, TlRead, TlWrite)]
-pub struct BlockValidationCandidate {
+pub(crate) struct BlockValidationCandidate {
     pub root_hash: [u8; 32],
     pub file_hash: [u8; 32],
 }
@@ -108,12 +108,12 @@ impl BlockValidationCandidate {
 
 #[derive(TlWrite, TlRead)]
 #[tl(boxed, id = 0x12341111)]
-pub struct OverlayNumber {
+pub(crate) struct OverlayNumber {
     pub session_seqno: u32,
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub enum ValidationResult {
+pub(crate) enum ValidationResult {
     Valid,
     Invalid,
     Insufficient,

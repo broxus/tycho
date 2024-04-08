@@ -13,16 +13,14 @@ use crate::{
     state_node::StateNodeAdapter,
     tracing_targets,
     types::{BlockCollationResult, CollationSessionId},
-    utils::async_queued_dispatcher::{
-        AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
-    },
+    utils::async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
 };
 
 use super::collator_processor::CollatorProcessor;
 
 // EVENTS EMITTER AMD LISTENER
 
-//TODO: remove all emitters
+//TODO: remove emitter
 #[async_trait]
 pub(crate) trait CollatorEventEmitter {
     /// When there are no internals and an empty anchor was received from mempool
@@ -119,8 +117,7 @@ where
         tracing::info!(target: tracing_targets::COLLATOR, "Collator ({}) starting...", collator_descr);
 
         // create dispatcher for own async tasks queue
-        let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
+        let (dispatcher, receiver) = AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         // create processor and run dispatcher for own tasks queue

@@ -23,6 +23,7 @@ pub(super) mod tests;
 
 // EVENTS EMITTER AMD LISTENER
 
+//TODO: remove emitter
 #[async_trait]
 pub(crate) trait MempoolEventEmitter {
     /// When mempool produced new committed anchor
@@ -44,19 +45,14 @@ pub(crate) trait MempoolAdapter: Send + Sync + 'static {
     fn create(listener: Arc<dyn MempoolEventListener>) -> Self;
 
     /// Schedule task to process new master block state (may perform gc or nodes rotation)
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()>;
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: Arc<ShardStateStuff>) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist.
     ///
     /// (TODO) Cache anchor to handle similar request from collator of another shard
-    async fn get_anchor_by_id(
-        &self,
-        anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>>;
+    async fn get_anchor_by_id(&self, anchor_id: MempoolAnchorId)
+        -> Result<Option<Arc<MempoolAnchor>>>;
 
     /// Request, await, and return the next anchor after the specified previous one.
     /// If anchor was not produced yet then await until mempool does this.
@@ -124,10 +120,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         }
     }
 
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
@@ -233,9 +226,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     }
 }
 
-fn _stub_create_random_anchor_with_stub_externals(
-    anchor_id: MempoolAnchorId,
-) -> Arc<MempoolAnchor> {
+fn _stub_create_random_anchor_with_stub_externals(anchor_id: MempoolAnchorId) -> Arc<MempoolAnchor> {
     let chain_time = std::time::SystemTime::now()
         .duration_since(std::time::SystemTime::UNIX_EPOCH)
         .unwrap()

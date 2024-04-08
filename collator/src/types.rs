@@ -130,6 +130,7 @@ pub(crate) struct BlockStuffForSync {
 /// (`ShardIdent`, seqno)
 pub(crate) type CollationSessionId = (ShardIdent, u32);
 
+#[derive(Clone)]
 pub(crate) struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,

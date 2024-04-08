@@ -386,27 +386,25 @@ where
                     new_session_seqno,
                 ))?;
 
-            //STUB: create subset with us and one dummy neighbor
-            let neighbor_keypair =
-                everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng());
-            let subset = vec![
-                ValidatorDescription {
-                    public_key: self.config.key_pair.public_key.to_bytes().into(),
-                    adnl_addr: Some(self.config.key_pair.public_key.to_bytes().into()),
-                    weight: 50,
-                    prev_total_weight: 50,
-                    mc_seqno_since: 0,
-                },
-                ValidatorDescription {
-                    public_key: neighbor_keypair.public_key.to_bytes().into(),
-                    adnl_addr: Some(neighbor_keypair.public_key.to_bytes().into()),
-                    weight: 50,
-                    prev_total_weight: 50,
-                    mc_seqno_since: 0,
-                },
-            ];
+            //STUB: create subset with only us
+            let subset = vec![ValidatorDescription {
+                public_key: self.config.key_pair.public_key.to_bytes().into(),
+                adnl_addr: Some(self.config.key_pair.public_key.to_bytes().into()),
+                weight: 90,
+                prev_total_weight: 90,
+                mc_seqno_since: 0,
+            }];
 
             let local_pubkey_opt = find_us_in_collators_set(&self.config, &subset);
+
+            let new_session_info = Arc::new(CollationSessionInfo::new(
+                new_session_seqno,
+                ValidatorSubsetInfo {
+                    validators: subset,
+                    short_hash: hash_short,
+                },
+                Some(self.config.key_pair),
+            ));
 
             if let Some(_local_pubkey) = local_pubkey_opt {
                 if let Entry::Vacant(entry) = self.active_collators.entry(shard_id) {
@@ -427,23 +425,18 @@ where
                     .await;
                     entry.insert(Arc::new(collator));
                 }
+
+                // notify validator, it will start overlay initialization
+                self.validator
+                    .enqueue_add_session(Arc::new(new_session_info.clone().try_into()?))
+                    .await?;
             } else if let Some(collator) = self.active_collators.remove(&shard_id) {
                 to_stop_collators.insert((shard_id, new_session_seqno), collator);
             }
 
-            let mut rng = rand::thread_rng();
-            let keypair = KeyPair::generate(&mut rng);
-            self.active_collation_sessions.insert(
-                shard_id,
-                Arc::new(CollationSessionInfo::new(
-                    new_session_seqno,
-                    ValidatorSubsetInfo {
-                        validators: subset,
-                        short_hash: hash_short,
-                    },
-                    Some(keypair),
-                )),
-            );
+            //TODO: possibly do not need to store collation sessions if we do not collate in them
+            self.active_collation_sessions
+                .insert(shard_id, new_session_info);
         }
 
         tracing::info!(

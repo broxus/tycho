@@ -16,6 +16,7 @@ use crate::{
 
 use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
 
+//TODO: remove emitter
 #[async_trait]
 pub(crate) trait ValidatorEventEmitter {
     /// When shard or master block was validated by validator
