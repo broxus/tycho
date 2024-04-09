@@ -30,9 +30,9 @@ impl Node {
             .with_config(DhtConfig {
                 max_k: 20,
                 routing_table_refresh_period: Duration::from_secs(1),
-                max_routing_table_refresh_period_jitter: Duration::from_secs(1),
+                routing_table_refresh_period_max_jitter: Duration::from_secs(1),
                 local_info_announce_period: Duration::from_secs(1),
-                max_local_info_announce_period_jitter: Duration::from_secs(1),
+                local_info_announce_period_max_jitter: Duration::from_secs(1),
                 ..Default::default()
             })
             .build();

@@ -36,6 +36,10 @@ async fn test_collation_process_on_stubs() {
         _ = tokio::signal::ctrl_c() => {
             println!();
             println!("Ctrl-C received, shutting down the test");
+        },
+        _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+            println!();
+            println!("Test timeout elapsed");
         }
     }
 }

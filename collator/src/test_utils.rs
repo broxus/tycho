@@ -42,9 +42,9 @@ pub fn create_node_network() -> NodeNetwork {
     let (_, dht_service) = DhtService::builder(local_id)
         .with_config(DhtConfig {
             local_info_announce_period: Duration::from_secs(1),
-            max_local_info_announce_period_jitter: Duration::from_secs(1),
+            local_info_announce_period_max_jitter: Duration::from_secs(1),
             routing_table_refresh_period: Duration::from_secs(1),
-            max_routing_table_refresh_period_jitter: Duration::from_secs(1),
+            routing_table_refresh_period_max_jitter: Duration::from_secs(1),
             ..Default::default()
         })
         .build();
