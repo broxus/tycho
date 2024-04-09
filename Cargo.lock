@@ -648,7 +648,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=0xdeafbeef/push-yntmntzvxrlu#9ef94cf9f1042d0605d2cc3325fdc570c1092bcd"
+source = "git+https://github.com/broxus/everscale-types.git?branch=0xdeafbeef/push-xrvxlsnspsok#a4e7c1441ae58d61b51d60e120c7626593f6902c"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -657,7 +657,6 @@ dependencies = [
  "everscale-crypto",
  "everscale-types-proc",
  "hex",
- "itertools",
  "once_cell",
  "serde",
  "sha2",
@@ -669,7 +668,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=0xdeafbeef/push-yntmntzvxrlu#9ef94cf9f1042d0605d2cc3325fdc570c1092bcd"
+source = "git+https://github.com/broxus/everscale-types.git?branch=0xdeafbeef/push-xrvxlsnspsok#a4e7c1441ae58d61b51d60e120c7626593f6902c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -951,6 +950,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c8640c5d730cb13ebd907d8d04b52f55ac9a2eec55b440c8892f40d56c76c1d"
 
 [[package]]
+name = "metrics"
+version = "0.22.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2be3cbd384d4e955b231c895ce10685e3d8260c5ccffae898c96c723b0772835"
+dependencies = [
+ "ahash",
+ "portable-atomic",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1218,6 +1227,12 @@ name = "platforms"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db23d408679286588f4d4644f965003d056e3dd5abcaaa938116871d7ce2fee7"
+
+[[package]]
+name = "portable-atomic"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7170ef9988bc169ba16dd36a7fa041e5c4cbeb6a35b76d4c03daded371eae7c0"
 
 [[package]]
 name = "powerfmt"
@@ -2207,14 +2222,18 @@ name = "tycho-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "async-trait",
  "castaway",
  "everscale-types",
  "futures-util",
  "itertools",
+ "metrics",
  "parking_lot",
+ "sha2",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
+ "tracing-test",
  "tycho-block-util",
  "tycho-network",
  "tycho-storage",

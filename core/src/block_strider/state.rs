@@ -1,4 +1,8 @@
+use std::sync::Arc;
+
 use everscale_types::models::BlockId;
+
+use tycho_storage::Storage;
 
 pub trait BlockStriderState: Send + Sync + 'static {
     fn load_last_traversed_master_block_id(&self) -> BlockId;
@@ -6,17 +10,27 @@ pub trait BlockStriderState: Send + Sync + 'static {
     fn commit_traversed(&self, block_id: BlockId);
 }
 
-impl<T: BlockStriderState> BlockStriderState for Box<T> {
+impl BlockStriderState for Arc<Storage> {
     fn load_last_traversed_master_block_id(&self) -> BlockId {
-        <T as BlockStriderState>::load_last_traversed_master_block_id(self)
+        self.node_state()
+            .load_last_mc_block_id()
+            .expect("Db is not initialized")
     }
 
     fn is_traversed(&self, block_id: &BlockId) -> bool {
-        <T as BlockStriderState>::is_traversed(self, block_id)
+        self.block_handle_storage()
+            .load_handle(block_id)
+            .expect("db is dead")
+            .is_some()
     }
 
     fn commit_traversed(&self, block_id: BlockId) {
-        <T as BlockStriderState>::commit_traversed(self, block_id);
+        if block_id.is_masterchain() {
+            self.node_state()
+                .store_last_mc_block_id(&block_id)
+                .expect("db is dead");
+        }
+        // other blocks are stored with state applier: todo rework this?
     }
 }
 

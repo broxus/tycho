@@ -11,6 +11,8 @@ use everscale_types::prelude::HashBytes;
 use std::collections::HashMap;
 use tycho_block_util::block::BlockStuff;
 
+pub mod archive_provider;
+
 const ZERO_HASH: HashBytes = HashBytes([0; 32]);
 
 impl BlockProvider for TestBlockProvider {
@@ -97,7 +99,7 @@ fn master_block(
 
     let shard_block_ids = link_shard_blocks(prev_shard_block_ref, 2, blocks);
     let block_extra = McBlockExtra {
-        shards: ShardHashes::from_shards(shard_block_ids).unwrap(),
+        shards: ShardHashes::from_shards(shard_block_ids.iter().map(|x| (&x.0, &x.1))).unwrap(),
         fees: ShardFees {
             root: None,
             fees: Default::default(),
@@ -142,7 +144,7 @@ fn insert_block(
         root_hash: block_ref.root_hash,
         file_hash: block_ref.file_hash,
     };
-    blocks.insert(id.clone(), block);
+    blocks.insert(id, block);
     if let Some(master_ids) = master_ids {
         master_ids.push(id);
     }
