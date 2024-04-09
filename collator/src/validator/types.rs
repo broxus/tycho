@@ -6,7 +6,7 @@ use anyhow::bail;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ValidatorDescription};
-use log::error;
+use tracing::error;
 use tl_proto::{TlRead, TlWrite};
 
 use crate::types::CollationSessionInfo;

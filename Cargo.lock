@@ -1678,15 +1678,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "signature"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1883,6 +1874,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tikv-jemallocator"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "965fe0c26be5c56c94e38ba547249074803efd52adfb66de62107d95aab3eaca"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
+]
+
+[[package]]
 name = "time"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1979,9 +1980,7 @@ dependencies = [
  "libc",
  "mio",
  "num_cpus",
- "parking_lot",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.48.0",
@@ -2135,6 +2134,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rustc_version",
+ "tikv-jemallocator",
+ "tokio",
+]
+
+[[package]]
 name = "tycho-collator"
 version = "0.0.1"
 dependencies = [
@@ -2143,9 +2153,7 @@ dependencies = [
  "everscale-crypto",
  "everscale-types",
  "futures-util",
- "log",
  "rand",
- "serde",
  "tl-proto",
  "tokio",
  "tracing",
@@ -2195,7 +2203,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
- "base64 0.21.7",
+ "base64 0.22.0",
  "bytes",
  "castaway",
  "clap",

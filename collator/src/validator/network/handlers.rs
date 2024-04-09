@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use everscale_types::models::BlockIdShort;
-use log::debug;
+use tracing::debug;
 
 use tycho_network::Response;
 

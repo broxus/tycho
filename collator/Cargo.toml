@@ -1,38 +1,37 @@
 [package]
 name = "tycho-collator"
-version = "0.0.1"
-edition = "2021"
 description = "A collator node."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # crates.io deps
-anyhow = "1.0"
-async-trait = "^0.1.77"
-rand = "0.8"
-#serde = "1.0"
-#thiserror = "1"
-tl-proto = "0.4"
-tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+tl-proto = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
-everscale-types = "0.1.0-rc.6"
-everscale-crypto = "0.2.0"
+everscale-types = { workspace = true }
+everscale-crypto = { workspace = true }
 
 # local deps
-tycho-core = { path = "../core", version = "=0.0.1" }
-#tycho-consensus = { path = "../consensus", version = "=0.0.1" }
-tycho-network = { path = "../network", version = "=0.0.1" }
-tycho-storage = { path = "../storage", version = "=0.0.1" }
-tycho-util = { path = "../util", version = "=0.0.1" }
-tycho-block-util = { path = "../block-util", version = "=0.0.1" }
-futures-util = "0.3.30"
-log = "0.4.21"
-serde = { version = "1.0.197", features = ["derive"] }
+tycho-core = { workspace = true }
+#tycho-consensus = { workspace = true }
+tycho-network = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
+tycho-block-util = { workspace = true }
+
+[dev-dependencies]
+tracing-test = { workspace = true }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-tracing-subscriber = "0.3.18"
-tracing-test = "0.2"

@@ -1,19 +1,23 @@
 [package]
 name = "tycho-core"
-version = "0.0.1"
-edition = "2021"
 description = "Basic functionality of peer."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # crates.io deps
-anyhow = "1.0"
-everscale-types = "0.1.0-rc.6"
-tokio = { version = "1.35.1", features = ["sync", "rt"] }
+anyhow = { workspace = true }
+everscale-types = { workspace = true }
+tokio = { workspace = true }
 
 # local deps
-tycho-network = { path = "../network", version = "=0.0.1" }
-tycho-storage = { path = "../storage", version = "=0.0.1" }
-tycho-util = { path = "../util", version = "=0.0.1" }
+tycho-network = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
 
 [lints]
-workspace= true
+workspace = true

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
-use log::warn;
+use tracing::warn;
 use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, error, trace};
