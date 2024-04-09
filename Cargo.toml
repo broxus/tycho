@@ -43,6 +43,7 @@ fdlimit = "0.3.0"
 futures-util = "0.3"
 hex = "0.4"
 humantime = "2"
+itertools = "0.12"
 libc = "0.2"
 moka = { version = "0.12", features = ["sync"] }
 num-traits = "0.2.18"
@@ -98,6 +99,7 @@ debug = true
 # NOTE: use crates.io dependency when it is released
 # https://github.com/sagebind/castaway/issues/18
 castaway = { git = "https://github.com/sagebind/castaway.git" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "0xdeafbeef/push-yntmntzvxrlu" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
