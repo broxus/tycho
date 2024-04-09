@@ -27,6 +27,15 @@ impl ShardStateStuff {
     pub fn new(block_id: BlockId, root: Cell, tracker: &MinRefMcStateTracker) -> Result<Self> {
         let shard_state = root.parse::<ShardStateUnsplit>()?;
 
+        Self::from_state_and_root(block_id, shard_state, root, tracker)
+    }
+
+    pub fn from_state_and_root(
+        block_id: BlockId,
+        shard_state: ShardStateUnsplit,
+        root: Cell,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self> {
         anyhow::ensure!(
             shard_state.shard_ident == block_id.shard,
             "shard state shard_ident mismatch"

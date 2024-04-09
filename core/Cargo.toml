@@ -10,6 +10,9 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
+anyhow = { workspace = true }
+everscale-types = { workspace = true }
+tokio = { workspace = true }
 
 # local deps
 tycho-network = { workspace = true }

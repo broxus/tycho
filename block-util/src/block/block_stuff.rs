@@ -16,6 +16,10 @@ pub struct BlockStuff {
 }
 
 impl BlockStuff {
+    pub fn with_block(id: BlockId, block: Block) -> Self {
+        Self { id, block }
+    }
+
     pub fn deserialize_checked(id: BlockId, data: &[u8]) -> Result<Self> {
         let file_hash = sha2::Sha256::digest(data);
         anyhow::ensure!(
