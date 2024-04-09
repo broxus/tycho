@@ -57,5 +57,7 @@ tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
 
+tycho-util = { workspace = true, features = ["test"] }
+
 [lints]
 workspace = true

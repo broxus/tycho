@@ -648,8 +648,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff3c058b07bdb5414da10bc8a2489715e31b0c3f4274a213c1a23831e9d94e91"
+source = "git+https://github.com/broxus/everscale-types.git?branch=0xdeafbeef/push-yntmntzvxrlu#9ef94cf9f1042d0605d2cc3325fdc570c1092bcd"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -658,6 +657,7 @@ dependencies = [
  "everscale-crypto",
  "everscale-types-proc",
  "hex",
+ "itertools",
  "once_cell",
  "serde",
  "sha2",
@@ -669,8 +669,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "323d8b61c76be2c16eb2d72d007f1542fdeb3760fdf2e2cae219fc0da3db0c09"
+source = "git+https://github.com/broxus/everscale-types.git?branch=0xdeafbeef/push-yntmntzvxrlu#9ef94cf9f1042d0605d2cc3325fdc570c1092bcd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -814,6 +813,15 @@ name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+
+[[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itoa"
@@ -2189,8 +2197,15 @@ name = "tycho-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "castaway",
  "everscale-types",
+ "futures-util",
+ "itertools",
+ "parking_lot",
  "tokio",
+ "tracing",
+ "tycho-block-util",
  "tycho-network",
  "tycho-storage",
  "tycho-util",
@@ -2306,6 +2321,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

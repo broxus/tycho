@@ -12,7 +12,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_network::{DhtClient, Network, OverlayId, PeerId, PublicOverlay, Request};
 
-use self::common::{init_logger, NodeBase, Ping, PingPongService, Pong};
+use self::common::{NodeBase, Ping, PingPongService, Pong};
 
 mod common;
 
@@ -76,8 +76,7 @@ fn make_network(node_count: usize) -> Vec<Node> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_overlays_accessible() -> Result<()> {
-    init_logger();
-    tracing::info!("public_overlays_accessible");
+    tycho_util::test::init_logger("public_overlays_accessible");
 
     #[derive(Debug, Default)]
     struct PeerState {

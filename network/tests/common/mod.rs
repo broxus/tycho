@@ -8,20 +8,6 @@ use tycho_network::{
     Service, ServiceRequest,
 };
 
-pub fn init_logger() {
-    tracing_subscriber::fmt::try_init().ok();
-    tracing::info!("bootstrap_nodes_accessible");
-
-    std::panic::set_hook(Box::new(|info| {
-        use std::io::Write;
-
-        tracing::error!("{}", info);
-        std::io::stderr().flush().ok();
-        std::io::stdout().flush().ok();
-        std::process::exit(1);
-    }));
-}
-
 pub struct NodeBase {
     pub network: Network,
     pub dht_service: DhtService,

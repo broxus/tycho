@@ -9,15 +9,24 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-# crates.io deps
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+castaway = { workspace = true }
 everscale-types = { workspace = true }
-tokio = { workspace = true }
+futures-util = { workspace = true }
+itertools = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
 
 # local deps
+tycho-block-util = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
+
+[dev-dependencies]
+tycho-util = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true
