@@ -14,10 +14,10 @@ path = "./src/main.rs"
 
 [dependencies]
 # crates.io deps
-anyhow = "1"
-clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-tikv-jemallocator = { version = "0.5", features = [
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ], optional = true }
@@ -25,8 +25,8 @@ tikv-jemallocator = { version = "0.5", features = [
 # local deps
 
 [build-dependencies]
-anyhow = "1"
-rustc_version = "0.4"
+anyhow = { workspace = true }
+rustc_version = { workspace = true }
 
 [features]
 default = ["jemalloc"]

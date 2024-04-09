@@ -10,26 +10,21 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
-ahash = "0.8"
-castaway = "0.2"
-dashmap = "5.4"
-futures-util = "0.3"
-hex = "0.4"
-humantime = "2"
-libc = "0.2"
-rand = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-thiserror = "1.0"
-tokio = { version = "1", default-features = false, features = ["time", "sync", "rt"] }
-tracing = "0.1"
+ahash = { workspace = true }
+castaway = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+hex = { workspace = true }
+humantime = { workspace = true }
+libc = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time", "sync", "rt"] }
+tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { version = "1", default-features = false, features = [
-    "time",
-    "sync",
-    "rt-multi-thread",
-    "macros",
-] }
+tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

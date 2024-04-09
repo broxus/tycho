@@ -73,7 +73,7 @@ impl TasksStream {
         I: Iterator<Item = OverlayId>,
         for<'a> F: FnMut(&'a OverlayId) -> tokio::time::Interval,
     {
-        self.rebuild_ext(iter, f, |_| {})
+        self.rebuild_ext(iter, f, |_| {});
     }
 
     pub fn rebuild_ext<I, F, R>(&mut self, iter: I, on_add: F, mut on_remove: R)

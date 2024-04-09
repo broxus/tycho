@@ -12,9 +12,9 @@ license.workspace = true
 # crates.io deps
 
 # local deps
-tycho-network = { path = "../network", version = "=0.0.1" }
-tycho-storage = { path = "../storage", version = "=0.0.1" }
-tycho-util = { path = "../util", version = "=0.0.1" }
+tycho-network = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
 
 [lints]
 workspace = true

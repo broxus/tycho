@@ -15,39 +15,39 @@ path = "examples/network_node.rs"
 
 [dependencies]
 # crates.io deps
-ahash = "0.8"
-anyhow = "1.0"
-arc-swap = "1.6"
-base64 = "0.21"
-bytes = { version = "1.0", features = ["serde"] }
-castaway = "0.2"
-dashmap = "5.4"
-ed25519 = { version = "2.0", features = ["alloc", "pkcs8"] }
-everscale-crypto = { version = "0.2", features = ["tl-proto"] }
-exponential-backoff = "1"
-futures-util = { version = "0.3", features = ["sink"] }
-hex = "0.4"
-moka = { version = "0.12", features = ["sync"] }
-parking_lot = "0.12"
-pin-project-lite = "0.2"
-pkcs8 = "0.10"
-quinn = { version = "0.10", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
-rand = "0.8"
-rcgen = "0.11"
-ring = "0.16"
-rustls = { version = "0.21", features = ["dangerous_configuration"] }
-rustls-webpki = "0.101"
-serde = "1.0"
-socket2 = "0.5"
-thiserror = "1"
-tl-proto = "0.4"
-tokio = { version = "1", features = ["rt", "sync", "io-util", "macros"] }
-tokio-util = { version = "0.7", features = ["codec"] }
-tracing = "0.1"
-x509-parser = "0.15"
+ahash = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
+castaway = { workspace = true }
+dashmap = { workspace = true }
+ed25519 = { workspace = true, features = ["alloc", "pkcs8"] }
+everscale-crypto = { workspace = true }
+exponential-backoff = { workspace = true }
+futures-util = { workspace = true, features = ["sink"] }
+hex = { workspace = true }
+moka = { workspace = true }
+parking_lot = { workspace = true }
+pin-project-lite = { workspace = true }
+pkcs8 = { workspace = true }
+quinn = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+ring = { workspace = true }
+rustls = { workspace = true }
+rustls-webpki = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+socket2 = { workspace = true }
+thiserror = { workspace = true }
+tl-proto = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "io-util", "macros"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+x509-parser = { workspace = true }
 
 # local deps
-tycho-util = { path = "../util", version = "=0.0.1" }
+tycho-util = { workspace = true }
 
 [dev-dependencies]
 clap = { version = "4.5.3", features = ["derive"] }
