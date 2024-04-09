@@ -31,10 +31,7 @@ impl MempoolAnchor {
     pub fn has_externals(&self) -> bool {
         !self.externals.is_empty()
     }
-    pub fn externals_iterator(
-        &self,
-        from_idx: usize,
-    ) -> impl Iterator<Item = Arc<OwnedMessage>> + '_ {
+    pub fn externals_iterator(&self, from_idx: usize) -> impl Iterator<Item = Arc<OwnedMessage>> + '_ {
         self.externals.iter().skip(from_idx).cloned()
     }
 }

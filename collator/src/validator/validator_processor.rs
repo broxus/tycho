@@ -12,9 +12,9 @@ use tokio::sync::broadcast;
 use tokio::time::interval;
 use tracing::{debug, error, trace};
 
+use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatedBlock, ValidatorNetwork};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
-use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatedBlock, ValidatorNetwork};
 
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::network_service::NetworkService;
@@ -72,13 +72,9 @@ where
         current_validator_keypair: KeyPair,
     ) -> Result<ValidatorTaskResult>;
 
-    async fn stop_candidate_validation(&self, candidate_id: BlockId)
-        -> Result<ValidatorTaskResult>;
+    async fn stop_candidate_validation(&self, candidate_id: BlockId) -> Result<ValidatorTaskResult>;
 
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()>;
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: Arc<ShardStateStuff>) -> Result<()>;
 
     async fn process_candidate_signature_response(
         &mut self,
@@ -131,7 +127,11 @@ impl<ST> ValidatorEventEmitter for ValidatorProcessorStdImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    async fn on_block_validated_event(&self, block: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
+    async fn on_block_validated_event(
+        &self,
+        block: BlockId,
+        event: OnValidatedBlockEvent,
+    ) -> Result<()> {
         self.listener.on_block_validated(block, event).await
     }
 }
@@ -229,13 +229,14 @@ where
         let current_validator_signature = HashBytes(current_validator_keypair.public_key.to_bytes());
         session.add_block(candidate_id)?;
 
-        let enqueue_task_result = self.dispatcher
+        let enqueue_task_result = self
+            .dispatcher
             .enqueue_task(method_to_async_task_closure!(
-                                                process_candidate_signature_response,
-                                                session_seqno,
-                                                candidate_id.as_short_id(),
-                                                vec![(current_validator_signature.0, our_signature.0)]
-                                            ))
+                process_candidate_signature_response,
+                session_seqno,
+                candidate_id.as_short_id(),
+                vec![(current_validator_signature.0, our_signature.0)]
+            ))
             .await;
 
         if let Err(e) = enqueue_task_result {
@@ -303,20 +304,14 @@ where
         Ok(ValidatorTaskResult::Void)
     }
 
-    async fn stop_candidate_validation(
-        &self,
-        candidate_id: BlockId,
-    ) -> Result<ValidatorTaskResult> {
+    async fn stop_candidate_validation(&self, candidate_id: BlockId) -> Result<ValidatorTaskResult> {
         self.stop_sender.send(StopMessage {
             block_id: candidate_id,
         })?;
         Ok(ValidatorTaskResult::Void)
     }
 
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        _mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+    async fn enqueue_process_new_mc_block_state(&self, _mc_state: Arc<ShardStateStuff>) -> Result<()> {
         todo!()
     }
 
@@ -364,7 +359,9 @@ where
 
             match session.validation_status(&block_id_short) {
                 ValidationResult::Valid => {
-                    let signatures = BlockSignatures{signatures: session.get_valid_signatures(&block_id_short)};
+                    let signatures = BlockSignatures {
+                        signatures: session.get_valid_signatures(&block_id_short),
+                    };
 
                     self.on_block_validated_event(block, OnValidatedBlockEvent::Valid(signatures))
                         .await?;

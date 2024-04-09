@@ -37,7 +37,11 @@ impl<ST> ValidatorEventEmitter for ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    async fn on_block_validated_event(&self, block_id: BlockId, event: OnValidatedBlockEvent) -> Result<()> {
+    async fn on_block_validated_event(
+        &self,
+        block_id: BlockId,
+        event: OnValidatedBlockEvent,
+    ) -> Result<()> {
         self.listener.on_block_validated(block_id, event).await
     }
 }
@@ -81,7 +85,12 @@ where
             "Validator (block: {}): STUB: emulated validation via signatures request",
             candidate_id.as_short_id(),
         );
-        self.listener.on_block_validated(candidate_id, OnValidatedBlockEvent::Valid(BlockSignatures{signatures})).await?;
+        self.listener
+            .on_block_validated(
+                candidate_id,
+                OnValidatedBlockEvent::Valid(BlockSignatures { signatures }),
+            )
+            .await?;
 
         Ok(ValidatorTaskResult::Void)
     }

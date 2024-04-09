@@ -23,9 +23,7 @@ use crate::{
 };
 
 use super::types::{McData, PrevData};
-use super::{
-    do_collate::DoCollate, types::WorkingState, CollatorEventEmitter, CollatorEventListener,
-};
+use super::{do_collate::DoCollate, types::WorkingState, CollatorEventEmitter, CollatorEventListener};
 
 // COLLATOR PROCESSOR
 
@@ -126,8 +124,7 @@ where
         //TODO: make real implementation
 
         let mc_data = McData::new(mc_state)?;
-        let (prev_shard_data, usage_tree) =
-            PrevData::build(&mc_data, &prev_states, prev_blocks_ids)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(&mc_data, &prev_states, prev_blocks_ids)?;
 
         let working_state = WorkingState {
             mc_data,
@@ -322,8 +319,7 @@ pub(crate) struct CollatorProcessorStdImpl<MQ, QI, MP, ST> {
 }
 
 #[async_trait]
-impl<MQ, QI, MP, ST> CollatorProcessorSpecific<MQ, MP, ST>
-    for CollatorProcessorStdImpl<MQ, QI, MP, ST>
+impl<MQ, QI, MP, ST> CollatorProcessorSpecific<MQ, MP, ST> for CollatorProcessorStdImpl<MQ, QI, MP, ST>
 where
     MQ: MessageQueueAdapter,
     QI: QueueIterator + Send,

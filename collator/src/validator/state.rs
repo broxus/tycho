@@ -271,11 +271,7 @@ impl ValidationState for ValidationStateStdImpl {
         }
     }
 
-    fn add_session(
-        &mut self,
-        session: Arc<ValidationSessionInfo>,
-        private_overlay: PrivateOverlay,
-    ) {
+    fn add_session(&mut self, session: Arc<ValidationSessionInfo>, private_overlay: PrivateOverlay) {
         let session_info = SessionInfo {
             session_id: session.seqno,
             max_weight: session.validators.values().map(|info| info.weight).sum(),
