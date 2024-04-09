@@ -1872,6 +1872,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tikv-jemallocator"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "965fe0c26be5c56c94e38ba547249074803efd52adfb66de62107d95aab3eaca"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
+]
+
+[[package]]
 name = "time"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2121,6 +2131,17 @@ dependencies = [
  "smallvec",
  "thiserror",
  "tycho-util",
+]
+
+[[package]]
+name = "tycho-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rustc_version",
+ "tikv-jemallocator",
+ "tokio",
 ]
 
 [[package]]

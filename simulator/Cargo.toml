@@ -1,15 +1,20 @@
 [package]
 name = "tycho-simulator"
-version = "0.0.1"
-edition = "2021"
 description = "A network simulation tool."
 include = ["src/**/*.rs"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "simulator"
 path = "src/main.rs"
 
 [dependencies]
+# crates.io deps
 anyhow = "1"
 clap = { version = "4.5.3", features = ["derive"] }
 hex = "0.4.3"

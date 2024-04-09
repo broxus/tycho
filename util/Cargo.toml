@@ -1,8 +1,12 @@
 [package]
 name = "tycho-util"
-version = "0.0.1"
-edition = "2021"
 description = "Shared utilities for node components."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # crates.io deps

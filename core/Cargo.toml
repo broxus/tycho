@@ -1,8 +1,12 @@
 [package]
 name = "tycho-core"
-version = "0.0.1"
-edition = "2021"
 description = "Basic functionality of peer."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # crates.io deps
@@ -13,4 +17,4 @@ tycho-storage = { path = "../storage", version = "=0.0.1" }
 tycho-util = { path = "../util", version = "=0.0.1" }
 
 [lints]
-workspace= true
+workspace = true

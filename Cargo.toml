@@ -1,6 +1,24 @@
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+authors = ["Broxus Team"]
+rust-version = "1.77.1"
+repository = "https://github.com/broxus/tycho"
+license = "MIT OR Apache-2.0"
+
 [workspace]
 resolver = "2"
-members = ["consensus", "core", "network", "simulator", "storage", "util", "collator", "block-util"]
+members = [
+    "block-util",
+    "cli",
+    "collator",
+    "consensus",
+    "core",
+    "network",
+    "simulator",
+    "storage",
+    "util",
+]
 
 [profile.release]
 debug = true

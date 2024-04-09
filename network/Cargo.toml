@@ -1,9 +1,13 @@
 [package]
 name = "tycho-network"
-version = "0.0.1"
-edition = "2021"
 description = "A peer-to-peer networking library."
 include = ["src/**/*.rs", "src/**/*.tl"]
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [[example]]
 name = "network-node"
