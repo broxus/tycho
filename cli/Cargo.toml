@@ -15,14 +15,21 @@ path = "./src/main.rs"
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
+base64 = { workspace = true }
 clap = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+everscale-crypto = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ], optional = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 # local deps
+tycho-network = { workspace = true }
+tycho-util = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

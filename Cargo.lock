@@ -2171,10 +2171,17 @@ name = "tycho-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.0",
  "clap",
+ "everscale-crypto",
+ "hex",
+ "rand",
  "rustc_version",
+ "serde_json",
  "tikv-jemallocator",
  "tokio",
+ "tycho-network",
+ "tycho-util",
 ]
 
 [[package]]
