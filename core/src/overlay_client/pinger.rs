@@ -1,5 +1,5 @@
-use crate::overlay::public_overlay_client::PublicOverlayClient;
-use std::time::{Duration, Instant};
+use crate::overlay_client::public_overlay_client::PublicOverlayClient;
+use std::time::Duration;
 
 async fn ping_neighbours(client: PublicOverlayClient) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
