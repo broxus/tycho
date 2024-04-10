@@ -1,7 +1,7 @@
 use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::seq::SliceRandom;
 use rand::Rng;
-
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tycho_network::{OverlayId, PeerId};
@@ -175,7 +175,6 @@ impl SelectionIndex {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
 
@@ -188,7 +187,6 @@ mod tests {
         //let neighbours = Neighbours::new()
         //let n_collection = NeighbourCollection(Arc::new(neighbours));
 
-
         let index_weights = [0.55, 0.1, 0.3, 0.8, 0.0];
         let builder = WalkerTableBuilder::new(&index_weights);
         let wa_table = builder.build();
@@ -196,8 +194,6 @@ mod tests {
         for i in (0..10).map(|_| wa_table.next()) {
             println!("{:?}", neighbours[i].peer_id());
         }
-
-
     }
 
     // pub fn synthetic_ping(n: Neighbour) {
@@ -211,13 +207,15 @@ mod tests {
         let mut i = 0;
         let mut neighbours = Vec::new();
         while i < 5 {
-            let n = Neighbour::new(PeerId([i;32]), NeighbourOptions {
-                default_roundtrip_ms: 200,
-            });
+            let n = Neighbour::new(
+                PeerId([i; 32]),
+                NeighbourOptions {
+                    default_roundtrip_ms: 200,
+                },
+            );
             neighbours.push(n)
         }
 
         neighbours
-
     }
 }
