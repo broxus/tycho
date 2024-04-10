@@ -7,8 +7,8 @@ use anyhow::{Error, Result};
 use tl_proto::{Boxed, Repr, TlRead, TlWrite};
 use tycho_network::Network;
 
-use crate::overlay::neighbour::Neighbour;
-use crate::overlay::neighbours::{NeighbourCollection, Neighbours};
+use crate::overlay_client::neighbour::Neighbour;
+use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
 use crate::proto::overlay::{Ping, Pong};
 
 trait OverlayClient {
