@@ -6,19 +6,20 @@ use std::time::{Duration, Instant};
 use anyhow::{Error, Result};
 use tl_proto::{Boxed, Repr, TlRead, TlWrite};
 
-use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
-use tycho_network::Network;
 use crate::overlay_client::neighbour::Neighbour;
+use tycho_network::Network;
+use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
 
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
 use crate::proto::overlay::{Ping, Pong};
 
-
 trait OverlayClient {
-    async fn send<R>(&self, data: R) -> Result<()> where
+    async fn send<R>(&self, data: R) -> Result<()>
+    where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>;
 
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>> where
+    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>>
+    where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>;
 }
@@ -46,13 +47,17 @@ impl PublicOverlayClient {
             "Selected neighbour to ping",
         );
 
-        let start_time =  Instant::now();
+        let start_time = Instant::now();
 
-        let pong_res = self.0.overlay.query(&self.0.network, neighbour.peer_id(), Request::from_tl(Ping)).await;
+        let pong_res = self
+            .0
+            .overlay
+            .query(&self.0.network, neighbour.peer_id(), Request::from_tl(Ping))
+            .await;
 
         let end_time = Instant::now();
 
-       let (success) =  match pong_res {
+        let (success) = match pong_res {
             Ok(response) => {
                 let pong = response.parse_tl::<Pong>()?;
                 tracing::info!(peer_id = %neighbour.peer_id(), "Pong received", );
@@ -64,19 +69,20 @@ impl PublicOverlayClient {
             }
         };
 
-        neighbour.track_request(end_time.duration_since(start_time).as_millis() as u64, success);
+        neighbour.track_request(
+            end_time.duration_since(start_time).as_millis() as u64,
+            success,
+        );
         self.0.neighbours.0.update_selection_index().await;
 
         Ok(())
-
     }
-
 }
 
 impl OverlayClient for PublicOverlayClient {
     async fn send<R>(&self, data: R) -> Result<()>
-        where
-            R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    where
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
         let Some(neighbour) = self.0.neighbours.0.choose().await else {
             tracing::error!("No neighbours found to send request");
@@ -84,11 +90,15 @@ impl OverlayClient for PublicOverlayClient {
         };
 
         //let boxed = tl_proto::serialize(data);
-        self.0.overlay.send(&self.0.network, neighbour.peer_id(), Request::from_tl(data)).await?;
+        self.0
+            .overlay
+            .send(&self.0.network, neighbour.peer_id(), Request::from_tl(data))
+            .await?;
         Ok(())
     }
 
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>> where
+    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>>
+    where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
     {
@@ -97,7 +107,11 @@ impl OverlayClient for PublicOverlayClient {
             return Err(Error::msg("Failed to ping")); //TODO: proper error
         };
         let start_time = Instant::now();
-        let response_opt = self.0.overlay.query(&self.0.network, neighbour.peer_id(), Request::from_tl(data)).await;
+        let response_opt = self
+            .0
+            .overlay
+            .query(&self.0.network, neighbour.peer_id(), Request::from_tl(data))
+            .await;
         let end_time = Instant::now();
 
         match response_opt {
@@ -111,7 +125,7 @@ impl OverlayClient for PublicOverlayClient {
                     _market: PhantomData,
                 })
             }
-            Err(e ) => {
+            Err(e) => {
                 tracing::error!(peer_id = %neighbour.peer_id(), "Failed to get response from peer. Err: {e:?}");
                 Err(e)
             }
@@ -122,7 +136,7 @@ impl OverlayClient for PublicOverlayClient {
 pub struct NeighbourPingResult {
     peer: PeerId,
     request_time: u32,
-    rt_time: u32
+    rt_time: u32,
 }
 
 struct OverlayClientState {
@@ -135,11 +149,13 @@ pub struct QueryResponse<'a, A: TlRead<'a>> {
     pub data: A,
     neighbour: Neighbour,
     roundtrip: u64,
-    _market: PhantomData<&'a ()>
+    _market: PhantomData<&'a ()>,
 }
 
-impl<'a, A> QueryResponse<'a, A> where  A: TlRead<'a, Repr=tl_proto::Boxed> {
-
+impl<'a, A> QueryResponse<'a, A>
+where
+    A: TlRead<'a, Repr = tl_proto::Boxed>,
+{
     pub fn data(&self) -> &A {
         &self.data
     }

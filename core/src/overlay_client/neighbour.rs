@@ -1,7 +1,7 @@
 use std::ops::Div;
 use std::sync::Arc;
 
-use tycho_network::{PeerId};
+use tycho_network::PeerId;
 use tycho_util::time::now_sec;
 
 #[derive(Debug, Copy, Clone)]
@@ -50,7 +50,7 @@ impl Neighbour {
         Some(roundtrip as u64)
     }
 
-    pub fn track_request(&self,roundtrip: u64, success: bool) {
+    pub fn track_request(&self, roundtrip: u64, success: bool) {
         let roundtrip = truncate_time(roundtrip);
         self.0.stats.write().update(roundtrip, success)
     }
@@ -152,7 +152,7 @@ impl TrackedStats {
         }
         self.total += 1;
 
-        let roundtrip_buffer =  &mut self.roundtrip;
+        let roundtrip_buffer = &mut self.roundtrip;
         roundtrip_buffer.add(roundtrip);
     }
 }
