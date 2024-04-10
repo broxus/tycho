@@ -5,7 +5,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result};
 use tl_proto::{Boxed, Repr, TlRead, TlWrite};
+
+use crate::overlay_client::neighbour::Neighbour;
 use tycho_network::Network;
+use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
 
 use crate::overlay_client::neighbour::Neighbour;
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
