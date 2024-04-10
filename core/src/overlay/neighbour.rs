@@ -50,13 +50,9 @@ impl Neighbour {
         Some(roundtrip as u64)
     }
 
-    pub fn track_request(&self, request_time: u64, roundtrip: u64, success: bool) {
+    pub fn track_request(&self, roundtrip: u64, success: bool) {
         let roundtrip = truncate_time(roundtrip);
-        let request_time = truncate_time(request_time);
-        self.0
-            .stats
-            .write()
-            .update(request_time, roundtrip, success)
+        self.0.stats.write().update(roundtrip, success)
     }
 }
 
@@ -87,7 +83,6 @@ struct TrackedStats {
     failed: u64,
     failed_requests_history: u64,
     roundtrip: PackedSmaBuffer,
-    request_time: PackedSmaBuffer,
     created: u32,
 }
 
@@ -102,7 +97,6 @@ impl TrackedStats {
             total: 0,
             failed: 0,
             failed_requests_history: 0,
-            request_time: PackedSmaBuffer(default_roundtrip_ms.div(2) as u64),
             roundtrip: PackedSmaBuffer(default_roundtrip_ms as u64),
             created: now_sec(),
         }
@@ -141,7 +135,7 @@ impl TrackedStats {
         (score >= Self::SCORE_THRESHOLD).then_some(score)
     }
 
-    fn update(&mut self, request_time: u16, roundtrip: u16, success: bool) {
+    fn update(&mut self, roundtrip: u16, success: bool) {
         const SUCCESS_REQUEST_SCORE: u8 = 8;
         const FAILED_REQUEST_PENALTY: u8 = 8;
 
@@ -159,9 +153,7 @@ impl TrackedStats {
         self.total += 1;
 
         let roundtrip_buffer = &mut self.roundtrip;
-        let request_time_buffer = &mut self.request_time;
         roundtrip_buffer.add(roundtrip);
-        request_time_buffer.add(request_time);
     }
 }
 
