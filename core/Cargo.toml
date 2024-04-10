@@ -11,6 +11,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
 castaway = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
