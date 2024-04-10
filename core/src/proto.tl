@@ -4,16 +4,10 @@
 ---types---
 
 /**
-* @param key   compressed ed25519 verifying key
-*/
-overlay.peerId key:int256 = overlay.PeerId;
-
-/**
 * Public overlay ping model
 * @param value     unix timestamp in millis when ping was sent
 */
 overlay.ping
-    value:long
     = overlay.Ping;
 
 /**
@@ -21,7 +15,6 @@ overlay.ping
 * @param value     unix timestamp in millis when ping was sent
 */
 overlay.pong
-    value:long
     = overlay.Pong;
 
 
