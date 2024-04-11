@@ -2222,7 +2222,6 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
- "weighted_rand",
 ]
 
 [[package]]
@@ -2506,16 +2505,6 @@ dependencies = [
  "rocksdb",
  "thiserror",
  "tracing",
-]
-
-[[package]]
-name = "weighted_rand"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ab9b6b2a8470ef752f01ec563216a4aa4fbb2ef285f4506b241095c1ef0b16e"
-dependencies = [
- "rand",
- "serde",
 ]
 
 [[package]]
