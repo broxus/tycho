@@ -17,9 +17,7 @@ async fn start_neighbours_update(client: PublicOverlayClient) {
     let mut interval = tokio::time::interval(Duration::from_millis(client.update_interval()));
     loop {
         interval.tick().await;
-        if let Err(e) = client.update_neighbours().await {
-            tracing::error!("Failed to update neighbours. Error: {e:?}")
-        }
+        client.update_neighbours().await;
     }
 }
 

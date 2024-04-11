@@ -146,7 +146,7 @@ impl TrackedStats {
                 Self::MAX_SCORE,
             );
         } else {
-            self.score = self.score.saturating_sub(FAILED_REQUEST_PENALTY);
+            self. score = self.score.saturating_sub(FAILED_REQUEST_PENALTY);
             self.failed += 1;
             self.failed_requests_history |= 1;
         }
