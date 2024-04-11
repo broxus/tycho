@@ -1,4 +1,3 @@
-use std::ops::Div;
 use std::sync::Arc;
 
 use tycho_network::PeerId;
@@ -52,7 +51,7 @@ impl Neighbour {
 
     pub fn track_request(&self, roundtrip: u64, success: bool) {
         let roundtrip = truncate_time(roundtrip);
-        self.0.stats.write().update(roundtrip, success)
+        self.0.stats.write().update(roundtrip, success);
     }
 }
 
