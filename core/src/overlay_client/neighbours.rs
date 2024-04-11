@@ -1,11 +1,8 @@
 use rand::distributions::uniform::{UniformInt, UniformSampler};
-use rand::seq::SliceRandom;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use itertools::Itertools;
 use tokio::sync::Mutex;
-use tycho_network::{OverlayId, PeerId, PublicOverlay};
+use tycho_network::{PublicOverlay};
 use crate::overlay_client::settings::NeighboursOptions;
 
 use super::neighbour::{Neighbour, NeighbourOptions};
@@ -74,7 +71,7 @@ impl Neighbours {
 
     pub async fn get_sorted_neighbours(&self) ->  Vec<(Neighbour, u32)> {
         let mut index = self.selection_index.lock().await;
-        index.indices_with_weights.sort_by(|(ln, lw), (rn, rw) | rw.cmp(lw));
+        index.indices_with_weights.sort_by(|(_, lw), (_, rw) | rw.cmp(lw));
         return Vec::from(index.indices_with_weights.as_slice())
     }
 
@@ -105,7 +102,7 @@ impl Neighbours {
                 continue;
             }
             if guard.len() < self.options.max_neighbours {
-                guard.push(n)
+                guard.push(n);
             } else {
                 return;
             }

@@ -1,18 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OverlayClientSettings {
     pub overlay_options: OverlayOptions,
     pub neighbours_options: NeighboursOptions
-}
-
-impl Default for OverlayClientSettings {
-    fn default() -> Self {
-        Self {
-            overlay_options: Default::default(),
-            neighbours_options: Default::default()
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

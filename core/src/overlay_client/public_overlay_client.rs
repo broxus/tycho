@@ -1,15 +1,12 @@
-use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-
+use std::time::{Instant};
 use anyhow::{Error, Result};
-use serde::{Deserialize, Serialize};
-use tl_proto::{Repr, TlRead, TlWrite};
+use tl_proto::{TlRead};
 
 use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_network::Network;
-use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
+use tycho_network::{NetworkExt, PublicOverlay, Request};
 
 use crate::overlay_client::neighbour::Neighbour;
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
@@ -21,7 +18,7 @@ trait OverlayClient {
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>;
 
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>>
+    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<'_, A>>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>;
@@ -43,10 +40,16 @@ impl PublicOverlayClient {
         }))
     }
 
+    fn neighbours(&self) -> &Arc<Neighbours> {
+        &self.0.neighbours.0
+    }
+
     pub async fn update_neighbours(&self) {
-        let active_neighbours = self.0.neighbours.0.get_active_neighbours_count().await;
-        let neighbours_to_get = self.0.neighbours.0.options().max_neighbours + (self.0.neighbours.0.options().max_neighbours - active_neighbours);
-        let neighbour_options = self.0.neighbours.0.options().clone();
+        let active_neighbours = self.neighbours().get_active_neighbours_count().await;
+        let max_neighbours = self.neighbours().options().max_neighbours;
+
+        let neighbours_to_get = max_neighbours + (max_neighbours - active_neighbours);
+        let neighbour_options = self.neighbours().options().clone();
 
         let neighbour_options = NeighbourOptions {
             default_roundtrip_ms: neighbour_options.default_roundtrip_ms,
@@ -57,7 +60,7 @@ impl PublicOverlayClient {
                 .map(|x| Neighbour::new(x.entry.peer_id, neighbour_options))
                 .collect::<Vec<_>>()
         };
-        self.0.neighbours.0.update(neighbours).await;
+        self.neighbours().update(neighbours).await;
     }
 
     pub async fn ping_random_neighbour(&self) -> Result<()> {
@@ -83,7 +86,7 @@ impl PublicOverlayClient {
 
         let (success) = match pong_res {
             Ok(response) => {
-                let pong = response.parse_tl::<Pong>()?;
+                response.parse_tl::<Pong>()?;
                 tracing::info!(peer_id = %neighbour.peer_id(), "Pong received", );
                 true
             }
@@ -97,7 +100,7 @@ impl PublicOverlayClient {
             end_time.duration_since(start_time).as_millis() as u64,
             success,
         );
-        self.0.neighbours.0.update_selection_index().await;
+        self.neighbours().update_selection_index().await;
 
         Ok(())
     }
