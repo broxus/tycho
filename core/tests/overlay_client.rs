@@ -1,8 +1,7 @@
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::thread_rng;
-use std::time::Duration;
 use tycho_core::overlay_client::neighbours::{Neighbours, NeighboursOptions};
-use tycho_network::{OverlayId, PeerId};
+use tycho_network::{OverlayId, PeerId, PublicOverlay};
 
 #[tokio::test]
 pub async fn test() {
@@ -13,10 +12,12 @@ pub async fn test() {
         PeerId([3u8; 32]),
         PeerId([4u8; 32]),
     ];
+    let public_overlay =  PublicOverlay::builder(OverlayId([0u8;32]))
+        .build(PingPongService);
     let neighbours = Neighbours::new(
+        public_overlay,
         NeighboursOptions::default(),
-        initial_peers.clone(),
-        OverlayId([0u8; 32]),
+
     )
     .await;
 
@@ -55,8 +56,8 @@ pub async fn test() {
     let peers = neighbours
         .get_sorted_neighbours()
         .await
-        .into_iter()
-        .map(|(n, w)| (*n.peer_id(), w))
+        .iter()
+        .map(|(n, w)| (*n.peer_id(), *w))
         .collect::<Vec<_>>();
 
     for i in &peers {
