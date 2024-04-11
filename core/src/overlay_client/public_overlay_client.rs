@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result};
-use tl_proto::{Boxed, Repr, TlRead, TlWrite};
+use serde::{Deserialize, Serialize};
+use tl_proto::{Repr, TlRead, TlWrite};
 
 use crate::overlay_client::neighbour::Neighbour;
 use tycho_network::Network;
@@ -12,6 +13,7 @@ use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
 
 use crate::overlay_client::neighbour::Neighbour;
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
+use crate::overlay_client::settings::{OverlayClientSettings, OverlayOptions};
 use crate::proto::overlay::{Ping, Pong};
 
 trait OverlayClient {
@@ -29,12 +31,23 @@ trait OverlayClient {
 pub struct PublicOverlayClient(Arc<OverlayClientState>);
 
 impl PublicOverlayClient {
-    pub fn new(network: Network, overlay: PublicOverlay, neighbours: NeighbourCollection) -> Self {
+
+    pub async fn new(network: Network, overlay: PublicOverlay, settings: OverlayClientSettings) -> Self {
+        let neighbours = Neighbours::new(overlay.clone(), settings.neighbours_options).await;
+        let neighbours_collection = NeighbourCollection(neighbours);
         Self(Arc::new(OverlayClientState {
             network,
             overlay,
-            neighbours,
+            neighbours: neighbours_collection,
+            settings: settings.overlay_options,
         }))
+    }
+
+    pub async fn update_neighbours(&self) -> Result<()> {
+        let neighbours = self.0.overlay.read_entries()
+            .choose_multiple(&mut rand::thread_rng(), 10);
+        //self.0.neighbours.0.update()
+        Ok(())
     }
 
     pub async fn ping_random_neighbour(&self) -> Result<()> {
@@ -78,6 +91,15 @@ impl PublicOverlayClient {
 
         Ok(())
     }
+
+    pub fn update_interval(&self) -> u64 {
+        self.0.settings.neighbours_update_interval
+    }
+
+    pub fn ping_interval(&self) -> u64 {
+        self.0.settings.neighbours_ping_interval
+    }
+
 }
 
 impl OverlayClient for PublicOverlayClient {
@@ -135,17 +157,15 @@ impl OverlayClient for PublicOverlayClient {
     }
 }
 
-pub struct NeighbourPingResult {
-    peer: PeerId,
-    request_time: u32,
-    rt_time: u32,
-}
-
 struct OverlayClientState {
     network: Network,
     overlay: PublicOverlay,
     neighbours: NeighbourCollection,
+
+    settings: OverlayOptions
 }
+
+
 
 pub struct QueryResponse<'a, A: TlRead<'a>> {
     pub data: A,

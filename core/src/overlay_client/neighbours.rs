@@ -4,26 +4,10 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tycho_network::{OverlayId, PeerId};
+use tycho_network::{OverlayId, PeerId, PublicOverlay};
+use crate::overlay_client::settings::NeighboursOptions;
 
 use super::neighbour::{Neighbour, NeighbourOptions};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeighboursOptions {
-    pub max_neighbours: usize,
-    pub max_ping_tasks: usize,
-    pub default_roundtrip_ms: u64,
-}
-
-impl Default for NeighboursOptions {
-    fn default() -> Self {
-        Self {
-            max_neighbours: 16,
-            max_ping_tasks: 6,
-            default_roundtrip_ms: 2000,
-        }
-    }
-}
 
 pub struct NeighbourCollection(pub Arc<Neighbours>);
 
@@ -31,22 +15,21 @@ pub struct Neighbours {
     options: NeighboursOptions,
     entries: Mutex<Vec<Neighbour>>,
     selection_index: Mutex<SelectionIndex>,
-    overlay_id: OverlayId,
+    overlay: PublicOverlay,
 }
 
 impl Neighbours {
     pub async fn new(
+        overlay: PublicOverlay,
         options: NeighboursOptions,
-        initial: Vec<PeerId>,
-        overlay_id: OverlayId,
     ) -> Arc<Self> {
         let neighbour_options = NeighbourOptions {
             default_roundtrip_ms: options.default_roundtrip_ms,
         };
 
-        let entries = initial
+        let entries = overlay.read_entries()
             .choose_multiple(&mut rand::thread_rng(), options.max_neighbours)
-            .map(|&peer_id| Neighbour::new(peer_id, neighbour_options))
+            .map(|entry_data| Neighbour::new(entry_data.entry.peer_id, neighbour_options))
             .collect();
 
         let entries = Mutex::new(entries);
@@ -57,7 +40,7 @@ impl Neighbours {
             options,
             entries,
             selection_index,
-            overlay_id,
+            overlay,
         };
         tracing::info!("Initial update selection call");
         result.update_selection_index().await;
@@ -86,7 +69,7 @@ impl Neighbours {
     pub async fn get_sorted_neighbours(&self) ->  Vec<(Neighbour, u32)> {
         let mut index = self.selection_index.lock().await;
         index.indices_with_weights.sort_by(|(ln, lw), (rn, rw) | lw.cmp(rw));
-        return index.indices_with_weights.clone()
+        return Vec::from(index.indices_with_weights.as_slice())
     }
 
     pub async fn get_bad_neighbours_count(&self) -> usize {
