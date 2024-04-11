@@ -7,7 +7,7 @@ use anyhow::{Error, Result};
 use serde::{Deserialize, Serialize};
 use tl_proto::{Repr, TlRead, TlWrite};
 
-use crate::overlay_client::neighbour::Neighbour;
+use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_network::Network;
 use tycho_network::{NetworkExt, PeerId, PublicOverlay, Request};
 
@@ -43,11 +43,21 @@ impl PublicOverlayClient {
         }))
     }
 
-    pub async fn update_neighbours(&self) -> Result<()> {
-        let neighbours = self.0.overlay.read_entries()
-            .choose_multiple(&mut rand::thread_rng(), 10);
-        //self.0.neighbours.0.update()
-        Ok(())
+    pub async fn update_neighbours(&self) {
+        let active_neighbours = self.0.neighbours.0.get_active_neighbours_count().await;
+        let neighbours_to_get = self.0.neighbours.0.options().max_neighbours + (self.0.neighbours.0.options().max_neighbours - active_neighbours);
+        let neighbour_options = self.0.neighbours.0.options().clone();
+
+        let neighbour_options = NeighbourOptions {
+            default_roundtrip_ms: neighbour_options.default_roundtrip_ms,
+        };
+        let neighbours = {
+            self.0.overlay.read_entries()
+                .choose_multiple(&mut rand::thread_rng(), neighbours_to_get )
+                .map(|x| Neighbour::new(x.entry.peer_id, neighbour_options))
+                .collect::<Vec<_>>()
+        };
+        self.0.neighbours.0.update(neighbours).await;
     }
 
     pub async fn ping_random_neighbour(&self) -> Result<()> {
