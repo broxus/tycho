@@ -9,7 +9,7 @@ use crate::util::parse_secret_key;
 
 /// Generate a DHT entry for a node.
 #[derive(clap::Parser)]
-pub struct CmdGenDht {
+pub struct Cmd {
     /// a list of node addresses
     #[clap(required = true)]
     addr: Vec<Address>,
@@ -27,7 +27,7 @@ pub struct CmdGenDht {
     ttl: Option<u32>,
 }
 
-impl CmdGenDht {
+impl Cmd {
     pub fn run(self) -> Result<()> {
         // Read key
         let key = match self.key {

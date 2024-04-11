@@ -7,6 +7,8 @@ use clap::{Parser, Subcommand};
 mod tools {
     pub mod gen_dht;
     pub mod gen_key;
+    pub mod gen_multisig_state;
+    pub mod gen_zerostate;
 }
 
 mod util;
@@ -77,8 +79,10 @@ struct RunCmd {}
 /// A collection of tools
 #[derive(Subcommand)]
 enum ToolCmd {
-    GenDht(tools::gen_dht::CmdGenDht),
-    GenKey(tools::gen_key::CmdGenKey),
+    GenDht(tools::gen_dht::Cmd),
+    GenKey(tools::gen_key::Cmd),
+    GenZerostate(tools::gen_zerostate::Cmd),
+    GenMultisigState(tools::gen_multisig_state::Cmd),
 }
 
 impl ToolCmd {
@@ -86,6 +90,8 @@ impl ToolCmd {
         match self {
             ToolCmd::GenDht(cmd) => cmd.run(),
             ToolCmd::GenKey(cmd) => cmd.run(),
+            ToolCmd::GenZerostate(cmd) => cmd.run(),
+            ToolCmd::GenMultisigState(cmd) => cmd.run(),
         }
     }
 }

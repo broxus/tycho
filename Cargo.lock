@@ -2174,6 +2174,7 @@ dependencies = [
  "base64 0.22.0",
  "clap",
  "everscale-crypto",
+ "everscale-types",
  "hex",
  "rand",
  "rustc_version",

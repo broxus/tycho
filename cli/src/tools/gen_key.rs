@@ -7,7 +7,7 @@ use crate::util::parse_secret_key;
 
 /// Generate a new key pair
 #[derive(clap::Parser)]
-pub struct CmdGenKey {
+pub struct Cmd {
     /// secret key (reads from stdin if only flag is provided)
     #[clap(long)]
     key: Option<Option<String>>,
@@ -17,7 +17,7 @@ pub struct CmdGenKey {
     raw_key: bool,
 }
 
-impl CmdGenKey {
+impl Cmd {
     pub fn run(self) -> Result<()> {
         let secret = match self.key {
             Some(flag) => {
