@@ -1,4 +1,4 @@
-mod neighbour;
-mod neighbours;
-mod pinger;
-mod public_overlay_client;
+pub mod neighbour;
+pub mod neighbours;
+pub mod pinger;
+pub mod public_overlay_client;

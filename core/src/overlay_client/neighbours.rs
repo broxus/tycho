@@ -83,6 +83,12 @@ impl Neighbours {
         lock.update(guard.as_slice());
     }
 
+    pub async fn get_sorted_neighbours(&self) ->  Vec<(Neighbour, u32)> {
+        let mut index = self.selection_index.lock().await;
+        index.indices_with_weights.sort_by(|(ln, lw), (rn, rw) | lw.cmp(rw));
+        return index.indices_with_weights.clone()
+    }
+
     pub async fn get_bad_neighbours_count(&self) -> usize {
         let guard = self.entries.lock().await;
         guard
@@ -175,47 +181,3 @@ impl SelectionIndex {
     }
 }
 
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use weighted_rand::builder::*;
-
-    #[tokio::test]
-    pub async fn test() {
-        let neighbours = create_neighbours();
-        //let neighbours = Neighbours::new()
-        //let n_collection = NeighbourCollection(Arc::new(neighbours));
-
-        let index_weights = [0.55, 0.1, 0.3, 0.8, 0.0];
-        let builder = WalkerTableBuilder::new(&index_weights);
-        let wa_table = builder.build();
-
-        for i in (0..10).map(|_| wa_table.next()) {
-            println!("{:?}", neighbours[i].peer_id());
-        }
-    }
-
-    // pub fn synthetic_ping(n: Neighbour) {
-    //     let index_weights = [0.55, 0.1, 0.3, 0.8, 0.0];
-    //     let builder = WalkerTableBuilder::new(&index_weights);
-    //     let wa_table = builder.build();
-    //     wa_table.next()
-    // }
-
-    pub fn create_neighbours() -> Vec<Neighbour> {
-        let mut i = 0;
-        let mut neighbours = Vec::new();
-        while i < 5 {
-            let n = Neighbour::new(
-                PeerId([i; 32]),
-                NeighbourOptions {
-                    default_roundtrip_ms: 200,
-                },
-            );
-            neighbours.push(n)
-        }
-
-        neighbours
-    }
-}
