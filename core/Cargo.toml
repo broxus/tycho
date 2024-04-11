@@ -30,7 +30,6 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 tycho-util = { workspace = true, features = ["test"] }
-weighted_rand = "0.4.2"
 
 [lints]
 workspace = true
