@@ -1,17 +1,37 @@
 [package]
 name = "tycho-collator"
-version = "0.0.1"
-edition = "2021"
 description = "A collator node."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # crates.io deps
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+tl-proto = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+everscale-types = { workspace = true }
+everscale-crypto = { workspace = true }
 
 # local deps
-tycho-core = { path = "../core", version = "=0.0.1" }
-tycho-consensus = { path = "../consensus", version = "=0.0.1" }
-tycho-storage = { path = "../storage", version = "=0.0.1" }
-tycho-util = { path = "../util", version = "=0.0.1" }
+tycho-core = { workspace = true }
+#tycho-consensus = { workspace = true }
+tycho-network = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
+tycho-block-util = { workspace = true }
+
+[dev-dependencies]
+tracing-test = { workspace = true }
 
 [lints]
 workspace = true

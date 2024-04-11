@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
-use argh::FromArgs;
+use clap::{Parser, Subcommand};
 use everscale_crypto::ed25519;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
@@ -20,18 +20,17 @@ use tycho_util::time::now_sec;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let app: App = argh::from_env();
-    app.run().await
+    Cli::parse().run().await
 }
 
 /// Tycho network node.
-#[derive(FromArgs)]
-struct App {
-    #[argh(subcommand)]
+#[derive(Parser)]
+struct Cli {
+    #[clap(subcommand)]
     cmd: Cmd,
 }
 
-impl App {
+impl Cli {
     async fn run(self) -> Result<()> {
         let enable_persistent_logs = std::env::var("TYCHO_PERSISTENT_LOGS").is_ok();
 
@@ -67,8 +66,7 @@ impl App {
     }
 }
 
-#[derive(FromArgs)]
-#[argh(subcommand)]
+#[derive(Subcommand)]
 enum Cmd {
     Run(CmdRun),
     GenKey(CmdGenKey),
@@ -76,23 +74,21 @@ enum Cmd {
 }
 
 /// run a node
-#[derive(FromArgs)]
-#[argh(subcommand, name = "run")]
+#[derive(Parser)]
 struct CmdRun {
     /// local node address
-    #[argh(positional)]
     addr: SocketAddr,
 
     /// node secret key
-    #[argh(option)]
+    #[clap(long)]
     key: String,
 
     /// path to the node config
-    #[argh(option)]
+    #[clap(long)]
     config: Option<String>,
 
     /// path to the global config
-    #[argh(option)]
+    #[clap(long)]
     global_config: String,
 }
 
@@ -125,8 +121,7 @@ impl CmdRun {
 }
 
 /// generate a key
-#[derive(FromArgs)]
-#[argh(subcommand, name = "genkey")]
+#[derive(Parser)]
 struct CmdGenKey {}
 
 impl CmdGenKey {
@@ -150,19 +145,17 @@ impl CmdGenKey {
 }
 
 /// generate a dht node info
-#[derive(FromArgs)]
-#[argh(subcommand, name = "gendht")]
+#[derive(Parser)]
 struct CmdGenDht {
     /// local node address
-    #[argh(positional)]
     addr: SocketAddr,
 
     /// node secret key
-    #[argh(option)]
+    #[clap(long)]
     key: String,
 
     /// time to live in seconds (default: unlimited)
-    #[argh(option)]
+    #[clap(long)]
     ttl: Option<u32>,
 }
 

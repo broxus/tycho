@@ -21,6 +21,13 @@ pub mod sync {
     mod priority_semaphore;
 }
 
+#[cfg(any(test, feature = "test"))]
+pub mod test {
+    pub use logger::init_logger;
+
+    mod logger;
+}
+
 mod util {
     pub(crate) mod linked_list;
     pub(crate) mod wake_list;

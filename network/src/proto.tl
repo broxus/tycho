@@ -52,22 +52,22 @@ dht.peerValueKey
     = dht.Key;
 
 /**
-* Key for the overlay-managed value
+* Key for the group-managed value
 *
 * @param name       key name enum
-* @param overlay_id overlay id
+* @param group_id   group id
 */
-dht.overlayValueKey
-    name:dht.OverlayValueKeyName
-    overlay_id:int256
+dht.mergedValueKey
+    name:dht.MergedValueKeyName
+    group_id:int256
     = dht.Key;
 
 // Peer value key names {
 dht.peerValueKeyName.nodeInfo = dht.PeerValueKeyName;
 // }
 
-// Overlay value key names {
-dht.overlayValueKeyName.peersList = dht.OverlayValueKeyName;
+// Merged value key names {
+dht.mergedValueKeyName.publicOverlayEntries = dht.MergedValueKeyName;
 // }
 
 /**
@@ -80,13 +80,13 @@ dht.overlayValueKeyName.peersList = dht.OverlayValueKeyName;
 dht.peerValue key:dht.peerValueKey data:bytes expires_at:int signature:bytes = dht.Value;
 
 /**
-* An overlay-managed value
+* An group-managed value
 *
-* @param key        overlay key
+* @param key        key info
 * @param value      any data
 * @param expires_at unix timestamp up to which this value is valid
 */
-dht.overlayValue key:dht.overlayValueKey data:bytes expires_at:int = dht.Value;
+dht.mergedValue key:dht.mergedValueKey data:bytes expires_at:int = dht.Value;
 
 
 /**

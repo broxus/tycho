@@ -1,14 +1,102 @@
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+authors = ["Broxus Team"]
+rust-version = "1.77.1"
+repository = "https://github.com/broxus/tycho"
+license = "MIT OR Apache-2.0"
+
 [workspace]
 resolver = "2"
-members = ["consensus", "core", "network", "simulator", "storage", "util", "collator", "block-util"]
+members = [
+    "block-util",
+    "cli",
+    "collator",
+    "consensus",
+    "core",
+    "network",
+    "simulator",
+    "storage",
+    "util",
+]
 
-[profile.release]
-debug = true
+[workspace.dependencies]
+# crates.io deps
+ahash = "0.8"
+anyhow = "1.0.79"
+arc-swap = "1.6.0"
+async-trait = "0.1"
+base64 = "0.22.0"
+bincode = "1.3"
+bumpalo = "3.14.0"
+bytes = "1.5.0"
+bytesize = { version = "1.3.0", features = ["serde"] }
+castaway = "0.2"
+clap = { version = "4.5.3", features = ["derive"] }
+crc = "3.0.1"
+dashmap = "5.4"
+ed25519 = "2.0"
+everscale-crypto = { version = "0.2", features = ["tl-proto"] }
+everscale-types = "0.1.0-rc.6"
+exponential-backoff = "1"
+fdlimit = "0.3.0"
+futures-util = "0.3"
+hex = "0.4"
+humantime = "2"
+itertools = "0.12"
+libc = "0.2"
+moka = { version = "0.12", features = ["sync"] }
+num-traits = "0.2.18"
+parking_lot = "0.12.1"
+parking_lot_core = "0.9.9"
+pin-project-lite = "0.2"
+pkcs8 = "0.10"
+quick_cache = "0.4.1"
+quinn = { version = "0.10", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
+rand = "0.8"
+rcgen = "0.11"
+ring = "0.16"
+rlimit = "0.10.1"
+rustc_version = "0.4"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rustls-webpki = "0.101"
+serde = "1.0"
+serde_json = "1.0.114"
+sha2 = "0.10.8"
+smallvec = "1.13.1"
+socket2 = "0.5"
+sysinfo = "0.30.5"
+tempfile = "3.10"
+thiserror = "1.0"
+tikv-jemallocator = { version = "0.5", features = [
+    "unprefixed_malloc_on_supported_platforms",
+    "background_threads",
+] }
+tl-proto = "0.4"
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", features = ["codec"] }
+tracing = "0.1"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-test = "0.2"
+triomphe = "0.1.11"
+weedb = "0.1.1"
+x509-parser = "0.15"
+
+# local deps
+tycho-block-util = { path = "./block-util" }
+tycho-collator = { path = "./collator" }
+tycho-consensus = { path = "./consensus" }
+tycho-core = { path = "./core" }
+tycho-network = { path = "./network" }
+tycho-storage = { path = "./storage" }
+tycho-util = { path = "./util" }
 
 [patch.crates-io]
 # NOTE: use crates.io dependency when it is released
 # https://github.com/sagebind/castaway/issues/18
 castaway = { git = "https://github.com/sagebind/castaway.git" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "0xdeafbeef/push-yntmntzvxrlu" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
@@ -84,3 +172,25 @@ unused_self = "warn"
 useless_transmute = "warn"
 verbose_file_reads = "warn"
 zero_sized_map_values = "warn"
+
+[profile.release]
+debug = true
+
+[profile.dev.package.hex]
+opt-level = 3
+[profile.dev.package.base64]
+opt-level = 3
+[profile.dev.package.rand]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.everscale-crypto]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519]
+opt-level = 3
+[profile.dev.package.hashbrown]
+opt-level = 3
+[profile.dev.package."*"]
+opt-level = 1
