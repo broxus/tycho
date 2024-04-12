@@ -1,11 +1,12 @@
-use std::time::Instant;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::thread_rng;
+use std::time::Instant;
 use tl_proto::{TlRead, TlWrite};
 use tycho_core::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_core::overlay_client::neighbours::Neighbours;
+use tycho_core::overlay_client::public_overlay_client::Peer;
 use tycho_core::overlay_client::settings::NeighboursOptions;
-use tycho_network::{OverlayId, PeerId, PublicOverlay, Response, service_query_fn};
+use tycho_network::{service_query_fn, OverlayId, PeerId, PublicOverlay, Response};
 
 #[derive(TlWrite, TlRead)]
 #[tl(boxed, id = 0x11223344)]
@@ -20,13 +21,18 @@ pub async fn test() {
         PeerId([2u8; 32]),
         PeerId([3u8; 32]),
         PeerId([4u8; 32]),
-    ];
-    let neighbours = Neighbours::new(
-        initial_peers.clone(),
-        options.clone(),
+    ]
+    .iter()
+    .map(|x| Peer {
+        id: *x,
+        expires_at: u32::MAX,
+    })
+    .collect::<Vec<_>>();
+    println!("{}", initial_peers.len());
 
-    )
-    .await;
+    let neighbours = Neighbours::new(initial_peers.clone(), options.clone()).await;
+    println!("{}", neighbours.get_active_neighbours().await.len());
+
 
     let first_success_rate = [0.2, 0.8];
     let second_success_rate = [1.0, 0.0];
@@ -51,7 +57,7 @@ pub async fn test() {
         //let end = Instant::now();
 
         if let Some(n) = n_opt {
-            let index = slice.iter().position(|&r| r == n.peer_id()).unwrap();
+            let index = slice.iter().position(|r| r.id == n.peer_id()).unwrap();
             let answer = indices[index].sample(&mut rng);
             if answer == 0 {
                 println!("Success request to peer: {}", n.peer_id());
@@ -62,11 +68,9 @@ pub async fn test() {
             }
 
             neighbours.update_selection_index().await;
-
         }
         i = i + 1;
     }
-
 
     let new_peers = vec![
         PeerId([5u8; 32]),
@@ -74,26 +78,34 @@ pub async fn test() {
         PeerId([7u8; 32]),
         PeerId([8u8; 32]),
         PeerId([9u8; 32]),
-    ];
+    ]
+    .iter()
+    .map(|x| Peer {
+        id: *x,
+        expires_at: u32::MAX,
+    })
+    .collect::<Vec<_>>();
 
-    let new_neighbours = new_peers.iter().map(|x| Neighbour::new(*x, NeighbourOptions {
-        default_roundtrip_ms: options.default_roundtrip_ms
-    })).collect::<Vec<_>>();
+    let new_neighbours = new_peers
+        .iter()
+        .map(|x| {
+            Neighbour::new(
+                x.id,
+                x.expires_at,
+                NeighbourOptions {
+                    default_roundtrip_ms: options.default_roundtrip_ms,
+                },
+            )
+        })
+        .collect::<Vec<_>>();
 
     neighbours.update(new_neighbours).await;
 
-
-
-
     let active = neighbours.get_active_neighbours().await;
-    println!("active neighbours {}", active.len() );
+    println!("active neighbours {}", active.len());
     for i in active {
         println!("peer {} score {}", i.peer_id(), i.get_stats().score);
     }
 
-
-
-
-
-   //assert_ne!(peers.len(), 5);
+    //assert_ne!(peers.len(), 5);
 }
