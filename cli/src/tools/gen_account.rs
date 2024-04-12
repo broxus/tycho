@@ -2,13 +2,11 @@ use std::io::IsTerminal;
 
 use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
-use everscale_types::models::{
-    Account, AccountState, OptionalAccount, StateInit, StdAddr, StorageUsed,
-};
-use everscale_types::num::{Tokens, VarUint56};
+use everscale_types::models::{Account, AccountState, OptionalAccount, StateInit, StdAddr};
+use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 
-use crate::util::parse_public_key;
+use crate::util::{compute_storage_used, parse_public_key};
 
 /// Generate an account state
 #[derive(clap::Parser)]
@@ -396,34 +394,4 @@ impl GiverBuilder {
 
         Ok((address, account))
     }
-}
-
-// TODO: move into types
-fn compute_storage_used(account: &Account) -> Result<StorageUsed> {
-    let cell = {
-        let cx = &mut Cell::empty_context();
-        let mut storage = CellBuilder::new();
-        storage.store_u64(account.last_trans_lt)?;
-        account.balance.store_into(&mut storage, cx)?;
-        account.state.store_into(&mut storage, cx)?;
-        if account.init_code_hash.is_some() {
-            account.init_code_hash.store_into(&mut storage, cx)?;
-        }
-        storage.build_ext(cx)?
-    };
-
-    let res = cell
-        .compute_unique_stats(usize::MAX)
-        .context("max size exceeded")?;
-
-    let res = StorageUsed {
-        cells: VarUint56::new(res.cell_count),
-        bits: VarUint56::new(res.bit_count),
-        public_cells: Default::default(),
-    };
-
-    anyhow::ensure!(res.bits.is_valid(), "bit count overflow");
-    anyhow::ensure!(res.cells.is_valid(), "cell count overflow");
-
-    Ok(res)
 }

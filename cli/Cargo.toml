@@ -22,6 +22,7 @@ everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
