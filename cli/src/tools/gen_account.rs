@@ -10,9 +10,66 @@ use everscale_types::prelude::*;
 
 use crate::util::parse_public_key;
 
-/// Generate a multisig wallet state.
+/// Generate an account state
 #[derive(clap::Parser)]
 pub struct Cmd {
+    #[clap(subcommand)]
+    cmd: SubCmd,
+}
+
+impl Cmd {
+    pub fn run(self) -> Result<()> {
+        self.cmd.run()
+    }
+}
+
+#[derive(clap::Subcommand)]
+enum SubCmd {
+    Wallet(WalletCmd),
+    Multisig(MultisigCmd),
+    Giver(GiverCmd),
+}
+
+impl SubCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Wallet(cmd) => cmd.run(),
+            Self::Multisig(cmd) => cmd.run(),
+            Self::Giver(cmd) => cmd.run(),
+        }
+    }
+}
+
+/// Generate a simple wallet state
+#[derive(clap::Parser)]
+struct WalletCmd {
+    /// account public key
+    #[clap(short, long, required = true)]
+    pubkey: String,
+
+    /// initial balance of the wallet (in nano)
+    #[clap(short, long, required = true)]
+    balance: Tokens,
+}
+
+impl WalletCmd {
+    fn run(self) -> Result<()> {
+        let pubkey =
+            parse_public_key(self.pubkey.as_bytes(), false).context("invalid deployer pubkey")?;
+
+        let (account, state) = WalletBuilder {
+            pubkey,
+            balance: self.balance,
+        }
+        .build()?;
+
+        write_state(&account, &state)
+    }
+}
+
+/// Generate a multisig wallet state
+#[derive(clap::Parser)]
+struct MultisigCmd {
     /// account public key
     #[clap(short, long, required = true)]
     pubkey: String,
@@ -38,8 +95,8 @@ pub struct Cmd {
     updatable: bool,
 }
 
-impl Cmd {
-    pub fn run(self) -> Result<()> {
+impl MultisigCmd {
+    fn run(self) -> Result<()> {
         let pubkey =
             parse_public_key(self.pubkey.as_bytes(), false).context("invalid deployer pubkey")?;
 
@@ -60,28 +117,87 @@ impl Cmd {
         }
         .build()?;
 
-        let res = serde_json::json!({
-            "account": account.to_string(),
-            "boc": BocRepr::encode_base64(OptionalAccount(Some(state)))?,
-        });
-
-        let output = if std::io::stdin().is_terminal() {
-            serde_json::to_string_pretty(&res)
-        } else {
-            serde_json::to_string(&res)
-        }?;
-        println!("{}", output);
-        Ok(())
+        write_state(&account, &state)
     }
 }
 
-const DEFAULT_LIFETIME: u32 = 3600;
-const MIN_LIFETIME: u32 = 600;
+/// Generate a giver state
+#[derive(clap::Parser)]
+struct GiverCmd {
+    /// account public key
+    #[clap(short, long, required = true)]
+    pubkey: String,
 
-/// Multisig2
-const SAFE_MULTISIG_CODE: &[u8] = include_bytes!("./safe_multisig_code.boc");
-/// SetcodeMultisig (old)
-const SETCODE_MULTISIG_CODE: &[u8] = include_bytes!("./setcode_multisig_code.boc");
+    /// initial balance of the giver (in nano)
+    #[clap(short, long, required = true)]
+    balance: Tokens,
+}
+
+impl GiverCmd {
+    fn run(self) -> Result<()> {
+        let pubkey =
+            parse_public_key(self.pubkey.as_bytes(), false).context("invalid deployer pubkey")?;
+
+        let (account, state) = GiverBuilder {
+            pubkey,
+            balance: self.balance,
+        }
+        .build()?;
+
+        write_state(&account, &state)
+    }
+}
+
+fn write_state(account: &HashBytes, state: &Account) -> Result<()> {
+    let res = serde_json::json!({
+        "account": account.to_string(),
+        "boc": BocRepr::encode_base64(OptionalAccount(Some(state.clone())))?,
+    });
+
+    let output = if std::io::stdin().is_terminal() {
+        serde_json::to_string_pretty(&res)
+    } else {
+        serde_json::to_string(&res)
+    }?;
+    println!("{}", output);
+    Ok(())
+}
+
+struct WalletBuilder {
+    pubkey: ed25519::PublicKey,
+    balance: Tokens,
+}
+
+impl WalletBuilder {
+    fn build(self) -> Result<(HashBytes, Account)> {
+        const EVER_WALLET_CODE: &[u8] = include_bytes!("../../res/ever_wallet_code.boc");
+
+        let data = CellBuilder::build_from((HashBytes::wrap(self.pubkey.as_bytes()), 0u64))?;
+        let code = Boc::decode(EVER_WALLET_CODE)?;
+
+        let state_init = StateInit {
+            split_depth: None,
+            special: None,
+            code: Some(code),
+            data: Some(data),
+            libraries: Dict::new(),
+        };
+        let address = *CellBuilder::build_from(&state_init)?.repr_hash();
+
+        let mut account = Account {
+            address: StdAddr::new(-1, address).into(),
+            storage_stat: Default::default(),
+            last_trans_lt: 0,
+            balance: self.balance.into(),
+            state: AccountState::Active(state_init),
+            init_code_hash: None,
+        };
+
+        account.storage_stat.used = compute_storage_used(&account)?;
+
+        Ok((address, account))
+    }
+}
 
 struct MultisigBuilder {
     pubkey: ed25519::PublicKey,
@@ -94,6 +210,14 @@ struct MultisigBuilder {
 
 impl MultisigBuilder {
     fn build(mut self) -> Result<(HashBytes, Account)> {
+        const DEFAULT_LIFETIME: u32 = 3600;
+        const MIN_LIFETIME: u32 = 600;
+
+        // Multisig2
+        const SAFE_MULTISIG_CODE: &[u8] = include_bytes!("../../res/safe_multisig_code.boc");
+        // SetcodeMultisig (old)
+        const SETCODE_MULTISIG_CODE: &[u8] = include_bytes!("../../res/setcode_multisig_code.boc");
+
         if let Some(lifetime) = self.lifetime {
             anyhow::ensure!(
                 !self.updatable,
@@ -221,6 +345,53 @@ impl MultisigBuilder {
             init_code_hash: None,
         };
 
+        account.storage_stat.used = compute_storage_used(&account)?;
+
+        Ok((address, account))
+    }
+}
+
+struct GiverBuilder {
+    pubkey: ed25519::PublicKey,
+    balance: Tokens,
+}
+
+impl GiverBuilder {
+    fn build(self) -> Result<(HashBytes, Account)> {
+        const GIVER_STATE: &[u8] = include_bytes!("../../res/giver_state.boc");
+
+        let mut account = BocRepr::decode::<OptionalAccount, _>(GIVER_STATE)?
+            .0
+            .expect("invalid giver state");
+
+        let address;
+        match &mut account.state {
+            AccountState::Active(state_init) => {
+                let mut data = CellBuilder::new();
+
+                // Append pubkey first
+                data.store_u256(HashBytes::wrap(self.pubkey.as_bytes()))?;
+
+                // Append everything except the pubkey
+                let prev_data = state_init
+                    .data
+                    .take()
+                    .expect("giver state must contain data");
+                let mut prev_data = prev_data.as_slice()?;
+                prev_data.advance(256, 0)?;
+
+                data.store_slice(prev_data)?;
+
+                // Update data
+                state_init.data = Some(data.build()?);
+
+                // Compute address
+                address = *CellBuilder::build_from(&*state_init)?.repr_hash();
+            }
+            _ => unreachable!("saved state is for the active account"),
+        };
+
+        account.balance.tokens = self.balance;
         account.storage_stat.used = compute_storage_used(&account)?;
 
         Ok((address, account))
