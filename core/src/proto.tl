@@ -22,24 +22,54 @@ overlay.pong
 *
 * @param value  an existing value
 */
-publicOverlay.response.ok value:publicOverlay.Value = publicOverlay.Response;
+publicOverlay.response.ok value:T = publicOverlay.Response T;
 /**
 * An unsuccessul response for the overlay query
 */
-publicOverlay.response.error = publicOverlay.Response;
+publicOverlay.response.error = publicOverlay.Response T;
 
 /**
 * A response for the `publicOverlay.getNextKeyBlockIds` query
 * @param blocks         list of key blocks
 * @param incomplete     flag points to finishinig query
 */
-publicOverlay.keyBlockIdsResponse blocks:(vector publicOverlay.blockId) incomplete:Bool = publicOverlay.KeyBlockIdsResponse;
+publicOverlay.keyBlockIds blocks:(vector publicOverlay.blockId) incomplete:Bool = publicOverlay.KeyBlockIds;
+
+/**
+* A response for getting full block info
+* @param id             block id
+* @param proof          block proof raw
+* @param block          block data raw
+* @param is_link        block proof link flag
+*/
+publicOverlay.blockFull.found id:publicOverlay.blockId proof:bytes block:bytes is_link:Bool = publicOverlay.BlockFull;
+
+/**
+* A response for getting empty block
+*/
+publicOverlay.blockFull.empty = publicOverlay.BlockFull;
+
 
 ---functions---
 
 /**
 * Get list of next key block ids.
 *
-* @param block     block to start with
+* @param block          block to start with
 */
-publicOverlay.getNextKeyBlockIds block:publicOverlay.blockId max_size:int = publicOverlay.KeyBlockIdsResponse;
+publicOverlay.getNextKeyBlockIds block:publicOverlay.blockId max_size:int = publicOverlay.Response publicOverlay.KeyBlockIds;
+
+/**
+* Get full block info
+*
+* @param block     block id to get
+*/
+publicOverlay.getBlockFull block:publicOverlay.blockId = publicOverlay.Response publicOverlay.blockFull;
+
+/**
+* Get next full block info
+*
+* @param prev_block     previous block id
+*/
+publicOverlay.getNextBlockFull prev_block:publicOverlay.blockId = publicOverlay.Response publicOverlay.blockFull;
+

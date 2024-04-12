@@ -1,5 +1,5 @@
+use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
-use tycho_network::proto::dht::rpc;
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "overlay.ping", scheme = "proto.tl")]
@@ -23,19 +23,53 @@ where
 }
 
 #[derive(Clone, TlRead, TlWrite)]
-#[tl(boxed, id = "publicOverlay.getNextKeyBlockIds", scheme = "proto.tl")]
-pub struct GetNextKeyBlockIds {
-    #[tl(with = "tl_block_id")]
-    pub block: everscale_types::models::BlockId,
-    pub max_size: u32,
-}
-
-#[derive(Clone, TlRead, TlWrite)]
-#[tl(boxed, id = "publicOverlay.keyBlockIdsResponse", scheme = "proto.tl")]
-pub struct KeyBlockIdsResponse {
+#[tl(boxed, id = "publicOverlay.keyBlockIds", scheme = "proto.tl")]
+pub struct KeyBlockIds {
     #[tl(with = "tl_block_id_vec")]
     pub blocks: Vec<everscale_types::models::BlockId>,
     pub incomplete: bool,
+}
+
+#[derive(Clone, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum BlockFull {
+    #[tl(id = "publicOverlay.blockFull.found")]
+    Found {
+        #[tl(with = "tl_block_id")]
+        block_id: everscale_types::models::BlockId,
+        proof: Bytes,
+        block: Bytes,
+        is_link: bool,
+    },
+    #[tl(id = "publicOverlay.blockFull.empty")]
+    Empty,
+}
+
+/// Overlay RPC models.
+pub mod rpc {
+    use super::*;
+
+    #[derive(Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "publicOverlay.getNextKeyBlockIds", scheme = "proto.tl")]
+    pub struct GetNextKeyBlockIds {
+        #[tl(with = "tl_block_id")]
+        pub block: everscale_types::models::BlockId,
+        pub max_size: u32,
+    }
+
+    #[derive(Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "publicOverlay.getBlockFull", scheme = "proto.tl")]
+    pub struct GetBlockFull {
+        #[tl(with = "tl_block_id")]
+        pub block: everscale_types::models::BlockId,
+    }
+
+    #[derive(Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "publicOverlay.getNextBlockFull", scheme = "proto.tl")]
+    pub struct GetNextBlockFull {
+        #[tl(with = "tl_block_id")]
+        pub prev_block: everscale_types::models::BlockId,
+    }
 }
 
 mod tl_block_id {
