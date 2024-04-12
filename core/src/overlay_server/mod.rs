@@ -41,7 +41,7 @@ impl Service<ServiceRequest> for OverlayServer {
         tycho_network::match_tl_request!(body, tag = constructor, {
             proto::overlay::GetNextKeyBlockIds as req => {
                 BoxFutureOrNoop::future({
-                    tracing::debug!(blockId = %req.block, max_size = req.max_size, "keyBlocksRequest");
+                    tracing::debug!(blockId = %req.block, max_size = req.max_size, "getNextKeyBlockIds");
 
                     let inner = self.0.clone();
 
