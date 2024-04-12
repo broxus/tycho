@@ -2216,6 +2216,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "serde",
+ "thiserror",
  "tl-proto",
  "tokio",
  "tracing",
