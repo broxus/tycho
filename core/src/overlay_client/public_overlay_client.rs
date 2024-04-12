@@ -1,12 +1,12 @@
+use anyhow::{Error, Result};
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::{Instant};
-use anyhow::{Error, Result};
-use tl_proto::{TlRead};
+use std::time::Instant;
+use tl_proto::TlRead;
 
 use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
-use tycho_network::Network;
-use tycho_network::{NetworkExt, PublicOverlay, Request};
+use tycho_network::{Network, PeerId};
+use tycho_network::{PublicOverlay, Request};
 
 use crate::overlay_client::neighbour::Neighbour;
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
@@ -27,10 +27,33 @@ trait OverlayClient {
 #[derive(Clone)]
 pub struct PublicOverlayClient(Arc<OverlayClientState>);
 
-impl PublicOverlayClient {
+pub struct Peer {
+    pub id: PeerId,
+    pub expires_at: u32,
+}
 
-    pub async fn new(network: Network, overlay: PublicOverlay, settings: OverlayClientSettings) -> Self {
-        let neighbours = Neighbours::new(overlay.clone(), settings.neighbours_options).await;
+impl PublicOverlayClient {
+    pub async fn new(
+        network: Network,
+        overlay: PublicOverlay,
+        settings: OverlayClientSettings,
+    ) -> Self {
+        let ttl = overlay.entry_ttl_sec();
+        let peers = {
+            overlay
+                .read_entries()
+                .choose_multiple(
+                    &mut rand::thread_rng(),
+                    settings.neighbours_options.max_neighbours,
+                )
+                .map(|entry_data| Peer {
+                    id: entry_data.entry.peer_id,
+                    expires_at: entry_data.expires_at(ttl),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let neighbours = Neighbours::new(peers, settings.neighbours_options).await;
         let neighbours_collection = NeighbourCollection(neighbours);
         Self(Arc::new(OverlayClientState {
             network,
@@ -45,7 +68,7 @@ impl PublicOverlayClient {
     }
 
     pub async fn update_neighbours(&self) {
-        let active_neighbours = self.neighbours().get_active_neighbours_count().await;
+        let active_neighbours = self.neighbours().get_active_neighbours().await.len();
         let max_neighbours = self.neighbours().options().max_neighbours;
 
         let neighbours_to_get = max_neighbours + (max_neighbours - active_neighbours);
@@ -55,9 +78,17 @@ impl PublicOverlayClient {
             default_roundtrip_ms: neighbour_options.default_roundtrip_ms,
         };
         let neighbours = {
-            self.0.overlay.read_entries()
-                .choose_multiple(&mut rand::thread_rng(), neighbours_to_get )
-                .map(|x| Neighbour::new(x.entry.peer_id, neighbour_options))
+            self.0
+                .overlay
+                .read_entries()
+                .choose_multiple(&mut rand::thread_rng(), neighbours_to_get)
+                .map(|x| {
+                    Neighbour::new(
+                        x.entry.peer_id,
+                        x.expires_at(self.0.overlay.entry_ttl_sec()),
+                        neighbour_options,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         self.neighbours().update(neighbours).await;
@@ -84,7 +115,7 @@ impl PublicOverlayClient {
 
         let end_time = Instant::now();
 
-        let (success) = match pong_res {
+        let success = match pong_res {
             Ok(response) => {
                 response.parse_tl::<Pong>()?;
                 tracing::info!(peer_id = %neighbour.peer_id(), "Pong received", );
@@ -112,7 +143,6 @@ impl PublicOverlayClient {
     pub fn ping_interval(&self) -> u64 {
         self.0.settings.neighbours_ping_interval
     }
-
 }
 
 impl OverlayClient for PublicOverlayClient {
@@ -133,7 +163,7 @@ impl OverlayClient for PublicOverlayClient {
         Ok(())
     }
 
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>>
+    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<'_, A>>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
@@ -175,10 +205,8 @@ struct OverlayClientState {
     overlay: PublicOverlay,
     neighbours: NeighbourCollection,
 
-    settings: OverlayOptions
+    settings: OverlayOptions,
 }
-
-
 
 pub struct QueryResponse<'a, A: TlRead<'a>> {
     pub data: A,
