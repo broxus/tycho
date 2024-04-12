@@ -12,17 +12,22 @@ pub struct NeighbourOptions {
 pub struct Neighbour(Arc<NeighbourState>);
 
 impl Neighbour {
-    pub fn new(peer_id: PeerId, options: NeighbourOptions) -> Self {
+    pub fn new(peer_id: PeerId, expires_at: u32,  options: NeighbourOptions) -> Self {
         let default_roundtrip_ms = truncate_time(options.default_roundtrip_ms);
         let stats = parking_lot::RwLock::new(TrackedStats::new(default_roundtrip_ms));
 
-        let state = Arc::new(NeighbourState { peer_id, stats });
+        let state = Arc::new(NeighbourState { peer_id, expires_at, stats });
         Self(state)
     }
 
     #[inline]
     pub fn peer_id(&self) -> &PeerId {
         &self.0.peer_id
+    }
+
+    #[inline]
+    pub fn expires_at_secs(&self) -> u32 {
+        self.0.expires_at
     }
 
     pub fn get_stats(&self) -> NeighbourStats {
@@ -73,6 +78,7 @@ pub struct NeighbourStats {
 
 struct NeighbourState {
     peer_id: PeerId,
+    expires_at: u32,
     stats: parking_lot::RwLock<TrackedStats>,
 }
 

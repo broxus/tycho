@@ -122,6 +122,10 @@ impl PublicOverlay {
         &self.inner.overlay_id
     }
 
+    pub fn entry_ttl_sec(&self) -> u32 {
+        self.inner.entry_ttl_sec
+    }
+
     pub async fn query(
         &self,
         network: &Network,
@@ -456,6 +460,16 @@ impl PublicOverlayEntries {
 pub struct PublicOverlayEntryData {
     pub entry: Arc<PublicEntry>,
     pub resolver_handle: PeerResolverHandle,
+}
+
+impl PublicOverlayEntryData {
+    pub fn is_expired(&self, now: u32, ttl: u32) -> bool {
+        self.entry.is_expired(now, ttl)
+    }
+
+    pub fn expires_at(&self, ttl: u32) -> u32 {
+        self.entry.created_at.saturating_add(ttl)
+    }
 }
 
 pub struct PublicOverlayEntriesReadGuard<'a> {

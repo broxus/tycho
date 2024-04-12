@@ -21,7 +21,6 @@ impl Default for OverlayOptions {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeighboursOptions {
     pub max_neighbours: usize,
@@ -32,7 +31,7 @@ pub struct NeighboursOptions {
 impl Default for NeighboursOptions {
     fn default() -> Self {
         Self {
-            max_neighbours: 16,
+            max_neighbours: 5,
             max_ping_tasks: 6,
             default_roundtrip_ms: 2000,
         }
