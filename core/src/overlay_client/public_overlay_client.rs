@@ -27,6 +27,7 @@ trait OverlayClient {
 #[derive(Clone)]
 pub struct PublicOverlayClient(Arc<OverlayClientState>);
 
+#[derive(Clone)]
 pub struct Peer {
     pub id: PeerId,
     pub expires_at: u32,
