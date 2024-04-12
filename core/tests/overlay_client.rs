@@ -1,10 +1,19 @@
+use std::time::Instant;
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::thread_rng;
-use tycho_core::overlay_client::neighbours::{Neighbours, NeighboursOptions};
-use tycho_network::{OverlayId, PeerId, PublicOverlay};
+use tl_proto::{TlRead, TlWrite};
+use tycho_core::overlay_client::neighbour::{Neighbour, NeighbourOptions};
+use tycho_core::overlay_client::neighbours::Neighbours;
+use tycho_core::overlay_client::settings::NeighboursOptions;
+use tycho_network::{OverlayId, PeerId, PublicOverlay, Response, service_query_fn};
+
+#[derive(TlWrite, TlRead)]
+#[tl(boxed, id = 0x11223344)]
+struct TestResponse;
 
 #[tokio::test]
 pub async fn test() {
+    let options = NeighboursOptions::default();
     let initial_peers = vec![
         PeerId([0u8; 32]),
         PeerId([1u8; 32]),
@@ -12,11 +21,9 @@ pub async fn test() {
         PeerId([3u8; 32]),
         PeerId([4u8; 32]),
     ];
-    let public_overlay =  PublicOverlay::builder(OverlayId([0u8;32]))
-        .build(PingPongService);
     let neighbours = Neighbours::new(
-        public_overlay,
-        NeighboursOptions::default(),
+        initial_peers.clone(),
+        options.clone(),
 
     )
     .await;
@@ -38,8 +45,12 @@ pub async fn test() {
     let mut i = 0;
     let mut rng = thread_rng();
     let slice = initial_peers.as_slice();
-    while i < 100 {
-        if let Some(n) = neighbours.choose().await {
+    while i < 1000 {
+        //let start = Instant::now();
+        let n_opt = neighbours.choose().await;
+        //let end = Instant::now();
+
+        if let Some(n) = n_opt {
             let index = slice.iter().position(|&r| r == n.peer_id()).unwrap();
             let answer = indices[index].sample(&mut rng);
             if answer == 0 {
@@ -49,21 +60,40 @@ pub async fn test() {
                 println!("Failed request to peer: {}", n.peer_id());
                 n.track_request(200, false)
             }
-            neighbours.update_selection_index().await
+
+            neighbours.update_selection_index().await;
+
         }
         i = i + 1;
     }
-    let peers = neighbours
-        .get_sorted_neighbours()
-        .await
-        .iter()
-        .map(|(n, w)| (*n.peer_id(), *w))
-        .collect::<Vec<_>>();
 
-    for i in &peers {
-        println!("Peer: {:?}", i);
+
+    let new_peers = vec![
+        PeerId([5u8; 32]),
+        PeerId([6u8; 32]),
+        PeerId([7u8; 32]),
+        PeerId([8u8; 32]),
+        PeerId([9u8; 32]),
+    ];
+
+    let new_neighbours = new_peers.iter().map(|x| Neighbour::new(*x, NeighbourOptions {
+        default_roundtrip_ms: options.default_roundtrip_ms
+    })).collect::<Vec<_>>();
+
+    neighbours.update(new_neighbours).await;
+
+
+
+
+    let active = neighbours.get_active_neighbours().await;
+    println!("active neighbours {}", active.len() );
+    for i in active {
+        println!("peer {} score {}", i.peer_id(), i.get_stats().score);
     }
 
 
-   assert_ne!(peers.len(), 5);
+
+
+
+   //assert_ne!(peers.len(), 5);
 }

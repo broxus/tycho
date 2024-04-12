@@ -1,9 +1,9 @@
+use crate::overlay_client::public_overlay_client::Peer;
+use crate::overlay_client::settings::NeighboursOptions;
 use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tycho_network::{PublicOverlay};
-use crate::overlay_client::settings::NeighboursOptions;
 
 use super::neighbour::{Neighbour, NeighbourOptions};
 
@@ -13,33 +13,25 @@ pub struct Neighbours {
     options: NeighboursOptions,
     entries: Mutex<Vec<Neighbour>>,
     selection_index: Mutex<SelectionIndex>,
-    overlay: PublicOverlay,
 }
 
 impl Neighbours {
-    pub async fn new(
-        overlay: PublicOverlay,
-        options: NeighboursOptions,
-    ) -> Arc<Self> {
+    pub async fn new(peers: Vec<Peer>, options: NeighboursOptions) -> Arc<Self> {
         let neighbour_options = NeighbourOptions {
             default_roundtrip_ms: options.default_roundtrip_ms,
         };
 
-        let entries = {
-            let entries = overlay.read_entries()
-                .choose_multiple(&mut rand::thread_rng(), options.max_neighbours)
-                .map(|entry_data| Neighbour::new(entry_data.entry.peer_id, neighbour_options))
-                .collect();
-            Mutex::new(entries)
-        };
+        let entries = peers
+            .iter()
+            .map(|x| Neighbour::new(x.id, x.expires_at, neighbour_options))
+            .collect::<Vec<_>>();
 
         let selection_index = Mutex::new(SelectionIndex::new(options.max_neighbours));
 
         let result = Self {
             options,
-            entries,
+            entries: Mutex::new(entries),
             selection_index,
-            overlay,
         };
 
         tracing::info!("Initial update selection call");
@@ -60,82 +52,57 @@ impl Neighbours {
             .get(&mut rand::thread_rng())
     }
 
-
-
     pub async fn update_selection_index(&self) {
+        let now = tycho_util::time::now_sec();
         let mut guard = self.entries.lock().await;
-        guard.retain(|x| x.is_reliable());
+        guard.retain(|x| x.is_reliable() && x.expires_at_secs() < now);
         let mut lock = self.selection_index.lock().await;
         lock.update(guard.as_slice());
     }
 
-    pub async fn get_sorted_neighbours(&self) ->  Vec<(Neighbour, u32)> {
+    pub async fn get_sorted_neighbours(&self) -> Vec<(Neighbour, u32)> {
         let mut index = self.selection_index.lock().await;
-        index.indices_with_weights.sort_by(|(_, lw), (_, rw) | rw.cmp(lw));
-        return Vec::from(index.indices_with_weights.as_slice())
+        index
+            .indices_with_weights
+            .sort_by(|(_, lw), (_, rw)| rw.cmp(lw));
+        return Vec::from(index.indices_with_weights.as_slice());
     }
 
-    pub async fn get_active_neighbours_count(&self) -> usize {
-        self.entries.lock().await.len()
+    pub async fn get_active_neighbours(&self) -> Vec<Neighbour> {
+        Vec::from(self.entries.lock().await.as_slice())
     }
-
-    // pub async fn get_bad_neighbours_count(&self) -> usize {
-    //     let guard = self.entries.lock().await;
-    //     guard
-    //         .iter()
-    //         .filter(|x| !x.is_reliable())
-    //         .cloned()
-    //         .collect::<Vec<_>>()
-    //         .len()
-    // }
 
     pub async fn update(&self, new: Vec<Neighbour>) {
+        let now = tycho_util::time::now_sec();
         let mut guard = self.entries.lock().await;
+        //remove unreliable and expired neighbours
+        guard.retain(|x| x.is_reliable() && x.expires_at_secs() < now);
+
+        //if all neighbours are reliable and valid then remove the worst
         if guard.len() >= self.options.max_neighbours {
-            // or we can alternatively remove the worst node
-            drop(guard);
-            return
+            if let Some(worst) = guard
+                .iter()
+                .min_by(|l, r| l.get_stats().score.cmp(&r.get_stats().score))
+            {
+                if let Some(index) = guard.iter().position(|x| x.peer_id() == worst.peer_id()) {
+                    guard.remove(index);
+                }
+            }
         }
 
         for n in new {
-            if let Some(_) = guard.iter().find(|x| x.peer_id() == n.peer_id()) {
+            if guard
+                .iter()
+                .any(|x| x.peer_id() == n.peer_id()) {
                 continue;
             }
             if guard.len() < self.options.max_neighbours {
                 guard.push(n);
-            } else {
-                return;
             }
         }
 
-        // const MINIMAL_NEIGHBOUR_COUNT: usize = 16;
-        // let mut guard = self.entries.lock().await;s
-        //
-        // guard.sort_by(|a, b| a.get_stats().score.cmp(&b.get_stats().score));
-        //
-        // let mut all_reliable = true;
-        //
-        // for entry in entries {
-        //     if let Some(index) = guard.iter().position(|x| x.peer_id() == entry.peer_id()) {
-        //         let nbg = guard.get(index).unwrap();
-        //
-        //         if !nbg.is_reliable() && guard.len() > MINIMAL_NEIGHBOUR_COUNT {
-        //             guard.remove(index);
-        //             all_reliable = false;
-        //         }
-        //     } else {
-        //         guard.push(entry.clone());
-        //     }
-        // }
-        //
-        // //if everything is reliable then remove the worst node
-        // if all_reliable && guard.len() > MINIMAL_NEIGHBOUR_COUNT {
-        //     guard.pop();
-        // }
-        //
         drop(guard);
         self.update_selection_index().await;
-
     }
 }
 
@@ -188,4 +155,3 @@ impl SelectionIndex {
             .cloned()
     }
 }
-
