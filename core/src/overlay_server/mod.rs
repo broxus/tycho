@@ -4,7 +4,7 @@ use bytes::{Buf, Bytes};
 use tokio::sync::broadcast;
 use tycho_network::proto::dht::{rpc, NodeResponse, Value, ValueResponseRaw};
 use tycho_network::{Response, Service, ServiceRequest};
-use tycho_storage::{KeyBlocksDirection, Storage};
+use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 
 use crate::proto;
@@ -39,20 +39,39 @@ impl Service<ServiceRequest> for OverlayServer {
         };
 
         tycho_network::match_tl_request!(body, tag = constructor, {
-            proto::overlay::GetNextKeyBlockIds as req => {
+            proto::overlay::rpc::GetNextKeyBlockIds as req => {
                 BoxFutureOrNoop::future({
                     tracing::debug!(blockId = %req.block, max_size = req.max_size, "getNextKeyBlockIds");
 
                     let inner = self.0.clone();
 
                     async move {
-                        let res = inner.handle_get_next_key_block_ids(&req);
+                        let res = inner.handle_get_next_key_block_ids(req);
                         Some(Response::from_tl(res))
+                    }
+                })
+            },
+            proto::overlay::rpc::GetBlockFull as req => {
+                BoxFutureOrNoop::future({
+                    tracing::debug!(blockId = %req.block, "getBlockFull");
 
-                        /*tokio::task::spawn_blocking(move || {
-                            let res = inner.handle_get_next_key_block_ids(&req);
-                            Some(Response::from_tl(res))
-                        }).await.unwrap_or_else(|_| None)*/
+                    let inner = self.0.clone();
+
+                    async move {
+                        let res = inner.handle_get_block_full(req).await;
+                        Some(Response::from_tl(res))
+                    }
+                })
+            },
+            proto::overlay::rpc::GetNextBlockFull as req => {
+                BoxFutureOrNoop::future({
+                    tracing::debug!(prevBlockId = %req.prev_block, "getNextBlockFull");
+
+                    let inner = self.0.clone();
+
+                    async move {
+                        let res = inner.handle_get_next_block_full(req).await;
+                        Some(Response::from_tl(res))
                     }
                 })
             },
@@ -93,8 +112,8 @@ impl OverlayServerInner {
 
     fn handle_get_next_key_block_ids(
         &self,
-        req: &proto::overlay::GetNextKeyBlockIds,
-    ) -> proto::overlay::Response<proto::overlay::KeyBlockIdsResponse> {
+        req: proto::overlay::rpc::GetNextKeyBlockIds,
+    ) -> proto::overlay::Response<proto::overlay::KeyBlockIds> {
         const NEXT_KEY_BLOCKS_LIMIT: usize = 8;
 
         let block_handle_storage = self.storage().block_handle_storage();
@@ -135,13 +154,96 @@ impl OverlayServerInner {
         match get_next_key_block_ids() {
             Ok(ids) => {
                 let incomplete = ids.len() < limit;
-                proto::overlay::Response::Ok(proto::overlay::KeyBlockIdsResponse {
+                proto::overlay::Response::Ok(proto::overlay::KeyBlockIds {
                     blocks: ids,
                     incomplete,
                 })
             }
             Err(e) => {
                 tracing::warn!("get_next_key_block_ids failed: {e:?}");
+                proto::overlay::Response::Err
+            }
+        }
+    }
+
+    async fn handle_get_block_full(
+        &self,
+        req: proto::overlay::rpc::GetBlockFull,
+    ) -> proto::overlay::Response<proto::overlay::BlockFull> {
+        let block_handle_storage = self.storage().block_handle_storage();
+        let block_storage = self.storage().block_storage();
+
+        let get_block_full = || async {
+            let mut is_link = false;
+            let block = match block_handle_storage.load_handle(&req.block)? {
+                Some(handle)
+                    if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) =>
+                {
+                    let block = block_storage.load_block_data_raw(&handle).await?;
+                    let proof = block_storage.load_block_proof_raw(&handle, is_link).await?;
+
+                    proto::overlay::BlockFull::Found {
+                        block_id: req.block,
+                        proof: proof.into(),
+                        block: block.into(),
+                        is_link,
+                    }
+                }
+                _ => proto::overlay::BlockFull::Empty,
+            };
+
+            Ok::<_, anyhow::Error>(block)
+        };
+
+        match get_block_full().await {
+            Ok(block_full) => proto::overlay::Response::Ok(block_full),
+            Err(e) => {
+                tracing::warn!("get_block_full failed: {e:?}");
+                proto::overlay::Response::Err
+            }
+        }
+    }
+
+    async fn handle_get_next_block_full(
+        &self,
+        req: proto::overlay::rpc::GetNextBlockFull,
+    ) -> proto::overlay::Response<proto::overlay::BlockFull> {
+        let block_handle_storage = self.storage().block_handle_storage();
+        let block_connection_storage = self.storage().block_connection_storage();
+        let block_storage = self.storage().block_storage();
+
+        let get_next_block_full = || async {
+            let next_block_id = match block_handle_storage.load_handle(&req.prev_block)? {
+                Some(handle) if handle.meta().has_next1() => block_connection_storage
+                    .load_connection(&req.prev_block, BlockConnection::Next1)?,
+                _ => return Ok(proto::overlay::BlockFull::Empty),
+            };
+
+            let mut is_link = false;
+            let block = match block_handle_storage.load_handle(&next_block_id)? {
+                Some(handle)
+                    if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) =>
+                {
+                    let block = block_storage.load_block_data_raw(&handle).await?;
+                    let proof = block_storage.load_block_proof_raw(&handle, is_link).await?;
+
+                    proto::overlay::BlockFull::Found {
+                        block_id: next_block_id,
+                        proof: proof.into(),
+                        block: block.into(),
+                        is_link,
+                    }
+                }
+                _ => proto::overlay::BlockFull::Empty,
+            };
+
+            Ok::<_, anyhow::Error>(block)
+        };
+
+        match get_next_block_full().await {
+            Ok(block_full) => proto::overlay::Response::Ok(block_full),
+            Err(e) => {
+                tracing::warn!("get_next_block_full failed: {e:?}");
                 proto::overlay::Response::Err
             }
         }
