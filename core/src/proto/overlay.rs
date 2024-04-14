@@ -23,6 +23,12 @@ where
 }
 
 #[derive(Clone, TlRead, TlWrite)]
+#[tl(boxed, id = "publicOverlay.data", scheme = "proto.tl")]
+pub struct Data {
+    pub data: Bytes,
+}
+
+#[derive(Clone, TlRead, TlWrite)]
 #[tl(boxed, id = "publicOverlay.keyBlockIds", scheme = "proto.tl")]
 pub struct KeyBlockIds {
     #[tl(with = "tl_block_id_vec")]
@@ -43,6 +49,15 @@ pub enum BlockFull {
     },
     #[tl(id = "publicOverlay.blockFull.empty")]
     Empty,
+}
+
+#[derive(Clone, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum ArchiveInfo {
+    #[tl(id = "publicOverlay.archiveInfo", size_hint = 8)]
+    Found { id: u64 },
+    #[tl(id = "publicOverlay.archiveNotFound")]
+    NotFound,
 }
 
 /// Overlay RPC models.
@@ -69,6 +84,30 @@ pub mod rpc {
     pub struct GetNextBlockFull {
         #[tl(with = "tl_block_id")]
         pub prev_block: everscale_types::models::BlockId,
+    }
+
+    #[derive(Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "publicOverlay.getArchiveInfo",
+        size_hint = 4,
+        scheme = "proto.tl"
+    )]
+    pub struct GetArchiveInfo {
+        pub mc_seqno: u32,
+    }
+
+    #[derive(Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "publicOverlay.getArchiveSlice",
+        size_hint = 20,
+        scheme = "proto.tl"
+    )]
+    pub struct GetArchiveSlice {
+        pub archive_id: u64,
+        pub offset: u64,
+        pub max_size: u32,
     }
 }
 
