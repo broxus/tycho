@@ -49,6 +49,21 @@ publicOverlay.blockFull.found id:publicOverlay.blockId proof:bytes block:bytes i
 */
 publicOverlay.blockFull.empty = publicOverlay.BlockFull;
 
+/**
+* An unsuccessul response for the 'getArchiveInfo' query
+*/
+publicOverlay.archiveNotFound = publicOverlay.ArchiveInfo;
+/**
+* A successul response for the 'getArchiveInfo' query
+*
+* @param id             archive id
+*/
+publicOverlay.archiveInfo id:long = publicOverlay.ArchiveInfo;
+
+/**
+* Raw data bytes
+*/
+publicOverlay.data data:bytes = publicOverlay.Data;
 
 ---functions---
 
@@ -62,7 +77,7 @@ publicOverlay.getNextKeyBlockIds block:publicOverlay.blockId max_size:int = publ
 /**
 * Get full block info
 *
-* @param block     block id to get
+* @param block          block id to get
 */
 publicOverlay.getBlockFull block:publicOverlay.blockId = publicOverlay.Response publicOverlay.blockFull;
 
@@ -73,3 +88,18 @@ publicOverlay.getBlockFull block:publicOverlay.blockId = publicOverlay.Response 
 */
 publicOverlay.getNextBlockFull prev_block:publicOverlay.blockId = publicOverlay.Response publicOverlay.blockFull;
 
+/**
+* Get archive info
+*
+* @param mac_seqno  masterchain sequence number
+*/
+publicOverlay.getArchiveInfo mc_seqno:int = publicOverlay.ArchiveInfo;
+
+/**
+* Get archive slice
+*
+* @param archive_id
+* @param offset
+* @param max_size
+*/
+publicOverlay.getArchiveSlice archive_id:long offset:long max_size:int = publicOverlay.Data;
