@@ -75,6 +75,35 @@ impl Service<ServiceRequest> for OverlayServer {
                     }
                 })
             },
+            proto::overlay::rpc::GetArchiveInfo as req => {
+                BoxFutureOrNoop::future({
+                    tracing::debug!(mc_seqno = %req.mc_seqno, "getArchiveInfo");
+
+                    let inner = self.0.clone();
+
+                    async move {
+                        let res = inner.handle_get_archive_info(req).await;
+                        Some(Response::from_tl(res))
+                    }
+                })
+            },
+            proto::overlay::rpc::GetArchiveSlice as req => {
+                BoxFutureOrNoop::future({
+                    tracing::debug!(
+                        archive_id = %req.archive_id,
+                        offset = %req.offset,
+                        max_size = %req.max_size,
+                        "getArchiveSlice"
+                    );
+
+                    let inner = self.0.clone();
+
+                    async move {
+                        let res = inner.handle_get_archive_slice(req).await;
+                        Some(Response::from_tl(res))
+                    }
+                })
+            },
         }, e => {
             tracing::debug!("failed to deserialize query: {e}");
             BoxFutureOrNoop::Noop
@@ -248,6 +277,72 @@ impl OverlayServerInner {
             }
         }
     }
+
+    async fn handle_get_archive_info(
+        &self,
+        req: proto::overlay::rpc::GetArchiveInfo,
+    ) -> proto::overlay::Response<proto::overlay::ArchiveInfo> {
+        let mc_seqno = req.mc_seqno;
+        let node_state = self.storage.node_state();
+
+        let get_archive_id = || {
+            let last_applied_mc_block = node_state.load_last_mc_block_id()?;
+            let shards_client_mc_block_id = node_state.load_shards_client_mc_block_id()?;
+
+            Ok::<_, anyhow::Error>((last_applied_mc_block, shards_client_mc_block_id))
+        };
+
+        match get_archive_id() {
+            Ok((last_applied_mc_block, shards_client_mc_block_id)) => {
+                if mc_seqno > last_applied_mc_block.seqno {
+                    return proto::overlay::Response::Ok(proto::overlay::ArchiveInfo::NotFound);
+                }
+
+                if mc_seqno > shards_client_mc_block_id.seqno {
+                    return proto::overlay::Response::Ok(proto::overlay::ArchiveInfo::NotFound);
+                }
+
+                let block_storage = self.storage().block_storage();
+                let res = match block_storage.get_archive_id(mc_seqno) {
+                    Some(id) => proto::overlay::ArchiveInfo::Found { id: id as u64 },
+                    None => proto::overlay::ArchiveInfo::NotFound,
+                };
+
+                proto::overlay::Response::Ok(res)
+            }
+            Err(e) => {
+                tracing::warn!("get_archive_id failed: {e:?}");
+                proto::overlay::Response::Err
+            }
+        }
+    }
+
+    async fn handle_get_archive_slice(
+        &self,
+        req: proto::overlay::rpc::GetArchiveSlice,
+    ) -> proto::overlay::Response<proto::overlay::Data> {
+        let block_storage = self.storage.block_storage();
+
+        let get_archive_slice = || {
+            let archive_slice = block_storage
+                .get_archive_slice(
+                    req.archive_id as u32,
+                    req.offset as usize,
+                    req.max_size as usize,
+                )?
+                .ok_or(OverlayServerError::ArchiveNotFound)?;
+
+            Ok::<_, anyhow::Error>(archive_slice)
+        };
+
+        match get_archive_slice() {
+            Ok(data) => proto::overlay::Response::Ok(proto::overlay::Data { data: data.into() }),
+            Err(e) => {
+                tracing::warn!("get_archive_slice failed: {e:?}");
+                proto::overlay::Response::Err
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -258,4 +353,6 @@ enum OverlayServerError {
     InvalidRootHash,
     #[error("Invalid file hash")]
     InvalidFileHash,
+    #[error("Archive not found")]
+    ArchiveNotFound,
 }
