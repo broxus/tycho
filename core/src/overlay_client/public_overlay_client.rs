@@ -13,7 +13,7 @@ use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
 use crate::overlay_client::settings::{OverlayClientSettings, OverlayOptions};
 use crate::proto::overlay::{Ping, Pong};
 
-trait OverlayClient {
+pub trait OverlayClient {
     async fn send<R>(&self, data: R) -> Result<()>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>;
