@@ -91,6 +91,7 @@ impl PublicOverlayBuilder {
                 entries: RwLock::new(entries),
                 entries_added: Notify::new(),
                 entries_changed: Notify::new(),
+                entries_removed: Notify::new(),
                 entry_count: AtomicUsize::new(0),
                 banned_peer_ids: self.banned_peer_ids,
                 service: service.boxed(),
@@ -174,6 +175,10 @@ impl PublicOverlay {
     /// Notifies when entries are updated in the overlay (added or updated).
     pub fn entries_changed(&self) -> &Notify {
         &self.inner.entries_changed
+    }
+
+    pub fn entries_removed(&self) -> &Notify {
+        &self.inner.entries_removed
     }
 
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
@@ -309,6 +314,8 @@ impl PublicOverlay {
             !item.entry.is_expired(now, this.entry_ttl_sec)
                 && !this.banned_peer_ids.contains(&item.entry.peer_id)
         });
+
+        self.inner.entries_removed.notify_waiters()
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
@@ -338,6 +345,7 @@ struct Inner {
     entry_count: AtomicUsize,
     entries_added: Notify,
     entries_changed: Notify,
+    entries_removed: Notify,
     banned_peer_ids: FastDashSet<PeerId>,
     service: BoxService<ServiceRequest, Response>,
     request_prefix: Box<[u8]>,

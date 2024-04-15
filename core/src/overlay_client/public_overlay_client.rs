@@ -68,6 +68,16 @@ impl PublicOverlayClient {
         &self.0.neighbours.0
     }
 
+    pub async fn entries_removed(&self) {
+        self.0.overlay.entries_removed().notified().await
+    }
+    pub fn neighbour_update_interval_ms(&self) -> u64 {
+        self.0.settings.neighbours_update_interval
+    }
+    pub fn neighbour_ping_interval_ms(&self) -> u64 {
+        self.0.settings.neighbours_ping_interval
+    }
+
     pub async fn update_neighbours(&self) {
         let active_neighbours = self.neighbours().get_active_neighbours().await.len();
         let max_neighbours = self.neighbours().options().max_neighbours;
@@ -93,6 +103,10 @@ impl PublicOverlayClient {
                 .collect::<Vec<_>>()
         };
         self.neighbours().update(neighbours).await;
+    }
+
+    pub async fn remove_outdated_neighbours(&self) {
+        self.neighbours().remove_outdated_neighbours().await;
     }
 
     pub async fn ping_random_neighbour(&self) -> Result<()> {
@@ -135,14 +149,6 @@ impl PublicOverlayClient {
         self.neighbours().update_selection_index().await;
 
         Ok(())
-    }
-
-    pub fn update_interval(&self) -> u64 {
-        self.0.settings.neighbours_update_interval
-    }
-
-    pub fn ping_interval(&self) -> u64 {
-        self.0.settings.neighbours_ping_interval
     }
 }
 
