@@ -53,9 +53,8 @@ impl Neighbours {
     }
 
     pub async fn update_selection_index(&self) {
-        let now = tycho_util::time::now_sec();
         let mut guard = self.entries.lock().await;
-        guard.retain(|x| x.is_reliable() && x.expires_at_secs() > now);
+        guard.retain(|x| x.is_reliable());
         let mut lock = self.selection_index.lock().await;
         lock.update(guard.as_slice());
     }
@@ -101,6 +100,15 @@ impl Neighbours {
             }
         }
 
+        drop(guard);
+        self.update_selection_index().await;
+    }
+
+    pub async fn remove_outdated_neighbours(&self) {
+        let now = tycho_util::time::now_sec();
+        let mut guard = self.entries.lock().await;
+        //remove unreliable and expired neighbours
+        guard.retain(|x| x.expires_at_secs() > now);
         drop(guard);
         self.update_selection_index().await;
     }
