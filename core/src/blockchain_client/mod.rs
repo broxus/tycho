@@ -40,7 +40,10 @@ impl BlockchainClient {
         Ok(data)
     }
 
-    pub async fn get_next_block_full(&self, prev_block: BlockId) -> Result<QueryResponse<'_, BlockFull>> {
+    pub async fn get_next_block_full(
+        &self,
+        prev_block: BlockId,
+    ) -> Result<QueryResponse<'_, BlockFull>> {
         let data = self
             .client
             .query::<GetNextBlockFull, BlockFull>(GetNextBlockFull { prev_block })
@@ -56,10 +59,19 @@ impl BlockchainClient {
         Ok(data)
     }
 
-    pub async fn get_archive_slice(&self, archive_id: u64, offset: u64, max_size: u32) -> Result<QueryResponse<'_, Data>> {
+    pub async fn get_archive_slice(
+        &self,
+        archive_id: u64,
+        offset: u64,
+        max_size: u32,
+    ) -> Result<QueryResponse<'_, Data>> {
         let data = self
             .client
-            .query::<GetArchiveSlice, Data>(GetArchiveSlice { archive_id, offset, max_size })
+            .query::<GetArchiveSlice, Data>(GetArchiveSlice {
+                archive_id,
+                offset,
+                max_size,
+            })
             .await?;
         Ok(data)
     }
