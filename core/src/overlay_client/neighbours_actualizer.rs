@@ -2,7 +2,7 @@ use crate::overlay_client::public_overlay_client::PublicOverlayClient;
 use std::time::Duration;
 
 async fn start_neighbours_ping(client: PublicOverlayClient) {
-    let mut interval = tokio::time::interval(Duration::from_millis(client.update_interval()));
+    let mut interval = tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
 
     loop {
         interval.tick().await;
@@ -13,10 +13,17 @@ async fn start_neighbours_ping(client: PublicOverlayClient) {
 }
 
 async fn start_neighbours_update(client: PublicOverlayClient) {
-    let mut interval = tokio::time::interval(Duration::from_millis(client.update_interval()));
+    let mut interval = tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
     loop {
         interval.tick().await;
         client.update_neighbours().await;
+    }
+}
+
+async fn wait_update_neighbours(client: PublicOverlayClient) {
+    loop {
+        client.entries_removed().await;
+        client.remove_outdated_neighbours().await;
     }
 }
 
