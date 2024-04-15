@@ -6,7 +6,7 @@ use tycho_core::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_core::overlay_client::neighbours::Neighbours;
 use tycho_core::overlay_client::public_overlay_client::Peer;
 use tycho_core::overlay_client::settings::NeighboursOptions;
-use tycho_network::{service_query_fn, OverlayId, PeerId, PublicOverlay, Response};
+use tycho_network::{PeerId};
 
 #[derive(TlWrite, TlRead)]
 #[tl(boxed, id = 0x11223344)]
