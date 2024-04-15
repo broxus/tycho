@@ -53,6 +53,15 @@ pub enum BlockFull {
 
 #[derive(Clone, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
+pub enum PersistentStatePart {
+    #[tl(id = "publicOverlay.persistentStatePart.found")]
+    Found { data: Bytes },
+    #[tl(id = "publicOverlay.persistentStatePart.notFound")]
+    NotFound,
+}
+
+#[derive(Clone, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
     #[tl(id = "publicOverlay.archiveInfo", size_hint = 8)]
     Found { id: u64 },
@@ -84,6 +93,21 @@ pub mod rpc {
     pub struct GetNextBlockFull {
         #[tl(with = "tl_block_id")]
         pub prev_block: everscale_types::models::BlockId,
+    }
+
+    #[derive(Clone, TlRead, TlWrite)]
+    #[tl(
+        boxed,
+        id = "publicOverlay.getPersistentStatePart",
+        scheme = "proto.tl"
+    )]
+    pub struct GetPersistentStatePart {
+        #[tl(with = "tl_block_id")]
+        pub block: everscale_types::models::BlockId,
+        #[tl(with = "tl_block_id")]
+        pub mc_block: everscale_types::models::BlockId,
+        pub offset: u64,
+        pub max_size: u64,
     }
 
     #[derive(Clone, TlRead, TlWrite)]
