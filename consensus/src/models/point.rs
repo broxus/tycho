@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use std::ops::{Add, Sub};
 
 use bytes::Bytes;
-use everscale_crypto::ed25519::ExpandedSecretKey;
+use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 
@@ -12,18 +12,58 @@ use tycho_util::FastHashMap;
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Digest(pub [u8; 32]);
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Signature(pub Bytes);
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Round(pub u32);
+
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct UnixTime(u64);
+
+impl UnixTime {
+    pub const fn from_millis(millis: u64) -> Self {
+        Self(millis)
+    }
+    pub fn now() -> Self {
+        Self(
+            u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("current time since unix epoch")
+                    .as_millis(),
+            )
+            .expect("current Unix time in millis as u64"),
+        )
+    }
+}
+
+impl Add for UnixTime {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0.saturating_add(rhs.0))
+    }
+}
+
+impl Sub for UnixTime {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+}
 
 impl Round {
     pub fn prev(&self) -> Round {
         self.0
             .checked_sub(1)
             .map(Round)
-            .unwrap_or_else(|| panic!("DAG round number overflow, fix dag initial configuration"))
+            .expect("DAG round number underflow, fix dag initial configuration")
+    }
+    pub fn next(&self) -> Round {
+        self.0
+            .checked_add(1)
+            .map(Round)
+            .expect("DAG round number overflow, inner type exhausted")
     }
 }
 
@@ -45,8 +85,13 @@ pub struct PrevPoint {
     // any node may proof its vertex@r-1 with its point@r+0 only
     // pub round: Round,
     pub digest: Digest,
-    // >= 2F witnesses, point author excluded, order does not matter
+    /// `>= 2F` neighbours, order does not matter;
+    /// point author is excluded: everyone must use the proven point to validate its proof
     pub evidence: FastHashMap<PeerId, Signature>,
+    // TODO if we use TL, then every node can sign hash of a point's body (not all body bytes)
+    //  so we can include that hash into PrevPoint
+    //  to check signatures inside BroadcastFilter::verify() without waiting for DAG
+    //  (if that will be fast enough to respond without overlay query timeout)
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -65,38 +110,48 @@ pub enum Link {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PointBody {
     pub location: Location, // let it be @ r+0
-    pub time: SystemTime,
+    pub time: UnixTime,
     pub payload: Vec<Bytes>,
-    // of the same author
+    /// by the same author
     pub proof: Option<PrevPoint>,
-    // >= 2F+1 points @ r-1,
-    // signed by author @ r-1 with some additional points just mentioned;
-    // mandatory includes author's own vertex iff proof is given.
-    // Repeatable order on every node needed for commit; map is used during validation
+    /// `>= 2F+1` points @ r-1,
+    /// signed by author @ r-1 with some additional points just mentioned;
+    /// mandatory includes author's own vertex iff proof is given.
+    /// Repeatable order on every node is needed for commit; map is used during validation
     pub includes: BTreeMap<PeerId, Digest>,
-    // >= 0 points @ r-2, signed by author @ r-1
-    // Repeatable order on every node needed for commit; map is used during validation
+    /// `>= 0` points @ r-2, signed by author @ r-1
+    /// Repeatable order on every node needed for commit; map is used during validation
     pub witness: BTreeMap<PeerId, Digest>,
-    // defines author's last committed anchor
-    pub last_anchor_trigger: Link,
-    // helps to maintain anchor chain linked without explicit DAG traverse
-    pub last_anchor_proof: Link,
+    /// last included by author; defines author's last committed anchor
+    pub anchor_trigger: Link,
+    /// last included by author; maintains anchor chain linked without explicit DAG traverse
+    pub anchor_proof: Link,
 }
 
 impl PointBody {
-    pub fn wrap(self, secret: ExpandedSecretKey) -> Option<Point> {
-        let body = bincode::serialize(&self).ok()?;
-        let pubkey = self.location.author.as_public_key()?;
-        let sig = secret.sign_raw(body.as_slice(), &pubkey);
+    pub fn wrap(self, local_keypair: &KeyPair) -> Point {
+        assert_eq!(
+            self.location.author,
+            PeerId::from(local_keypair.public_key),
+            "produced point author must match local key pair"
+        );
+        let body = bincode::serialize(&self).expect("shouldn't happen");
+        let sig = local_keypair.sign_raw(body.as_slice());
         let mut hasher = Sha256::new();
         hasher.update(body.as_slice());
         hasher.update(sig.as_slice());
         let digest = Digest(hasher.finalize().into());
-        Some(Point {
+        Point {
             body: self,
             signature: Signature(Bytes::from(sig.to_vec())),
             digest,
-        })
+        }
+    }
+
+    pub fn sign(&self, local_keypair: &KeyPair) -> Signature {
+        let body = bincode::serialize(&self).expect("shouldn't happen");
+        let sig = local_keypair.sign_raw(body.as_slice());
+        Signature(Bytes::from(sig.to_vec()))
     }
 }
 
@@ -159,8 +214,8 @@ impl Point {
                     && self.body.witness.is_empty()
                     && self.body.payload.is_empty()
                     && self.body.proof.is_none()
-                    && self.body.last_anchor_proof == Link::ToSelf
-                    && self.body.last_anchor_trigger == Link::ToSelf
+                    && self.body.anchor_proof == Link::ToSelf
+                    && self.body.anchor_trigger == Link::ToSelf
             }
             round if round > LAST_GENESIS_ROUND => {
                 // no witness is possible at the round right after genesis;
@@ -169,19 +224,21 @@ impl Point {
                 // leader must maintain its chain of proofs,
                 // while others must link to previous points (checked at the end of this method);
                 // its decided later (using dag round data) whether current point belongs to leader
-                && !(self.body.last_anchor_proof == Link::ToSelf && self.body.proof.is_none())
-                && !(self.body.last_anchor_trigger == Link::ToSelf && self.body.proof.is_none())
+                && !(self.body.anchor_proof == Link::ToSelf && self.body.proof.is_none())
+                && !(self.body.anchor_trigger == Link::ToSelf && self.body.proof.is_none())
             }
             _ => false,
         };
         is_special_ok
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
             && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(&author)
-            && self.is_link_well_formed(&self.body.last_anchor_proof)
-            && self.is_link_well_formed(&self.body.last_anchor_trigger)
+            // in contrast, evidence must contain only signatures of others
+            && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
+            && self.is_link_well_formed(&self.body.anchor_proof)
+            && self.is_link_well_formed(&self.body.anchor_trigger)
             && match (
-                self.last_anchor_proof_round(),
-                self.last_anchor_trigger_round(),
+            self.anchor_proof_round(),
+            self.anchor_trigger_round(),
             ) {
                 (x, LAST_GENESIS_ROUND) => x >= LAST_GENESIS_ROUND,
                 (LAST_GENESIS_ROUND, y) => y >= LAST_GENESIS_ROUND,
@@ -214,28 +271,30 @@ impl Point {
         }
     }
 
-    pub fn last_anchor_trigger_round(&self) -> Round {
-        self.get_linked_to_round(&self.body.last_anchor_trigger)
+    // TODO maybe implement field accessors parameterized by combination of enums
+
+    pub fn anchor_trigger_round(&self) -> Round {
+        self.get_linked_to_round(&self.body.anchor_trigger)
     }
 
-    pub fn last_anchor_proof_round(&self) -> Round {
-        self.get_linked_to_round(&self.body.last_anchor_proof)
+    pub fn anchor_proof_round(&self) -> Round {
+        self.get_linked_to_round(&self.body.anchor_proof)
     }
 
-    pub fn last_anchor_trigger_id(&self) -> PointId {
-        self.get_linked_to(&self.body.last_anchor_trigger)
+    pub fn anchor_trigger_id(&self) -> PointId {
+        self.get_linked_to(&self.body.anchor_trigger)
     }
 
-    pub fn last_anchor_proof_id(&self) -> PointId {
-        self.get_linked_to(&self.body.last_anchor_proof)
+    pub fn anchor_proof_id(&self) -> PointId {
+        self.get_linked_to(&self.body.anchor_proof)
     }
 
-    pub fn last_anchor_trigger_through(&self) -> PointId {
-        self.get_linked_through(&self.body.last_anchor_trigger)
+    pub fn anchor_trigger_through(&self) -> PointId {
+        self.get_linked_through(&self.body.anchor_trigger)
     }
 
-    pub fn last_anchor_proof_through(&self) -> PointId {
-        self.get_linked_through(&self.body.last_anchor_proof)
+    pub fn anchor_proof_through(&self) -> PointId {
+        self.get_linked_through(&self.body.anchor_proof)
     }
 
     fn get_linked_to_round(&self, link: &Link) -> Round {
@@ -271,15 +330,10 @@ impl Point {
     }
 
     fn get_linked(&self, peer: &PeerId, through_includes: bool) -> PointId {
-        let through = if through_includes {
-            &self.body.includes
+        let (through, round) = if through_includes {
+            (&self.body.includes, self.body.location.round.prev())
         } else {
-            &self.body.witness
-        };
-        let round = if through_includes {
-            self.body.location.round.prev()
-        } else {
-            self.body.location.round.prev().prev()
+            (&self.body.witness, self.body.location.round.prev().prev())
         };
         PointId {
             location: Location {

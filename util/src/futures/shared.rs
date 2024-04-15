@@ -5,13 +5,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
-use futures_util::future::BoxFuture;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+
+type PermitFuture =
+    dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync + 'static;
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Shared<Fut: Future> {
     inner: Option<Arc<Inner<Fut>>>,
-    permit_fut: Option<BoxFuture<'static, Result<OwnedSemaphorePermit, AcquireError>>>,
+    permit_fut: Option<Pin<Box<PermitFuture>>>,
     permit: Option<OwnedSemaphorePermit>,
 }
 
@@ -222,6 +224,21 @@ where
         }
     }
 }
+/* FIXME remove if test will work
+unsafe impl<Fut: Send> Send for Shared<Fut>
+where
+    Fut: Future + Send,
+    Fut::Output: Send + Sync,
+{
+}
+
+unsafe impl<Fut: Send> Sync for Shared<Fut>
+where
+    Fut: Future + Send,
+    Fut::Output: Send + Sync,
+{
+}
+*/
 
 unsafe impl<Fut> Send for Inner<Fut>
 where
