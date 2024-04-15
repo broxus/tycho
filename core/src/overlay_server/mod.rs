@@ -326,6 +326,11 @@ impl OverlayServerInner {
             return proto::overlay::Response::Err;
         }
 
+        let persistent_state_storage = self.storage().persistent_state_storage();
+        if !persistent_state_storage.state_exists(&req.mc_block, &req.block) {
+            return proto::overlay::Response::Ok(proto::overlay::PersistentStatePart::NotFound);
+        }
+
         let persistent_state_storage = self.storage.persistent_state_storage();
         match persistent_state_storage
             .read_state_part(&req.mc_block, &req.block, req.offset, req.max_size)
