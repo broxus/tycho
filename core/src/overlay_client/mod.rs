@@ -1,14 +1,14 @@
-use std::time::Duration;
 use crate::overlay_client::public_overlay_client::PublicOverlayClient;
+use std::time::Duration;
 
 pub mod neighbour;
 pub mod neighbours;
 pub mod public_overlay_client;
 pub mod settings;
 
-
 async fn start_neighbours_ping(client: PublicOverlayClient) {
-    let mut interval = tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
+    let mut interval =
+        tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
 
     loop {
         interval.tick().await;
@@ -19,7 +19,8 @@ async fn start_neighbours_ping(client: PublicOverlayClient) {
 }
 
 async fn start_neighbours_update(client: PublicOverlayClient) {
-    let mut interval = tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
+    let mut interval =
+        tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
     loop {
         interval.tick().await;
         client.update_neighbours().await;
