@@ -7,7 +7,7 @@ use crate::overlay_client::public_overlay_client::{
     OverlayClient, PublicOverlayClient, QueryResponse,
 };
 use crate::proto::overlay::rpc::*;
-use crate::proto::overlay::{ArchiveInfo, BlockFull, Data, KeyBlockIds};
+use crate::proto::overlay::*;
 
 pub struct BlockchainClient {
     client: PublicOverlayClient,
@@ -69,6 +69,25 @@ impl BlockchainClient {
             .client
             .query::<GetArchiveSlice, Data>(GetArchiveSlice {
                 archive_id,
+                offset,
+                max_size,
+            })
+            .await?;
+        Ok(data)
+    }
+
+    pub async fn get_persistent_state_part(
+        &self,
+        mc_block: BlockId,
+        block: BlockId,
+        offset: u64,
+        max_size: u64,
+    ) -> Result<QueryResponse<'_, PersistentStatePart>> {
+        let data = self
+            .client
+            .query::<GetPersistentStatePart, PersistentStatePart>(GetPersistentStatePart {
+                block,
+                mc_block,
                 offset,
                 max_size,
             })
