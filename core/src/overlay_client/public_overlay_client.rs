@@ -216,7 +216,7 @@ struct OverlayClientState {
 }
 
 pub struct QueryResponse<'a, A: TlRead<'a>> {
-    pub data: A,
+    data: A,
     neighbour: Neighbour,
     roundtrip: u64,
     _marker: PhantomData<&'a ()>,
