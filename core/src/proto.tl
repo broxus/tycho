@@ -61,6 +61,17 @@ publicOverlay.archiveNotFound = publicOverlay.ArchiveInfo;
 publicOverlay.archiveInfo id:long = publicOverlay.ArchiveInfo;
 
 /**
+* An unsuccessul response for the 'getPersistentStatePart' query
+*/
+publicOverlay.persistentStatePart.notFound = publicOverlay.PersistentStatePart;
+/**
+* A successul response for the 'getPersistentStatePart' query
+*
+* @param data           persistent state part
+*/
+publicOverlay.persistentStatePart.found data:bytes = publicOverlay.PersistentStatePart;
+
+/**
 * Raw data bytes
 */
 publicOverlay.data data:bytes = publicOverlay.Data;
@@ -103,3 +114,13 @@ publicOverlay.getArchiveInfo mc_seqno:int = publicOverlay.ArchiveInfo;
 * @param max_size
 */
 publicOverlay.getArchiveSlice archive_id:long offset:long max_size:int = publicOverlay.Data;
+
+/**
+* Get persisten state part
+*
+* @param block
+* @param masterchain_block
+* @param offset
+* @param max_size
+*/
+publicOverlay.getPersistentStatePart block:publicOverlay.blockId mc_block:publicOverlay.blockId offset:long max_size:long = publicOverlay.PersistentStatePart;

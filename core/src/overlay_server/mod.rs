@@ -12,8 +12,11 @@ use crate::proto;
 pub struct OverlayServer(Arc<OverlayServerInner>);
 
 impl OverlayServer {
-    pub fn new(storage: Arc<Storage>) -> Arc<Self> {
-        Arc::new(Self(Arc::new(OverlayServerInner { storage })))
+    pub fn new(storage: Arc<Storage>, support_persistent_states: bool) -> Arc<Self> {
+        Arc::new(Self(Arc::new(OverlayServerInner {
+            storage,
+            support_persistent_states,
+        })))
     }
 }
 
@@ -75,6 +78,24 @@ impl Service<ServiceRequest> for OverlayServer {
                     }
                 })
             },
+            proto::overlay::rpc::GetPersistentStatePart as req => {
+                BoxFutureOrNoop::future({
+                    tracing::debug!(
+                        block = %req.block,
+                        mc_block = %req.mc_block,
+                        offset = %req.offset,
+                        max_size = %req.max_size,
+                        "пetPersistentStatePart"
+                    );
+
+                    let inner = self.0.clone();
+
+                    async move {
+                        let res = inner.handle_get_persistent_state_part(req).await;
+                        Some(Response::from_tl(res))
+                    }
+                })
+            },
             proto::overlay::rpc::GetArchiveInfo as req => {
                 BoxFutureOrNoop::future({
                     tracing::debug!(mc_seqno = %req.mc_seqno, "getArchiveInfo");
@@ -123,11 +144,16 @@ impl Service<ServiceRequest> for OverlayServer {
 
 struct OverlayServerInner {
     storage: Arc<Storage>,
+    support_persistent_states: bool,
 }
 
 impl OverlayServerInner {
     fn storage(&self) -> &Storage {
         self.storage.as_ref()
+    }
+
+    fn supports_persistent_state_handling(&self) -> bool {
+        self.support_persistent_states
     }
 
     fn try_handle_prefix<'a>(&self, req: &'a ServiceRequest) -> anyhow::Result<(u32, &'a [u8])> {
@@ -275,6 +301,40 @@ impl OverlayServerInner {
                 tracing::warn!("get_next_block_full failed: {e:?}");
                 proto::overlay::Response::Err
             }
+        }
+    }
+
+    async fn handle_get_persistent_state_part(
+        &self,
+        req: proto::overlay::rpc::GetPersistentStatePart,
+    ) -> proto::overlay::Response<proto::overlay::PersistentStatePart> {
+        const PART_MAX_SIZE: u64 = 1 << 21;
+
+        let persistent_state_request_validation = || {
+            anyhow::ensure!(
+                self.supports_persistent_state_handling(),
+                "Get persistent state not supported"
+            );
+
+            anyhow::ensure!(req.max_size <= PART_MAX_SIZE, "Unsupported max size");
+
+            Ok::<_, anyhow::Error>(())
+        };
+
+        if let Err(e) = persistent_state_request_validation() {
+            tracing::warn!("persistent_state_request_validation failed: {e:?}");
+            return proto::overlay::Response::Err;
+        }
+
+        let persistent_state_storage = self.storage.persistent_state_storage();
+        match persistent_state_storage
+            .read_state_part(&req.mc_block, &req.block, req.offset, req.max_size)
+            .await
+        {
+            Some(data) => {
+                proto::overlay::Response::Ok(proto::overlay::PersistentStatePart::Found { data })
+            }
+            None => proto::overlay::Response::Ok(proto::overlay::PersistentStatePart::NotFound),
         }
     }
 
