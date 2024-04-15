@@ -12,11 +12,15 @@ pub struct NeighbourOptions {
 pub struct Neighbour(Arc<NeighbourState>);
 
 impl Neighbour {
-    pub fn new(peer_id: PeerId, expires_at: u32,  options: NeighbourOptions) -> Self {
+    pub fn new(peer_id: PeerId, expires_at: u32, options: NeighbourOptions) -> Self {
         let default_roundtrip_ms = truncate_time(options.default_roundtrip_ms);
         let stats = parking_lot::RwLock::new(TrackedStats::new(default_roundtrip_ms));
 
-        let state = Arc::new(NeighbourState { peer_id, expires_at, stats });
+        let state = Arc::new(NeighbourState {
+            peer_id,
+            expires_at,
+            stats,
+        });
         Self(state)
     }
 
@@ -151,7 +155,7 @@ impl TrackedStats {
                 Self::MAX_SCORE,
             );
         } else {
-            self. score = self.score.saturating_sub(FAILED_REQUEST_PENALTY);
+            self.score = self.score.saturating_sub(FAILED_REQUEST_PENALTY);
             self.failed += 1;
             self.failed_requests_history |= 1;
         }
