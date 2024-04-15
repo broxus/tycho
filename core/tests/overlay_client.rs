@@ -6,7 +6,7 @@ use tycho_core::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_core::overlay_client::neighbours::Neighbours;
 use tycho_core::overlay_client::public_overlay_client::Peer;
 use tycho_core::overlay_client::settings::NeighboursOptions;
-use tycho_network::{PeerId};
+use tycho_network::PeerId;
 
 #[derive(TlWrite, TlRead)]
 #[tl(boxed, id = 0x11223344)]
@@ -32,7 +32,6 @@ pub async fn test() {
 
     let neighbours = Neighbours::new(initial_peers.clone(), options.clone()).await;
     println!("{}", neighbours.get_active_neighbours().await.len());
-
 
     let first_success_rate = [0.2, 0.8];
     let second_success_rate = [1.0, 0.0];

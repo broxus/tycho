@@ -90,9 +90,7 @@ impl Neighbours {
         }
 
         for n in new {
-            if guard
-                .iter()
-                .any(|x| x.peer_id() == n.peer_id()) {
+            if guard.iter().any(|x| x.peer_id() == n.peer_id()) {
                 continue;
             }
             if guard.len() < self.options.max_neighbours {

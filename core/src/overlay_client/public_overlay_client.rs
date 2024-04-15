@@ -194,7 +194,7 @@ impl OverlayClient for PublicOverlayClient {
                     data: response_model,
                     roundtrip: start_time.duration_since(end_time).as_millis() as u64,
                     neighbour: neighbour.clone(),
-                    _market: PhantomData,
+                    _marker: PhantomData,
                 })
             }
             Err(e) => {
@@ -217,7 +217,7 @@ pub struct QueryResponse<'a, A: TlRead<'a>> {
     pub data: A,
     neighbour: Neighbour,
     roundtrip: u64,
-    _market: PhantomData<&'a ()>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, A> QueryResponse<'a, A>

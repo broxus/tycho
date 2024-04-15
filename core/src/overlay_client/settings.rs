@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OverlayClientSettings {
     pub overlay_options: OverlayOptions,
-    pub neighbours_options: NeighboursOptions
+    pub neighbours_options: NeighboursOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,7 +16,7 @@ impl Default for OverlayOptions {
     fn default() -> Self {
         Self {
             neighbours_update_interval: 60 * 2 * 1000,
-            neighbours_ping_interval: 2000
+            neighbours_ping_interval: 2000,
         }
     }
 }
