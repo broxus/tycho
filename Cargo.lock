@@ -2168,10 +2168,12 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytesize",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
  "rand",
+ "tempfile",
  "tl-proto",
  "tokio",
  "tracing",

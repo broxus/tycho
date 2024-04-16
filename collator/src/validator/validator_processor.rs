@@ -12,7 +12,7 @@ use tokio::time::interval;
 use tracing::warn;
 use tracing::{debug, error, trace};
 
-use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatedBlock, ValidatorNetwork};
+use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
 
@@ -33,7 +33,7 @@ const MAX_VALIDATION_ATTEMPTS: u32 = 1000;
 const VALIDATION_RETRY_TIMEOUT_SEC: u64 = 3;
 
 #[derive(PartialEq, Debug)]
-pub enum ValidatorTaskResult {
+pub(crate) enum ValidatorTaskResult {
     Void,
     Signatures(HashMap<HashBytes, Signature>),
     ValidationStatus(ValidationResult),
@@ -46,7 +46,8 @@ pub struct StopMessage {
 
 #[allow(private_bounds)]
 #[async_trait]
-pub trait ValidatorProcessor<ST>: ValidatorEventEmitter + Sized + Send + Sync + 'static
+pub(crate) trait ValidatorProcessor<ST>:
+    ValidatorEventEmitter + Sized + Send + Sync + 'static
 where
     ST: StateNodeAdapter,
 {
@@ -432,7 +433,7 @@ where
 
         let dispatcher = self.get_dispatcher();
 
-        let receiver = self.state_node_adapter.request_block(candidate_id).await?;
+        let block_from_state = self.state_node_adapter.load_block(candidate_id).await?;
 
         let validators = session.validators_without_signatures(&block_id_short);
 
@@ -443,7 +444,7 @@ where
         let network = self.network.clone();
 
         tokio::spawn(async move {
-            if let Ok(Some(_)) = receiver.try_recv().await {
+            if block_from_state.is_some() {
                 let result = dispatcher
                     .clone()
                     .enqueue_task(method_to_async_task_closure!(

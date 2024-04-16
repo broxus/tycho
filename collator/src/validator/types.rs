@@ -41,20 +41,12 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
 pub(crate) struct ValidationSessionInfo {
     pub seqno: u32,
     pub validators: ValidatorsMap,
-    pub current_validator_keypair: KeyPair,
 }
 
 impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
     type Error = anyhow::Error;
 
     fn try_from(session_info: Arc<CollationSessionInfo>) -> std::result::Result<Self, Self::Error> {
-        let current_validator_keypair = match session_info.current_collator_keypair() {
-            Some(keypair) => *keypair,
-            None => {
-                bail!("Collator keypair is not set, skip candidate validation");
-            }
-        };
-
         let mut validators = HashMap::new();
         for validator_descr in session_info.collators().validators.iter() {
             let validator_info: anyhow::Result<ValidatorInfo, ValidatorInfoError> =
@@ -75,7 +67,6 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
         let validation_session = ValidationSessionInfo {
             seqno: session_info.seqno(),
             validators,
-            current_validator_keypair,
         };
         Ok(validation_session)
     }

@@ -142,6 +142,7 @@ mod tests {
     use std::collections::HashMap;
     use std::net::Ipv4Addr;
 
+    use bytesize::ByteSize;
     use std::time::Duration;
 
     use everscale_crypto::ed25519;
@@ -156,6 +157,7 @@ mod tests {
     use tycho_network::{
         DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
     };
+    use tycho_storage::{Db, DbOptions, Storage};
 
     use crate::state_node::{
         StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeEventListener,
@@ -214,6 +216,14 @@ mod tests {
     #[async_trait]
     impl StateNodeEventListener for TestValidatorEventListener {
         async fn on_mc_block(&self, _mc_block_id: BlockId) -> Result<()> {
+            unimplemented!("Not implemented");
+        }
+
+        async fn on_block_accepted(&self, block_id: &BlockId) {
+            unimplemented!("Not implemented");
+        }
+
+        async fn on_block_accepted_external(&self, block_id: &BlockId) {
             unimplemented!("Not implemented");
         }
     }
@@ -291,8 +301,9 @@ mod tests {
         let test_listener = TestValidatorEventListener::new(1);
         let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
-        let state_node_adapter =
-            Arc::new(StateNodeAdapterBuilderStdImpl::new().build(test_listener.clone()));
+        let state_node_adapter = Arc::new(
+            StateNodeAdapterBuilderStdImpl::new(create_storage()).build(test_listener.clone()),
+        );
         let _validation_state = ValidationStateStdImpl::new();
 
         let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
@@ -368,6 +379,28 @@ mod tests {
         Ok(())
     }
 
+    fn create_storage() -> Arc<Storage> {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let root_path = tmp_dir.path();
+
+        // Init rocksdb
+        let db_options = DbOptions {
+            rocksdb_lru_capacity: ByteSize::kb(1024),
+            cells_cache_size: ByteSize::kb(1024),
+        };
+        let db = Db::open(root_path.join("db_storage"), db_options).unwrap();
+
+        // Init storage
+        let storage = Storage::new(
+            db,
+            root_path.join("file_storage"),
+            db_options.cells_cache_size.as_u64(),
+        )
+        .unwrap();
+
+        storage
+    }
+
     #[tokio::test]
     async fn test_validator_accept_block_by_network() -> Result<()> {
         try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
@@ -386,8 +419,9 @@ mod tests {
             let test_listener = TestValidatorEventListener::new(blocks_amount);
             listeners.push(test_listener.clone());
 
-            let state_node_adapter =
-                Arc::new(StateNodeAdapterBuilderStdImpl::new().build(test_listener.clone()));
+            let state_node_adapter = Arc::new(
+                StateNodeAdapterBuilderStdImpl::new(create_storage()).build(test_listener.clone()),
+            );
             let _validation_state = ValidationStateStdImpl::new();
             let network = ValidatorNetwork {
                 overlay_service: node.overlay_service.clone(),
