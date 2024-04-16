@@ -41,6 +41,8 @@ pub struct BlockCandidateContainer {
     block_id: BlockId,
     /// Current block candidate entry with signatures
     entry: Option<BlockCandidateEntry>,
+    /// New state related to current block candidate
+    new_state_stuff: Arc<ShardStateStuff>,
     /// True when the candidate became valid due to the applied validation result.
     /// Updates by `set_validation_result()`
     is_valid: bool,
@@ -59,7 +61,7 @@ pub struct BlockCandidateContainer {
     pub containing_mc_block: Option<BlockCacheKey>,
 }
 impl BlockCandidateContainer {
-    pub fn new(candidate: BlockCandidate) -> Self {
+    pub fn new(candidate: BlockCandidate, new_state_stuff: Arc<ShardStateStuff>) -> Self {
         let block_id = *candidate.block_id();
         let key = candidate.block_id().as_short_id();
         let entry = BlockCandidateEntry {
@@ -83,6 +85,7 @@ impl BlockCandidateContainer {
                 .map(|id| id.as_short_id())
                 .collect(),
             entry: Some(entry),
+            new_state_stuff,
             is_valid: false,
             containing_mc_block: None,
             send_sync_status: SendSyncStatus::NotReady,
@@ -172,6 +175,10 @@ impl BlockCandidateContainer {
         }
         Ok(())
     }
+
+    pub fn get_new_state_stuff(&self) -> Arc<ShardStateStuff> {
+        self.new_state_stuff.clone()
+    }
 }
 
 pub struct BlockCandidateToSend {
@@ -182,31 +189,4 @@ pub struct BlockCandidateToSend {
 pub struct McBlockSubgraphToSend {
     pub mc_block: BlockCandidateToSend,
     pub shard_blocks: Vec<BlockCandidateToSend>,
-}
-
-pub(in crate::manager) trait ShardStateStuffExt {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Arc<Self>>;
-}
-impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Arc<Self>> {
-        let mut builder = CellBuilder::new();
-        let mut cell_context = Cell::empty_context();
-        shard_state.store_into(&mut builder, &mut cell_context)?;
-        let root = builder.build_ext(&mut cell_context)?;
-
-        Ok(Arc::new(ShardStateStuff::from_state_and_root(
-            block_id,
-            shard_state,
-            root,
-            tracker,
-        )?))
-    }
 }

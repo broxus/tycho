@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use everscale_types::{
     cell::{CellBuilder, CellSliceRange, HashBytes},
-    models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr},
+    models::{account, ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr},
 };
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
@@ -237,11 +237,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 fn _stub_create_random_anchor_with_stub_externals(
     anchor_id: MempoolAnchorId,
 ) -> Arc<MempoolAnchor> {
-    let chain_time = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let externals_count: i32 = rand::thread_rng().gen_range(-10..10).max(0);
+    let chain_time = anchor_id as u64 * 471 * 6 % 1000000000;
+    let externals_count = chain_time as i32 % 10;
     let mut externals = vec![];
     for i in 0..externals_count {
         let rand_addr = (0..32).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();

@@ -4,15 +4,16 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use everscale_types::models::{BlockId, BlockIdShort, OwnedMessage, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, OwnedMessage, ShardIdent, ShardStateUnsplit};
 
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
 use tycho_core::internal_queue::types::QueueDiff;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::msg_queue::{IterItem, QueueIterator};
 use crate::tracing_targets;
+use crate::types::{BlockCandidate, CollationConfig, CollationSessionInfo};
 use crate::{
     mempool::MempoolAdapter,
     method_to_async_task_closure,
@@ -23,9 +24,16 @@ use crate::{
 };
 
 use super::types::{McData, PrevData};
-use super::{
-    do_collate::DoCollate, types::WorkingState, CollatorEventEmitter, CollatorEventListener,
-};
+use super::{types::WorkingState, CollatorEventEmitter, CollatorEventListener};
+
+#[path = "./build_block.rs"]
+mod build_block;
+#[path = "./do_collate.rs"]
+mod do_collate;
+#[path = "./execution_manager.rs"]
+mod execution_manager;
+
+use do_collate::DoCollate;
 
 // COLLATOR PROCESSOR
 
@@ -121,9 +129,8 @@ where
     ) -> Result<WorkingState> {
         //TODO: make real implementation
 
-        let mc_data = McData::new(mc_state)?;
-        let (prev_shard_data, usage_tree) =
-            PrevData::build(&mc_data, &prev_states, prev_blocks_ids)?;
+        let mc_data = McData::build(mc_state)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(&mc_data, &prev_states)?;
 
         let working_state = WorkingState {
             mc_data,
@@ -246,12 +253,15 @@ where
 pub(super) trait CollatorProcessorSpecific<MQ, MP, ST>: Sized {
     fn new(
         collator_descr: Arc<String>,
+        config: Arc<CollationConfig>,
+        collation_session: Arc<CollationSessionInfo>,
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
         listener: Arc<dyn CollatorEventListener>,
         mq_adapter: Arc<MQ>,
         mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         shard_id: ShardIdent,
+        state_tracker: Arc<MinRefMcStateTracker>,
     ) -> Self;
 
     fn collator_descr(&self) -> &str;
@@ -266,7 +276,7 @@ pub(super) trait CollatorProcessorSpecific<MQ, MP, ST>: Sized {
 
     fn working_state(&self) -> &WorkingState;
     fn set_working_state(&mut self, working_state: WorkingState);
-    fn update_working_state(&mut self, new_prev_block_id: BlockId) -> Result<()>;
+    fn update_working_state(&mut self, new_state_stuff: Arc<ShardStateStuff>) -> Result<()>;
 
     async fn init_mq_iterator(&mut self) -> Result<()>;
 
@@ -290,6 +300,10 @@ pub(super) trait CollatorProcessorSpecific<MQ, MP, ST>: Sized {
 
 pub(crate) struct CollatorProcessorStdImpl<MQ, QI, MP, ST> {
     collator_descr: Arc<String>,
+
+    config: Arc<CollationConfig>,
+    collation_session: Arc<CollationSessionInfo>,
+
     dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
     listener: Arc<dyn CollatorEventListener>,
     mq_adapter: Arc<MQ>,
@@ -315,6 +329,17 @@ pub(crate) struct CollatorProcessorStdImpl<MQ, QI, MP, ST> {
     ///
     /// Updated in the `get_next_external()` method
     has_pending_externals: bool,
+
+    /// State tracker for creating ShardStateStuff locally
+    state_tracker: Arc<MinRefMcStateTracker>,
+}
+
+impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
+    fn working_state(&self) -> &WorkingState {
+        self.working_state
+            .as_ref()
+            .expect("should `init` collator before calling `working_state`")
+    }
 }
 
 #[async_trait]
@@ -328,15 +353,20 @@ where
 {
     fn new(
         collator_descr: Arc<String>,
+        config: Arc<CollationConfig>,
+        collation_session: Arc<CollationSessionInfo>,
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
         listener: Arc<dyn CollatorEventListener>,
         mq_adapter: Arc<MQ>,
         mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
         shard_id: ShardIdent,
+        state_tracker: Arc<MinRefMcStateTracker>,
     ) -> Self {
         Self {
             collator_descr,
+            config,
+            collation_session,
             dispatcher,
             listener,
             mq_adapter,
@@ -352,6 +382,8 @@ where
 
             externals_read_upto: BTreeMap::new(),
             has_pending_externals: false,
+
+            state_tracker,
         }
     }
 
@@ -376,33 +408,41 @@ where
     }
 
     fn working_state(&self) -> &WorkingState {
-        self.working_state
-            .as_ref()
-            .expect("should `init` collator before calling `working_state`")
+        self.working_state()
     }
     fn set_working_state(&mut self, working_state: WorkingState) {
         self.working_state = Some(working_state);
     }
 
-    ///(TODO) Update working state from new state after block collation
+    ///(TODO) Update working state from new block and state after block collation
     ///
     ///STUB: currently have stub signature and implementation
-    fn update_working_state(&mut self, new_prev_block_id: BlockId) -> Result<()> {
-        let new_next_block_id = BlockIdShort {
-            shard: new_prev_block_id.shard,
-            seqno: new_prev_block_id.seqno + 1,
+    fn update_working_state(&mut self, new_state_stuff: Arc<ShardStateStuff>) -> Result<()> {
+        let new_next_block_id_short = BlockIdShort {
+            shard: new_state_stuff.block_id().shard,
+            seqno: new_state_stuff.block_id().seqno + 1,
         };
-        let new_collator_descr = format!("next block: {}", new_next_block_id);
+        let new_collator_descr = format!("next block: {}", new_next_block_id_short);
 
-        self.working_state
+        let working_state_mut = self
+            .working_state
             .as_mut()
-            .expect("should `init` collator before calling `update_working_state`")
-            .prev_shard_data
-            .update_state(vec![new_prev_block_id])?;
+            .expect("should `init` collator before calling `update_working_state`");
+
+        if new_state_stuff.block_id().shard.is_masterchain() {
+            let new_mc_data = McData::build(new_state_stuff.clone())?;
+            working_state_mut.mc_data = new_mc_data;
+        }
+
+        let prev_states = vec![new_state_stuff];
+        let (new_prev_shard_data, usage_tree) =
+            PrevData::build(&working_state_mut.mc_data, &prev_states)?;
+        working_state_mut.prev_shard_data = new_prev_shard_data;
+        working_state_mut.usage_tree = usage_tree;
 
         tracing::debug!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): STUB: working state updated from just collated block...",
+            "Collator ({}): working state updated from just collated block...",
             self.collator_descr(),
         );
 

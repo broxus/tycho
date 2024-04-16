@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use crate::{
     mempool::{MempoolAdapter, MempoolAnchor},
@@ -12,7 +12,7 @@ use crate::{
     msg_queue::MessageQueueAdapter,
     state_node::StateNodeAdapter,
     tracing_targets,
-    types::{BlockCollationResult, CollationSessionId},
+    types::{BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo},
     utils::async_queued_dispatcher::{
         AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
     },
@@ -60,6 +60,8 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     //TODO: use factory that takes CollationManager and creates Collator impl
     /// Create collator, start its tasks queue, and equeue first initialization task
     async fn start(
+        config: Arc<CollationConfig>,
+        collation_session: Arc<CollationSessionInfo>,
         listener: Arc<dyn CollatorEventListener>,
         mq_adapter: Arc<MQ>,
         mpool_adapter: Arc<MP>,
@@ -67,6 +69,7 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
         mc_state: Arc<ShardStateStuff>,
+        state_tracker: Arc<MinRefMcStateTracker>,
     ) -> Self;
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
@@ -74,7 +77,7 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
-        top_shard_blocks_ids: Vec<BlockId>,
+        top_shard_blocks_info: Vec<(BlockId, Arc<ShardStateStuff>)>,
     ) -> Result<()>;
 }
 
@@ -102,6 +105,8 @@ where
     ST: StateNodeAdapter,
 {
     async fn start(
+        config: Arc<CollationConfig>,
+        collation_session: Arc<CollationSessionInfo>,
         listener: Arc<dyn CollatorEventListener>,
         mq_adapter: Arc<MQ>,
         mpool_adapter: Arc<MP>,
@@ -109,6 +114,7 @@ where
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
         mc_state: Arc<ShardStateStuff>,
+        state_tracker: Arc<MinRefMcStateTracker>,
     ) -> Self {
         let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
         let next_block_id = BlockIdShort {
@@ -126,12 +132,15 @@ where
         // create processor and run dispatcher for own tasks queue
         let processor = W::new(
             collator_descr.clone(),
+            config,
+            collation_session,
             dispatcher.clone(),
             listener,
             mq_adapter,
             mpool_adapter,
             state_node_adapter,
             shard_id,
+            state_tracker,
         );
         AsyncQueuedDispatcher::run(processor, receiver);
         tracing::trace!(target: tracing_targets::COLLATOR, "Tasks queue dispatcher started");
@@ -169,13 +178,13 @@ where
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
-        top_shard_blocks_ids: Vec<BlockId>,
+        top_shard_blocks_info: Vec<(BlockId, Arc<ShardStateStuff>)>,
     ) -> Result<()> {
         self.dispatcher
             .enqueue_task(method_to_async_task_closure!(
                 do_collate,
                 next_chain_time,
-                top_shard_blocks_ids
+                top_shard_blocks_info
             ))
             .await
     }

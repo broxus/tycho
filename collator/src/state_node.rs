@@ -54,10 +54,17 @@ pub trait StateNodeEventListener: Send + Sync {
 
 #[async_trait]
 pub trait StateNodeAdapter: BlockProvider + Send + Sync + 'static {
+    /// Return id of last master block that was applied to node local state
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
+    /// Return master or shard state on specified block from node local state
     async fn load_state(&self, block_id: &BlockId) -> Result<Arc<ShardStateStuff>>;
+    /// Return block by it's id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<Arc<BlockStuff>>>;
+    /// Return block handle by it's id from node local state
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<Arc<BlockHandle>>>;
+    /// Accept block:
+    /// 1. (TODO) Broadcast block to blockchain network
+    /// 2. Provide block to the block strider
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()>;
 }
 

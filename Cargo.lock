@@ -602,7 +602,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#180f4603973258df219a5d4cca530361ba3f8d69"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation#3b11c86427fb39ae91c50e071edb43db6795881c"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -622,7 +622,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#180f4603973258df219a5d4cca530361ba3f8d69"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation#3b11c86427fb39ae91c50e071edb43db6795881c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2103,6 +2103,7 @@ dependencies = [
  "everscale-types",
  "futures-util",
  "rand",
+ "sha2",
  "tempfile",
  "tl-proto",
  "tokio",

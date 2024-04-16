@@ -1,24 +1,29 @@
+use std::{collections::HashMap, sync::Arc};
+
+use anyhow::Result;
+
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::cell::HashBytes;
+use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
-use std::collections::HashMap;
 
-use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
+use tycho_block_util::block::{BlockStuff, BlockStuffAug, ValidatorSubsetInfo};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
-
-use std::sync::Arc;
-
-use tycho_block_util::block::BlockStuff;
 
 pub struct CollationConfig {
     pub key_pair: KeyPair,
     pub mc_block_min_interval_ms: u64,
     pub max_mc_block_delta_from_bc_to_await_own: i32,
+
+    pub supported_block_version: u32,
+    pub supported_capabilities: u64,
+
+    pub max_collate_threads: u16,
 }
 
 pub(crate) struct BlockCollationResult {
     pub candidate: BlockCandidate,
-    pub new_state: ShardStateUnsplit,
+    pub new_state_stuff: Arc<ShardStateStuff>,
 }
 
 #[derive(Clone)]
@@ -68,6 +73,26 @@ impl BlockCandidate {
     }
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+}
+
+pub(crate) trait ShardStateStuffExt {
+    fn from_state(
+        block_id: BlockId,
+        shard_state: ShardStateUnsplit,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+}
+impl ShardStateStuffExt for ShardStateStuff {
+    fn from_state(
+        block_id: BlockId,
+        shard_state: ShardStateUnsplit,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self> {
+        let root = CellBuilder::build_from(&shard_state)?;
+        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
     }
 }
 

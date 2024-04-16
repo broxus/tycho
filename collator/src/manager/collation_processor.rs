@@ -22,7 +22,7 @@ use crate::{
     tracing_targets,
     types::{
         BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-        CollationSessionInfo, OnValidatedBlockEvent,
+        CollationSessionInfo, OnValidatedBlockEvent, ShardStateStuffExt,
     },
     utils::{async_queued_dispatcher::AsyncQueuedDispatcher, shard::calc_split_merge_actions},
     validator::Validator,
@@ -31,7 +31,7 @@ use crate::{
 use super::{
     types::{
         BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache,
-        McBlockSubgraphToSend, SendSyncStatus, ShardStateStuffExt,
+        McBlockSubgraphToSend, SendSyncStatus,
     },
     utils::{build_block_stuff_for_sync, find_us_in_collators_set},
 };
@@ -59,7 +59,7 @@ where
     active_collators: HashMap<ShardIdent, Arc<C>>,
     collators_to_stop: HashMap<CollationSessionId, Arc<C>>,
 
-    state_tracker: MinRefMcStateTracker,
+    state_tracker: Arc<MinRefMcStateTracker>,
 
     blocks_cache: BlocksCache,
 
@@ -94,7 +94,7 @@ where
             state_node_adapter,
             mq_adapter: Arc::new(MQ::new()),
             validator,
-            state_tracker: MinRefMcStateTracker::default(),
+            state_tracker: Arc::new(MinRefMcStateTracker::default()),
             active_collation_sessions: HashMap::new(),
             collation_sessions_to_finish: HashMap::new(),
             active_collators: HashMap::new(),
@@ -476,6 +476,8 @@ where
                         shard_id,
                     );
                     let collator = C::start(
+                        self.config.clone(),
+                        new_session_info.clone(),
                         self.dispatcher.clone(),
                         self.mq_adapter.clone(),
                         self.mpool_adapter.clone(),
@@ -483,6 +485,7 @@ where
                         shard_id,
                         prev_blocks_ids,
                         mc_state.clone(),
+                        self.state_tracker.clone(),
                     )
                     .await;
                     entry.insert(Arc::new(collator));
@@ -593,7 +596,9 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        self.store_candidate(collation_result.candidate)?;
+        let new_state_stuff = collation_result.new_state_stuff;
+        let new_mc_state = new_state_stuff.clone();
+        self.store_candidate(collation_result.candidate, new_state_stuff)?;
 
         // send validation task to validator
         // we need to send session info with the collators list to the validator
@@ -651,12 +656,6 @@ where
             );
 
             self.set_last_collated_mc_block_id(candidate_id);
-
-            let new_mc_state = ShardStateStuff::from_state(
-                candidate_id,
-                collation_result.new_state,
-                &self.state_tracker,
-            )?;
 
             Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), new_mc_state.clone())
                 .await?;
@@ -754,11 +753,11 @@ where
     }
 
     /// Find top shard blocks in cacche for the next master block collation
-    fn detect_top_shard_blocks_ids_for_mc_block(
+    fn detect_top_shard_blocks_info_for_mc_block(
         &self,
         _next_mc_block_chain_time: u64,
         _trigger_shard_block_id: Option<BlockId>,
-    ) -> Vec<BlockId> {
+    ) -> Vec<(BlockId, Arc<ShardStateStuff>)> {
         //TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
 
         //STUB: when we work with only one shard we can just get the last shard block
@@ -769,7 +768,11 @@ where
             .blocks_cache
             .shards
             .iter()
-            .filter_map(|(_, shard_cache)| shard_cache.last_key_value().map(|(_, v)| *v.block_id()))
+            .filter_map(|(_, shard_cache)| {
+                shard_cache
+                    .last_key_value()
+                    .map(|(_, v)| (*v.block_id(), v.get_new_state_stuff()))
+            })
             .collect::<Vec<_>>();
 
         res
@@ -794,7 +797,7 @@ where
         //      Or the first from previouses (An-x) that includes externals for that shard (ShB)
         //      if all next including required one ([An-x+1, An]) do not contain externals for shard (ShB).
 
-        let top_shard_blocks_ids = self.detect_top_shard_blocks_ids_for_mc_block(
+        let top_shard_blocks_info = self.detect_top_shard_blocks_info_for_mc_block(
             next_mc_block_chain_time,
             trigger_shard_block_id,
         );
@@ -804,13 +807,13 @@ where
 
         self.set_next_mc_block_chain_time(next_mc_block_chain_time);
 
-        let _tracing_top_shard_blocks_descr = top_shard_blocks_ids
+        let _tracing_top_shard_blocks_descr = top_shard_blocks_info
             .iter()
-            .map(|id| id.as_short_id().to_string())
+            .map(|(id, _)| id.as_short_id().to_string())
             .collect::<Vec<_>>();
 
         mc_collator
-            .equeue_do_collate(next_mc_block_chain_time, top_shard_blocks_ids)
+            .equeue_do_collate(next_mc_block_chain_time, top_shard_blocks_info)
             .await?;
 
         tracing::info!(
@@ -866,13 +869,17 @@ where
     }
 
     /// Store block in a cache structure that allow to append signatures
-    fn store_candidate(&mut self, candidate: BlockCandidate) -> Result<()> {
+    fn store_candidate(
+        &mut self,
+        candidate: BlockCandidate,
+        new_state_stuff: Arc<ShardStateStuff>,
+    ) -> Result<()> {
         //TODO: in future we may store to cache a block received from blockchain before,
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
         let candidate_id = *candidate.block_id();
-        let block_container = BlockCandidateContainer::new(candidate);
+        let block_container = BlockCandidateContainer::new(candidate, new_state_stuff);
         if candidate_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container

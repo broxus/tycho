@@ -342,6 +342,12 @@ mod tests {
     }
 
     fn make_network(service_name: &str) -> Result<Network> {
+        let b = Network::builder();
+        let b = b.with_service_name("".to_string());
+        let b = b.with_config(NetworkConfig {
+            enable_0rtt: true,
+            ..Default::default()
+        });
         Network::builder()
             .with_config(NetworkConfig {
                 enable_0rtt: true,
