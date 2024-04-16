@@ -1,31 +1,35 @@
 [package]
 name = "tycho-consensus"
-version = "0.0.1"
-edition = "2021"
 description = "DAG-based consensus for external messages queue."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
 
 [dependencies]
 # crates.io deps
-anyhow = "1.0"
-bincode = "1.3"
-bytes = { version = "1.0", features = ["serde"] }
+anyhow = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true, features = ["serde"] }
 castaway = "0.2"
 dashmap = "5.4"
 everscale-crypto = "0.2"
-futures-util = { version = "0.3" }
+futures-util = { workspace = true }
 parking_lot = "0.12"
 rand = { version = "0.8" }
 rand_pcg = { version = "0.3" }
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt"] }
-tracing = "0.1"
-weedb = "0.1"
+tracing = { workspace = true }
+weedb = { workspace = true }
 
 # local deps
-tycho-network = { path = "../network" }
-tycho-storage = { path = "../storage" }
-tycho-util = { path = "../util" }
+tycho-network = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }
 
 # temp
 #hex = "0.4.3"
@@ -33,7 +37,7 @@ thiserror = "1.0"
 ahash = "0.8"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [lints]

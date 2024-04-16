@@ -24,7 +24,7 @@ impl Node {
             .arg("--example")
             .arg("network-node")
             .arg("--")
-            .arg("gendht")
+            .arg("gen-dht")
             .arg(format!("{ip}:{port}"))
             .arg("--key")
             .arg(&private_key)

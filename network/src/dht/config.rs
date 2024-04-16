@@ -51,7 +51,7 @@ pub struct DhtConfig {
     ///
     /// Default: 1 minute.
     #[serde(with = "serde_helpers::humantime")]
-    pub max_local_info_announce_period_jitter: Duration,
+    pub local_info_announce_period_max_jitter: Duration,
 
     /// A period of updating and populating the routing table.
     ///
@@ -63,7 +63,7 @@ pub struct DhtConfig {
     ///
     /// Default: 1 minutes.
     #[serde(with = "serde_helpers::humantime")]
-    pub max_routing_table_refresh_period_jitter: Duration,
+    pub routing_table_refresh_period_max_jitter: Duration,
 
     /// The capacity of the announced peers channel.
     ///
@@ -81,9 +81,9 @@ impl Default for DhtConfig {
             storage_item_time_to_idle: None,
             local_info_refresh_period: Duration::from_secs(60),
             local_info_announce_period: Duration::from_secs(600),
-            max_local_info_announce_period_jitter: Duration::from_secs(60),
+            local_info_announce_period_max_jitter: Duration::from_secs(60),
             routing_table_refresh_period: Duration::from_secs(600),
-            max_routing_table_refresh_period_jitter: Duration::from_secs(60),
+            routing_table_refresh_period_max_jitter: Duration::from_secs(60),
             announced_peers_channel_capacity: 10,
         }
     }

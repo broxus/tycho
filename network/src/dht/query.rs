@@ -108,6 +108,13 @@ impl<R> Default for QueryCache<R> {
 
 type WeakSpawnedFut<T> = WeakShared<JoinTask<T>>;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DhtQueryMode {
+    #[default]
+    Closest,
+    Random,
+}
+
 pub struct Query {
     network: Network,
     candidates: SimpleRoutingTable,
@@ -120,9 +127,20 @@ impl Query {
         routing_table: &HandlesRoutingTable,
         target_id: &[u8; 32],
         max_k: usize,
+        mode: DhtQueryMode,
     ) -> Self {
         let mut candidates = SimpleRoutingTable::new(PeerId(*target_id));
-        routing_table.visit_closest(target_id, max_k, |node| {
+
+        let random_id;
+        let target_id_for_full = match mode {
+            DhtQueryMode::Closest => target_id,
+            DhtQueryMode::Random => {
+                random_id = rand::random();
+                &random_id
+            }
+        };
+
+        routing_table.visit_closest(target_id_for_full, max_k, |node| {
             candidates.add(node.load_peer_info(), max_k, &Duration::MAX, Some);
         });
 
@@ -203,7 +221,7 @@ impl Query {
                 }
                 // Do nothing on error
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e:?}");
+                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e}");
                 }
                 // Do nothing on timeout
                 None => {
@@ -274,7 +292,7 @@ impl Query {
                 }
                 // Do nothing on error
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e:?}");
+                    tracing::warn!(peer_id = %node.id, "failed to query nodes: {e}");
                 }
                 // Do nothing on timeout
                 None => {
@@ -384,20 +402,21 @@ impl StoreValue<()> {
     pub fn new(
         network: Network,
         routing_table: &HandlesRoutingTable,
-        value: ValueRef<'_>,
+        value: &ValueRef<'_>,
         max_k: usize,
         local_peer_info: Option<&PeerInfo>,
     ) -> StoreValue<impl Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> {
-        let key_hash = match &value {
+        let key_hash = match value {
             ValueRef::Peer(value) => tl_proto::hash(&value.key),
-            ValueRef::Overlay(value) => tl_proto::hash(&value.key),
+            ValueRef::Merged(value) => tl_proto::hash(&value.key),
         };
 
         let request_body = Bytes::from(match local_peer_info {
-            Some(peer_info) => {
-                tl_proto::serialize((rpc::WithPeerInfoRef { peer_info }, rpc::StoreRef { value }))
-            }
-            None => tl_proto::serialize(rpc::StoreRef { value }),
+            Some(peer_info) => tl_proto::serialize((
+                rpc::WithPeerInfo::wrap(peer_info),
+                rpc::StoreRef::wrap(value),
+            )),
+            None => tl_proto::serialize(rpc::StoreRef::wrap(value)),
         });
 
         let semaphore = Arc::new(Semaphore::new(10));
@@ -450,7 +469,7 @@ impl<T: Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> StoreValue<
                     tracing::debug!(peer_id = %node.id, "value stored");
                 }
                 Some(Err(e)) => {
-                    tracing::warn!(peer_id = %node.id, "failed to store value: {e:?}");
+                    tracing::warn!(peer_id = %node.id, "failed to store value: {e}");
                 }
                 // Do nothing on timeout
                 None => {

@@ -52,6 +52,7 @@ type CallbackRx = oneshot::Receiver<Result<PeerId, Arc<anyhow::Error>>>;
 
 impl Drop for ConnectionManager {
     fn drop(&mut self) {
+        tracing::trace!("dropping connection manager");
         self.endpoint.close();
     }
 }
@@ -122,7 +123,6 @@ impl ConnectionManager {
                             if e.is_panic() {
                                 std::panic::resume_unwind(e.into_panic());
                             }
-                            continue;
                         }
                     }
                 }
@@ -134,7 +134,11 @@ impl ConnectionManager {
                 }
                 Some(connection_handler_output) = self.connection_handlers.join_next() => {
                     // NOTE: unwrap here is to propagate panic from the spawned future
-                    connection_handler_output.unwrap();
+                    if let Err(e) = connection_handler_output {
+                        if e.is_panic() {
+                            std::panic::resume_unwind(e.into_panic());
+                        }
+                    }
                 }
             }
         }
@@ -149,6 +153,8 @@ impl ConnectionManager {
     }
 
     async fn shutdown(mut self) {
+        tracing::trace!("shutting down connection manager");
+
         self.endpoint.close();
         self.pending_partial_connections.shutdown().await;
         self.pending_connections.shutdown().await;
@@ -257,7 +263,7 @@ impl ConnectionManager {
                 self.handle_incoming_impl(connection, Some(accepted), timeout_at);
             }
             Into0RttResult::WithoutIdentity(partial_connection) => {
-                tracing::debug!("connection identity is not available yet");
+                tracing::trace!("connection identity is not available yet");
 
                 let timeout_at = Instant::now() + self.config.connect_timeout;
                 self.pending_partial_connections.spawn(async move {
@@ -269,7 +275,7 @@ impl ConnectionManager {
                         Ok(Err(e)) => {
                             tracing::warn!(
                                 %remote_addr,
-                                "failed to establish an incoming connection: {e:?}",
+                                "failed to establish an incoming connection: {e}",
                             );
                             None
                         }
@@ -285,7 +291,7 @@ impl ConnectionManager {
             }
             Into0RttResult::InvalidConnection(e) => {
                 // TODO: Lower log level to trace/debug?
-                tracing::warn!(%remote_addr, "invalid incoming connection: {e:?}");
+                tracing::warn!(%remote_addr, "invalid incoming connection: {e}");
             }
             Into0RttResult::Unavailable(_) => unreachable!(
                 "BUG: For incoming connections, a 0.5-RTT connection must \
@@ -344,6 +350,7 @@ impl ConnectionManager {
                     peer_id = %connection.peer_id(),
                     "rejecting connection due to PeerAffinity::Never",
                 );
+                connection.close();
                 return;
             }
             _ => {
@@ -357,6 +364,7 @@ impl ConnectionManager {
                         peer_id = %connection.peer_id(),
                         "rejecting connection due too many concurrent connections",
                     );
+                    connection.close();
                     return;
                 }
             }
@@ -419,15 +427,16 @@ impl ConnectionManager {
     fn handle_connecting_result(&mut self, mut res: ConnectingOutput) {
         // Check seqno first to drop outdated results.
         {
-            let entry = self
-                .pending_connection_callbacks
-                .get(&res.target_address)
-                .expect("Connection tasks must be tracked");
+            let Some(entry) = self.pending_connection_callbacks.get(&res.target_address) else {
+                tracing::trace!("connection task reordering detected");
+                return;
+            };
 
             if entry.last_seqno != res.seqno {
                 tracing::debug!(
-                    target_address = %res.target_address,
-                    target_peer_id = ?res.target_peer_id,
+                    local_id = %self.endpoint.peer_id(),
+                    peer_id = %res.target_peer_id,
+                    remote_addr = %res.target_address,
                     "connection result is outdated"
                 );
                 return;
@@ -445,7 +454,12 @@ impl ConnectionManager {
         match unsafe { ManuallyDrop::take(&mut res.connecting_result) } {
             Ok(connection) => {
                 let peer_id = *connection.peer_id();
-                tracing::debug!(%peer_id, "new connection");
+                tracing::debug!(
+                    local_id = %self.endpoint.peer_id(),
+                    %peer_id,
+                    remote_addr = %res.target_address,
+                    "new connection",
+                );
                 self.add_peer(connection);
 
                 for callback in callbacks {
@@ -454,9 +468,10 @@ impl ConnectionManager {
             }
             Err(e) => {
                 tracing::debug!(
-                    target_address = %res.target_address,
-                    target_peer_id = ?res.target_peer_id,
-                    "connection failed: {e:?}"
+                    local_id = %self.endpoint.peer_id(),
+                    peer_id = ?res.target_peer_id,
+                    remote_addr = %res.target_address,
+                    "connection failed: {e}"
                 );
 
                 for callback in callbacks {
@@ -478,7 +493,15 @@ impl ConnectionManager {
         }
     }
 
-    #[tracing::instrument(level = "trace", skip_all, fields(peer_id = ?peer_id, address = %address))]
+    #[tracing::instrument(
+        level = "trace",
+        skip_all,
+        fields(
+            local_id = %self.endpoint.peer_id(),
+            peer_id = %peer_id,
+            remote_addr = %address,
+        ),
+    )]
     fn dial_peer(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
         async fn dial_peer_task(
             seqno: u32,
@@ -509,12 +532,13 @@ impl ConnectionManager {
             }
         }
 
-        tracing::info!(
-            local_id = %self.endpoint.peer_id(),
-            %peer_id,
-            remote_addr = %address,
-            "connecting to peer",
-        );
+        if self.active_peers.contains(peer_id) {
+            tracing::debug!("peer is already connected");
+            _ = callback.send(Ok(*peer_id));
+            return;
+        }
+
+        tracing::trace!("connecting to peer");
 
         let entry = match self.pending_connection_callbacks.entry(address.clone()) {
             hash_map::Entry::Vacant(entry) => Some(entry.insert(PendingConnectionCallbacks {
@@ -530,18 +554,16 @@ impl ConnectionManager {
                 entry.callbacks.push(callback);
 
                 // Check if the outgoing connection is a simultaneous dial.
-                if simultaneous_dial_tie_breaking(
+                let break_tie = simultaneous_dial_tie_breaking(
                     self.endpoint.peer_id(),
                     peer_id,
                     entry.origin,
                     Direction::Outbound,
-                ) {
+                );
+
+                if break_tie && entry.origin != Direction::Outbound {
                     // New connection wins the tie, abort the old one and spawn a new task.
-                    tracing::debug!(
-                        remote_addr = %address,
-                        %peer_id,
-                        "cancelling old connection to mitigate simultaneous dial",
-                    );
+                    tracing::debug!("cancelling old connection to mitigate simultaneous dial");
 
                     entry.origin = Direction::Outbound;
                     entry.last_seqno += 1;
@@ -550,12 +572,8 @@ impl ConnectionManager {
                     }
                     Some(entry)
                 } else {
-                    // Old connection wins the tie, gracefully close the new one.
-                    tracing::debug!(
-                        remote_addr = %address,
-                        %peer_id,
-                        "cancelling new connection to mitigate simultaneous dial",
-                    );
+                    // Old connection wins the tie, don't create a new one
+                    tracing::trace!("reusing old connection to mitigate simultaneous dial");
                     None
                 }
             }
@@ -566,13 +584,13 @@ impl ConnectionManager {
             let connecting = self
                 .endpoint
                 .connect_with_expected_id(address.clone(), peer_id);
-            self.pending_connections.spawn(dial_peer_task(
+            entry.abort_handle = Some(self.pending_connections.spawn(dial_peer_task(
                 entry.last_seqno,
                 connecting,
                 target_address,
                 *peer_id,
                 self.config.clone(),
-            ));
+            )));
         }
     }
 }

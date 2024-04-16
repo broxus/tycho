@@ -3,14 +3,16 @@
 //! RUST_LOG=info,tycho_network=trace
 //! ```
 
+use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
 use tl_proto::{TlRead, TlWrite};
 use tycho_network::{
-    proto, Address, DhtClient, DhtService, FindValueError, Network, PeerId, PeerInfo, Router,
+    proto, DhtClient, DhtConfig, DhtService, FindValueError, Network, PeerInfo, Router,
 };
 use tycho_util::time::now_sec;
 
@@ -20,10 +22,20 @@ struct Node {
 }
 
 impl Node {
-    fn new(key: &ed25519::SecretKey) -> Self {
-        let keypair = ed25519::KeyPair::from(key);
+    fn with_random_key() -> Self {
+        let key = ed25519::SecretKey::generate(&mut rand::thread_rng());
+        let local_id = ed25519::PublicKey::from(&key).into();
 
-        let (dht_tasks, dht_service) = DhtService::builder(keypair.public_key.into()).build();
+        let (dht_tasks, dht_service) = DhtService::builder(local_id)
+            .with_config(DhtConfig {
+                max_k: 20,
+                routing_table_refresh_period: Duration::from_secs(1),
+                routing_table_refresh_period_max_jitter: Duration::from_secs(1),
+                local_info_announce_period: Duration::from_secs(1),
+                local_info_announce_period_max_jitter: Duration::from_secs(1),
+                ..Default::default()
+            })
+            .build();
 
         let router = Router::builder().route(dht_service.clone()).build();
 
@@ -35,38 +47,22 @@ impl Node {
 
         dht_tasks.spawn(&network);
 
-        let dht = dht_service.make_client(network.clone());
+        let dht = dht_service.make_client(&network);
 
         Self { network, dht }
-    }
-
-    fn make_peer_info(key: &ed25519::SecretKey, address: Address) -> PeerInfo {
-        let keypair = ed25519::KeyPair::from(key);
-        let peer_id = PeerId::from(keypair.public_key);
-
-        let now = now_sec();
-        let mut node_info = PeerInfo {
-            id: peer_id,
-            address_list: vec![address].into_boxed_slice(),
-            created_at: now,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        };
-        *node_info.signature = keypair.sign(&node_info);
-        node_info
     }
 }
 
 fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
-    let keys = (0..node_count)
-        .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
+    let nodes = (0..node_count)
+        .map(|_| Node::with_random_key())
         .collect::<Vec<_>>();
 
-    let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
-
-    let bootstrap_info = std::iter::zip(&keys, &nodes)
-        .map(|(key, node)| Arc::new(Node::make_peer_info(key, node.network.local_addr().into())))
+    let bootstrap_info = nodes
+        .iter()
+        .map(|node| Arc::new(node.network.sign_peer_info(0, u32::MAX)))
         .collect::<Vec<_>>();
+
     for node in &nodes {
         for info in &bootstrap_info {
             node.dht.add_peer(info.clone()).unwrap();
@@ -149,7 +145,7 @@ async fn connect_new_node_to_bootstrap() -> Result<()> {
 
     let (bootstrap_nodes, global_config) = make_network(5);
 
-    let node = Node::new(&ed25519::SecretKey::generate(&mut rand::thread_rng()));
+    let node = Node::with_random_key();
     for peer_info in &global_config {
         node.dht.add_peer(peer_info.clone())?;
     }
@@ -183,4 +179,72 @@ async fn connect_new_node_to_bootstrap() -> Result<()> {
     assert!(somebody_knows_the_peer);
 
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn startup_from_single_bootstrap_node() -> Result<()> {
+    tracing_subscriber::fmt::try_init().ok();
+    tracing::info!("startup_from_single_bootstrap_node");
+
+    #[derive(Debug, Default)]
+    struct PeerState {
+        knows_about: usize,
+        known_by: usize,
+        is_bootstrap: bool,
+    }
+
+    // Create network with only one bootstrap node available
+    const NODE_COUNT: usize = 20;
+
+    let nodes = (0..NODE_COUNT)
+        .map(|_| Node::with_random_key())
+        .collect::<Vec<_>>();
+
+    let first_node_info = nodes
+        .first()
+        .map(|node| Arc::new(node.network.sign_peer_info(0, u32::MAX)))
+        .unwrap();
+
+    for node in &nodes {
+        node.dht.add_peer(first_node_info.clone()).unwrap();
+    }
+
+    // Start the network and wait until all nodes are known to everyone
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    for _ in 0..60 {
+        interval.tick().await;
+
+        let mut states = BTreeMap::<_, PeerState>::new();
+
+        let mut all_known = true;
+        for (i, left) in nodes.iter().enumerate() {
+            for (j, right) in nodes.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+
+                let left_id = left.network.peer_id();
+                let right_id = right.network.peer_id();
+
+                if left.dht.service().has_peer(right_id) {
+                    states.entry(left_id).or_default().knows_about += 1;
+                    states.entry(right_id).or_default().known_by += 1;
+                } else {
+                    all_known = false;
+                }
+            }
+        }
+
+        states.entry(&first_node_info.id).or_default().is_bootstrap = true;
+
+        println!("known: {:#?}", states);
+
+        if all_known {
+            return Ok(());
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "failed to distribute peers info whithin the time limit"
+    ))
 }

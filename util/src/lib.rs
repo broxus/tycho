@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+pub mod progress_bar;
 pub mod serde_helpers;
 pub mod time;
 
@@ -20,6 +21,13 @@ pub mod sync {
     mod priority_semaphore;
 }
 
+#[cfg(any(test, feature = "test"))]
+pub mod test {
+    pub use logger::init_logger;
+
+    mod logger;
+}
+
 mod util {
     pub(crate) mod linked_list;
     pub(crate) mod wake_list;
@@ -29,6 +37,7 @@ pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 pub type FastDashSet<K> = dashmap::DashSet<K, ahash::RandomState>;
 pub type FastHashMap<K, V> = HashMap<K, V, ahash::RandomState>;
 pub type FastHashSet<K> = HashSet<K, ahash::RandomState>;
+pub type FastHasherState = ahash::RandomState;
 
 /// # Example
 ///

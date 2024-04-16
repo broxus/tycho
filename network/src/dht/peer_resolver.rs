@@ -287,7 +287,17 @@ impl PeerResolverInner {
             // NOTE: Acquire network ref only during the operation.
             {
                 let network = self.weak_network.upgrade()?;
-                let dht_client = self.dht_service.make_client(network.clone());
+                if let Some(peer_info) = network.known_peers().get(&data.peer_id) {
+                    tracing::trace!(
+                        peer_id = %data.peer_id,
+                        attempts,
+                        is_stale,
+                        "peer info exists",
+                    );
+                    return Some((network, peer_info));
+                }
+
+                let dht_client = self.dht_service.make_client(&network);
 
                 let res = {
                     let _permit = self.semaphore.acquire().await.unwrap();
@@ -367,6 +377,10 @@ impl PeerResolverHandle {
                 resolver: Weak::new(),
             })),
         }
+    }
+
+    pub fn peer_id(&self) -> &PeerId {
+        &self.inner.data.peer_id
     }
 
     pub fn load_handle(&self) -> Option<KnownPeerHandle> {
