@@ -1,3 +1,4 @@
+use bytesize::ByteSize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -93,4 +94,26 @@ impl Storage {
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.node_state_storage
     }
+}
+
+#[cfg(any(test, feature = "integration-tests"))]
+pub fn build_tmp_storage() -> anyhow::Result<Arc<Storage>> {
+    let tmp_dir = tempfile::tempdir()?;
+    let root_path = tmp_dir.path();
+
+    // Init rocksdb
+    let db_options = DbOptions {
+        rocksdb_lru_capacity: ByteSize::kb(1024),
+        cells_cache_size: ByteSize::kb(1024),
+    };
+    let db = Db::open(root_path.join("db_storage"), db_options)?;
+
+    // Init storage
+    let storage = Storage::new(
+        db,
+        root_path.join("file_storage"),
+        db_options.cells_cache_size.as_u64(),
+    )?;
+
+    Ok(storage)
 }

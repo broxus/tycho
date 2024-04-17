@@ -11,10 +11,7 @@ use tycho_block_util::state::ShardStateStuff;
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
 use crate::validator::types::ValidationSessionInfo;
-use crate::{
-    state_node::StateNodeAdapter, types::ValidatedBlock,
-    utils::async_queued_dispatcher::AsyncQueuedDispatcher,
-};
+use crate::{state_node::StateNodeAdapter, utils::async_queued_dispatcher::AsyncQueuedDispatcher};
 
 use super::{
     validator_processor::{ValidatorProcessor, ValidatorTaskResult},
@@ -27,7 +24,7 @@ where
 {
     _dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
     listener: Arc<dyn ValidatorEventListener>,
-    state_node_adapter: Arc<ST>,
+    _state_node_adapter: Arc<ST>,
 
     _stub_candidates_cache: HashMap<BlockId, bool>,
 }
@@ -61,13 +58,13 @@ where
     fn new(
         _dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
         listener: Arc<dyn ValidatorEventListener>,
-        state_node_adapter: Arc<ST>,
+        _state_node_adapter: Arc<ST>,
         _network: ValidatorNetwork,
     ) -> Self {
         Self {
             _dispatcher,
             listener,
-            state_node_adapter,
+            _state_node_adapter,
             _stub_candidates_cache: HashMap::new(),
         }
     }
@@ -99,7 +96,7 @@ where
     }
 
     fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>> {
-        todo!()
+        unimplemented!()
     }
 
     async fn try_add_session(

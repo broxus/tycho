@@ -33,7 +33,7 @@ const MAX_VALIDATION_ATTEMPTS: u32 = 1000;
 const VALIDATION_RETRY_TIMEOUT_SEC: u64 = 3;
 
 #[derive(PartialEq, Debug)]
-pub(crate) enum ValidatorTaskResult {
+pub enum ValidatorTaskResult {
     Void,
     Signatures(HashMap<HashBytes, Signature>),
     ValidationStatus(ValidationResult),
@@ -46,8 +46,7 @@ pub struct StopMessage {
 
 #[allow(private_bounds)]
 #[async_trait]
-pub(crate) trait ValidatorProcessor<ST>:
-    ValidatorEventEmitter + Sized + Send + Sync + 'static
+pub trait ValidatorProcessor<ST>: ValidatorEventEmitter + Sized + Send + Sync + 'static
 where
     ST: StateNodeAdapter,
 {
@@ -115,7 +114,7 @@ where
     ) -> Result<ValidatorTaskResult>;
 }
 
-pub(crate) struct ValidatorProcessorStdImpl<ST>
+pub struct ValidatorProcessorStdImpl<ST>
 where
     ST: StateNodeAdapter,
 {

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, ShardIdent};
 use futures_util::future::BoxFuture;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{broadcast, Mutex};
 
 use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
 use tycho_core::block_strider::provider::{BlockProvider, OptionalBlockStuff};
@@ -15,8 +15,6 @@ use tycho_storage::Storage;
 
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
-
-// BUILDER
 
 #[allow(private_bounds, private_interfaces)]
 pub trait StateNodeAdapterBuilder<T>
@@ -41,10 +39,8 @@ impl StateNodeAdapterBuilder<StateNodeAdapterStdImpl> for StateNodeAdapterBuilde
     }
 }
 
-// EVENTS LISTENER
-
 #[async_trait]
-pub(crate) trait StateNodeEventListener: Send + Sync {
+pub trait StateNodeEventListener: Send + Sync {
     /// When new masterchain block received from blockchain
     async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()>;
     async fn on_block_accepted(&self, block_id: &BlockId);
@@ -52,7 +48,7 @@ pub(crate) trait StateNodeEventListener: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait StateNodeAdapter: BlockProvider + Send + Sync + 'static {
+pub trait StateNodeAdapter: BlockProvider + Send + Sync + 'static {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     async fn load_state(&self, block_id: BlockId) -> Result<Arc<ShardStateStuff>>;
     async fn load_block(&self, block_id: BlockId) -> Result<Option<Arc<BlockStuff>>>;
@@ -62,8 +58,8 @@ pub(crate) trait StateNodeAdapter: BlockProvider + Send + Sync + 'static {
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: Arc<Mutex<HashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>>>,
-    notifier: Arc<Notify>,
     storage: Arc<Storage>,
+    broadcaster: broadcast::Sender<BlockId>,
 }
 
 impl BlockProvider for StateNodeAdapterStdImpl {
@@ -71,58 +67,64 @@ impl BlockProvider for StateNodeAdapterStdImpl {
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async move {
-            loop {
-                let blocks = self.blocks.lock().await;
-                if let Some(mc_shard) = blocks.get(&prev_block_id.shard) {
-                    if let Some(block) = mc_shard.get(&prev_block_id.seqno) {
-                        for id in block.top_shard_blocks_ids.iter() {
-                            if let Some(shard_blocks) = blocks.get(&id.shard) {
-                                if let Some(block) = shard_blocks.get(&id.seqno) {
-                                    return Some(
-                                        block.block_stuff.clone().ok_or(anyhow!("no block stuff")),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                drop(blocks);
-                self.notifier.notified().await;
-            }
-        })
+        self.wait_for_block(prev_block_id)
     }
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(async move {
-            loop {
-                let blocks = self.blocks.lock().await;
-                if let Some(sc_shard) = blocks.get(&block_id.shard) {
-                    if let Some(block) = sc_shard.get(&block_id.seqno) {
-                        return Some(block.block_stuff.clone().ok_or(anyhow!("no block stuff")));
-                    }
-                }
-                drop(blocks);
-                self.notifier.notified().await;
-            }
-        })
+        self.wait_for_block(block_id)
     }
 }
 
 impl StateNodeAdapterStdImpl {
-    fn create(listener: Arc<dyn StateNodeEventListener>, storage: Arc<Storage>) -> Self {
+    pub fn create(listener: Arc<dyn StateNodeEventListener>, storage: Arc<Storage>) -> Self {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
+        let (broadcaster, _) = broadcast::channel(1000);
         Self {
             listener,
             storage,
             blocks: Default::default(),
-            notifier: Arc::new(Notify::new()),
+            broadcaster,
         }
+    }
+
+    fn wait_for_block<'a>(
+        &'a self,
+        block_id: &'a BlockId,
+    ) -> <StateNodeAdapterStdImpl as BlockProvider>::GetBlockFut<'a> {
+        let mut receiver = self.broadcaster.subscribe();
+        Box::pin(async move {
+            loop {
+                let blocks = self.blocks.lock().await;
+                if let Some(shard_blocks) = blocks.get(&block_id.shard) {
+                    if let Some(block) = shard_blocks.get(&block_id.seqno) {
+                        return Some(block.block_stuff.clone().ok_or(anyhow!("no block stuff")));
+                    }
+                }
+                drop(blocks);
+
+                loop {
+                    match receiver.recv().await {
+                        Ok(received_block_id) if received_block_id == *block_id => {
+                            break;
+                        }
+                        Ok(_) => continue,
+                        Err(broadcast::error::RecvError::Lagged(count)) => {
+                            tracing::warn!(target: tracing_targets::STATE_NODE_ADAPTER, "Broadcast channel lagged: {}", count);
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Broadcast channel closed");
+                            return None;
+                        }
+                    }
+                }
+            }
+        })
     }
 }
 
 impl BlockSubscriber for StateNodeAdapterStdImpl {
-    type HandleBlockFut = BoxFuture<'static, anyhow::Result<()>>;
+    type HandleBlockFut = BoxFuture<'static, Result<()>>;
 
     fn handle_block(&self, block: &BlockStuff) -> Self::HandleBlockFut {
         let block_id = *block.id();
@@ -133,35 +135,51 @@ impl BlockSubscriber for StateNodeAdapterStdImpl {
         let listener = self.listener.clone();
 
         Box::pin(async move {
-            let mut blocks = blocks_lock.lock().await;
+            let mut blocks_guard = blocks_lock.lock().await;
+            let mut to_split = Vec::new();
+            let mut to_remove = Vec::new();
 
-            if let Some(shard_blocks) = blocks.get_mut(&shard) {
+            let result_future = if let Some(shard_blocks) = blocks_guard.get(&shard) {
                 if let Some(block_data) = shard_blocks.get(&seqno) {
-                    let top_shard_blocks_ids = block_data.top_shard_blocks_ids.clone();
-
                     if shard.is_masterchain() {
-                        let prev_id = block_data
+                        let prev_seqno = block_data
                             .prev_blocks_ids
                             .last()
                             .ok_or(anyhow!("no prev block"))?
                             .seqno;
-                        for id in top_shard_blocks_ids.iter() {
-                            if let Some(shard_blocks) = blocks.get_mut(&id.shard) {
-                                shard_blocks.split_off(&prev_id);
-                                shard_blocks.remove(&prev_id);
-                            }
+                        for id in &block_data.top_shard_blocks_ids {
+                            to_split.push((id.shard, id.seqno));
+                            to_remove.push((id.shard, id.seqno));
                         }
+                        to_split.push((shard, prev_seqno));
+                        to_remove.push((shard, prev_seqno));
                     } else {
-                        shard_blocks.split_off(&seqno);
-                        shard_blocks.remove(&seqno);
+                        to_remove.push((shard, seqno));
                     }
-                    listener.on_block_accepted(&block_id).await;
+                    listener.on_block_accepted(&block_id)
                 } else {
-                    listener.on_block_accepted_external(&block_id).await;
+                    listener.on_block_accepted_external(&block_id)
                 }
             } else {
-                listener.on_block_accepted_external(&block_id).await;
+                listener.on_block_accepted_external(&block_id)
+            };
+
+            for (shard, seqno) in &to_split {
+                if let Some(shard_blocks) = blocks_guard.get_mut(shard) {
+                    shard_blocks.split_off(seqno);
+                }
             }
+
+            for (shard, seqno) in &to_remove {
+                if let Some(shard_blocks) = blocks_guard.get_mut(shard) {
+                    shard_blocks.remove(seqno);
+                }
+            }
+
+            drop(blocks_guard);
+
+            result_future.await;
+
             Ok(())
         })
     }
@@ -199,27 +217,30 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
         let mut blocks = self.blocks.lock().await;
-        match block.block_id.shard.is_masterchain() {
+        let block_id = match block.block_id.shard.is_masterchain() {
             true => {
-                let prev_id = block
+                let prev_block_id = *block
                     .prev_blocks_ids
                     .last()
-                    .ok_or(anyhow!("no prev block"))?
-                    .seqno;
+                    .ok_or(anyhow!("no prev block"))?;
+
                 blocks
                     .entry(block.block_id.shard)
                     .or_insert_with(BTreeMap::new)
-                    .insert(prev_id, block);
+                    .insert(prev_block_id.seqno, block);
+                prev_block_id
             }
             false => {
+                let block_id = block.block_id;
                 blocks
                     .entry(block.block_id.shard)
                     .or_insert_with(BTreeMap::new)
                     .insert(block.block_id.seqno, block);
+                block_id
             }
-        }
-
-        self.notifier.notify_waiters();
+        };
+        let broadcast_result = self.broadcaster.send(block_id).ok();
+        tracing::trace!(target: tracing_targets::STATE_NODE_ADAPTER, "Block broadcast_result: {:?}", broadcast_result);
         Ok(())
     }
 }

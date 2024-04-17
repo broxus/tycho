@@ -5,6 +5,7 @@ use tycho_collator::{
     types::CollationConfig,
     validator_test_impl::ValidatorProcessorTestImpl,
 };
+use tycho_storage::build_tmp_storage;
 
 #[tokio::test]
 async fn test_collation_process_on_stubs() {
@@ -15,7 +16,8 @@ async fn test_collation_process_on_stubs() {
         mc_block_min_interval_ms: 10000,
     };
     let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
-    let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new();
+    let state_node_adapter_builder =
+        StateNodeAdapterBuilderStdImpl::new(build_tmp_storage().unwrap());
 
     tracing::info!("Trying to start CollationManager");
 

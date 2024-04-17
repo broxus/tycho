@@ -32,7 +32,7 @@ pub trait ValidationState: Send + Sync + 'static {
 }
 
 /// Holds information about a validation session.
-pub(crate) struct SessionInfo {
+pub struct SessionInfo {
     session_id: u32,
     max_weight: u64,
     blocks_signatures: HashMap<BlockIdShort, (BlockId, SignatureMaps)>,
@@ -190,18 +190,6 @@ impl SessionInfo {
     ) -> HashMap<HashBytes, Signature> {
         if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {
             signature_maps.valid_signatures.clone()
-        } else {
-            HashMap::new()
-        }
-    }
-
-    /// Retrieves valid signatures for a block.
-    pub fn get_invalid_signatures(
-        &self,
-        block_id_short: &BlockIdShort,
-    ) -> HashMap<HashBytes, Signature> {
-        if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {
-            signature_maps.invalid_signatures.clone()
         } else {
             HashMap::new()
         }

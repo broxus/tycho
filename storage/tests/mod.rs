@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use bytesize::ByteSize;
@@ -6,7 +7,7 @@ use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, DynCell};
 use everscale_types::models::{BlockId, ShardState};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+use tycho_storage::{build_tmp_storage, BlockMetaData, Db, DbOptions, Storage};
 
 #[derive(Clone)]
 struct ShardStateCombined {
@@ -68,11 +69,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     let db = Db::open(root_path.join("db_storage"), db_options)?;
 
     // Init storage
-    let storage = Storage::new(
-        db,
-        root_path.join("file_storage"),
-        db_options.cells_cache_size.as_u64(),
-    )?;
+    let storage = build_tmp_storage()?;
     assert!(storage.node_state().load_init_mc_block_id().is_err());
 
     // Read zerostate

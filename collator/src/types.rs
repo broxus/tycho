@@ -67,7 +67,7 @@ impl BlockCandidate {
     }
 }
 
-pub(crate) enum OnValidatedBlockEvent {
+pub enum OnValidatedBlockEvent {
     ValidByState,
     Invalid,
     Valid(BlockSignatures),
@@ -83,7 +83,7 @@ impl OnValidatedBlockEvent {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct BlockSignatures {
+pub struct BlockSignatures {
     pub signatures: HashMap<HashBytes, Signature>,
 }
 
@@ -118,7 +118,7 @@ impl ValidatedBlock {
     }
 }
 
-pub(crate) struct BlockStuffForSync {
+pub struct BlockStuffForSync {
     //STUB: will not parse Block because candidate does not contain real block
     //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
@@ -132,7 +132,7 @@ pub(crate) struct BlockStuffForSync {
 pub(crate) type CollationSessionId = (ShardIdent, u32);
 
 #[derive(Clone)]
-pub(crate) struct CollationSessionInfo {
+pub struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,
