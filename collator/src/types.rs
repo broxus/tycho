@@ -125,6 +125,7 @@ pub(crate) struct BlockStuffForSync {
     pub block_stuff: Option<BlockStuff>,
     pub signatures: HashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks_ids: Vec<BlockId>,
 }
 
 /// (`ShardIdent`, seqno)

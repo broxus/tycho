@@ -16,6 +16,7 @@ pub fn build_block_stuff_for_sync(
         block_stuff: None,
         signatures: block_candidate.signatures.clone(),
         prev_blocks_ids: block_candidate.candidate.prev_blocks_ids().into(),
+        top_shard_blocks_ids: block_candidate.candidate.top_shard_blocks_ids().into(),
     };
 
     Ok(res)

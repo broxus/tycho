@@ -233,6 +233,14 @@ where
         ))
         .await
     }
+
+    async fn on_block_accepted(&self, block_id: &BlockId) {
+        todo!()
+    }
+
+    async fn on_block_accepted_external(&self, block_id: &BlockId) {
+        todo!()
+    }
 }
 
 #[async_trait]

@@ -152,28 +152,25 @@ where
         }
 
         // request mc state for this master block
-        let receiver = self.state_node_adapter.request_state(mc_block_id).await?;
+        let mc_state = self.state_node_adapter.load_state(mc_block_id).await?;
 
         // when state received execute master block processing routines
         let mpool_adapter = self.mpool_adapter.clone();
         let dispatcher = self.dispatcher.clone();
-        receiver
-            .process_on_recv(|mc_state| async move {
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "Processing requested mc state for block ({})...",
-                    mc_state.block_id().as_short_id()
-                );
-                Self::notify_mempool_about_mc_block(mpool_adapter, mc_state.clone()).await?;
 
-                dispatcher
-                    .enqueue_task(method_to_async_task_closure!(
-                        refresh_collation_sessions,
-                        mc_state
-                    ))
-                    .await
-            })
-            .await;
+        tracing::info!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Processing requested mc state for block ({})...",
+            mc_state.block_id().as_short_id()
+        );
+        Self::notify_mempool_about_mc_block(mpool_adapter, mc_state.clone()).await?;
+
+        dispatcher
+            .enqueue_task(method_to_async_task_closure!(
+                refresh_collation_sessions,
+                mc_state
+            ))
+            .await?;
 
         Ok(())
     }
@@ -232,7 +229,7 @@ where
         );
         let last_mc_block_id = self
             .state_node_adapter
-            .get_last_applied_mc_block_id()
+            .load_last_applied_mc_block_id()
             .await?;
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,

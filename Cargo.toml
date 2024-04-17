@@ -92,9 +92,6 @@ tycho-network = { path = "./network" }
 tycho-storage = { path = "./storage" }
 tycho-util = { path = "./util" }
 
-[profile.release]
-debug = true
-
 [patch.crates-io]
 # NOTE: use crates.io dependency when it is released
 # https://github.com/sagebind/castaway/issues/18
@@ -175,3 +172,25 @@ unused_self = "warn"
 useless_transmute = "warn"
 verbose_file_reads = "warn"
 zero_sized_map_values = "warn"
+
+[profile.release]
+debug = true
+
+[profile.dev.package.hex]
+opt-level = 3
+[profile.dev.package.base64]
+opt-level = 3
+[profile.dev.package.rand]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.everscale-crypto]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519]
+opt-level = 3
+[profile.dev.package.hashbrown]
+opt-level = 3
+[profile.dev.package."*"]
+opt-level = 1
