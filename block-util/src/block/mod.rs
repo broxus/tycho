@@ -6,5 +6,5 @@ pub use self::block_stuff::{BlockStuff, BlockStuffAug};
 pub use self::top_blocks::{TopBlocks, TopBlocksShortIdsIter};
 
 mod block_proof_stuff;
-mod block_stuff;
+pub mod block_stuff;
 mod top_blocks;

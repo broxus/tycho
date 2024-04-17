@@ -33,7 +33,12 @@ tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tracing-test = { workspace = true }
+tycho-storage = { workspace = true, features = ["integration-tests"] }
+
+[features]
+integration-tests = []
 
 [lints]
 workspace = true

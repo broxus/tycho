@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-use anyhow::bail;
-use everscale_crypto::ed25519::{KeyPair, PublicKey};
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
@@ -13,15 +12,15 @@ use crate::types::CollationSessionInfo;
 
 pub(crate) type ValidatorsMap = HashMap<[u8; 32], Arc<ValidatorInfo>>;
 
-pub(crate) enum ValidatorInfoError {
+pub enum ValidatorInfoError {
     InvalidPublicKey,
 }
 
 #[derive(Clone)]
-pub(crate) struct ValidatorInfo {
+pub struct ValidatorInfo {
     pub public_key: PublicKey,
     pub weight: u64,
-    pub adnl_addr: Option<HashBytes>,
+    pub _adnl_addr: Option<HashBytes>,
 }
 
 impl TryFrom<&ValidatorDescription> for ValidatorInfo {
@@ -33,12 +32,12 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
         Ok(Self {
             public_key: pubkey,
             weight: value.weight,
-            adnl_addr: value.adnl_addr.map(|addr| HashBytes(addr.0)),
+            _adnl_addr: value.adnl_addr.map(|addr| HashBytes(addr.0)),
         })
     }
 }
 
-pub(crate) struct ValidationSessionInfo {
+pub struct ValidationSessionInfo {
     pub seqno: u32,
     pub validators: ValidatorsMap,
 }
@@ -104,7 +103,7 @@ pub(crate) struct OverlayNumber {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub(crate) enum ValidationResult {
+pub enum ValidationResult {
     Valid,
     Invalid,
     Insufficient,

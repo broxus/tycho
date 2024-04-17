@@ -216,6 +216,9 @@ pub fn read_block_id_le(data: &[u8]) -> Option<BlockId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Db, DbOptions, Storage};
+    use bytesize::ByteSize;
+    use std::sync::Arc;
 
     #[test]
     fn fully_on_stack() {

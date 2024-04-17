@@ -27,6 +27,10 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 tycho-util = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["integration-tests"] }
+
+[features]
+integration-tests = []
 
 [lints]
 workspace = true
