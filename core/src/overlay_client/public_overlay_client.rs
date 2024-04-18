@@ -1,7 +1,8 @@
-use anyhow::{Error, Result};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
+
+use anyhow::{Error, Result};
 use itertools::any;
 use tl_proto::TlRead;
 
@@ -194,8 +195,8 @@ impl OverlayClient for PublicOverlayClient {
                 let response = response.parse_tl::<Response<A>>()?;
                 let response_model = match response {
                     Response::Ok(r) => r,
-                    Response::Err(bytes) => {
-                        return Err(Error::msg("Failed to get response"))
+                    Response::Err(code) => {
+                        return Err(Error::msg(format!("Failed to get response: {code}")))
                     }
                 };
 

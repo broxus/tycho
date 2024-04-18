@@ -27,18 +27,12 @@ impl BlockchainClient {
     ) -> Result<QueryResponse<'_, KeyBlockIds>> {
         let data = self
             .client
-            .query::<GetNextKeyBlockIds, KeyBlockIds>(GetNextKeyBlockIds {
-                block,
-                max_size,
-            })
+            .query::<GetNextKeyBlockIds, KeyBlockIds>(GetNextKeyBlockIds { block, max_size })
             .await?;
         Ok(data)
     }
 
-    pub async fn get_block_full(
-        &self,
-        block: BlockId,
-    ) -> Result<QueryResponse<'_, BlockFull>> {
+    pub async fn get_block_full(&self, block: BlockId) -> Result<QueryResponse<'_, BlockFull>> {
         let data = self
             .client
             .query::<GetBlockFull, BlockFull>(GetBlockFull { block })
@@ -57,13 +51,10 @@ impl BlockchainClient {
         Ok(data)
     }
 
-    pub async fn get_archive_info(
-        &self,
-        mc_seqno: u32,
-    ) -> Result<QueryResponse<'_, Response<ArchiveInfo>>> {
+    pub async fn get_archive_info(&self, mc_seqno: u32) -> Result<QueryResponse<'_, ArchiveInfo>> {
         let data = self
             .client
-            .query::<GetArchiveInfo, Response<ArchiveInfo>>(GetArchiveInfo { mc_seqno })
+            .query::<GetArchiveInfo, ArchiveInfo>(GetArchiveInfo { mc_seqno })
             .await?;
 
         Ok(data)
@@ -95,14 +86,12 @@ impl BlockchainClient {
     ) -> Result<QueryResponse<'_, PersistentStatePart>> {
         let data = self
             .client
-            .query::<GetPersistentStatePart, PersistentStatePart>(
-                GetPersistentStatePart {
-                    block,
-                    mc_block,
-                    offset,
-                    max_size,
-                },
-            )
+            .query::<GetPersistentStatePart, PersistentStatePart>(GetPersistentStatePart {
+                block,
+                mc_block,
+                offset,
+                max_size,
+            })
             .await?;
         Ok(data)
     }

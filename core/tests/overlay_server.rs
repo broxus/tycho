@@ -14,7 +14,7 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_core::blockchain_client::BlockchainClient;
 use tycho_core::overlay_client::public_overlay_client::PublicOverlayClient;
 use tycho_core::overlay_client::settings::OverlayClientSettings;
-use tycho_core::overlay_server::OverlayServer;
+use tycho_core::overlay_server::{OverlayServer, DEFAULT_ERROR_CODE};
 use tycho_core::proto::overlay::{
     ArchiveInfo, BlockFull, Data, KeyBlockIds, PersistentStatePart, Response,
 };
@@ -304,14 +304,14 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         assert!(result.is_ok());
 
         if let Ok(response) = &result {
-            assert_eq!(response.data(), &Response::Ok(BlockFull::Empty));
+            assert_eq!(response.data(), &BlockFull::Empty);
         }
 
         let result = client.get_next_block_full(BlockId::default()).await;
         assert!(result.is_ok());
 
         if let Ok(response) = &result {
-            assert_eq!(response.data(), &Response::Ok(BlockFull::Empty));
+            assert_eq!(response.data(), &BlockFull::Empty);
         }
 
         let result = client.get_next_key_block_ids(BlockId::default(), 10).await;
@@ -322,7 +322,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
                 blocks: vec![],
                 incomplete: true,
             };
-            assert_eq!(response.data(), &Response::Ok(ids));
+            assert_eq!(response.data(), &ids);
         }
 
         let result = client
@@ -331,29 +331,26 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         assert!(result.is_ok());
 
         if let Ok(response) = &result {
-            assert_eq!(
-                response.data(),
-                &Response::Ok(PersistentStatePart::NotFound)
-            );
+            assert_eq!(response.data(), &PersistentStatePart::NotFound);
         }
 
         let result = client.get_archive_info(0).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
 
-        if let Ok(response) = &result {
+        if let Err(e) = &result {
             assert_eq!(
-                response.data(),
-                &Response::Err("State not found".to_string().into_bytes())
+                e.to_string(),
+                format!("Failed to get response: {DEFAULT_ERROR_CODE}")
             );
         }
 
         let result = client.get_archive_slice(0, 0, 100).await;
-        assert!(result.is_ok());
+        assert!(result.is_err());
 
-        if let Ok(response) = &result {
+        if let Err(e) = &result {
             assert_eq!(
-                response.data(),
-                &Response::Err("Archive not found".to_string().into_bytes())
+                e.to_string(),
+                format!("Failed to get response: {DEFAULT_ERROR_CODE}")
             );
         }
 
