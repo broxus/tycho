@@ -1,6 +1,5 @@
 use rand::distributions::{Distribution, WeightedIndex};
 use rand::thread_rng;
-use std::time::Instant;
 use tl_proto::{TlRead, TlWrite};
 use tycho_core::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_core::overlay_client::neighbours::Neighbours;
