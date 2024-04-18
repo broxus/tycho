@@ -20,22 +20,28 @@ impl BlockchainClient {
         })
     }
 
-    pub async fn get_next_block_ids(
+    pub async fn get_next_key_block_ids(
         &self,
         block: BlockId,
         max_size: u32,
-    ) -> Result<QueryResponse<'_, KeyBlockIds>> {
+    ) -> Result<QueryResponse<'_, Response<KeyBlockIds>>> {
         let data = self
             .client
-            .query::<GetNextKeyBlockIds, KeyBlockIds>(GetNextKeyBlockIds { block, max_size })
+            .query::<GetNextKeyBlockIds, Response<KeyBlockIds>>(GetNextKeyBlockIds {
+                block,
+                max_size,
+            })
             .await?;
         Ok(data)
     }
 
-    pub async fn get_block_full(&self, block: BlockId) -> Result<QueryResponse<'_, BlockFull>> {
+    pub async fn get_block_full(
+        &self,
+        block: BlockId,
+    ) -> Result<QueryResponse<'_, Response<BlockFull>>> {
         let data = self
             .client
-            .query::<GetBlockFull, BlockFull>(GetBlockFull { block })
+            .query::<GetBlockFull, Response<BlockFull>>(GetBlockFull { block })
             .await?;
         Ok(data)
     }
@@ -43,19 +49,23 @@ impl BlockchainClient {
     pub async fn get_next_block_full(
         &self,
         prev_block: BlockId,
-    ) -> Result<QueryResponse<'_, BlockFull>> {
+    ) -> Result<QueryResponse<'_, Response<BlockFull>>> {
         let data = self
             .client
-            .query::<GetNextBlockFull, BlockFull>(GetNextBlockFull { prev_block })
+            .query::<GetNextBlockFull, Response<BlockFull>>(GetNextBlockFull { prev_block })
             .await?;
         Ok(data)
     }
 
-    pub async fn get_archive_info(&self, mc_seqno: u32) -> Result<QueryResponse<'_, ArchiveInfo>> {
+    pub async fn get_archive_info(
+        &self,
+        mc_seqno: u32,
+    ) -> Result<QueryResponse<'_, Response<ArchiveInfo>>> {
         let data = self
             .client
-            .query::<GetArchiveInfo, ArchiveInfo>(GetArchiveInfo { mc_seqno })
+            .query::<GetArchiveInfo, Response<ArchiveInfo>>(GetArchiveInfo { mc_seqno })
             .await?;
+
         Ok(data)
     }
 
@@ -64,10 +74,10 @@ impl BlockchainClient {
         archive_id: u64,
         offset: u64,
         max_size: u32,
-    ) -> Result<QueryResponse<'_, Data>> {
+    ) -> Result<QueryResponse<'_, Response<Data>>> {
         let data = self
             .client
-            .query::<GetArchiveSlice, Data>(GetArchiveSlice {
+            .query::<GetArchiveSlice, Response<Data>>(GetArchiveSlice {
                 archive_id,
                 offset,
                 max_size,
@@ -82,15 +92,17 @@ impl BlockchainClient {
         block: BlockId,
         offset: u64,
         max_size: u64,
-    ) -> Result<QueryResponse<'_, PersistentStatePart>> {
+    ) -> Result<QueryResponse<'_, Response<PersistentStatePart>>> {
         let data = self
             .client
-            .query::<GetPersistentStatePart, PersistentStatePart>(GetPersistentStatePart {
-                block,
-                mc_block,
-                offset,
-                max_size,
-            })
+            .query::<GetPersistentStatePart, Response<PersistentStatePart>>(
+                GetPersistentStatePart {
+                    block,
+                    mc_block,
+                    offset,
+                    max_size,
+                },
+            )
             .await?;
         Ok(data)
     }

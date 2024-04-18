@@ -22,13 +22,13 @@ where
     Err,
 }
 
-#[derive(Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "publicOverlay.data", scheme = "proto.tl")]
 pub struct Data {
     pub data: Bytes,
 }
 
-#[derive(Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "publicOverlay.keyBlockIds", scheme = "proto.tl")]
 pub struct KeyBlockIds {
     #[tl(with = "tl_block_id_vec")]
@@ -36,7 +36,7 @@ pub struct KeyBlockIds {
     pub incomplete: bool,
 }
 
-#[derive(Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum BlockFull {
     #[tl(id = "publicOverlay.blockFull.found")]
@@ -51,7 +51,7 @@ pub enum BlockFull {
     Empty,
 }
 
-#[derive(Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum PersistentStatePart {
     #[tl(id = "publicOverlay.persistentStatePart.found")]
@@ -60,7 +60,7 @@ pub enum PersistentStatePart {
     NotFound,
 }
 
-#[derive(Clone, TlRead, TlWrite)]
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
     #[tl(id = "publicOverlay.archiveInfo", size_hint = 8)]

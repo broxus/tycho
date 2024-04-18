@@ -12,11 +12,11 @@ use crate::proto;
 pub struct OverlayServer(Arc<OverlayServerInner>);
 
 impl OverlayServer {
-    pub fn new(storage: Arc<Storage>, support_persistent_states: bool) -> Arc<Self> {
-        Arc::new(Self(Arc::new(OverlayServerInner {
+    pub fn new(storage: Arc<Storage>, support_persistent_states: bool) -> Self {
+        Self(Arc::new(OverlayServerInner {
             storage,
             support_persistent_states,
-        })))
+        }))
     }
 }
 
@@ -368,6 +368,7 @@ impl OverlayServerInner {
                 }
 
                 let block_storage = self.storage().block_storage();
+
                 let res = match block_storage.get_archive_id(mc_seqno) {
                     Some(id) => proto::overlay::ArchiveInfo::Found { id: id as u64 },
                     None => proto::overlay::ArchiveInfo::NotFound,
