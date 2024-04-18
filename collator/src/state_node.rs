@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, Mutex};
 use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
 use tycho_core::block_strider::provider::{BlockProvider, OptionalBlockStuff};
 use tycho_core::block_strider::subscriber::BlockSubscriber;
-use tycho_storage::Storage;
+use tycho_storage::{BlockHandle, Storage};
 
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
@@ -50,8 +50,9 @@ pub trait StateNodeEventListener: Send + Sync {
 #[async_trait]
 pub trait StateNodeAdapter: BlockProvider + Send + Sync + 'static {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
-    async fn load_state(&self, block_id: BlockId) -> Result<Arc<ShardStateStuff>>;
-    async fn load_block(&self, block_id: BlockId) -> Result<Option<Arc<BlockStuff>>>;
+    async fn load_state(&self, block_id: &BlockId) -> Result<Arc<ShardStateStuff>>;
+    async fn load_block(&self, block_id: &BlockId) -> Result<Option<Arc<BlockStuff>>>;
+    async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<Arc<BlockHandle>>>;
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()>;
 }
 
@@ -78,7 +79,7 @@ impl BlockProvider for StateNodeAdapterStdImpl {
 impl StateNodeAdapterStdImpl {
     pub fn create(listener: Arc<dyn StateNodeEventListener>, storage: Arc<Storage>) -> Self {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "State node adapter created");
-        let (broadcaster, _) = broadcast::channel(1000);
+        let (broadcaster, _) = broadcast::channel(10000);
         Self {
             listener,
             storage,
@@ -97,7 +98,7 @@ impl StateNodeAdapterStdImpl {
                 let blocks = self.blocks.lock().await;
                 if let Some(shard_blocks) = blocks.get(&block_id.shard) {
                     if let Some(block) = shard_blocks.get(&block_id.seqno) {
-                        return Some(block.block_stuff.clone().ok_or(anyhow!("no block stuff")));
+                        return block.block_stuff.as_ref().map(|block_stuff| Ok(block_stuff.clone()));
                     }
                 }
                 drop(blocks);
@@ -192,17 +193,17 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(last_mc_block_id)
     }
 
-    async fn load_state(&self, block_id: BlockId) -> Result<Arc<ShardStateStuff>> {
+    async fn load_state(&self, block_id: &BlockId) -> Result<Arc<ShardStateStuff>> {
         let state = self
             .storage
             .shard_state_storage()
-            .load_state(&block_id)
+            .load_state(block_id)
             .await?;
         Ok(state)
     }
 
-    async fn load_block(&self, block_id: BlockId) -> Result<Option<Arc<BlockStuff>>> {
-        let block_handle = self.storage.block_handle_storage().load_handle(&block_id)?;
+    async fn load_block(&self, block_id: &BlockId) -> Result<Option<Arc<BlockStuff>>> {
+        let block_handle = self.storage.block_handle_storage().load_handle(block_id)?;
         if let Some(handle) = block_handle {
             let block_stuff = self
                 .storage
@@ -213,6 +214,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             return Ok(block_stuff);
         }
         Ok(None)
+    }
+
+    async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<Arc<BlockHandle>>> {
+        let block_handle = self.storage.block_handle_storage().load_handle(block_id)?;
+        Ok(block_handle)
     }
 
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {

@@ -432,7 +432,10 @@ where
 
         let dispatcher = self.get_dispatcher();
 
-        let block_from_state = self.state_node_adapter.load_block(candidate_id).await?;
+        let block_from_state = self
+            .state_node_adapter
+            .load_block_handle(&candidate_id)
+            .await?;
 
         let validators = session.validators_without_signatures(&block_id_short);
 

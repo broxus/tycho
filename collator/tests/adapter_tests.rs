@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use everscale_types::models::{BlockId, ShardIdent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use tycho_block_util::block::block_stuff::get_empty_block_with_block_id;
+use tycho_block_util::block::block_stuff::get_empty_block;
+use tycho_block_util::block::BlockStuff;
 use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
@@ -99,7 +100,7 @@ async fn test_add_and_get_next_block() {
 }
 
 #[tokio::test]
-async fn test_add_read_handle_1000_blocks_parallel() {
+async fn test_add_read_handle_100000_blocks_parallel() {
     let mock_storage = build_tmp_storage().unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
@@ -110,34 +111,39 @@ async fn test_add_read_handle_1000_blocks_parallel() {
         mock_storage.clone(),
     ));
 
-    // Task 1: Adding 1000 blocks
+    let empty_block = get_empty_block();
+    let cloned_block = empty_block.clone();
+    // Task 1: Adding 100000 blocks
     let add_blocks = {
         let adapter = adapter.clone();
         tokio::spawn(async move {
-            for i in 1..=1000 {
+            for i in 1..=100000 {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
                     seqno: i,
                     root_hash: Default::default(),
                     file_hash: Default::default(),
                 };
+                let block_stuff = BlockStuff::with_block(block_id.clone(), cloned_block.clone());
+
                 let block = BlockStuffForSync {
                     block_id,
-                    block_stuff: None,
+                    block_stuff: Some(block_stuff.clone()),
                     signatures: Default::default(),
                     prev_blocks_ids: Vec::new(),
                     top_shard_blocks_ids: Vec::new(),
                 };
-                adapter.accept_block(block).await.unwrap();
+                let accept_result = adapter.accept_block(block).await;
+                assert!(accept_result.is_ok(), "Block {} should be accepted", i);
             }
         })
     };
 
-    // Task 2: Retrieving and handling 1000 blocks
+    // Task 2: Retrieving and handling 100000 blocks
     let handle_blocks = {
         let adapter = adapter.clone();
         tokio::spawn(async move {
-            for i in 1..=1000 {
+            for i in 1..=100000 {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
                     seqno: i,
@@ -151,18 +157,24 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     i
                 );
 
-                let block_stuff = get_empty_block_with_block_id(block_id);
+                let block_stuff = BlockStuff::with_block(block_id.clone(), empty_block.clone());
 
-                adapter.handle_block(&block_stuff).await.unwrap();
+                let handle_block = adapter.handle_block(&block_stuff).await;
+                assert!(
+                    handle_block.is_ok(),
+                    "Block {} should be handled after being added",
+                    i
+                );
             }
         })
     };
 
     // Await both tasks to complete
     let _ = tokio::join!(handle_blocks, add_blocks);
+
     assert_eq!(
         counter.load(Ordering::SeqCst),
-        1000,
-        "1000 blocks should be accepted"
+        100000,
+        "100000 blocks should be accepted"
     );
 }
