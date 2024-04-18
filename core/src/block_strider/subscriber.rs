@@ -1,7 +1,9 @@
-use futures_util::future;
 use std::future::Future;
+use std::sync::Arc;
 
-use tycho_block_util::block::BlockStuff;
+use futures_util::future;
+
+use tycho_block_util::block::BlockStuffAug;
 use tycho_block_util::state::ShardStateStuff;
 
 pub trait BlockSubscriber: Send + Sync + 'static {
@@ -9,8 +11,8 @@ pub trait BlockSubscriber: Send + Sync + 'static {
 
     fn handle_block(
         &self,
-        block: &BlockStuff,
-        state: Option<&ShardStateStuff>,
+        block: &BlockStuffAug,
+        state: Option<&Arc<ShardStateStuff>>,
     ) -> Self::HandleBlockFut;
 }
 
@@ -19,8 +21,8 @@ impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
 
     fn handle_block(
         &self,
-        block: &BlockStuff,
-        state: Option<&ShardStateStuff>,
+        block: &BlockStuffAug,
+        state: Option<&Arc<ShardStateStuff>>,
     ) -> Self::HandleBlockFut {
         <T as BlockSubscriber>::handle_block(self, block, state)
     }
@@ -36,8 +38,8 @@ impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for FanoutBlockSu
 
     fn handle_block(
         &self,
-        block: &BlockStuff,
-        state: Option<&ShardStateStuff>,
+        block: &BlockStuffAug,
+        state: Option<&Arc<ShardStateStuff>>,
     ) -> Self::HandleBlockFut {
         let left = self.left.handle_block(block, state);
         let right = self.right.handle_block(block, state);
@@ -60,8 +62,8 @@ pub mod test {
 
         fn handle_block(
             &self,
-            block: &BlockStuff,
-            _state: Option<&ShardStateStuff>,
+            block: &BlockStuffAug,
+            _state: Option<&Arc<ShardStateStuff>>,
         ) -> Self::HandleBlockFut {
             tracing::info!("handling block: {:?}", block.id());
             future::ready(Ok(()))

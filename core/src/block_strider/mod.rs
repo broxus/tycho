@@ -22,7 +22,7 @@ use crate::block_strider::state_applier::ShardStateUpdater;
 use provider::BlockProvider;
 use state::BlockStriderState;
 use subscriber::BlockSubscriber;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::BlockStuffAug;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
 use tycho_util::FastDashMap;
@@ -221,7 +221,7 @@ where
         .boxed()
     }
 
-    async fn fetch_next_master_block(&self) -> Option<BlockStuff> {
+    async fn fetch_next_master_block(&self) -> Option<BlockStuffAug> {
         let last_traversed_master_block = self.state.load_last_traversed_master_block_id();
         tracing::debug!(?last_traversed_master_block, "Fetching next master block");
         loop {
@@ -242,7 +242,7 @@ where
         }
     }
 
-    async fn fetch_block(&self, block_id: &BlockId) -> Result<BlockStuff> {
+    async fn fetch_block(&self, block_id: &BlockId) -> Result<BlockStuffAug> {
         loop {
             match self.provider.get_block(block_id).await {
                 Some(Ok(block)) => break Ok(block),
@@ -259,7 +259,7 @@ where
 }
 
 struct BlocksGraph {
-    block_store_map: FastDashMap<BlockId, BlockStuff>,
+    block_store_map: FastDashMap<BlockId, BlockStuffAug>,
     connections: FastDashMap<BlockId, BlockId>,
     bottom_blocks: Vec<BlockId>,
 }
@@ -273,7 +273,7 @@ impl BlocksGraph {
         }
     }
 
-    fn store_block(&self, block: BlockStuff) {
+    fn store_block(&self, block: BlockStuffAug) {
         self.block_store_map.insert(*block.id(), block);
     }
 

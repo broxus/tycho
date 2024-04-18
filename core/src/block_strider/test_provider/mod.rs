@@ -9,7 +9,7 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::HashBytes;
 use std::collections::HashMap;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
 pub mod archive_provider;
 
@@ -26,18 +26,22 @@ impl BlockProvider for TestBlockProvider {
             .iter()
             .find(|id| id.seqno == prev_block_id.seqno + 1);
         futures_util::future::ready(next_id.and_then(|id| {
-            self.blocks
-                .get(id)
-                .map(|b| Ok(BlockStuff::with_block(*id, b.clone())))
+            self.blocks.get(id).map(|b| {
+                Ok(BlockStuffAug::new(
+                    BlockStuff::with_block(*id, b.clone()),
+                    everscale_types::boc::BocRepr::encode(b).unwrap(),
+                ))
+            })
         }))
     }
 
     fn get_block(&self, id: &BlockId) -> Self::GetBlockFut<'_> {
-        futures_util::future::ready(
-            self.blocks
-                .get(id)
-                .map(|b| Ok(BlockStuff::with_block(*id, b.clone()))),
-        )
+        futures_util::future::ready(self.blocks.get(id).map(|b| {
+            Ok(BlockStuffAug::new(
+                BlockStuff::with_block(*id, b.clone()),
+                everscale_types::boc::BocRepr::encode(b).unwrap(),
+            ))
+        }))
     }
 }
 

@@ -10,7 +10,7 @@ use futures_util::FutureExt;
 use sha2::Digest;
 
 use tycho_block_util::archive::{ArchiveEntryId, ArchiveReader};
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff};
 
@@ -33,10 +33,12 @@ impl BlockProvider for ArchiveProvider {
     }
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(
-            self.get_block_by_id(block_id)
-                .map(|b| (Ok(BlockStuff::with_block(*block_id, b)))),
-        )
+        futures_util::future::ready(self.get_block_by_id(block_id).map(|b| {
+            Ok(BlockStuffAug::new(
+                BlockStuff::with_block(*block_id, b.clone()),
+                everscale_types::boc::BocRepr::encode(b).unwrap(),
+            ))
+        }))
         .boxed()
     }
 }

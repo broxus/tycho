@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::FutureExt;
 
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::{BlockHandle, BlockMetaData, Storage};
 
@@ -43,8 +43,8 @@ where
 
     fn handle_block(
         &self,
-        block: &BlockStuff,
-        _state: Option<&ShardStateStuff>,
+        block: &BlockStuffAug,
+        _state: Option<&Arc<ShardStateStuff>>,
     ) -> Self::HandleBlockFut {
         tracing::info!(id = ?block.id(), "applying block");
         let block = block.clone();
@@ -53,7 +53,7 @@ where
         let subscriber = self.state_subscriber.clone();
 
         async move {
-            let block_h = Self::get_block_handle(&block, &storage)?;
+            let block_h = Self::get_block_handle(&block, &storage).await?;
 
             let (prev_id, _prev_id_2) = block //todo: handle merge
                 .construct_prev_id()
@@ -69,7 +69,7 @@ where
             let new_state = Self::compute_and_store_state_update(
                 &block,
                 &min_ref_mc_state_tracker,
-                storage,
+                &storage,
                 &block_h,
                 prev_state,
             )
@@ -103,6 +103,12 @@ where
             let elapsed = start.elapsed();
             metrics::histogram!("tycho_subscriber_handle_block_seconds").record(elapsed);
 
+            block_h.meta().set_is_applied();
+            storage
+                .block_handle_storage()
+                .store_handle(&block_h)
+                .context("Failed to store block handle")?;
+
             Ok(())
         }
         .boxed()
@@ -113,17 +119,20 @@ impl<S> ShardStateUpdater<S>
 where
     S: BlockSubscriber,
 {
-    fn get_block_handle(block: &BlockStuff, storage: &Arc<Storage>) -> Result<Arc<BlockHandle>> {
+    async fn get_block_handle(
+        block: &BlockStuffAug,
+        storage: &Arc<Storage>,
+    ) -> Result<Arc<BlockHandle>> {
         let info = block
             .block()
             .info
             .load()
             .context("Failed to load block info")?;
 
-        let (block_h, _) = storage
-            .block_handle_storage()
-            .create_or_load_handle(
-                block.id(),
+        let h = storage
+            .block_storage()
+            .store_block_data(
+                block,
                 BlockMetaData {
                     is_key_block: info.key_block,
                     gen_utime: info.gen_utime,
@@ -138,18 +147,18 @@ where
                         .context("Failed to process master ref")?,
                 },
             )
-            .context("Failed to create or load block handle")?;
+            .await?;
 
-        Ok(block_h)
+        Ok(h.handle)
     }
 
     async fn compute_and_store_state_update(
         block: &BlockStuff,
         min_ref_mc_state_tracker: &MinRefMcStateTracker,
-        storage: Arc<Storage>,
+        storage: &Arc<Storage>,
         block_h: &Arc<BlockHandle>,
         prev_state: Arc<ShardStateStuff>,
-    ) -> Result<ShardStateStuff> {
+    ) -> Result<Arc<ShardStateStuff>> {
         let update = block
             .block()
             .load_state_update()
@@ -169,7 +178,7 @@ where
             .await
             .context("Failed to store new state")?;
 
-        Ok(new_state)
+        Ok(Arc::new(new_state))
     }
 }
 
