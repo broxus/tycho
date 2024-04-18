@@ -152,7 +152,7 @@ where
         }
 
         // request mc state for this master block
-        let mc_state = self.state_node_adapter.load_state(mc_block_id).await?;
+        let mc_state = self.state_node_adapter.load_state(&mc_block_id).await?;
 
         // when state received execute master block processing routines
         let mpool_adapter = self.mpool_adapter.clone();

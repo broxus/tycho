@@ -158,9 +158,9 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
     let test_listener = TestValidatorEventListener::new(1);
     let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
-    let state_node_adapter = Arc::new(
-        StateNodeAdapterBuilderStdImpl::new(build_tmp_storage()?).build(test_listener.clone()),
-    );
+    let storage = build_tmp_storage()?;
+    let state_node_adapter =
+        Arc::new(StateNodeAdapterBuilderStdImpl::new(storage).build(test_listener.clone()));
     let _validation_state = ValidationStateStdImpl::new();
 
     let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());

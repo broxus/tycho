@@ -96,7 +96,7 @@ where
         let mut prev_states = vec![];
         for prev_block_id in prev_blocks_ids {
             // request state for prev block and wait for response
-            let state = state_node_adapter.load_state(prev_block_id).await?;
+            let state = state_node_adapter.load_state(&prev_block_id).await?;
             tracing::info!(
                 target: tracing_targets::COLLATOR,
                 "To init working state loaded prev shard state for prev_block_id {}",
