@@ -2,6 +2,7 @@ use anyhow::{Error, Result};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
+use itertools::any;
 use tl_proto::TlRead;
 
 use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
@@ -11,7 +12,7 @@ use tycho_network::{PublicOverlay, Request};
 use crate::overlay_client::neighbour::Neighbour;
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
 use crate::overlay_client::settings::{OverlayClientSettings, OverlayOptions};
-use crate::proto::overlay::{Ping, Pong};
+use crate::proto::overlay::{Ping, Pong, Response};
 
 pub trait OverlayClient {
     async fn send<R>(&self, data: R) -> Result<()>
@@ -190,7 +191,13 @@ impl OverlayClient for PublicOverlayClient {
 
         match response_opt {
             Ok(response) => {
-                let response_model = response.parse_tl::<A>()?;
+                let response = response.parse_tl::<Response<A>>()?;
+                let response_model = match response {
+                    Response::Ok(r) => r,
+                    Response::Err(bytes) => {
+                        return Err(Error::msg("Failed to get response"))
+                    }
+                };
 
                 Ok(QueryResponse {
                     data: response_model,

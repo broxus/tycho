@@ -24,10 +24,10 @@ impl BlockchainClient {
         &self,
         block: BlockId,
         max_size: u32,
-    ) -> Result<QueryResponse<'_, Response<KeyBlockIds>>> {
+    ) -> Result<QueryResponse<'_, KeyBlockIds>> {
         let data = self
             .client
-            .query::<GetNextKeyBlockIds, Response<KeyBlockIds>>(GetNextKeyBlockIds {
+            .query::<GetNextKeyBlockIds, KeyBlockIds>(GetNextKeyBlockIds {
                 block,
                 max_size,
             })
@@ -38,10 +38,10 @@ impl BlockchainClient {
     pub async fn get_block_full(
         &self,
         block: BlockId,
-    ) -> Result<QueryResponse<'_, Response<BlockFull>>> {
+    ) -> Result<QueryResponse<'_, BlockFull>> {
         let data = self
             .client
-            .query::<GetBlockFull, Response<BlockFull>>(GetBlockFull { block })
+            .query::<GetBlockFull, BlockFull>(GetBlockFull { block })
             .await?;
         Ok(data)
     }
@@ -49,10 +49,10 @@ impl BlockchainClient {
     pub async fn get_next_block_full(
         &self,
         prev_block: BlockId,
-    ) -> Result<QueryResponse<'_, Response<BlockFull>>> {
+    ) -> Result<QueryResponse<'_, BlockFull>> {
         let data = self
             .client
-            .query::<GetNextBlockFull, Response<BlockFull>>(GetNextBlockFull { prev_block })
+            .query::<GetNextBlockFull, BlockFull>(GetNextBlockFull { prev_block })
             .await?;
         Ok(data)
     }
@@ -74,10 +74,10 @@ impl BlockchainClient {
         archive_id: u64,
         offset: u64,
         max_size: u32,
-    ) -> Result<QueryResponse<'_, Response<Data>>> {
+    ) -> Result<QueryResponse<'_, Data>> {
         let data = self
             .client
-            .query::<GetArchiveSlice, Response<Data>>(GetArchiveSlice {
+            .query::<GetArchiveSlice, Data>(GetArchiveSlice {
                 archive_id,
                 offset,
                 max_size,
@@ -92,10 +92,10 @@ impl BlockchainClient {
         block: BlockId,
         offset: u64,
         max_size: u64,
-    ) -> Result<QueryResponse<'_, Response<PersistentStatePart>>> {
+    ) -> Result<QueryResponse<'_, PersistentStatePart>> {
         let data = self
             .client
-            .query::<GetPersistentStatePart, Response<PersistentStatePart>>(
+            .query::<GetPersistentStatePart, PersistentStatePart>(
                 GetPersistentStatePart {
                     block,
                     mc_block,

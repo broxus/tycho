@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use tl_proto::{TlRead, TlWrite};
+use tl_proto::{TlPacket, TlRead, TlWrite};
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "overlay.ping", scheme = "proto.tl")]
@@ -13,8 +13,6 @@ pub struct Pong;
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum Response<T>
-where
-    T: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
 {
     #[tl(id = "publicOverlay.response.ok")]
     Ok(T),
