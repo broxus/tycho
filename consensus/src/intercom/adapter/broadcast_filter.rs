@@ -59,7 +59,7 @@ impl BroadcastFilter {
             }
             Ok(_) => {}
             Err(err @ RecvError::Lagged(_)) => {
-                tracing::warn!("peer schedule updates {err}");
+                tracing::error!("peer schedule updates {err}");
             }
             Err(err @ RecvError::Closed) => {
                 panic!("peer schedule updates {err}");
@@ -81,20 +81,30 @@ impl BroadcastFilter {
         //   as they may be used by some point as a dependency
         // * newer broadcasts are enqueued until 1/3+1 points per round collected
         let dag_round = Round(self.current_dag_round.load(Ordering::Acquire));
+        tracing::info!(
+            "filter @ {dag_round:?} got point @ {:?}",
+            point.body.location.round
+        );
         // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=0
         let PointId {
             location: Location { round, author },
             digest,
         } = point.id();
         // conceal raw point, do not use it
-        let point = Verifier::verify(&point, &self.peer_schedule)
-            .map_or_else(ConsensusEvent::Invalid, |_| ConsensusEvent::Verified(point));
+        let point = match Verifier::verify(&point, &self.peer_schedule) {
+            Ok(()) => ConsensusEvent::Verified(point),
+            Err(dag_point) => {
+                tracing::error!("filter @ {dag_round:?}: invalid, {:.4?}", point);
+                ConsensusEvent::Invalid(dag_point)
+            }
+        };
         if round <= dag_round.next() {
             let response = if matches!(point, ConsensusEvent::Invalid(_)) {
                 BroadcastResponse::Rejected
             } else if round >= dag_round.prev() {
                 BroadcastResponse::Accepted // we will sign, maybe
             } else {
+                tracing::error!("Rejected 1");
                 // too old, current node will not sign, but some point may include it
                 BroadcastResponse::Rejected
             };
@@ -122,6 +132,7 @@ impl BroadcastFilter {
             // node must not send broadcasts out-of order;
             // TODO we should ban a peer that broadcasts its rounds out of order,
             //   though we cannot prove this decision for other nodes
+            tracing::error!("Rejected 2");
             return BroadcastResponse::Rejected;
         };
         if let Some(to_delete) = outdated_peer_round {
@@ -133,23 +144,22 @@ impl BroadcastFilter {
                 authors.remove(&author);
             });
         }
-
-        let mut same_round = match self.by_round.entry(round).or_try_insert_with(|| {
+        match self.by_round.entry(round).or_try_insert_with(|| {
             // how many nodes should send broadcasts
             NodeCount::try_from(self.peer_schedule.peers_for(&round).len())
                 .map(|node_count| (node_count, Default::default()))
         }) {
-            Ok(entry) => entry,
             // will not accept broadcasts from not initialized validator set
             Err(_) => return BroadcastResponse::TryLater,
-        };
-
-        let (node_count, ref mut same_round) = same_round.value_mut();
-        same_round.entry(author).or_default().insert(digest, point);
-        if same_round.len() < node_count.reliable_minority() {
-            return BroadcastResponse::TryLater; // round is not yet determined
-        };
-        _ = same_round;
+            Ok(mut entry) => {
+                let (node_count, ref mut same_round) = entry.value_mut();
+                same_round.entry(author).or_default().insert(digest, point);
+                if same_round.len() < node_count.reliable_minority() {
+                    tracing::info!("round is not yet determined");
+                    return BroadcastResponse::TryLater; // round is not yet determined
+                };
+            }
+        }
 
         self.advance_round(&round).await;
         BroadcastResponse::Accepted

@@ -53,6 +53,7 @@ impl PeerSchedule {
     }
 
     pub fn updates(&self) -> broadcast::Receiver<(PeerId, PeerState)> {
+        tracing::info!("subscribing to peer updates");
         self.updates.subscribe()
     }
 
@@ -124,7 +125,7 @@ impl PeerSchedule {
 
     pub fn all_resolved(&self) -> FastHashSet<PeerId> {
         let inner = self.inner.lock();
-        inner.all_resolved()
+        inner.all_resolved(self.local_id())
     }
 
     pub fn peers_for(&self, round: &Round) -> Arc<BTreeMap<PeerId, PeerState>> {
@@ -190,7 +191,7 @@ impl PeerSchedule {
         _ = inner.next_epoch_start.replace(round);
     }
 
-    pub fn set_next_peers(&self, peers: &Vec<PeerId>) {
+    pub fn set_next_peers(&self, peers: &Vec<(PeerId, bool)>) {
         let mut all_peers = BTreeMap::new();
         let mut inner = self.inner.lock();
         for i in 0..inner.peers_resolved.len() {
@@ -198,7 +199,7 @@ impl PeerSchedule {
         }
         let old = peers
             .iter()
-            .filter_map(|peer_id| {
+            .filter_map(|(peer_id, _)| {
                 all_peers
                     .get(peer_id)
                     .map(|&state| (peer_id.clone(), state.clone()))
@@ -206,7 +207,16 @@ impl PeerSchedule {
             .collect::<Vec<_>>();
         let next = Arc::make_mut(&mut inner.peers_resolved[2]);
         next.clear();
-        next.extend(peers.clone().into_iter().map(|a| (a, PeerState::Added)));
+        next.extend(peers.clone().into_iter().map(|(peer_id, is_resolved)| {
+            (
+                peer_id,
+                if is_resolved {
+                    PeerState::Resolved
+                } else {
+                    PeerState::Added
+                },
+            )
+        }));
         next.extend(old);
     }
 
@@ -277,12 +287,12 @@ impl PeerScheduleInner {
         }
     }
 
-    fn all_resolved(&self) -> FastHashSet<PeerId> {
+    fn all_resolved(&self, local_id: PeerId) -> FastHashSet<PeerId> {
         self.peers_resolved[0]
             .iter()
             .chain(self.peers_resolved[1].iter())
             .chain(self.peers_resolved[2].iter())
-            .filter(|(_, state)| *state == &PeerState::Resolved)
+            .filter(|(peer_id, state)| *state == &PeerState::Resolved && peer_id != &local_id)
             .map(|(peer_id, _)| *peer_id)
             .collect()
     }

@@ -9,36 +9,31 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-# crates.io deps
+ahash = { workspace = true }
 anyhow = { workspace = true }
 bincode = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
-castaway = "0.2"
-dashmap = "5.4"
-everscale-crypto = "0.2"
+dashmap = { workspace = true }
+everscale-crypto = { workspace = true }
 futures-util = { workspace = true }
-parking_lot = "0.12"
-rand = { version = "0.8" }
-rand_pcg = { version = "0.3" }
+parking_lot = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-sha2 = "0.10"
-tokio = { version = "1", features = ["rt"] }
+sha2 = { workspace = true }
+tokio = { workspace = true, default-features = false }
 tracing = { workspace = true }
 weedb = { workspace = true }
 
 # local deps
+rand_pcg = { version = "0.3" }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-util = { workspace = true }
-
-# temp
-#hex = "0.4.3"
-thiserror = "1.0"
-ahash = "0.8"
+tycho-util = { workspace = true, features = ["test"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = { workspace = true, features = ["deadlock_detection"] }
+tokio = { workspace = true, default-features = false, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [lints]
 workspace = true

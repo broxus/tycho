@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Sub};
 
 use bytes::Bytes;
@@ -7,16 +8,65 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+use crate::engine::MempoolConfig;
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Digest(pub [u8; 32]);
+impl Display for Digest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let len = f.precision().unwrap_or(32);
+        for byte in self.0.iter().take(len) {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+impl Debug for Digest {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Digest(")?;
+        std::fmt::Display::fmt(self, f)?;
+        f.write_str(")")
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Signature(pub Bytes);
+impl Display for Signature {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let len = f.precision().unwrap_or(64);
+        for byte in self.0.iter().take(len) {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+impl Debug for Signature {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Signature(")?;
+        std::fmt::Display::fmt(self, f)?;
+        f.write_str(")")
+    }
+}
 
 #[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Round(pub u32);
+
+impl Round {
+    pub fn prev(&self) -> Round {
+        self.0
+            .checked_sub(1)
+            .map(Round)
+            .expect("DAG round number underflow, fix dag initial configuration")
+    }
+    pub fn next(&self) -> Round {
+        self.0
+            .checked_add(1)
+            .map(Round)
+            .expect("DAG round number overflow, inner type exhausted")
+    }
+}
 
 #[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct UnixTime(u64);
@@ -52,21 +102,6 @@ impl Sub for UnixTime {
     }
 }
 
-impl Round {
-    pub fn prev(&self) -> Round {
-        self.0
-            .checked_sub(1)
-            .map(Round)
-            .expect("DAG round number underflow, fix dag initial configuration")
-    }
-    pub fn next(&self) -> Round {
-        self.0
-            .checked_add(1)
-            .map(Round)
-            .expect("DAG round number overflow, inner type exhausted")
-    }
-}
-
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Location {
     pub round: Round,
@@ -87,7 +122,8 @@ pub struct PrevPoint {
     pub digest: Digest,
     /// `>= 2F` neighbours, order does not matter;
     /// point author is excluded: everyone must use the proven point to validate its proof
-    pub evidence: FastHashMap<PeerId, Signature>,
+    // Note: bincode may be non-stable on (de)serializing hashmaps due to different local order
+    pub evidence: BTreeMap<PeerId, Signature>,
     // TODO if we use TL, then every node can sign hash of a point's body (not all body bytes)
     //  so we can include that hash into PrevPoint
     //  to check signatures inside BroadcastFilter::verify() without waiting for DAG
@@ -206,10 +242,9 @@ impl Point {
     /// must be checked right after integrity, before any manipulations with the point
     pub fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
-        const LAST_GENESIS_ROUND: Round = Round(0);
         let author = &self.body.location.author;
         let is_special_ok = match self.body.location.round {
-            LAST_GENESIS_ROUND => {
+            MempoolConfig::GENESIS_ROUND => {
                 self.body.includes.is_empty()
                     && self.body.witness.is_empty()
                     && self.body.payload.is_empty()
@@ -217,10 +252,10 @@ impl Point {
                     && self.body.anchor_proof == Link::ToSelf
                     && self.body.anchor_trigger == Link::ToSelf
             }
-            round if round > LAST_GENESIS_ROUND => {
+            round if round > MempoolConfig::GENESIS_ROUND => {
                 // no witness is possible at the round right after genesis;
                 // the other way: we may panic on round.prev().prev() while extracting link's round
-                (round.0 > LAST_GENESIS_ROUND.0 + 1 || self.body.witness.is_empty())
+                (round > MempoolConfig::GENESIS_ROUND.next() || self.body.witness.is_empty())
                 // leader must maintain its chain of proofs,
                 // while others must link to previous points (checked at the end of this method);
                 // its decided later (using dag round data) whether current point belongs to leader
@@ -236,16 +271,13 @@ impl Point {
             && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
             && self.is_link_well_formed(&self.body.anchor_proof)
             && self.is_link_well_formed(&self.body.anchor_trigger)
-            && match (
-            self.anchor_proof_round(),
-            self.anchor_trigger_round(),
-            ) {
-                (x, LAST_GENESIS_ROUND) => x >= LAST_GENESIS_ROUND,
-                (LAST_GENESIS_ROUND, y) => y >= LAST_GENESIS_ROUND,
+            && match (self.anchor_proof_round(), self.anchor_trigger_round()) {
+                (x, MempoolConfig::GENESIS_ROUND) => x >= MempoolConfig::GENESIS_ROUND,
+                (MempoolConfig::GENESIS_ROUND, y) => y >= MempoolConfig::GENESIS_ROUND,
                 // equality is impossible due to commit waves do not start every round;
                 // anchor trigger may belong to a later round than proof and vice versa;
                 // no indirect links over genesis tombstone
-                (x, y) => x != y && x > LAST_GENESIS_ROUND && y > LAST_GENESIS_ROUND,
+                (x, y) => x != y && x > MempoolConfig::GENESIS_ROUND && y > MempoolConfig::GENESIS_ROUND,
             }
     }
 
@@ -259,14 +291,14 @@ impl Point {
                 to,
             } => {
                 self.body.includes.contains_key(peer)
-                    && to.location.round.0 + 1 < self.body.location.round.0
+                    && to.location.round.next() < self.body.location.round
             }
             Link::Indirect {
                 path: Through::Witness(peer),
                 to,
             } => {
                 self.body.witness.contains_key(peer)
-                    && to.location.round.0 + 2 < self.body.location.round.0
+                    && to.location.round.next().next() < self.body.location.round
             }
         }
     }

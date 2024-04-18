@@ -1,6 +1,5 @@
 use std::mem;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
@@ -14,13 +13,15 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::intercom::adapter::dto::SignerSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{NodeCount, Point, Signature};
+use crate::models::{NodeCount, Point, Round, Signature};
 
 type BcastResult = anyhow::Result<BroadcastResponse>;
 type SigResult = anyhow::Result<SignatureResponse>;
-const LOOP_DURATION: Duration = Duration::from_millis(100);
 
 pub struct Broadcaster {
+    local_id: Arc<String>,
+    current_round: Round,
+
     point_body: Vec<u8>,
     dispatcher: Dispatcher,
     bcaster_ready: Arc<Notify>,
@@ -46,6 +47,7 @@ pub struct Broadcaster {
 
 impl Broadcaster {
     pub fn new(
+        local_id: &Arc<String>,
         point: &Point,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
@@ -59,11 +61,14 @@ impl Broadcaster {
             .iter()
             .map(|(peer_id, _)| *peer_id)
             .collect::<FastHashSet<_>>();
-        let signers_count = NodeCount::try_from(signers.len()).unwrap();
+        let signers_count = NodeCount::new(signers.len());
         let bcast_peers = peer_schedule.all_resolved();
+        tracing::info!("bcast_peers {}", bcast_peers.len());
         let bcast_request = Dispatcher::broadcast_request(&point);
         let sig_request = Dispatcher::signature_request(&point.body.location.round);
         Self {
+            local_id: local_id.clone(),
+            current_round: point.body.location.round,
             point_body,
             dispatcher: dispatcher.clone(),
             bcaster_ready,
@@ -104,8 +109,8 @@ impl Broadcaster {
         // * enqueued for any of two requests above
         // * rejected to sign our point (incl. rejection of the point itself and incorrect sig)
         // * successfully signed our point and dequeued
-        for peer_id in mem::take(&mut self.bcast_peers).iter() {
-            self.broadcast(peer_id)
+        for peer_id in mem::take(&mut self.bcast_peers) {
+            self.broadcast(&peer_id)
         }
         loop {
             tokio::select! {
@@ -119,21 +124,36 @@ impl Broadcaster {
                     self.match_peer_updates(update)
                 }
                 Some(signer_signal) = self.signer_signal.recv() => {
-                    match signer_signal {
-                        SignerSignal::Ok => self.is_signer_ready_ok = true,
-                        SignerSignal::Err => {
-                            // even if we can return successful result, it will be discarded
-                            return Err(())
-                        },
-                        SignerSignal::Retry => {
-                            match self.check_if_ready() {
-                                Some(result) => break result.map(|_| self.signatures),
-                                None => self.retry(),
-                            }
-                        },
+                    if let Some(result) = self.match_signer_signal(signer_signal) {
+                        break result.map(|_| self.signatures)
                     }
                 }
+                else => {
+                    panic!("bcaster unhandled");
+                }
             }
+        }
+    }
+    fn match_signer_signal(&mut self, signer_signal: SignerSignal) -> Option<Result<(), ()>> {
+        tracing::info!(
+            "{} @ {:?} bcaster <= signer : {signer_signal:?}; sigs {} of {}; rejects {} of {}",
+            self.local_id,
+            self.current_round,
+            self.signatures.len(),
+            self.signers_count.majority_of_others(),
+            self.rejections.len(),
+            self.signers_count.reliable_minority(),
+        );
+        match signer_signal {
+            SignerSignal::Ok => {
+                self.is_signer_ready_ok = true;
+                None
+            }
+            SignerSignal::Err => {
+                // even if we can return successful result, it will be discarded
+                Some(Err(()))
+            }
+            SignerSignal::Retry => self.check_if_ready(),
         }
     }
     fn check_if_ready(&mut self) -> Option<Result<(), ()>> {
@@ -148,23 +168,30 @@ impl Broadcaster {
                 return Some(Ok(()));
             }
         }
+        for peer_id in mem::take(&mut self.sig_peers) {
+            self.request_signature(&peer_id);
+        }
+        for peer_id in mem::take(&mut self.bcast_peers) {
+            self.broadcast(&peer_id);
+        }
         None
-    }
-    fn retry(&mut self) {
-        for peer_id in mem::take(&mut self.sig_peers).iter() {
-            self.request_signature(peer_id);
-        }
-        for peer_id in mem::take(&mut self.bcast_peers).iter() {
-            self.broadcast(peer_id);
-        }
     }
     fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
         match result {
-            Ok((_peer_id, PeerState::Added)) => { /* ignore */ }
-            Ok((peer_id, PeerState::Resolved)) => self.broadcast(&peer_id),
-            Ok((peer_id, PeerState::Removed)) => _ = self.removed_peers.insert(peer_id),
+            Ok(update) => {
+                tracing::info!(
+                    "{} @ {:?} bcaster peer update: {update:?}",
+                    self.local_id,
+                    self.current_round
+                );
+                match update {
+                    (_peer_id, PeerState::Added) => { /* ignore */ }
+                    (peer_id, PeerState::Resolved) => self.broadcast(&peer_id),
+                    (peer_id, PeerState::Removed) => _ = self.removed_peers.insert(peer_id),
+                }
+            }
             Err(err @ RecvError::Lagged(_)) => {
-                tracing::warn!("Broadcaster peer updates {err}")
+                tracing::error!("Broadcaster peer updates {err}")
             }
             Err(err @ RecvError::Closed) => {
                 panic!("Broadcaster peer updates {err}")
@@ -173,50 +200,87 @@ impl Broadcaster {
     }
     fn match_broadcast_result(&mut self, peer_id: PeerId, result: BcastResult) {
         match result {
-            Ok(BroadcastResponse::Accepted) => self.request_signature(&peer_id),
-            Ok(BroadcastResponse::TryLater) => _ = self.sig_peers.insert(peer_id),
-            Ok(BroadcastResponse::Rejected) => {
-                if self.signers.contains(&peer_id) {
-                    self.rejections.insert(peer_id);
-                }
-            }
             Err(error) => {
                 // TODO distinguish timeouts from models incompatibility etc
-
                 // self.bcast_peers.push(peer_id); // let it retry
                 self.sig_peers.insert(peer_id); // lighter weight retry loop
-                tracing::warn!("on broadcasting own point: {error}");
+                tracing::error!(
+                    "{} @ {:?} bcaster <= signer {peer_id:.4?} broadcast error : {error}",
+                    self.local_id,
+                    self.current_round
+                );
+            }
+            Ok(response) => {
+                if response == BroadcastResponse::Rejected {
+                    tracing::warn!(
+                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        self.local_id,
+                        self.current_round
+                    );
+                } else {
+                    tracing::info!(
+                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        self.local_id,
+                        self.current_round
+                    );
+                }
+                match response {
+                    BroadcastResponse::Accepted => self.request_signature(&peer_id),
+                    BroadcastResponse::TryLater => _ = self.sig_peers.insert(peer_id),
+                    BroadcastResponse::Rejected => {
+                        if self.signers.contains(&peer_id) {
+                            self.rejections.insert(peer_id);
+                        }
+                    }
+                }
             }
         }
     }
     fn match_signature_result(&mut self, peer_id: PeerId, result: SigResult) {
         match result {
-            Ok(SignatureResponse::Signature(signature)) => {
-                if self.signers.contains(&peer_id) {
-                    if self.is_signature_ok(&peer_id, &signature) {
-                        self.signatures.insert(peer_id, signature);
-                    } else {
-                        // any invalid signature lowers our chances
-                        // to successfully finish current round
-                        self.rejections.insert(peer_id);
-                    }
-                }
-            }
-            Ok(SignatureResponse::NoPoint) => {
-                self.broadcast(&peer_id);
-            }
-            Ok(SignatureResponse::TryLater) => {
-                self.sig_peers.insert(peer_id);
-            }
-            Ok(SignatureResponse::Rejected) => {
-                if self.signers.contains(&peer_id) {
-                    self.rejections.insert(peer_id);
-                }
-            }
             Err(error) => {
                 // TODO distinguish timeouts from models incompatibility etc
                 self.sig_peers.insert(peer_id); // let it retry
-                tracing::warn!("on requesting signatures for own point: {error}");
+                tracing::error!(
+                    "{} @ {:?} bcaster <= signer {peer_id:.4?} signature request error : {error}",
+                    self.local_id,
+                    self.current_round
+                );
+            }
+            Ok(response) => {
+                if response == SignatureResponse::Rejected {
+                    tracing::warn!(
+                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        self.local_id,
+                        self.current_round
+                    );
+                } else {
+                    tracing::info!(
+                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        self.local_id,
+                        self.current_round
+                    );
+                };
+                match response {
+                    SignatureResponse::Signature(signature) => {
+                        if self.signers.contains(&peer_id) {
+                            if self.is_signature_ok(&peer_id, &signature) {
+                                self.signatures.insert(peer_id, signature);
+                            } else {
+                                // any invalid signature lowers our chances
+                                // to successfully finish current round
+                                self.rejections.insert(peer_id);
+                            }
+                        }
+                    }
+                    SignatureResponse::NoPoint => self.broadcast(&peer_id),
+                    SignatureResponse::TryLater => _ = self.sig_peers.insert(peer_id),
+                    SignatureResponse::Rejected => {
+                        if self.signers.contains(&peer_id) {
+                            self.rejections.insert(peer_id);
+                        }
+                    }
+                }
             }
         }
     }
@@ -224,12 +288,34 @@ impl Broadcaster {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
             self.bcast_futs
                 .push(self.dispatcher.request(&peer_id, &self.bcast_request));
+            tracing::info!(
+                "{} @ {:?} bcaster => signer {peer_id:.4?}: broadcast",
+                self.local_id,
+                self.current_round
+            );
+        } else {
+            tracing::warn!(
+                "{} @ {:?} bcaster => signer {peer_id:.4?}: broadcast impossible",
+                self.local_id,
+                self.current_round
+            );
         }
     }
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
             self.sig_futs
                 .push(self.dispatcher.request(&peer_id, &self.sig_request));
+            tracing::info!(
+                "{} @ {:?} bcaster => signer {peer_id:.4?}: signature request",
+                self.local_id,
+                self.current_round
+            );
+        } else {
+            tracing::warn!(
+                "{} @ {:?} bcaster => signer {peer_id:.4?}: signature request impossible",
+                self.local_id,
+                self.current_round
+            );
         }
     }
     fn is_signature_ok(&self, peer_id: &PeerId, signature: &Signature) -> bool {

@@ -5,6 +5,7 @@ use tycho_network::PeerId;
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
+#[derive(Debug)]
 pub enum AnchorStage {
     Candidate(PeerId), // TODO nothing special, remove
     Proof(PeerId),

@@ -7,6 +7,7 @@ use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
+use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, Link, Location, NodeCount, Point, ValidPoint};
 
@@ -75,7 +76,9 @@ impl Verifier {
         match &dag_round.anchor_stage() {
             // no one may link to self
             None | Some(AnchorStage::Candidate(_)) => {
-                point.body.anchor_proof != Link::ToSelf && point.body.anchor_trigger != Link::ToSelf
+                (point.body.anchor_proof != Link::ToSelf
+                    && point.body.anchor_trigger != Link::ToSelf)
+                    || point.body.location.round == MempoolConfig::GENESIS_ROUND
             }
             // leader must link to own point while others must not
             Some(AnchorStage::Proof(leader_id)) => {
@@ -277,6 +280,32 @@ impl Verifier {
 
     /// blame author and every dependent point's author
     fn is_list_of_signers_ok(point /* @ r+0 */: &Point, peer_schedule: &PeerSchedule) -> bool {
+        if point.body.location.round == MempoolConfig::GENESIS_ROUND {
+            return true; // all maps are empty for a well-formed genesis
+        }
+        let [
+            witness_peers/* @ r-2 */ ,
+            includes_peers /* @ r-1 */ ,
+            proof_peers /* @ r+0 */
+        ] = peer_schedule.peers_for_array([
+                point.body.location.round.prev().prev(),
+                point.body.location.round.prev(),
+                point.body.location.round.clone(),
+            ]);
+        for (peer_id, _) in point.body.witness.iter() {
+            if !witness_peers.contains_key(peer_id) {
+                return false;
+            }
+        }
+        let node_count = NodeCount::new(includes_peers.len());
+        if point.body.includes.len() < node_count.majority() {
+            return false;
+        };
+        for (peer_id, _) in point.body.includes.iter() {
+            if !includes_peers.contains_key(peer_id) {
+                return false;
+            }
+        }
         let Some(proven /* @ r-1 */) = &point.body.proof else {
             return true;
         };
@@ -287,17 +316,15 @@ impl Verifier {
         // its point @ r-1 won't become a vertex because its proof point @ r+0 cannot be valid.
         // That means: payloads from the last round of validation epoch are never collated.
 
-        let proof_round_peers /* @ r+0 */ = peer_schedule.peers_for(&point.body.location.round);
         // reject point in case this node is not ready to accept: the point is from far future
-        let Ok(node_count) = NodeCount::try_from(proof_round_peers.len()) else {
+        let Ok(node_count) = NodeCount::try_from(proof_peers.len()) else {
             return false;
         };
         if proven.evidence.len() < node_count.majority_of_others() {
             return false;
         }
-
-        for (peer, _) in proven.evidence.iter() {
-            if !proof_round_peers.contains_key(peer) {
+        for (peer_id, _) in proven.evidence.iter() {
+            if !proof_peers.contains_key(peer_id) {
                 return false;
             }
         }

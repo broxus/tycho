@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use tycho_network::PeerId;
@@ -15,6 +15,7 @@ use crate::intercom::dto::SignatureResponse;
 use crate::models::{Point, Round};
 
 pub struct Signer {
+    local_id: Arc<String>,
     from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
     signature_requests: mpsc::UnboundedReceiver<SignatureRequest>,
     next_round: Round,
@@ -23,15 +24,20 @@ pub struct Signer {
 
 impl Signer {
     pub fn new(
+        local_id: Arc<String>,
         from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
         signature_requests: mpsc::UnboundedReceiver<SignatureRequest>,
-        last_round: &Round,
+        next_includes: impl Iterator<Item = InclusionState>,
+        next_round: Round,
     ) -> Self {
         Self {
+            local_id,
             from_bcast_filter,
             signature_requests,
-            next_round: last_round.next(),
-            next_includes: FuturesUnordered::new(),
+            next_round,
+            next_includes: FuturesUnordered::from_iter(
+                next_includes.map(|a| futures_util::future::ready(a).boxed()),
+            ),
         }
     }
 
@@ -52,8 +58,9 @@ impl Signer {
         };
         self.next_round = next_dag_round.round().clone();
         let task = SignerTask {
-            next_dag_round,
+            local_id: self.local_id.clone(),
             current_round: current_dag_round.clone(),
+            next_dag_round,
             includes,
             includes_ready: has_own_point.into_iter().count(),
             next_includes: FuturesUnordered::new(),
@@ -80,6 +87,9 @@ impl Signer {
 type SignatureRequest = (Round, PeerId, oneshot::Sender<SignatureResponse>);
 struct SignerTask {
     // for node running @ r+0:
+    local_id: Arc<String>,
+    current_round: DagRound,  // = r+0
+    next_dag_round: DagRound, // = r+1 is always in DAG; contains the keypair to produce point @ r+1
 
     // @ r+0, will become includes in point @ r+1
     // needed in order to not include same point twice - as an include and as a witness;
@@ -89,9 +99,6 @@ struct SignerTask {
     /// do not poll during this round, just pass to next round;
     /// anyway should rewrite signing mechanics - look for comments inside [DagRound::add_exact]
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
-
-    next_dag_round: DagRound, // = r+1 is always in DAG; contains the keypair to produce point @ r+1
-    current_round: DagRound,  // = r+0
 
     signer_signal: mpsc::UnboundedSender<SignerSignal>,
     bcaster_ready: Arc<Notify>,
@@ -111,8 +118,14 @@ impl SignerTask {
         loop {
             tokio::select! {
                 request = signature_requests.recv() => match request {
-                    Some((round, peer_id, callback)) =>
-                        _ = callback.send(self.signature_response(&round, &peer_id)),
+                    Some((round, peer_id, callback)) => {
+                        let response = self.signature_response(&round, &peer_id);
+                        tracing::info!(
+                            "{} @ {:?} signer => bcaster {peer_id:.4?} @ {round:?} : {response:.4?}",
+                            self.local_id, self.current_round.round()
+                        );
+                        _ = callback.send(response);
+                    }
                     None => panic!("channel with signature requests closed")
                 },
                 filtered = from_bcast_filter.recv() => match filtered {
@@ -126,11 +139,21 @@ impl SignerTask {
                 },
                 _ = self.bcaster_ready.notified() => {
                     self.is_bcaster_ready = true;
+                    tracing::info!(
+                        "{} @ {:.4?} signer <= bcaster ready : includes {} of {}",
+                         self.local_id, self.current_round.round(),
+                         self.includes_ready, self.current_round.node_count().majority()
+                    );
                     if self.includes_ready >= self.current_round.node_count().majority() {
                         return Ok(self.next_includes)
                     }
                 },
                 _ = retry_interval.tick() => {
+                    tracing::info!(
+                        "{} @ {:.4?} signer retry : includes {} of {}",
+                         self.local_id, self.current_round.round(),
+                         self.includes_ready, self.current_round.node_count().majority()
+                    );
                     // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
                     if self.includes_ready >= self.current_round.node_count().majority() {
                         _ = self.signer_signal.send(SignerSignal::Ok);
@@ -148,16 +171,33 @@ impl SignerTask {
                 //  do not return location from DagLocation::add_validate(point)
                 Some(state) = self.includes.next() => {
                     // slow but at least may work
-                    if let Some(signable) = state.signable() {
-                        if signable.sign(
+                    let signed = if let Some(signable) = state.signable() {
+                        signable.sign(
                             self.current_round.round(),
                             self.next_dag_round.key_pair(),
                             MempoolConfig::sign_time_range(),
-                        ) {
-                            self.includes_ready += 1;
-                        }
+                        )
+                    } else {
+                        state.signed().is_some() // FIXME this is very fragile duct tape
+                    };
+                    if signed {
+                        tracing::info!(
+                            "{} @ {:.4?} includes {} +1 : {:.4?} {:.4?}",
+                             self.local_id, self.current_round.round(), self.includes_ready,
+                             state.init_id(), state.signed()
+                        );
+                        self.includes_ready += 1;
+                    } else {
+                        tracing::warn!(
+                            "{} @ {:.4?} includes {} : {:.4?} {:.4?}",
+                             self.local_id, self.current_round.round(), self.includes_ready,
+                             state.init_id(), state.signed()
+                        );
                     }
                 },
+                else => {
+                    panic!("signer unhandled");
+                }
             }
         }
     }
@@ -197,13 +237,19 @@ impl SignerTask {
                 }
             }
         }
-        match state.signed() {
+        let res = match state.signed() {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.with.clone()),
             Some(Err(())) => SignatureResponse::Rejected,
             None => SignatureResponse::TryLater,
-        }
+        };
+        res
     }
     fn match_filtered(&self, filtered: &ConsensusEvent) -> Result<(), Round> {
+        tracing::info!(
+            "{} @ {:?} signer <= bcast filter : {filtered:.4?}",
+            self.local_id,
+            self.current_round.round()
+        );
         match filtered {
             ConsensusEvent::Forward(consensus_round) => {
                 match consensus_round.cmp(self.next_dag_round.round()) {

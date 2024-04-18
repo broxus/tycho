@@ -19,6 +19,7 @@ pub struct PeerScheduleUpdater {
 
 impl PeerScheduleUpdater {
     pub fn run(overlay: PrivateOverlay, peer_schedule: Arc<PeerSchedule>) {
+        tracing::info!("started peer schedule updater");
         let this = Self {
             overlay,
             peer_schedule,
@@ -29,9 +30,10 @@ impl PeerScheduleUpdater {
     }
 
     fn respawn_resolve_task(&self) {
+        let local_id = self.peer_schedule.local_id();
+        tracing::info!("{local_id:.4?} respawn_resolve_task");
         let mut fut = futures_util::stream::FuturesUnordered::new();
         {
-            let local_id = self.peer_schedule.local_id();
             let entries = self.overlay.read_entries();
             for entry in entries
                 .iter()
@@ -63,16 +65,18 @@ impl PeerScheduleUpdater {
     }
 
     async fn listen(self) {
-        let mut rx = self.overlay.read_entries().subscribe();
         let local_id = self.peer_schedule.local_id();
+        tracing::info!("{local_id:.4?} listen peer updates");
+        let mut rx = self.overlay.read_entries().subscribe();
         loop {
             match rx.recv().await {
                 Ok(ref event @ PrivateOverlayEntriesEvent::Removed(node)) if node != local_id => {
+                    tracing::info!("{local_id:.4?} got {event:?}");
                     if self.peer_schedule.set_resolved(&node, false) {
                         // respawn resolve task with fewer peers to await
                         self.respawn_resolve_task();
                     } else {
-                        tracing::debug!("Skipped {event:?}");
+                        tracing::info!("{local_id:.4?} Skipped {event:?}");
                     }
                 }
                 Err(RecvError::Closed) => {
@@ -84,7 +88,9 @@ impl PeerScheduleUpdater {
                          Consider increasing channel capacity."
                     )
                 }
-                Ok(_) => {}
+                Ok(a) => {
+                    tracing::warn!("{local_id:.4?} peer schedule updater missed {a:?}");
+                }
             }
         }
     }

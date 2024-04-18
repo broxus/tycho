@@ -5,7 +5,7 @@ use crate::models::{Point, Signature};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PointByIdResponse(pub Option<Point>);
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum BroadcastResponse {
     /// peer will verify and maybe sign the point
     Accepted,

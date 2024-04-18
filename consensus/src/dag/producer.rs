@@ -114,7 +114,6 @@ impl Producer {
                 Link::ToSelf
             }
             _ => {
-                // TODO simplify to single iterator scan
                 let point = includes
                     .iter()
                     .max_by_key(|point| {
@@ -125,7 +124,10 @@ impl Producer {
                         }
                     })
                     .expect("non-empty list of includes for own point");
-                if point.body.location.round == new_round.round().prev() {
+                if point.body.location.round == new_round.round().prev()
+                    && ((is_for_trigger && point.body.anchor_trigger == Link::ToSelf)
+                        || (!is_for_trigger && point.body.anchor_proof == Link::ToSelf))
+                {
                     Link::Direct(Through::Includes(point.body.location.author.clone()))
                 } else {
                     let to = if is_for_trigger {
@@ -166,7 +168,10 @@ impl Producer {
         else {
             return;
         };
-        if point.body.location.round == finished_round.prev() {
+        if point.body.location.round == finished_round.prev()
+            && ((is_for_trigger && point.body.anchor_trigger == Link::ToSelf)
+                || (!is_for_trigger && point.body.anchor_proof == Link::ToSelf))
+        {
             *link = Link::Direct(Through::Witness(point.body.location.author))
         } else {
             let to = if is_for_trigger {

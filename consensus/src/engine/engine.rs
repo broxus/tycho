@@ -5,32 +5,33 @@ use tokio::sync::{mpsc, Notify};
 
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
-use crate::dag::{DagRound, Producer};
+use crate::dag::{Dag, DagRound, Producer};
 use crate::intercom::{
     BroadcastFilter, Broadcaster, Dispatcher, PeerSchedule, PeerScheduleUpdater, Responder, Signer,
 };
 use crate::models::{Point, PrevPoint};
 
 pub struct Engine {
-    // dag: Arc<Mutex<Dag>>,
+    dag: Dag,
+    local_id: Arc<String>,
     peer_schedule: Arc<PeerSchedule>,
     dispatcher: Dispatcher,
-    finished_dag_round: DagRound,
     signer: Signer,
     prev_point: Option<PrevPoint>,
     cur_point: Option<Arc<Point>>,
+    current_dag_round: DagRound,
 }
 
 impl Engine {
-    pub async fn add_next_peers(&self, next_peers: Vec<PeerId>) {}
-
     pub async fn new(
         secret_key: &SecretKey,
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         peers: &Vec<PeerId>,
     ) -> Self {
-        let peer_schedule = Arc::new(PeerSchedule::new(Arc::new(KeyPair::from(secret_key))));
+        let key_pair = KeyPair::from(secret_key);
+        let local_id = Arc::new(format!("{:.4?}", PeerId::from(key_pair.public_key)));
+        let peer_schedule = Arc::new(PeerSchedule::new(Arc::new(key_pair)));
 
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
 
@@ -47,12 +48,19 @@ impl Engine {
 
         let genesis = Arc::new(crate::test_utils::genesis());
         // finished epoch
-        peer_schedule.set_next_peers(&vec![genesis.body.location.author]);
+        peer_schedule.set_next_peers(&vec![(genesis.body.location.author, false)]);
         peer_schedule.set_next_start(genesis.body.location.round);
         peer_schedule.rotate();
         // current epoch
         peer_schedule.set_next_start(genesis.body.location.round.next());
-        peer_schedule.set_next_peers(peers);
+        peer_schedule.set_next_peers(
+            &dispatcher
+                .overlay
+                .read_entries()
+                .iter()
+                .map(|a| (a.peer_id, a.resolver_handle.is_resolved()))
+                .collect(),
+        );
         peer_schedule.rotate();
         // start updater only after peers are populated into schedule
         PeerScheduleUpdater::run(dispatcher.overlay.clone(), peer_schedule.clone());
@@ -66,32 +74,37 @@ impl Engine {
         //  * or search through last round to find the latest trigger
         //   * * can U do so without scan of a round ???
 
-        let finished_dag_round = DagRound::genesis(&genesis, &peer_schedule).await;
-        let signer = Signer::new(bcast_rx, sig_responses, finished_dag_round.round());
+        let mut dag = Dag::new();
+        let current_dag_round = dag.get_or_insert(DagRound::genesis(&genesis, &peer_schedule));
+
+        let genesis_state = current_dag_round
+            .insert_exact_validate(&genesis, &peer_schedule)
+            .await;
+        let signer = Signer::new(
+            local_id.clone(),
+            bcast_rx,
+            sig_responses,
+            genesis_state.into_iter(),
+            current_dag_round.round().clone(),
+        );
 
         Self {
-            // dag: Arc::new(Mutex::new(dag)),
+            dag,
+            local_id,
             peer_schedule,
             dispatcher,
-            finished_dag_round,
             signer,
             prev_point: None,
             cur_point: None,
+            current_dag_round,
         }
     }
 
     pub async fn run(mut self) {
         loop {
-            // FIXME must there be any next round as in Signer? check broadcast filter
-            let current_round = self.finished_dag_round.next(self.peer_schedule.as_ref());
-
-            self.cur_point = Producer::new_point(
-                &self.finished_dag_round,
-                &current_round,
-                self.prev_point.as_ref(),
-                vec![],
-            )
-            .await;
+            let next_dag_round = self
+                .dag
+                .get_or_insert(self.current_dag_round.next(self.peer_schedule.as_ref()));
 
             let bcaster_ready = Arc::new(Notify::new());
             // let this channel unbounded - there won't be many items, but every of them is essential
@@ -107,18 +120,20 @@ impl Engine {
             //         in order to prevent unlimited DAG growth
             //   sync if signer detected a gap exceeding dag depth
             //   join
-            if let Some(own_point) = &self.cur_point {
-                let own_state = current_round
+            if let Some(own_point) = self.cur_point {
+                let own_state = self
+                    .current_dag_round
                     .insert_exact_validate(&own_point, &self.peer_schedule)
                     .await;
                 let signer_run = tokio::spawn(self.signer.run(
-                    current_round.clone(),
+                    next_dag_round.clone(),
                     Some(own_point.clone()),
                     signer_signal_tx,
                     bcaster_ready.clone(),
                 ));
                 let bcaster_run = tokio::spawn(
                     Broadcaster::new(
+                        &self.local_id,
                         &own_point,
                         &self.dispatcher,
                         &self.peer_schedule,
@@ -130,12 +145,19 @@ impl Engine {
                 let joined = tokio::join!(signer_run, bcaster_run);
                 match joined {
                     (Ok(signer_upd), Ok(evidence_or_reject)) => {
-                        self.signer = signer_upd;
-                        self.finished_dag_round = current_round; // FIXME must fill gaps with empty rounds
                         self.prev_point = evidence_or_reject.ok().map(|evidence| PrevPoint {
                             digest: own_point.digest.clone(),
-                            evidence,
+                            evidence: evidence.into_iter().collect(),
                         });
+                        self.cur_point = Producer::new_point(
+                            &self.current_dag_round,
+                            &next_dag_round,
+                            self.prev_point.as_ref(),
+                            vec![],
+                        )
+                        .await;
+                        self.current_dag_round = next_dag_round; // FIXME must fill gaps with empty rounds
+                        self.signer = signer_upd;
                     }
                     (Err(se), Err(be)) => {
                         panic!(
@@ -153,7 +175,7 @@ impl Engine {
                 signer_signal_rx.close();
                 bcaster_ready.notify_one();
                 let signer_run = tokio::spawn(self.signer.run(
-                    current_round.clone(),
+                    next_dag_round.clone(),
                     None,
                     signer_signal_tx,
                     bcaster_ready,
@@ -161,24 +183,21 @@ impl Engine {
                 .await;
                 match signer_run {
                     Ok(signer_upd) => {
-                        self.finished_dag_round = current_round; // FIXME must fill gaps with empty rounds
-                        self.signer = signer_upd;
                         self.prev_point = None;
+                        self.cur_point = Producer::new_point(
+                            &self.current_dag_round,
+                            &next_dag_round,
+                            self.prev_point.as_ref(),
+                            vec![],
+                        )
+                        .await;
+                        self.current_dag_round = next_dag_round; // FIXME must fill gaps with empty rounds
+                        self.signer = signer_upd;
                     }
                     Err(se) => panic!("Signer panicked: {se:?}"),
                 }
             }
         }
-    }
-}
-
-pub trait EngineTestExt {
-    fn dispatcher(&self) -> &'_ Dispatcher;
-}
-
-impl EngineTestExt for Engine {
-    fn dispatcher(&self) -> &'_ Dispatcher {
-        &self.dispatcher
     }
 }
 

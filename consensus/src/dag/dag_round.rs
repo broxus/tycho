@@ -68,19 +68,17 @@ impl DagRound {
         }))
     }
 
-    pub async fn genesis(genesis: &Arc<Point>, peer_schedule: &PeerSchedule) -> Self {
+    pub fn genesis(genesis: &Arc<Point>, peer_schedule: &PeerSchedule) -> Self {
         let locations = FastDashMap::with_capacity_and_hasher(1, RandomState::new());
         let round = genesis.body.location.round;
-        let this = Self(Arc::new(DagRoundInner {
+        Self(Arc::new(DagRoundInner {
             round,
             node_count: NodeCount::GENESIS,
             key_pair: None,
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
             prev: WeakDagRound::BOTTOM,
-        }));
-        this.insert_exact_validate(genesis, peer_schedule).await;
-        this
+        }))
     }
 
     pub fn round(&self) -> &'_ Round {
@@ -172,7 +170,7 @@ impl DagRound {
         &self,
         point: &Arc<Point>,
         peer_schedule: &PeerSchedule,
-    ) -> InclusionState {
+    ) -> Option<InclusionState> {
         if !Verifier::verify(point, peer_schedule).is_ok() {
             panic!("Coding error: malformed point")
         }
@@ -180,37 +178,45 @@ impl DagRound {
         if point.valid().is_none() {
             panic!("Coding error: not a valid point")
         }
-        let state = self.insert_exact(&point);
+        let Some(state) = self.insert_exact(&point) else {
+            return None;
+        };
+        let state = state.await;
         if let Some(signable) = state.signable() {
             signable.sign(
                 self.round(),
-                peer_schedule.local_keys(self.round()).as_deref(),
+                peer_schedule.local_keys(&self.round().next()).as_deref(),
                 MempoolConfig::sign_time_range(),
             );
         }
         if state.signed_point(self.round()).is_none() {
             panic!("Coding or configuration error: valid point cannot be signed; time issue?")
         }
-        state
+        Some(state)
     }
 
-    pub fn insert_invalid(&self, dag_point: &DagPoint) -> Option<InclusionState> {
+    pub fn insert_invalid(
+        &self,
+        dag_point: &DagPoint,
+    ) -> Option<BoxFuture<'static, InclusionState>> {
         if dag_point.valid().is_some() {
             panic!("Coding error: failed to insert valid point as invalid")
         }
         self.scan(&dag_point.location().round)
             .map(|linked| linked.insert_exact(dag_point))
+            .flatten()
     }
 
-    fn insert_exact(&self, dag_point: &DagPoint) -> InclusionState {
+    fn insert_exact(&self, dag_point: &DagPoint) -> Option<BoxFuture<'static, InclusionState>> {
         if &dag_point.location().round != self.round() {
             panic!("Coding error: dag round mismatches point round on insert")
         }
         self.edit(&dag_point.location().author, |loc| {
-            _ = loc.add_validate(dag_point.digest(), || {
+            let state = loc.state().clone();
+            loc.add_validate(dag_point.digest(), || {
                 futures_util::future::ready(dag_point.clone())
-            });
-            loc.state().clone()
+            })
+            .map(|first| first.clone().map(|_| state).boxed())
         })
     }
 

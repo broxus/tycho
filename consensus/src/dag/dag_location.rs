@@ -8,7 +8,7 @@ use futures_util::FutureExt;
 
 use tycho_util::futures::{JoinTask, Shared};
 
-use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
+use crate::models::{DagPoint, Digest, PointId, Round, Signature, UnixTime, ValidPoint};
 
 /// If DAG location exists, it must have non-empty `versions` map;
 ///
@@ -151,14 +151,19 @@ impl InclusionState {
             None
         }
     }
+    /// only for logging
+    pub fn init_id(&self) -> Option<PointId> {
+        self.0.get().map(|signable| signable.first_completed.id())
+    }
 }
-
+#[derive(Debug)]
 pub struct Signable {
     first_completed: DagPoint,
     // signature cannot be rolled back, the point must be included as next point dependency
     signed: OnceLock<Result<Signed, ()>>,
 }
 
+#[derive(Debug)]
 pub struct Signed {
     pub at: Round,
     pub with: Signature,

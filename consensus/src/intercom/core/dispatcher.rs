@@ -82,16 +82,6 @@ impl Dispatcher {
     }
 }
 
-pub trait DispatcherTestExt {
-    fn network(&self) -> &'_ Network;
-}
-
-impl DispatcherTestExt for Dispatcher {
-    fn network(&self) -> &'_ Network {
-        &self.network
-    }
-}
-
 /* FIXME
 #[cfg(test)]
 mod tests {

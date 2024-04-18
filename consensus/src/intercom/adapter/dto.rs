@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::models::{DagPoint, Point, Round};
 
+#[derive(Debug)]
 pub enum ConsensusEvent {
     // allows not to peek but poll the channel when local dag is not ready yet
     Forward(Round),
@@ -17,6 +18,7 @@ pub enum ConsensusEvent {
 /// * broadcaster may finish Err, signalling () to signer
 ///
 /// => signer may run without broadcaster, as if broadcaster signalled ()
+#[derive(Debug)]
 pub enum SignerSignal {
     Ok,
     Err,

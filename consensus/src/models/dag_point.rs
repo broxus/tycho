@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::models::point::{Digest, Location, Point, PointId};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ValidPoint {
     pub point: Arc<Point>,
     pub is_committed: Arc<AtomicBool>,
@@ -18,7 +18,7 @@ impl ValidPoint {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum DagPoint {
     // FIXME time skew is determined at the moment of signature response and is not reentrant
     /// valid without demur, needed to blame equivocation or graph connectivity violations
