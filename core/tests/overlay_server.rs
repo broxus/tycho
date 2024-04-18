@@ -341,14 +341,20 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         assert!(result.is_ok());
 
         if let Ok(response) = &result {
-            assert_eq!(response.data(), &Response::Err);
+            assert_eq!(
+                response.data(),
+                &Response::Err("State not found".to_string().into_bytes())
+            );
         }
 
         let result = client.get_archive_slice(0, 0, 100).await;
         assert!(result.is_ok());
 
         if let Ok(response) = &result {
-            assert_eq!(response.data(), &Response::Err);
+            assert_eq!(
+                response.data(),
+                &Response::Err("Archive not found".to_string().into_bytes())
+            );
         }
 
         break;

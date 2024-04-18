@@ -216,7 +216,7 @@ impl OverlayServerInner {
             }
             Err(e) => {
                 tracing::warn!("get_next_key_block_ids failed: {e:?}");
-                proto::overlay::Response::Err
+                proto::overlay::Response::Err(e.to_string().into_bytes())
             }
         }
     }
@@ -254,7 +254,7 @@ impl OverlayServerInner {
             Ok(block_full) => proto::overlay::Response::Ok(block_full),
             Err(e) => {
                 tracing::warn!("get_block_full failed: {e:?}");
-                proto::overlay::Response::Err
+                proto::overlay::Response::Err(e.to_string().into_bytes())
             }
         }
     }
@@ -299,7 +299,7 @@ impl OverlayServerInner {
             Ok(block_full) => proto::overlay::Response::Ok(block_full),
             Err(e) => {
                 tracing::warn!("get_next_block_full failed: {e:?}");
-                proto::overlay::Response::Err
+                proto::overlay::Response::Err(e.to_string().into_bytes())
             }
         }
     }
@@ -323,7 +323,7 @@ impl OverlayServerInner {
 
         if let Err(e) = persistent_state_request_validation() {
             tracing::warn!("persistent_state_request_validation failed: {e:?}");
-            return proto::overlay::Response::Err;
+            return proto::overlay::Response::Err(e.to_string().into_bytes());
         }
 
         let persistent_state_storage = self.storage().persistent_state_storage();
@@ -378,7 +378,7 @@ impl OverlayServerInner {
             }
             Err(e) => {
                 tracing::warn!("get_archive_id failed: {e:?}");
-                proto::overlay::Response::Err
+                proto::overlay::Response::Err(e.to_string().into_bytes())
             }
         }
     }
@@ -405,7 +405,7 @@ impl OverlayServerInner {
             Ok(data) => proto::overlay::Response::Ok(proto::overlay::Data { data: data.into() }),
             Err(e) => {
                 tracing::warn!("get_archive_slice failed: {e:?}");
-                proto::overlay::Response::Err
+                proto::overlay::Response::Err(e.to_string().into_bytes())
             }
         }
     }

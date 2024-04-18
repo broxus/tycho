@@ -26,7 +26,7 @@ publicOverlay.response.ok value:T = publicOverlay.Response T;
 /**
 * An unsuccessul response for the overlay query
 */
-publicOverlay.response.error = publicOverlay.Response T;
+publicOverlay.response.error error:bytes = publicOverlay.Response T;
 
 /**
 * A response for the `publicOverlay.getNextKeyBlockIds` query
