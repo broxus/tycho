@@ -41,10 +41,10 @@ impl StateNodeAdapterBuilder<StateNodeAdapterStdImpl> for StateNodeAdapterBuilde
 
 #[async_trait]
 pub trait StateNodeEventListener: Send + Sync {
-    /// When new masterchain block received from blockchain
-    async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()>;
-    async fn on_block_accepted(&self, block_id: &BlockId);
-    async fn on_block_accepted_external(&self, block_id: &BlockId);
+    /// When our collated block was accepted and applied in state node
+    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()>;
+    /// When new applied block was received from blockchain
+    async fn on_block_accepted_external(&self, block_id: &BlockId) -> Result<()>;
 }
 
 #[async_trait]
@@ -179,7 +179,7 @@ impl BlockSubscriber for StateNodeAdapterStdImpl {
 
             drop(blocks_guard);
 
-            result_future.await;
+            result_future.await?;
 
             Ok(())
         })

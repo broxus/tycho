@@ -226,20 +226,27 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
-            process_mc_block_from_bc,
-            mc_block_id
-        ))
-        .await
+    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()> {
+        //TODO: remove accepted block from cache
+        //STUB: do nothing, currently we remove block from cache when it sent to state node
+        Ok(())
     }
 
-    async fn on_block_accepted(&self, block_id: &BlockId) {
-        todo!()
-    }
-
-    async fn on_block_accepted_external(&self, block_id: &BlockId) {
-        todo!()
+    async fn on_block_accepted_external(&self, block_id: &BlockId) -> Result<()> {
+        //TODO: should store block info from blockchain if it was not already collated
+        //      and validated by ourself. Will use this info for faster validation further:
+        //      will consider that just collated block is already validated if it have the
+        //      same root hash and file hash
+        if block_id.shard.is_masterchain() {
+            let mc_block_id = *block_id;
+            self.enqueue_task(method_to_async_task_closure!(
+                process_mc_block_from_bc,
+                mc_block_id
+            ))
+            .await
+        } else {
+            Ok(())
+        }
     }
 }
 

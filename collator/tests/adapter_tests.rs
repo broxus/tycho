@@ -19,13 +19,13 @@ struct MockEventListener {
 
 #[async_trait]
 impl StateNodeEventListener for MockEventListener {
-    async fn on_mc_block(&self, _mc_block_id: BlockId) -> Result<()> {
+    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
+        self.accepted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn on_block_accepted(&self, _block_id: &BlockId) {
-        self.accepted_count.fetch_add(1, Ordering::SeqCst);
+    async fn on_block_accepted_external(&self, _block_id: &BlockId) -> Result<()> {
+        Ok(())
     }
-    async fn on_block_accepted_external(&self, _block_id: &BlockId) {}
 }
 
 #[tokio::test]

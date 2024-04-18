@@ -13,6 +13,7 @@ use tycho_block_util::block::BlockStuff;
 pub struct CollationConfig {
     pub key_pair: KeyPair,
     pub mc_block_min_interval_ms: u64,
+    pub max_mc_block_delta_from_bc_to_await_own: i32,
 }
 
 pub(crate) struct BlockCollationResult {

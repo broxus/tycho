@@ -64,6 +64,8 @@ where
     blocks_cache: BlocksCache,
 
     last_processed_mc_block_id: Option<BlockId>,
+    /// id of last master block collated by ourselves
+    last_collated_mc_block_id: Option<BlockId>,
     /// chain time of last collated master block or received from bc
     last_mc_block_chain_time: u64,
     /// chain time for next master block to be collated
@@ -101,6 +103,7 @@ where
             blocks_cache: BlocksCache::default(),
 
             last_processed_mc_block_id: None,
+            last_collated_mc_block_id: None,
             last_mc_block_chain_time: 0,
             next_mc_block_chain_time: 0,
         }
@@ -124,9 +127,15 @@ where
     fn last_processed_mc_block_id(&self) -> Option<&BlockId> {
         self.last_processed_mc_block_id.as_ref()
     }
-
     fn set_last_processed_mc_block_id(&mut self, block_id: BlockId) {
         self.last_processed_mc_block_id = Some(block_id);
+    }
+
+    fn last_collated_mc_block_id(&self) -> Option<&BlockId> {
+        self.last_collated_mc_block_id.as_ref()
+    }
+    fn set_last_collated_mc_block_id(&mut self, block_id: BlockId) {
+        self.last_collated_mc_block_id = Some(block_id);
     }
 
     /// (TODO) Check sync status between mempool and blockchain state
@@ -152,6 +161,7 @@ where
         }
 
         // request mc state for this master block
+        //TODO: should await state and schedule processing in async task
         let mc_state = self.state_node_adapter.load_state(&mc_block_id).await?;
 
         // when state received execute master block processing routines
@@ -176,17 +186,65 @@ where
     }
 
     /// 1. Skip if it was already processed before
-    /// 2. (TODO) Skip if it is not far ahead of last collated by ourselves
+    /// 2. Skip if it is not far ahead of last collated by ourselves
     fn should_process_mc_block_from_bc(&self, mc_block_id: &BlockId) -> bool {
-        let is_not_ahead = self.check_if_mc_block_not_ahead_last_processed(mc_block_id);
-        if is_not_ahead {
+        let (seqno_delta, is_equal) =
+            Self::compare_mc_block_with(mc_block_id, self.last_processed_mc_block_id());
+        // check if already processed before
+        let already_processed_before = is_equal || seqno_delta < 0;
+        if already_processed_before {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
-                "Should NOT process mc block ({}) from bc",
+                "Should NOT process mc block ({}) from bc: it was already processed before",
                 mc_block_id.as_short_id(),
             );
+
+            return false;
+        } else {
+            let last_collated_mc_block_id_opt = self.last_collated_mc_block_id();
+            if last_collated_mc_block_id_opt.is_some() {
+                let (seqno_delta, _) =
+                    Self::compare_mc_block_with(mc_block_id, self.last_collated_mc_block_id());
+                // check if need await own collated block
+                if seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
+                    tracing::info!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        r#"Should NOT process mc block ({}) from bc: seqno_delta = {}",
+                        max_mc_block_delta_from_bc_to_await_own = {}"#,
+                        mc_block_id.as_short_id(), seqno_delta,
+                        self.config.max_mc_block_delta_from_bc_to_await_own,
+                    );
+
+                    return false;
+                }
+            }
         }
-        !is_not_ahead
+        true
+    }
+
+    /// Returns: (seqno delta from other, true - if equal)
+    fn compare_mc_block_with(
+        mc_block_id: &BlockId,
+        other_mc_block_id_opt: Option<&BlockId>,
+    ) -> (i32, bool) {
+        //TODO: consider block shard?
+        let (seqno_delta, is_equal) = match other_mc_block_id_opt {
+            None => (0, false),
+            Some(other_mc_block_id) => (
+                mc_block_id.seqno as i32 - other_mc_block_id.seqno as i32,
+                mc_block_id != other_mc_block_id,
+            ),
+        };
+        if seqno_delta < 0 || is_equal {
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "mc block ({}) is NOT AHEAD of other ({:?}): is_equal = {}, seqno_delta = {}",
+                mc_block_id.as_short_id(),
+                other_mc_block_id_opt.map(|b| b.as_short_id()),
+                is_equal, seqno_delta,
+            );
+        }
+        (seqno_delta, is_equal)
     }
 
     /// * TRUE - provided `mc_block_id` is before or equal to last processed
@@ -270,8 +328,11 @@ where
         //      2. Skip refreshing sessions if this master was processed by any chance
 
         // do not re-process this master block if it is lower then last processed or equal to it
+        // but process a new version of block with the same seqno
         let processing_mc_block_id = *mc_state.block_id();
-        if self.check_if_mc_block_not_ahead_last_processed(&processing_mc_block_id) {
+        let (seqno_delta, is_equal) =
+            Self::compare_mc_block_with(&processing_mc_block_id, self.last_processed_mc_block_id());
+        if seqno_delta < 0 || is_equal {
             return Ok(());
         }
 
@@ -588,6 +649,8 @@ where
                 candidate_id.as_short_id(),
                 candidate_chain_time,
             );
+
+            self.set_last_collated_mc_block_id(candidate_id);
 
             let new_mc_state = ShardStateStuff::from_state(
                 candidate_id,

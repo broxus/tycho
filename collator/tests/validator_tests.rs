@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use bytesize::ByteSize;
 use std::time::Duration;
 
+use anyhow::Result;
 use everscale_crypto::ed25519;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, ValidatorDescription};
@@ -72,15 +73,11 @@ impl ValidatorEventListener for TestValidatorEventListener {
 
 #[async_trait]
 impl StateNodeEventListener for TestValidatorEventListener {
-    async fn on_mc_block(&self, _mc_block_id: BlockId) -> anyhow::Result<()> {
+    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()> {
         unimplemented!("Not implemented");
     }
 
-    async fn on_block_accepted(&self, block_id: &BlockId) {
-        unimplemented!("Not implemented");
-    }
-
-    async fn on_block_accepted_external(&self, block_id: &BlockId) {
+    async fn on_block_accepted_external(&self, block_id: &BlockId) -> Result<()> {
         unimplemented!("Not implemented");
     }
 }
