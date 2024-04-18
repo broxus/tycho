@@ -89,18 +89,18 @@ where
 
     async fn validate_candidate_by_block_from_bc(
         &mut self,
-        _candidate_id: BlockId,
+        candidate_id: BlockId,
     ) -> Result<ValidatorTaskResult> {
-        // self.on_block_validated_event(ValidatedBlock::new(candidate_id, vec![], true))
-        //     .await?;
-        // Ok(ValidatorTaskResult::Void)
-        todo!();
+        self.on_block_validated_event(candidate_id, OnValidatedBlockEvent::ValidByState)
+            .await?;
+        Ok(ValidatorTaskResult::Void)
     }
     async fn get_block_signatures(
         &mut self,
         session_seqno: u32,
         block_id_short: &BlockIdShort,
     ) -> Result<ValidatorTaskResult>;
+
     async fn validate_candidate(
         &mut self,
         candidate_id: BlockId,
