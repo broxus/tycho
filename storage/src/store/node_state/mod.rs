@@ -108,7 +108,7 @@ impl NodeStateStorage {
 
         let value = match self.db.node_states.get(key)? {
             Some(data) => read_block_id_le(&data).ok_or(NodeStateStorageError::InvalidBlockId)?,
-            None => return Err(NodeStateStorageError::ParamNotFound.into()),
+            None => return Err(NodeStateStorageError::StateNotFound.into()),
         };
         *cache.lock() = Some(value);
         Ok(value)
@@ -119,8 +119,8 @@ impl NodeStateStorage {
 pub enum NodeStateStorageError {
     #[error("High block not found")]
     HighBlockNotFound,
-    #[error("Not found")]
-    ParamNotFound,
+    #[error("State not found")]
+    StateNotFound,
     #[error("Invalid block id")]
     InvalidBlockId,
 }

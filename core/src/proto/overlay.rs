@@ -19,7 +19,7 @@ where
     #[tl(id = "publicOverlay.response.ok")]
     Ok(T),
     #[tl(id = "publicOverlay.response.error")]
-    Err,
+    Err(Vec<u8>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
