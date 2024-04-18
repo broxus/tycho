@@ -320,7 +320,7 @@ impl BlocksGraph {
 #[cfg(test)]
 mod test {
     use super::state::InMemoryBlockStriderState;
-    use super::subscriber::PrintSubscriber;
+    use super::subscriber::test::PrintSubscriber;
     use super::test_provider::TestBlockProvider;
     use crate::block_strider::BlockStrider;
 
@@ -331,7 +331,7 @@ mod test {
         provider.validate();
 
         let subscriber = PrintSubscriber;
-        let state = InMemoryBlockStriderState::new(provider.first_master_block());
+        let state = InMemoryBlockStriderState::with_initial_id(provider.first_master_block());
 
         let strider = BlockStrider::builder()
             .with_state(state)

@@ -14,7 +14,7 @@ impl BlockStriderState for Arc<Storage> {
     fn load_last_traversed_master_block_id(&self) -> BlockId {
         self.node_state()
             .load_last_mc_block_id()
-            .expect("Db is not initialized")
+            .expect("db is not initialized")
     }
 
     fn is_traversed(&self, block_id: &BlockId) -> bool {
@@ -34,15 +34,14 @@ impl BlockStriderState for Arc<Storage> {
     }
 }
 
-#[cfg(test)]
 pub struct InMemoryBlockStriderState {
     last_traversed_master_block_id: parking_lot::Mutex<BlockId>,
+    // TODO: Use topblocks here.
     traversed_blocks: tycho_util::FastDashSet<BlockId>,
 }
 
-#[cfg(test)]
 impl InMemoryBlockStriderState {
-    pub fn new(id: BlockId) -> Self {
+    pub fn with_initial_id(id: BlockId) -> Self {
         let traversed_blocks = tycho_util::FastDashSet::default();
         traversed_blocks.insert(id);
 
@@ -53,7 +52,6 @@ impl InMemoryBlockStriderState {
     }
 }
 
-#[cfg(test)]
 impl BlockStriderState for InMemoryBlockStriderState {
     fn load_last_traversed_master_block_id(&self) -> BlockId {
         *self.last_traversed_master_block_id.lock()

@@ -178,7 +178,7 @@ pub mod test {
     use super::super::test_provider::archive_provider::ArchiveProvider;
     use super::*;
 
-    use crate::block_strider::subscriber::PrintSubscriber;
+    use crate::block_strider::subscriber::test::PrintSubscriber;
     use crate::block_strider::BlockStrider;
     use everscale_types::cell::HashBytes;
     use everscale_types::models::BlockId;

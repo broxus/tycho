@@ -49,19 +49,22 @@ impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for FanoutBlockSu
     }
 }
 
-#[cfg(test)]
-pub struct PrintSubscriber;
+#[cfg(any(test, feature = "test"))]
+pub mod test {
+    use super::*;
 
-#[cfg(test)]
-impl BlockSubscriber for PrintSubscriber {
-    type HandleBlockFut = future::Ready<anyhow::Result<()>>;
+    pub struct PrintSubscriber;
 
-    fn handle_block(
-        &self,
-        block: &BlockStuff,
-        _state: Option<&ShardStateStuff>,
-    ) -> Self::HandleBlockFut {
-        println!("Handling block: {:?}", block.id());
-        future::ready(Ok(()))
+    impl BlockSubscriber for PrintSubscriber {
+        type HandleBlockFut = future::Ready<anyhow::Result<()>>;
+
+        fn handle_block(
+            &self,
+            block: &BlockStuff,
+            _state: Option<&ShardStateStuff>,
+        ) -> Self::HandleBlockFut {
+            tracing::info!("handling block: {:?}", block.id());
+            future::ready(Ok(()))
+        }
     }
 }
