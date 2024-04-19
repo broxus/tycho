@@ -220,14 +220,14 @@ pub mod test {
     }
 
     pub async fn prepare_state_apply() -> Result<(ArchiveProvider, Arc<Storage>)> {
-        let data = include_bytes!("../../tests/00001");
+        let data = include_bytes!("../../tests/data/00001");
         let provider = ArchiveProvider::new(data).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
         let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();
 
-        let master = include_bytes!("../../tests/everscale_zerostate.boc");
-        let shard = include_bytes!("../../tests/everscale_shard_zerostate.boc");
+        let master = include_bytes!("../../tests/data/everscale_zerostate.boc");
+        let shard = include_bytes!("../../tests/data/everscale_shard_zerostate.boc");
 
         let master_id = BlockId {
             root_hash: HashBytes::from_str(

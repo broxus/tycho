@@ -156,7 +156,7 @@ mod test {
     }
 
     fn get_empty_block() -> BlockStuffAug {
-        let block_data = include_bytes!("../../tests/empty_block.bin");
+        let block_data = include_bytes!("../../tests/data/empty_block.bin");
         let block = everscale_types::boc::BocRepr::decode(block_data).unwrap();
         BlockStuffAug::new(
             BlockStuff::with_block(get_default_block_id(), block),

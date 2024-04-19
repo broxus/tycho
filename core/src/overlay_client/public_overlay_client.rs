@@ -10,7 +10,6 @@ use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
 use tycho_network::{Network, PeerId};
 use tycho_network::{PublicOverlay, Request};
 
-use crate::overlay_client::neighbour::Neighbour;
 use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
 use crate::overlay_client::settings::{OverlayClientSettings, OverlayOptions};
 use crate::proto::overlay::{Ping, Pong, Response};
@@ -181,7 +180,6 @@ impl OverlayClient for PublicOverlayClient {
             tracing::error!("No neighbours found to send request");
             return Err(Error::msg("Failed to ping")); //TODO: proper error
         };
-
         let start_time = Instant::now();
         let response_opt = self
             .0
