@@ -5,13 +5,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tycho_block_util::block::block_stuff::get_empty_block;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
 use tycho_collator::types::BlockStuffForSync;
+use tycho_core::block_strider::{BlockStrider, prepare_state_apply};
 use tycho_core::block_strider::provider::BlockProvider;
 use tycho_core::block_strider::subscriber::BlockSubscriber;
+use tycho_core::block_strider::subscriber::test::PrintSubscriber;
 use tycho_storage::build_tmp_storage;
 
 struct MockEventListener {
@@ -69,6 +71,28 @@ async fn test_add_and_get_block() {
         next_block.is_some(),
         "Block should be retrieved after being added"
     );
+}
+
+#[tokio::test]
+async fn test_storage_accessors() {
+    let (provider, storage) = prepare_state_apply().await.unwrap();
+
+    let block_strider = BlockStrider::builder()
+        .with_provider(provider)
+        .with_subscriber(PrintSubscriber)
+        .with_state(storage.clone())
+        .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
+
+    block_strider.run().await.unwrap();
+
+    // let adapter = StateNodeAdapterStdImpl::create(listener, storage.clone());
+
+    let last_mc_block_id = storage.node_state().load_last_mc_block_id().unwrap();
+
+    storage
+        .shard_state_storage()
+        .load_state(&last_mc_block_id)
+        .await.unwrap();
 }
 
 #[tokio::test]
