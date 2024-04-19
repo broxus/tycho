@@ -10,10 +10,10 @@ use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
 use tycho_collator::types::BlockStuffForSync;
-use tycho_core::block_strider::{BlockStrider, prepare_state_apply};
 use tycho_core::block_strider::provider::BlockProvider;
-use tycho_core::block_strider::subscriber::BlockSubscriber;
 use tycho_core::block_strider::subscriber::test::PrintSubscriber;
+use tycho_core::block_strider::subscriber::BlockSubscriber;
+use tycho_core::block_strider::{prepare_state_apply, BlockStrider};
 use tycho_storage::build_tmp_storage;
 
 struct MockEventListener {
@@ -84,15 +84,19 @@ async fn test_storage_accessors() {
         .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
 
     block_strider.run().await.unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let listener = Arc::new(MockEventListener {
+        accepted_count: counter.clone(),
+    });
+    let adapter = StateNodeAdapterStdImpl::create(listener, storage.clone());
 
-    // let adapter = StateNodeAdapterStdImpl::create(listener, storage.clone());
-
-    let last_mc_block_id = storage.node_state().load_last_mc_block_id().unwrap();
+    let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
 
     storage
         .shard_state_storage()
         .load_state(&last_mc_block_id)
-        .await.unwrap();
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

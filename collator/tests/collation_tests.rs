@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use tycho_block_util::state::MinRefMcStateTracker;
+use tycho_collator::validator::validator_processor::ValidatorProcessor;
 use tycho_collator::{
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
     state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
@@ -7,7 +8,6 @@ use tycho_collator::{
     types::CollationConfig,
     validator_test_impl::ValidatorProcessorTestImpl,
 };
-use tycho_collator::validator::validator_processor::ValidatorProcessor;
 use tycho_core::block_strider::subscriber::test::PrintSubscriber;
 use tycho_core::block_strider::{prepare_state_apply, BlockStrider};
 use tycho_storage::build_tmp_storage;
@@ -49,7 +49,6 @@ async fn test_collation_process_on_stubs() {
         state_node_adapter_builder,
         node_network,
     );
-
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
