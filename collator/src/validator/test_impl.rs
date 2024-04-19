@@ -96,7 +96,7 @@ where
     }
 
     fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>> {
-        unimplemented!()
+        self._dispatcher.clone()
     }
 
     async fn try_add_session(

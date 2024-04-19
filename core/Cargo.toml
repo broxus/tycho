@@ -10,14 +10,18 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-async-trait = { workspace = true }
 castaway = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
 itertools = { workspace = true }
+metrics = { workspace = true }
 parking_lot = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
+tracing-test = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
@@ -27,10 +31,12 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 tycho-util = { workspace = true, features = ["test"] }
-tycho-storage = { workspace = true, features = ["integration-tests"] }
+tycho-storage = { workspace = true, features = ["test"] }
+tempfile = { workspace = true }
+tracing-test = { workspace = true }
 
 [features]
-integration-tests = []
+test = []
 
 [lints]
 workspace = true

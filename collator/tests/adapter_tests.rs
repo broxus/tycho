@@ -4,13 +4,16 @@ use everscale_types::models::{BlockId, ShardIdent};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tycho_block_util::block::block_stuff::get_empty_block;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
 use tycho_collator::types::BlockStuffForSync;
 use tycho_core::block_strider::provider::BlockProvider;
+use tycho_core::block_strider::subscriber::test::PrintSubscriber;
 use tycho_core::block_strider::subscriber::BlockSubscriber;
+use tycho_core::block_strider::{prepare_state_apply, BlockStrider};
 use tycho_storage::build_tmp_storage;
 
 struct MockEventListener {
@@ -23,7 +26,11 @@ impl StateNodeEventListener for MockEventListener {
         self.accepted_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn on_block_accepted_external(&self, _block_id: &BlockId) -> Result<()> {
+    async fn on_block_accepted_external(
+        &self,
+        block_id: &BlockId,
+        state: Option<Arc<ShardStateStuff>>,
+    ) -> Result<()> {
         Ok(())
     }
 }
@@ -44,9 +51,14 @@ async fn test_add_and_get_block() {
         root_hash: Default::default(),
         file_hash: Default::default(),
     };
+
+    let empty_block = get_empty_block();
+    let block_stuff_aug =
+        BlockStuffAug::loaded(BlockStuff::with_block(block_id.clone(), empty_block));
+
     let block = BlockStuffForSync {
         block_id,
-        block_stuff: None,
+        block_stuff_aug,
         signatures: Default::default(),
         prev_blocks_ids: Vec::new(),
         top_shard_blocks_ids: Vec::new(),
@@ -59,6 +71,32 @@ async fn test_add_and_get_block() {
         next_block.is_some(),
         "Block should be retrieved after being added"
     );
+}
+
+#[tokio::test]
+async fn test_storage_accessors() {
+    let (provider, storage) = prepare_state_apply().await.unwrap();
+
+    let block_strider = BlockStrider::builder()
+        .with_provider(provider)
+        .with_subscriber(PrintSubscriber)
+        .with_state(storage.clone())
+        .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
+
+    block_strider.run().await.unwrap();
+    let counter = Arc::new(AtomicUsize::new(0));
+    let listener = Arc::new(MockEventListener {
+        accepted_count: counter.clone(),
+    });
+    let adapter = StateNodeAdapterStdImpl::create(listener, storage.clone());
+
+    let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
+
+    storage
+        .shard_state_storage()
+        .load_state(&last_mc_block_id)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -83,9 +121,13 @@ async fn test_add_and_get_next_block() {
         root_hash: Default::default(),
         file_hash: Default::default(),
     };
+    let empty_block = get_empty_block();
+    let block_stuff_aug =
+        BlockStuffAug::loaded(BlockStuff::with_block(block_id.clone(), empty_block));
+
     let block = BlockStuffForSync {
         block_id,
-        block_stuff: None,
+        block_stuff_aug,
         signatures: Default::default(),
         prev_blocks_ids: vec![previous_block_id],
         top_shard_blocks_ids: Vec::new(),
@@ -124,11 +166,14 @@ async fn test_add_read_handle_100000_blocks_parallel() {
                     root_hash: Default::default(),
                     file_hash: Default::default(),
                 };
-                let block_stuff = BlockStuff::with_block(block_id.clone(), cloned_block.clone());
+                let block_stuff_aug = BlockStuffAug::loaded(BlockStuff::with_block(
+                    block_id.clone(),
+                    cloned_block.clone(),
+                ));
 
                 let block = BlockStuffForSync {
                     block_id,
-                    block_stuff: Some(block_stuff.clone()),
+                    block_stuff_aug,
                     signatures: Default::default(),
                     prev_blocks_ids: Vec::new(),
                     top_shard_blocks_ids: Vec::new(),
@@ -157,9 +202,12 @@ async fn test_add_read_handle_100000_blocks_parallel() {
                     i
                 );
 
-                let block_stuff = BlockStuff::with_block(block_id.clone(), empty_block.clone());
+                let block_stuff = BlockStuffAug::loaded(BlockStuff::with_block(
+                    block_id.clone(),
+                    empty_block.clone(),
+                ));
 
-                let handle_block = adapter.handle_block(&block_stuff).await;
+                let handle_block = adapter.handle_block(&block_stuff, None).await;
                 assert!(
                     handle_block.is_ok(),
                     "Block {} should be handled after being added",

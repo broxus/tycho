@@ -62,13 +62,18 @@ impl ShardStateStuff {
         let file_hash = sha2::Sha256::digest(bytes);
         anyhow::ensure!(
             id.file_hash.as_slice() == file_hash.as_slice(),
-            "file_hash mismatch for {id}"
+            "file_hash mismatch. Expected: {}, got: {}",
+            hex::encode(file_hash),
+            id.file_hash,
         );
 
         let root = Boc::decode(bytes)?;
         anyhow::ensure!(
             &id.root_hash == root.repr_hash(),
-            "root_hash mismatch for {id}"
+            "root_hash mismatch for {id}. Expected: {expected}, got: {got}",
+            id = id,
+            expected = id.root_hash,
+            got = root.repr_hash(),
         );
 
         Self::new(

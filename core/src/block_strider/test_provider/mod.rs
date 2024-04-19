@@ -9,7 +9,9 @@ use everscale_types::models::{
 };
 use everscale_types::prelude::HashBytes;
 use std::collections::HashMap;
-use tycho_block_util::block::BlockStuff;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+
+pub mod archive_provider;
 
 const ZERO_HASH: HashBytes = HashBytes([0; 32]);
 
@@ -24,18 +26,22 @@ impl BlockProvider for TestBlockProvider {
             .iter()
             .find(|id| id.seqno == prev_block_id.seqno + 1);
         futures_util::future::ready(next_id.and_then(|id| {
-            self.blocks
-                .get(id)
-                .map(|b| Ok(BlockStuff::with_block(*id, b.clone())))
+            self.blocks.get(id).map(|b| {
+                Ok(BlockStuffAug::new(
+                    BlockStuff::with_block(*id, b.clone()),
+                    everscale_types::boc::BocRepr::encode(b).unwrap(),
+                ))
+            })
         }))
     }
 
     fn get_block(&self, id: &BlockId) -> Self::GetBlockFut<'_> {
-        futures_util::future::ready(
-            self.blocks
-                .get(id)
-                .map(|b| Ok(BlockStuff::with_block(*id, b.clone()))),
-        )
+        futures_util::future::ready(self.blocks.get(id).map(|b| {
+            Ok(BlockStuffAug::new(
+                BlockStuff::with_block(*id, b.clone()),
+                everscale_types::boc::BocRepr::encode(b).unwrap(),
+            ))
+        }))
     }
 }
 
@@ -97,7 +103,7 @@ fn master_block(
 
     let shard_block_ids = link_shard_blocks(prev_shard_block_ref, 2, blocks);
     let block_extra = McBlockExtra {
-        shards: ShardHashes::from_shards(shard_block_ids).unwrap(),
+        shards: ShardHashes::from_shards(shard_block_ids.iter().map(|x| (&x.0, &x.1))).unwrap(),
         fees: ShardFees {
             root: None,
             fees: Default::default(),
@@ -142,7 +148,7 @@ fn insert_block(
         root_hash: block_ref.root_hash,
         file_hash: block_ref.file_hash,
     };
-    blocks.insert(id.clone(), block);
+    blocks.insert(id, block);
     if let Some(master_ids) = master_ids {
         master_ids.push(id);
     }
