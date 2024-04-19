@@ -37,7 +37,7 @@ crc = "3.0.1"
 dashmap = "5.4"
 ed25519 = "2.0"
 everscale-crypto = { version = "0.2", features = ["tl-proto"] }
-everscale-types = { version = "0.1.0-rc.6", features = ["tycho"] }
+everscale-types = { version = "0.1.0-rc.6" }
 exponential-backoff = "1"
 fdlimit = "0.3.0"
 futures-util = "0.3"
@@ -96,7 +96,7 @@ tycho-util = { path = "./util" }
 # NOTE: use crates.io dependency when it is released
 # https://github.com/sagebind/castaway/issues/18
 castaway = { git = "https://github.com/sagebind/castaway.git" }
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "tycho" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
