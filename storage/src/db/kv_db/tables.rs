@@ -51,7 +51,7 @@ impl ColumnFamily for BlockHandles {
 
 /// Maps seqno to key block id
 /// - Key: `u32 (BE)`
-/// - Value: `ton_block::BlockIdExt`
+/// - Value: `BlockIdExt`
 pub struct KeyBlocks;
 impl ColumnFamily for KeyBlocks {
     const NAME: &'static str = "key_blocks";

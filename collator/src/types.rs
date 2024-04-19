@@ -3,7 +3,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
 use std::collections::HashMap;
 
-use tycho_block_util::block::ValidatorSubsetInfo;
+use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
 
 use std::sync::Arc;
@@ -123,7 +123,7 @@ pub struct BlockStuffForSync {
     //STUB: will not parse Block because candidate does not contain real block
     //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
-    pub block_stuff: Option<BlockStuff>,
+    pub block_stuff_aug: Option<BlockStuffAug>,
     pub signatures: HashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,

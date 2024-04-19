@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, Notify};
 use tracing::debug;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
+use tycho_block_util::state::ShardStateStuff;
 use tycho_collator::state_node::{
     StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeEventListener,
 };
@@ -77,7 +78,11 @@ impl StateNodeEventListener for TestValidatorEventListener {
         unimplemented!("Not implemented");
     }
 
-    async fn on_block_accepted_external(&self, block_id: &BlockId) -> Result<()> {
+    async fn on_block_accepted_external(
+        &self,
+        block_id: &BlockId,
+        state: Option<Arc<ShardStateStuff>>,
+    ) -> Result<()> {
         unimplemented!("Not implemented");
     }
 }

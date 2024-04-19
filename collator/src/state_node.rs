@@ -8,6 +8,7 @@ use everscale_types::models::{BlockId, ShardIdent};
 use futures_util::future::BoxFuture;
 use tokio::sync::{broadcast, Mutex};
 
+use tycho_block_util::block::BlockStuffAug;
 use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
 use tycho_core::block_strider::provider::{BlockProvider, OptionalBlockStuff};
 use tycho_core::block_strider::subscriber::BlockSubscriber;
@@ -44,7 +45,11 @@ pub trait StateNodeEventListener: Send + Sync {
     /// When our collated block was accepted and applied in state node
     async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()>;
     /// When new applied block was received from blockchain
-    async fn on_block_accepted_external(&self, block_id: &BlockId) -> Result<()>;
+    async fn on_block_accepted_external(
+        &self,
+        block_id: &BlockId,
+        state: Option<Arc<ShardStateStuff>>,
+    ) -> Result<()>;
 }
 
 #[async_trait]
@@ -98,7 +103,10 @@ impl StateNodeAdapterStdImpl {
                 let blocks = self.blocks.lock().await;
                 if let Some(shard_blocks) = blocks.get(&block_id.shard) {
                     if let Some(block) = shard_blocks.get(&block_id.seqno) {
-                        return block.block_stuff.as_ref().map(|block_stuff| Ok(block_stuff.clone()));
+                        return block
+                            .block_stuff_aug
+                            .as_ref()
+                            .map(|block_stuff_aug| Ok(block_stuff_aug.clone()));
                     }
                 }
                 drop(blocks);
@@ -127,13 +135,18 @@ impl StateNodeAdapterStdImpl {
 impl BlockSubscriber for StateNodeAdapterStdImpl {
     type HandleBlockFut = BoxFuture<'static, Result<()>>;
 
-    fn handle_block(&self, block: &BlockStuff) -> Self::HandleBlockFut {
+    fn handle_block(
+        &self,
+        block: &BlockStuffAug,
+        state: Option<&Arc<ShardStateStuff>>,
+    ) -> Self::HandleBlockFut {
         let block_id = *block.id();
         let shard = block_id.shard;
         let seqno = block_id.seqno;
 
         let blocks_lock = self.blocks.clone();
         let listener = self.listener.clone();
+        let state = state.cloned();
 
         Box::pin(async move {
             let mut blocks_guard = blocks_lock.lock().await;
@@ -159,10 +172,10 @@ impl BlockSubscriber for StateNodeAdapterStdImpl {
                     }
                     listener.on_block_accepted(&block_id)
                 } else {
-                    listener.on_block_accepted_external(&block_id)
+                    listener.on_block_accepted_external(&block_id, state)
                 }
             } else {
-                listener.on_block_accepted_external(&block_id)
+                listener.on_block_accepted_external(&block_id, state)
             };
 
             for (shard, seqno) in &to_split {

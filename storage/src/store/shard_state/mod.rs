@@ -108,6 +108,7 @@ impl ShardStateStorage {
 
         let _gc_lock = self.gc_lock.lock().await;
 
+        // todo: spawn_blocking
         let len = self
             .cell_storage
             .store_cell(&mut batch, state.root_cell().clone())?;

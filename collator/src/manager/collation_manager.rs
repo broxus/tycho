@@ -4,6 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, ShardIdent};
+use tycho_block_util::state::ShardStateStuff;
 
 use tycho_core::internal_queue::iterator::QueueIteratorImpl;
 
@@ -232,7 +233,11 @@ where
         Ok(())
     }
 
-    async fn on_block_accepted_external(&self, block_id: &BlockId) -> Result<()> {
+    async fn on_block_accepted_external(
+        &self,
+        block_id: &BlockId,
+        state: Option<Arc<ShardStateStuff>>,
+    ) -> Result<()> {
         //TODO: should store block info from blockchain if it was not already collated
         //      and validated by ourself. Will use this info for faster validation further:
         //      will consider that just collated block is already validated if it have the

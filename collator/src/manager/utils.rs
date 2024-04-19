@@ -13,7 +13,7 @@ pub fn build_block_stuff_for_sync(
     //STUB: just build dummy block for sync
     let res = BlockStuffForSync {
         block_id: *block_candidate.candidate.block_id(),
-        block_stuff: None,
+        block_stuff_aug: None,
         signatures: block_candidate.signatures.clone(),
         prev_blocks_ids: block_candidate.candidate.prev_blocks_ids().into(),
         top_shard_blocks_ids: block_candidate.candidate.top_shard_blocks_ids().into(),
