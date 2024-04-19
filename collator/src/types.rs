@@ -66,6 +66,9 @@ impl BlockCandidate {
     pub fn top_shard_blocks_ids(&self) -> &[BlockId] {
         &self.top_shard_blocks_ids
     }
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
 pub enum OnValidatedBlockEvent {
@@ -123,7 +126,7 @@ pub struct BlockStuffForSync {
     //STUB: will not parse Block because candidate does not contain real block
     //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
-    pub block_stuff_aug: Option<BlockStuffAug>,
+    pub block_stuff_aug: BlockStuffAug,
     pub signatures: HashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,

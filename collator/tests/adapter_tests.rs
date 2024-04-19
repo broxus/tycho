@@ -51,10 +51,8 @@ async fn test_add_and_get_block() {
     };
 
     let empty_block = get_empty_block();
-    let block_stuff_aug = Some(BlockStuffAug::loaded(BlockStuff::with_block(
-        block_id.clone(),
-        empty_block,
-    )));
+    let block_stuff_aug =
+        BlockStuffAug::loaded(BlockStuff::with_block(block_id.clone(), empty_block));
 
     let block = BlockStuffForSync {
         block_id,
@@ -96,10 +94,8 @@ async fn test_add_and_get_next_block() {
         file_hash: Default::default(),
     };
     let empty_block = get_empty_block();
-    let block_stuff_aug = Some(BlockStuffAug::loaded(BlockStuff::with_block(
-        block_id.clone(),
-        empty_block,
-    )));
+    let block_stuff_aug =
+        BlockStuffAug::loaded(BlockStuff::with_block(block_id.clone(), empty_block));
 
     let block = BlockStuffForSync {
         block_id,
@@ -142,10 +138,10 @@ async fn test_add_read_handle_100000_blocks_parallel() {
                     root_hash: Default::default(),
                     file_hash: Default::default(),
                 };
-                let block_stuff_aug = Some(BlockStuffAug::loaded(BlockStuff::with_block(
+                let block_stuff_aug = BlockStuffAug::loaded(BlockStuff::with_block(
                     block_id.clone(),
                     cloned_block.clone(),
-                )));
+                ));
 
                 let block = BlockStuffForSync {
                     block_id,

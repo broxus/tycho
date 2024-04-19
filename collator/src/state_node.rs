@@ -103,10 +103,7 @@ impl StateNodeAdapterStdImpl {
                 let blocks = self.blocks.lock().await;
                 if let Some(shard_blocks) = blocks.get(&block_id.shard) {
                     if let Some(block) = shard_blocks.get(&block_id.seqno) {
-                        return block
-                            .block_stuff_aug
-                            .as_ref()
-                            .map(|block_stuff_aug| Ok(block_stuff_aug.clone()));
+                        return Some(Ok(block.block_stuff_aug.clone()));
                     }
                 }
                 drop(blocks);
