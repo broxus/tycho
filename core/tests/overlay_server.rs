@@ -221,7 +221,7 @@ fn make_network(storage: Arc<Storage>, node_count: usize) -> Vec<Node> {
 
 #[tokio::test]
 async fn overlay_server_with_empty_storage() -> Result<()> {
-    tycho_util::test::init_logger("public_overlays_accessible");
+    tycho_util::test::init_logger("overlay_server_with_empty_storage");
 
     #[derive(Debug, Default)]
     struct PeerState {
