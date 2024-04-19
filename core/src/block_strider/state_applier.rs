@@ -192,16 +192,18 @@ pub mod test {
     use everscale_types::cell::HashBytes;
     use everscale_types::models::BlockId;
     use everscale_types::models::ShardIdent;
+    use itertools::Itertools;
     use std::str::FromStr;
     use tracing_test::traced_test;
     use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
 
-    #[tokio::test]
     #[traced_test]
+    #[tokio::test]
     async fn test_state_apply() -> anyhow::Result<()> {
         let (provider, storage) = prepare_state_apply().await?;
 
         let last_mc = *provider.mc_block_ids.last_key_value().unwrap().1;
+        let blocks = provider.blocks.keys().copied().collect_vec();
 
         let block_strider = BlockStrider::builder()
             .with_provider(provider)
@@ -215,6 +217,25 @@ pub mod test {
             storage.node_state().load_last_mc_block_id().unwrap(),
             last_mc
         );
+        storage
+            .shard_state_storage()
+            .load_state(&last_mc)
+            .await
+            .unwrap();
+
+        for block in &blocks {
+            let handle = storage
+                .block_handle_storage()
+                .load_handle(block)
+                .unwrap()
+                .unwrap();
+            assert!(handle.meta().is_applied());
+            storage
+                .shard_state_storage()
+                .load_state(block)
+                .await
+                .unwrap();
+        }
 
         Ok(())
     }

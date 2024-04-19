@@ -146,6 +146,11 @@ where
             let elapsed = start.elapsed();
             metrics::histogram!("tycho_find_prev_shard_blocks_seconds").record(elapsed);
 
+            self.subscriber
+                .handle_block(&master_block, None)
+                .await
+                .expect("subscriber failed");
+
             map.set_bottom_blocks(blocks);
             map.walk_topo(&self.subscriber, &self.state).await;
             self.state.commit_traversed(*master_id);
