@@ -22,6 +22,7 @@ members = [
 
 [workspace.dependencies]
 # crates.io deps
+aarc = "0.2"
 ahash = "0.8"
 anyhow = "1.0.79"
 arc-swap = "1.6.0"
@@ -46,6 +47,7 @@ humantime = "2"
 itertools = "0.12"
 libc = "0.2"
 moka = { version = "0.12", features = ["sync"] }
+metrics = "0.22.3"
 num-traits = "0.2.18"
 parking_lot = "0.12.1"
 parking_lot_core = "0.9.9"
@@ -96,7 +98,7 @@ tycho-util = { path = "./util" }
 # NOTE: use crates.io dependency when it is released
 # https://github.com/sagebind/castaway/issues/18
 castaway = { git = "https://github.com/sagebind/castaway.git" }
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "0xdeafbeef/push-yntmntzvxrlu" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"
@@ -155,6 +157,8 @@ needless_for_each = "warn"
 option_option = "warn"
 path_buf_push_overwrite = "warn"
 ptr_as_ptr = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
 rc_mutex = "warn"
 ref_option_ref = "warn"
 rest_pat_in_fully_bound_structs = "warn"

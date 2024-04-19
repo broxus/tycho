@@ -47,7 +47,7 @@ impl TopBlocks {
         self.contains_shard_seqno(&block_id.shard, block_id.seqno)
     }
 
-    /// Checks whether the given pair of [`ton_block::ShardIdent`] and seqno
+    /// Checks whether the given pair of [`ShardIdent`] and seqno
     /// is equal to or greater than the last block for the given shard.
     ///
     /// NOTE: Specified shard could be split or merged
