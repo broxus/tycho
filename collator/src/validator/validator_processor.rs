@@ -93,6 +93,7 @@ where
     ) -> Result<ValidatorTaskResult> {
         self.on_block_validated_event(candidate_id, OnValidatedBlockEvent::ValidByState)
             .await?;
+        println!("VALIDATED BY STATE");
         Ok(ValidatorTaskResult::Void)
     }
     async fn get_block_signatures(

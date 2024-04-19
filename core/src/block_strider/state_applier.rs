@@ -182,7 +182,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 pub mod test {
     use super::super::test_provider::archive_provider::ArchiveProvider;
     use super::*;

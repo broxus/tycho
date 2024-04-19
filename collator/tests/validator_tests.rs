@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -26,6 +27,7 @@ use tycho_collator::validator::state::{ValidationState, ValidationStateStdImpl};
 use tycho_collator::validator::types::ValidationSessionInfo;
 use tycho_collator::validator::validator::{Validator, ValidatorEventListener, ValidatorStdImpl};
 use tycho_collator::validator::validator_processor::ValidatorProcessorStdImpl;
+use tycho_core::block_strider::prepare_state_apply;
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
 };
@@ -67,7 +69,7 @@ impl ValidatorEventListener for TestValidatorEventListener {
         let mut validated_blocks = self.validated_blocks.lock().await;
         validated_blocks.push(block_id);
         self.increment_and_check().await;
-        debug!("block validated event");
+        println!("block validated event");
         Ok(())
     }
 }
@@ -160,9 +162,9 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
     let test_listener = TestValidatorEventListener::new(1);
     let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
-    let storage = build_tmp_storage()?;
+    let (_, storage) = prepare_state_apply().await?;
     let state_node_adapter =
-        Arc::new(StateNodeAdapterBuilderStdImpl::new(storage).build(test_listener.clone()));
+        Arc::new(StateNodeAdapterBuilderStdImpl::new(storage.clone()).build(test_listener.clone()));
     let _validation_state = ValidationStateStdImpl::new();
 
     let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
@@ -198,43 +200,62 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         dht_client,
     };
 
-    let _validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_>, _>::create(
+    let validator = ValidatorStdImpl::<ValidatorProcessorStdImpl<_>, _>::create(
         test_listener.clone(),
         state_node_adapter,
         validator_network,
     );
 
-    let block = BlockId {
-        shard: Default::default(),
-        seqno: 0,
-        root_hash: Default::default(),
-        file_hash: Default::default(),
-    };
+    let v_keypair = KeyPair::generate(&mut ThreadRng::default());
 
     let validator_description = ValidatorDescription {
-        public_key: KeyPair::generate(&mut ThreadRng::default())
-            .public_key
-            .to_bytes()
-            .into(),
-        weight: 0,
+        public_key: v_keypair.public_key.to_bytes().into(),
+        weight: 1,
         adnl_addr: None,
         mc_seqno_since: 0,
         prev_total_weight: 0,
     };
 
+    let validator_description2 = ValidatorDescription {
+        public_key: KeyPair::generate(&mut ThreadRng::default())
+            .public_key
+            .to_bytes()
+            .into(),
+        weight: 3,
+        adnl_addr: None,
+        mc_seqno_since: 0,
+        prev_total_weight: 0,
+    };
+
+    let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
+
+    let block_handle = storage.block_handle_storage().load_handle(&block_id)?;
+    assert!(block_handle.is_some(), "Block handle not found in storage.");
+
     let validators = ValidatorSubsetInfo {
-        validators: vec![validator_description],
+        validators: vec![validator_description, validator_description2],
         short_hash: 0,
     };
     let keypair = KeyPair::generate(&mut ThreadRng::default());
-    let _collator_session_info = CollationSessionInfo::new(0, validators, Some(keypair));
-    test_listener
-        .on_block_validated(block, OnValidatedBlockEvent::ValidByState)
-        .await?;
+    let collator_session_info = Arc::new(CollationSessionInfo::new(0, validators, Some(keypair)));
+
+    let validation_session =
+        Arc::new(ValidationSessionInfo::try_from(collator_session_info.clone()).unwrap());
+
+    validator
+        .enqueue_add_session(validation_session)
+        .await
+        .unwrap();
+
+    validator
+        .enqueue_candidate_validation(block_id, collator_session_info.seqno(), v_keypair)
+        .await
+        .unwrap();
+
+    test_listener.notify.notified().await;
 
     let validated_blocks = test_listener.validated_blocks.lock().await;
     assert!(!validated_blocks.is_empty(), "No blocks were validated.");
-
     Ok(())
 }
 
@@ -249,7 +270,7 @@ async fn test_validator_accept_block_by_network() -> anyhow::Result<()> {
     let _test_listener = TestValidatorEventListener::new(expected_validations);
 
     let mut validators = vec![];
-    let mut listeners = vec![]; // Track listeners for later validati
+    let mut listeners = vec![]; // Track listeners for later validation
 
     for node in network_nodes {
         // Create a unique listener for each validator

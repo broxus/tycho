@@ -96,7 +96,7 @@ impl Storage {
     }
 }
 
-#[cfg(any(test, feature = "integration-tests"))]
+#[cfg(any(test, feature = "test"))]
 pub fn build_tmp_storage() -> anyhow::Result<Arc<Storage>> {
     let tmp_dir = tempfile::tempdir()?;
     let root_path = tmp_dir.path();

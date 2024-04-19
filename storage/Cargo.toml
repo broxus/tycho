@@ -50,7 +50,7 @@ tracing-subscriber = { workspace = true }
 tracing-test = { workspace = true }
 
 [features]
-integration-tests = []
+test = []
 
 [lints]
 workspace = true

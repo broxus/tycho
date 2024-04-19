@@ -13,10 +13,10 @@ pub mod subscriber;
 
 mod state_applier;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test"))]
 pub mod test_provider;
-#[cfg(test)]
-pub(crate) use state_applier::test::prepare_state_apply;
+#[cfg(any(test, feature = "test"))]
+pub use state_applier::test::prepare_state_apply;
 
 use crate::block_strider::state_applier::ShardStateUpdater;
 use provider::BlockProvider;
