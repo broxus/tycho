@@ -11,6 +11,7 @@ use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tl_proto::{TlRead, TlWrite};
+use tycho_core::block_strider::provider::BlockProvider;
 use tycho_core::blockchain_client::BlockchainClient;
 use tycho_core::overlay_client::public_overlay_client::PublicOverlayClient;
 use tycho_core::overlay_client::settings::OverlayClientSettings;
@@ -353,6 +354,12 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
                 format!("Failed to get response: {DEFAULT_ERROR_CODE}")
             );
         }
+
+        let block = client.get_block(&BlockId::default()).await;
+        assert!(block.is_none());
+
+        let block = client.get_next_block(&BlockId::default()).await;
+        assert!(block.is_none());
 
         break;
     }
