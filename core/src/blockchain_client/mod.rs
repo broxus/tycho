@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
+use futures_util::future::BoxFuture;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
-use crate::overlay_client::public_overlay_client::{
-    OverlayClient, PublicOverlayClient, QueryResponse,
-};
+use crate::block_strider::provider::*;
+use crate::overlay_client::public_overlay_client::*;
 use crate::proto::overlay::rpc::*;
 use crate::proto::overlay::*;
 
@@ -94,5 +95,64 @@ impl BlockchainClient {
             })
             .await?;
         Ok(data)
+    }
+}
+
+impl BlockProvider for BlockchainClient {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        Box::pin(async {
+            let get_block = || async {
+                let res = self.get_next_block_full(*prev_block_id).await?;
+                let block = match res.data() {
+                    BlockFull::Found {
+                        block_id,
+                        block: data,
+                        ..
+                    } => {
+                        let block = BlockStuff::deserialize_checked(*block_id, data)?;
+                        Some(BlockStuffAug::new(block, data.to_vec()))
+                    }
+                    BlockFull::Empty => None,
+                };
+
+                Ok::<_, anyhow::Error>(block)
+            };
+
+            match get_block().await {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        Box::pin(async {
+            let get_block = || async {
+                let res = self.get_block_full(*block_id).await?;
+                let block = match res.data() {
+                    BlockFull::Found {
+                        block_id,
+                        block: data,
+                        ..
+                    } => {
+                        let block = BlockStuff::deserialize_checked(*block_id, data)?;
+                        Some(BlockStuffAug::new(block, data.to_vec()))
+                    }
+                    BlockFull::Empty => None,
+                };
+
+                Ok::<_, anyhow::Error>(block)
+            };
+
+            match get_block().await {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
     }
 }
