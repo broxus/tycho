@@ -72,7 +72,6 @@ impl BlockProvider for StateNodeAdapterStdImpl {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
-    metrics::histogram!("tycho_metric_name_seconds").record(elapsed_time)
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Get next block: {:?}", prev_block_id);
         self.wait_for_block(prev_block_id)

@@ -1144,7 +1144,7 @@ where
                 }
             });
             //TODO: make proper panic and error processing without waiting for spawned task
-            let _ = join_handle.await?;
+            join_handle.await??;
         } else {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
