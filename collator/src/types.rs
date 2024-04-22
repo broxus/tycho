@@ -4,9 +4,11 @@ use anyhow::Result;
 
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::{CellBuilder, HashBytes};
-use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
+use everscale_types::models::{
+    Block, BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature,
+};
 
-use tycho_block_util::block::{BlockStuff, BlockStuffAug, ValidatorSubsetInfo};
+use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
 
@@ -29,6 +31,7 @@ pub(crate) struct BlockCollationResult {
 #[derive(Clone)]
 pub(crate) struct BlockCandidate {
     block_id: BlockId,
+    block: Block,
     prev_blocks_ids: Vec<BlockId>,
     top_shard_blocks_ids: Vec<BlockId>,
     data: Vec<u8>,
@@ -39,6 +42,7 @@ pub(crate) struct BlockCandidate {
 impl BlockCandidate {
     pub fn new(
         block_id: BlockId,
+        block: Block,
         prev_blocks_ids: Vec<BlockId>,
         top_shard_blocks_ids: Vec<BlockId>,
         data: Vec<u8>,
@@ -48,6 +52,7 @@ impl BlockCandidate {
     ) -> Self {
         Self {
             block_id,
+            block,
             prev_blocks_ids,
             top_shard_blocks_ids,
             data,
@@ -58,6 +63,9 @@ impl BlockCandidate {
     }
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
+    }
+    pub fn block(&self) -> &Block {
+        &self.block
     }
     pub fn shard_id(&self) -> &ShardIdent {
         &self.block_id.shard

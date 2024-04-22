@@ -1,25 +1,28 @@
-use std::sync::Arc;
+use std::collections::HashMap;
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 
 use everscale_types::{
-    cell::{CellBuilder, HashBytes},
-    models::{BlockId, BlockIdShort},
+    cell::HashBytes,
+    models::{
+        AddSub, BlockId, BlockIdShort, BlockInfo, ConfigParam7, CurrencyCollection,
+        ShardDescription, ValueFlow,
+    },
+    num::{Tokens, VarUint248},
 };
 use rand::Rng;
-use tycho_block_util::state::ShardStateStuff;
 
 use crate::{
     collator::{
         collator_processor::execution_manager::ExecutionManager,
-        types::{BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData},
+        types::{BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt},
     },
     mempool::MempoolAdapter,
     msg_queue::{MessageQueueAdapter, QueueIterator},
     state_node::StateNodeAdapter,
     tracing_targets,
-    types::{BlockCandidate, BlockCollationResult, ShardStateStuffExt},
+    types::BlockCollationResult,
 };
 
 use super::super::CollatorEventEmitter;
@@ -33,7 +36,7 @@ pub trait DoCollate<MQ, MP, ST>:
     async fn do_collate(
         &mut self,
         next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, Arc<ShardStateStuff>)>,
+        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
     ) -> Result<()>;
 }
 
@@ -48,7 +51,7 @@ where
     async fn do_collate(
         &mut self,
         mut next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, Arc<ShardStateStuff>)>,
+        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
     ) -> Result<()> {
         //TODO: make real implementation
         let mc_data = &self.working_state().mc_data;
@@ -61,7 +64,7 @@ where
                 ", top_shard_blocks: {:?}",
                 top_shard_blocks_info
                     .iter()
-                    .map(|(id, _)| id.as_short_id().to_string())
+                    .map(|(id, _, _)| id.as_short_id().to_string())
                     .collect::<Vec<_>>()
                     .as_slice(),
             )
@@ -91,11 +94,23 @@ where
         };
         collation_data.rand_seed = rand_seed;
 
-        //TODO: init ShardHashes
+        // init ShardHashes descriptions for master
         if collation_data.block_id_short.shard.is_masterchain() {
-            collation_data.top_shard_blocks =
-                top_shard_blocks_info.iter().map(|(id, _)| *id).collect();
-            collation_data.set_shards(Default::default());
+            let mut shards = HashMap::new();
+            for (top_block_id, top_block_info, top_block_value_flow) in top_shard_blocks_info {
+                let mut shard_descr = ShardDescription::from_block_info(
+                    top_block_id,
+                    &top_block_info,
+                    &top_block_value_flow,
+                );
+                shard_descr.reg_mc_seqno = collation_data.block_id_short.seqno;
+
+                collation_data.update_shards_max_end_lt(shard_descr.end_lt);
+
+                shards.insert(top_block_id.shard, Box::new(shard_descr));
+                collation_data.top_shard_blocks_ids.push(top_block_id);
+            }
+            collation_data.set_shards(shards);
         }
 
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
@@ -120,6 +135,9 @@ where
             .state()
             .externals_processed_upto
             .clone();
+
+        // compute created / minted / recovered / from_prev_block
+        //self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // init execution manager
         let exec_manager = ExecutionManager::new(
@@ -231,9 +249,126 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         tracing::debug!(
             "Collator ({}): start_lt set to {}",
             collator_descr,
-            start_lt
+            start_lt,
         );
 
         Ok(start_lt)
+    }
+
+    fn update_value_flow(
+        &self,
+        mc_data: &McData,
+        prev_shard_data: &PrevData,
+        collation_data: &mut BlockCollationData,
+    ) -> Result<()> {
+        tracing::trace!("Collator ({}): update_value_flow", self.collator_descr);
+
+        if collation_data.block_id_short.shard.is_masterchain() {
+            collation_data.value_flow.created.tokens =
+                mc_data.config().get_block_creation_reward(true)?;
+
+            collation_data.value_flow.recovered = collation_data.value_flow.created.clone();
+            collation_data
+                .value_flow
+                .recovered
+                .add(&collation_data.value_flow.fees_collected)?;
+            collation_data
+                .value_flow
+                .recovered
+                .add(&mc_data.mc_state_stuff().state().total_validator_fees)?;
+
+            match mc_data.config().get_fee_collector_address() {
+                Err(_) => {
+                    tracing::debug!(
+                        "Collator ({}): fee recovery disabled (no collector smart contract defined in configuration)",
+                        self.collator_descr,
+                    );
+                    collation_data.value_flow.recovered = CurrencyCollection::default();
+                }
+                Ok(_addr) => {
+                    if collation_data.value_flow.recovered.tokens < Tokens::new(1_000_000_000) {
+                        tracing::debug!(
+                            "Collator({}): fee recovery skipped ({:?})",
+                            self.collator_descr,
+                            collation_data.value_flow.recovered,
+                        );
+                        collation_data.value_flow.recovered = CurrencyCollection::default();
+                    }
+                }
+            };
+
+            collation_data.value_flow.minted = self.compute_minted_amount(mc_data)?;
+
+            if collation_data.value_flow.minted != CurrencyCollection::ZERO
+                && mc_data.config().get_minter_address().is_err()
+            {
+                tracing::warn!(
+                    "Collator ({}): minting of {:?} disabled: no minting smart contract defined",
+                    self.collator_descr,
+                    collation_data.value_flow.minted,
+                );
+                collation_data.value_flow.minted = CurrencyCollection::default();
+            }
+        } else {
+            collation_data.value_flow.created.tokens =
+                mc_data.config().get_block_creation_reward(false)?;
+            //TODO: should check if it is good to cast `prefix_len` from u16 to u8
+            collation_data.value_flow.created.tokens >>=
+                collation_data.block_id_short.shard.prefix_len() as u8;
+        }
+        // info: `prev_data.observable_accounts().root_extra().balance` is `prev_data.total_balance()` in old node
+        collation_data.value_flow.from_prev_block = prev_shard_data
+            .observable_accounts()
+            .root_extra()
+            .balance
+            .clone();
+        Ok(())
+    }
+
+    fn compute_minted_amount(&self, mc_data: &McData) -> Result<CurrencyCollection> {
+        //TODO: just copied from old node, needs to review
+        tracing::trace!("Collator ({}): compute_minted_amount", self.collator_descr);
+
+        let mut to_mint = CurrencyCollection::default();
+
+        let to_mint_cp = match mc_data.config().get::<ConfigParam7>() {
+            Ok(Some(v)) => v,
+            _ => {
+                tracing::warn!(
+                    "Collator ({}): Can't get config param 7 (to_mint)",
+                    self.collator_descr,
+                );
+                return Ok(to_mint);
+            }
+        };
+
+        let old_global_balance = &mc_data.mc_state_extra().global_balance;
+        for item in to_mint_cp.as_dict().iter() {
+            let (key, amount) = item?;
+            let amount2 = old_global_balance
+                .other
+                .as_dict()
+                .get(key)?
+                .unwrap_or_default();
+            if amount > amount2 {
+                let mut delta = amount.clone();
+                //TODO: cal delta when
+                let delta = VarUint248::new(0);
+                //delta.sub(&amount2)?;
+                tracing::debug!(
+                    "{}: currency #{}: existing {:?}, required {:?}, to be minted {:?}",
+                    self.collator_descr,
+                    key,
+                    amount2,
+                    amount,
+                    delta,
+                );
+                if key != HashBytes::ZERO {
+                    to_mint.other.as_dict_mut().set(key, delta)?;
+                }
+            }
+        }
+
+        Ok(to_mint)
     }
 }

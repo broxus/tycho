@@ -11,10 +11,10 @@ use everscale_types::{
     models::{
         in_message::{ImportFees, InMsg},
         out_message::OutMsg,
-        AccountBlock, AccountState, BlockId, BlockIdShort, BlockRef, BlockchainConfig,
+        AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
         CurrencyCollection, LibDescr, McStateExtra, OutMsgQueueInfo, OwnedMessage, PrevBlockRef,
-        ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription, ShardFees, ShardHashes,
-        ShardIdent, SimpleLib, ValueFlow,
+        ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription, ShardFees, ShardIdent,
+        SimpleLib, ValueFlow,
     },
 };
 
@@ -326,38 +326,39 @@ impl PrevData {
 #[derive(Debug, Default)]
 pub(super) struct BlockCollationData {
     //block_descr: Arc<String>,
-    pub block_id_short: BlockIdShort, //v
-    pub chain_time: u32,              //v
+    pub block_id_short: BlockIdShort,
+    pub chain_time: u32,
 
-    pub start_lt: u64, //v
+    pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt
     // which is updating during tx execution
-    pub max_lt: u64, //v
+    pub max_lt: u64,
 
-    pub in_msgs: InMsgDescr,   //v
-    pub out_msgs: OutMsgDescr, //v
+    pub in_msgs: InMsgDescr,
+    pub out_msgs: OutMsgDescr,
 
     // should read from prev_shard_state
-    pub out_msg_queue_stuff: OutMsgQueueInfoStuff, //v
+    pub out_msg_queue_stuff: OutMsgQueueInfoStuff,
     /// Index of the highest external processed from the anchor: (anchor, index)
-    pub externals_processed_upto: Dict<u32, u64>, //v
+    pub externals_processed_upto: Dict<u32, u64>,
 
     /// Ids of top blocks from shards that be included in the master block
-    pub top_shard_blocks: Vec<BlockId>, //v
+    pub top_shard_blocks_ids: Vec<BlockId>,
 
     shards: Option<HashMap<ShardIdent, Box<ShardDescription>>>,
     shards_max_end_lt: u64,
 
+    //TODO: setup update logic when ShardFees would be implemented
     pub shard_fees: ShardFees,
 
-    pub mint_msg: Option<InMsg>,           //v
-    pub recover_create_msg: Option<InMsg>, //v
+    pub mint_msg: Option<InMsg>,
+    pub recover_create_msg: Option<InMsg>,
 
     pub value_flow: ValueFlow,
 
-    min_ref_mc_seqno: Option<u32>, //v
+    min_ref_mc_seqno: Option<u32>,
 
-    pub rand_seed: HashBytes, //v
+    pub rand_seed: HashBytes,
 }
 
 impl BlockCollationData {
@@ -463,6 +464,46 @@ impl OutMsgQueueInfoStuff {
             proc_info: self.proc_info.clone(),
         };
         (msg_queue_info, min_ref_mc_seqno)
+    }
+}
+
+pub trait ShardDescriptionExt {
+    fn from_block_info(
+        block_id: BlockId,
+        block_info: &BlockInfo,
+        value_flow: &ValueFlow,
+    ) -> ShardDescription;
+}
+impl ShardDescriptionExt for ShardDescription {
+    fn from_block_info(
+        block_id: BlockId,
+        block_info: &BlockInfo,
+        value_flow: &ValueFlow,
+    ) -> ShardDescription {
+        ShardDescription {
+            seqno: block_id.seqno,
+            reg_mc_seqno: 0,
+            start_lt: block_info.start_lt,
+            end_lt: block_info.end_lt,
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
+            before_split: block_info.before_split,
+            before_merge: false, //TODO: by t-node, needs to review
+            want_split: block_info.want_split,
+            want_merge: block_info.want_merge,
+            nx_cc_updated: false, //TODO: by t-node, needs to review
+            next_catchain_seqno: block_info.gen_catchain_seqno,
+            next_validator_shard: block_info.shard.prefix(), // eq to `shard_prefix_with_tag` in old node
+            min_ref_mc_seqno: block_info.min_ref_mc_seqno,
+            gen_utime: block_info.gen_utime,
+            split_merge_at: None, //TODO: check if we really should not use it here
+            fees_collected: value_flow.fees_collected.clone(),
+            funds_created: value_flow.created.clone(),
+            copyleft_rewards: Default::default(),
+            proof_chain: None,
+            #[cfg(feature = "venom")]
+            collators: None,
+        }
     }
 }
 

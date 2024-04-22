@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use crate::{
@@ -77,7 +77,7 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, Arc<ShardStateStuff>)>,
+        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
     ) -> Result<()>;
 }
 
@@ -178,7 +178,7 @@ where
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, Arc<ShardStateStuff>)>,
+        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
     ) -> Result<()> {
         self.dispatcher
             .enqueue_task(method_to_async_task_closure!(

@@ -3,11 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use everscale_crypto::ed25519::KeyPair;
-
 use anyhow::{anyhow, bail, Result};
 
-use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription, ValidatorSet};
+use everscale_types::models::{
+    BlockId, BlockInfo, ShardIdent, ValidatorDescription, ValidatorSet, ValueFlow,
+};
 use tycho_block_util::{
     block::ValidatorSubsetInfo,
     state::{MinRefMcStateTracker, ShardStateStuff},
@@ -598,7 +598,7 @@ where
         );
         let new_state_stuff = collation_result.new_state_stuff;
         let new_mc_state = new_state_stuff.clone();
-        self.store_candidate(collation_result.candidate, new_state_stuff)?;
+        self.store_candidate(collation_result.candidate)?;
 
         // send validation task to validator
         // we need to send session info with the collators list to the validator
@@ -757,25 +757,24 @@ where
         &self,
         _next_mc_block_chain_time: u64,
         _trigger_shard_block_id: Option<BlockId>,
-    ) -> Vec<(BlockId, Arc<ShardStateStuff>)> {
+    ) -> Result<Vec<(BlockId, BlockInfo, ValueFlow)>> {
         //TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
 
         //STUB: when we work with only one shard we can just get the last shard block
         //      because collator manager will try run master block collation before
         //      before processing any next candidate from the shard collator
         //      because of dispatcher tasks queue
-        let res = self
+        let mut res = vec![];
+        for (_, v) in self
             .blocks_cache
             .shards
             .iter()
-            .filter_map(|(_, shard_cache)| {
-                shard_cache
-                    .last_key_value()
-                    .map(|(_, v)| (*v.block_id(), v.get_new_state_stuff()))
-            })
-            .collect::<Vec<_>>();
-
-        res
+            .filter_map(|(_, shard_cache)| shard_cache.last_key_value())
+        {
+            let block = v.get_block()?;
+            res.push((*v.block_id(), block.load_info()?, block.load_value_flow()?));
+        }
+        Ok(res)
     }
 
     /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation
@@ -800,7 +799,7 @@ where
         let top_shard_blocks_info = self.detect_top_shard_blocks_info_for_mc_block(
             next_mc_block_chain_time,
             trigger_shard_block_id,
-        );
+        )?;
 
         //TODO: We should somehow collect externals for masterchain during the shard blocks collation
         //      or pull them directly when collating master
@@ -809,7 +808,7 @@ where
 
         let _tracing_top_shard_blocks_descr = top_shard_blocks_info
             .iter()
-            .map(|(id, _)| id.as_short_id().to_string())
+            .map(|(id, _, _)| id.as_short_id().to_string())
             .collect::<Vec<_>>();
 
         mc_collator
@@ -869,17 +868,13 @@ where
     }
 
     /// Store block in a cache structure that allow to append signatures
-    fn store_candidate(
-        &mut self,
-        candidate: BlockCandidate,
-        new_state_stuff: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+    fn store_candidate(&mut self, candidate: BlockCandidate) -> Result<()> {
         //TODO: in future we may store to cache a block received from blockchain before,
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
         let candidate_id = *candidate.block_id();
-        let block_container = BlockCandidateContainer::new(candidate, new_state_stuff);
+        let block_container = BlockCandidateContainer::new(candidate);
         if candidate_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container

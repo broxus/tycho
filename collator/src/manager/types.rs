@@ -1,16 +1,11 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::{
-    cell::{Cell, CellBuilder, CellFamily, HashBytes, Store},
-    models::{BlockId, BlockIdShort, ShardIdent, ShardStateUnsplit, Signature},
+    cell::HashBytes,
+    models::{Block, BlockId, BlockIdShort, ShardIdent, Signature},
 };
-
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use crate::types::BlockCandidate;
 
@@ -41,8 +36,6 @@ pub struct BlockCandidateContainer {
     block_id: BlockId,
     /// Current block candidate entry with signatures
     entry: Option<BlockCandidateEntry>,
-    /// New state related to current block candidate
-    new_state_stuff: Arc<ShardStateStuff>,
     /// True when the candidate became valid due to the applied validation result.
     /// Updates by `set_validation_result()`
     is_valid: bool,
@@ -61,7 +54,7 @@ pub struct BlockCandidateContainer {
     pub containing_mc_block: Option<BlockCacheKey>,
 }
 impl BlockCandidateContainer {
-    pub fn new(candidate: BlockCandidate, new_state_stuff: Arc<ShardStateStuff>) -> Self {
+    pub fn new(candidate: BlockCandidate) -> Self {
         let block_id = *candidate.block_id();
         let key = candidate.block_id().as_short_id();
         let entry = BlockCandidateEntry {
@@ -85,7 +78,6 @@ impl BlockCandidateContainer {
                 .map(|id| id.as_short_id())
                 .collect(),
             entry: Some(entry),
-            new_state_stuff,
             is_valid: false,
             containing_mc_block: None,
             send_sync_status: SendSyncStatus::NotReady,
@@ -176,8 +168,12 @@ impl BlockCandidateContainer {
         Ok(())
     }
 
-    pub fn get_new_state_stuff(&self) -> Arc<ShardStateStuff> {
-        self.new_state_stuff.clone()
+    pub fn get_block(&self) -> Result<&Block> {
+        let entry = self
+            .entry
+            .as_ref()
+            .ok_or_else(|| anyhow!("`entry` was extracted"))?;
+        Ok(entry.candidate.block())
     }
 }
 

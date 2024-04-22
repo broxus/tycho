@@ -238,8 +238,9 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
 
         let block_candidate = BlockCandidate::new(
             new_block_id,
+            new_block,
             prev_shard_data.blocks_ids().clone(),
-            collation_data.top_shard_blocks.clone(),
+            collation_data.top_shard_blocks_ids.clone(),
             new_block_boc,
             collated_data,
             HashBytes::ZERO,
