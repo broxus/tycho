@@ -22,8 +22,8 @@ impl Producer {
         let key_pair = new_round.key_pair()?;
         let local_id = PeerId::from(key_pair.public_key);
         match new_round.anchor_stage() {
-            Some(AnchorStage::Proof(peer_id) | AnchorStage::Trigger(peer_id))
-                if peer_id == &local_id && prev_point.is_none() =>
+            Some(AnchorStage::Proof { leader, .. } | AnchorStage::Trigger { leader, .. })
+                if leader == &local_id && prev_point.is_none() =>
             {
                 // wave leader must skip new round if it failed to produce 3 points in a row
                 return None;
@@ -107,10 +107,10 @@ impl Producer {
         is_for_trigger: bool,
     ) -> Link {
         match new_round.anchor_stage() {
-            Some(AnchorStage::Trigger(leader_id)) if is_for_trigger && leader_id == local_id => {
+            Some(AnchorStage::Trigger { leader, .. }) if is_for_trigger && leader == local_id => {
                 Link::ToSelf
             }
-            Some(AnchorStage::Proof(leader_id)) if !is_for_trigger && leader_id == local_id => {
+            Some(AnchorStage::Proof { leader, .. }) if !is_for_trigger && leader == local_id => {
                 Link::ToSelf
             }
             _ => {

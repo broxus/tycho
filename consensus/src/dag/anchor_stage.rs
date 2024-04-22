@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use rand::{Rng, SeedableRng};
 
 use tycho_network::PeerId;
@@ -8,8 +10,16 @@ use crate::models::Round;
 #[derive(Debug)]
 pub enum AnchorStage {
     Candidate(PeerId), // TODO nothing special, remove
-    Proof(PeerId),
-    Trigger(PeerId),
+    /// if anchor is locally committed then it must be marked as used (and vice versa)
+    Proof {
+        leader: PeerId,
+        is_used: AtomicBool,
+    },
+    /// trigger is not necessary used - proof may be included by the next anchor and its own trigger
+    Trigger {
+        leader: PeerId,
+        is_used: AtomicBool,
+    },
 }
 
 impl AnchorStage {
@@ -35,8 +45,14 @@ impl AnchorStage {
         match round.0 % WAVE_SIZE {
             0 => None, // both genesis and trailing (proof inclusion) round
             1 => Some(AnchorStage::Candidate(leader.clone())),
-            2 => Some(AnchorStage::Proof(leader.clone())),
-            3 => Some(AnchorStage::Trigger(leader.clone())),
+            2 => Some(AnchorStage::Proof {
+                leader: leader.clone(),
+                is_used: AtomicBool::new(false),
+            }),
+            3 => Some(AnchorStage::Trigger {
+                leader: leader.clone(),
+                is_used: AtomicBool::new(false),
+            }),
             _ => unreachable!(),
         }
     }

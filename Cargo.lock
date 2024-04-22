@@ -2243,6 +2243,7 @@ dependencies = [
  "dashmap",
  "everscale-crypto",
  "futures-util",
+ "itertools",
  "parking_lot",
  "rand",
  "rand_pcg",

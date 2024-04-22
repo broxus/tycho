@@ -34,6 +34,14 @@ pub enum DagPoint {
 }
 
 impl DagPoint {
+    pub fn into_valid(self) -> Option<ValidPoint> {
+        match self {
+            DagPoint::Trusted(valid) => Some(valid),
+            DagPoint::Suspicious(valid) => Some(valid),
+            _ => None,
+        }
+    }
+
     pub fn valid(&self) -> Option<&'_ ValidPoint> {
         match self {
             DagPoint::Trusted(valid) => Some(valid),

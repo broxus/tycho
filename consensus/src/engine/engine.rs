@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
+use itertools::Itertools;
 use tokio::sync::{mpsc, Notify};
 
 use tycho_network::{DhtClient, OverlayService, PeerId};
@@ -74,7 +75,7 @@ impl Engine {
         //  * or search through last round to find the latest trigger
         //   * * can U do so without scan of a round ???
 
-        let mut dag = Dag::new();
+        let dag = Dag::new();
         let current_dag_round = dag.get_or_insert(DagRound::genesis(&genesis, &peer_schedule));
 
         let genesis_state = current_dag_round
@@ -110,6 +111,8 @@ impl Engine {
             // let this channel unbounded - there won't be many items, but every of them is essential
             let (signer_signal_tx, mut signer_signal_rx) = mpsc::unbounded_channel();
 
+            let commit_run = tokio::spawn(self.dag.clone().commit(next_dag_round.clone()));
+
             // TODO change round, then
             //   apply peer schedule and config changes if some
             //   spawn signer
@@ -142,9 +145,10 @@ impl Engine {
                     )
                     .run(),
                 );
-                let joined = tokio::join!(signer_run, bcaster_run);
+                let joined = tokio::join!(signer_run, bcaster_run, commit_run);
                 match joined {
-                    (Ok(signer_upd), Ok(evidence_or_reject)) => {
+                    (Ok(signer_upd), Ok(evidence_or_reject), Ok(committed)) => {
+                        tracing::info!("committed {:#.4?}", committed);
                         self.prev_point = evidence_or_reject.ok().map(|evidence| PrevPoint {
                             digest: own_point.digest.clone(),
                             evidence: evidence.into_iter().collect(),
@@ -159,16 +163,18 @@ impl Engine {
                         self.current_dag_round = next_dag_round; // FIXME must fill gaps with empty rounds
                         self.signer = signer_upd;
                     }
-                    (Err(se), Err(be)) => {
-                        panic!(
-                        "Both Signer and Broadcaster panicked. Signer: {se:?}. Broadcaster: {be:?}"
-                    )
-                    }
-                    (Err(se), _) => {
-                        panic!("Signer panicked: {se:?}")
-                    }
-                    (_, Err(be)) => {
-                        panic!("Broadcaster panicked: {be:?}")
+                    (signer, bcaster, commit) => {
+                        let msg = [
+                            (signer.err(), "signer"),
+                            (bcaster.err(), "broadcaster"),
+                            (commit.err(), "commit"),
+                        ]
+                        .into_iter()
+                        .filter_map(|(res, name)| {
+                            res.map(|err| format!("{name} task panicked: {err:?}"))
+                        })
+                        .join("; \n");
+                        panic!("{}", msg)
                     }
                 }
             } else {
@@ -179,10 +185,10 @@ impl Engine {
                     None,
                     signer_signal_tx,
                     bcaster_ready,
-                ))
-                .await;
-                match signer_run {
-                    Ok(signer_upd) => {
+                ));
+                match tokio::join!(signer_run, commit_run) {
+                    (Ok(signer_upd), Ok(committed)) => {
+                        tracing::info!("committed {:#.4?}", committed);
                         self.prev_point = None;
                         self.cur_point = Producer::new_point(
                             &self.current_dag_round,
@@ -194,7 +200,15 @@ impl Engine {
                         self.current_dag_round = next_dag_round; // FIXME must fill gaps with empty rounds
                         self.signer = signer_upd;
                     }
-                    Err(se) => panic!("Signer panicked: {se:?}"),
+                    (signer, commit) => {
+                        let msg = [(signer.err(), "signer"), (commit.err(), "commit")]
+                            .into_iter()
+                            .filter_map(|(res, name)| {
+                                res.map(|err| format!("{name} task panicked: {err:?}"))
+                            })
+                            .join("; \n");
+                        panic!("{}", msg)
+                    }
                 }
             }
         }

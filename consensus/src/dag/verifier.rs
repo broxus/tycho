@@ -81,12 +81,11 @@ impl Verifier {
                     || point.body.location.round == MempoolConfig::GENESIS_ROUND
             }
             // leader must link to own point while others must not
-            Some(AnchorStage::Proof(leader_id)) => {
-                (leader_id == point.body.location.author)
-                    == (point.body.anchor_proof == Link::ToSelf)
+            Some(AnchorStage::Proof { leader, .. }) => {
+                (leader == point.body.location.author) == (point.body.anchor_proof == Link::ToSelf)
             }
-            Some(AnchorStage::Trigger(leader_id)) => {
-                (leader_id == point.body.location.author)
+            Some(AnchorStage::Trigger { leader, .. }) => {
+                (leader == point.body.location.author)
                     == (point.body.anchor_trigger == Link::ToSelf)
             }
         }
@@ -110,10 +109,10 @@ impl Verifier {
                 if found {
                     match (&dag_round.anchor_stage(), is_trigger) {
                         // AnchorStage::Candidate(_) requires nothing special
-                        (Some(AnchorStage::Proof(leader_id)), false)
-                            if leader_id == linked.location.author => {}
-                        (Some(AnchorStage::Trigger(leader_id)), true)
-                            if leader_id == linked.location.author => {}
+                        (Some(AnchorStage::Proof { leader, .. }), false)
+                            if leader == linked.location.author => {}
+                        (Some(AnchorStage::Trigger { leader, .. }), true)
+                            if leader == linked.location.author => {}
                         _ => return false, // link not to round's leader
                     }
                     linked_with_round.push((

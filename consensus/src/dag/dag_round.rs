@@ -130,6 +130,18 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
+    pub async fn vertex_by_proof(&self, proof: &ValidPoint) -> Option<ValidPoint> {
+        match proof.point.body.proof {
+            Some(ref proven) => {
+                let dag_round = self.scan(&proof.point.body.location.round.prev())?;
+                dag_round
+                    .valid_point_exact(&proof.point.body.location.author, &proven.digest)
+                    .await
+            }
+            None => None,
+        }
+    }
+
     pub async fn valid_point(&self, point_id: &PointId) -> Option<ValidPoint> {
         match self.scan(&point_id.location.round) {
             Some(linked) => {
@@ -221,9 +233,10 @@ impl DagRound {
     }
 
     pub fn scan(&self, round: &Round) -> Option<Self> {
-        if round > self.round() {
-            panic!("Coding error: cannot add future point into DAG round with scan")
-        }
+        assert!(
+            round <= self.round(),
+            "Coding error: cannot scan DAG rounds chain for a future round"
+        );
         let mut visited = self.clone();
         if round == self.round() {
             return Some(visited);

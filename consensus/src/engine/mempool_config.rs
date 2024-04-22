@@ -25,7 +25,7 @@ impl MempoolConfig {
     /// (dependencies and/or signatures), and waiting for slow nodes
     pub const RETRY_INTERVAL: Duration = Duration::from_millis(1000);
 
-    pub const DAG_DEPTH: usize = 20;
+    pub const COMMIT_DEPTH: u32 = 20;
 
     pub const GENESIS_ROUND: Round = Round(1);
 }

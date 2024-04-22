@@ -85,7 +85,7 @@ impl ResponderInner {
             }
         };
 
-        let res = Some(Response {
+        Some(Response {
             version: Version::default(),
             body: Bytes::from(match bincode::serialize(&MPRemoteResult::Ok(response)) {
                 Ok(data) => data,
@@ -95,7 +95,6 @@ impl ResponderInner {
                         .expect("must not fail")
                 }
             }),
-        });
-        res
+        })
     }
 }

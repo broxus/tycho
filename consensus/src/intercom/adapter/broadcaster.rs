@@ -250,13 +250,13 @@ impl Broadcaster {
             Ok(response) => {
                 if response == SignatureResponse::Rejected {
                     tracing::warn!(
-                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:.4?}",
                         self.local_id,
                         self.current_round
                     );
                 } else {
                     tracing::info!(
-                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:.4?}",
                         self.local_id,
                         self.current_round
                     );
