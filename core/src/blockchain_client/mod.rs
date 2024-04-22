@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
@@ -9,12 +10,17 @@ use crate::proto::overlay::*;
 
 pub struct BlockchainClient {
     client: PublicOverlayClient,
+    config: BlockchainClientConfig,
 }
 
 impl BlockchainClient {
-    pub fn new(overlay_client: PublicOverlayClient) -> Arc<BlockchainClient> {
+    pub fn new(
+        overlay_client: PublicOverlayClient,
+        config: BlockchainClientConfig,
+    ) -> Arc<BlockchainClient> {
         Arc::new(Self {
             client: overlay_client,
+            config,
         })
     }
 
@@ -93,4 +99,13 @@ impl BlockchainClient {
             .await?;
         Ok(data)
     }
+
+    pub fn config(&self) -> &BlockchainClientConfig {
+        &self.config
+    }
+}
+
+pub struct BlockchainClientConfig {
+    pub get_next_block_polling_interval: Duration,
+    pub get_block_polling_interval: Duration,
 }
