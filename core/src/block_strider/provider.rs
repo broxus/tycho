@@ -86,54 +86,83 @@ impl BlockProvider for BlockchainClient {
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
-            let get_block = || async {
-                let res = self.get_next_block_full(*prev_block_id).await?;
-                let block = match res.data() {
-                    BlockFull::Found {
-                        block_id,
-                        block: data,
-                        ..
-                    } => {
-                        let block = BlockStuff::deserialize_checked(*block_id, data)?;
-                        Some(BlockStuffAug::new(block, data.to_vec()))
+            let config = self.config();
+
+            loop {
+                let res = self.get_next_block_full(*prev_block_id).await;
+
+                let block = match res {
+                    Ok(res) if matches!(res.data(), BlockFull::Found { .. }) => {
+                        let (block_id, data) = match res.data() {
+                            BlockFull::Found {
+                                block_id, block, ..
+                            } => (*block_id, block),
+                            BlockFull::Empty => unreachable!(),
+                        };
+
+                        match BlockStuff::deserialize_checked(block_id, data) {
+                            Ok(block) => {
+                                res.mark_response(true);
+                                Some(Ok(BlockStuffAug::new(block, data.clone())))
+                            }
+                            Err(e) => {
+                                tracing::error!("failed to deserialize block: {:?}", e);
+                                res.mark_response(false);
+                                None
+                            }
+                        }
                     }
-                    BlockFull::Empty => None,
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::error!("failed to get next block: {:?}", e);
+                        None
+                    }
                 };
 
-                Ok::<_, anyhow::Error>(block)
-            };
+                if block.is_some() {
+                    break block;
+                }
 
-            match get_block().await {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
+                tokio::time::sleep(config.get_next_block_polling_interval).await;
             }
         })
     }
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
         Box::pin(async {
-            let get_block = || async {
-                let res = self.get_block_full(*block_id).await?;
+            let config = self.config();
+
+            loop {
+                let res = match self.get_block_full(*block_id).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        tracing::error!("failed to get block: {:?}", e);
+                        tokio::time::sleep(config.get_block_polling_interval).await;
+                        continue;
+                    }
+                };
+
                 let block = match res.data() {
                     BlockFull::Found {
                         block_id,
                         block: data,
                         ..
-                    } => {
-                        let block = BlockStuff::deserialize_checked(*block_id, data)?;
-                        Some(BlockStuffAug::new(block, data.to_vec()))
+                    } => match BlockStuff::deserialize_checked(*block_id, data) {
+                        Ok(block) => Some(Ok(BlockStuffAug::new(block, data.clone()))),
+                        Err(e) => {
+                            res.mark_response(false);
+                            tracing::error!("failed to deserialize block: {:?}", e);
+                            tokio::time::sleep(config.get_block_polling_interval).await;
+                            continue;
+                        }
+                    },
+                    BlockFull::Empty => {
+                        tokio::time::sleep(config.get_block_polling_interval).await;
+                        continue;
                     }
-                    BlockFull::Empty => None,
                 };
 
-                Ok::<_, anyhow::Error>(block)
-            };
-
-            match get_block().await {
-                Ok(Some(block)) => Some(Ok(block)),
-                Ok(None) => None,
-                Err(e) => Some(Err(e)),
+                break block;
             }
         })
     }
