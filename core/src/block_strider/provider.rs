@@ -1,9 +1,12 @@
+use crate::blockchain_client::BlockchainClient;
+use crate::proto::overlay::BlockFull;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tycho_block_util::block::BlockStuffAug;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_storage::{BlockConnection, Storage};
 
 pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
 
@@ -73,6 +76,131 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
                 return res;
             }
             self.right.get_block(block_id).await
+        })
+    }
+}
+
+impl BlockProvider for BlockchainClient {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        Box::pin(async {
+            let get_block = || async {
+                let res = self.get_next_block_full(*prev_block_id).await?;
+                let block = match res.data() {
+                    BlockFull::Found {
+                        block_id,
+                        block: data,
+                        ..
+                    } => {
+                        let block = BlockStuff::deserialize_checked(*block_id, data)?;
+                        Some(BlockStuffAug::new(block, data.to_vec()))
+                    }
+                    BlockFull::Empty => None,
+                };
+
+                Ok::<_, anyhow::Error>(block)
+            };
+
+            match get_block().await {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        Box::pin(async {
+            let get_block = || async {
+                let res = self.get_block_full(*block_id).await?;
+                let block = match res.data() {
+                    BlockFull::Found {
+                        block_id,
+                        block: data,
+                        ..
+                    } => {
+                        let block = BlockStuff::deserialize_checked(*block_id, data)?;
+                        Some(BlockStuffAug::new(block, data.to_vec()))
+                    }
+                    BlockFull::Empty => None,
+                };
+
+                Ok::<_, anyhow::Error>(block)
+            };
+
+            match get_block().await {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+    }
+}
+
+impl BlockProvider for Storage {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        Box::pin(async {
+            let block_storage = self.block_storage();
+            let block_handle_storage = self.block_handle_storage();
+            let block_connection_storage = self.block_connection_storage();
+
+            let get_next_block = || async {
+                let next_block_id = match block_handle_storage.load_handle(prev_block_id)? {
+                    Some(handle) if handle.meta().has_next1() => block_connection_storage
+                        .load_connection(prev_block_id, BlockConnection::Next1)?,
+                    _ => return Ok(None),
+                };
+
+                let block = match block_handle_storage.load_handle(&next_block_id)? {
+                    Some(handle) if handle.meta().has_data() => {
+                        let data = block_storage.load_block_data_raw(&handle).await?;
+
+                        let block = BlockStuff::deserialize_checked(next_block_id, &data)?;
+                        Some(BlockStuffAug::new(block, data))
+                    }
+                    _ => None,
+                };
+
+                Ok::<_, anyhow::Error>(block)
+            };
+
+            match get_next_block().await {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        Box::pin(async {
+            let block_storage = self.block_storage();
+            let block_handle_storage = self.block_handle_storage();
+
+            let get_block = || async {
+                let block = match block_handle_storage.load_handle(block_id)? {
+                    Some(handle) if handle.meta().has_data() => {
+                        let data = block_storage.load_block_data_raw(&handle).await?;
+
+                        let block = BlockStuff::deserialize_checked(*block_id, &data)?;
+                        Some(BlockStuffAug::new(block, data))
+                    }
+                    _ => None,
+                };
+
+                Ok::<_, anyhow::Error>(block)
+            };
+
+            match get_block().await {
+                Ok(Some(block)) => Some(Ok(block)),
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            }
         })
     }
 }
