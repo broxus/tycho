@@ -52,6 +52,8 @@ where
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
         node_network: NodeNetwork,
     ) -> Self;
+
+    fn get_state_node_adapter(&self) -> Arc<ST>;
 }
 
 /// Generic implementation of [`CollationManager`]
@@ -66,6 +68,7 @@ where
     config: Arc<CollationConfig>,
 
     dispatcher: Arc<AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>>,
+    state_node_adapter: Arc<ST>,
 }
 
 #[allow(private_bounds)]
@@ -172,6 +175,7 @@ where
         let mgr = Self {
             config,
             dispatcher: dispatcher.clone(),
+            state_node_adapter,
         };
 
         // start other async processes
@@ -195,6 +199,10 @@ where
 
         // return manager
         mgr
+    }
+
+    fn get_state_node_adapter(&self) -> Arc<ST> {
+        self.state_node_adapter.clone()
     }
 }
 

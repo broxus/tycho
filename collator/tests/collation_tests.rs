@@ -10,6 +10,7 @@ use everscale_types::{
 use futures_util::{future::BoxFuture, FutureExt};
 use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_collator::manager::CollationManager;
 use tycho_collator::{
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
     state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
@@ -40,7 +41,7 @@ async fn test_collation_process_on_stubs() {
     block_strider.run().await.unwrap();
 
     let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
-    let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new(storage);
+    let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new(storage.clone());
 
     let config = CollationConfig {
         key_pair: everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng()),
@@ -65,6 +66,16 @@ async fn test_collation_process_on_stubs() {
         state_node_adapter_builder,
         node_network,
     );
+
+    let state_node_adapter = _manager.get_state_node_adapter();
+
+    let block_strider = BlockStrider::builder()
+        .with_provider(state_node_adapter)
+        .with_subscriber(PrintSubscriber)
+        .with_state(storage.clone())
+        .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
+
+    block_strider.run().await.unwrap();
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
