@@ -1,35 +1,39 @@
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
-use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
-use bytesize::ByteSize;
-use everscale_crypto::ed25519;
 use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tl_proto::{TlRead, TlWrite};
 use tycho_core::block_strider::provider::BlockProvider;
 use tycho_core::blockchain_client::BlockchainClient;
 use tycho_core::overlay_client::public_overlay_client::PublicOverlayClient;
 use tycho_core::overlay_client::settings::OverlayClientSettings;
-use tycho_core::overlay_server::{OverlayServer, DEFAULT_ERROR_CODE};
-use tycho_core::proto::overlay::{
-    ArchiveInfo, BlockFull, Data, KeyBlockIds, PersistentStatePart, Response,
-};
-use tycho_network::{
-    DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService, PeerId,
-    PeerResolver, PublicOverlay, Request, Router, Service, ServiceRequest,
-};
-use tycho_storage::{Db, DbOptions, Storage};
+use tycho_core::proto::overlay::{BlockFull, KeyBlockIds, PersistentStatePart};
+use tycho_network::{OverlayId, PeerId};
 
 mod common;
 
 #[tokio::test]
-async fn overlay_server_with_empty_storage() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_with_empty_storage");
+async fn storage_block_strider() -> anyhow::Result<()> {
+    tycho_util::test::init_logger("storage_block_strider");
+
+    let (storage, tmp_dir) = common::storage::init_storage().await?;
+
+    let block = storage.get_block(&BlockId::default()).await;
+    assert!(block.is_none());
+
+    let next_block = storage.get_next_block(&BlockId::default()).await;
+    assert!(next_block.is_none());
+
+    tmp_dir.close()?;
+
+    tracing::info!("done!");
+    Ok(())
+}
+
+#[tokio::test]
+async fn overlay_block_strider() -> anyhow::Result<()> {
+    tycho_util::test::init_logger("overlay_block_strider");
 
     #[derive(Debug, Default)]
     struct PeerState {
@@ -98,7 +102,6 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     }
 
     tracing::info!("making overlay requests...");
-
     let node = nodes.first().unwrap();
 
     let client = BlockchainClient::new(
@@ -110,59 +113,11 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         .await,
     );
 
-    let result = client.get_block_full(BlockId::default()).await;
-    assert!(result.is_ok());
+    let block = client.get_block(&BlockId::default()).await;
+    assert!(block.is_none());
 
-    if let Ok(response) = &result {
-        assert_eq!(response.data(), &BlockFull::Empty);
-    }
-
-    let result = client.get_next_block_full(BlockId::default()).await;
-    assert!(result.is_ok());
-
-    if let Ok(response) = &result {
-        assert_eq!(response.data(), &BlockFull::Empty);
-    }
-
-    let result = client.get_next_key_block_ids(BlockId::default(), 10).await;
-    assert!(result.is_ok());
-
-    if let Ok(response) = &result {
-        let ids = KeyBlockIds {
-            blocks: vec![],
-            incomplete: true,
-        };
-        assert_eq!(response.data(), &ids);
-    }
-
-    let result = client
-        .get_persistent_state_part(BlockId::default(), BlockId::default(), 0, 0)
-        .await;
-    assert!(result.is_ok());
-
-    if let Ok(response) = &result {
-        assert_eq!(response.data(), &PersistentStatePart::NotFound);
-    }
-
-    let result = client.get_archive_info(0).await;
-    assert!(result.is_err());
-
-    if let Err(e) = &result {
-        assert_eq!(
-            e.to_string(),
-            format!("Failed to get response: {DEFAULT_ERROR_CODE}")
-        );
-    }
-
-    let result = client.get_archive_slice(0, 0, 100).await;
-    assert!(result.is_err());
-
-    if let Err(e) = &result {
-        assert_eq!(
-            e.to_string(),
-            format!("Failed to get response: {DEFAULT_ERROR_CODE}")
-        );
-    }
+    let block = client.get_next_block(&BlockId::default()).await;
+    assert!(block.is_none());
 
     tmp_dir.close()?;
 
