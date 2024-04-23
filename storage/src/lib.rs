@@ -18,9 +18,9 @@ mod util {
 pub struct Storage {
     runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,
+    block_connection_storage: Arc<BlockConnectionStorage>,
     block_storage: Arc<BlockStorage>,
     shard_state_storage: ShardStateStorage,
-    block_connection_storage: BlockConnectionStorage,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
 }
@@ -34,8 +34,13 @@ impl Storage {
         let files_dir = FileDb::new(file_db_path);
 
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
+        let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
         let runtime_storage = Arc::new(RuntimeStorage::new(block_handle_storage.clone()));
-        let block_storage = Arc::new(BlockStorage::new(db.clone(), block_handle_storage.clone())?);
+        let block_storage = Arc::new(BlockStorage::new(
+            db.clone(),
+            block_handle_storage.clone(),
+            block_connection_storage.clone(),
+        )?);
         let shard_state_storage = ShardStateStorage::new(
             db.clone(),
             &files_dir,
@@ -45,8 +50,7 @@ impl Storage {
         )?;
         let persistent_state_storage =
             PersistentStateStorage::new(db.clone(), &files_dir, block_handle_storage.clone())?;
-        let node_state_storage = NodeStateStorage::new(db.clone());
-        let block_connection_storage = BlockConnectionStorage::new(db);
+        let node_state_storage = NodeStateStorage::new(db);
 
         Ok(Arc::new(Self {
             block_handle_storage,
