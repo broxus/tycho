@@ -76,7 +76,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     assert!(storage.node_state().load_init_mc_block_id().is_err());
 
     // Read zerostate
-    let zero_state_raw = ShardStateCombined::from_file("tests/data/everscale_zerostate.boc")?;
+    let zero_state_raw = ShardStateCombined::from_file("tests/everscale_zerostate.boc")?;
 
     // Parse block id
     let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
