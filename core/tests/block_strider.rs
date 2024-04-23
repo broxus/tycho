@@ -8,8 +8,7 @@ use tycho_core::block_strider::provider::BlockProvider;
 use tycho_core::blockchain_client::BlockchainClient;
 use tycho_core::overlay_client::public_overlay_client::PublicOverlayClient;
 use tycho_core::overlay_client::settings::OverlayClientSettings;
-use tycho_core::proto::overlay::{BlockFull, KeyBlockIds, PersistentStatePart};
-use tycho_network::{OverlayId, PeerId};
+use tycho_network::PeerId;
 
 mod common;
 
@@ -111,6 +110,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
             OverlayClientSettings::default(),
         )
         .await,
+        Default::default(),
     );
 
     let block = client.get_block(&BlockId::default()).await;

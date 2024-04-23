@@ -1,9 +1,9 @@
+use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Error, Result};
-use itertools::any;
 use tl_proto::TlRead;
 
 use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
@@ -15,13 +15,13 @@ use crate::overlay_client::settings::{OverlayClientSettings, OverlayOptions};
 use crate::proto::overlay::{Ping, Pong, Response};
 
 pub trait OverlayClient {
-    async fn send<R>(&self, data: R) -> Result<()>
+    fn send<R>(&self, data: R) -> impl Future<Output = Result<()>> + Send
     where
-        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>;
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed> + Send;
 
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<'_, A>>
+    fn query<R, A>(&self, data: R) -> impl Future<Output = Result<QueryResponse<'_, A>>> + Send
     where
-        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed> + Send,
         for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>;
 }
 

@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use std::net::SocketAddr;
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]

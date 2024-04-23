@@ -109,3 +109,9 @@ pub struct BlockchainClientConfig {
     pub get_next_block_polling_interval: Duration,
     pub get_block_polling_interval: Duration,
 }
+
+impl Default for BlockchainClientConfig {
+    fn default() -> Self {
+        todo!()
+    }
+}

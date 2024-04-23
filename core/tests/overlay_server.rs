@@ -108,6 +108,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
             OverlayClientSettings::default(),
         )
         .await,
+        Default::default(),
     );
 
     let result = client.get_block_full(BlockId::default()).await;
