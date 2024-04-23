@@ -29,6 +29,7 @@ pub struct BlockStorage {
     block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
     block_subscriptions: Mutex<FastHashMap<BlockId, Vec<BlockTx>>>,
+    block_subscriptions_lock: tokio::sync::Mutex<()>,
 }
 
 impl BlockStorage {
@@ -43,6 +44,7 @@ impl BlockStorage {
             block_connection_storage,
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
+            block_subscriptions_lock: Default::default(),
         };
 
         manager.preload()?;
@@ -85,6 +87,8 @@ impl BlockStorage {
         block: &BlockStuffAug,
         meta_data: BlockMetaData,
     ) -> Result<StoreBlockResult> {
+        let _lock = self.block_subscriptions_lock.lock().await;
+
         let block_id = block.id();
         let (handle, status) = self
             .block_handle_storage
@@ -598,8 +602,11 @@ impl BlockStorage {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
+        let lock = self.block_subscriptions_lock.lock().await;
         match block_handle_storage.load_handle(&block_id)? {
             Some(handle) if handle.meta().has_data() => {
+                drop(lock);
+
                 let block = self.load_block_data(&handle).await?;
                 tx.send(BlockStuffAug::loaded(block)).ok();
             }
@@ -617,6 +624,7 @@ impl BlockStorage {
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
+        let lock = self.block_subscriptions_lock.lock().await;
         let next_block_id = match block_handle_storage.load_handle(&prev_block_id)? {
             Some(handle) if handle.meta().has_next1() => {
                 block_connection_storage.load_connection(&prev_block_id, BlockConnection::Next1)?
@@ -629,6 +637,8 @@ impl BlockStorage {
 
         match block_handle_storage.load_handle(&next_block_id)? {
             Some(handle) if handle.meta().has_data() => {
+                drop(lock);
+
                 let block = self.load_block_data(&handle).await?;
                 tx.send(BlockStuffAug::loaded(block)).ok();
             }
