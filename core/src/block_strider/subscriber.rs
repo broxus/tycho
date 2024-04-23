@@ -28,6 +28,18 @@ impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
     }
 }
 
+impl<T: BlockSubscriber> BlockSubscriber for Arc<T> {
+    type HandleBlockFut = T::HandleBlockFut;
+
+    fn handle_block(
+        &self,
+        block: &BlockStuffAug,
+        state: Option<&Arc<ShardStateStuff>>,
+    ) -> Self::HandleBlockFut {
+        <T as BlockSubscriber>::handle_block(self, block, state)
+    }
+}
+
 pub struct FanoutBlockSubscriber<T1, T2> {
     pub left: T1,
     pub right: T2,

@@ -70,8 +70,8 @@ async fn test_collation_process_on_stubs() {
     let state_node_adapter = _manager.get_state_node_adapter();
 
     let block_strider = BlockStrider::builder()
-        .with_provider(state_node_adapter)
-        .with_subscriber(PrintSubscriber)
+        .with_provider(state_node_adapter.clone())
+        .with_subscriber(state_node_adapter)
         .with_state(storage.clone())
         .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
 
