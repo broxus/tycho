@@ -75,9 +75,13 @@ async fn test_collation_process_on_stubs() {
         .with_state(storage.clone())
         .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
 
-    block_strider.run().await.unwrap();
+    let strider_handle = block_strider.run();
 
     tokio::select! {
+        _ = strider_handle => {
+            println!();
+            println!("block_strider finished");
+        },
         _ = tokio::signal::ctrl_c() => {
             println!();
             println!("Ctrl-C received, shutting down the test");

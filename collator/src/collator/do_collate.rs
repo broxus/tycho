@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 
 use everscale_types::{
@@ -9,7 +9,7 @@ use everscale_types::{
         AddSub, BlockId, BlockIdShort, BlockInfo, ConfigParam7, CurrencyCollection,
         ShardDescription, ValueFlow,
     },
-    num::{Tokens, VarUint248},
+    num::Tokens,
 };
 use rand::Rng;
 
@@ -111,6 +111,8 @@ where
                 collation_data.top_shard_blocks_ids.push(top_block_id);
             }
             collation_data.set_shards(shards);
+
+            //TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
         }
 
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
@@ -137,7 +139,7 @@ where
             .clone();
 
         // compute created / minted / recovered / from_prev_block
-        //self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
+        self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // init execution manager
         let exec_manager = ExecutionManager::new(
@@ -157,7 +159,6 @@ where
         //STUB: do not execute transactions and produce empty block
 
         // build block candidate and new state
-        //TODO: return `new_state: ShardStateStuff`
         let (candidate, new_state_stuff) = self
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
@@ -351,10 +352,13 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                 .get(key)?
                 .unwrap_or_default();
             if amount > amount2 {
-                let mut delta = amount.clone();
-                //TODO: cal delta when
-                let delta = VarUint248::new(0);
-                //delta.sub(&amount2)?;
+                let delta = amount.checked_sub(&amount2).ok_or_else(|| {
+                    anyhow!(
+                        "amount {:?} should sub amount2 {:?} without overflow",
+                        amount,
+                        amount2,
+                    )
+                })?;
                 tracing::debug!(
                     "{}: currency #{}: existing {:?}, required {:?}, to be minted {:?}",
                     self.collator_descr,
@@ -363,7 +367,7 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                     amount,
                     delta,
                 );
-                if key != HashBytes::ZERO {
+                if key != 0 {
                     to_mint.other.as_dict_mut().set(key, delta)?;
                 }
             }
