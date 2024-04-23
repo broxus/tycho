@@ -6,8 +6,8 @@ use everscale_crypto::ed25519;
 use tycho_core::overlay_server::OverlayServer;
 
 use tycho_network::{
-    DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService, PeerId,
-    PeerResolver, PublicOverlay, Request, Router,
+    DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService,
+    PeerResolver, PublicOverlay, Router,
 };
 use tycho_storage::Storage;
 

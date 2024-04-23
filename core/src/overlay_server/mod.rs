@@ -1,8 +1,6 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use bytes::{Buf, Bytes};
-use tokio::sync::broadcast;
-use tycho_network::proto::dht::{rpc, NodeResponse, Value, ValueResponseRaw};
+use bytes::Buf;
 use tycho_network::{Response, Service, ServiceRequest};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
@@ -157,10 +155,10 @@ impl OverlayServerInner {
     }
 
     fn try_handle_prefix<'a>(&self, req: &'a ServiceRequest) -> anyhow::Result<(u32, &'a [u8])> {
-        let mut body = req.as_ref();
+        let body = req.as_ref();
         anyhow::ensure!(body.len() >= 4, tl_proto::TlError::UnexpectedEof);
 
-        let mut constructor = std::convert::identity(body).get_u32_le();
+        let constructor = std::convert::identity(body).get_u32_le();
 
         Ok((constructor, body))
     }
