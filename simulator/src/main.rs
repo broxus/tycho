@@ -1,6 +1,5 @@
 #![allow(clippy::unused_self)]
 
-use std::io;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -185,7 +184,7 @@ impl AddCommand {
         let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
         let mut sim = Simulator::new(config)?;
         let next_node_index = sim.next_node_index();
-        sim.add_node(next_node_index)?;
+        sim.add_node(next_node_index, self.delay, self.loss)?;
         sim.finalize()?;
 
         println!("Added node-{}", next_node_index);
@@ -255,7 +254,7 @@ struct NodeInfoCommand {
 impl NodeInfoCommand {
     fn run (self, compose: ComposeRunner) -> Result<()> {
         let output = compose.node_info(self.node_index)?;
-        println!("{output}");
+        println!("Node {} artificial delay: {} ms and packet loss: {}% ", self.node_index, output.delay, output.packet_loss);
         Ok(())
     }
 }

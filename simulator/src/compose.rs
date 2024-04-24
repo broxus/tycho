@@ -3,12 +3,13 @@ use std::ffi::OsStr;
 use std::{str};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ServiceConfig;
-use crate::node::NodeExtra;
+use crate::node::NodeOptions;
 
 pub struct ComposeRunner {
     compose_path: PathBuf,
@@ -69,7 +70,7 @@ impl ComposeRunner {
         }
 
         let result = command
-            .stdout(Stdio::inherit())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .stdin(Stdio::inherit())
             .spawn()
@@ -112,15 +113,51 @@ impl ComposeRunner {
         args.push("-d".to_string());
 
         self.execute_compose_command(&args)?;
+
+        {
+            for i in self.get_running_nodes_list()? {
+                let index = usize::from_str(&i[5..6])?;
+                let info = self.node_info(index)?;
+                if info.delay > 0 {
+                    self.set_delay(index, info.delay)?;
+                }
+                if info.packet_loss > 0 {
+                    self.set_packet_loss(index, info.packet_loss)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
-    pub fn node_info(&self, node_index: usize) -> Result<String> {
-        let command = "cat /etc/node-extra.json";
-        let output = self.exec_command(node_index, command, vec![])?;
-        let extra: NodeExtra = serde_json::from_slice(output.stdout.as_slice())?;
+    pub fn get_running_nodes_list(&self) -> Result<Vec<String>> {
+        let docker_compose_command = vec!["config".to_string(), "--services".to_string()];
+        let output = self.execute_compose_command(&docker_compose_command)?;
+        let x = String::from_utf8(output.stdout)?.split("\n").map(|x| x.to_string()).collect();
+        Ok(x)
+    }
 
-        Ok(format!("Node {node_index} artificial delay: {} ms and packet loss: {}% ", extra.delay, extra.packet_loss))
+    pub fn node_info(&self, node_index: usize) -> Result<NodeOptions> {
+        let command = "cat";
+        let output = self.exec_command(node_index, command, vec!["/options/options.json".to_string()])?;
+        let node_options = serde_json::from_slice(output.stdout.as_slice())?;
+        Ok(node_options)
+    }
+
+    pub fn set_delay(&self, node_index: usize, delay: u16) -> Result<()> {
+        println!("Setting delay {delay}ms for node {node_index}");
+        let command = "sh";
+        let args = format!("tc qdisc add dev eth0 root netem delay {delay}ms");
+        self.exec_command(node_index, command, vec!["-c".to_string(), format!("{args}")])?;
+        Ok(())
+    }
+
+    pub fn set_packet_loss(&self, node_index: usize, loss: u16) -> Result<()> {
+        println!("Setting packet loss {loss}% for node {node_index}");
+        let command = "sh";
+        let args = format!("tc qdisc change dev eth0 root netem loss {loss}%");
+        self.exec_command(node_index, command, vec!["-c".to_string(), format!("{args}")])?;
+        Ok(())
     }
 
     pub fn exec_command(&self, node_index: usize, cmd: &str, args: Vec<String>) -> Result<Output> {

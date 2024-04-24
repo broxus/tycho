@@ -15,17 +15,17 @@ pub struct Node {
     pub port: u16,
     pub dht_value: serde_json::Value,
     pub key: String,
-    pub extra: Option<NodeExtra>
+    pub options: Option<NodeOptions>
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct NodeExtra {
+#[derive(Serialize, Deserialize, Default, Debug)]
+pub struct NodeOptions {
     pub delay: u16,
     pub packet_loss: u16
 }
 
 impl Node {
-    pub fn init_from_cli(ip: Ipv4Addr, port: u16, index: usize) -> Result<Self> {
+    pub fn init_from_cli(ip: Ipv4Addr, port: u16, index: usize, options: Option<NodeOptions>) -> Result<Self> {
         let private_key = hex::encode(rand::random::<[u8; 32]>());
         let output = Command::new("cargo")
             .arg("run")
@@ -51,7 +51,7 @@ impl Node {
             dht_value,
             port,
             key: private_key,
-            extra: None,
+            options,
         })
     }
 
@@ -64,6 +64,10 @@ impl Node {
             format!(
                 "{}:/app/global-config.json",
                 service_config.global_config_path().to_string_lossy()
+            ),
+            format!(
+                "./options/node-{}_options.json:/options/options.json",
+                self.index
             ),
             format!(
                 "{}:/app/logs:rw",
@@ -99,6 +103,11 @@ impl Node {
         service_config
             .entrypoints()
             .join(format!("node-{}_entrypoint.sh", self.index))
+    }
+
+    pub fn options_path(&self, service_config: &ServiceConfig) -> PathBuf {
+        service_config.options()
+            .join(format!("node-{}_options.json", self.index))
     }
 
     pub fn run_command(&self) -> String {
