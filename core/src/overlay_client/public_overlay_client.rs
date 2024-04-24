@@ -70,7 +70,7 @@ impl PublicOverlayClient {
     }
 
     pub async fn entries_removed(&self) {
-        self.0.overlay.entries_removed().notified().await
+        self.0.overlay.entries_removed().notified().await;
     }
     pub fn neighbour_update_interval_ms(&self) -> u64 {
         self.0.settings.neighbours_update_interval

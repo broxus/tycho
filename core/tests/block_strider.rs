@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_core::block_strider::provider::BlockProvider;
@@ -18,11 +17,15 @@ async fn storage_block_strider() -> anyhow::Result<()> {
 
     let (storage, tmp_dir) = common::storage::init_storage().await?;
 
-    let block = storage.get_block(&BlockId::default()).await;
-    assert!(block.is_none());
+    let block_ids = common::storage::get_block_ids()?;
+    for block_id in block_ids {
+        if block_id.shard.is_masterchain() {
+            let block = storage.get_block(&block_id).await;
 
-    let next_block = storage.get_next_block(&BlockId::default()).await;
-    assert!(next_block.is_none());
+            assert!(block.is_some());
+            assert_eq!(&block_id, block.unwrap()?.id());
+        }
+    }
 
     tmp_dir.close()?;
 
@@ -42,7 +45,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
 
     let (storage, tmp_dir) = common::storage::init_storage().await?;
 
-    const NODE_COUNT: usize = 5;
+    const NODE_COUNT: usize = 10;
     let nodes = common::node::make_network(storage, NODE_COUNT);
 
     tracing::info!("discovering nodes");
@@ -113,11 +116,17 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         Default::default(),
     );
 
-    let block = client.get_block(&BlockId::default()).await;
-    assert!(block.is_none());
+    let block_ids = common::storage::get_block_ids()?;
+    for block_id in block_ids {
+        if block_id.shard.is_masterchain() {
+            let block = client.get_block(&block_id).await;
 
-    let block = client.get_next_block(&BlockId::default()).await;
-    assert!(block.is_none());
+            assert!(block.is_some());
+            assert_eq!(&block_id, block.unwrap()?.id());
+
+            break;
+        }
+    }
 
     tmp_dir.close()?;
 

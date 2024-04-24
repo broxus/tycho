@@ -315,7 +315,7 @@ impl PublicOverlay {
                 && !this.banned_peer_ids.contains(&item.entry.peer_id)
         });
 
-        self.inner.entries_removed.notify_waiters()
+        self.inner.entries_removed.notify_waiters();
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
