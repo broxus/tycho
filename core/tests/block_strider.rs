@@ -17,13 +17,18 @@ async fn storage_block_strider() -> anyhow::Result<()> {
 
     let (storage, tmp_dir) = common::storage::init_storage().await?;
 
-    let block_ids = common::storage::get_block_ids()?;
-    for block_id in block_ids {
+    let archive = common::storage::get_archive()?;
+    for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
             let block = storage.get_block(&block_id).await;
-
             assert!(block.is_some());
-            assert_eq!(&block_id, block.unwrap()?.id());
+
+            if let Some(block) = block {
+                let block = block?;
+
+                assert_eq!(&block_id, block.id());
+                assert_eq!(&data.block.unwrap().data, block.block());
+            }
         }
     }
 
@@ -116,15 +121,18 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         Default::default(),
     );
 
-    let block_ids = common::storage::get_block_ids()?;
-    for block_id in block_ids {
+    let archive = common::storage::get_archive()?;
+    for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
             let block = client.get_block(&block_id).await;
-
             assert!(block.is_some());
-            assert_eq!(&block_id, block.unwrap()?.id());
 
-            break;
+            if let Some(block) = block {
+                let block = block?;
+
+                assert_eq!(&block_id, block.id());
+                assert_eq!(&data.block.unwrap().data, block.block());
+            }
         }
     }
 

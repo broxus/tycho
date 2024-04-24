@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
-use everscale_types::models::BlockId;
 use tempfile::TempDir;
+use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
 
@@ -29,19 +29,6 @@ pub(crate) async fn init_empty_storage() -> Result<(Arc<Storage>, TempDir)> {
     assert!(storage.node_state().load_init_mc_block_id().is_err());
 
     Ok((storage, tmp_dir))
-}
-
-pub(crate) fn get_block_ids() -> Result<Vec<BlockId>> {
-    let data = include_bytes!("../../tests/data/00001");
-    let archive = archive::Archive::new(data)?;
-
-    let block_ids = archive
-        .blocks
-        .into_iter()
-        .map(|(block_id, _)| block_id)
-        .collect();
-
-    Ok(block_ids)
 }
 
 pub(crate) fn get_archive() -> Result<archive::Archive> {
@@ -78,9 +65,15 @@ pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
                     .context("Failed to process master ref")?,
             };
 
-            let block_data = everscale_types::boc::BocRepr::encode(&block)?;
-            let block_stuff =
-                BlockStuffAug::new(BlockStuff::with_block(block_id, block.clone()), block_data);
+            let block_archive_data = match block.archive_data {
+                ArchiveData::New(archive_data) => archive_data,
+                ArchiveData::Existing => anyhow::bail!("invalid block archive data"),
+            };
+
+            let block_stuff = BlockStuffAug::new(
+                BlockStuff::with_block(block_id, block.data.clone()),
+                block_archive_data,
+            );
 
             let block_result = storage
                 .block_storage()
@@ -102,18 +95,21 @@ pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
                 .await?;
 
             assert_eq!(bs.id(), &block_id);
-            assert_eq!(bs.block(), &block);
+            assert_eq!(bs.block(), &block.data);
+
+            let proof_archive_data = match proof.archive_data {
+                ArchiveData::New(archive_data) => archive_data,
+                ArchiveData::Existing => anyhow::bail!("invalid proof archive data"),
+            };
 
             let block_proof = BlockProofStuff::deserialize(
                 block_id,
-                everscale_types::boc::BocRepr::encode(&proof)?.as_slice(),
+                everscale_types::boc::BocRepr::encode(&proof.data)?.as_slice(),
                 false,
             )?;
 
-            let block_proof_with_data = BlockProofStuffAug::new(
-                block_proof.clone(),
-                everscale_types::boc::BocRepr::encode(&proof)?,
-            );
+            let block_proof_with_data =
+                BlockProofStuffAug::new(block_proof.clone(), proof_archive_data);
 
             let handle = storage
                 .block_storage()

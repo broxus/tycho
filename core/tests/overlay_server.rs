@@ -12,6 +12,8 @@ use tycho_core::overlay_server::DEFAULT_ERROR_CODE;
 use tycho_core::proto::overlay::{BlockFull, KeyBlockIds, PersistentStatePart};
 use tycho_network::PeerId;
 
+use crate::common::archive::*;
+
 mod common;
 
 #[tokio::test]
@@ -243,24 +245,29 @@ async fn overlay_server_blocks() -> Result<()> {
     );
 
     let archive = common::storage::get_archive()?;
-    for (block_id, block) in archive.blocks {
+    for (block_id, archive_data) in archive.blocks {
         if block_id.shard.is_masterchain() {
             let result = client.get_block_full(block_id.clone()).await;
             assert!(result.is_ok());
 
             if let Ok(response) = &result {
-                let proof = everscale_types::boc::BocRepr::encode(block.proof.unwrap())?.into();
-                let block = everscale_types::boc::BocRepr::encode(block.block.unwrap())?.into();
-
-                assert_eq!(
-                    response.data(),
-                    &BlockFull::Found {
+                match response.data() {
+                    BlockFull::Found {
                         block_id,
                         block,
                         proof,
-                        is_link: false,
+                        ..
+                    } => {
+                        let block = deserialize_block(block_id, block)?;
+                        assert_eq!(block, archive_data.block.unwrap().data);
+
+                        let proof = deserialize_block_proof(block_id, proof, false)?;
+                        let archive_proof = archive_data.proof.unwrap();
+                        assert_eq!(proof.proof_for, archive_proof.data.proof_for);
+                        assert_eq!(proof.root, archive_proof.data.root);
                     }
-                );
+                    _ => anyhow::bail!("block not found"),
+                }
             }
         }
     }

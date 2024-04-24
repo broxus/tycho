@@ -102,7 +102,7 @@ impl BlockProvider for BlockchainClient {
                             BlockFull::Empty => unreachable!(),
                         };
 
-                        match BlockStuff::deserialize(block_id, data) {
+                        match BlockStuff::deserialize_checked(block_id, data) {
                             Ok(block) => {
                                 res.mark_response(true);
                                 Some(Ok(BlockStuffAug::new(block, data.clone())))
@@ -149,7 +149,7 @@ impl BlockProvider for BlockchainClient {
                         block_id,
                         block: data,
                         ..
-                    } => match BlockStuff::deserialize(*block_id, data) {
+                    } => match BlockStuff::deserialize_checked(*block_id, data) {
                         Ok(block) => Some(Ok(BlockStuffAug::new(block, data.clone()))),
                         Err(e) => {
                             res.mark_response(false);
