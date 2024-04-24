@@ -11,3 +11,5 @@ perf.data*
 .scratch
 
 .DS_Store
+
+zerostate.json

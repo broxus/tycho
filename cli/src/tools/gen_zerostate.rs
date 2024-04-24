@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
-use everscale_types::models::{
-    Account, AccountState, CurrencyCollection, OptionalAccount, SpecialFlags, StateInit, StdAddr,
-};
+use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -25,8 +23,8 @@ pub struct Cmd {
     config: Option<PathBuf>,
 
     /// path to the output file
-    #[clap(short, long)]
-    output: PathBuf,
+    #[clap(short, long, required_unless_present = "init_config")]
+    output: Option<PathBuf>,
 
     /// explicit unix timestamp of the zero state
     #[clap(long)]
@@ -35,8 +33,14 @@ pub struct Cmd {
 
 impl Cmd {
     pub fn run(self) -> Result<()> {
-        // todo
-        Ok(())
+        match self.init_config {
+            Some(path) => {
+                let config = ZerostateConfig::default();
+                std::fs::write(path, serde_json::to_string_pretty(&config).unwrap())?;
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 }
 
@@ -51,19 +55,251 @@ struct ZerostateConfig {
 
     #[serde(with = "serde_account_states")]
     accounts: HashMap<HashBytes, OptionalAccount>,
+
+    params: BlockchainConfigParams,
 }
 
-#[derive(Serialize, Deserialize)]
-struct BlockchainConfig {
-    #[serde(with = "serde_helpers::hex_byte_array")]
-    config_address: HashBytes,
-    #[serde(with = "serde_helpers::hex_byte_array")]
-    elector_address: HashBytes,
-    #[serde(with = "serde_helpers::hex_byte_array")]
-    minter_address: HashBytes,
-    // TODO: additional currencies
-    global_version: u32,
-    global_capabilities: u64,
+impl Default for ZerostateConfig {
+    fn default() -> Self {
+        Self {
+            global_id: 0,
+            config_public_key: ed25519::PublicKey::from_bytes([0; 32]).unwrap(),
+            minter_public_key: ed25519::PublicKey::from_bytes([0; 32]).unwrap(),
+            accounts: Default::default(),
+            params: make_default_params().unwrap(),
+        }
+    }
+}
+
+fn make_default_params() -> Result<BlockchainConfigParams> {
+    let mut params = BlockchainConfig::new_empty(HashBytes([0x55; 32])).params;
+
+    // Param 1
+    params.set_elector_address(&HashBytes([0x33; 32]))?;
+
+    // Param 2
+    params.set_minter_address(&HashBytes([0x00; 32]))?;
+
+    // Param 8
+    params.set_global_version(&GlobalVersion {
+        version: 32,
+        capabilities: GlobalCapabilities::from([
+            GlobalCapability::CapCreateStatsEnabled,
+            GlobalCapability::CapBounceMsgBody,
+            GlobalCapability::CapReportVersion,
+            GlobalCapability::CapShortDequeue,
+            GlobalCapability::CapFastStorageStat,
+            GlobalCapability::CapOffHypercube,
+            GlobalCapability::CapMyCode,
+            GlobalCapability::CapFixTupleIndexBug,
+        ]),
+    })?;
+
+    // Param 9
+    params.set_mandatory_params(&[
+        0, 1, 9, 10, 12, 14, 15, 16, 17, 18, 20, 21, 22, 23, 24, 25, 28, 34,
+    ])?;
+
+    // Param 10
+    params.set_critical_params(&[0, 1, 9, 10, 12, 14, 15, 16, 17, 32, 34, 36])?;
+
+    // Param 11
+    params.set::<ConfigParam11>(&ConfigVotingSetup {
+        normal_params: Lazy::new(&ConfigProposalSetup {
+            min_total_rounds: 2,
+            max_total_rounds: 3,
+            min_wins: 2,
+            max_losses: 2,
+            min_store_sec: 1000000,
+            max_store_sec: 10000000,
+            bit_price: 1,
+            cell_price: 500,
+        })?,
+        critical_params: Lazy::new(&ConfigProposalSetup {
+            min_total_rounds: 4,
+            max_total_rounds: 7,
+            min_wins: 4,
+            max_losses: 2,
+            min_store_sec: 5000000,
+            max_store_sec: 20000000,
+            bit_price: 2,
+            cell_price: 1000,
+        })?,
+    })?;
+
+    // Param 12 will always be overwritten
+
+    // Param 14
+    params.set_block_creation_rewards(&BlockCreationRewards {
+        masterchain_block_fee: Tokens::new(1700000000),
+        basechain_block_fee: Tokens::new(1000000000),
+    })?;
+
+    // Param 15
+    params.set_election_timings(&ElectionTimings {
+        validators_elected_for: 65536,
+        elections_start_before: 32768,
+        elections_end_before: 8192,
+        stake_held_for: 32768,
+    })?;
+
+    // Param 16
+    params.set_validator_count_params(&ValidatorCountParams {
+        max_validators: 1000,
+        max_main_validators: 100,
+        min_validators: 13,
+    })?;
+
+    // Param 17
+    params.set_validator_stake_params(&ValidatorStakeParams {
+        min_stake: Tokens::new(10000000000000),
+        max_stake: Tokens::new(10000000000000000),
+        min_total_stake: Tokens::new(100000000000000),
+        max_stake_factor: 196608,
+    })?;
+
+    // Param 18
+    params.set_storage_prices(&[StoragePrices {
+        utime_since: 0,
+        bit_price_ps: 1,
+        cell_price_ps: 500,
+        mc_bit_price_ps: 1000,
+        mc_cell_price_ps: 500000,
+    }])?;
+
+    // Param 20 (masterchain)
+    params.set_gas_prices(
+        true,
+        &GasLimitsPrices {
+            gas_price: 655360000,
+            gas_limit: 1000000,
+            special_gas_limit: 100000000,
+            gas_credit: 10000,
+            block_gas_limit: 11000000,
+            freeze_due_limit: 100000000,
+            delete_due_limit: 1000000000,
+            flat_gas_limit: 1000,
+            flat_gas_price: 10000000,
+        },
+    )?;
+
+    // Param 21 (basechain)
+    params.set_gas_prices(
+        false,
+        &GasLimitsPrices {
+            gas_price: 65536000,
+            gas_limit: 1000000,
+            special_gas_limit: 1000000,
+            gas_credit: 10000,
+            block_gas_limit: 10000000,
+            freeze_due_limit: 100000000,
+            delete_due_limit: 1000000000,
+            flat_gas_limit: 1000,
+            flat_gas_price: 1000000,
+        },
+    )?;
+
+    // Param 22 (masterchain)
+    params.set_block_limits(
+        true,
+        &BlockLimits {
+            bytes: BlockParamLimits {
+                underload: 131072,
+                soft_limit: 524288,
+                hard_limit: 1048576,
+            },
+            gas: BlockParamLimits {
+                underload: 900000,
+                soft_limit: 1200000,
+                hard_limit: 2000000,
+            },
+            lt_delta: BlockParamLimits {
+                underload: 1000,
+                soft_limit: 5000,
+                hard_limit: 10000,
+            },
+        },
+    )?;
+
+    // Param 23 (basechain)
+    params.set_block_limits(
+        true,
+        &BlockLimits {
+            bytes: BlockParamLimits {
+                underload: 131072,
+                soft_limit: 524288,
+                hard_limit: 1048576,
+            },
+            gas: BlockParamLimits {
+                underload: 900000,
+                soft_limit: 1200000,
+                hard_limit: 2000000,
+            },
+            lt_delta: BlockParamLimits {
+                underload: 1000,
+                soft_limit: 5000,
+                hard_limit: 10000,
+            },
+        },
+    )?;
+
+    // Param 24 (masterchain)
+    params.set_msg_forward_prices(
+        true,
+        &MsgForwardPrices {
+            lump_price: 10000000,
+            bit_price: 655360000,
+            cell_price: 65536000000,
+            ihr_price_factor: 98304,
+            first_frac: 21845,
+            next_frac: 21845,
+        },
+    )?;
+
+    // Param 25 (basechain)
+    params.set_msg_forward_prices(
+        false,
+        &MsgForwardPrices {
+            lump_price: 1000000,
+            bit_price: 65536000,
+            cell_price: 6553600000,
+            ihr_price_factor: 98304,
+            first_frac: 21845,
+            next_frac: 21845,
+        },
+    )?;
+
+    // Param 28
+    params.set_catchain_config(&CatchainConfig {
+        isolate_mc_validators: false,
+        shuffle_mc_validators: true,
+        mc_catchain_lifetime: 250,
+        shard_catchain_lifetime: 250,
+        shard_validators_lifetime: 1000,
+        shard_validators_num: 11,
+    })?;
+
+    // Param 29
+    params.set_consensus_config(&ConsensusConfig {
+        new_catchain_ids: true,
+        round_candidates: 3.try_into().unwrap(),
+        next_candidate_delay_ms: 2000,
+        consensus_timeout_ms: 16000,
+        fast_attempts: 3,
+        attempt_duration: 8,
+        catchain_max_deps: 4,
+        max_block_bytes: 2097152,
+        max_collated_bytes: 2097152,
+    })?;
+
+    // Param 31
+    params.set_fundamental_addresses(&[
+        HashBytes([0x00; 32]),
+        HashBytes([0x33; 32]),
+        HashBytes([0x55; 32]),
+    ])?;
+
+    Ok(params)
 }
 
 fn build_minter_account(pubkey: &ed25519::PublicKey) -> Result<Account> {
@@ -185,7 +421,6 @@ mod serde_account_states {
     use serde::de::Deserializer;
     use serde::ser::{SerializeMap, Serializer};
     use serde::{Deserialize, Serialize};
-    use tycho_util::serde_helpers;
 
     pub fn serialize<S>(
         value: &HashMap<HashBytes, OptionalAccount>,
@@ -196,17 +431,13 @@ mod serde_account_states {
     {
         #[derive(Serialize)]
         #[repr(transparent)]
-        struct WrapperKey<'a>(#[serde(with = "serde_helpers::hex_byte_array")] &'a [u8; 32]);
-
-        #[derive(Serialize)]
-        #[repr(transparent)]
         struct WrapperValue<'a>(
             #[serde(serialize_with = "BocRepr::serialize")] &'a OptionalAccount,
         );
 
         let mut ser = serializer.serialize_map(Some(value.len()))?;
         for (key, value) in value {
-            ser.serialize_entry(&WrapperKey(key.as_array()), &WrapperValue(value))?;
+            ser.serialize_entry(key, &WrapperValue(value))?;
         }
         ser.end()
     }
@@ -217,18 +448,11 @@ mod serde_account_states {
     where
         D: Deserializer<'de>,
     {
-        #[derive(Deserialize, Hash, PartialEq, Eq)]
-        #[repr(transparent)]
-        struct WrapperKey(#[serde(with = "serde_helpers::hex_byte_array")] [u8; 32]);
-
         #[derive(Deserialize)]
         #[repr(transparent)]
         struct WrappedValue(#[serde(with = "BocRepr")] OptionalAccount);
 
-        <HashMap<WrapperKey, WrappedValue>>::deserialize(deserializer).map(|map| {
-            map.into_iter()
-                .map(|(k, v)| (HashBytes(k.0), v.0))
-                .collect()
-        })
+        <HashMap<HashBytes, WrappedValue>>::deserialize(deserializer)
+            .map(|map| map.into_iter().map(|(k, v)| (k, v.0)).collect())
     }
 }

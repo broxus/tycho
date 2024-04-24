@@ -602,7 +602,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git#96332943ca1942b3bee968e3c16306b330a4e974"
+source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -622,7 +622,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git#96332943ca1942b3bee968e3c16306b330a4e974"
+source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -766,6 +766,16 @@ name = "humantime"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
+
+[[package]]
+name = "indexmap"
+version = "2.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "168fb715dda47215e360912c096649d23d58bf392ac62f73919e831745e40f26"
+dependencies = [
+ "equivalent",
+ "hashbrown",
+]
 
 [[package]]
 name = "itertools"
@@ -1599,6 +1609,7 @@ version = "1.0.115"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12dc5c46daa8e9fdf4f5e71b6cf9a53f2487da0e86e55808e2d35539666497dd"
 dependencies = [
+ "indexmap",
  "itoa",
  "ryu",
  "serde",
