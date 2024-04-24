@@ -12,6 +12,7 @@ use everscale_types::{
     num::Tokens,
 };
 use rand::Rng;
+use sha2::Digest;
 
 use crate::{
     collator::{
@@ -77,12 +78,17 @@ where
             next_chain_time,
         );
 
-        //TODO: get rand seed from the anchor
-        let rand_bytes = {
-            let mut rng = rand::thread_rng();
-            (0..32).map(|_| rng.gen::<u8>()).collect::<Vec<_>>()
-        };
-        let rand_seed = HashBytes::from_slice(rand_bytes.as_slice());
+        // generate seed from the chain_time from the anchor
+        let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
+        let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            "Collator ({}{}): next chain time: {}: rand_seed from chain time: {}",
+            self.collator_descr(),
+            _tracing_top_shard_blocks_descr,
+            next_chain_time,
+            rand_seed,
+        );
 
         // prepare block collation data
         //STUB: consider split/merge in future for taking prev_block_id
@@ -224,7 +230,7 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         prev_shard_data: &PrevData,
         collation_data: &BlockCollationData,
     ) -> Result<u64> {
-        tracing::trace!("Collator ({}): init_lt", collator_descr);
+        tracing::trace!("Collator ({}): calc_start_lt()", collator_descr);
 
         let mut start_lt = if !collation_data.block_id_short.shard.is_masterchain() {
             std::cmp::max(
@@ -262,7 +268,7 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         prev_shard_data: &PrevData,
         collation_data: &mut BlockCollationData,
     ) -> Result<()> {
-        tracing::trace!("Collator ({}): update_value_flow", self.collator_descr);
+        tracing::trace!("Collator ({}): update_value_flow()", self.collator_descr);
 
         if collation_data.block_id_short.shard.is_masterchain() {
             collation_data.value_flow.created.tokens =

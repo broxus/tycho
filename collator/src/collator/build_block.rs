@@ -182,8 +182,8 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                 collation_data.out_msgs.clone(),
             )
             .build();
-        //TODO: fill rand_seed and created_by
-        //extra.rand_seed = self.rand_seed.clone();
+        new_block_extra.rand_seed = collation_data.rand_seed;
+        //TODO: fill created_by
         //extra.created_by = self.created_by.clone();
         if let Some(mc_state_extra) = mc_state_extra {
             let new_mc_block_extra = McBlockExtra {
