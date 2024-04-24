@@ -282,9 +282,9 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_validator_accept_block_by_network");
 
-    let network_nodes = make_network(20);
-    let blocks_amount = 10;
-    let sessions = 2;
+    let network_nodes = make_network(13);
+    let blocks_amount = 1000;
+    let sessions = 1;
 
     let mut validators = vec![];
     let mut listeners = vec![]; // Track listeners for later validation
@@ -347,14 +347,19 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
                 .unwrap();
         }
 
-        for (validator, _node) in &validators {
-            let collator_session_info = Arc::new(CollationSessionInfo::new(
-                session,
-                validators_subset_info.clone(),
-                Some(_node.keypair), // Ensure you use the node's keypair correctly here
-            ));
+        let mut i = 0;
+        for block in blocks.iter() {
+            i += 1;
+            for (validator, _node) in &validators {
+                let collator_session_info = Arc::new(CollationSessionInfo::new(
+                    session,
+                    validators_subset_info.clone(),
+                    Some(_node.keypair), // Ensure you use the node's keypair correctly here
+                ));
 
-            for block in blocks.iter() {
+                if i % 10 == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
                 validator
                     .enqueue_candidate_validation(
                         *block,

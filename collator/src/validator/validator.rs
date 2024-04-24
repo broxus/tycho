@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
-
+const VALIDATOR_BUFFER_SIZE: usize = 1usize;
 //TODO: remove emitter
 #[async_trait]
 pub trait ValidatorEventEmitter {
@@ -86,8 +86,7 @@ where
         tracing::info!(target: tracing_targets::VALIDATOR, "Creating validator...");
 
         // create dispatcher for own async tasks queue
-        let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
+        let (dispatcher, receiver) = AsyncQueuedDispatcher::new(VALIDATOR_BUFFER_SIZE);
         let dispatcher = Arc::new(dispatcher);
 
         // create validation processor and run dispatcher for own tasks queue
