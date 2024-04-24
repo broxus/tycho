@@ -5,15 +5,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
-use futures_util::future::BoxFuture;
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Shared<Fut: Future> {
     inner: Option<Arc<Inner<Fut>>>,
-    permit_fut: Option<BoxFuture<'static, Result<OwnedSemaphorePermit, AcquireError>>>,
+    permit_fut: Option<SyncBoxFuture<Result<OwnedSemaphorePermit, AcquireError>>>,
     permit: Option<OwnedSemaphorePermit>,
 }
+
+type SyncBoxFuture<T> = Pin<Box<dyn Future<Output = T> + Sync + Send + 'static>>;
 
 impl<Fut: Future> Clone for Shared<Fut> {
     fn clone(&self) -> Self {
