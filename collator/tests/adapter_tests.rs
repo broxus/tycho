@@ -9,6 +9,7 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
+use tycho_collator::test_utils::prepare_test_storage;
 use tycho_collator::types::BlockStuffForSync;
 use tycho_core::block_strider::provider::BlockProvider;
 use tycho_core::block_strider::subscriber::test::PrintSubscriber;
@@ -75,7 +76,7 @@ async fn test_add_and_get_block() {
 
 #[tokio::test]
 async fn test_storage_accessors() {
-    let (provider, storage) = prepare_state_apply().await.unwrap();
+    let (provider, storage) = prepare_test_storage().await.unwrap();
 
     let block_strider = BlockStrider::builder()
         .with_provider(provider)
@@ -84,6 +85,7 @@ async fn test_storage_accessors() {
         .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
 
     block_strider.run().await.unwrap();
+
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),

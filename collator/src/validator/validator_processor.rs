@@ -285,12 +285,11 @@ where
                     Duration::from_millis(0)
                 } else {
                     let exponential_backoff = INITIAL_BACKOFF * BACKOFF_FACTOR.pow(iteration - 1);
-                    let calculated_duration = exponential_backoff + NETWORK_TIMEOUT;
 
-                    if calculated_duration > MAX_BACKOFF {
+                    if exponential_backoff > MAX_BACKOFF {
                         MAX_BACKOFF
                     } else {
-                        calculated_duration
+                        exponential_backoff
                     }
                 };
 
@@ -522,7 +521,7 @@ where
                             trace!(target: tracing_targets::VALIDATOR, validator_pubkey=?validator.public_key.as_bytes(), "trying to send request for getting signatures from validator");
 
                             let response = tokio::time::timeout(
-                                Duration::from_secs(1),
+                                NETWORK_TIMEOUT,
                                 cloned_private_overlay.query(
                                     &cloned_network,
                                     &PeerId(validator.public_key.to_bytes()),

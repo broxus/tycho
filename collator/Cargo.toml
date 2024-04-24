@@ -36,6 +36,7 @@ log = "0.4.21"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-test = { workspace = true }
 tycho-core = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }

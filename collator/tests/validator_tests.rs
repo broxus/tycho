@@ -277,13 +277,13 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_validator_accept_block_by_network() -> anyhow::Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_validator_accept_block_by_network() -> Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_validator_accept_block_by_network");
 
-    let network_nodes = make_network(2);
-    let blocks_amount = 100;
+    let network_nodes = make_network(20);
+    let blocks_amount = 10;
     let sessions = 2;
 
     let mut validators = vec![];

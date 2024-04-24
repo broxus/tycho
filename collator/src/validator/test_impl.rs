@@ -104,7 +104,6 @@ where
         &mut self,
         _session: Arc<ValidationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
-        //STUB: do nothing
         Ok(ValidatorTaskResult::Void)
     }
 
