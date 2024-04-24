@@ -56,7 +56,7 @@ impl Simulator {
     }
 
     // updates the next_node_ip and adds a new node to the network
-    pub fn add_node(&mut self, node_index: usize) -> Result<()> {
+    pub fn add_node(&mut self, node_index: usize, delay: Option<u16>, loss: Option<u16>) -> Result<()> {
         let node_ip = increment_ip(self.next_node_ip, 1);
         let mut node = Node::init_from_cli(node_ip, self.config.node_port, node_index)
             .with_context(|| format!("failed to init node-{node_index}"))?;

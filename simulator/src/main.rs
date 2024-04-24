@@ -1,5 +1,6 @@
 #![allow(clippy::unused_self)]
 
+use std::io;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -113,7 +114,8 @@ impl StatusCommand {
         let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
         let compose = ComposeRunner::load_from_fs(&config)?;
 
-        compose.execute_compose_command(&["ps"])
+        compose.execute_compose_command(&["ps"])?;
+        Ok(())
     }
 }
 
@@ -147,6 +149,7 @@ enum NodeCommand {
     Add(AddCommand),
     Start(NodeStartCommand),
     Stop(NodeStopCommand),
+    Info(NodeInfoCommand),
     Logs(NodeLogsCommand),
     Exec(NodeExecCommand),
     Status(StatusCommand),
@@ -164,12 +167,18 @@ impl NodeCommand {
             NodeCommand::Logs(a) => a.run(compose),
             NodeCommand::Exec(a) => a.run(compose),
             NodeCommand::Status(a) => a.run(),
+            NodeCommand::Info(a) => a.run(compose),
         }
     }
 }
 
 #[derive(Parser)]
-struct AddCommand;
+struct AddCommand {
+    #[clap(short, long)]
+    pub delay: Option<u16>,
+    #[clap(short, long)]
+    pub loss: Option<u16>
+}
 
 impl AddCommand {
     fn run(self) -> Result<()> {
@@ -232,6 +241,21 @@ struct NodeExecCommand {
 
 impl NodeExecCommand {
     fn run(self, compose: ComposeRunner) -> Result<()> {
-        compose.exec_command(self.node_index, &self.cmd, self.args)
+        compose.exec_command(self.node_index, &self.cmd, self.args)?;
+        Ok(())
+    }
+}
+
+#[derive(Parser)]
+struct NodeInfoCommand {
+    #[clap(short, long)]
+    node_index: usize,
+}
+
+impl NodeInfoCommand {
+    fn run (self, compose: ComposeRunner) -> Result<()> {
+        let output = compose.node_info(self.node_index)?;
+        println!("{output}");
+        Ok(())
     }
 }

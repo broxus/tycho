@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::compose::{Service, ServiceNetwork};
 use crate::config::ServiceConfig;
@@ -14,6 +15,13 @@ pub struct Node {
     pub port: u16,
     pub dht_value: serde_json::Value,
     pub key: String,
+    pub extra: Option<NodeExtra>
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NodeExtra {
+    pub delay: u16,
+    pub packet_loss: u16
 }
 
 impl Node {
@@ -43,6 +51,7 @@ impl Node {
             dht_value,
             port,
             key: private_key,
+            extra: None,
         })
     }
 
