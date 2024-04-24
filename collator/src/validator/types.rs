@@ -106,5 +106,5 @@ pub(crate) struct OverlayNumber {
 pub enum ValidationResult {
     Valid,
     Invalid,
-    Insufficient,
+    Insufficient(u64, u64),
 }

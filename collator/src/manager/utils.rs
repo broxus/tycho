@@ -1,7 +1,7 @@
 use anyhow::Result;
 use everscale_crypto::ed25519::PublicKey;
 use everscale_types::boc::BocRepr;
-use everscale_types::models::{Block, ValidatorDescription};
+use everscale_types::models::ValidatorDescription;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
 use crate::types::{BlockStuffForSync, CollationConfig};

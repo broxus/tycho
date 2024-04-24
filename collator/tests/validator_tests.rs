@@ -17,17 +17,19 @@ use tokio::sync::{Mutex, Notify};
 use tracing::debug;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
     StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeEventListener,
 };
-use tycho_collator::test_utils::try_init_test_tracing;
+use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{CollationSessionInfo, OnValidatedBlockEvent, ValidatorNetwork};
 use tycho_collator::validator::state::{ValidationState, ValidationStateStdImpl};
 use tycho_collator::validator::types::ValidationSessionInfo;
 use tycho_collator::validator::validator::{Validator, ValidatorEventListener, ValidatorStdImpl};
 use tycho_collator::validator::validator_processor::ValidatorProcessorStdImpl;
-use tycho_core::block_strider::prepare_state_apply;
+use tycho_core::block_strider::state::BlockStriderState;
+use tycho_core::block_strider::subscriber::test::PrintSubscriber;
+use tycho_core::block_strider::{prepare_state_apply, BlockStrider};
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
 };
@@ -54,6 +56,11 @@ impl TestValidatorEventListener {
         let mut received = self.received_notifications.lock().await;
         *received += 1;
         if *received == *self.expected_notifications.lock().await {
+            println!(
+                "received: {}, expected: {}",
+                *received,
+                *self.expected_notifications.lock().await
+            );
             self.notify.notify_one();
         }
     }
@@ -69,7 +76,6 @@ impl ValidatorEventListener for TestValidatorEventListener {
         let mut validated_blocks = self.validated_blocks.lock().await;
         validated_blocks.push(block_id);
         self.increment_and_check().await;
-        println!("block validated event");
         Ok(())
     }
 }
@@ -162,7 +168,16 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
     let test_listener = TestValidatorEventListener::new(1);
     let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
-    let (_, storage) = prepare_state_apply().await?;
+    let (provider, storage) = prepare_test_storage().await.unwrap();
+
+    let block_strider = BlockStrider::builder()
+        .with_provider(provider)
+        .with_subscriber(PrintSubscriber)
+        .with_state(storage.clone())
+        .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
+
+    block_strider.run().await.unwrap();
+
     let state_node_adapter =
         Arc::new(StateNodeAdapterBuilderStdImpl::new(storage.clone()).build(test_listener.clone()));
     let _validation_state = ValidationStateStdImpl::new();
@@ -227,7 +242,7 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         prev_total_weight: 0,
     };
 
-    let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
+    let block_id = storage.load_last_traversed_master_block_id();
 
     let block_handle = storage.block_handle_storage().load_handle(&block_id)?;
     assert!(block_handle.is_some(), "Block handle not found in storage.");
@@ -253,34 +268,36 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         .unwrap();
 
     test_listener.notify.notified().await;
-
     let validated_blocks = test_listener.validated_blocks.lock().await;
-    assert!(!validated_blocks.is_empty(), "No blocks were validated.");
+    assert_eq!(
+        validated_blocks.len() as u32,
+        1,
+        "Expected each validator to validate the block once."
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn test_validator_accept_block_by_network() -> anyhow::Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
+    tycho_util::test::init_logger("test_validator_accept_block_by_network");
 
-    let network_nodes = make_network(3);
-    let blocks_amount = 1; // Assuming you expect 3 validation per node.
-
-    let expected_validations = network_nodes.len() as u32; // Expecting each node to validate
-    let _test_listener = TestValidatorEventListener::new(expected_validations);
+    let network_nodes = make_network(2);
+    let blocks_amount = 100;
+    let sessions = 2;
 
     let mut validators = vec![];
     let mut listeners = vec![]; // Track listeners for later validation
 
     for node in network_nodes {
         // Create a unique listener for each validator
-        let test_listener = TestValidatorEventListener::new(blocks_amount);
+        let test_listener = TestValidatorEventListener::new(blocks_amount * sessions);
         listeners.push(test_listener.clone());
 
         let state_node_adapter = Arc::new(
             StateNodeAdapterBuilderStdImpl::new(build_tmp_storage()?).build(test_listener.clone()),
         );
-        let _validation_state = ValidationStateStdImpl::new();
+
         let network = ValidatorNetwork {
             overlay_service: node.overlay_service.clone(),
             dht_client: node.dht_client.clone(),
@@ -295,9 +312,8 @@ async fn test_validator_accept_block_by_network() -> anyhow::Result<()> {
     }
 
     let mut validators_descriptions = vec![];
-    for (_validator, node) in &validators {
+    for (_, node) in &validators {
         let peer_id = node.network.peer_id();
-        let _keypair = node.keypair;
         validators_descriptions.push(ValidatorDescription {
             public_key: (*peer_id.as_bytes()).into(),
             weight: 1,
@@ -307,46 +323,47 @@ async fn test_validator_accept_block_by_network() -> anyhow::Result<()> {
         });
     }
 
-    let blocks = create_blocks(blocks_amount);
-
     let validators_subset_info = ValidatorSubsetInfo {
         validators: validators_descriptions,
         short_hash: 0,
     };
-    for (validator, _node) in &validators {
-        let collator_session_info = Arc::new(CollationSessionInfo::new(
-            1,
-            validators_subset_info.clone(),
-            Some(_node.keypair), // Ensure you use the node's keypair correctly here
-        ));
-        // Assuming this setup is correct and necessary for each validator
 
-        let validation_session =
-            Arc::new(ValidationSessionInfo::try_from(collator_session_info.clone()).unwrap());
-        validator
-            .enqueue_add_session(validation_session)
-            .await
-            .unwrap();
-    }
+    for session in 1..=sessions {
+        let blocks = create_blocks(blocks_amount);
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
+        for (validator, _node) in &validators {
+            let collator_session_info = Arc::new(CollationSessionInfo::new(
+                session,
+                validators_subset_info.clone(),
+                Some(_node.keypair), // Ensure you use the node's keypair correctly here
+            ));
+            // Assuming this setup is correct and necessary for each validator
 
-    for (validator, _node) in &validators {
-        let collator_session_info = Arc::new(CollationSessionInfo::new(
-            1,
-            validators_subset_info.clone(),
-            Some(_node.keypair), // Ensure you use the node's keypair correctly here
-        ));
-
-        for block in blocks.iter() {
+            let validation_session =
+                Arc::new(ValidationSessionInfo::try_from(collator_session_info.clone()).unwrap());
             validator
-                .enqueue_candidate_validation(
-                    *block,
-                    collator_session_info.seqno(),
-                    *collator_session_info.current_collator_keypair().unwrap(),
-                )
+                .enqueue_add_session(validation_session)
                 .await
                 .unwrap();
+        }
+
+        for (validator, _node) in &validators {
+            let collator_session_info = Arc::new(CollationSessionInfo::new(
+                session,
+                validators_subset_info.clone(),
+                Some(_node.keypair), // Ensure you use the node's keypair correctly here
+            ));
+
+            for block in blocks.iter() {
+                validator
+                    .enqueue_candidate_validation(
+                        *block,
+                        collator_session_info.seqno(),
+                        *collator_session_info.current_collator_keypair().unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
         }
     }
 
@@ -354,8 +371,8 @@ async fn test_validator_accept_block_by_network() -> anyhow::Result<()> {
         listener.notify.notified().await;
         let validated_blocks = listener.validated_blocks.lock().await;
         assert_eq!(
-            validated_blocks.len(),
-            blocks_amount as usize,
+            validated_blocks.len() as u32,
+            sessions * blocks_amount,
             "Expected each validator to validate the block once."
         );
     }

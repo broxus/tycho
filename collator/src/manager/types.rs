@@ -7,6 +7,8 @@ use everscale_types::{
     models::{Block, BlockId, BlockIdShort, ShardIdent, Signature},
 };
 
+use tycho_util::FastHashMap;
+
 use crate::types::BlockCandidate;
 
 pub(super) type BlockCacheKey = BlockIdShort;
@@ -20,7 +22,7 @@ pub(super) struct BlocksCache {
 pub struct BlockCandidateEntry {
     pub key: BlockCacheKey,
     pub candidate: BlockCandidate,
-    pub signatures: HashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<HashBytes, Signature>,
 }
 
 pub enum SendSyncStatus {
@@ -105,7 +107,7 @@ impl BlockCandidateContainer {
         &mut self,
         is_valid: bool,
         already_synced: bool,
-        signatures: HashMap<HashBytes, Signature>,
+        signatures: FastHashMap<HashBytes, Signature>,
     ) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;

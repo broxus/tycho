@@ -11,6 +11,7 @@ use everscale_types::models::{
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
+use tycho_util::FastHashMap;
 
 pub struct CollationConfig {
     pub key_pair: KeyPair,
@@ -121,7 +122,7 @@ impl OnValidatedBlockEvent {
 
 #[derive(Default, Clone)]
 pub struct BlockSignatures {
-    pub signatures: HashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<HashBytes, Signature>,
 }
 
 pub struct ValidatedBlock {
@@ -160,7 +161,7 @@ pub struct BlockStuffForSync {
     //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
     pub block_stuff_aug: BlockStuffAug,
-    pub signatures: HashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
 }

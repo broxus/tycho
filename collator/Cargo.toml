@@ -32,12 +32,14 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
+log = "0.4.21"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tracing-test = { workspace = true }
 tycho-core = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
+tycho-util = { workspace = true, features = ["test"] }
 
 [features]
 test = []

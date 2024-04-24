@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, Signature};
 use tl_proto::{TlRead, TlWrite};
+use tycho_util::FastHashMap;
 
 #[derive(Debug, Clone, TlRead, TlWrite)]
 #[tl(boxed, id = 0x11112222)]
@@ -17,7 +18,7 @@ impl SignaturesQuery {
     pub(crate) fn create(
         session_seqno: u32,
         block_header: BlockIdShort,
-        current_signatures: &HashMap<HashBytes, Signature>,
+        current_signatures: &FastHashMap<HashBytes, Signature>,
     ) -> Self {
         let signatures = current_signatures.iter().map(|(k, v)| (k.0, v.0)).collect();
         Self {

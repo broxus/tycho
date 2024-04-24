@@ -7,6 +7,7 @@ use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 
 use tycho_block_util::state::ShardStateStuff;
+use tycho_util::FastHashMap;
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
@@ -75,7 +76,7 @@ where
         _session_seqno: u32,
         current_validator_keypair: KeyPair,
     ) -> Result<ValidatorTaskResult> {
-        let mut signatures = HashMap::new();
+        let mut signatures = FastHashMap::default();
         signatures.insert(
             current_validator_keypair.public_key.to_bytes().into(),
             Signature::default(),

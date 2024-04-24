@@ -11,6 +11,7 @@ use futures_util::{future::BoxFuture, FutureExt};
 use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::manager::CollationManager;
+use tycho_collator::test_utils::prepare_test_storage;
 use tycho_collator::{
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
     state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
@@ -116,101 +117,4 @@ fn supported_capabilities() -> u64 {
         | GlobalCapability::CapSuspendedList as u64
         | GlobalCapability::CapsTvmBugfixes2022 as u64;
     caps
-}
-
-struct DummyArchiveProvider;
-impl BlockProvider for DummyArchiveProvider {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        futures_util::future::ready(None).boxed()
-    }
-
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(None).boxed()
-    }
-}
-
-async fn prepare_test_storage() -> Result<(DummyArchiveProvider, Arc<Storage>)> {
-    let provider = DummyArchiveProvider;
-    let temp = tempfile::tempdir().unwrap();
-    let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
-    let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();
-    let tracker = MinRefMcStateTracker::default();
-
-    // master state
-    let master_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_master.boc");
-    let master_file_hash: HashBytes = sha2::Sha256::digest(master_bytes).into();
-    let master_root = Boc::decode(master_bytes)?;
-    let master_root_hash = *master_root.repr_hash();
-    let master_state = master_root.parse::<ShardStateUnsplit>()?;
-
-    let mc_state_extra = master_state.load_custom()?;
-    let mc_state_extra = mc_state_extra.unwrap();
-    let mut shard_info_opt = None;
-    for shard_info in mc_state_extra.shards.iter() {
-        shard_info_opt = Some(shard_info?);
-        break;
-    }
-    let shard_info = shard_info_opt.unwrap();
-
-    let master_id = BlockId {
-        shard: master_state.shard_ident,
-        seqno: master_state.seqno,
-        root_hash: master_root_hash,
-        file_hash: master_file_hash,
-    };
-    let master_state_stuff =
-        ShardStateStuff::from_state_and_root(master_id, master_state, master_root, &tracker)?;
-
-    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &master_id,
-        BlockMetaData {
-            is_key_block: mc_state_extra.after_key_block,
-            gen_utime: master_state_stuff.state().gen_utime,
-            mc_ref_seqno: Some(0),
-        },
-    )?;
-
-    storage
-        .shard_state_storage()
-        .store_state(&handle, &master_state_stuff)
-        .await?;
-
-    // shard state
-    let shard_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_0:80.boc");
-    let shard_file_hash: HashBytes = sha2::Sha256::digest(shard_bytes).into();
-    let shard_root = Boc::decode(shard_bytes)?;
-    let shard_root_hash = *shard_root.repr_hash();
-    let shard_state = shard_root.parse::<ShardStateUnsplit>()?;
-    let shard_id = BlockId {
-        shard: shard_info.0,
-        seqno: shard_info.1.seqno,
-        root_hash: shard_info.1.root_hash,
-        file_hash: shard_info.1.file_hash,
-    };
-    let shard_state_stuff =
-        ShardStateStuff::from_state_and_root(shard_id, shard_state, shard_root, &tracker)?;
-
-    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &shard_id,
-        BlockMetaData {
-            is_key_block: false,
-            gen_utime: shard_state_stuff.state().gen_utime,
-            mc_ref_seqno: Some(0),
-        },
-    )?;
-
-    storage
-        .shard_state_storage()
-        .store_state(&handle, &shard_state_stuff)
-        .await?;
-
-    storage
-        .node_state()
-        .store_last_mc_block_id(&master_id)
-        .unwrap();
-
-    Ok((provider, storage))
 }

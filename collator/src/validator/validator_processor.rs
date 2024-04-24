@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,13 +7,13 @@ use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::broadcast;
-use tokio::time::interval;
 use tracing::warn;
-use tracing::{debug, error, trace};
+use tracing::{debug, trace};
 
 use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
+use tycho_util::FastHashMap;
 
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::network_service::NetworkService;
@@ -29,13 +28,15 @@ use crate::{
 
 use super::{ValidatorEventEmitter, ValidatorEventListener};
 
-const MAX_VALIDATION_ATTEMPTS: u32 = 1000;
-const VALIDATION_RETRY_TIMEOUT_SEC: u64 = 3;
+const NETWORK_TIMEOUT: Duration = Duration::from_millis(1000);
+const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_BACKOFF: Duration = Duration::from_secs(10);
+const BACKOFF_FACTOR: u32 = 2; // Factor by which the timeout will increase
 
 #[derive(PartialEq, Debug)]
 pub enum ValidatorTaskResult {
     Void,
-    Signatures(HashMap<HashBytes, Signature>),
+    Signatures(FastHashMap<HashBytes, Signature>),
     ValidationStatus(ValidationResult),
 }
 
@@ -93,7 +94,6 @@ where
     ) -> Result<ValidatorTaskResult> {
         self.on_block_validated_event(candidate_id, OnValidatedBlockEvent::ValidByState)
             .await?;
-        println!("VALIDATED BY STATE");
         Ok(ValidatorTaskResult::Void)
     }
     async fn get_block_signatures(
@@ -172,6 +172,7 @@ where
         &mut self,
         session: Arc<ValidationSessionInfo>,
     ) -> Result<ValidatorTaskResult> {
+        trace!(target: tracing_targets::VALIDATOR, "Trying to add session seqno {:?}", session.seqno);
         if self.validation_state.get_session(session.seqno).is_none() {
             let (peer_resolver, local_peer_id) = {
                 let network = self.network.clone();
@@ -184,6 +185,7 @@ where
             let overlay_id = OverlayNumber {
                 session_seqno: session.seqno,
             };
+            trace!(target: tracing_targets::VALIDATOR, overlay_id = ?session.seqno, "Creating private overlay");
             let overlay_id = OverlayId(tl_proto::hash(overlay_id));
             let network_service = NetworkService::new(self.get_dispatcher().clone());
 
@@ -197,7 +199,7 @@ where
                 .add_private_overlay(&private_overlay);
 
             if !overlay_added {
-                bail!("Failed to add private overlay");
+                panic!("Failed to add private overlay");
             }
 
             self.validation_state
@@ -210,8 +212,10 @@ where
                     continue;
                 }
                 entries.insert(&PeerId(validator.public_key.to_bytes()));
+                trace!(target: tracing_targets::VALIDATOR, validator_pubkey = ?validator.public_key.as_bytes(), "Added validator to overlay");
             }
         }
+        trace!(target: tracing_targets::VALIDATOR, "Session seqno {:?} added", session.seqno);
         Ok(ValidatorTaskResult::Void)
     }
 
@@ -223,6 +227,7 @@ where
         current_validator_keypair: KeyPair,
     ) -> Result<ValidatorTaskResult> {
         let mut stop_receiver = self.stop_sender.subscribe();
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Starting candidate validation");
 
         // Simplify session retrieval with clear, concise error handling.
         let session = self
@@ -230,36 +235,67 @@ where
             .get_mut_session(session_seqno)
             .ok_or_else(|| anyhow!("Failed to start candidate validation. Session not found"))?;
 
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Signing block");
+
         let our_signature = sign_block(&current_validator_keypair, &candidate_id)?;
         let current_validator_signature =
             HashBytes(current_validator_keypair.public_key.to_bytes());
+
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Adding block to session");
         session.add_block(candidate_id)?;
 
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Adding our signature to session");
+
         let enqueue_task_result = self
-            .dispatcher
-            .enqueue_task(method_to_async_task_closure!(
-                process_candidate_signature_response,
+            .process_candidate_signature_response(
                 session_seqno,
                 candidate_id.as_short_id(),
-                vec![(current_validator_signature.0, our_signature.0)]
-            ))
+                vec![(current_validator_signature.0, our_signature.0)],
+            )
             .await;
 
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Enqueued task for processing signatures response");
         if let Err(e) = enqueue_task_result {
+            trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Failed to enqueue task for processing signatures response {e:?}");
             bail!("Failed to enqueue task for processing signatures response {e:?}");
+        }
+
+        let session = self
+            .validation_state
+            .get_session(session_seqno)
+            .ok_or_else(|| anyhow!("Failed to start candidate validation. Session not found"))?;
+
+        let validation_status = session.validation_status(&candidate_id.as_short_id());
+
+        if validation_status == ValidationResult::Valid
+            || validation_status == ValidationResult::Invalid
+        {
+            trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Validation status is already set for block {:?}", candidate_id);
+            return Ok(ValidatorTaskResult::Void);
         }
 
         let dispatcher = self.get_dispatcher().clone();
         let current_validator_pubkey = current_validator_keypair.public_key;
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Starting validation loop");
 
         tokio::spawn(async move {
-            let mut retry_interval = interval(Duration::from_secs(VALIDATION_RETRY_TIMEOUT_SEC));
-            let max_retries = MAX_VALIDATION_ATTEMPTS;
-            let mut attempts = 0;
+            let mut iteration = 0;
+            loop {
+                let interval_duration = if iteration == 0 {
+                    Duration::from_millis(0)
+                } else {
+                    let exponential_backoff = INITIAL_BACKOFF * BACKOFF_FACTOR.pow(iteration - 1);
+                    let calculated_duration = exponential_backoff + NETWORK_TIMEOUT;
 
-            while attempts < max_retries {
-                trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Attempt to validate block");
-                attempts += 1;
+                    if calculated_duration > MAX_BACKOFF {
+                        MAX_BACKOFF
+                    } else {
+                        calculated_duration
+                    }
+                };
+
+                trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, interval = ?interval_duration, "Waiting for next validation attempt");
+
                 let dispatcher_clone = dispatcher.clone();
                 let cloned_candidate = candidate_id;
 
@@ -270,13 +306,16 @@ where
                             break;
                         }
                     },
-                    _ = retry_interval.tick() => {
+                    _  = tokio::time::sleep(interval_duration) => {
+
                         let validation_task_result = dispatcher_clone.enqueue_task_with_responder(
                             method_to_async_task_closure!(
                                 get_validation_status,
                                 session_seqno,
                                 &cloned_candidate.as_short_id())
                         ).await;
+
+                        trace!(target: tracing_targets::VALIDATOR, block = %cloned_candidate, "Enqueued task for getting validation status");
 
                         match validation_task_result {
                             Ok(receiver) => match receiver.await.unwrap() {
@@ -286,27 +325,26 @@ where
                                         break;
                                     }
 
+                                    trace!(target: tracing_targets::VALIDATOR, block = %cloned_candidate, "Validation status is not set yet. Enqueueing validation task");
                                     dispatcher_clone.enqueue_task(method_to_async_task_closure!(
                                         validate_candidate,
                                         cloned_candidate,
                                         session_seqno,
                                         current_validator_pubkey
                                     )).await.expect("Failed to validate candidate");
+                                    trace!(target: tracing_targets::VALIDATOR, block = %cloned_candidate, "Enqueued validation task");
                                 },
                                 Ok(e) => panic!("Unexpected response from get_validation_status: {:?}", e),
                                 Err(e) => panic!("Failed to get validation status: {:?}", e),
                             },
                             Err(e) => panic!("Failed to enqueue validation task: {:?}", e),
                         }
-
-                        if attempts >= max_retries {
-                            warn!(target: tracing_targets::VALIDATOR, "Max retries reached without successful validation for block {:?}.", cloned_candidate);
-                            break;
-                        }
                     }
                 }
+                iteration += 1;
             }
         });
+
         Ok(ValidatorTaskResult::Void)
     }
 
@@ -333,6 +371,7 @@ where
         block_id_short: BlockIdShort,
         signatures: Vec<([u8; 32], [u8; 64])>,
     ) -> Result<ValidatorTaskResult> {
+        trace!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Processing candidate signature response");
         // Simplified session retrieval
         let session = self
             .validation_state
@@ -379,11 +418,17 @@ where
                         .await?;
                 }
                 ValidationResult::Invalid => {
+                    trace!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Block is invalid");
                     self.on_block_validated_event(block, OnValidatedBlockEvent::Invalid)
                         .await?;
                 }
-                ValidationResult::Insufficient => {
-                    debug!("Insufficient signatures for block {:?}", block_id_short);
+                ValidationResult::Insufficient(total_valid_weight, valid_weight) => {
+                    trace!(
+                        "Insufficient signatures for block {:?}. Total valid weight: {}. Required weight: {}",
+                        block_id_short,
+                        total_valid_weight,
+                        valid_weight
+                    );
                 }
             }
         } else {
@@ -424,6 +469,7 @@ where
         session_seqno: u32,
         current_validator_pubkey: everscale_crypto::ed25519::PublicKey,
     ) -> Result<ValidatorTaskResult> {
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Validating candidate");
         let block_id_short = candidate_id.as_short_id();
 
         let validation_state = &self.validation_state;
@@ -431,22 +477,22 @@ where
             .get_session(session_seqno)
             .ok_or(anyhow!("Session not found"))?;
 
+        trace!(target: tracing_targets::VALIDATOR, block = %candidate_id, "Getting validators");
         let dispatcher = self.get_dispatcher();
-
-        let block_from_state = self
-            .state_node_adapter
-            .load_block_handle(&candidate_id)
-            .await?;
+        let state_node_adapter = self.state_node_adapter.clone();
 
         let validators = session.validators_without_signatures(&block_id_short);
 
         let private_overlay = session.get_overlay().clone();
-
         let current_signatures = session.get_valid_signatures(&candidate_id.as_short_id());
-
         let network = self.network.clone();
 
         tokio::spawn(async move {
+            let block_from_state = state_node_adapter
+                .load_block_handle(&candidate_id)
+                .await
+                .expect("Failed to load block from state");
+
             if block_from_state.is_some() {
                 let result = dispatcher
                     .clone()
@@ -457,8 +503,7 @@ where
                     .await;
 
                 if let Err(e) = result {
-                    error!(err = %e, "Failed to validate block by state");
-                    panic!("Failed to validate block by state {e}");
+                    panic!("Failed to validate block by state {e:?}");
                 }
             } else {
                 let payload = SignaturesQuery::create(
@@ -468,43 +513,57 @@ where
                 );
 
                 for validator in validators {
-                    if validator.public_key != current_validator_pubkey {
-                        trace!(target: tracing_targets::VALIDATOR, validator_pubkey=?validator.public_key.as_bytes(), "trying to send request for getting signatures from validator");
-                        let response = private_overlay
-                            .query(
-                                network.dht_client.network(),
-                                &PeerId(validator.public_key.to_bytes()),
-                                Request::from_tl(payload.clone()),
+                    let cloned_private_overlay = private_overlay.clone();
+                    let cloned_network = network.dht_client.network().clone();
+                    let cloned_payload = Request::from_tl(payload.clone());
+                    let cloned_dispatcher = dispatcher.clone();
+                    tokio::spawn(async move {
+                        if validator.public_key != current_validator_pubkey {
+                            trace!(target: tracing_targets::VALIDATOR, validator_pubkey=?validator.public_key.as_bytes(), "trying to send request for getting signatures from validator");
+
+                            let response = tokio::time::timeout(
+                                Duration::from_secs(1),
+                                cloned_private_overlay.query(
+                                    &cloned_network,
+                                    &PeerId(validator.public_key.to_bytes()),
+                                    cloned_payload,
+                                ),
                             )
                             .await;
-                        match response {
-                            Ok(response) => {
-                                let response = response.parse_tl::<SignaturesQuery>();
-                                match response {
-                                    Ok(signatures) => {
-                                        let enqueue_task_result = dispatcher
-                                            .enqueue_task(method_to_async_task_closure!(
-                                                process_candidate_signature_response,
-                                                signatures.session_seqno,
-                                                signatures.block_id_short,
-                                                signatures.signatures
-                                            ))
-                                            .await;
 
-                                        if let Err(e) = enqueue_task_result {
-                                            error!(err = %e, "Failed to enqueue task for processing signatures response");
+                            match response {
+                                Ok(Ok(response)) => {
+                                    let response = response.parse_tl::<SignaturesQuery>();
+                                    trace!(target: tracing_targets::VALIDATOR, "Received response from overlay");
+                                    match response {
+                                        Ok(signatures) => {
+                                            let enqueue_task_result = cloned_dispatcher
+                                                .enqueue_task(method_to_async_task_closure!(
+                                                    process_candidate_signature_response,
+                                                    signatures.session_seqno,
+                                                    signatures.block_id_short,
+                                                    signatures.signatures
+                                                ))
+                                                .await;
+                                            trace!(target: tracing_targets::VALIDATOR, "Enqueued task for processing signatures response");
+                                            if let Err(e) = enqueue_task_result {
+                                                panic!("Failed to enqueue task for processing signatures response: {e}");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            panic!("Failed convert signatures response to SignaturesQuery: {e}");
                                         }
                                     }
-                                    Err(e) => {
-                                        error!(err = %e, "Failed convert signatures response to SignaturesQuery");
-                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("Failed to get response from overlay: {e}");
+                                }
+                                Err(e) => {
+                                    warn!("Network request timed out: {e}");
                                 }
                             }
-                            Err(e) => {
-                                error!(err = %e, "Failed to get response from overlay");
-                            }
                         }
-                    }
+                    });
                 }
             }
         });

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use everscale_types::{
     cell::{CellBuilder, CellSliceRange, HashBytes},
-    models::{account, ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr},
+    models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr},
 };
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
