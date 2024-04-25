@@ -724,7 +724,7 @@ fn remove_blocks(
 
         // Read only prefix with shard ident and seqno
         let BlockIdShort { shard, seqno } =
-            BlockIdShort::deserialize(&mut std::convert::identity(key))?;
+            <BlockIdShort as StoredValue>::deserialize(&mut std::convert::identity(key))?;
 
         // Don't gc latest blocks
         if top_blocks.contains_shard_seqno(&shard, seqno) {

@@ -603,7 +603,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation#1b1170070bf894048355081100acb5b690388541"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#2fe1048125269cc0ff94a37cb4a5d78def71b9fd"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -623,7 +623,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation#1b1170070bf894048355081100acb5b690388541"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#2fe1048125269cc0ff94a37cb4a5d78def71b9fd"
 dependencies = [
  "proc-macro2",
  "quote",
