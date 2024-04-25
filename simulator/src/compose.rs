@@ -45,8 +45,38 @@ impl ComposeRunner {
         })
     }
 
-    pub fn add_service(&mut self, name: String, service: Service) {
-        self.compose.services.insert(name, service);
+    pub fn add_prometheus(&mut self, ) -> Result<()> {
+        let prom_data = r#"
+        {
+            "image": "prom/prometheus",
+            "ports": ["9090:9090"],
+            "restart": "unless-stopped",
+            "volumes": ["./prometheus:/etc/prometheus"],
+            command: ['--config.file=/etc/prometheus/prometheus.yml']
+        }"#;
+        let prom_value = serde_json::Value::from_str(prom_data)?;
+        self.compose.services.insert("prometheus".to_string(), prom_value);
+        Ok(())
+    }
+
+    pub fn add_grafana(&mut self) -> Result<()> {
+        let prom_data = r#"
+        {
+            "image": "grafana/grafana",
+            "ports": ["3000:3000"],
+            "restart": "unless-stopped",
+            "volumes": ["./grafana:/etc/grafana/provisioning/datasources"],
+            "environment": ["GF_SECURITY_ADMIN_USER=admin", "GF_SECURITY_ADMIN_PASSWORD=grafana"]
+        }"#;
+        let prom_value = serde_json::Value::from_str(prom_data)?;
+        self.compose.services.insert("grafana".to_string(), prom_value);
+        Ok(())
+    }
+
+    pub fn add_service(&mut self, name: String, service: Service) -> Result<()> {
+        let value = serde_json::to_value(service)?;
+        self.compose.services.insert(name, value);
+        Ok(())
     }
 
     pub fn finalize(&self) -> Result<()> {
@@ -177,7 +207,7 @@ impl ComposeRunner {
 #[derive(Serialize, Deserialize, Debug)]
 struct DockerCompose {
     version: String,
-    services: HashMap<String, Service>,
+    services: HashMap<String, serde_json::value::Value>,
     networks: HashMap<String, Network>,
 }
 
