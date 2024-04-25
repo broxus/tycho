@@ -44,13 +44,22 @@ async fn test_collation_process_on_stubs() {
     let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
     let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new(storage.clone());
 
+    let mut rnd = rand::thread_rng();
+    let node_1_keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rnd);
+
     let config = CollationConfig {
-        key_pair: everscale_crypto::ed25519::KeyPair::generate(&mut rand::thread_rng()),
+        key_pair: node_1_keypair,
         mc_block_min_interval_ms: 10000,
         max_mc_block_delta_from_bc_to_await_own: 2,
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
         max_collate_threads: 1,
+
+        #[cfg(feature = "test")]
+        test_validators_keypairs: vec![
+            node_1_keypair,
+            everscale_crypto::ed25519::KeyPair::generate(&mut rnd),
+        ],
     };
 
     tracing::info!("Trying to start CollationManager");

@@ -22,6 +22,9 @@ pub struct CollationConfig {
     pub supported_capabilities: u64,
 
     pub max_collate_threads: u16,
+
+    #[cfg(feature = "test")]
+    pub test_validators_keypairs: Vec<KeyPair>,
 }
 
 pub(crate) struct BlockCollationResult {

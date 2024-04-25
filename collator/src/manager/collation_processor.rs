@@ -375,17 +375,9 @@ where
         // find out the actual collation session seqno from master state
         let new_session_seqno = mc_state_extra.validator_info.catchain_seqno;
 
-        //TODO: get validators set from config from current master state
         // we need full validators set to define the subset for each session and to check if current node should collate
-        //let full_validators_set = mc_state.config_params()?.get_current_validator_set()?;
-        //STUB: return dummy validator set
-        let full_validators_set = ValidatorSet {
-            utime_since: 0,
-            utime_until: 0,
-            main: std::num::NonZeroU16::MIN,
-            total_weight: 0,
-            list: vec![],
-        };
+        let full_validators_set = mc_state.config_params()?.get_current_validator_set()?;
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "full_validators_set {:?}", full_validators_set);
 
         // compare with active sessions and detect new sessions to start and outdated sessions to finish
         let mut sessions_to_keep = HashMap::new();
@@ -448,14 +440,31 @@ where
                     new_session_seqno,
                 ))?;
 
-            //STUB: create subset with only us
-            let subset = vec![ValidatorDescription {
-                public_key: self.config.key_pair.public_key.to_bytes().into(),
-                adnl_addr: Some(self.config.key_pair.public_key.to_bytes().into()),
-                weight: 90,
-                prev_total_weight: 90,
-                mc_seqno_since: 0,
-            }];
+            //TEST: override with test subset with test keypairs defined on test run
+            #[cfg(feature = "test")]
+            let subset = if self.config.test_validators_keypairs.is_empty() {
+                subset
+            } else {
+                let mut test_subset = vec![];
+                for (i, keypair) in self.config.test_validators_keypairs.iter().enumerate() {
+                    let val_descr = &subset[i];
+                    test_subset.push(ValidatorDescription {
+                        public_key: keypair.public_key.to_bytes().into(),
+                        adnl_addr: val_descr.adnl_addr,
+                        weight: val_descr.weight,
+                        mc_seqno_since: val_descr.mc_seqno_since,
+                        prev_total_weight: val_descr.prev_total_weight,
+                    });
+                }
+                test_subset
+            };
+            #[cfg(feature = "test")]
+            tracing::warn!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "FOR TEST: overrided subset of validators to collate shard {}: {:?}",
+                shard_id,
+                subset,
+            );
 
             let local_pubkey_opt = find_us_in_collators_set(&self.config, &subset);
 
