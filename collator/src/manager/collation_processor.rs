@@ -51,8 +51,7 @@ where
     state_node_adapter: Arc<ST>,
     mq_adapter: Arc<MQ>,
 
-    //TODO: possibly use V because manager may not need a ref to validator
-    validator: Arc<V>,
+    validator: V,
 
     active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
     collation_sessions_to_finish: HashMap<CollationSessionId, Arc<CollationSessionInfo>>,
@@ -85,7 +84,7 @@ where
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
         mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
-        validator: Arc<V>,
+        validator: V,
     ) -> Self {
         Self {
             config,
@@ -376,6 +375,7 @@ where
         // find out the actual collation session seqno from master state
         let new_session_seqno = mc_state_extra.validator_info.catchain_seqno;
 
+        //TODO: get validators set from config from current master state
         // we need full validators set to define the subset for each session and to check if current node should collate
         //let full_validators_set = mc_state.config_params()?.get_current_validator_set()?;
         //STUB: return dummy validator set

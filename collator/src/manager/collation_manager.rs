@@ -153,11 +153,11 @@ where
         let state_node_adapter = Arc::new(state_node_adapter);
 
         // create validator and start its tasks queue
-        let validator = Arc::new(Validator::create(
+        let validator = Validator::create(
             dispatcher.clone(),
             state_node_adapter.clone(),
             node_network.into(),
-        ));
+        );
 
         // create collation processor that will use these adapters
         // and run dispatcher for its own tasks queue

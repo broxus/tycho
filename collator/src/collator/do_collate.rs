@@ -135,7 +135,7 @@ where
         let out_msg_queue_info = prev_shard_data.observable_states()[0]
             .state()
             .load_out_msg_queue_info()
-            .unwrap_or_default();
+            .unwrap_or_default(); //TODO: should not fail there
         collation_data.out_msg_queue_stuff = OutMsgQueueInfoStuff {
             proc_info: out_msg_queue_info.proc_info,
         };
