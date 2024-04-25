@@ -45,14 +45,14 @@ impl ComposeRunner {
         })
     }
 
-    pub fn add_prometheus(&mut self, ) -> Result<()> {
+    pub fn add_prometheus(&mut self) -> Result<()> {
         let prom_data = r#"
         {
             "image": "prom/prometheus",
             "ports": ["9090:9090"],
             "restart": "unless-stopped",
             "volumes": ["./prometheus:/etc/prometheus"],
-            command: ['--config.file=/etc/prometheus/prometheus.yml']
+            "command": ["--config.file=/etc/prometheus/prometheus.yml"]
         }"#;
         let prom_value = serde_json::Value::from_str(prom_data)?;
         self.compose.services.insert("prometheus".to_string(), prom_value);

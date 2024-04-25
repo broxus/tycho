@@ -46,6 +46,13 @@ impl ServiceConfig {
     pub fn entrypoints(&self) -> PathBuf {
         self.scratch_dir.join("entrypoints")
     }
+    pub fn grafana(&self) -> PathBuf {
+        self.scratch_dir.join("grafana")
+    }
+    pub fn prometheus(&self) -> PathBuf {
+        self.scratch_dir.join("prometheus")
+    }
+
     pub fn options(&self) -> PathBuf {
         self.scratch_dir.join("options")
     }

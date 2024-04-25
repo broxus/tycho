@@ -38,12 +38,14 @@ impl Simulator {
     }
 
     pub fn prepare(&mut self, nodes: usize) -> Result<()> {
+        let mut ips = Vec::new();
         for node_index in 0..nodes {
-            self.add_node(node_index, None, None)?;
+            let ip = self.add_node(node_index, None, None)?;
+            ips.push(ip)
         }
 
         self.add_grafana()?;
-        self.add_prometheus()?;
+        self.add_prometheus(ips)?;
 
         self.finalize()?;
         Ok(())
@@ -66,7 +68,7 @@ impl Simulator {
         node_index: usize,
         delay: Option<u16>,
         loss: Option<u16>,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let node_ip = increment_ip(self.next_node_ip, 1);
 
         let options = match (delay, loss) {
@@ -87,6 +89,7 @@ impl Simulator {
 
         let mut node = Node::init_from_cli(node_ip, self.config.node_port, node_index, options)
             .with_context(|| format!("failed to init node-{node_index}"))?;
+        let ip = node.ip.to_string();
         let service = node.as_service(&self.config)?;
 
         self.global_config
@@ -101,14 +104,16 @@ impl Simulator {
 
         self.write_run_data(node)?;
         self.next_node_ip = node_ip;
-        Ok(())
+        Ok(ip)
     }
 
     pub fn add_grafana(&mut self) -> Result<()> {
+        self.write_grafana_data()?;
         self.compose.add_grafana()
     }
 
-    pub fn add_prometheus(&mut self) -> Result<()> {
+    pub fn add_prometheus(&mut self, node_addresses: Vec<String>) -> Result<()> {
+        self.write_prometheus_data(node_addresses)?;
         self.compose.add_prometheus()
     }
 
@@ -116,6 +121,60 @@ impl Simulator {
         self.global_config.bootstrap_peers.len()
     }
 
+    fn write_grafana_data(&self) -> Result<()> {
+        std::fs::create_dir_all(self.config.grafana())?;
+        let grafana_data =
+            r#"apiVersion: 1
+
+datasources:
+- name: Prometheus
+  type: prometheus
+  url: http://prometheus:9090
+  isDefault: true
+  access: proxy
+  editable: true
+        "#;
+        let grafana_datasource_config = self.config.grafana().join("datasource.yml");
+        std::fs::write(&grafana_datasource_config, grafana_data)
+            .context("Failed to write grafana data")?;
+
+        Ok(())
+    }
+
+    fn write_prometheus_data(&self, node_addresses: Vec<String>) -> Result<()> {
+        let nodes = node_addresses
+            .iter()
+            .map(|x| format!("- {x}:9081"))
+            .reduce(|left, right| format!("{}\n    {}", left, right)).unwrap_or_default();
+        std::fs::create_dir_all(self.config.prometheus())?;
+        let prometheus_data =
+            format!(r#"global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+alerting:
+  alertmanagers:
+  - static_configs:
+    - targets: []
+    scheme: http
+    timeout: 10s
+    api_version: v1
+scrape_configs:
+- job_name: prometheus
+  honor_timestamps: true
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  metrics_path: /metrics
+  scheme: http
+  static_configs:
+  - targets:
+    {}
+            "#, nodes);
+        let prometheus_datasource_config = self.config.prometheus().join("prometheus.yml");
+        std::fs::write(&prometheus_datasource_config, prometheus_data)
+            .context("Failed to write prometheus data")?;
+        Ok(())
+    }
     fn write_run_data(&self, node: Node) -> Result<()> {
         let entrypoint_data = generate_entrypoint(node.run_command());
         let entrypoint_path = node.entrypoint_path(&self.config);
