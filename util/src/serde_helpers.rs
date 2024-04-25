@@ -5,58 +5,6 @@ use std::str::FromStr;
 use serde::de::{Error, Expected, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-pub mod public_key {
-    use everscale_crypto::ed25519;
-
-    use super::*;
-
-    pub fn serialize<S: Serializer>(
-        value: &ed25519::PublicKey,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        hex_byte_array::serialize(value.as_bytes(), serializer)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<ed25519::PublicKey, D::Error> {
-        hex_byte_array::deserialize(deserializer).and_then(|bytes| {
-            ed25519::PublicKey::from_bytes(bytes).ok_or_else(|| Error::custom("invalid public key"))
-        })
-    }
-}
-
-pub mod hex_byte_array {
-    use super::*;
-
-    pub fn serialize<S: Serializer>(
-        value: &dyn AsRef<[u8]>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        if serializer.is_human_readable() {
-            serializer.serialize_str(&hex::encode(value.as_ref()))
-        } else {
-            serializer.serialize_bytes(value.as_ref())
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>, const N: usize>(
-        deserializer: D,
-    ) -> Result<[u8; N], D::Error> {
-        if deserializer.is_human_readable() {
-            deserializer.deserialize_str(HexVisitor).and_then(|bytes| {
-                let len = bytes.len();
-                match <[u8; N]>::try_from(bytes) {
-                    Ok(bytes) => Ok(bytes),
-                    Err(_) => Err(Error::invalid_length(len, &"32 bytes")),
-                }
-            })
-        } else {
-            deserializer.deserialize_bytes(BytesVisitor::<N>)
-        }
-    }
-}
-
 pub mod socket_addr {
     use std::net::SocketAddr;
 

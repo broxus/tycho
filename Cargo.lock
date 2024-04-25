@@ -587,14 +587,15 @@ dependencies = [
 
 [[package]]
 name = "everscale-crypto"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3b3e4fc7882223c86a7cfd8ccdb58e017b89a9f91d90114beafa0e8d35b45fb"
+checksum = "0b0304a55e328ca4f354e59e6816bccb43b03f681b85b31c6bd10ea7233d62b5"
 dependencies = [
  "curve25519-dalek",
  "generic-array",
  "hex",
  "rand",
+ "serde",
  "sha2",
  "tl-proto",
 ]
@@ -602,7 +603,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
+source = "git+https://github.com/broxus/everscale-types.git#40f2cd862ede93943a254351fe4eea313be83233"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -622,7 +623,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
+source = "git+https://github.com/broxus/everscale-types.git#40f2cd862ede93943a254351fe4eea313be83233"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1616,6 +1617,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_path_to_error"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af99884400da37c88f5e9146b7f1fd0fbcae8f6eec4e9da38b67d05486f814a6"
+dependencies = [
+ "itoa",
+ "serde",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,6 +2117,9 @@ dependencies = [
  "rustc_version",
  "serde",
  "serde_json",
+ "serde_path_to_error",
+ "sha2",
+ "thiserror",
  "tikv-jemallocator",
  "tokio",
  "tycho-network",

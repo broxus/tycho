@@ -295,7 +295,7 @@ impl MultisigBuilder {
         let mut data = CellBuilder::new();
 
         // Write headers
-        data.store_u256(HashBytes::wrap(self.pubkey.as_bytes()))?;
+        data.store_u256(&self.pubkey)?;
         data.store_u64(0)?; // time
         data.store_bit_one()?; // constructor flag
 
@@ -368,7 +368,7 @@ impl GiverBuilder {
                 let mut data = CellBuilder::new();
 
                 // Append pubkey first
-                data.store_u256(HashBytes::wrap(self.pubkey.as_bytes()))?;
+                data.store_u256(&self.pubkey)?;
 
                 // Append everything except the pubkey
                 let prev_data = state_init
