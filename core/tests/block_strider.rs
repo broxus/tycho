@@ -5,8 +5,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_core::block_strider::provider::BlockProvider;
 use tycho_core::blockchain_client::BlockchainClient;
-use tycho_core::overlay_client::public_overlay_client::PublicOverlayClient;
-use tycho_core::overlay_client::settings::OverlayClientSettings;
+use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
 
 mod common;
@@ -115,9 +114,8 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
-            OverlayClientSettings::default(),
-        )
-        .await,
+            PublicOverlayClientConfig::default(),
+        ),
         Default::default(),
     );
 

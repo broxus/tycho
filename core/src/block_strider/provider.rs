@@ -91,25 +91,25 @@ impl BlockProvider for BlockchainClient {
             let config = self.config();
 
             loop {
-                let res = self.get_next_block_full(*prev_block_id).await;
+                let res = self.get_next_block_full(prev_block_id).await;
 
                 let block = match res {
                     Ok(res) if matches!(res.data(), BlockFull::Found { .. }) => {
                         let (block_id, data) = match res.data() {
                             BlockFull::Found {
                                 block_id, block, ..
-                            } => (*block_id, block),
+                            } => (*block_id, block.clone()),
                             BlockFull::Empty => unreachable!(),
                         };
 
-                        match BlockStuff::deserialize_checked(block_id, data) {
+                        match BlockStuff::deserialize_checked(block_id, &data) {
                             Ok(block) => {
-                                res.mark_response(true);
-                                Some(Ok(BlockStuffAug::new(block, data.clone())))
+                                res.accept();
+                                Some(Ok(BlockStuffAug::new(block, data)))
                             }
                             Err(e) => {
                                 tracing::error!("failed to deserialize block: {:?}", e);
-                                res.mark_response(false);
+                                res.reject();
                                 None
                             }
                         }
@@ -135,7 +135,7 @@ impl BlockProvider for BlockchainClient {
             let config = self.config();
 
             loop {
-                let res = match self.get_block_full(*block_id).await {
+                let res = match self.get_block_full(block_id).await {
                     Ok(res) => res,
                     Err(e) => {
                         tracing::error!("failed to get block: {:?}", e);
@@ -152,7 +152,7 @@ impl BlockProvider for BlockchainClient {
                     } => match BlockStuff::deserialize_checked(*block_id, data) {
                         Ok(block) => Some(Ok(BlockStuffAug::new(block, data.clone()))),
                         Err(e) => {
-                            res.mark_response(false);
+                            res.accept();
                             tracing::error!("failed to deserialize block: {:?}", e);
                             tokio::time::sleep(config.get_block_polling_interval).await;
                             continue;

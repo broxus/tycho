@@ -6,8 +6,7 @@ use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_core::blockchain_client::BlockchainClient;
-use tycho_core::overlay_client::public_overlay_client::PublicOverlayClient;
-use tycho_core::overlay_client::settings::OverlayClientSettings;
+use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::overlay_server::DEFAULT_ERROR_CODE;
 use tycho_core::proto::overlay::{BlockFull, KeyBlockIds, PersistentStatePart};
 use tycho_network::PeerId;
@@ -94,27 +93,26 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
-            OverlayClientSettings::default(),
-        )
-        .await,
+            Default::default(),
+        ),
         Default::default(),
     );
 
-    let result = client.get_block_full(BlockId::default()).await;
+    let result = client.get_block_full(&BlockId::default()).await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
         assert_eq!(response.data(), &BlockFull::Empty);
     }
 
-    let result = client.get_next_block_full(BlockId::default()).await;
+    let result = client.get_next_block_full(&BlockId::default()).await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
         assert_eq!(response.data(), &BlockFull::Empty);
     }
 
-    let result = client.get_next_key_block_ids(BlockId::default(), 10).await;
+    let result = client.get_next_key_block_ids(&BlockId::default(), 10).await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
@@ -126,7 +124,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     }
 
     let result = client
-        .get_persistent_state_part(BlockId::default(), BlockId::default(), 0, 0)
+        .get_persistent_state_part(&BlockId::default(), &BlockId::default(), 0, 0)
         .await;
     assert!(result.is_ok());
 
@@ -238,16 +236,15 @@ async fn overlay_server_blocks() -> Result<()> {
         PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
-            OverlayClientSettings::default(),
-        )
-        .await,
+            Default::default(),
+        ),
         Default::default(),
     );
 
     let archive = common::storage::get_archive()?;
     for (block_id, archive_data) in archive.blocks {
         if block_id.shard.is_masterchain() {
-            let result = client.get_block_full(block_id.clone()).await;
+            let result = client.get_block_full(&block_id).await;
             assert!(result.is_ok());
 
             if let Ok(response) = &result {

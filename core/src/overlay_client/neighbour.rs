@@ -1,66 +1,67 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use parking_lot::RwLock;
 use tycho_network::PeerId;
 use tycho_util::time::now_sec;
 
-#[derive(Debug, Copy, Clone)]
-pub struct NeighbourOptions {
-    pub default_roundtrip_ms: u64,
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct Neighbour {
+    inner: Arc<Inner>,
 }
 
-#[derive(Clone)]
-pub struct Neighbour(Arc<NeighbourState>);
-
 impl Neighbour {
-    pub fn new(peer_id: PeerId, expires_at: u32, options: NeighbourOptions) -> Self {
-        let default_roundtrip_ms = truncate_time(options.default_roundtrip_ms);
-        let stats = parking_lot::RwLock::new(TrackedStats::new(default_roundtrip_ms));
-
-        let state = Arc::new(NeighbourState {
-            peer_id,
-            expires_at,
-            stats,
-        });
-        Self(state)
+    pub fn new(peer_id: PeerId, expires_at: u32, default_roundtrip: &Duration) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                peer_id,
+                expires_at,
+                stats: RwLock::new(TrackedStats::new(truncate_time(default_roundtrip))),
+            }),
+        }
     }
 
     #[inline]
     pub fn peer_id(&self) -> &PeerId {
-        &self.0.peer_id
+        &self.inner.peer_id
     }
 
     #[inline]
     pub fn expires_at_secs(&self) -> u32 {
-        self.0.expires_at
+        self.inner.expires_at
     }
 
     pub fn get_stats(&self) -> NeighbourStats {
-        let stats = self.0.stats.read();
+        let stats = self.inner.stats.read();
         NeighbourStats {
             score: stats.score,
             total_requests: stats.total,
             failed_requests: stats.failed,
-            avg_roundtrip: stats.roundtrip.get_avg(),
+            avg_roundtrip: stats
+                .roundtrip
+                .get_avg()
+                .map(|avg| Duration::from_millis(avg as u64)),
             created: stats.created,
         }
     }
 
     pub fn is_reliable(&self) -> bool {
-        self.0.stats.read().higher_than_threshold()
+        self.inner.stats.read().higher_than_threshold()
     }
 
     pub fn compute_selection_score(&self) -> Option<u8> {
-        self.0.stats.read().compute_selection_score()
+        self.inner.stats.read().compute_selection_score()
     }
 
-    pub fn get_roundtrip(&self) -> Option<u64> {
-        let roundtrip = self.0.stats.read().roundtrip.get_avg()?;
-        Some(roundtrip as u64)
+    pub fn get_roundtrip(&self) -> Option<Duration> {
+        let roundtrip = self.inner.stats.read().roundtrip.get_avg()?;
+        Some(Duration::from_millis(roundtrip as u64))
     }
 
-    pub fn track_request(&self, roundtrip: u64, success: bool) {
+    pub fn track_request(&self, roundtrip: &Duration, success: bool) {
         let roundtrip = truncate_time(roundtrip);
-        self.0.stats.write().update(roundtrip, success);
+        self.inner.stats.write().update(roundtrip, success);
     }
 }
 
@@ -73,14 +74,14 @@ pub struct NeighbourStats {
     pub total_requests: u64,
     /// The number of failed requests to the neighbour.
     pub failed_requests: u64,
-    /// Average ADNL roundtrip in milliseconds.
-    /// NONE if there were no ADNL requests to the neighbour.
-    pub avg_roundtrip: Option<u16>,
+    /// Average roundtrip.
+    /// NONE if there were no requests to the neighbour.
+    pub avg_roundtrip: Option<Duration>,
     /// Neighbour first appearance
     pub created: u32,
 }
 
-struct NeighbourState {
+struct Inner {
     peer_id: PeerId,
     expires_at: u32,
     stats: parking_lot::RwLock<TrackedStats>,
@@ -193,6 +194,6 @@ impl PackedSmaBuffer {
     }
 }
 
-fn truncate_time(roundtrip: u64) -> u16 {
-    std::cmp::min(roundtrip, u16::MAX as u64) as u16
+fn truncate_time(roundtrip: &Duration) -> u16 {
+    std::cmp::min(roundtrip.as_millis() as u64, u16::MAX as u64) as u16
 }

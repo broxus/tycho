@@ -5,7 +5,6 @@ use rand::Rng;
 use tokio::sync::Mutex;
 
 use crate::overlay_client::neighbour::Neighbour;
-use crate::overlay_client::settings::NeighboursOptions;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -14,21 +13,17 @@ pub struct Neighbours {
 }
 
 impl Neighbours {
-    pub fn new(entries: Vec<Neighbour>, options: NeighboursOptions) -> Self {
-        let mut selection_index = SelectionIndex::new(options.max_neighbours);
+    pub fn new(entries: Vec<Neighbour>, max_neighbours: usize) -> Self {
+        let mut selection_index = SelectionIndex::new(max_neighbours);
         selection_index.update(&entries);
 
         Self {
             inner: Arc::new(Inner {
-                options,
+                max_neighbours,
                 entries: Mutex::new(entries),
                 selection_index: Mutex::new(selection_index),
             }),
         }
-    }
-
-    pub fn options(&self) -> &NeighboursOptions {
-        &self.inner.options
     }
 
     pub async fn choose(&self) -> Option<Neighbour> {
@@ -63,7 +58,7 @@ impl Neighbours {
         guard.retain(|x| x.is_reliable() && x.expires_at_secs() > now);
 
         // if all neighbours are reliable and valid then remove the worst
-        if guard.len() >= self.inner.options.max_neighbours {
+        if guard.len() >= self.inner.max_neighbours {
             if let Some(worst) = guard
                 .iter()
                 .min_by(|l, r| l.get_stats().score.cmp(&r.get_stats().score))
@@ -78,7 +73,7 @@ impl Neighbours {
             if guard.iter().any(|x| x.peer_id() == n.peer_id()) {
                 continue;
             }
-            if guard.len() < self.inner.options.max_neighbours {
+            if guard.len() < self.inner.max_neighbours {
                 guard.push(n);
             }
         }
@@ -99,7 +94,7 @@ impl Neighbours {
 }
 
 struct Inner {
-    options: NeighboursOptions,
+    max_neighbours: usize,
     entries: Mutex<Vec<Neighbour>>,
     selection_index: Mutex<SelectionIndex>,
 }
