@@ -232,6 +232,15 @@ checksum = "cf4b9d6a944f767f8e5e0db018570623c85f3d925ac718db4e06d0187adb21c1"
 
 [[package]]
 name = "block-buffer"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4152116fd6e9dadb291ae18fc1ec3575ed6d84c29642d97890f4b4a3417297e4"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
+name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
@@ -535,11 +544,20 @@ dependencies = [
 
 [[package]]
 name = "digest"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3dd60d1080a57a05ab032377049e0591415d2b31afd7028356dbf3cc6dcb066"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
+name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
- "block-buffer",
+ "block-buffer 0.10.4",
  "crypto-common",
 ]
 
@@ -596,6 +614,7 @@ dependencies = [
  "generic-array",
  "hex",
  "rand",
+ "sha2 0.10.8",
  "serde",
  "sha2",
  "tl-proto",
@@ -611,11 +630,31 @@ dependencies = [
  "bitflags 2.5.0",
  "crc32c",
  "everscale-crypto",
- "everscale-types-proc",
+ "everscale-types-proc 0.1.4 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
  "hex",
  "once_cell",
  "serde",
- "sha2",
+ "sha2 0.10.8",
+ "smallvec",
+ "thiserror",
+ "tl-proto",
+]
+
+[[package]]
+name = "everscale-types"
+version = "0.1.0-rc.6"
+source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
+dependencies = [
+ "ahash",
+ "base64 0.21.7",
+ "bitflags 2.5.0",
+ "crc32c",
+ "everscale-crypto",
+ "everscale-types-proc 0.1.4 (git+https://github.com/broxus/everscale-types.git)",
+ "hex",
+ "once_cell",
+ "serde",
+ "sha2 0.10.8",
  "smallvec",
  "thiserror",
  "tl-proto",
@@ -625,6 +664,16 @@ dependencies = [
 name = "everscale-types-proc"
 version = "0.1.4"
 source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#640ed863dd20e38964798ec7d9ae2bada5b2b20a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.60",
+]
+
+[[package]]
+name = "everscale-types-proc"
+version = "0.1.4"
+source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1001,6 +1050,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "num"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3135b08af27d103b0a51f2ae0f8632117b7b185ccf931445affa8df530576a41"
+dependencies = [
+ "num-bigint",
+ "num-complex",
+ "num-integer",
+ "num-iter",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1012,10 +1075,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-complex"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23c6602fda94a57c990fe0df199a035d83576b496aa29f4e634a8ac6004e68a6"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
+
+[[package]]
+name = "num-derive"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "876a53fff98e03a936a674b29568b0e605f06b29372c2489ff4de23f1949743d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
 
 [[package]]
 name = "num-integer"
@@ -1023,6 +1106,29 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-iter"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d869c01cc0c455284163fd0092f1f93835385ccab5a98a0dcc497b2f8bf055a9"
+dependencies = [
+ "autocfg",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0638a1c9d0a3c0914158145bc76cff373a75a627e6ecbfb71cbe6f453a5a19b0"
+dependencies = [
+ "autocfg",
+ "num-bigint",
+ "num-integer",
  "num-traits",
 ]
 
@@ -1068,6 +1174,12 @@ name = "once_cell"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3fdb12b2476b595f9358c5161aa467c2438859caa136dec86c26fdd2efe17b92"
+
+[[package]]
+name = "opaque-debug"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "overload"
@@ -1156,7 +1268,7 @@ checksum = "2adbf29bb9776f28caece835398781ab24435585fe0d4dc1374a61db5accedca"
 dependencies = [
  "once_cell",
  "pest",
- "sha2",
+ "sha2 0.10.8",
 ]
 
 [[package]]
@@ -1629,13 +1741,26 @@ dependencies = [
 
 [[package]]
 name = "sha2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d58a1e1bf39749807d89cf2d98ac2dfa0ff1cb3faa38fbb64dd88ac8013d800"
+dependencies = [
+ "block-buffer 0.9.0",
+ "cfg-if",
+ "cpufeatures",
+ "digest 0.9.0",
+ "opaque-debug",
+]
+
+[[package]]
+name = "sha2"
 version = "0.10.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
- "digest",
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -1906,8 +2031,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4da430e55186abb18b4d1457a23eb0765af0dee66a9f741d652d6eaa476a8d7"
 dependencies = [
  "bytes",
- "digest",
- "sha2",
+ "digest 0.10.7",
+ "sha2 0.10.8",
  "smallvec",
  "thiserror",
  "tl-proto-proc",
@@ -1981,6 +2106,39 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "ton_executor"
+version = "2.0.0"
+source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#019ab361c61ac59435baa08c1277562ed2d85094"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git)",
+ "log",
+ "thiserror",
+ "ton_vm",
+]
+
+[[package]]
+name = "ton_vm"
+version = "2.0.0"
+source = "git+https://github.com/broxus/ton-labs-vm.git?branch=new_cells#c5023624f0722a3ca4de8538195d3741f1f3b058"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "everscale-crypto",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git)",
+ "hex",
+ "lazy_static",
+ "log",
+ "num",
+ "num-derive",
+ "num-traits",
+ "rand",
+ "sha2 0.9.9",
+ "thiserror",
 ]
 
 [[package]]
@@ -2095,11 +2253,11 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
- "everscale-types",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
  "hex",
  "parking_lot",
  "rand",
- "sha2",
+ "sha2 0.10.8",
  "smallvec",
  "thiserror",
  "tycho-util",
@@ -2136,15 +2294,16 @@ dependencies = [
  "async-trait",
  "bytesize",
  "everscale-crypto",
- "everscale-types",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
  "futures-util",
  "log",
  "rand",
- "sha2",
+ "sha2 0.10.8",
  "tempfile",
  "tl-proto",
  "tokio",
  "tokio-util",
+ "ton_executor",
  "tracing",
  "tracing-subscriber",
  "tracing-test",
@@ -2269,7 +2428,7 @@ dependencies = [
  "bytesize",
  "crc",
  "dashmap",
- "everscale-types",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
  "fdlimit",
  "hex",
  "humantime",
@@ -2281,7 +2440,7 @@ dependencies = [
  "rlimit",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.8",
  "smallvec",
  "sysinfo",
  "tempfile",

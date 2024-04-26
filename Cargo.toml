@@ -77,7 +77,8 @@ tikv-jemallocator = { version = "0.5", features = [
 ] }
 tl-proto = "0.4"
 tokio = { version = "1", default-features = false }
-tokio-util = { version = "0.7.10", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", branch = "new_cells" }
 tracing = "0.1"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -100,6 +101,7 @@ tycho-util = { path = "./util" }
 # https://github.com/sagebind/castaway/issues/18
 castaway = { git = "https://github.com/sagebind/castaway.git" }
 everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "tycho" }
+
 
 [workspace.lints.rust]
 future_incompatible = "warn"

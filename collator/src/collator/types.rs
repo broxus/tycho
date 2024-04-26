@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Result};
 
+use everscale_types::models::TickTock;
 use everscale_types::{
     cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
     dict::{AugDict, Dict},
@@ -499,11 +500,20 @@ impl ShardDescriptionExt for ShardDescription {
     }
 }
 
+/// Async message
 pub(super) enum AsyncMessage {
     /// 0 - message; 1 - message.id_hash()
     Ext(OwnedMessage, HashBytes),
     /// 0 - message in execution queue; 1 - TRUE when from the same shard
     Int(EnqueuedMessage, bool),
+    /// 0 - message
+    Recover(OwnedMessage),
+    /// 0 - message
+    Mint(OwnedMessage),
+    /// 0 - message, 1 - prev_trans_cell
+    New(OwnedMessage, Cell),
+    /// TickTock message
+    TickTock(TickTock),
 }
 
 pub mod ext_types_stubs {}
