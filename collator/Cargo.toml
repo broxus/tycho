@@ -21,6 +21,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ton_executor = { workspace = true }
 
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
