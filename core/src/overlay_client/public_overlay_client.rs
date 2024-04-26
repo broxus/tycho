@@ -1,80 +1,124 @@
-use std::future::Future;
-use std::marker::PhantomData;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Error, Result};
-use tl_proto::TlRead;
-
-use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
-use tycho_network::{Network, PeerId};
+use tycho_network::Network;
 use tycho_network::{PublicOverlay, Request};
 
-use crate::overlay_client::neighbours::{NeighbourCollection, Neighbours};
+use crate::overlay_client::neighbour::{Neighbour, NeighbourOptions};
+use crate::overlay_client::neighbours::Neighbours;
 use crate::overlay_client::settings::{OverlayClientSettings, OverlayOptions};
 use crate::proto::overlay::{Ping, Pong, Response};
 
-pub trait OverlayClient {
-    fn send<R>(&self, data: R) -> impl Future<Output = Result<()>> + Send
-    where
-        R: tl_proto::TlWrite<Repr = tl_proto::Boxed> + Send;
-
-    fn query<R, A>(&self, data: R) -> impl Future<Output = Result<QueryResponse<'_, A>>> + Send
-    where
-        R: tl_proto::TlWrite<Repr = tl_proto::Boxed> + Send,
-        for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>;
-}
-
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct PublicOverlayClient(Arc<OverlayClientState>);
 
-#[derive(Clone)]
-pub struct Peer {
-    pub id: PeerId,
-    pub expires_at: u32,
-}
-
 impl PublicOverlayClient {
-    pub async fn new(
-        network: Network,
-        overlay: PublicOverlay,
-        settings: OverlayClientSettings,
-    ) -> Self {
+    pub fn new(network: Network, overlay: PublicOverlay, settings: OverlayClientSettings) -> Self {
+        let neighbour_options = NeighbourOptions {
+            default_roundtrip_ms: settings.neighbours_options.default_roundtrip_ms,
+        };
+
         let ttl = overlay.entry_ttl_sec();
-        let peers = {
+        let entries = {
             overlay
                 .read_entries()
                 .choose_multiple(
                     &mut rand::thread_rng(),
                     settings.neighbours_options.max_neighbours,
                 )
-                .map(|entry_data| Peer {
-                    id: entry_data.entry.peer_id,
-                    expires_at: entry_data.expires_at(ttl),
+                .map(|entry_data| {
+                    Neighbour::new(
+                        entry_data.entry.peer_id,
+                        entry_data.expires_at(ttl),
+                        neighbour_options,
+                    )
                 })
                 .collect::<Vec<_>>()
         };
 
-        let neighbours = Neighbours::new(peers, settings.neighbours_options).await;
-        let neighbours_collection = NeighbourCollection(neighbours);
-        Self(Arc::new(OverlayClientState {
+        let neighbours = Neighbours::new(entries, settings.neighbours_options);
+
+        let inner = Arc::new(OverlayClientState {
             network,
             overlay,
-            neighbours: neighbours_collection,
+            neighbours,
             settings: settings.overlay_options,
-        }))
+        });
+
+        Self(inner)
     }
 
-    fn neighbours(&self) -> &Arc<Neighbours> {
-        &self.0.neighbours.0
+    pub fn neighbours(&self) -> &Neighbours {
+        &self.0.neighbours
     }
 
-    pub async fn entries_removed(&self) {
+    pub async fn send<R>(&self, data: R) -> Result<()>
+    where
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+    {
+        let Some(neighbour) = self.0.neighbours.choose().await else {
+            tracing::error!("No neighbours found to send request");
+            return Err(Error::msg("Failed to ping")); //TODO: proper error
+        };
+
+        self.0
+            .overlay
+            .send(&self.0.network, neighbour.peer_id(), Request::from_tl(data))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>>
+    where
+        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
+        for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
+    {
+        let Some(neighbour) = self.0.neighbours.choose().await else {
+            tracing::error!("No neighbours found to send request");
+            return Err(Error::msg("Failed to ping")); //TODO: proper error
+        };
+
+        let start_time = Instant::now();
+        let response_opt = self
+            .0
+            .overlay
+            .query(&self.0.network, neighbour.peer_id(), Request::from_tl(data))
+            .await;
+        let roundtrip = start_time.elapsed();
+
+        match response_opt {
+            Ok(response) => {
+                let response = response.parse_tl::<Response<A>>()?;
+                let response_model = match response {
+                    Response::Ok(r) => r,
+                    Response::Err(code) => {
+                        return Err(Error::msg(format!("Failed to get response: {code}")))
+                    }
+                };
+
+                Ok(QueryResponse {
+                    data: response_model,
+                    roundtrip: roundtrip.as_millis() as u64,
+                    neighbour: neighbour.clone(),
+                })
+            }
+            Err(e) => {
+                tracing::error!(peer_id = %neighbour.peer_id(), "Failed to get response from peer. Err: {e:?}");
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn wait_entries_removed(&self) {
         self.0.overlay.entries_removed().notified().await;
     }
+
     pub fn neighbour_update_interval_ms(&self) -> u64 {
         self.0.settings.neighbours_update_interval
     }
+
     pub fn neighbour_ping_interval_ms(&self) -> u64 {
         self.0.settings.neighbours_ping_interval
     }
@@ -111,7 +155,7 @@ impl PublicOverlayClient {
     }
 
     pub async fn ping_random_neighbour(&self) -> Result<()> {
-        let Some(neighbour) = self.0.neighbours.0.choose().await else {
+        let Some(neighbour) = self.0.neighbours.choose().await else {
             tracing::error!("No neighbours found to ping");
             return Err(Error::msg("Failed to ping"));
         };
@@ -153,88 +197,53 @@ impl PublicOverlayClient {
     }
 }
 
-impl OverlayClient for PublicOverlayClient {
-    async fn send<R>(&self, data: R) -> Result<()>
-    where
-        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
-    {
-        let Some(neighbour) = self.0.neighbours.0.choose().await else {
-            tracing::error!("No neighbours found to send request");
-            return Err(Error::msg("Failed to ping")); //TODO: proper error
-        };
+async fn start_neighbours_ping(client: PublicOverlayClient) {
+    let mut interval =
+        tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
 
-        //let boxed = tl_proto::serialize(data);
-        self.0
-            .overlay
-            .send(&self.0.network, neighbour.peer_id(), Request::from_tl(data))
-            .await?;
-        Ok(())
-    }
-
-    async fn query<R, A>(&self, data: R) -> Result<QueryResponse<'_, A>>
-    where
-        R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
-        for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
-    {
-        let Some(neighbour) = self.0.neighbours.0.choose().await else {
-            tracing::error!("No neighbours found to send request");
-            return Err(Error::msg("Failed to ping")); //TODO: proper error
-        };
-        let start_time = Instant::now();
-        let response_opt = self
-            .0
-            .overlay
-            .query(&self.0.network, neighbour.peer_id(), Request::from_tl(data))
-            .await;
-        let end_time = Instant::now();
-
-        match response_opt {
-            Ok(response) => {
-                let response = response.parse_tl::<Response<A>>()?;
-                let response_model = match response {
-                    Response::Ok(r) => r,
-                    Response::Err(code) => {
-                        return Err(Error::msg(format!("Failed to get response: {code}")))
-                    }
-                };
-
-                Ok(QueryResponse {
-                    data: response_model,
-                    roundtrip: start_time.duration_since(end_time).as_millis() as u64,
-                    neighbour: neighbour.clone(),
-                    _marker: PhantomData,
-                })
-            }
-            Err(e) => {
-                tracing::error!(peer_id = %neighbour.peer_id(), "Failed to get response from peer. Err: {e:?}");
-                Err(e)
-            }
+    loop {
+        interval.tick().await;
+        if let Err(e) = client.ping_random_neighbour().await {
+            tracing::error!("Failed to ping random neighbour. Error: {e:?}");
         }
+    }
+}
+
+async fn start_neighbours_update(client: PublicOverlayClient) {
+    let mut interval =
+        tokio::time::interval(Duration::from_millis(client.neighbour_update_interval_ms()));
+    loop {
+        interval.tick().await;
+        client.update_neighbours().await;
+    }
+}
+
+async fn wait_update_neighbours(client: PublicOverlayClient) {
+    loop {
+        client.wait_entries_removed().await;
+        client.remove_outdated_neighbours().await;
     }
 }
 
 struct OverlayClientState {
     network: Network,
     overlay: PublicOverlay,
-    neighbours: NeighbourCollection,
+    neighbours: Neighbours,
 
     settings: OverlayOptions,
 }
 
-pub struct QueryResponse<'a, A: TlRead<'a>> {
+pub struct QueryResponse<A> {
     data: A,
     neighbour: Neighbour,
     roundtrip: u64,
-    _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, A> QueryResponse<'a, A>
-where
-    A: TlRead<'a, Repr = tl_proto::Boxed>,
-{
+impl<A> QueryResponse<A> {
     pub fn data(&self) -> &A {
         &self.data
     }
+
     pub fn mark_response(&self, success: bool) {
         self.neighbour.track_request(self.roundtrip, success);
     }

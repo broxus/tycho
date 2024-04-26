@@ -309,13 +309,18 @@ impl PublicOverlay {
     pub(crate) fn remove_invalid_entries(&self, now: u32) {
         let this = self.inner.as_ref();
 
+        let mut should_notify = false;
         let mut entries = this.entries.write();
         entries.retain(|item| {
-            !item.entry.is_expired(now, this.entry_ttl_sec)
-                && !this.banned_peer_ids.contains(&item.entry.peer_id)
+            let retain = !item.entry.is_expired(now, this.entry_ttl_sec)
+                && !this.banned_peer_ids.contains(&item.entry.peer_id);
+            should_notify |= !retain;
+            retain
         });
 
-        self.inner.entries_removed.notify_waiters();
+        if should_notify {
+            self.inner.entries_removed.notify_waiters();
+        }
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
