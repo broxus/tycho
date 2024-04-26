@@ -9,7 +9,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Link, Location, NodeCount, Point, ValidPoint};
+use crate::models::{DagPoint, Digest, Link, Location, NodeCount, Point, PointId, ValidPoint};
 
 /*
 Note on equivocation.
@@ -47,7 +47,11 @@ impl Verifier {
     }
 
     /// must be called iff [Self::verify] succeeded
-    pub async fn validate(point /* @ r+0 */: Arc<Point>, r_0 /* r+0 */: DagRound) -> DagPoint {
+    pub async fn validate(
+        point /* @ r+0 */: Arc<Point>,
+        r_0 /* r+0 */: DagRound,
+        downloader: Downloader,
+    ) -> DagPoint {
         // TODO upgrade Weak whenever used to let Dag Round drop if some future hangs up for long
         if &point.body.location.round != r_0.round() {
             panic!("Coding error: dag round mismatches point round")
@@ -57,12 +61,12 @@ impl Verifier {
         if !({
             Self::is_self_links_ok(&point, &r_0)
                 // the last task spawns if ok - in order not to walk through every dag round twice
-                && Self::add_anchor_links_if_ok(&point, &r_0, &mut dependencies)
+                && Self::add_anchor_links_if_ok(&point, &r_0, &downloader, &mut dependencies)
         }) {
             return DagPoint::Invalid(point.clone());
         }
         if let Some(r_1) = r_0.prev().get() {
-            Self::gather_deps(&point, &r_1, &mut dependencies);
+            Self::gather_deps(&point, &r_1, &downloader, &mut dependencies);
             return Self::check_deps(&point, dependencies).await;
         }
         // If r-1 exceeds dag depth, the arg point @ r+0 is considered valid by itself.
@@ -95,6 +99,7 @@ impl Verifier {
     fn add_anchor_links_if_ok(
         point: &Point,        // @ r+0
         dag_round: &DagRound, // start with r+0
+        downloader: &Downloader,
         dependencies: &mut JoinSet<DagPoint>,
     ) -> bool {
         let mut links = vec![
@@ -138,40 +143,63 @@ impl Verifier {
             if dag_round.round() < &point.body.location.round {
                 // will add the same point from direct dependencies twice,
                 // we can do better but nothing terrible
-                Self::add_dependency(&author, &digest, &dag_round, dependencies);
+                Self::add_dependency(
+                    &author,
+                    &digest,
+                    &dag_round,
+                    &point.body.location.author,
+                    downloader,
+                    dependencies,
+                );
             }
         }
         true
     }
 
     fn add_dependency(
-        node: &PeerId,
+        author: &PeerId,
         digest: &Digest,
         round: &DagRound,
+        dependant: &PeerId,
+        downloader: &Downloader,
         dependencies: &mut JoinSet<DagPoint>,
     ) {
-        let shared = round.edit(node, |loc| loc.add_dependency(digest, || Downloader {}));
+        let downloader = downloader.clone();
+        let shared = round.edit(author, |loc| {
+            loc.add_dependency(digest, move || {
+                let point_id = PointId {
+                    location: Location {
+                        author: author.clone(),
+                        round: round.round().clone(),
+                    },
+                    digest: digest.clone(),
+                };
+                downloader.run(point_id, round.clone(), dependant.clone())
+            })
+        });
         dependencies.spawn(shared.map(|(dag_point, _)| dag_point));
     }
 
     fn gather_deps(
         point /* @ r+0 */: &Point,
         r_1 /* r-1 */: &DagRound,
+        downloader: &Downloader,
         dependencies: &mut JoinSet<DagPoint>,
     ) {
-        r_1.view(&point.body.location.author, |loc| {
+        let author = &point.body.location.author;
+        r_1.view(author, |loc| {
             for (_, shared) in loc.versions() {
                 dependencies.spawn(shared.clone().map(|(dag_point, _)| dag_point));
             }
         });
         for (node, digest) in &point.body.includes {
             // integrity check passed, so includes contain author's prev point proof
-            Self::add_dependency(&node, &digest, &r_1, dependencies);
+            Self::add_dependency(&node, &digest, &r_1, author, downloader, dependencies);
         }
 
         if let Some(r_2) = r_1.prev().get() {
             for (node, digest) in &point.body.witness {
-                Self::add_dependency(&node, &digest, &r_2, dependencies);
+                Self::add_dependency(&node, &digest, &r_2, author, downloader, dependencies);
             }
         };
     }

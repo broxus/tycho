@@ -29,7 +29,7 @@ pub struct PeerSchedule {
     // FIXME remove mutex ( parking_lot ! )
     //  and just restart updater when new peers or epoch start are known;
     //  use copy-on-write to replace Inner as a whole;
-    //  maybe store schedule-per-round inside DAG round, but how to deal with download tasks?
+    //  maybe store schedule-per-round inside DAG round, but how to deal with download tasks then?
     inner: Arc<Mutex<PeerScheduleInner>>,
     // Connection to self is always "Added"
     // Updates are Resolved or Removed, sent single time
@@ -52,6 +52,7 @@ impl PeerSchedule {
         this
     }
 
+    /// Does not return updates on local peer_id
     pub fn updates(&self) -> broadcast::Receiver<(PeerId, PeerState)> {
         tracing::info!("subscribing to peer updates");
         self.updates.subscribe()
@@ -60,32 +61,21 @@ impl PeerSchedule {
     // To sign a point or to query for points, we need to know the intersection of:
     // * which nodes are in the validator set during the round of interest
     // * which nodes are able to connect at the moment
-    /// TODO replace bool with AtomicBool? use Arc<FastDashMap>? to return map with auto refresh
     pub async fn wait_for_peers(&self, round: &Round, node_count: NodeCount) {
         let mut rx = self.updates();
-        let mut peers = (*self.peers_for(round)).clone();
-        let mut count = peers
-            .iter()
-            .filter(|(_, state)| **state == PeerState::Resolved)
-            .count();
+        let peers = (*self.peers_for(round)).clone();
         let local_id = self.local_id();
-        while count < node_count.majority_of_others() {
+        let mut resolved = peers
+            .iter()
+            .filter(|(&peer_id, &state)| state == PeerState::Resolved && peer_id != local_id)
+            .map(|(peer_id, _)| *peer_id)
+            .collect::<FastHashSet<_>>();
+        while resolved.len() < node_count.majority_of_others() {
             match rx.recv().await {
-                Ok((peer_id, new_state)) if peer_id != local_id => {
-                    if let Some(state) = peers.get_mut(&peer_id) {
-                        match (&state, &new_state) {
-                            (PeerState::Added, PeerState::Removed) => count -= 1,
-                            (PeerState::Resolved, PeerState::Removed) => count -= 1,
-                            (PeerState::Added, PeerState::Resolved) => count += 1,
-                            (PeerState::Removed, PeerState::Resolved) => {
-                                count += 1; // should not occur
-                                tracing::warn!("peer {peer_id} is resolved after being removed")
-                            }
-                            (_, _) => {}
-                        }
-                        *state = new_state;
-                    }
-                }
+                Ok((peer_id, new_state)) => match new_state {
+                    PeerState::Resolved => _ = resolved.insert(peer_id),
+                    PeerState::Unknown => _ = resolved.remove(&peer_id),
+                },
                 _ => {}
             }
         }
@@ -192,6 +182,7 @@ impl PeerSchedule {
     }
 
     pub fn set_next_peers(&self, peers: &Vec<(PeerId, bool)>) {
+        let local_id = self.local_id();
         let mut all_peers = BTreeMap::new();
         let mut inner = self.inner.lock();
         for i in 0..inner.peers_resolved.len() {
@@ -199,21 +190,18 @@ impl PeerSchedule {
         }
         let old = peers
             .iter()
-            .filter_map(|(peer_id, _)| {
-                all_peers
-                    .get(peer_id)
-                    .map(|&state| (peer_id.clone(), state.clone()))
-            })
+            .filter_map(|(peer_id, _)| all_peers.get(peer_id).map(|state| (*peer_id, *state)))
             .collect::<Vec<_>>();
+        // detach existing copies - they are tightened to use-site DAG round
         let next = Arc::make_mut(&mut inner.peers_resolved[2]);
         next.clear();
         next.extend(peers.clone().into_iter().map(|(peer_id, is_resolved)| {
             (
                 peer_id,
-                if is_resolved {
+                if is_resolved && peer_id != local_id {
                     PeerState::Resolved
                 } else {
-                    PeerState::Added
+                    PeerState::Unknown
                 },
             )
         }));
@@ -223,10 +211,10 @@ impl PeerSchedule {
     /// Returns [true] if update was successfully applied
     pub(super) fn set_resolved(&self, peer_id: &PeerId, resolved: bool) -> bool {
         let mut is_applied = false;
-        let new_state = if resolved {
+        let new_state = if resolved && peer_id != self.local_id() {
             PeerState::Resolved
         } else {
-            PeerState::Removed
+            PeerState::Unknown
         };
         {
             let mut inner = self.inner.lock();

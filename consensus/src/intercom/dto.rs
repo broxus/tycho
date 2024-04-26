@@ -34,9 +34,10 @@ pub enum SignatureResponse {
     Rejected,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum PeerState {
-    Added,    // not yet ready to connect; always includes local peer id
-    Resolved, // remote peer ready to connect
-    Removed,  // remote peer will not be added again
+    /// Not yet ready to connect or already disconnected; always includes local peer id.
+    Unknown,
+    /// remote peer ready to connect
+    Resolved,
 }

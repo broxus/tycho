@@ -5,12 +5,12 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tokio::sync::broadcast::{self, error::RecvError};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::intercom::adapter::dto::SignerSignal;
+use crate::intercom::broadcast::dto::CollectorSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{NodeCount, Point, Round, Signature};
@@ -18,15 +18,20 @@ use crate::models::{NodeCount, Point, Round, Signature};
 type BcastResult = anyhow::Result<BroadcastResponse>;
 type SigResult = anyhow::Result<SignatureResponse>;
 
+#[derive(Debug)]
+pub enum BroadcasterSignal {
+    Ok,
+    Err,
+}
+
 pub struct Broadcaster {
     local_id: Arc<String>,
     current_round: Round,
 
     point_body: Vec<u8>,
     dispatcher: Dispatcher,
-    bcaster_ready: Arc<Notify>,
-    signer_signal: mpsc::UnboundedReceiver<SignerSignal>,
-    is_signer_ready_ok: bool,
+    bcaster_signal: mpsc::Sender<BroadcasterSignal>,
+    collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
 
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
@@ -36,7 +41,7 @@ pub struct Broadcaster {
     // results
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
-    // TODO move generic logic out of dispatcher
+    // TODO move generic logic close to dispatcher, also check DownloadTask
     bcast_request: tycho_network::Request,
     bcast_peers: FastHashSet<PeerId>,
     bcast_futs: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
@@ -51,8 +56,8 @@ impl Broadcaster {
         point: &Point,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
-        bcaster_ready: Arc<Notify>,
-        signer_signal: mpsc::UnboundedReceiver<SignerSignal>,
+        bcaster_signal: mpsc::Sender<BroadcasterSignal>,
+        collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> Self {
         let point_body = bincode::serialize(&point.body).expect("own point serializes to bytes");
         let peer_updates = peer_schedule.updates();
@@ -62,8 +67,12 @@ impl Broadcaster {
             .map(|(peer_id, _)| *peer_id)
             .collect::<FastHashSet<_>>();
         let signers_count = NodeCount::new(signers.len());
-        let bcast_peers = peer_schedule.all_resolved();
-        tracing::info!("bcast_peers {}", bcast_peers.len());
+        let collectors = peer_schedule.all_resolved();
+        tracing::info!(
+            "{local_id} @ {:?} collectors count = {}",
+            point.body.location.round,
+            collectors.len()
+        );
         let bcast_request = Dispatcher::broadcast_request(&point);
         let sig_request = Dispatcher::signature_request(&point.body.location.round);
         Self {
@@ -71,9 +80,8 @@ impl Broadcaster {
             current_round: point.body.location.round,
             point_body,
             dispatcher: dispatcher.clone(),
-            bcaster_ready,
-            signer_signal,
-            is_signer_ready_ok: false,
+            bcaster_signal,
+            collector_signal,
 
             peer_updates,
             signers,
@@ -83,7 +91,7 @@ impl Broadcaster {
             signatures: Default::default(),
 
             bcast_request,
-            bcast_peers,
+            bcast_peers: collectors,
             bcast_futs: FuturesUnordered::new(),
 
             sig_request,
@@ -92,7 +100,7 @@ impl Broadcaster {
         }
     }
     /// returns evidence for broadcast point
-    pub async fn run(mut self) -> Result<FastHashMap<PeerId, Signature>, ()> {
+    pub async fn run(mut self) -> FastHashMap<PeerId, Signature> {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -123,9 +131,9 @@ impl Broadcaster {
                 update = self.peer_updates.recv() => {
                     self.match_peer_updates(update)
                 }
-                Some(signer_signal) = self.signer_signal.recv() => {
-                    if let Some(result) = self.match_signer_signal(signer_signal) {
-                        break result.map(|_| self.signatures)
+                Some(collector_signal) = self.collector_signal.recv() => {
+                    if self.should_finish(collector_signal).await {
+                        break self.signatures
                     }
                 }
                 else => {
@@ -134,9 +142,9 @@ impl Broadcaster {
             }
         }
     }
-    fn match_signer_signal(&mut self, signer_signal: SignerSignal) -> Option<Result<(), ()>> {
+    async fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
         tracing::info!(
-            "{} @ {:?} bcaster <= signer : {signer_signal:?}; sigs {} of {}; rejects {} of {}",
+            "{} @ {:?} bcaster <= Collector::{collector_signal:?} : sigs {} of {}, rejects {} of {}",
             self.local_id,
             self.current_round,
             self.signatures.len(),
@@ -144,50 +152,42 @@ impl Broadcaster {
             self.rejections.len(),
             self.signers_count.reliable_minority(),
         );
-        match signer_signal {
-            SignerSignal::Ok => {
-                self.is_signer_ready_ok = true;
-                None
-            }
-            SignerSignal::Err => {
-                // even if we can return successful result, it will be discarded
-                Some(Err(()))
-            }
-            SignerSignal::Retry => self.check_if_ready(),
-        }
-    }
-    fn check_if_ready(&mut self) -> Option<Result<(), ()>> {
-        if self.rejections.len() >= self.signers_count.reliable_minority() {
-            self.bcaster_ready.notify_one();
-            if self.is_signer_ready_ok {
-                return Some(Err(()));
-            }
-        } else if self.signatures.len() >= self.signers_count.majority_of_others() {
-            self.bcaster_ready.notify_one();
-            if self.is_signer_ready_ok {
-                return Some(Ok(()));
+        match collector_signal {
+            // though we return successful result, it will be discarded on Err
+            CollectorSignal::Finish | CollectorSignal::Err => true,
+            CollectorSignal::Retry => {
+                if self.rejections.len() >= self.signers_count.reliable_minority() {
+                    _ = self.bcaster_signal.send(BroadcasterSignal::Err).await;
+                    return true;
+                }
+                if self.signatures.len() >= self.signers_count.majority_of_others() {
+                    _ = self.bcaster_signal.send(BroadcasterSignal::Ok).await;
+                }
+                for peer_id in mem::take(&mut self.sig_peers) {
+                    self.request_signature(&peer_id);
+                }
+                for peer_id in mem::take(&mut self.bcast_peers) {
+                    self.broadcast(&peer_id);
+                }
+                false
             }
         }
-        for peer_id in mem::take(&mut self.sig_peers) {
-            self.request_signature(&peer_id);
-        }
-        for peer_id in mem::take(&mut self.bcast_peers) {
-            self.broadcast(&peer_id);
-        }
-        None
     }
     fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
         match result {
-            Ok(update) => {
+            Ok((peer_id, new_state)) => {
                 tracing::info!(
-                    "{} @ {:?} bcaster peer update: {update:?}",
+                    "{} @ {:?} bcaster peer update: {peer_id:?} -> {new_state:?}",
                     self.local_id,
                     self.current_round
                 );
-                match update {
-                    (_peer_id, PeerState::Added) => { /* ignore */ }
-                    (peer_id, PeerState::Resolved) => self.broadcast(&peer_id),
-                    (peer_id, PeerState::Removed) => _ = self.removed_peers.insert(peer_id),
+                match new_state {
+                    PeerState::Resolved => {
+                        self.removed_peers.remove(&peer_id);
+                        self.rejections.remove(&peer_id);
+                        self.broadcast(&peer_id);
+                    }
+                    PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
                 }
             }
             Err(err @ RecvError::Lagged(_)) => {
@@ -205,7 +205,7 @@ impl Broadcaster {
                 // self.bcast_peers.push(peer_id); // let it retry
                 self.sig_peers.insert(peer_id); // lighter weight retry loop
                 tracing::error!(
-                    "{} @ {:?} bcaster <= signer {peer_id:.4?} broadcast error : {error}",
+                    "{} @ {:?} bcaster <= collector {peer_id:.4?} broadcast error : {error}",
                     self.local_id,
                     self.current_round
                 );
@@ -213,13 +213,13 @@ impl Broadcaster {
             Ok(response) => {
                 if response == BroadcastResponse::Rejected {
                     tracing::warn!(
-                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:?}",
                         self.local_id,
                         self.current_round
                     );
                 } else {
                     tracing::info!(
-                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:?}",
+                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:?}",
                         self.local_id,
                         self.current_round
                     );
@@ -242,7 +242,7 @@ impl Broadcaster {
                 // TODO distinguish timeouts from models incompatibility etc
                 self.sig_peers.insert(peer_id); // let it retry
                 tracing::error!(
-                    "{} @ {:?} bcaster <= signer {peer_id:.4?} signature request error : {error}",
+                    "{} @ {:?} bcaster <= collector {peer_id:.4?} signature request error : {error}",
                     self.local_id,
                     self.current_round
                 );
@@ -250,13 +250,13 @@ impl Broadcaster {
             Ok(response) => {
                 if response == SignatureResponse::Rejected {
                     tracing::warn!(
-                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:.4?}",
+                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:.4?}",
                         self.local_id,
                         self.current_round
                     );
                 } else {
                     tracing::info!(
-                        "{} @ {:?} bcaster <= signer {peer_id:.4?} : {response:.4?}",
+                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:.4?}",
                         self.local_id,
                         self.current_round
                     );
@@ -289,13 +289,13 @@ impl Broadcaster {
             self.bcast_futs
                 .push(self.dispatcher.request(&peer_id, &self.bcast_request));
             tracing::info!(
-                "{} @ {:?} bcaster => signer {peer_id:.4?}: broadcast",
+                "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast",
                 self.local_id,
                 self.current_round
             );
         } else {
             tracing::warn!(
-                "{} @ {:?} bcaster => signer {peer_id:.4?}: broadcast impossible",
+                "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast impossible",
                 self.local_id,
                 self.current_round
             );
@@ -306,13 +306,13 @@ impl Broadcaster {
             self.sig_futs
                 .push(self.dispatcher.request(&peer_id, &self.sig_request));
             tracing::info!(
-                "{} @ {:?} bcaster => signer {peer_id:.4?}: signature request",
+                "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request",
                 self.local_id,
                 self.current_round
             );
         } else {
             tracing::warn!(
-                "{} @ {:?} bcaster => signer {peer_id:.4?}: signature request impossible",
+                "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request impossible",
                 self.local_id,
                 self.current_round
             );

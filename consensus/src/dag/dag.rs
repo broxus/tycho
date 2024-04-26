@@ -185,7 +185,7 @@ impl Dag {
 
     // TODO the next "little anchor candidate that could" must have at least full dag depth
     fn drop_tail(&self, anchor_at: Round) {
-        if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH) {
+        if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
             let mut rounds = self.rounds.lock();
             // TODO if sync is implemented as a second sub-graph - drop up to last linked
             *rounds = rounds.split_off(&Round(tail));

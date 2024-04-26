@@ -1,11 +1,13 @@
-pub use adapter::*;
+pub use broadcast::*;
 pub use core::*;
+pub use dependency::*;
 pub use peer_schedule::*;
 
 // Note: intercom modules' responsibilities
-// matches visibility of their internal DTOs
+//   matches visibility of their internal DTOs
 
-mod adapter;
+mod broadcast;
 mod core;
+mod dependency;
 mod dto;
 mod peer_schedule;

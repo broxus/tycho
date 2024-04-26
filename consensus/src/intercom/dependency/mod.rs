@@ -1,9 +1,8 @@
-pub use dispatcher::*;
-pub use responder::*;
+pub use downloader::*;
+pub use uploader::*;
 
 // Note: intercom modules' responsibilities
 //   matches visibility of their internal DTOs
 
-mod dispatcher;
-mod dto;
-mod responder;
+mod downloader;
+mod uploader;

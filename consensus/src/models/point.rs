@@ -122,7 +122,7 @@ pub struct PrevPoint {
     pub digest: Digest,
     /// `>= 2F` neighbours, order does not matter;
     /// point author is excluded: everyone must use the proven point to validate its proof
-    // Note: bincode may be non-stable on (de)serializing hashmaps due to different local order
+    // Note: bincode may be non-stable on (de)serializing HashMap due to different local order
     pub evidence: BTreeMap<PeerId, Signature>,
     // TODO if we use TL, then every node can sign hash of a point's body (not all body bytes)
     //  so we can include that hash into PrevPoint
@@ -191,6 +191,7 @@ impl PointBody {
     }
 }
 
+// Todo: Arc<Point{...}> => Point(Arc<...{...}>)
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Point {
     pub body: PointBody,

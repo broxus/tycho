@@ -6,7 +6,6 @@ use tycho_network::{DhtClient, Network, OverlayId, OverlayService, PeerId, Priva
 
 use crate::intercom::core::dto::{MPRequest, MPResponse};
 use crate::intercom::core::responder::Responder;
-use crate::intercom::dto::PointByIdResponse;
 use crate::models::{Point, PointId, Round};
 
 #[derive(Clone)]
@@ -40,10 +39,8 @@ impl Dispatcher {
         }
     }
 
-    pub async fn point_by_id(&self, peer: &PeerId, id: &PointId) -> Result<PointByIdResponse> {
-        let request = (&MPRequest::PointById(id.clone())).into();
-        let response = self.overlay.query(&self.network, peer, request).await?;
-        PointByIdResponse::try_from(MPResponse::try_from(&response)?)
+    pub fn point_by_id_request(&self, id: &PointId) -> tycho_network::Request {
+        (&MPRequest::PointById(id.clone())).into()
     }
 
     pub fn broadcast_request(point: &Point) -> tycho_network::Request {

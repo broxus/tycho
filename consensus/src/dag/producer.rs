@@ -81,7 +81,7 @@ impl Producer {
             .collect::<Vec<_>>();
         assert!(
             includes.iter().count() >= finished_round.node_count().majority(),
-            "Coding error: producing point with not enough includes, check Signer logic"
+            "Coding error: producing point with not enough includes, check Collector logic"
         );
         includes
     }

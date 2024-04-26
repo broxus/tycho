@@ -4,27 +4,30 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{mpsc, oneshot};
 
 use tycho_network::PeerId;
 
 use crate::dag::{DagRound, InclusionState};
 use crate::engine::MempoolConfig;
-use crate::intercom::adapter::dto::{ConsensusEvent, SignerSignal};
+use crate::intercom::broadcast::dto::{CollectorSignal, ConsensusEvent};
 use crate::intercom::dto::SignatureResponse;
+use crate::intercom::{BroadcasterSignal, Downloader};
 use crate::models::{Point, Round};
 
-pub struct Signer {
+pub struct Collector {
     local_id: Arc<String>,
+    downloader: Downloader,
     from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
     signature_requests: mpsc::UnboundedReceiver<SignatureRequest>,
     next_round: Round,
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
 }
 
-impl Signer {
+impl Collector {
     pub fn new(
         local_id: Arc<String>,
+        downloader: &Downloader,
         from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
         signature_requests: mpsc::UnboundedReceiver<SignatureRequest>,
         next_includes: impl Iterator<Item = InclusionState>,
@@ -32,6 +35,7 @@ impl Signer {
     ) -> Self {
         Self {
             local_id,
+            downloader: downloader.clone(),
             from_bcast_filter,
             signature_requests,
             next_round,
@@ -45,29 +49,33 @@ impl Signer {
         mut self,
         next_dag_round: DagRound, // r+1
         has_own_point: Option<Arc<Point>>,
-        signer_signal: mpsc::UnboundedSender<SignerSignal>,
-        bcaster_ready: Arc<Notify>,
+        collector_signal: mpsc::UnboundedSender<CollectorSignal>,
+        bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
     ) -> Self {
         let current_dag_round = next_dag_round
             .prev()
             .get()
             .expect("current DAG round must be linked into DAG chain");
-        let mut includes = mem::take(&mut self.next_includes);
-        if current_dag_round.round() != &self.next_round {
-            includes.clear();
-        };
+        let includes = mem::take(&mut self.next_includes);
+        assert_eq!(
+            current_dag_round.round(),
+            &self.next_round,
+            "collector expected to be run at {:?}",
+            &self.next_round
+        );
         self.next_round = next_dag_round.round().clone();
-        let task = SignerTask {
+        let task = CollectorTask {
             local_id: self.local_id.clone(),
+            downloader: self.downloader.clone(),
             current_round: current_dag_round.clone(),
             next_dag_round,
             includes,
             includes_ready: has_own_point.into_iter().count(),
             next_includes: FuturesUnordered::new(),
 
-            signer_signal,
-            bcaster_ready,
-            is_bcaster_ready: false,
+            collector_signal,
+            bcaster_signal,
+            is_bcaster_ready_ok: false,
         };
         let result = task
             .run(&mut self.from_bcast_filter, &mut self.signature_requests)
@@ -85,9 +93,10 @@ impl Signer {
 }
 
 type SignatureRequest = (Round, PeerId, oneshot::Sender<SignatureResponse>);
-struct SignerTask {
+struct CollectorTask {
     // for node running @ r+0:
     local_id: Arc<String>,
+    downloader: Downloader,
     current_round: DagRound,  // = r+0
     next_dag_round: DagRound, // = r+1 is always in DAG; contains the keypair to produce point @ r+1
 
@@ -100,12 +109,12 @@ struct SignerTask {
     /// anyway should rewrite signing mechanics - look for comments inside [DagRound::add_exact]
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
 
-    signer_signal: mpsc::UnboundedSender<SignerSignal>,
-    bcaster_ready: Arc<Notify>,
-    is_bcaster_ready: bool,
+    collector_signal: mpsc::UnboundedSender<CollectorSignal>,
+    bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
+    is_bcaster_ready_ok: bool,
 }
 
-impl SignerTask {
+impl CollectorTask {
     /// includes @ r+0 must include own point @ r+0 iff the one is produced
 
     /// returns includes for our point at the next round
@@ -118,51 +127,36 @@ impl SignerTask {
         loop {
             tokio::select! {
                 request = signature_requests.recv() => match request {
-                    Some((round, peer_id, callback)) => {
-                        let response = self.signature_response(&round, &peer_id);
-                        tracing::info!(
-                            "{} @ {:?} signer => bcaster {peer_id:.4?} @ {round:?} : {response:.4?}",
-                            self.local_id, self.current_round.round()
-                        );
-                        _ = callback.send(response);
+                    Some((round, author, callback)) => {
+                        _ = callback.send(self.signature_response(&round, &author));
                     }
                     None => panic!("channel with signature requests closed")
                 },
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
                         if let Err(round) = self.match_filtered(&consensus_event) {
-                            _ = self.signer_signal.send(SignerSignal::Err);
+                            _ = self.collector_signal.send(CollectorSignal::Err);
                             return Err(round)
                         }
                     },
                     None => panic!("channel from Broadcast Filter closed"),
                 },
-                _ = self.bcaster_ready.notified() => {
-                    self.is_bcaster_ready = true;
-                    tracing::info!(
-                        "{} @ {:.4?} signer <= bcaster ready : includes {} of {}",
-                         self.local_id, self.current_round.round(),
-                         self.includes_ready, self.current_round.node_count().majority()
-                    );
-                    if self.includes_ready >= self.current_round.node_count().majority() {
+                Some(bcaster_signal) = self.bcaster_signal.recv() => {
+                    if self.should_fail(bcaster_signal) {
+                        // has to jump over one round
+                        return Err(self.next_dag_round.round().next())
+                    }
+                    // bcaster sends its signal immediately after receiving Signal::Retry,
+                    // so we don't have to wait for one more interval
+                    if self.is_ready() {
                         return Ok(self.next_includes)
                     }
                 },
                 _ = retry_interval.tick() => {
-                    tracing::info!(
-                        "{} @ {:.4?} signer retry : includes {} of {}",
-                         self.local_id, self.current_round.round(),
-                         self.includes_ready, self.current_round.node_count().majority()
-                    );
-                    // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
-                    if self.includes_ready >= self.current_round.node_count().majority() {
-                        _ = self.signer_signal.send(SignerSignal::Ok);
-                        _ = self.signer_signal.send(SignerSignal::Retry);
-                        if self.is_bcaster_ready {
-                            return Ok(self.next_includes)
-                        }
+                    if self.is_ready() {
+                        return Ok(self.next_includes)
                     } else {
-                        _ = self.signer_signal.send(SignerSignal::Retry);
+                        _ = self.collector_signal.send(CollectorSignal::Retry);
                     }
                 },
                 // FIXME not so great: some signature requests will be retried,
@@ -178,7 +172,7 @@ impl SignerTask {
                             MempoolConfig::sign_time_range(),
                         )
                     } else {
-                        state.signed().is_some() // FIXME this is very fragile duct tape
+                        state.signed().is_some() // FIXME very fragile duct tape
                     };
                     if signed {
                         tracing::info!(
@@ -196,10 +190,44 @@ impl SignerTask {
                     }
                 },
                 else => {
-                    panic!("signer unhandled");
+                    panic!("collector unhandled");
                 }
             }
         }
+    }
+
+    fn should_fail(&mut self, signal: BroadcasterSignal) -> bool {
+        tracing::info!(
+            "{} @ {:.4?} collector <= Bcaster::{signal:?} : includes {} of {}",
+            self.local_id,
+            self.current_round.round(),
+            self.includes_ready,
+            self.current_round.node_count().majority()
+        );
+        match signal {
+            BroadcasterSignal::Ok => {
+                self.is_bcaster_ready_ok = true;
+                self.bcaster_signal.close();
+                false
+            }
+            BroadcasterSignal::Err => true,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        tracing::info!(
+            "{} @ {:.4?} collector self-check : includes {} of {}",
+            self.local_id,
+            self.current_round.round(),
+            self.includes_ready,
+            self.current_round.node_count().majority()
+        );
+        // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
+        let is_self_ready = self.includes_ready >= self.current_round.node_count().majority();
+        if is_self_ready && self.is_bcaster_ready_ok {
+            _ = self.collector_signal.send(CollectorSignal::Finish);
+        }
+        is_self_ready && self.is_bcaster_ready_ok
     }
 
     fn signature_response(&mut self, round: &Round, author: &PeerId) -> SignatureResponse {
@@ -237,20 +265,26 @@ impl SignerTask {
                 }
             }
         }
-        let res = match state.signed() {
+        let response = match state.signed() {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.with.clone()),
             Some(Err(())) => SignatureResponse::Rejected,
             None => SignatureResponse::TryLater,
         };
-        res
-    }
-    fn match_filtered(&self, filtered: &ConsensusEvent) -> Result<(), Round> {
         tracing::info!(
-            "{} @ {:?} signer <= bcast filter : {filtered:.4?}",
+            "{} @ {:?} collector => bcaster {author:.4?} @ {round:?} : {response:.4?}",
             self.local_id,
             self.current_round.round()
         );
-        match filtered {
+        response
+    }
+
+    fn match_filtered(&self, consensus_event: &ConsensusEvent) -> Result<(), Round> {
+        tracing::info!(
+            "{} @ {:?} collector <= bcast filter : {consensus_event:.4?}",
+            self.local_id,
+            self.current_round.round()
+        );
+        match consensus_event {
             ConsensusEvent::Forward(consensus_round) => {
                 match consensus_round.cmp(self.next_dag_round.round()) {
                     // we're too late, consensus moved forward
@@ -263,23 +297,23 @@ impl SignerTask {
             }
             ConsensusEvent::Verified(point) => match &point.body.location.round {
                 x if x > self.next_dag_round.round() => {
-                    panic!("Coding error: broadcast filter advanced while signer left behind")
+                    panic!("Coding error: broadcast filter advanced while collector left behind")
                 }
                 x if x == self.next_dag_round.round() => {
-                    if let Some(task) = self.next_dag_round.add(point) {
+                    if let Some(task) = self.next_dag_round.add(point, &self.downloader) {
                         self.next_includes.push(task)
                     }
                 }
                 x if x == self.current_round.round() => {
-                    if let Some(task) = self.current_round.add(point) {
+                    if let Some(task) = self.current_round.add(point, &self.downloader) {
                         self.includes.push(task)
                     }
                 }
-                _ => _ = self.current_round.add(&point), // maybe other's dependency
+                _ => _ = self.current_round.add(&point, &self.downloader), // maybe other's dependency
             },
             ConsensusEvent::Invalid(dag_point) => {
                 if &dag_point.location().round > self.next_dag_round.round() {
-                    panic!("Coding error: broadcast filter advanced while signer left behind")
+                    panic!("Coding error: broadcast filter advanced while collector left behind")
                 } else {
                     _ = self.next_dag_round.insert_invalid(&dag_point);
                 }

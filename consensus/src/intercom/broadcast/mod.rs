@@ -1,13 +1,11 @@
 pub use broadcast_filter::*;
 pub use broadcaster::*;
-pub use downloader::*;
-pub use signer::*;
+pub use collector::*;
 
 // Note: intercom modules' responsibilities
-// matches visibility of their internal DTOs
+//   matches visibility of their internal DTOs
 
 mod broadcast_filter;
 mod broadcaster;
-mod downloader;
+mod collector;
 mod dto;
-mod signer;

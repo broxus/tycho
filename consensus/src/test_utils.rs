@@ -154,7 +154,7 @@ mod tests {
         check_parking_lot();
         heart_beat();
         let mut js = JoinSet::new();
-        for engine in make_network(3).await {
+        for engine in make_network(4).await {
             js.spawn(engine.run());
         }
         while let Some(res) = js.join_next().await {

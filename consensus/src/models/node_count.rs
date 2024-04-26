@@ -1,13 +1,9 @@
-use std::fmt::Formatter;
-
 #[derive(Clone)]
-pub struct NodeCount(usize);
+pub struct NodeCount(u8);
 
 impl std::fmt::Debug for NodeCount {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NodeCount(")?;
-        f.write_str(self.full().to_string().as_str())?;
-        f.write_str(")")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NodeCount({})", self.full())
     }
 }
 
@@ -32,32 +28,34 @@ impl NodeCount {
             total_peers != 0 && total_peers != 2,
             "invalid node count: {total_peers}"
         );
-        // ceil up to 3F+1; assume the least possible amount of nodes is offline
-        let count = ((total_peers + 1) / 3) * 3 + 1;
+        // ceil up to 3F+1 and scale down to 1F,
+        // assuming the least possible amount of nodes is not in validator set
+        let one_f = (total_peers + 1) / 3;
         assert!(
-            total_peers <= count,
-            "node count {total_peers} overflows after rounding up to 3F+1"
+            u8::try_from(one_f).is_ok(),
+            "node count 1F={one_f} overflows u8 after scaling {total_peers} up to 3F+1"
         );
-        NodeCount((count - 1) / 3) // 1F
+        NodeCount(one_f as u8)
     }
 
     fn full(&self) -> usize {
-        self.0 * 3 + 1
+        self.0 as usize * 3 + 1
     }
 
     pub fn majority(&self) -> usize {
-        self.0 * 2 + 1
+        self.0 as usize * 2 + 1
     }
 
     /// excluding either current node or the point's author, depending on the context
     pub fn majority_of_others(&self) -> usize {
-        // yes, genesis has the contradiction: reliable minority > majority of others;
-        // but no node may exist in genesis, thus cannot exclude itself from it
-        self.0 * 2
+        // at first glance, genesis has a contradiction: reliable minority > majority of others;
+        // but a real node cannot exist in genesis, thus cannot exclude itself from it
+        self.0 as usize * 2
     }
 
+    /// at least one node is reliable
     pub fn reliable_minority(&self) -> usize {
-        self.0 + 1
+        self.0 as usize + 1
     }
     /*
     pub fn unreliable(&self) -> usize {

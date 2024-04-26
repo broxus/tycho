@@ -81,7 +81,7 @@ impl DagLocation {
                     // TODO either leave output as is and reduce locking in 'inclusion state'
                     //  (as single thread consumes them and makes signature),
                     //  or better add global Watch CurrentDagRound (unify with broadcast filter!)
-                    //  and sign inside this future (remove futures unordered in signer)
+                    //  and sign inside this future (remove futures unordered in collector)
                     init().inspect(move |dag_point| state.init(dag_point))
                 })));
                 Some(shared)
@@ -96,7 +96,7 @@ impl DagLocation {
     }
 }
 
-// Todo remove inner locks and introduce global current dag round watch simultaneously, see Signer
+// Todo remove inner locks and introduce global current dag round watch simultaneously, see Collector
 #[derive(Default, Clone)]
 pub struct InclusionState(Arc<OnceLock<Signable>>);
 

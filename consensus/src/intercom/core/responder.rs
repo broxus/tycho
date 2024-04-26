@@ -9,22 +9,26 @@ use tycho_util::futures::BoxFutureOrNoop;
 use crate::intercom::core::dto::{MPRemoteResult, MPRequest, MPResponse};
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::intercom::BroadcastFilter;
-use crate::models::Round;
+use crate::models::{PointId, Round};
 
 pub struct Responder(Arc<ResponderInner>);
 
 impl Responder {
     pub fn new(
-        broadcast_filter: Arc<BroadcastFilter>,
+        local_id: Arc<String>,
+        broadcast_filter: BroadcastFilter,
         signature_requests: mpsc::UnboundedSender<(
             Round,
             PeerId,
             oneshot::Sender<SignatureResponse>,
         )>,
+        uploads: mpsc::UnboundedSender<(PointId, oneshot::Sender<PointByIdResponse>)>,
     ) -> Self {
         Self(Arc::new(ResponderInner {
+            local_id,
             broadcast_filter,
             signature_requests,
+            uploads,
         }))
     }
 }
@@ -53,8 +57,10 @@ impl Service<ServiceRequest> for Responder {
 
 struct ResponderInner {
     // state and storage components go here
-    broadcast_filter: Arc<BroadcastFilter>,
+    local_id: Arc<String>,
+    broadcast_filter: BroadcastFilter,
     signature_requests: mpsc::UnboundedSender<(Round, PeerId, oneshot::Sender<SignatureResponse>)>,
+    uploads: mpsc::UnboundedSender<(PointId, oneshot::Sender<PointByIdResponse>)>,
 }
 
 impl ResponderInner {
@@ -69,18 +75,35 @@ impl ResponderInner {
         };
 
         let response = match body {
-            MPRequest::PointById(point_id) => MPResponse::PointById(PointByIdResponse(None)),
+            MPRequest::PointById(point_id) => {
+                let (tx, rx) = oneshot::channel();
+                self.uploads.send((point_id, tx)).ok();
+                match rx.await {
+                    Ok(response) => MPResponse::PointById(response),
+                    Err(e) => panic!("Responder point by id await of request failed: {e}"),
+                };
+                MPResponse::PointById(PointByIdResponse(None))
+            }
             MPRequest::Broadcast(point) => {
-                MPResponse::Broadcast(self.broadcast_filter.add(Arc::new(point)).await)
+                MPResponse::Broadcast(self.broadcast_filter.add(Arc::new(point)))
             }
             MPRequest::Signature(round) => {
                 let (tx, rx) = oneshot::channel();
-                _ = self
-                    .signature_requests
-                    .send((round, req.metadata.peer_id.clone(), tx));
+                self.signature_requests
+                    .send((round, req.metadata.peer_id.clone(), tx))
+                    .ok();
                 match rx.await {
                     Ok(response) => MPResponse::Signature(response),
-                    Err(_) => MPResponse::Signature(SignatureResponse::TryLater),
+                    Err(e) => {
+                        let response = SignatureResponse::TryLater;
+                        tracing::error!(
+                            "{} responder => collector {:.4?} @ {round:?} : \
+                            {response:?} due to oneshot {e}",
+                            self.local_id,
+                            req.metadata.peer_id
+                        );
+                        MPResponse::Signature(response)
+                    }
                 }
             }
         };

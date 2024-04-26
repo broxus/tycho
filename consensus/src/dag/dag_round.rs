@@ -11,7 +11,7 @@ use tycho_util::FastDashMap;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::{DagLocation, InclusionState, Verifier};
 use crate::engine::MempoolConfig;
-use crate::intercom::PeerSchedule;
+use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, NodeCount, Point, PointId, Round, ValidPoint};
 
 #[derive(Clone)]
@@ -158,12 +158,20 @@ impl DagRound {
         point_fut.await.0.valid().cloned()
     }
 
-    pub fn add(&self, point: &Arc<Point>) -> Option<BoxFuture<'static, InclusionState>> {
+    pub fn add(
+        &self,
+        point: &Arc<Point>,
+        downloader: &Downloader,
+    ) -> Option<BoxFuture<'static, InclusionState>> {
         self.scan(&point.body.location.round)
-            .and_then(|linked| linked.add_exact(&point))
+            .and_then(|linked| linked.add_exact(&point, downloader))
     }
 
-    fn add_exact(&self, point: &Arc<Point>) -> Option<BoxFuture<'static, InclusionState>> {
+    fn add_exact(
+        &self,
+        point: &Arc<Point>,
+        downloader: &Downloader,
+    ) -> Option<BoxFuture<'static, InclusionState>> {
         if &point.body.location.round != self.round() {
             panic!("Coding error: dag round mismatches point round on add")
         }
@@ -172,7 +180,8 @@ impl DagRound {
         self.edit(&point.body.location.author, |loc| {
             let state = loc.state().clone();
             let point = point.clone();
-            loc.add_validate(digest, || Verifier::validate(point, dag_round))
+            let downloader = downloader.clone();
+            loc.add_validate(digest, || Verifier::validate(point, dag_round, downloader))
                 .map(|first| first.clone().map(|_| state).boxed())
         })
     }
@@ -182,11 +191,12 @@ impl DagRound {
         &self,
         point: &Arc<Point>,
         peer_schedule: &PeerSchedule,
+        downloader: &Downloader,
     ) -> Option<InclusionState> {
         if !Verifier::verify(point, peer_schedule).is_ok() {
             panic!("Coding error: malformed point")
         }
-        let point = Verifier::validate(point.clone(), self.clone()).await;
+        let point = Verifier::validate(point.clone(), self.clone(), downloader.clone()).await;
         if point.valid().is_none() {
             panic!("Coding error: not a valid point")
         }

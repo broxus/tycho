@@ -15,7 +15,55 @@ use crate::models::{Digest, Location, NodeCount, Point, PointId, Round};
 
 use super::dto::ConsensusEvent;
 
-pub struct BroadcastFilter {
+#[derive(Clone)]
+pub struct BroadcastFilter(Arc<BroadcastFilterInner>);
+
+impl BroadcastFilter {
+    pub fn new(
+        local_id: Arc<String>,
+        peer_schedule: Arc<PeerSchedule>,
+        output: mpsc::UnboundedSender<ConsensusEvent>,
+    ) -> Self {
+        let this = Self(Arc::new(BroadcastFilterInner {
+            local_id,
+            last_by_peer: Default::default(),
+            by_round: Default::default(),
+            current_dag_round: Default::default(), // will advance with other peers
+            peer_schedule,
+            output,
+        }));
+        let listener = this.clone();
+        tokio::spawn(listener.clean_cache());
+        this
+    }
+
+    pub fn add(&self, point: Arc<Point>) -> BroadcastResponse {
+        self.0.add(point)
+    }
+
+    pub fn advance_round(&self, new_round: &Round) {
+        self.0.advance_round(new_round)
+    }
+
+    async fn clean_cache(self) {
+        let mut rx = self.0.peer_schedule.updates();
+        match rx.recv().await {
+            Ok((peer_id, PeerState::Unknown)) => {
+                self.0.last_by_peer.remove(&peer_id);
+            }
+            Ok(_) => {}
+            Err(err @ RecvError::Lagged(_)) => {
+                tracing::error!("peer schedule updates {err}");
+            }
+            Err(err @ RecvError::Closed) => {
+                panic!("peer schedule updates {err}");
+            }
+        }
+    }
+}
+
+struct BroadcastFilterInner {
+    local_id: Arc<String>,
     // defend from spam from future rounds:
     // should keep rounds greater than current dag round
     last_by_peer: FastDashMap<PeerId, Round>,
@@ -33,40 +81,7 @@ pub struct BroadcastFilter {
     output: mpsc::UnboundedSender<ConsensusEvent>,
 }
 
-impl BroadcastFilter {
-    pub fn new(
-        peer_schedule: Arc<PeerSchedule>,
-        output: mpsc::UnboundedSender<ConsensusEvent>,
-    ) -> Arc<Self> {
-        let this = Self {
-            last_by_peer: Default::default(),
-            by_round: Default::default(),
-            current_dag_round: Default::default(), // will advance with other peers
-            peer_schedule,
-            output,
-        };
-        let this = Arc::new(this);
-        let listener = this.clone();
-        tokio::spawn(listener.clean_cache());
-        this
-    }
-
-    async fn clean_cache(self: Arc<Self>) {
-        let mut rx = self.peer_schedule.updates();
-        match rx.recv().await {
-            Ok((peer_id, PeerState::Removed)) => {
-                self.last_by_peer.remove(&peer_id);
-            }
-            Ok(_) => {}
-            Err(err @ RecvError::Lagged(_)) => {
-                tracing::error!("peer schedule updates {err}");
-            }
-            Err(err @ RecvError::Closed) => {
-                panic!("peer schedule updates {err}");
-            }
-        }
-    }
-
+impl BroadcastFilterInner {
     // TODO logic is doubtful because of contradiction in requirements:
     //  * we must determine the latest consensus round reliably:
     //    the current approach is to collect 1/3+1 points at the same future round
@@ -75,26 +90,31 @@ impl BroadcastFilter {
     //    => we should discard points from the far future
 
     /// returns Vec of points to insert into DAG if consensus round is determined reliably
-    pub async fn add(&self, point: Arc<Point>) -> BroadcastResponse {
+    fn add(&self, point: Arc<Point>) -> BroadcastResponse {
+        let local_id = &self.local_id;
         // dag @r+0 accepts broadcasts of [r-1; r+1] rounds;
         // * points older than r-1 are rejected, but are sent to DAG for validation
         //   as they may be used by some point as a dependency
         // * newer broadcasts are enqueued until 1/3+1 points per round collected
         let dag_round = Round(self.current_dag_round.load(Ordering::Acquire));
-        tracing::info!(
-            "filter @ {dag_round:?} got point @ {:?}",
-            point.body.location.round
-        );
         // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=0
         let PointId {
             location: Location { round, author },
             digest,
         } = point.id();
+
+        tracing::info!(
+            "{local_id} @ {dag_round:?} filter <= bcaster {author:.4?} @ {round:?} : received"
+        );
+
         // conceal raw point, do not use it
         let point = match Verifier::verify(&point, &self.peer_schedule) {
             Ok(()) => ConsensusEvent::Verified(point),
             Err(dag_point) => {
-                tracing::error!("filter @ {dag_round:?}: invalid, {:.4?}", point);
+                tracing::error!(
+                    "{local_id} @ {dag_round:?} filter <= bcaster {author:.4?} @ {round:?} : \
+                     invalid {point:.4?}"
+                );
                 ConsensusEvent::Invalid(dag_point)
             }
         };
@@ -104,7 +124,10 @@ impl BroadcastFilter {
             } else if round >= dag_round.prev() {
                 BroadcastResponse::Accepted // we will sign, maybe
             } else {
-                tracing::error!("Rejected 1");
+                tracing::error!(
+                    "{local_id} @ {dag_round:?} filter <= bcaster {author:.4?} @ {round:?} : \
+                    Rejected as too old round"
+                );
                 // too old, current node will not sign, but some point may include it
                 BroadcastResponse::Rejected
             };
@@ -132,7 +155,10 @@ impl BroadcastFilter {
             // node must not send broadcasts out-of order;
             // TODO we should ban a peer that broadcasts its rounds out of order,
             //   though we cannot prove this decision for other nodes
-            tracing::error!("Rejected 2");
+            tracing::error!(
+                "{local_id} @ {dag_round:?} filter <= bcaster {author:.4?} @ {round:?} : \
+                 Rejected as out of order by round"
+            );
             return BroadcastResponse::Rejected;
         };
         if let Some(to_delete) = outdated_peer_round {
@@ -155,18 +181,21 @@ impl BroadcastFilter {
                 let (node_count, ref mut same_round) = entry.value_mut();
                 same_round.entry(author).or_default().insert(digest, point);
                 if same_round.len() < node_count.reliable_minority() {
-                    tracing::info!("round is not yet determined");
+                    tracing::info!(
+                        "{local_id} @ {dag_round:?} filter <= bcaster {author:.4?} @ {round:?} : \
+                        round is not determined yet",
+                    );
                     return BroadcastResponse::TryLater; // round is not yet determined
                 };
             }
         }
 
-        self.advance_round(&round).await;
+        self.advance_round(&round);
         BroadcastResponse::Accepted
     }
 
     // drop everything up to the new round (inclusive), channelling cached points
-    pub async fn advance_round(&self, new_round: &Round) {
+    fn advance_round(&self, new_round: &Round) {
         let Ok(old) =
             self.current_dag_round
                 .fetch_update(Ordering::Release, Ordering::Relaxed, |old| {
