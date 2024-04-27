@@ -1,20 +1,25 @@
 use std::sync::atomic::Ordering;
 use std::{
     collections::HashMap,
+    mem, result,
     sync::{atomic::AtomicU64, Arc},
 };
 
 use anyhow::{anyhow, Result};
-use everscale_types::cell::Cell;
+use everscale_types::cell::{Cell, CellFamily, Store};
 use everscale_types::models::envelope_message::MsgEnvelope;
 use everscale_types::models::in_message::InMsg;
 use everscale_types::models::out_message::OutMsg;
-use everscale_types::models::{ShardAccount, Transaction};
+use everscale_types::models::{
+    ExtInMsgInfo, IntMsgInfo, Lazy, MsgInfo, OptionalAccount, OwnedMessage, ShardAccount, TickTock,
+    Transaction,
+};
 use everscale_types::{
     cell::HashBytes,
     dict::Dict,
     models::{BlockchainConfig, LibDescr},
 };
+use futures_util::future::try_join_all;
 use ton_executor::{
     ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
 };
@@ -25,16 +30,7 @@ use crate::collator::types::{BlockCollationData, PrevData};
 /// Execution manager
 pub(super) struct ExecutionManager {
     /// changed accounts
-    #[allow(clippy::type_complexity)]
-    pub changed_accounts: HashMap<
-        AccountId,
-        (
-            tokio::sync::mpsc::Sender<Arc<AsyncMessage>>,
-            tokio::task::JoinHandle<Result<ShardAccountStuff>>,
-        ),
-    >,
-    /// max collate threads
-    max_collate_threads: u16,
+    pub changed_accounts: HashMap<AccountId, ShardAccountStuff>,
     /// libraries
     pub libraries: Dict<HashBytes, LibDescr>,
     /// gen_utime
@@ -49,15 +45,14 @@ pub(super) struct ExecutionManager {
     seed_block: HashBytes,
     /// blockchain config
     config: BlockchainConfig,
-    /// transaction receiver
-    receiver_tr:
-        tokio::sync::mpsc::UnboundedReceiver<Option<(Arc<AsyncMessage>, Result<Transaction>)>>,
-    /// transaction sender
-    sender_tr: tokio::sync::mpsc::UnboundedSender<Option<(Arc<AsyncMessage>, Result<Transaction>)>>,
     /// total transaction duration
     total_trans_duration: Arc<AtomicU64>,
     /// block version
     block_version: u32,
+    /// messages set
+    messages_set: Vec<OwnedMessage>,
+    /// group limit
+    pub group_limit: u32,
 }
 
 impl ExecutionManager {
@@ -69,13 +64,11 @@ impl ExecutionManager {
         seed_block: HashBytes,
         libraries: Dict<HashBytes, LibDescr>,
         config: BlockchainConfig,
-        max_collate_threads: u16,
         block_version: u32,
+        group_limit: u32,
     ) -> Self {
-        let (sender_tr, receiver_tr) = tokio::sync::mpsc::unbounded_channel();
         Self {
             changed_accounts: HashMap::new(),
-            max_collate_threads,
             libraries,
             gen_utime,
             start_lt,
@@ -83,174 +76,158 @@ impl ExecutionManager {
             min_lt: Arc::new(AtomicU64::new(max_lt)),
             seed_block,
             config,
-            sender_tr,
-            receiver_tr,
             block_version,
+            group_limit,
             total_trans_duration: Arc::new(AtomicU64::new(0)),
+            messages_set: Vec::new(),
         }
     }
 
-    /// execute message
-    pub async fn execute(
+    /// execute messages set
+    pub fn execute_msgs_set(&mut self, msgs: Vec<OwnedMessage>) {
+        tracing::trace!("adding set of messages");
+        let _ = std::mem::replace(&mut self.messages_set, msgs);
+    }
+
+    /// tick
+    pub async fn tick(
         &mut self,
-        account_id: AccountId,
-        msg: AsyncMessage,
+        offset: u32,
         prev_data: &PrevData,
         collator_data: &mut BlockCollationData,
+        anchor: u32,
     ) -> Result<()> {
-        tracing::trace!("execute (adding into queue): {}", account_id);
-        if let Some((sender, _handle)) = self.changed_accounts.get(&account_id) {
-            sender.send(Arc::new(msg))?;
-        } else {
-            let shard_acc = if let Some(shard_acc) = prev_data.accounts().account(&account_id)? {
-                shard_acc
-            } else if let AsyncMessage::Ext(_, msg_id) = msg {
-                return Ok(()); // skip external messages for not existing accounts
-            } else {
-                ShardAccount::default()
-            };
-            let (sender, handle) = self.start_account_job(account_id.clone(), shard_acc)?;
-            sender.send(Arc::new(msg))?;
-            self.changed_accounts.insert(account_id, (sender, handle));
-        }
+        tracing::trace!("execute manager messages set tick with {offset}");
 
-        self.check_parallel_transactions(collator_data).await?;
+        let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
+
+        let mut futures = vec![];
+        let total_trans_duration = self.total_trans_duration.clone();
+
+        for (account_id, msg) in group {
+            futures.push(self.execute_message(account_id, msg, prev_data, collator_data));
+        }
+        let now = std::time::Instant::now();
+
+        let res = try_join_all(futures).await?;
+
+        let duration = now.elapsed().as_micros() as u64;
+        tracing::trace!("tick executed {duration}μ;",);
+
+        total_trans_duration.fetch_add(duration, Ordering::Relaxed);
+
+        collator_data
+            .externals_processed_upto
+            .replace(anchor, &new_offset)?;
 
         Ok(())
     }
 
-    /// start account job
-    fn start_account_job(
-        &self,
-        account_addr: AccountId,
-        shard_acc: ShardAccount,
-    ) -> Result<(
-        tokio::sync::mpsc::UnboundedSender<Arc<AsyncMessage>>,
-        tokio::task::JoinHandle<Result<ShardAccountStuff>>,
-    )> {
-        tracing::trace!("start_account_job: {}", account_addr);
+    /// execute message
+    pub async fn execute_message(
+        &mut self,
+        account_id: AccountId,
+        msg: OwnedMessage,
+        prev_data: &PrevData,
+        collator_data: &mut BlockCollationData,
+    ) -> Result<()> {
+        tracing::trace!("execute message for account {account_id}");
+
+        let shard_account =
+            if let Some(shard_account) = prev_data.observable_accounts().get(&account_id)? {
+                shard_account
+            } else if let MsgInfo::ExtIn(_) = msg.info {
+                return Ok(()); // skip external messages for not existing accounts
+            } else {
+                ShardAccount {
+                    account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
+                    last_trans_hash: Default::default(),
+                    last_trans_lt: 0,
+                }
+            };
 
         let mut shard_acc = ShardAccountStuff::new(
-            account_addr,
-            shard_acc,
-            Arc::new(AtomicU64::new(self.min_lt.load(Ordering::Relaxed))),
+            account_id,
+            shard_account,
+            self.max_lt.load(Ordering::Relaxed),
+            self.libraries.clone(),
         )?;
 
-        let block_unixtime = self.gen_utime;
-        let block_lt = self.start_lt;
-        let seed_block = self.seed_block.clone();
-        let total_trans_duration = self.total_trans_duration.clone();
-        let sender_tr = self.sender_tr.clone();
-        let min_lt = self.min_lt.clone();
-        let max_lt = self.max_lt.clone();
+        shard_acc
+            .lt()
+            .fetch_max(self.min_lt.load(Ordering::Relaxed), Ordering::Relaxed);
+        shard_acc
+            .lt()
+            .fetch_max(shard_acc.last_trans_lt + 1, Ordering::Relaxed);
+        shard_acc
+            .lt()
+            .fetch_max(shard_acc.last_trans_lt + 1, Ordering::Relaxed);
+
+        let params = ExecuteParams {
+            state_libs: self.libraries.clone(),
+            block_unixtime: self.gen_utime,
+            block_lt: self.start_lt,
+            last_tr_lt: shard_acc.lt(),
+            seed_block: self.seed_block.clone(),
+            block_version: self.block_version,
+            ..ExecuteParams::default()
+        };
         let config = self.config.clone();
-        let block_version = self.block_version;
-        let libraries = self.libraries.clone().inner();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Arc<AsyncMessage>>();
-        let handle = tokio::spawn(async move {
-            while let Some(new_msg) = receiver.recv().await {
-                tracing::trace!("new message for {:x}", shard_acc.account_addr());
-                shard_acc
-                    .lt()
-                    .fetch_max(min_lt.load(Ordering::Relaxed), Ordering::Relaxed);
-                shard_acc
-                    .lt()
-                    .fetch_max(shard_acc.last_trans_lt() + 1, Ordering::Relaxed);
-                shard_acc
-                    .lt()
-                    .fetch_max(shard_acc.last_trans_lt() + 1, Ordering::Relaxed);
+        let mut account_root = shard_acc.account_root.clone();
+        let (mut transaction_res, account_root) = tokio::task::spawn_blocking(move || {
+            (
+                execute_ordinary_message(&msg, &mut account_root, params, &config),
+                account_root,
+            )
+        })
+        .await?;
 
-                let mut account_root = shard_acc.account_root();
-                let params = ExecuteParams {
-                    state_libs: libraries.clone(),
-                    block_unixtime,
-                    block_lt,
-                    last_tr_lt: shard_acc.lt(),
-                    seed_block: seed_block.clone(),
-                    block_version,
-                    ..ExecuteParams::default()
-                };
-                let new_msg1 = new_msg.clone();
-                let (mut transaction_res, account_root, duration) =
-                    tokio::task::spawn_blocking(move || {
-                        let now = std::time::Instant::now();
-                        (
-                            execute_new_message(&new_msg1, &mut account_root, params, &config),
-                            account_root,
-                            now.elapsed().as_micros() as u64,
-                        )
-                    })
-                    .await?;
-
-                if let Ok(transaction) = transaction_res.as_mut() {
-                    shard_acc.add_transaction(transaction, account_root)?;
-                }
-                total_trans_duration.fetch_add(duration, Ordering::Relaxed);
-                tracing::trace!(
-                    "account {:x} TIME execute {}μ;",
-                    shard_acc.account_addr(),
-                    duration
-                );
-
-                max_lt.fetch_max(shard_acc.lt().load(Ordering::Relaxed), Ordering::Relaxed);
-                if let Err(e) = sender_tr.send(Some((new_msg, transaction_res))) {
-                    tracing::error!("transaction channel send error: {}", e);
-                    return Err(anyhow!("Execution manager transaction receiver is closed, sending msg for account {:x} failed", shard_acc.account_addr()));
-                }
-            }
-            Ok(shard_acc)
-        });
-        Ok((sender, handle))
-    }
-
-    /// wait for transaction
-    async fn wait_transaction(&mut self, collator_data: &mut BlockCollationData) -> Result<()> {
-        tracing::trace!("wait_transaction");
-
-        if let Some(Some((new_msg, transaction_res))) = self.receiver_tr.recv().await {
-            self.finalize_transaction(new_msg, transaction_res, collator_data)?;
+        if let Ok(transaction) = transaction_res.as_mut() {
+            shard_acc.add_transaction(transaction, account_root)?;
         }
+
+        self.max_lt
+            .fetch_max(shard_acc.lt.load(Ordering::Relaxed), Ordering::Relaxed);
+
+        self.finalize_transaction(msg, transaction_res, collator_data)?;
+        self.changed_accounts.insert(account_id, shard_acc);
+
+        // TODO! add to queue
+        // collator_data.add_to_queue(account_id, msg);
+
         Ok(())
     }
 
     /// finalize transaction
     fn finalize_transaction(
         &mut self,
-        new_msg: Arc<AsyncMessage>,
+        new_msg: OwnedMessage,
         transaction_res: Result<Transaction>,
         collator_data: &mut BlockCollationData,
     ) -> Result<()> {
-        if let AsyncMessage::Ext(msg, msg_id) = new_msg.deref() {
-            let account_id = msg.int_dst_account_id().unwrap_or_default();
+        if let MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) = new_msg.info {
+            let account_id = dst.as_std().unwrap_or_default().address;
             if let Err(err) = transaction_res {
                 tracing::warn!(
-                    "account {:x} rejected inbound external message {:x}, by reason: {}",
-                    account_id,
-                    msg_id,
-                    err
+                    "account {account_id} rejected inbound external message  by reason: {err}",
                 );
-                // collator_data
-                //     .rejected_ext_messages
-                //     .push((msg_id.clone(), err.to_string()));
                 return Ok(());
             } else {
-                tracing::debug!(
-                    "account {:x} accepted inbound external message {:x}",
-                    account_id,
-                    msg_id,
-                );
-                collator_data
-                    .externals_processed_upto
-                    .push((msg_id.clone(), msg.dst_workchain_id().unwrap_or_default()));
+                tracing::debug!("account {account_id} accepted inbound external message",);
             }
         }
         let tr = transaction_res?;
-        let tr_cell = tr.serialize()?;
+        let mut builder = everscale_types::cell::CellBuilder::new();
+
+        tr.store_into(&mut builder, &mut Cell::empty_context())?;
+
+        let tr_cell = builder.build()?;
+
         tracing::trace!(
-            "finalize_transaction {} with hash {:x}, {:x}",
-            tr.logical_time(),
+            "finalize_transaction {} with hash {:x}, {}",
+            tr.lt,
             tr_cell.repr_hash(),
-            tr.account_id()
+            tr.account
         );
         let in_msg_opt = match new_msg.deref() {
             AsyncMessage::Int(enq, our) => {
@@ -272,44 +249,6 @@ impl ExecutionManager {
                 let in_msg = InMsg::external(msg.serialize()?, tr_cell.clone());
                 Some(in_msg)
             }
-            AsyncMessage::New(env, prev_tr_cell) => {
-                let env_cell = env.inner().serialize()?;
-                let in_msg = InMsg::immediate(
-                    env_cell.clone(),
-                    tr_cell.clone(),
-                    env.fwd_fee_remaining().clone(),
-                );
-                let out_msg =
-                    OutMsg::immediate(env_cell, prev_tr_cell.clone(), in_msg.serialize()?);
-                collator_data.add_out_msg_to_block(env.message_hash(), &out_msg)?;
-                Some(in_msg)
-            }
-            AsyncMessage::Mint(msg) | AsyncMessage::Recover(msg) => {
-                let msg_cell = msg.serialize()?;
-                let src = msg.src_ref().ok_or_else(|| {
-                    tracing::error!(
-                        "source address of message {:x} is invalid",
-                        msg_cell.repr_hash()
-                    )
-                })?;
-                let src_prefix = AccountIdPrefixFull::prefix(src)?;
-                let dst = msg.dst_ref().ok_or_else(|| {
-                    tracing::error!(
-                        "destination address of message {:x} is invalid",
-                        msg_cell.repr_hash()
-                    )
-                })?;
-                let dst_prefix = AccountIdPrefixFull::prefix(dst)?;
-                let (cur_addr, next_addr) =
-                    perform_hypercube_routing(&src_prefix, &dst_prefix, shard, use_hypercube)?;
-                let env = MsgEnvelope::with_routing(msg_cell, fwd_fee, cur_addr, next_addr);
-
-                Some(InMsg::immediate(
-                    env.inner().serialize()?,
-                    tr_cell.clone(),
-                    Default::default(),
-                ))
-            }
             AsyncMessage::TickTock(_) => None,
         };
         if tr.orig_status != tr.end_status {
@@ -325,38 +264,108 @@ impl ExecutionManager {
 
         collator_data.update_lt(self.max_lt.load(Ordering::Relaxed));
 
-        match new_msg.deref() {
-            AsyncMessage::Mint(_) => collator_data.mint_msg = in_msg_opt,
-            AsyncMessage::Recover(_) => collator_data.recover_create_msg = in_msg_opt,
-            _ => (),
-        }
         collator_data.block_full |= !collator_data.limit_fits(ParamLimitIndex::Normal);
         Ok(())
     }
 }
 
-/// execute new message
-fn execute_new_message(
-    new_msg: &AsyncMessage,
+/// execute ordinary message
+fn execute_ordinary_message(
+    new_msg: &OwnedMessage,
     account_root: &mut Cell,
     params: ExecuteParams,
     config: &BlockchainConfig,
 ) -> Result<Transaction> {
-    let (executor, msg_opt): (Box<dyn TransactionExecutor>, _) = match new_msg {
-        AsyncMessage::Int(enq, _our) => (
-            Box::new(OrdinaryTransactionExecutor::new()),
-            Some(enq.env.message.clone()),
-        ),
-        AsyncMessage::Recover(msg) | AsyncMessage::Mint(msg) | AsyncMessage::Ext(msg, _) => {
-            (Box::new(OrdinaryTransactionExecutor::new()), Some(msg))
+    let executor = OrdinaryTransactionExecutor::new();
+    executor.execute_with_libs_and_params(new_msg, account_root, params, config)
+}
+
+/// execute tick tock message
+fn execute_ticktock_message(
+    tick_tock: TickTock,
+    account_root: &mut Cell,
+    params: ExecuteParams,
+    config: &BlockchainConfig,
+) -> Result<Transaction> {
+    let executor = TickTockTransactionExecutor::new(tick_tock);
+    executor.execute_with_libs_and_params(None, account_root, params, config)
+}
+
+/// calculate group
+pub fn calculate_group(
+    messages_set: &[OwnedMessage],
+    group_limit: u32,
+    offset: u32,
+) -> (u32, HashMap<AccountId, OwnedMessage>) {
+    let mut new_offset = offset;
+    let mut holes_group: HashMap<AccountId, u32> = HashMap::new();
+    let mut max_account_count = 0;
+    let mut holes_max_count: i32 = 0;
+    let mut holes_count: i32 = 0;
+    let mut group = HashMap::new();
+    for (i, msg) in messages_set.iter().enumerate() {
+        let account_id = match msg.info() {
+            MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => dst.as_std().unwrap_or_default().address,
+            MsgInfo::Int(IntMsgInfo { dst, .. }) => dst.as_std().unwrap_or_default().address,
+            _ => {
+                unreachable!()
+            }
+        };
+        if (i as u32) < offset {
+            let count = holes_group.entry(account_id).or_default();
+            *count += 1;
+            if *count > max_account_count {
+                max_account_count = *count;
+                holes_max_count = (group_limit * max_account_count) as i32 - offset as i32;
+            }
+        } else {
+            if group.len() < group_limit as usize {
+                match holes_group.get_mut(&account_id) {
+                    None => {
+                        if holes_max_count > 0 {
+                            holes_group.insert(account_id, 1);
+                            holes_max_count -= 1;
+                            holes_count += 1;
+                        } else {
+                            // if group have this account we skip it
+                            if group.get(&account_id).is_none() {
+                                group.insert(account_id, msg.clone());
+                            } else {
+                                // if the offset was not set previously, and the account is skipped then
+                                // it means that we need to move by current group length
+                                if new_offset == offset {
+                                    new_offset += group.len() as u32;
+                                }
+                            }
+                        }
+                    }
+                    Some(count) => {
+                        if *count != max_account_count && holes_max_count > 0 {
+                            *count += 1;
+                            holes_max_count -= 1;
+                            holes_count += 1;
+                        } else {
+                            // group has this account, but it was not taken on previous runs
+                            if group.get(&account_id).is_none() {
+                                group.insert(account_id, msg.clone());
+                            } else {
+                                // if the offset was not set previously, and the account is skipped then
+                                // it means that we need to move by current group length
+                                if new_offset == offset {
+                                    new_offset += group.len() as u32;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
         }
-        AsyncMessage::New(env, _prev_tr_cell) => (
-            Box::new(OrdinaryTransactionExecutor::new()),
-            Some(env.message.clone()),
-        ),
-        AsyncMessage::TickTock(tt) => {
-            (Box::new(TickTockTransactionExecutor::new(tt.clone())), None)
-        }
-    };
-    executor.execute_with_libs_and_params(msg_opt, account_root, params, config)
+    }
+    // if new offset was not set then it means that we took all group elements and all holes on our way
+    if new_offset == offset {
+        new_offset += group.len() as u32 + holes_count as u32;
+    }
+    (new_offset, group)
 }

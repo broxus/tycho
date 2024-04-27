@@ -630,7 +630,7 @@ dependencies = [
  "bitflags 2.5.0",
  "crc32c",
  "everscale-crypto",
- "everscale-types-proc 0.1.4 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
+ "everscale-types-proc 0.1.4 (git+https://github.com/broxus/everscale-types.git?branch=tycho)",
  "hex",
  "once_cell",
  "serde",
@@ -643,7 +643,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
+source = "git+https://github.com/broxus/everscale-types.git#0abd8155f3b782518c4f0a1fae9feeae43616f1b"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -673,7 +673,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git#254e80a9244b6d763f7ca3a47eadbef32fb0bf3c"
+source = "git+https://github.com/broxus/everscale-types.git#0abd8155f3b782518c4f0a1fae9feeae43616f1b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2111,7 +2111,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#019ab361c61ac59435baa08c1277562ed2d85094"
+source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#ecec21c9328eeac7d9d061d4f87165ed49f7e85e"
 dependencies = [
  "ahash",
  "anyhow",
@@ -2253,7 +2253,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytes",
- "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=tycho)",
  "hex",
  "parking_lot",
  "rand",
@@ -2294,7 +2294,7 @@ dependencies = [
  "async-trait",
  "bytesize",
  "everscale-crypto",
- "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=tycho)",
  "futures-util",
  "log",
  "rand",
@@ -2428,7 +2428,7 @@ dependencies = [
  "bytesize",
  "crc",
  "dashmap",
- "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=feature/empty-block-collation)",
+ "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=tycho)",
  "fdlimit",
  "hex",
  "humantime",

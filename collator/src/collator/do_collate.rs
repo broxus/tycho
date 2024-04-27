@@ -122,7 +122,7 @@ impl CollatorStdImpl {
             mc_data.mc_state_stuff().state().libraries.clone(),
             mc_data.config().clone(),
             self.config.max_collate_threads,
-            self.config.supported_block_version
+            self.config.supported_block_version,
         );
 
         //STUB: just remove fisrt anchor from cache
