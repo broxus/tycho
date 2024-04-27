@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -5,7 +6,9 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
-use everscale_types::models::TickTock;
+use everscale_types::cell::{CellFamily, Store};
+use everscale_types::merkle::MerkleUpdate;
+use everscale_types::models::{Lazy, TickTock, Transaction};
 use everscale_types::{
     cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
     dict::{AugDict, Dict},
@@ -410,6 +413,12 @@ pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
     pub orig_libs: Dict<HashBytes, SimpleLib>,
+    pub account_root: Cell,
+    pub last_trans_hash: HashBytes,
+    pub state_update: HashBytes,
+    pub last_trans_lt: u64,
+    pub lt: Arc<AtomicU64>,
+    pub transactions: Vec<Transaction>,
 }
 
 impl ShardAccountStuff {
@@ -446,6 +455,58 @@ impl ShardAccountStuff {
             //     Ok(true)
             // })?;
         }
+        Ok(())
+    }
+
+    pub fn new(
+        account_addr: AccountId,
+        shard_account: ShardAccount,
+        lt: Arc<AtomicU64>,
+        orig_libs: Dict<HashBytes, SimpleLib>,
+    ) -> Result<Self> {
+        let account_root = shard_account.account.clone().inner();
+        let state_update = account_root.repr_hash();
+        let last_trans_hash = shard_account.last_trans_hash.clone();
+        let last_trans_lt = shard_account.last_trans_lt;
+        Ok(Self {
+            account_addr,
+            shard_account,
+            orig_libs,
+            account_root: account_root.clone(),
+            last_trans_hash,
+            last_trans_lt,
+            lt,
+            transactions: Default::default(),
+            state_update: state_update.clone(),
+        })
+    }
+    pub fn add_transaction(
+        &mut self,
+        transaction: &mut Transaction,
+        account_root: Cell,
+    ) -> Result<()> {
+        transaction.prev_trans_hash = self.last_trans_hash.clone();
+        transaction.prev_trans_lt = self.last_trans_lt;
+
+        self.account_root = account_root;
+        self.state_update = self.account_root.repr_hash().clone();
+
+        let mut builder = everscale_types::cell::CellBuilder::new();
+
+        transaction.store_into(&mut builder, &mut Cell::empty_context())?;
+
+        let tr_root = builder.build()?;
+
+        self.last_trans_hash = tr_root.repr_hash().clone();
+        self.last_trans_lt = transaction.lt;
+
+        // TODO! setref
+        // self.transactions.setref(
+        //     &transaction.logical_time(),
+        //     &tr_root,
+        //     transaction.total_fees()
+        // )?;
+
         Ok(())
     }
 }
@@ -514,12 +575,6 @@ pub(super) enum AsyncMessage {
     Ext(OwnedMessage, HashBytes),
     /// 0 - message in execution queue; 1 - TRUE when from the same shard
     Int(EnqueuedMessage, bool),
-    /// 0 - message
-    Recover(OwnedMessage),
-    /// 0 - message
-    Mint(OwnedMessage),
-    /// 0 - message, 1 - prev_trans_cell
-    New(OwnedMessage, Cell),
     /// TickTock message
     TickTock(TickTock),
 }
