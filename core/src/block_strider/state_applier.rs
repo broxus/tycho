@@ -49,6 +49,7 @@ where
         tracing::info!(id = ?cx.block.id(), "applying block");
 
         let state_storage = self.inner.storage.shard_state_storage();
+        let handle_storage = self.inner.storage.block_handle_storage();
 
         // Load handle
         let handle = self
@@ -130,9 +131,7 @@ where
         metrics::histogram!("tycho_subscriber_handle_block_seconds").record(started_at.elapsed());
 
         // Mark block as applied
-        handle.meta().set_is_applied();
-        let handle_storage = self.inner.storage.block_handle_storage();
-        handle_storage.store_handle(&handle)?;
+        handle_storage.store_block_applied(&handle);
 
         // Done
         Ok(())
@@ -143,7 +142,7 @@ where
         mc_block_id: &BlockId,
         block: &BlockStuff,
         archive_data: &ArchiveData,
-    ) -> Result<Arc<BlockHandle>> {
+    ) -> Result<BlockHandle> {
         let block_storage = self.inner.storage.block_storage();
 
         let info = block.load_info()?;
@@ -259,11 +258,7 @@ pub mod test {
             .unwrap();
 
         for block in &blocks {
-            let handle = storage
-                .block_handle_storage()
-                .load_handle(block)
-                .unwrap()
-                .unwrap();
+            let handle = storage.block_handle_storage().load_handle(block).unwrap();
             assert!(handle.meta().is_applied());
             storage
                 .shard_state_storage()
@@ -306,7 +301,7 @@ pub mod test {
         let (handle, _) = storage.block_handle_storage().create_or_load_handle(
             &block_id,
             BlockMetaData::zero_state(master.state().gen_utime),
-        )?;
+        );
 
         storage
             .shard_state_storage()
@@ -331,16 +326,13 @@ pub mod test {
         let (handle, _) = storage.block_handle_storage().create_or_load_handle(
             &shard_id,
             BlockMetaData::zero_state(shard.state().gen_utime),
-        )?;
+        );
         storage
             .shard_state_storage()
             .store_state(&handle, &shard)
             .await?;
 
-        storage
-            .node_state()
-            .store_last_mc_block_id(&master_id)
-            .unwrap();
+        storage.node_state().store_last_mc_block_id(&master_id);
         Ok((provider, storage))
     }
 }

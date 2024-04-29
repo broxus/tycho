@@ -6,7 +6,9 @@ use tycho_storage::Storage;
 
 pub trait BlockStriderState: Send + Sync + 'static {
     fn load_last_traversed_master_block_id(&self) -> BlockId;
+
     fn is_traversed(&self, block_id: &BlockId) -> bool;
+
     fn commit_traversed(&self, block_id: &BlockId);
 }
 
@@ -18,17 +20,12 @@ impl BlockStriderState for Arc<Storage> {
     }
 
     fn is_traversed(&self, block_id: &BlockId) -> bool {
-        self.block_handle_storage()
-            .load_handle(block_id)
-            .expect("db is dead")
-            .is_some()
+        self.block_handle_storage().load_handle(block_id).is_some()
     }
 
     fn commit_traversed(&self, block_id: &BlockId) {
         if block_id.is_masterchain() {
-            self.node_state()
-                .store_last_mc_block_id(block_id)
-                .expect("db is dead");
+            self.node_state().store_last_mc_block_id(block_id);
         }
         // other blocks are stored with state applier: todo rework this?
     }

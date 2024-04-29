@@ -1,6 +1,5 @@
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use anyhow::Result;
 use everscale_types::models::BlockId;
 use tycho_block_util::block::TopBlocks;
 use tycho_block_util::state::is_persistent_state;
@@ -12,7 +11,7 @@ use crate::util::*;
 
 pub struct BlockHandleStorage {
     db: Arc<Db>,
-    cache: Arc<FastDashMap<BlockId, Weak<BlockHandle>>>,
+    cache: Arc<FastDashMap<BlockId, WeakBlockHandle>>,
 }
 
 impl BlockHandleStorage {
@@ -23,103 +22,129 @@ impl BlockHandleStorage {
         }
     }
 
-    pub fn store_block_applied(&self, handle: &Arc<BlockHandle>) -> Result<bool> {
-        if handle.meta().set_is_applied() {
-            self.store_handle(handle)?;
-            Ok(true)
-        } else {
-            Ok(false)
+    pub fn store_block_applied(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().set_is_applied();
+        if updated {
+            self.store_handle(handle);
         }
+        updated
     }
 
     pub fn create_or_load_handle(
         &self,
         block_id: &BlockId,
         meta_data: BlockMetaData,
-    ) -> Result<(Arc<BlockHandle>, HandleCreationStatus)> {
-        if let Some(handle) = self.load_handle(block_id)? {
-            return Ok((handle, HandleCreationStatus::Fetched));
+    ) -> (BlockHandle, HandleCreationStatus) {
+        use dashmap::mapref::entry::Entry;
+
+        let block_handles = &self.db.block_handles;
+
+        // Fast path - lookup in cache
+        if let Some(weak) = self.cache.get(block_id) {
+            if let Some(handle) = weak.upgrade() {
+                return (handle, HandleCreationStatus::Fetched);
+            }
         }
 
-        if let Some(handle) = self.create_handle(*block_id, BlockMeta::with_data(meta_data))? {
-            return Ok((handle, HandleCreationStatus::Created));
-        }
+        match block_handles.get(block_id.root_hash.as_slice()).unwrap() {
+            // Try to load block handle from an existing data
+            Some(data) => {
+                let meta = BlockMeta::from_slice(data.as_ref());
 
-        if let Some(handle) = self.load_handle(block_id)? {
-            return Ok((handle, HandleCreationStatus::Fetched));
-        }
+                // Fill the cache with a new handle
+                let handle = self.fill_cache(block_id, meta);
 
-        Err(BlockHandleStorageError::FailedToCreateBlockHandle.into())
+                // Done
+                (handle, HandleCreationStatus::Fetched)
+            }
+            None => {
+                // Create a new handle
+                let handle = BlockHandle::new(
+                    block_id,
+                    BlockMeta::with_data(meta_data),
+                    self.cache.clone(),
+                );
+
+                // Fill the cache with the new handle
+                match self.cache.entry(*block_id) {
+                    Entry::Vacant(entry) => {
+                        entry.insert(handle.downgrade());
+                    }
+                    Entry::Occupied(mut entry) => match entry.get().upgrade() {
+                        // Another thread has created the handle
+                        Some(handle) => return (handle, HandleCreationStatus::Fetched),
+                        None => {
+                            entry.insert(handle.downgrade());
+                        }
+                    },
+                };
+
+                // Store the handle in the storage
+                self.store_handle(&handle);
+
+                // Done
+                (handle, HandleCreationStatus::Created)
+            }
+        }
     }
 
-    pub fn load_handle(&self, block_id: &BlockId) -> Result<Option<Arc<BlockHandle>>> {
-        Ok(loop {
-            if let Some(weak) = self.cache.get(block_id) {
-                if let Some(handle) = weak.upgrade() {
-                    break Some(handle);
-                }
-            }
+    pub fn load_handle(&self, block_id: &BlockId) -> Option<BlockHandle> {
+        let block_handles = &self.db.block_handles;
 
-            if let Some(meta) = self.db.block_handles.get(block_id.root_hash.as_slice())? {
-                let meta = BlockMeta::from_slice(meta.as_ref())?;
-                if let Some(handle) = self.create_handle(*block_id, meta)? {
-                    break Some(handle);
-                }
-            } else {
-                break None;
+        // Fast path - lookup in cache
+        if let Some(weak) = self.cache.get(block_id) {
+            if let Some(handle) = weak.upgrade() {
+                return Some(handle);
             }
-        })
+        }
+
+        // Load meta from storage
+        let meta = match block_handles.get(block_id.root_hash.as_slice()).unwrap() {
+            Some(data) => BlockMeta::from_slice(data.as_ref()),
+            None => return None,
+        };
+
+        // Fill the cache with a new handle
+        Some(self.fill_cache(block_id, meta))
     }
 
-    pub fn store_handle(&self, handle: &BlockHandle) -> Result<()> {
+    pub fn store_handle(&self, handle: &BlockHandle) {
         let id = handle.id();
 
         self.db
             .block_handles
-            .insert(id.root_hash.as_slice(), handle.meta().to_vec())?;
+            .insert(id.root_hash.as_slice(), handle.meta().to_vec())
+            .unwrap();
 
         if handle.is_key_block() {
             self.db
                 .key_blocks
-                .insert(id.seqno.to_be_bytes(), id.to_vec())?;
+                .insert(id.seqno.to_be_bytes(), id.to_vec())
+                .unwrap();
         }
-
-        Ok(())
     }
 
-    pub fn load_key_block_handle(&self, seqno: u32) -> Result<Arc<BlockHandle>> {
-        let key_block_id = self
-            .db
-            .key_blocks
-            .get(seqno.to_be_bytes())?
-            .map(|value| BlockId::from_slice(value.as_ref()))
-            .transpose()?
-            .ok_or(BlockHandleStorageError::KeyBlockNotFound)?;
-
-        self.load_handle(&key_block_id)?.ok_or_else(|| {
-            BlockHandleStorageError::KeyBlockHandleNotFound(key_block_id.seqno).into()
-        })
+    pub fn load_key_block_handle(&self, seqno: u32) -> Option<BlockHandle> {
+        let key_blocks = &self.db.key_blocks;
+        let key_block_id = match key_blocks.get(seqno.to_be_bytes()).unwrap() {
+            Some(data) => BlockId::from_slice(data.as_ref()),
+            None => return None,
+        };
+        self.load_handle(&key_block_id)
     }
 
-    pub fn find_last_key_block(&self) -> Result<Arc<BlockHandle>> {
+    pub fn find_last_key_block(&self) -> Option<BlockHandle> {
         let mut iter = self.db.key_blocks.raw_iterator();
         iter.seek_to_last();
 
-        // Load key block from current iterator value
-        let key_block_id = iter
-            .value()
-            .map(BlockId::from_slice)
-            .transpose()?
-            .ok_or(BlockHandleStorageError::KeyBlockNotFound)?;
-
-        self.load_handle(&key_block_id)?.ok_or_else(|| {
-            BlockHandleStorageError::KeyBlockHandleNotFound(key_block_id.seqno).into()
-        })
+        // Load key block from the current iterator value
+        let key_block_id = BlockId::from_slice(iter.value()?);
+        self.load_handle(&key_block_id)
     }
 
-    pub fn find_prev_key_block(&self, seqno: u32) -> Result<Option<Arc<BlockHandle>>> {
+    pub fn find_prev_key_block(&self, seqno: u32) -> Option<BlockHandle> {
         if seqno == 0 {
-            return Ok(None);
+            return None;
         }
 
         // Create iterator and move it to the previous key block before the specified
@@ -127,20 +152,13 @@ impl BlockHandleStorage {
         iter.seek_for_prev((seqno - 1u32).to_be_bytes());
 
         // Load key block from current iterator value
-        iter.value()
-            .map(BlockId::from_slice)
-            .transpose()?
-            .map(|key_block_id| {
-                self.load_handle(&key_block_id)?.ok_or_else(|| {
-                    BlockHandleStorageError::KeyBlockHandleNotFound(key_block_id.seqno).into()
-                })
-            })
-            .transpose()
+        let key_block_id = BlockId::from_slice(iter.value()?);
+        self.load_handle(&key_block_id)
     }
 
-    pub fn find_prev_persistent_key_block(&self, seqno: u32) -> Result<Option<Arc<BlockHandle>>> {
+    pub fn find_prev_persistent_key_block(&self, seqno: u32) -> Option<BlockHandle> {
         if seqno == 0 {
-            return Ok(None);
+            return None;
         }
 
         // Create iterator and move it to the previous key block before the specified
@@ -148,51 +166,43 @@ impl BlockHandleStorage {
         iter.seek_for_prev((seqno - 1u32).to_be_bytes());
 
         // Loads key block from current iterator value and moves it backward
-        let mut get_key_block = move || -> Result<Option<Arc<BlockHandle>>> {
+        let mut get_key_block = move || -> Option<BlockHandle> {
             // Load key block id
-            let key_block_id = match iter.value().map(BlockId::from_slice).transpose()? {
-                Some(prev_key_block) => prev_key_block,
-                None => return Ok(None),
-            };
+            let key_block_id = BlockId::from_slice(iter.value()?);
 
             // Load block handle for this id
-            let handle = self.load_handle(&key_block_id)?.ok_or(
-                BlockHandleStorageError::KeyBlockHandleNotFound(key_block_id.seqno),
-            )?;
+            let handle = self.load_handle(&key_block_id)?;
 
             // Move iterator backward
             iter.prev();
 
             // Done
-            Ok(Some(handle))
+            Some(handle)
         };
 
         // Load previous key block
-        let mut key_block = match get_key_block()? {
-            Some(id) => id,
-            None => return Ok(None),
-        };
+        let mut key_block = get_key_block()?;
 
         // Load previous key blocks and check if the `key_block` is for persistent state
-        while let Some(prev_key_block) = get_key_block()? {
+        while let Some(prev_key_block) = get_key_block() {
             if is_persistent_state(
                 key_block.meta().gen_utime(),
                 prev_key_block.meta().gen_utime(),
             ) {
                 // Found
-                return Ok(Some(key_block));
+                return Some(key_block);
             }
             key_block = prev_key_block;
         }
 
         // Not found
-        Ok(None)
+        None
     }
 
     pub fn key_blocks_iterator(
         &self,
         direction: KeyBlocksDirection,
-    ) -> impl Iterator<Item = Result<BlockId>> + '_ {
+    ) -> impl Iterator<Item = BlockId> + '_ {
         let mut raw_iterator = self.db.key_blocks.raw_iterator();
         let reverse = match direction {
             KeyBlocksDirection::ForwardFrom(seqno) => {
@@ -240,25 +250,24 @@ impl BlockHandleStorage {
         total_removed
     }
 
-    fn create_handle(
-        &self,
-        block_id: BlockId,
-        meta: BlockMeta,
-    ) -> Result<Option<Arc<BlockHandle>>> {
+    fn fill_cache(&self, block_id: &BlockId, meta: BlockMeta) -> BlockHandle {
         use dashmap::mapref::entry::Entry;
 
-        let handle = match self.cache.entry(block_id) {
+        match self.cache.entry(*block_id) {
             Entry::Vacant(entry) => {
-                let handle = Arc::new(BlockHandle::new(block_id, meta, self.cache.clone()));
-                entry.insert(Arc::downgrade(&handle));
+                let handle = BlockHandle::new(block_id, meta, self.cache.clone());
+                entry.insert(handle.downgrade());
                 handle
             }
-            Entry::Occupied(_) => return Ok(None),
-        };
-
-        self.store_handle(&handle)?;
-
-        Ok(Some(handle))
+            Entry::Occupied(mut entry) => match entry.get().upgrade() {
+                Some(handle) => handle,
+                None => {
+                    let handle = BlockHandle::new(block_id, meta, self.cache.clone());
+                    entry.insert(handle.downgrade());
+                    handle
+                }
+            },
+        }
     }
 }
 
@@ -280,7 +289,7 @@ struct KeyBlocksIterator<'a> {
 }
 
 impl Iterator for KeyBlocksIterator<'_> {
-    type Item = Result<BlockId>;
+    type Item = BlockId;
 
     fn next(&mut self) -> Option<Self::Item> {
         let value = self.raw_iterator.value().map(BlockId::from_slice)?;
@@ -289,17 +298,6 @@ impl Iterator for KeyBlocksIterator<'_> {
         } else {
             self.raw_iterator.next();
         }
-
         Some(value)
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-enum BlockHandleStorageError {
-    #[error("Failed to create block handle")]
-    FailedToCreateBlockHandle,
-    #[error("Key block not found")]
-    KeyBlockNotFound,
-    #[error("Key block handle not found: {}", .0)]
-    KeyBlockHandleNotFound(u32),
 }

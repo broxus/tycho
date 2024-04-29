@@ -73,7 +73,7 @@ async fn persistent_storage_everscale() -> Result<()> {
         root_path.join("file_storage"),
         db_options.cells_cache_size.as_u64(),
     )?;
-    assert!(storage.node_state().load_init_mc_block_id().is_err());
+    assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     // Read zerostate
     let zero_state_raw = ShardStateCombined::from_file("tests/everscale_zerostate.boc")?;
@@ -85,7 +85,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
         &block_id,
         BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap()),
-    )?;
+    );
 
     let zerostate = ShardStateStuff::new(
         block_id,

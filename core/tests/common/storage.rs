@@ -26,7 +26,7 @@ pub(crate) async fn init_empty_storage() -> Result<(Arc<Storage>, TempDir)> {
         root_path.join("file_storage"),
         db_options.cells_cache_size.as_u64(),
     )?;
-    assert!(storage.node_state().load_init_mc_block_id().is_err());
+    assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     Ok((storage, tmp_dir))
 }
@@ -68,7 +68,7 @@ pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
 
             let handle = storage
                 .block_handle_storage()
-                .load_handle(&block_id)?
+                .load_handle(&block_id)
                 .unwrap();
 
             assert_eq!(handle.id(), block_stuff.id());

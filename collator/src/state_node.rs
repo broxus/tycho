@@ -167,7 +167,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         //TODO: make real implementation
         //STUB: create dummy blcok handle
         let handle = BlockHandle::new(
-            block.block_id,
+            &block.block_id,
             Default::default(),
             Arc::new(Default::default()),
         );

@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::Result;
 use bytes::Buf;
 use everscale_types::models::BlockInfo;
 
@@ -205,17 +204,17 @@ impl StoredValue for BlockMeta {
         buffer.write_raw_slice(&self.gen_utime.to_le_bytes());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Result<Self>
+    fn deserialize(reader: &mut &[u8]) -> Self
     where
         Self: Sized,
     {
         let flags = reader.get_u64_le();
         let gen_utime = reader.get_u32_le();
 
-        Ok(Self {
+        Self {
             flags: AtomicU64::new(flags),
             gen_utime,
-        })
+        }
     }
 }
 

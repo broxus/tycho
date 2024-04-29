@@ -133,7 +133,7 @@ impl ShardStateStorage {
         self.db.raw().write(batch)?;
 
         Ok(if handle.meta().set_has_state() {
-            self.block_handle_storage.store_handle(handle)?;
+            self.block_handle_storage.store_handle(handle);
             true
         } else {
             false
@@ -204,7 +204,7 @@ impl ShardStateStorage {
                 },
             };
 
-            let block_id = BlockIdShort::deserialize(&mut std::convert::identity(key))?;
+            let block_id = BlockIdShort::from_slice(key);
             let root_hash = HashBytes::wrap(value.try_into().expect("invalid value"));
 
             // Skip blocks from zero state and top blocks
@@ -270,7 +270,7 @@ impl ShardStateStorage {
         };
 
         // Find block handle
-        let handle = match self.block_handle_storage.load_handle(&mc_block_id)? {
+        let handle = match self.block_handle_storage.load_handle(&mc_block_id) {
             Some(handle) if handle.meta().has_data() => handle,
             // Skip blocks without handle or data
             _ => return Ok(None),
@@ -292,11 +292,7 @@ impl ShardStateStorage {
         };
 
         // Find block handle
-        let min_ref_block_handle = match self
-            .block_handle_storage
-            .load_handle(&min_ref_block_id)
-            .context("Failed to find min ref mc block handle")?
-        {
+        let min_ref_block_handle = match self.block_handle_storage.load_handle(&min_ref_block_id) {
             Some(handle) if handle.meta().has_data() => handle,
             // Skip blocks without handle or data
             _ => return Ok(None),

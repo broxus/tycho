@@ -94,7 +94,7 @@ impl BlockStorage {
         let block_id = block.id();
         let (handle, status) = self
             .block_handle_storage
-            .create_or_load_handle(block_id, meta_data)?;
+            .create_or_load_handle(block_id, meta_data);
 
         let archive_id = ArchiveEntryId::Block(block_id);
         let mut updated = false;
@@ -105,7 +105,7 @@ impl BlockStorage {
             if !handle.meta().has_data() {
                 self.add_data(&archive_id, data)?;
                 if handle.meta().set_has_data() {
-                    self.block_handle_storage.store_handle(&handle)?;
+                    self.block_handle_storage.store_handle(&handle);
                     updated = true;
                 }
             }
@@ -173,7 +173,7 @@ impl BlockStorage {
             BlockProofHandle::Existing(handle) => (handle, HandleCreationStatus::Fetched),
             BlockProofHandle::New(meta_data) => self
                 .block_handle_storage
-                .create_or_load_handle(block_id, meta_data)?,
+                .create_or_load_handle(block_id, meta_data),
         };
 
         let mut updated = false;
@@ -186,7 +186,7 @@ impl BlockStorage {
                 if !handle.meta().has_proof_link() {
                     self.add_data(&archive_id, data)?;
                     if handle.meta().set_has_proof_link() {
-                        self.block_handle_storage.store_handle(&handle)?;
+                        self.block_handle_storage.store_handle(&handle);
                         updated = true;
                     }
                 }
@@ -200,7 +200,7 @@ impl BlockStorage {
                 if !handle.meta().has_proof() {
                     self.add_data(&archive_id, data)?;
                     if handle.meta().set_has_proof() {
-                        self.block_handle_storage.store_handle(&handle)?;
+                        self.block_handle_storage.store_handle(&handle);
                         updated = true;
                     }
                 }
@@ -497,10 +497,10 @@ impl BlockStorage {
         let target_block = match gc_type {
             BlocksGcKind::BeforePreviousKeyBlock => self
                 .block_handle_storage
-                .find_prev_key_block(key_block_id.seqno)?,
+                .find_prev_key_block(key_block_id.seqno),
             BlocksGcKind::BeforePreviousPersistentState => self
                 .block_handle_storage
-                .find_prev_persistent_key_block(key_block_id.seqno)?,
+                .find_prev_persistent_key_block(key_block_id.seqno),
         };
 
         // Load target block data
@@ -609,7 +609,7 @@ impl BlockStorage {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let lock = self.block_subscriptions_lock.lock().await;
-        match block_handle_storage.load_handle(&block_id)? {
+        match block_handle_storage.load_handle(&block_id) {
             Some(handle) if handle.meta().has_data() => {
                 drop(lock);
 
@@ -631,17 +631,17 @@ impl BlockStorage {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let lock = self.block_subscriptions_lock.lock().await;
-        let next_block_id = match block_handle_storage.load_handle(&prev_block_id)? {
-            Some(handle) if handle.meta().has_next1() => {
-                block_connection_storage.load_connection(&prev_block_id, BlockConnection::Next1)?
-            }
+        let next_block_id = match block_handle_storage.load_handle(&prev_block_id) {
+            Some(handle) if handle.meta().has_next1() => block_connection_storage
+                .load_connection(&prev_block_id, BlockConnection::Next1)
+                .context("connection no found")?,
             _ => {
                 self.add_block_subscription(prev_block_id, tx);
                 return Ok(rx);
             }
         };
 
-        match block_handle_storage.load_handle(&next_block_id)? {
+        match block_handle_storage.load_handle(&next_block_id) {
             Some(handle) if handle.meta().has_data() => {
                 drop(lock);
 
@@ -771,12 +771,12 @@ pub enum BlocksGcKind {
 
 #[derive(Clone)]
 pub enum BlockProofHandle {
-    Existing(Arc<BlockHandle>),
+    Existing(BlockHandle),
     New(BlockMetaData),
 }
 
-impl From<Arc<BlockHandle>> for BlockProofHandle {
-    fn from(handle: Arc<BlockHandle>) -> Self {
+impl From<BlockHandle> for BlockProofHandle {
+    fn from(handle: BlockHandle) -> Self {
         Self::Existing(handle)
     }
 }
@@ -788,7 +788,7 @@ impl From<BlockMetaData> for BlockProofHandle {
 }
 
 pub struct StoreBlockResult {
-    pub handle: Arc<BlockHandle>,
+    pub handle: BlockHandle,
     pub updated: bool,
     pub new: bool,
 }
@@ -823,8 +823,7 @@ fn remove_blocks(
         };
 
         // Read only prefix with shard ident and seqno
-        let BlockIdShort { shard, seqno } =
-            <BlockIdShort as StoredValue>::deserialize(&mut std::convert::identity(key))?;
+        let BlockIdShort { shard, seqno } = BlockIdShort::from_slice(key);
 
         // Don't gc latest blocks
         if top_blocks.contains_shard_seqno(&shard, seqno) {

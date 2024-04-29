@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use everscale_types::models::*;
 use parking_lot::Mutex;
 
@@ -24,105 +23,92 @@ impl NodeStateStorage {
         }
     }
 
-    pub fn store_historical_sync_start(&self, id: &BlockId) -> Result<()> {
+    pub fn store_historical_sync_start(&self, id: &BlockId) {
         let node_states = &self.db.node_states;
-        node_states.insert(HISTORICAL_SYNC_LOW, id.to_vec())?;
-        Ok(())
+        node_states
+            .insert(HISTORICAL_SYNC_LOW, id.to_vec())
+            .unwrap()
     }
 
-    pub fn load_historical_sync_start(&self) -> Result<Option<BlockId>> {
-        Ok(match self.db.node_states.get(HISTORICAL_SYNC_LOW)? {
-            Some(data) => Some(BlockId::from_slice(data.as_ref())?),
+    pub fn load_historical_sync_start(&self) -> Option<BlockId> {
+        match self.db.node_states.get(HISTORICAL_SYNC_LOW).unwrap() {
+            Some(data) => Some(BlockId::from_slice(data.as_ref())),
             None => None,
-        })
+        }
     }
 
-    pub fn store_historical_sync_end(&self, id: &BlockId) -> Result<()> {
+    pub fn store_historical_sync_end(&self, id: &BlockId) {
         let node_states = &self.db.node_states;
-        node_states.insert(HISTORICAL_SYNC_HIGH, id.to_vec())?;
-        Ok(())
+        node_states
+            .insert(HISTORICAL_SYNC_HIGH, id.to_vec())
+            .unwrap();
     }
 
-    pub fn load_historical_sync_end(&self) -> Result<BlockId> {
+    pub fn load_historical_sync_end(&self) -> Option<BlockId> {
         let node_states = &self.db.node_states;
-        let data = node_states
-            .get(HISTORICAL_SYNC_HIGH)?
-            .ok_or(NodeStateStorageError::HighBlockNotFound)?;
-        BlockId::from_slice(data.as_ref())
+        let data = node_states.get(HISTORICAL_SYNC_HIGH).unwrap()?;
+        Some(BlockId::from_slice(data.as_ref()))
     }
 
-    #[allow(unused)]
-    pub fn store_last_uploaded_archive(&self, archive_id: u32) -> Result<()> {
+    pub fn store_last_uploaded_archive(&self, archive_id: u32) {
         let node_states = &self.db.node_states;
-        node_states.insert(LAST_UPLOADED_ARCHIVE, archive_id.to_le_bytes())?;
-        Ok(())
+        node_states
+            .insert(LAST_UPLOADED_ARCHIVE, archive_id.to_le_bytes())
+            .unwrap();
     }
 
-    #[allow(unused)]
-    pub fn load_last_uploaded_archive(&self) -> Result<Option<u32>> {
-        Ok(match self.db.node_states.get(LAST_UPLOADED_ARCHIVE)? {
+    pub fn load_last_uploaded_archive(&self) -> Option<u32> {
+        match self.db.node_states.get(LAST_UPLOADED_ARCHIVE).unwrap() {
             Some(data) if data.len() >= 4 => {
                 Some(u32::from_le_bytes(data[..4].try_into().unwrap()))
             }
             _ => None,
-        })
+        }
     }
 
-    pub fn store_last_mc_block_id(&self, id: &BlockId) -> Result<()> {
+    pub fn store_last_mc_block_id(&self, id: &BlockId) {
         self.store_block_id(&self.last_mc_block_id, id)
     }
 
-    pub fn load_last_mc_block_id(&self) -> Result<BlockId> {
+    pub fn load_last_mc_block_id(&self) -> Option<BlockId> {
         self.load_block_id(&self.last_mc_block_id)
     }
 
-    pub fn store_init_mc_block_id(&self, id: &BlockId) -> Result<()> {
+    pub fn store_init_mc_block_id(&self, id: &BlockId) {
         self.store_block_id(&self.init_mc_block_id, id)
     }
 
-    pub fn load_init_mc_block_id(&self) -> Result<BlockId> {
+    pub fn load_init_mc_block_id(&self) -> Option<BlockId> {
         self.load_block_id(&self.init_mc_block_id)
     }
 
-    pub fn store_shards_client_mc_block_id(&self, id: &BlockId) -> Result<()> {
+    pub fn store_shards_client_mc_block_id(&self, id: &BlockId) {
         self.store_block_id(&self.shards_client_mc_block_id, id)
     }
 
-    pub fn load_shards_client_mc_block_id(&self) -> Result<BlockId> {
+    pub fn load_shards_client_mc_block_id(&self) -> Option<BlockId> {
         self.load_block_id(&self.shards_client_mc_block_id)
     }
 
     #[inline(always)]
-    fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) -> Result<()> {
+    fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
         let node_states = &self.db.node_states;
-        node_states.insert(key, write_block_id_le(block_id))?;
+        node_states
+            .insert(key, write_block_id_le(block_id))
+            .unwrap();
         *cache.lock() = Some(*block_id);
-        Ok(())
     }
 
     #[inline(always)]
-    fn load_block_id(&self, (cache, key): &BlockIdCache) -> Result<BlockId> {
+    fn load_block_id(&self, (cache, key): &BlockIdCache) -> Option<BlockId> {
         if let Some(cached) = &*cache.lock() {
-            return Ok(*cached);
+            return Some(*cached);
         }
 
-        let value = match self.db.node_states.get(key)? {
-            Some(data) => read_block_id_le(&data).ok_or(NodeStateStorageError::InvalidBlockId)?,
-            None => return Err(NodeStateStorageError::StateNotFound.into()),
-        };
+        let value = read_block_id_le(&self.db.node_states.get(key).unwrap()?);
         *cache.lock() = Some(value);
-        Ok(value)
+        Some(value)
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum NodeStateStorageError {
-    #[error("High block not found")]
-    HighBlockNotFound,
-    #[error("State not found")]
-    StateNotFound,
-    #[error("Invalid block id")]
-    InvalidBlockId,
 }
 
 type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);

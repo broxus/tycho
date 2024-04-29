@@ -119,7 +119,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         mut self,
         block_id: BlockId,
         progress_bar: &mut ProgressBar,
-    ) -> Result<Arc<ShardStateStuff>> {
+    ) -> Result<ShardStateStuff> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -231,11 +231,11 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
                 let cell = self.cell_storage.load_cell(cell_id)?;
-                Ok(Arc::new(ShardStateStuff::new(
+                Ok(ShardStateStuff::new(
                     block_id,
                     Cell::from(cell as Arc<_>),
                     self.min_ref_mc_state,
-                )?))
+                )?)
             }
             None => Err(ReplaceTransactionError::NotFound.into()),
         }

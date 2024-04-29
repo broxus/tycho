@@ -8,19 +8,35 @@ use tycho_util::FastDashMap;
 
 #[derive(Clone)]
 #[repr(transparent)]
+pub struct WeakBlockHandle {
+    inner: Weak<Inner>,
+}
+
+impl WeakBlockHandle {
+    pub fn strong_count(&self) -> usize {
+        self.inner.strong_count()
+    }
+
+    pub fn upgrade(&self) -> Option<BlockHandle> {
+        self.inner.upgrade().map(|inner| BlockHandle { inner })
+    }
+}
+
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct BlockHandle {
     inner: Arc<Inner>,
 }
 
 impl BlockHandle {
     pub fn new(
-        id: BlockId,
+        id: &BlockId,
         meta: BlockMeta,
-        cache: Arc<FastDashMap<BlockId, Weak<BlockHandle>>>,
+        cache: Arc<FastDashMap<BlockId, WeakBlockHandle>>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                id,
+                id: *id,
                 meta,
                 block_data_lock: Default::default(),
                 proof_data_block: Default::default(),
@@ -70,20 +86,44 @@ impl BlockHandle {
             self.inner.meta.masterchain_ref_seqno()
         }
     }
-}
 
-impl Drop for BlockHandle {
-    fn drop(&mut self) {
-        self.inner
-            .cache
-            .remove_if(&self.inner.id, |_, weak| weak.strong_count() == 0);
+    pub fn downgrade(&self) -> WeakBlockHandle {
+        WeakBlockHandle {
+            inner: Arc::downgrade(&self.inner),
+        }
     }
 }
 
-struct Inner {
+unsafe impl arc_swap::RefCnt for BlockHandle {
+    type Base = Inner;
+
+    fn into_ptr(me: Self) -> *mut Self::Base {
+        arc_swap::RefCnt::into_ptr(me.inner)
+    }
+
+    fn as_ptr(me: &Self) -> *mut Self::Base {
+        arc_swap::RefCnt::as_ptr(&me.inner)
+    }
+
+    unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
+        Self {
+            inner: arc_swap::RefCnt::from_ptr(ptr),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct Inner {
     id: BlockId,
     meta: BlockMeta,
     block_data_lock: RwLock<()>,
     proof_data_block: RwLock<()>,
-    cache: Arc<FastDashMap<BlockId, Weak<BlockHandle>>>,
+    cache: Arc<FastDashMap<BlockId, WeakBlockHandle>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.cache
+            .remove_if(&self.id, |_, weak| weak.strong_count() == 0);
+    }
 }

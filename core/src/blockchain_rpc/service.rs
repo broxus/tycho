@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use anyhow::Context;
 use bytes::Buf;
 use serde::{Deserialize, Serialize};
 use tycho_network::{Response, Service, ServiceRequest};
@@ -196,7 +197,7 @@ impl Inner {
                 .key_blocks_iterator(KeyBlocksDirection::ForwardFrom(req.block_id.seqno))
                 .take(limit + 1);
 
-            if let Some(id) = iterator.next().transpose()? {
+            if let Some(id) = iterator.next() {
                 anyhow::ensure!(
                     id.root_hash == req.block_id.root_hash,
                     "first block root hash mismatch"
@@ -208,7 +209,7 @@ impl Inner {
             }
 
             let mut ids = Vec::with_capacity(limit);
-            while let Some(id) = iterator.next().transpose()? {
+            while let Some(id) = iterator.next() {
                 ids.push(id);
                 if ids.len() >= limit {
                     break;
@@ -239,7 +240,7 @@ impl Inner {
 
         let get_block_full = async {
             let mut is_link = false;
-            let block = match block_handle_storage.load_handle(&req.block_id)? {
+            let block = match block_handle_storage.load_handle(&req.block_id) {
                 Some(handle)
                     if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) =>
                 {
@@ -277,14 +278,15 @@ impl Inner {
         let block_storage = self.storage().block_storage();
 
         let get_next_block_full = async {
-            let next_block_id = match block_handle_storage.load_handle(&req.prev_block_id)? {
+            let next_block_id = match block_handle_storage.load_handle(&req.prev_block_id) {
                 Some(handle) if handle.meta().has_next1() => block_connection_storage
-                    .load_connection(&req.prev_block_id, BlockConnection::Next1)?,
+                    .load_connection(&req.prev_block_id, BlockConnection::Next1)
+                    .context("connection not found")?,
                 _ => return Ok(BlockFull::Empty),
             };
 
             let mut is_link = false;
-            let block = match block_handle_storage.load_handle(&next_block_id)? {
+            let block = match block_handle_storage.load_handle(&next_block_id) {
                 Some(handle)
                     if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) =>
                 {
@@ -356,8 +358,12 @@ impl Inner {
         let node_state = self.storage.node_state();
 
         let get_archive_id = || {
-            let last_applied_mc_block = node_state.load_last_mc_block_id()?;
-            let shards_client_mc_block_id = node_state.load_shards_client_mc_block_id()?;
+            let last_applied_mc_block = node_state
+                .load_last_mc_block_id()
+                .context("last mc block not found")?;
+            let shards_client_mc_block_id = node_state
+                .load_shards_client_mc_block_id()
+                .context("shard client mc block not found")?;
             Ok::<_, anyhow::Error>((last_applied_mc_block, shards_client_mc_block_id))
         };
 

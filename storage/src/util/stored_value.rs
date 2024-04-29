@@ -1,7 +1,6 @@
 use bytes::Buf;
 use smallvec::SmallVec;
 
-use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 
@@ -22,7 +21,7 @@ pub trait StoredValue {
     /// moved to the end of the deserialized data.
     ///
     /// NOTE: `reader` should not be used after this call in case of an error
-    fn deserialize(reader: &mut &[u8]) -> Result<Self>
+    fn deserialize(reader: &mut &[u8]) -> Self
     where
         Self: Sized;
 
@@ -30,7 +29,7 @@ pub trait StoredValue {
     ///
     /// [`StoredValue::deserialize`]
     #[inline(always)]
-    fn from_slice(mut data: &[u8]) -> Result<Self>
+    fn from_slice(mut data: &[u8]) -> Self
     where
         Self: Sized,
     {
@@ -95,13 +94,13 @@ impl StoredValue for BlockId {
         buffer.write_raw_slice(self.file_hash.as_slice());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Result<Self>
+    fn deserialize(reader: &mut &[u8]) -> Self
     where
         Self: Sized,
     {
         debug_assert!(reader.remaining() >= Self::SIZE_HINT);
 
-        let shard = ShardIdent::deserialize(reader)?;
+        let shard = ShardIdent::deserialize(reader);
         let seqno = reader.get_u32();
 
         let mut root_hash = HashBytes::default();
@@ -109,12 +108,12 @@ impl StoredValue for BlockId {
         let mut file_hash = HashBytes::default();
         file_hash.0.copy_from_slice(&reader[32..]);
 
-        Ok(Self {
+        Self {
             shard,
             seqno,
             root_hash,
             file_hash,
-        })
+        }
     }
 }
 
@@ -131,7 +130,7 @@ impl StoredValue for ShardIdent {
         buffer.write_raw_slice(&self.prefix().to_be_bytes());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Result<Self>
+    fn deserialize(reader: &mut &[u8]) -> Self
     where
         Self: Sized,
     {
@@ -139,7 +138,7 @@ impl StoredValue for ShardIdent {
 
         let workchain = reader.get_u32() as i32;
         let prefix = reader.get_u64();
-        Ok(unsafe { Self::new_unchecked(workchain, prefix) })
+        unsafe { Self::new_unchecked(workchain, prefix) }
     }
 }
 
@@ -156,15 +155,15 @@ impl StoredValue for BlockIdShort {
         buffer.write_raw_slice(&self.seqno.to_be_bytes());
     }
 
-    fn deserialize(reader: &mut &[u8]) -> Result<Self>
+    fn deserialize(reader: &mut &[u8]) -> Self
     where
         Self: Sized,
     {
         debug_assert!(reader.remaining() >= BlockIdShort::SIZE_HINT);
 
-        let shard = ShardIdent::deserialize(reader)?;
+        let shard = ShardIdent::deserialize(reader);
         let seqno = reader.get_u32();
-        Ok(Self { shard, seqno })
+        Self { shard, seqno }
     }
 }
 
@@ -180,10 +179,8 @@ pub fn write_block_id_le(block_id: &BlockId) -> [u8; 80] {
 }
 
 /// Reads `BlockId` in little-endian format
-pub fn read_block_id_le(data: &[u8]) -> Option<BlockId> {
-    if data.len() < 80 {
-        return None;
-    }
+pub fn read_block_id_le(data: &[u8]) -> BlockId {
+    assert!(data.len() >= 80);
 
     let mut workchain = [0; 4];
     workchain.copy_from_slice(&data[0..4]);
@@ -205,12 +202,12 @@ pub fn read_block_id_le(data: &[u8]) -> Option<BlockId> {
 
     let shard = unsafe { ShardIdent::new_unchecked(workchain, shard) };
 
-    Some(BlockId {
+    BlockId {
         shard,
         seqno,
         root_hash: root_hash.into(),
         file_hash: file_hash.into(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +238,6 @@ mod tests {
         let serialized = write_block_id_le(&block_id);
         assert_eq!(serialized, SERIALIZED);
 
-        assert_eq!(read_block_id_le(&serialized).unwrap(), block_id);
+        assert_eq!(read_block_id_le(&serialized), block_id);
     }
 }
