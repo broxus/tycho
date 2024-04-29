@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -9,66 +9,55 @@ use parking_lot::Mutex;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
+use crate::intercom::PeerSchedule;
 use crate::models::{Point, Round, ValidPoint};
 
 #[derive(Clone)]
 pub struct Dag {
-    // from the oldest to the current round; newer ones are in the future
+    // from the oldest to the current round; newer ones are in the future;
+    //
     rounds: Arc<Mutex<BTreeMap<Round, DagRound>>>,
 }
 
 impl Dag {
-    // pub fn new(peer_schedule: &PeerSchedule) -> Self {
-    //     Self {
-    //         rounds: BTreeMap::from([(Arc::new(DagRound::new(round, &peer_schedule, None)))]),
-    //         peer_schedule,
-    //     }
-    // }
-    //
-    // // TODO new point is checked against the dag only if it has valid sig, time and round
-    // // TODO download from neighbours
-    // pub fn fill_up_to(&mut self, round: Round) {
-    //     match self.rounds.last_key_value() {
-    //         None => unreachable!("DAG empty"),
-    //         Some((last, _)) => {
-    //             for round in (last.0..round.0).into_iter().map(|i| Round(i + 1)) {
-    //                 let prev = self.rounds.last_key_value().map(|(_, v)| Arc::downgrade(v));
-    //                 self.rounds.entry(round).or_insert_with(|| {
-    //                     Arc::new(DagRound::new(round, &self.peer_schedule, prev))
-    //                 });
-    //             }
-    //         }
-    //     }
-    // }
-
-    pub fn new() -> Self {
+    pub fn new(dag_round: DagRound) -> Self {
+        let mut rounds = BTreeMap::new();
+        rounds.insert(dag_round.round().clone(), dag_round);
         Self {
-            rounds: Default::default(),
+            rounds: Arc::new(Mutex::new(rounds)),
         }
     }
 
-    pub fn get_or_insert(&self, dag_round: DagRound) -> DagRound {
+    pub fn top(&self, round: &Round, peer_schedule: &PeerSchedule) -> DagRound {
         let mut rounds = self.rounds.lock();
-        rounds
-            .entry(dag_round.round().clone())
-            .or_insert(dag_round)
-            .clone()
+        let mut top = match rounds.last_key_value() {
+            None => unreachable!("DAG cannot be empty"),
+            Some((_, top)) => top.clone(),
+        };
+        if (top.round().0 + MempoolConfig::COMMIT_DEPTH as u32) < round.0 {
+            unimplemented!("sync")
+        }
+        for _ in top.round().next().0..=round.0 {
+            top = rounds
+                .entry(top.round().next())
+                .or_insert(top.next(peer_schedule))
+                .clone();
+        }
+        top
     }
 
     // fixme must not be async
-    pub async fn commit(
-        self,
-        next_dag_round: DagRound,
-    ) -> VecDeque<(Arc<Point>, VecDeque<Arc<Point>>)> {
+    /// result is in historical order
+    pub async fn commit(self, next_dag_round: DagRound) -> Vec<(Arc<Point>, Vec<Arc<Point>>)> {
         let Some(latest_trigger) = Self::latest_trigger(&next_dag_round).await else {
-            return VecDeque::new();
+            return Vec::new();
         };
         let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone()).await;
-        let mut ordered = VecDeque::new();
+        let mut ordered = Vec::new();
         while let Some((anchor, anchor_round)) = anchor_stack.pop() {
             self.drop_tail(anchor.point.body.location.round);
             let committed = Self::gather_uncommitted(&anchor.point, &anchor_round).await;
-            ordered.push_back((anchor.point, committed));
+            ordered.push((anchor.point, committed));
         }
         ordered
     }
@@ -192,13 +181,13 @@ impl Dag {
         };
     }
 
-    /// returns historically ordered vertices (back to front is older to newer)
+    /// returns historically ordered vertices
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
     async fn gather_uncommitted(
         anchor /* @ r+1 */: &Point,
         anchor_round /* r+1 */: &DagRound,
-    ) -> VecDeque<Arc<Point>> {
+    ) -> Vec<Arc<Point>> {
         assert_eq!(
             *anchor_round.round(),
             anchor.body.location.round,
@@ -216,7 +205,7 @@ impl Dag {
         ];
         _ = anchor; // anchor payload will be committed the next time
 
-        let mut uncommitted = VecDeque::new();
+        let mut uncommitted = Vec::new();
 
         // TODO visited rounds count must be equal to dag depth:
         //  read/download non-existent rounds and drop too old ones
@@ -257,12 +246,13 @@ impl Dag {
                     // vertex will be skipped in r_1 as committed
                     r[2].extend(vertex.point.body.includes.clone()); // points @ r-2
                     r[3].extend(vertex.point.body.witness.clone()); // points @ r-3
-                    uncommitted.push_back(vertex.point); // LIFO
+                    uncommitted.push(vertex.point);
                 }
             }
             proof_round = vertex_round; // next r+0
             r.rotate_left(1);
         }
+        uncommitted.reverse();
         uncommitted
     }
 }

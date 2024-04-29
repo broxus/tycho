@@ -7,7 +7,7 @@ use everscale_crypto::ed25519::KeyPair;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
-use tycho_network::PeerId;
+use tycho_network::{PeerId, PrivateOverlay};
 use tycho_util::FastHashSet;
 
 use crate::intercom::dto::PeerState;
@@ -181,31 +181,35 @@ impl PeerSchedule {
         _ = inner.next_epoch_start.replace(round);
     }
 
-    pub fn set_next_peers(&self, peers: &Vec<(PeerId, bool)>) {
+    /// use [updater](super::PeerScheduleUpdater::set_next_peers())
+    pub(super) fn set_next_peers(&self, peers: &Vec<PeerId>, overlay: &PrivateOverlay) {
         let local_id = self.local_id();
-        let mut all_peers = BTreeMap::new();
         let mut inner = self.inner.lock();
-        for i in 0..inner.peers_resolved.len() {
-            all_peers.extend(inner.peers_resolved[i].iter());
-        }
-        let old = peers
+        // check resolved peers only after blocking other threads from updating inner;
+        // note that entries are under read lock
+        let resolved = overlay
+            .read_entries()
             .iter()
-            .filter_map(|(peer_id, _)| all_peers.get(peer_id).map(|state| (*peer_id, *state)))
+            .filter(|a| a.resolver_handle.is_resolved())
+            .map(|a| a.peer_id.clone())
+            .collect::<FastHashSet<_>>();
+        let peers = peers
+            .iter()
+            .map(|peer_id| {
+                (
+                    peer_id.clone(),
+                    if resolved.contains(&peer_id) && peer_id != local_id {
+                        PeerState::Resolved
+                    } else {
+                        PeerState::Unknown
+                    },
+                )
+            })
             .collect::<Vec<_>>();
         // detach existing copies - they are tightened to use-site DAG round
         let next = Arc::make_mut(&mut inner.peers_resolved[2]);
         next.clear();
-        next.extend(peers.clone().into_iter().map(|(peer_id, is_resolved)| {
-            (
-                peer_id,
-                if is_resolved && peer_id != local_id {
-                    PeerState::Resolved
-                } else {
-                    PeerState::Unknown
-                },
-            )
-        }));
-        next.extend(old);
+        next.extend(peers);
     }
 
     /// Returns [true] if update was successfully applied

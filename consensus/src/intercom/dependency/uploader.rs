@@ -3,19 +3,19 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::dag::WeakDagRound;
+use crate::dag::DagRound;
 use crate::intercom::dto::PointByIdResponse;
 use crate::models::{DagPoint, Point, PointId};
 
 pub struct Uploader {
     requests: mpsc::UnboundedReceiver<(PointId, oneshot::Sender<PointByIdResponse>)>,
-    top_dag_round: watch::Receiver<WeakDagRound>,
+    top_dag_round: watch::Receiver<DagRound>,
 }
 
 impl Uploader {
     pub fn new(
         requests: mpsc::UnboundedReceiver<(PointId, oneshot::Sender<PointByIdResponse>)>,
-        top_dag_round: watch::Receiver<WeakDagRound>,
+        top_dag_round: watch::Receiver<DagRound>,
     ) -> Self {
         Self {
             requests,
@@ -35,7 +35,7 @@ impl Uploader {
     }
 
     async fn find(&self, point_id: &PointId) -> Option<Arc<Point>> {
-        let top_dag_round = self.top_dag_round.borrow().get()?;
+        let top_dag_round = self.top_dag_round.borrow().clone();
         let shared = top_dag_round
             .scan(&point_id.location.round)
             .map(|dag_round| {

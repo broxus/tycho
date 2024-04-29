@@ -50,6 +50,13 @@ impl DagPoint {
         }
     }
 
+    pub fn trusted(&self) -> Option<&'_ ValidPoint> {
+        match self {
+            DagPoint::Trusted(valid) => Some(valid),
+            _ => None,
+        }
+    }
+
     pub fn id(&self) -> PointId {
         PointId {
             location: self.location().clone(),

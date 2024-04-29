@@ -118,7 +118,7 @@ impl BroadcastFilterInner {
                 ConsensusEvent::Invalid(dag_point)
             }
         };
-        if round <= dag_round.next() {
+        if round <= dag_round {
             let response = if matches!(point, ConsensusEvent::Invalid(_)) {
                 BroadcastResponse::Rejected
             } else if round >= dag_round.prev() {

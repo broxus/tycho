@@ -1,6 +1,5 @@
 use std::sync::{Arc, Weak};
 
-use ahash::RandomState;
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -41,7 +40,7 @@ impl WeakDagRound {
 impl DagRound {
     pub fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
         let peers = peer_schedule.peers_for(&round);
-        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), RandomState::new());
+        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
         Self(Arc::new(DagRoundInner {
             round,
             node_count: NodeCount::try_from(peers.len())
@@ -56,7 +55,7 @@ impl DagRound {
     pub fn next(&self, peer_schedule: &PeerSchedule) -> Self {
         let next_round = self.round().next();
         let peers = peer_schedule.peers_for(&next_round);
-        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), RandomState::new());
+        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
         Self(Arc::new(DagRoundInner {
             round: next_round,
             node_count: NodeCount::try_from(peers.len())
@@ -69,7 +68,7 @@ impl DagRound {
     }
 
     pub fn genesis(genesis: &Arc<Point>, peer_schedule: &PeerSchedule) -> Self {
-        let locations = FastDashMap::with_capacity_and_hasher(1, RandomState::new());
+        let locations = FastDashMap::with_capacity_and_hasher(1, Default::default());
         let round = genesis.body.location.round;
         Self(Arc::new(DagRoundInner {
             round,

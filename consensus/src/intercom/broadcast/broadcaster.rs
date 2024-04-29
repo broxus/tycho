@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::intercom::broadcast::dto::CollectorSignal;
+use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{NodeCount, Point, Round, Signature};
@@ -122,6 +122,11 @@ impl Broadcaster {
         }
         loop {
             tokio::select! {
+                Some(collector_signal) = self.collector_signal.recv() => {
+                    if self.should_finish(collector_signal).await {
+                        break self.signatures
+                    }
+                }
                 Some((peer_id, result)) = self.bcast_futs.next() => {
                     self.match_broadcast_result(peer_id, result)
                 },
@@ -131,17 +136,13 @@ impl Broadcaster {
                 update = self.peer_updates.recv() => {
                     self.match_peer_updates(update)
                 }
-                Some(collector_signal) = self.collector_signal.recv() => {
-                    if self.should_finish(collector_signal).await {
-                        break self.signatures
-                    }
-                }
                 else => {
                     panic!("bcaster unhandled");
                 }
             }
         }
     }
+
     async fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
         tracing::info!(
             "{} @ {:?} bcaster <= Collector::{collector_signal:?} : sigs {} of {}, rejects {} of {}",
@@ -173,31 +174,7 @@ impl Broadcaster {
             }
         }
     }
-    fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
-        match result {
-            Ok((peer_id, new_state)) => {
-                tracing::info!(
-                    "{} @ {:?} bcaster peer update: {peer_id:?} -> {new_state:?}",
-                    self.local_id,
-                    self.current_round
-                );
-                match new_state {
-                    PeerState::Resolved => {
-                        self.removed_peers.remove(&peer_id);
-                        self.rejections.remove(&peer_id);
-                        self.broadcast(&peer_id);
-                    }
-                    PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
-                }
-            }
-            Err(err @ RecvError::Lagged(_)) => {
-                tracing::error!("Broadcaster peer updates {err}")
-            }
-            Err(err @ RecvError::Closed) => {
-                panic!("Broadcaster peer updates {err}")
-            }
-        }
-    }
+
     fn match_broadcast_result(&mut self, peer_id: PeerId, result: BcastResult) {
         match result {
             Err(error) => {
@@ -236,6 +213,7 @@ impl Broadcaster {
             }
         }
     }
+
     fn match_signature_result(&mut self, peer_id: PeerId, result: SigResult) {
         match result {
             Err(error) => {
@@ -284,6 +262,7 @@ impl Broadcaster {
             }
         }
     }
+
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
             self.bcast_futs
@@ -301,6 +280,7 @@ impl Broadcaster {
             );
         }
     }
+
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
             self.sig_futs
@@ -318,6 +298,7 @@ impl Broadcaster {
             );
         }
     }
+
     fn is_signature_ok(&self, peer_id: &PeerId, signature: &Signature) -> bool {
         let sig_raw: Result<[u8; 64], _> = signature.0.to_vec().try_into();
         sig_raw
@@ -326,5 +307,31 @@ impl Broadcaster {
             .map_or(false, |(sig_raw, pub_key)| {
                 pub_key.verify_raw(self.point_body.as_slice(), &sig_raw)
             })
+    }
+
+    fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {
+        match result {
+            Ok((peer_id, new_state)) => {
+                tracing::info!(
+                    "{} @ {:?} bcaster peer update: {peer_id:?} -> {new_state:?}",
+                    self.local_id,
+                    self.current_round
+                );
+                match new_state {
+                    PeerState::Resolved => {
+                        self.removed_peers.remove(&peer_id);
+                        self.rejections.remove(&peer_id);
+                        self.broadcast(&peer_id);
+                    }
+                    PeerState::Unknown => _ = self.removed_peers.insert(peer_id),
+                }
+            }
+            Err(err @ RecvError::Lagged(_)) => {
+                tracing::error!("Broadcaster peer updates {err}")
+            }
+            Err(err @ RecvError::Closed) => {
+                panic!("Broadcaster peer updates {err}")
+            }
+        }
     }
 }

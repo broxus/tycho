@@ -1,6 +1,7 @@
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use crate::models::{DagPoint, Point, Round};
+use crate::models::{DagPoint, Point, Round, Ugly, UglyPrint};
 
 #[derive(Debug)]
 pub enum ConsensusEvent {
@@ -11,10 +12,12 @@ pub enum ConsensusEvent {
     Invalid(DagPoint),
 }
 
-/// collector may run without broadcaster, as if broadcaster signalled Ok
-#[derive(Debug)]
-pub enum CollectorSignal {
-    Finish,
-    Err,
-    Retry,
+impl Debug for UglyPrint<'_, ConsensusEvent> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            ConsensusEvent::Verified(point) => write!(f, "Verified({:?})", point.ugly())?,
+            fwd => Debug::fmt(fwd, f)?,
+        };
+        Ok(())
+    }
 }

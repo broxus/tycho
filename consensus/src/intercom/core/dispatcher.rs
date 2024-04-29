@@ -44,6 +44,7 @@ impl Dispatcher {
     }
 
     pub fn broadcast_request(point: &Point) -> tycho_network::Request {
+        // TODO use send message for broadcast, leave Rejected/TryLater only in sig request
         (&MPRequest::Broadcast(point.clone())).into()
     }
 

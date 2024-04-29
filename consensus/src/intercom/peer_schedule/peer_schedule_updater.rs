@@ -6,7 +6,7 @@ use rand::prelude::IteratorRandom;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::AbortHandle;
 
-use tycho_network::{PrivateOverlay, PrivateOverlayEntriesEvent};
+use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesEvent};
 
 use crate::intercom::PeerSchedule;
 
@@ -18,15 +18,22 @@ pub struct PeerScheduleUpdater {
 }
 
 impl PeerScheduleUpdater {
-    pub fn run(overlay: PrivateOverlay, peer_schedule: Arc<PeerSchedule>) {
-        tracing::info!("started peer schedule updater");
-        let this = Self {
+    pub fn new(overlay: PrivateOverlay, peer_schedule: Arc<PeerSchedule>) -> Self {
+        Self {
             overlay,
             peer_schedule,
             abort_resolve_peers: Default::default(),
-        };
-        this.respawn_resolve_task();
-        tokio::spawn(this.listen());
+        }
+    }
+
+    pub async fn run(self) -> ! {
+        tracing::info!("started peer schedule updater");
+        self.respawn_resolve_task();
+        self.listen().await
+    }
+
+    pub fn set_next_peers(&self, peers: &Vec<PeerId>) {
+        self.peer_schedule.set_next_peers(&peers, &self.overlay)
     }
 
     fn respawn_resolve_task(&self) {
@@ -34,6 +41,9 @@ impl PeerScheduleUpdater {
         tracing::info!("{local_id:.4?} respawn_resolve_task");
         let mut fut = futures_util::stream::FuturesUnordered::new();
         {
+            // Note: set_next_peers() and respawn_resolve_task() will not deadlock
+            //   although peer_schedule.inner is locked in two opposite orders
+            //   because only read read lock on overlay entries is taken
             let entries = self.overlay.read_entries();
             for entry in entries
                 .iter()
@@ -64,7 +74,7 @@ impl PeerScheduleUpdater {
         *abort_resolve_handle = new_abort_handle;
     }
 
-    async fn listen(self) {
+    async fn listen(self) -> ! {
         let local_id = self.peer_schedule.local_id();
         tracing::info!("{local_id:.4?} listen peer updates");
         let mut rx = self.overlay.read_entries().subscribe();

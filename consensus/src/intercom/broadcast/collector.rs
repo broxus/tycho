@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::mem;
 use std::sync::Arc;
 
@@ -7,13 +8,22 @@ use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
 use tycho_network::PeerId;
+use tycho_util::FastHashSet;
 
 use crate::dag::{DagRound, InclusionState};
 use crate::engine::MempoolConfig;
-use crate::intercom::broadcast::dto::{CollectorSignal, ConsensusEvent};
+use crate::intercom::broadcast::dto::ConsensusEvent;
 use crate::intercom::dto::SignatureResponse;
 use crate::intercom::{BroadcasterSignal, Downloader};
-use crate::models::{Point, Round};
+use crate::models::{Round, Ugly};
+
+/// collector may run without broadcaster, as if broadcaster signalled Ok
+#[derive(Debug)]
+pub enum CollectorSignal {
+    Finish,
+    Err,
+    Retry,
+}
 
 pub struct Collector {
     local_id: Arc<String>,
@@ -48,7 +58,7 @@ impl Collector {
     pub async fn run(
         mut self,
         next_dag_round: DagRound, // r+1
-        has_own_point: Option<Arc<Point>>,
+        own_point_state: oneshot::Receiver<InclusionState>,
         collector_signal: mpsc::UnboundedSender<CollectorSignal>,
         bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
     ) -> Self {
@@ -57,6 +67,19 @@ impl Collector {
             .get()
             .expect("current DAG round must be linked into DAG chain");
         let includes = mem::take(&mut self.next_includes);
+        includes.push(
+            (async move {
+                match own_point_state.await {
+                    Ok(state) => state,
+                    Err(_) => {
+                        futures_util::pending!();
+                        unreachable!()
+                    }
+                }
+            })
+            .boxed(),
+        );
+
         assert_eq!(
             current_dag_round.round(),
             &self.next_round,
@@ -64,13 +87,18 @@ impl Collector {
             &self.next_round
         );
         self.next_round = next_dag_round.round().clone();
+        let includes_ready = FastHashSet::with_capacity_and_hasher(
+            current_dag_round.node_count().full(),
+            Default::default(),
+        );
         let task = CollectorTask {
             local_id: self.local_id.clone(),
             downloader: self.downloader.clone(),
             current_round: current_dag_round.clone(),
             next_dag_round,
             includes,
-            includes_ready: has_own_point.into_iter().count(),
+            includes_ready,
+            is_includes_ready: false,
             next_includes: FuturesUnordered::new(),
 
             collector_signal,
@@ -104,7 +132,8 @@ struct CollectorTask {
     // needed in order to not include same point twice - as an include and as a witness;
     // need to drop them with round change
     includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
-    includes_ready: usize,
+    includes_ready: FastHashSet<PeerId>,
+    is_includes_ready: bool,
     /// do not poll during this round, just pass to next round;
     /// anyway should rewrite signing mechanics - look for comments inside [DagRound::add_exact]
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
@@ -126,21 +155,6 @@ impl CollectorTask {
         let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
         loop {
             tokio::select! {
-                request = signature_requests.recv() => match request {
-                    Some((round, author, callback)) => {
-                        _ = callback.send(self.signature_response(&round, &author));
-                    }
-                    None => panic!("channel with signature requests closed")
-                },
-                filtered = from_bcast_filter.recv() => match filtered {
-                    Some(consensus_event) => {
-                        if let Err(round) = self.match_filtered(&consensus_event) {
-                            _ = self.collector_signal.send(CollectorSignal::Err);
-                            return Err(round)
-                        }
-                    },
-                    None => panic!("channel from Broadcast Filter closed"),
-                },
                 Some(bcaster_signal) = self.bcaster_signal.recv() => {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
@@ -159,35 +173,41 @@ impl CollectorTask {
                         _ = self.collector_signal.send(CollectorSignal::Retry);
                     }
                 },
-                // FIXME not so great: some signature requests will be retried,
-                //  just because this futures were not polled. Use global 'current dag round' round
-                //  and sign inside shared join task in dag location,
-                //  do not return location from DagLocation::add_validate(point)
+                filtered = from_bcast_filter.recv() => match filtered {
+                    Some(consensus_event) => {
+                        if let Err(round) = self.match_filtered(&consensus_event) {
+                            self.collector_signal.send(CollectorSignal::Err).ok();
+                            return Err(round)
+                        }
+                    },
+                    None => panic!("channel from Broadcast Filter closed"),
+                },
                 Some(state) = self.includes.next() => {
-                    // slow but at least may work
-                    let signed = if let Some(signable) = state.signable() {
-                        signable.sign(
-                            self.current_round.round(),
-                            self.next_dag_round.key_pair(),
-                            MempoolConfig::sign_time_range(),
-                        )
-                    } else {
-                        state.signed().is_some() // FIXME very fragile duct tape
-                    };
-                    if signed {
-                        tracing::info!(
-                            "{} @ {:.4?} includes {} +1 : {:.4?} {:.4?}",
-                             self.local_id, self.current_round.round(), self.includes_ready,
-                             state.init_id(), state.signed()
-                        );
-                        self.includes_ready += 1;
-                    } else {
-                        tracing::warn!(
-                            "{} @ {:.4?} includes {} : {:.4?} {:.4?}",
-                             self.local_id, self.current_round.round(), self.includes_ready,
-                             state.init_id(), state.signed()
-                        );
+                    self.on_inclusion_validated(&state)
+                },
+                Some(state) = self.next_includes.next() => {
+                    if let Some(valid) = state.point().map(|p| p.valid()).flatten() {
+                        self.is_includes_ready = true;
+                        match valid.point.body.location.round.cmp(self.next_dag_round.round()) {
+                            Ordering::Less => panic!("Coding error: next includes futures contain current round"),
+                            Ordering::Greater => {
+                                tracing::error!("Collector was left behind while bcast filter advanced??");
+                                self.collector_signal.send(CollectorSignal::Err).ok();
+                                return Err(valid.point.body.location.round);
+                            },
+                            Ordering::Equal => {
+                                if self.is_ready() {
+                                    return Ok(self.next_includes)
+                                }
+                            }
+                        }
                     }
+                },
+                request = signature_requests.recv() => match request {
+                    Some((round, author, callback)) => {
+                        _ = callback.send(self.signature_response(&round, &author));
+                    }
+                    None => panic!("channel with signature requests closed")
                 },
                 else => {
                     panic!("collector unhandled");
@@ -201,7 +221,7 @@ impl CollectorTask {
             "{} @ {:.4?} collector <= Bcaster::{signal:?} : includes {} of {}",
             self.local_id,
             self.current_round.round(),
-            self.includes_ready,
+            self.includes_ready.len(),
             self.current_round.node_count().majority()
         );
         match signal {
@@ -214,20 +234,113 @@ impl CollectorTask {
         }
     }
 
-    fn is_ready(&self) -> bool {
+    fn is_ready(&mut self) -> bool {
         tracing::info!(
             "{} @ {:.4?} collector self-check : includes {} of {}",
             self.local_id,
             self.current_round.round(),
-            self.includes_ready,
+            self.includes_ready.len(),
             self.current_round.node_count().majority()
         );
         // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
-        let is_self_ready = self.includes_ready >= self.current_round.node_count().majority();
-        if is_self_ready && self.is_bcaster_ready_ok {
+        self.is_includes_ready |=
+            self.includes_ready.len() >= self.current_round.node_count().majority();
+        if self.is_includes_ready && self.is_bcaster_ready_ok {
             _ = self.collector_signal.send(CollectorSignal::Finish);
         }
-        is_self_ready && self.is_bcaster_ready_ok
+        self.is_includes_ready && self.is_bcaster_ready_ok
+    }
+
+    fn match_filtered(&self, consensus_event: &ConsensusEvent) -> Result<(), Round> {
+        tracing::info!(
+            "{} @ {:?} collector <= bcast filter : {:?}",
+            self.local_id,
+            self.current_round.round(),
+            consensus_event.ugly()
+        );
+        match consensus_event {
+            ConsensusEvent::Forward(consensus_round) => {
+                match consensus_round.cmp(self.next_dag_round.round()) {
+                    // we're too late, consensus moved forward
+                    std::cmp::Ordering::Greater => return Err(consensus_round.clone()),
+                    // we still have a chance to finish current round
+                    std::cmp::Ordering::Equal => {}
+                    // we are among the fastest nodes of consensus
+                    std::cmp::Ordering::Less => {}
+                }
+            }
+            ConsensusEvent::Verified(point) => match &point.body.location.round {
+                x if x > self.next_dag_round.round() => {
+                    panic!(
+                        "{} @ {:?} Coding error: broadcast filter advanced \
+                            while collector left behind; event: {:?}",
+                        self.local_id,
+                        self.current_round.round(),
+                        consensus_event.ugly()
+                    )
+                }
+                x if x == self.next_dag_round.round() => {
+                    if let Some(task) = self.next_dag_round.add(point, &self.downloader) {
+                        self.next_includes.push(task)
+                    }
+                }
+                x if x == self.current_round.round() => {
+                    if let Some(task) = self.current_round.add(point, &self.downloader) {
+                        self.includes.push(task)
+                    }
+                }
+                _ => _ = self.current_round.add(&point, &self.downloader), // maybe other's dependency
+            },
+            ConsensusEvent::Invalid(dag_point) => {
+                if &dag_point.location().round > self.next_dag_round.round() {
+                    panic!(
+                        "{} @ {:?} Coding error: broadcast filter advanced \
+                            while collector left behind; event: {:?}",
+                        self.local_id,
+                        self.current_round.round(),
+                        consensus_event.ugly()
+                    )
+                } else {
+                    _ = self.next_dag_round.insert_invalid(&dag_point);
+                }
+            }
+        };
+        Ok(())
+    }
+
+    // FIXME not so great: some signature requests will be retried,
+    //  just because this futures were not polled. Use global 'current dag round' round
+    //  and sign inside shared join task in dag location,
+    //  do not return location from DagLocation::add_validate(point)
+    fn on_inclusion_validated(&mut self, state: &InclusionState) {
+        // slow but at least may work
+        if let Some(signable) = state.signable() {
+            signable.sign(
+                self.current_round.round(),
+                self.next_dag_round.key_pair(),
+                MempoolConfig::sign_time_range(),
+            );
+        };
+        if let Some(signed) = state.signed_point(self.current_round.round()) {
+            self.includes_ready
+                .insert(signed.point.body.location.author);
+            tracing::info!(
+                "{} @ {:.4?} includes {} +1 : {:?}",
+                self.local_id,
+                self.current_round.round(),
+                self.includes_ready.len(),
+                signed.point.id().ugly()
+            );
+        } else {
+            tracing::warn!(
+                "{} @ {:.4?} includes {} : {:?} {:.4?}",
+                self.local_id,
+                self.current_round.round(),
+                self.includes_ready.len(),
+                state.point().map(|a| a.id()).as_ref().map(|a| a.ugly()),
+                state.signed()
+            );
+        }
     }
 
     fn signature_response(&mut self, round: &Round, author: &PeerId) -> SignatureResponse {
@@ -261,7 +374,7 @@ impl CollectorTask {
                 MempoolConfig::sign_time_range(),
             ) {
                 if round == self.current_round.round() {
-                    self.includes_ready += 1;
+                    self.includes_ready.insert(author.clone());
                 }
             }
         }
@@ -276,49 +389,5 @@ impl CollectorTask {
             self.current_round.round()
         );
         response
-    }
-
-    fn match_filtered(&self, consensus_event: &ConsensusEvent) -> Result<(), Round> {
-        tracing::info!(
-            "{} @ {:?} collector <= bcast filter : {consensus_event:.4?}",
-            self.local_id,
-            self.current_round.round()
-        );
-        match consensus_event {
-            ConsensusEvent::Forward(consensus_round) => {
-                match consensus_round.cmp(self.next_dag_round.round()) {
-                    // we're too late, consensus moved forward
-                    std::cmp::Ordering::Greater => return Err(consensus_round.clone()),
-                    // we still have a chance to finish current round
-                    std::cmp::Ordering::Equal => {}
-                    // we are among the fastest nodes of consensus
-                    std::cmp::Ordering::Less => {}
-                }
-            }
-            ConsensusEvent::Verified(point) => match &point.body.location.round {
-                x if x > self.next_dag_round.round() => {
-                    panic!("Coding error: broadcast filter advanced while collector left behind")
-                }
-                x if x == self.next_dag_round.round() => {
-                    if let Some(task) = self.next_dag_round.add(point, &self.downloader) {
-                        self.next_includes.push(task)
-                    }
-                }
-                x if x == self.current_round.round() => {
-                    if let Some(task) = self.current_round.add(point, &self.downloader) {
-                        self.includes.push(task)
-                    }
-                }
-                _ => _ = self.current_round.add(&point, &self.downloader), // maybe other's dependency
-            },
-            ConsensusEvent::Invalid(dag_point) => {
-                if &dag_point.location().round > self.next_dag_round.round() {
-                    panic!("Coding error: broadcast filter advanced while collector left behind")
-                } else {
-                    _ = self.next_dag_round.insert_invalid(&dag_point);
-                }
-            }
-        };
-        Ok(())
     }
 }

@@ -102,6 +102,12 @@ impl Sub for UnixTime {
     }
 }
 
+impl Display for UnixTime {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Location {
     pub round: Round,

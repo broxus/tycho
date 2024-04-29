@@ -8,7 +8,7 @@ use futures_util::FutureExt;
 
 use tycho_util::futures::{JoinTask, Shared};
 
-use crate::models::{DagPoint, Digest, PointId, Round, Signature, UnixTime, ValidPoint};
+use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
 
 /// If DAG location exists, it must have non-empty `versions` map;
 ///
@@ -105,7 +105,7 @@ impl InclusionState {
     pub fn init(&self, first_completed: &DagPoint) {
         _ = self.0.get_or_init(|| {
             let signed = OnceLock::new();
-            if Signable::filter(first_completed).is_none() {
+            if first_completed.trusted().is_none() {
                 _ = signed.set(Err(()));
             }
             Signable {
@@ -116,8 +116,8 @@ impl InclusionState {
     }
     fn insert_own_point(&self, my_point: &DagPoint) {
         let signed = OnceLock::new();
-        match Signable::filter(my_point) {
-            None => assert!(false, "Coding error: own point is not signable"),
+        match my_point.trusted() {
+            None => assert!(false, "Coding error: own point is not trusted"),
             Some(valid) => {
                 _ = signed.set(Ok(Signed {
                     at: valid.point.body.location.round.clone(),
@@ -151,9 +151,8 @@ impl InclusionState {
             None
         }
     }
-    /// only for logging
-    pub fn init_id(&self) -> Option<PointId> {
-        self.0.get().map(|signable| signable.first_completed.id())
+    pub fn point(&self) -> Option<&DagPoint> {
+        self.0.get().map(|signable| &signable.first_completed)
     }
 }
 #[derive(Debug)]
@@ -177,7 +176,7 @@ impl Signable {
         time_range: RangeInclusive<UnixTime>,
     ) -> bool {
         let mut this_call_signed = false;
-        if let Some((valid, key_pair)) = Self::filter(&self.first_completed).zip(key_pair) {
+        if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
             if time_range.contains(&valid.point.body.time) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
@@ -199,11 +198,5 @@ impl Signable {
     }
     fn is_completed(&self) -> bool {
         self.signed.get().is_some()
-    }
-    fn filter(first_completed: &DagPoint) -> Option<&ValidPoint> {
-        match first_completed {
-            DagPoint::Trusted(valid) => Some(valid),
-            _ => None, // including valid Suspicious
-        }
     }
 }

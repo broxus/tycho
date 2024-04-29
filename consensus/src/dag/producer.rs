@@ -14,14 +14,14 @@ pub struct Producer;
 
 impl Producer {
     pub async fn new_point(
-        finished_round: &DagRound,
-        new_round: &DagRound,
+        current_round: &DagRound,
         prev_point: Option<&PrevPoint>,
         payload: Vec<Bytes>,
     ) -> Option<Arc<Point>> {
-        let key_pair = new_round.key_pair()?;
+        let finished_round = current_round.prev().get()?;
+        let key_pair = current_round.key_pair()?;
         let local_id = PeerId::from(key_pair.public_key);
-        match new_round.anchor_stage() {
+        match current_round.anchor_stage() {
             Some(AnchorStage::Proof { leader, .. } | AnchorStage::Trigger { leader, .. })
                 if leader == &local_id && prev_point.is_none() =>
             {
@@ -30,14 +30,16 @@ impl Producer {
             }
             _ => {}
         };
-        let includes = Self::includes(finished_round);
-        let mut anchor_trigger = Self::link_from_includes(&local_id, &new_round, &includes, true);
-        let mut anchor_proof = Self::link_from_includes(&local_id, &new_round, &includes, false);
-        let witness = Self::witness(finished_round);
+        let includes = Self::includes(&finished_round);
+        let mut anchor_trigger =
+            Self::link_from_includes(&local_id, &current_round, &includes, true);
+        let mut anchor_proof =
+            Self::link_from_includes(&local_id, &current_round, &includes, false);
+        let witness = Self::witness(&finished_round);
         Self::update_link_from_witness(&mut anchor_trigger, finished_round.round(), &witness, true);
         Self::update_link_from_witness(&mut anchor_proof, finished_round.round(), &witness, false);
         let time = Self::get_time(
-            finished_round,
+            &finished_round,
             &local_id,
             &anchor_proof,
             prev_point,
@@ -49,6 +51,17 @@ impl Producer {
             .into_iter()
             .map(|point| (point.body.location.author, point.digest.clone()))
             .collect::<BTreeMap<_, _>>();
+        assert!(
+            prev_point.map_or(true, |prev| includes
+                .get(&local_id)
+                .map_or(false, |digest| digest == &prev.digest)),
+            "must include own point if it exists"
+        );
+        assert!(
+            prev_point.map_or(true, |prev| prev.evidence.len()
+                >= current_round.node_count().majority_of_others()),
+            "Collected not enough evidence, check Broadcaster logic"
+        );
         let witness = witness
             .into_iter()
             .map(|point| (point.body.location.author, point.digest.clone()))
@@ -56,7 +69,7 @@ impl Producer {
         Some(Arc::new(
             PointBody {
                 location: Location {
-                    round: new_round.round().clone(),
+                    round: current_round.round().clone(),
                     author: local_id.clone(),
                 },
                 time,
@@ -75,8 +88,19 @@ impl Producer {
         let includes = finished_round
             .select(|(_, loc)| {
                 loc.state()
-                    .signed_point(finished_round.round())
-                    .map(|valid| valid.point.clone())
+                    .point()
+                    .map(|dag_point| dag_point.trusted())
+                    .flatten()
+                    .filter(|_| {
+                        loc.state()
+                            .signed()
+                            .map(|r| {
+                                r.as_ref()
+                                    .map_or(false, |s| &s.at == finished_round.round())
+                            })
+                            .unwrap_or(true)
+                    })
+                    .map(|dag_point| dag_point.point.clone())
             })
             .collect::<Vec<_>>();
         assert!(
@@ -102,11 +126,11 @@ impl Producer {
 
     fn link_from_includes(
         local_id: &PeerId,
-        new_round: &DagRound,
+        current_round: &DagRound,
         includes: &Vec<Arc<Point>>,
         is_for_trigger: bool,
     ) -> Link {
-        match new_round.anchor_stage() {
+        match current_round.anchor_stage() {
             Some(AnchorStage::Trigger { leader, .. }) if is_for_trigger && leader == local_id => {
                 Link::ToSelf
             }
@@ -124,7 +148,7 @@ impl Producer {
                         }
                     })
                     .expect("non-empty list of includes for own point");
-                if point.body.location.round == new_round.round().prev()
+                if point.body.location.round == current_round.round().prev()
                     && ((is_for_trigger && point.body.anchor_trigger == Link::ToSelf)
                         || (!is_for_trigger && point.body.anchor_proof == Link::ToSelf))
                 {

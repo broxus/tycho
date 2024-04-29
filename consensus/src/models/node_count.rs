@@ -38,7 +38,7 @@ impl NodeCount {
         NodeCount(one_f as u8)
     }
 
-    fn full(&self) -> usize {
+    pub fn full(&self) -> usize {
         self.0 as usize * 3 + 1
     }
 
