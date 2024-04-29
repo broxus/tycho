@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Result};
 
 use everscale_types::cell::{CellFamily, Store};
 use everscale_types::merkle::MerkleUpdate;
-use everscale_types::models::{Lazy, TickTock, Transaction};
+use everscale_types::models::{Lazy, StateInit, TickTock, Transaction};
 use everscale_types::{
     cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
     dict::{AugDict, Dict},
@@ -404,6 +404,7 @@ pub(super) type OutMsgDescr = AugDict<HashBytes, CurrencyCollection, OutMsg>;
 
 pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, AccountBlock>;
 
+#[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
@@ -456,13 +457,27 @@ impl ShardAccountStuff {
     pub fn new(
         account_addr: AccountId,
         shard_account: ShardAccount,
-        lt: Arc<AtomicU64>,
-        orig_libs: Dict<HashBytes, SimpleLib>,
+        max_lt: u64,
+        min_lt: u64,
     ) -> Result<Self> {
         let account_root = shard_account.account.clone().inner();
         let state_update = account_root.repr_hash();
         let last_trans_hash = shard_account.last_trans_hash.clone();
         let last_trans_lt = shard_account.last_trans_lt;
+        let orig_libs = shard_account
+            .load_account()?
+            .map(|account| {
+                if let AccountState::Active(StateInit { ref libraries, .. }) = account.state {
+                    libraries.clone()
+                } else {
+                    Default::default()
+                }
+            })
+            .unwrap_or_default();
+
+        let mut lt = Arc::new(max_lt.into());
+        lt.fetch_max(min_lt, Ordering::Release);
+        lt.fetch_max(last_trans_lt + 1, Ordering::Release);
         Ok(Self {
             account_addr,
             shard_account,
@@ -487,9 +502,7 @@ impl ShardAccountStuff {
         self.state_update = self.account_root.repr_hash().clone();
 
         let mut builder = everscale_types::cell::CellBuilder::new();
-
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
-
         let tr_root = builder.build()?;
 
         self.last_trans_hash = tr_root.repr_hash().clone();
@@ -504,6 +517,8 @@ impl ShardAccountStuff {
 
         Ok(())
     }
+
+    pub fn set_lt(&mut self, lt: u64) {}
 }
 
 #[derive(Debug, Default)]
@@ -575,3 +590,8 @@ pub(super) enum AsyncMessage {
 }
 
 pub mod ext_types_stubs {}
+
+pub trait ShardStateProvider {
+    fn get_shard_state(&self, account_id: &AccountId) -> Option<ShardAccount>;
+    fn set_shard_state(&mut self, account_id: &AccountId, account: ShardAccount);
+}
