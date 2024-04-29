@@ -155,7 +155,7 @@ where
     pub async fn process_mc_block_from_bc(&self, mc_block_id: BlockId) -> Result<()> {
         // check if we should skip this master block from the blockchain
         // because it is not far ahead of last collated by ourselves
-        if !self.should_process_mc_block_from_bc(&mc_block_id) {
+        if !self.check_should_process_mc_block_from_bc(&mc_block_id) {
             return Ok(());
         }
 
@@ -184,36 +184,68 @@ where
         Ok(())
     }
 
-    /// 1. Skip if it was already processed before
-    /// 2. Skip if it is not far ahead of last collated by ourselves
-    fn should_process_mc_block_from_bc(&self, mc_block_id: &BlockId) -> bool {
-        let (seqno_delta, is_equal) =
-            Self::compare_mc_block_with(mc_block_id, self.last_processed_mc_block_id());
-        // check if already processed before
-        let already_processed_before = is_equal || seqno_delta < 0;
-        if already_processed_before {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Should NOT process mc block ({}) from bc: it was already processed before",
-                mc_block_id.as_short_id(),
-            );
+    /// 1. Skip if it is equal or not far ahead from last collated by ourselves
+    /// 2. Skip if it was already processed before
+    /// 3. Skip if waiting for the first own master block collation less then `max_mc_block_delta_from_bc_to_await_own`
+    fn check_should_process_mc_block_from_bc(&self, mc_block_id: &BlockId) -> bool {
+        let last_collated_mc_block_id_opt = self.last_collated_mc_block_id();
+        let last_processed_mc_block_id_opt = self.last_processed_mc_block_id();
+        if last_collated_mc_block_id_opt.is_some() {
+            // when we have last own collated master block then skip if incoming one is equal
+            // or not far ahead from last own collated
+            // then will wait for next own collated master block
+            let (seqno_delta, is_equal) =
+                Self::compare_mc_block_with(mc_block_id, self.last_collated_mc_block_id());
+            if is_equal || seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    r#"Should NOT process mc block ({}) from bc: should wait for next own collated:
+                    is_equal = {}, seqno_delta = {}, max_mc_block_delta_from_bc_to_await_own = {}"#,
+                    mc_block_id.as_short_id(), is_equal, seqno_delta,
+                    self.config.max_mc_block_delta_from_bc_to_await_own,
+                );
 
-            return false;
+                return false;
+            } else if !is_equal {
+                //STUB: skip processing master block from bc even if it is far away from own last collated
+                //      because the logic for updating collators in this case is not implemented yet
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "STUB: skip processing mc block ({}) from bc anyway if we are collating by ourselves",
+                    mc_block_id.as_short_id(),
+                );
+                return false;
+            }
         } else {
-            let last_collated_mc_block_id_opt = self.last_collated_mc_block_id();
-            if last_collated_mc_block_id_opt.is_some() {
-                let (seqno_delta, _) =
-                    Self::compare_mc_block_with(mc_block_id, self.last_collated_mc_block_id());
-                // check if need await own collated block
-                if seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
+            // When we do not have last own collated master block then check last processed master block
+            // If None then we should process incoming master block anyway to init collation process
+            // If we have already processed some previous incoming master block and colaltions were started
+            // then we should wait for the first own collated master block
+            // but not more then `max_mc_block_delta_from_bc_to_await_own`
+            if last_processed_mc_block_id_opt.is_some() {
+                let (seqno_delta, is_equal) =
+                    Self::compare_mc_block_with(mc_block_id, last_processed_mc_block_id_opt);
+                let already_processed_before = is_equal || seqno_delta < 0;
+                if already_processed_before {
                     tracing::info!(
                         target: tracing_targets::COLLATION_MANAGER,
-                        r#"Should NOT process mc block ({}) from bc: seqno_delta = {}",
-                        max_mc_block_delta_from_bc_to_await_own = {}"#,
+                        "Should NOT process mc block ({}) from bc: it was already processed before",
+                        mc_block_id.as_short_id(),
+                    );
+
+                    return false;
+                }
+                let should_wait_for_next_own_collated = seqno_delta
+                    <= self.config.max_mc_block_delta_from_bc_to_await_own
+                    && self.active_collators.contains_key(&ShardIdent::MASTERCHAIN);
+                if should_wait_for_next_own_collated {
+                    tracing::info!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        r#"Should NOT process mc block ({}) from bc: should wait for first own collated:
+                        seqno_delta = {}, max_mc_block_delta_from_bc_to_await_own = {}"#,
                         mc_block_id.as_short_id(), seqno_delta,
                         self.config.max_mc_block_delta_from_bc_to_await_own,
                     );
-
                     return false;
                 }
             }
