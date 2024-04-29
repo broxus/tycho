@@ -196,12 +196,9 @@ pub(super) struct PrevData {
     externals_processed_upto: BTreeMap<MempoolAnchorId, u64>,
 }
 impl PrevData {
-    pub fn build(
-        _mc_data: &McData,
-        prev_states: &Vec<Arc<ShardStateStuff>>,
-    ) -> Result<(Self, UsageTree)> {
+    pub fn build(prev_states: Vec<Arc<ShardStateStuff>>) -> Result<(Self, UsageTree)> {
         //TODO: make real implementation
-        // refer to the old node impl:
+        // consider split/merge logic
         //  Collator::prepare_data()
         //  Collator::unpack_last_state()
 

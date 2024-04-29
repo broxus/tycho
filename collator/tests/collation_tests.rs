@@ -1,31 +1,16 @@
-use std::sync::Arc;
+use everscale_types::models::GlobalCapability;
 
-use anyhow::Result;
-
-use everscale_types::{
-    boc::Boc,
-    cell::HashBytes,
-    models::{BlockId, GlobalCapability, ShardStateUnsplit},
-};
-use futures_util::{future::BoxFuture, FutureExt};
-use sha2::Digest;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_collator::manager::CollationManager;
+use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::test_utils::prepare_test_storage;
+use tycho_collator::validator_test_impl::ValidatorProcessorTestImpl;
 use tycho_collator::{
+    manager::CollationManager,
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
     state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
     test_utils::try_init_test_tracing,
     types::CollationConfig,
-    validator_test_impl::ValidatorProcessorTestImpl,
 };
-use tycho_core::block_strider::{
-    prepare_state_apply, provider::BlockProvider, subscriber::test::PrintSubscriber, BlockStrider,
-};
-use tycho_core::block_strider::{
-    provider::OptionalBlockStuff, test_provider::archive_provider::ArchiveProvider,
-};
-use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+use tycho_core::block_strider::{subscriber::test::PrintSubscriber, BlockStrider};
 
 #[tokio::test]
 async fn test_collation_process_on_stubs() {

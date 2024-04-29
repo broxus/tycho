@@ -130,7 +130,8 @@ where
         //TODO: make real implementation
 
         let mc_data = McData::build(mc_state)?;
-        let (prev_shard_data, usage_tree) = PrevData::build(&mc_data, &prev_states)?;
+        check_prev_states_and_master(&mc_data, &prev_states)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
 
         let working_state = WorkingState {
             mc_data,
@@ -139,6 +140,19 @@ where
         };
 
         Ok(working_state)
+    }
+
+    /// Update McData in working state
+    /// and equeue next attempt to collate block
+    async fn update_mc_data_and_resume_collation(
+        &mut self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()> {
+        self.update_mc_data(mc_state)?;
+
+        self.get_dispatcher()
+            .enqueue_task(method_to_async_task_closure!(try_collate,))
+            .await
     }
 
     /// Attempt to collate next shard block
@@ -218,6 +232,7 @@ where
         } else {
             // notify manager when next anchor was imported but id does not contain externals
             if let Some(anchor) = next_anchor {
+                // this will initiate master block collation or next shard block collation attempt
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
                     "Collator ({}): just imported anchor has no externals, will notify collation manager",
@@ -225,15 +240,15 @@ where
                 );
                 self.on_skipped_empty_anchor_event(*self.shard_id(), anchor)
                     .await?;
+            } else {
+                // otherwise enqueue next shard block collation attempt right now
+                self.get_dispatcher()
+                    .enqueue_task(method_to_async_task_closure!(try_collate,))
+                    .await?;
             }
         }
 
-        // finally enqueue next collation attempt
-        // which will be processed right after current one
-        // or after previously scheduled collation
-        self.get_dispatcher()
-            .enqueue_task(method_to_async_task_closure!(try_collate,))
-            .await
+        Ok(())
     }
 }
 
@@ -277,6 +292,8 @@ pub(super) trait CollatorProcessorSpecific<MQ, MP, ST>: Sized {
     fn working_state(&self) -> &WorkingState;
     fn set_working_state(&mut self, working_state: WorkingState);
     fn update_working_state(&mut self, new_state_stuff: Arc<ShardStateStuff>) -> Result<()>;
+
+    fn update_mc_data(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()>;
 
     async fn init_mq_iterator(&mut self) -> Result<()>;
 
@@ -414,9 +431,7 @@ where
         self.working_state = Some(working_state);
     }
 
-    ///(TODO) Update working state from new block and state after block collation
-    ///
-    ///STUB: currently have stub signature and implementation
+    /// Update working state from new block and state after block collation
     fn update_working_state(&mut self, new_state_stuff: Arc<ShardStateStuff>) -> Result<()> {
         let new_next_block_id_short = BlockIdShort {
             shard: new_state_stuff.block_id().shard,
@@ -435,18 +450,41 @@ where
         }
 
         let prev_states = vec![new_state_stuff];
-        let (new_prev_shard_data, usage_tree) =
-            PrevData::build(&working_state_mut.mc_data, &prev_states)?;
+        check_prev_states_and_master(&working_state_mut.mc_data, &prev_states)?;
+        let (new_prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
         working_state_mut.prev_shard_data = new_prev_shard_data;
         working_state_mut.usage_tree = usage_tree;
 
         tracing::debug!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): working state updated from just collated block...",
+            "Collator ({}): working state updated from just collated block",
             self.collator_descr(),
         );
 
         self.collator_descr = Arc::new(new_collator_descr);
+
+        Ok(())
+    }
+
+    /// Update McData in working state
+    fn update_mc_data(&mut self, mc_state: Arc<ShardStateStuff>) -> Result<()> {
+        let mc_state_block_id = mc_state.block_id().as_short_id();
+
+        let new_mc_data = McData::build(mc_state)?;
+
+        let working_state_mut = self
+            .working_state
+            .as_mut()
+            .expect("should `init` collator before calling `update_mc_data`");
+
+        working_state_mut.mc_data = new_mc_data;
+
+        tracing::debug!(
+            target: tracing_targets::COLLATOR,
+            "Collator ({}): McData updated in working state from new master state on {}",
+            self.collator_descr(),
+            mc_state_block_id,
+        );
 
         Ok(())
     }
@@ -528,6 +566,17 @@ where
 
         None
     }
+}
+
+/// (TODO) Perform some checks on master state and prev states
+fn check_prev_states_and_master(
+    _mc_data: &McData,
+    _prev_states: &[Arc<ShardStateStuff>],
+) -> Result<()> {
+    //TODO: make real implementation
+    // refer to the old node impl:
+    //  Collator::unpack_last_state()
+    Ok(())
 }
 
 #[async_trait]

@@ -73,6 +73,13 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     ) -> Self;
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
+    /// Enqueue update of McData in working state and run attempt to collate shard block
+    async fn equeue_update_mc_data_and_resume_shard_collation(
+        &self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()>;
+    /// Enqueue next attemt to collate block
+    async fn equeue_try_collate(&self) -> Result<()>;
     /// Enqueue new block collation
     async fn equeue_do_collate(
         &self,
@@ -173,6 +180,24 @@ where
 
     async fn equeue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
         todo!()
+    }
+
+    async fn equeue_update_mc_data_and_resume_shard_collation(
+        &self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()> {
+        self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(
+                update_mc_data_and_resume_collation,
+                mc_state
+            ))
+            .await
+    }
+
+    async fn equeue_try_collate(&self) -> Result<()> {
+        self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(try_collate,))
+            .await
     }
 
     async fn equeue_do_collate(
