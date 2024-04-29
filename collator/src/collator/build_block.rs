@@ -36,19 +36,8 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         // update shard accounts tree and prepare accounts blocks
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
-        let mut changed_accounts = HashMap::new();
 
         let mut new_config_opt: Option<BlockchainConfig> = None;
-
-        for (account_id, (sender, handle)) in exec_manager.changed_accounts.drain() {
-            // drop sender to stop the task that process messages and force it to return updated shard account
-            std::mem::drop(sender);
-            let shard_acc_stuff = handle.await??;
-            //TODO: read account
-            //TODO: get updated blockchain config if it stored in account
-            //TODO: if have transactions, build AccountBlock and add to account_blocks
-            changed_accounts.insert(account_id, shard_acc_stuff);
-        }
 
         //TODO: update new_config_opt from hard fork
 
