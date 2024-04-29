@@ -1,5 +1,5 @@
 use std::borrow::Borrow;
-use std::collections::BTreeSet;
+use std::collections::{hash_map, BTreeSet};
 use std::convert::TryInto;
 use std::hash::Hash;
 use std::ops::{Bound, RangeBounds};
@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::models::*;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::{
     make_archive_entry, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier, GetFileName,
@@ -15,23 +15,36 @@ use tycho_block_util::archive::{
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
+use tycho_util::FastHashMap;
 
 use crate::db::*;
 use crate::util::*;
-use crate::{models::*, BlockHandleStorage, HandleCreationStatus};
+use crate::{
+    models::*, BlockConnection, BlockConnectionStorage, BlockHandleStorage, HandleCreationStatus,
+};
 
 pub struct BlockStorage {
     db: Arc<Db>,
     block_handle_storage: Arc<BlockHandleStorage>,
+    block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
+    block_subscriptions: Mutex<FastHashMap<BlockId, Vec<BlockTx>>>,
+    block_subscriptions_lock: tokio::sync::Mutex<()>,
 }
 
 impl BlockStorage {
-    pub fn new(db: Arc<Db>, block_handle_storage: Arc<BlockHandleStorage>) -> Result<Self> {
+    pub fn new(
+        db: Arc<Db>,
+        block_handle_storage: Arc<BlockHandleStorage>,
+        block_connection_storage: Arc<BlockConnectionStorage>,
+    ) -> Result<Self> {
         let manager = Self {
             db,
             block_handle_storage,
+            block_connection_storage,
             archive_ids: Default::default(),
+            block_subscriptions: Default::default(),
+            block_subscriptions_lock: Default::default(),
         };
 
         manager.preload()?;
@@ -74,6 +87,8 @@ impl BlockStorage {
         block: &BlockStuffAug,
         meta_data: BlockMetaData,
     ) -> Result<StoreBlockResult> {
+        let _lock = self.block_subscriptions_lock.lock().await;
+
         let block_id = block.id();
         let (handle, status) = self
             .block_handle_storage
@@ -93,6 +108,19 @@ impl BlockStorage {
                 }
             }
         }
+
+        let mut block_subscriptions = self.block_subscriptions.lock();
+        block_subscriptions.retain(|block_id, subscribers| {
+            if block.id() == block_id {
+                while let Some(tx) = subscribers.pop() {
+                    tx.send(block.clone()).ok();
+                }
+                false
+            } else {
+                true
+            }
+        });
+        drop(block_subscriptions);
 
         Ok(StoreBlockResult {
             handle,
@@ -569,6 +597,72 @@ impl BlockStorage {
         Ok(())
     }
 
+    pub async fn subscribe_to_block(&self, block_id: BlockId) -> Result<BlockRx> {
+        let block_handle_storage = &self.block_handle_storage;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let lock = self.block_subscriptions_lock.lock().await;
+        match block_handle_storage.load_handle(&block_id)? {
+            Some(handle) if handle.meta().has_data() => {
+                drop(lock);
+
+                let block = self.load_block_data(&handle).await?;
+                tx.send(BlockStuffAug::loaded(block)).ok();
+            }
+            _ => {
+                self.add_block_subscription(block_id, tx);
+            }
+        }
+
+        Ok(rx)
+    }
+
+    pub async fn subscribe_to_next_block(&self, prev_block_id: BlockId) -> Result<BlockRx> {
+        let block_handle_storage = &self.block_handle_storage;
+        let block_connection_storage = &self.block_connection_storage;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let lock = self.block_subscriptions_lock.lock().await;
+        let next_block_id = match block_handle_storage.load_handle(&prev_block_id)? {
+            Some(handle) if handle.meta().has_next1() => {
+                block_connection_storage.load_connection(&prev_block_id, BlockConnection::Next1)?
+            }
+            _ => {
+                self.add_block_subscription(prev_block_id, tx);
+                return Ok(rx);
+            }
+        };
+
+        match block_handle_storage.load_handle(&next_block_id)? {
+            Some(handle) if handle.meta().has_data() => {
+                drop(lock);
+
+                let block = self.load_block_data(&handle).await?;
+                tx.send(BlockStuffAug::loaded(block)).ok();
+            }
+            _ => {
+                self.add_block_subscription(prev_block_id, tx);
+            }
+        }
+
+        Ok(rx)
+    }
+
+    fn add_block_subscription(&self, block_id: BlockId, tx: BlockTx) {
+        let mut block_subscriptions = self.block_subscriptions.lock();
+        match block_subscriptions.entry(block_id) {
+            hash_map::Entry::Occupied(mut entry) => {
+                let sibscribers = entry.get_mut();
+                sibscribers.push(tx);
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(vec![tx]);
+            }
+        }
+    }
+
     fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
     where
         I: Borrow<BlockId> + Hash,
@@ -808,6 +902,9 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 pub const ARCHIVE_SLICE_SIZE: u32 = 20_000;
+
+type BlockRx = tokio::sync::oneshot::Receiver<BlockStuffAug>;
+type BlockTx = tokio::sync::oneshot::Sender<BlockStuffAug>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
