@@ -31,7 +31,7 @@ pub struct ShardStateStorage {
     cell_storage: Arc<CellStorage>,
 
     gc_lock: tokio::sync::Mutex<()>,
-    min_ref_mc_state: Arc<MinRefMcStateTracker>,
+    min_ref_mc_state: MinRefMcStateTracker,
     max_new_mc_cell_count: AtomicUsize,
     max_new_sc_cell_count: AtomicUsize,
 }
@@ -56,7 +56,7 @@ impl ShardStateStorage {
             cell_storage,
             downloads_dir,
             gc_lock: Default::default(),
-            min_ref_mc_state: Arc::new(Default::default()),
+            min_ref_mc_state: Default::default(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
         };
@@ -84,15 +84,11 @@ impl ShardStateStorage {
         self.cell_storage.cache_stats()
     }*/
 
-    pub fn min_ref_mc_state(&self) -> &Arc<MinRefMcStateTracker> {
+    pub fn min_ref_mc_state(&self) -> &MinRefMcStateTracker {
         &self.min_ref_mc_state
     }
 
-    pub async fn store_state(
-        &self,
-        handle: &Arc<BlockHandle>,
-        state: &ShardStateStuff,
-    ) -> Result<bool> {
+    pub async fn store_state(&self, handle: &BlockHandle, state: &ShardStateStuff) -> Result<bool> {
         if handle.id() != state.block_id() {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
@@ -144,7 +140,7 @@ impl ShardStateStorage {
         })
     }
 
-    pub async fn load_state(&self, block_id: &BlockId) -> Result<Arc<ShardStateStuff>> {
+    pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         let cell_id = self.load_state_root(block_id.as_short_id())?;
         let cell = self.cell_storage.load_cell(cell_id)?;
 
@@ -153,7 +149,6 @@ impl ShardStateStorage {
             Cell::from(cell as Arc<_>),
             &self.min_ref_mc_state,
         )
-        .map(Arc::new)
     }
 
     pub fn begin_replace(&'_ self, block_id: &BlockId) -> Result<ShardStateReplaceTransaction<'_>> {

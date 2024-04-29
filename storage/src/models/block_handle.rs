@@ -1,95 +1,89 @@
 use std::sync::{Arc, Weak};
 
-use anyhow::Result;
 use everscale_types::models::*;
 use tokio::sync::RwLock;
 
 use super::BlockMeta;
 use tycho_util::FastDashMap;
 
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct BlockHandle {
-    id: BlockId,
-    meta: BlockMeta,
-    block_data_lock: RwLock<()>,
-    proof_data_block: RwLock<()>,
-    cache: Arc<FastDashMap<BlockId, Weak<BlockHandle>>>,
+    inner: Arc<Inner>,
 }
 
 impl BlockHandle {
-    pub fn with_values(
+    pub fn new(
         id: BlockId,
         meta: BlockMeta,
         cache: Arc<FastDashMap<BlockId, Weak<BlockHandle>>>,
     ) -> Self {
         Self {
-            id,
-            meta,
-            block_data_lock: Default::default(),
-            proof_data_block: Default::default(),
-            cache,
+            inner: Arc::new(Inner {
+                id,
+                meta,
+                block_data_lock: Default::default(),
+                proof_data_block: Default::default(),
+                cache,
+            }),
         }
     }
 
     #[inline]
     pub fn id(&self) -> &BlockId {
-        &self.id
+        &self.inner.id
     }
 
     #[inline]
     pub fn meta(&self) -> &BlockMeta {
-        &self.meta
+        &self.inner.meta
     }
 
     #[inline]
     pub fn is_key_block(&self) -> bool {
-        self.meta.is_key_block() || self.id.seqno == 0
+        self.inner.meta.is_key_block() || self.inner.id.seqno == 0
     }
 
     #[inline]
     pub fn block_data_lock(&self) -> &RwLock<()> {
-        &self.block_data_lock
+        &self.inner.block_data_lock
     }
 
     #[inline]
     pub fn proof_data_lock(&self) -> &RwLock<()> {
-        &self.proof_data_block
+        &self.inner.proof_data_block
     }
 
     pub fn has_proof_or_link(&self, is_link: &mut bool) -> bool {
-        *is_link = !self.id.shard.is_masterchain();
+        *is_link = !self.inner.id.shard.is_masterchain();
         if *is_link {
-            self.meta.has_proof_link()
+            self.inner.meta.has_proof_link()
         } else {
-            self.meta.has_proof()
+            self.inner.meta.has_proof()
         }
     }
 
     pub fn masterchain_ref_seqno(&self) -> u32 {
-        if self.id.shard.is_masterchain() {
-            self.id.seqno
+        if self.inner.id.shard.is_masterchain() {
+            self.inner.id.seqno
         } else {
-            self.meta.masterchain_ref_seqno()
-        }
-    }
-
-    pub fn set_masterchain_ref_seqno(&self, masterchain_ref_seqno: u32) -> Result<bool> {
-        match self.meta.set_masterchain_ref_seqno(masterchain_ref_seqno) {
-            0 => Ok(true),
-            prev_seqno if prev_seqno == masterchain_ref_seqno => Ok(false),
-            _ => Err(BlockHandleError::RefSeqnoAlreadySet.into()),
+            self.inner.meta.masterchain_ref_seqno()
         }
     }
 }
 
 impl Drop for BlockHandle {
     fn drop(&mut self) {
-        self.cache
-            .remove_if(&self.id, |_, weak| weak.strong_count() == 0);
+        self.inner
+            .cache
+            .remove_if(&self.inner.id, |_, weak| weak.strong_count() == 0);
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-enum BlockHandleError {
-    #[error("Different masterchain ref seqno has already been set")]
-    RefSeqnoAlreadySet,
+struct Inner {
+    id: BlockId,
+    meta: BlockMeta,
+    block_data_lock: RwLock<()>,
+    proof_data_block: RwLock<()>,
+    cache: Arc<FastDashMap<BlockId, Weak<BlockHandle>>>,
 }

@@ -71,7 +71,7 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
         })
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'_> {
         Box::pin(async {
             let res = self.left.get_block(block_id).await;
             if res.is_some() {
@@ -230,7 +230,7 @@ mod test {
         type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
         type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
-        fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        fn get_next_block(&self, _prev_block_id: &BlockId) -> Self::GetNextBlockFut<'_> {
             Box::pin(async {
                 if self.has_block.load(Ordering::Acquire) {
                     Some(Ok(get_empty_block()))
@@ -240,7 +240,7 @@ mod test {
             })
         }
 
-        fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        fn get_block(&self, _block_id: &BlockId) -> Self::GetBlockFut<'_> {
             Box::pin(async {
                 if self.has_block.load(Ordering::Acquire) {
                     Some(Ok(get_empty_block()))

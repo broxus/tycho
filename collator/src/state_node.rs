@@ -166,7 +166,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<Arc<BlockHandle>> {
         //TODO: make real implementation
         //STUB: create dummy blcok handle
-        let handle = BlockHandle::with_values(
+        let handle = BlockHandle::new(
             block.block_id,
             Default::default(),
             Arc::new(Default::default()),

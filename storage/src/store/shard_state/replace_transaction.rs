@@ -20,7 +20,7 @@ use tycho_util::FastHashMap;
 pub struct ShardStateReplaceTransaction<'a> {
     db: &'a Db,
     cell_storage: &'a Arc<CellStorage>,
-    min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
+    min_ref_mc_state: &'a MinRefMcStateTracker,
     reader: ShardStatePacketReader,
     header: Option<BocHeader>,
     cells_read: u64,
@@ -32,7 +32,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         db: &'a Db,
         downloads_dir: &FileDb,
         cell_storage: &'a Arc<CellStorage>,
-        min_ref_mc_state: &'a Arc<MinRefMcStateTracker>,
+        min_ref_mc_state: &'a MinRefMcStateTracker,
         block_id: &BlockId,
     ) -> Result<Self> {
         let file_ctx = FilesContext::new(downloads_dir, block_id)?;

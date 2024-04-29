@@ -1,185 +1,220 @@
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use futures_util::FutureExt;
+use everscale_types::cell::Cell;
+use everscale_types::models::BlockId;
+use futures_util::future::BoxFuture;
 
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::archive::ArchiveData;
+use tycho_block_util::block::BlockStuff;
+use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, BlockMetaData, Storage};
 
-use super::subscriber::BlockSubscriber;
+use crate::block_strider::{
+    BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
+};
 
-pub struct ShardStateUpdater<S> {
-    min_ref_mc_state_tracker: MinRefMcStateTracker,
-
-    storage: Arc<Storage>,
-    state_subscriber: Arc<S>,
+#[repr(transparent)]
+pub struct ShardStateApplier<S> {
+    inner: Arc<Inner<S>>,
 }
 
-impl<S> ShardStateUpdater<S>
+impl<S> ShardStateApplier<S>
 where
-    S: BlockSubscriber,
+    S: StateSubscriber,
 {
-    pub(crate) fn new(
-        min_ref_mc_state_tracker: MinRefMcStateTracker,
+    pub fn new(
+        mc_state_tracker: MinRefMcStateTracker,
         storage: Arc<Storage>,
         state_subscriber: S,
     ) -> Self {
         Self {
-            min_ref_mc_state_tracker,
-            storage,
-            state_subscriber: Arc::new(state_subscriber),
+            inner: Arc::new(Inner {
+                mc_state_tracker,
+                storage,
+                state_subscriber,
+            }),
         }
     }
-}
 
-impl<S> BlockSubscriber for ShardStateUpdater<S>
-where
-    S: BlockSubscriber,
-{
-    type HandleBlockFut = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
+    async fn handle_block_impl(&self, cx: &BlockSubscriberContext) -> Result<()> {
+        enum RefMcStateHandles {
+            Split(
+                #[allow(unused)] RefMcStateHandle,
+                #[allow(unused)] RefMcStateHandle,
+            ),
+            Single(#[allow(unused)] RefMcStateHandle),
+        }
 
-    fn handle_block(
-        &self,
-        block: &BlockStuffAug,
-        _state: Option<&Arc<ShardStateStuff>>,
-    ) -> Self::HandleBlockFut {
-        tracing::info!(id = ?block.id(), "applying block");
-        let block = block.clone();
-        let min_ref_mc_state_tracker = self.min_ref_mc_state_tracker.clone();
-        let storage = self.storage.clone();
-        let subscriber = self.state_subscriber.clone();
+        tracing::info!(id = ?cx.block.id(), "applying block");
 
-        async move {
-            let block_h = Self::get_block_handle(&block, &storage).await?;
+        let state_storage = self.inner.storage.shard_state_storage();
 
-            let (prev_id, _prev_id_2) = block //todo: handle merge
+        // Load handle
+        let handle = self
+            .get_block_handle(&cx.mc_block_id, &cx.block, &cx.archive_data)
+            .await?;
+
+        // Load previous states
+        let (prev_root_cell, _handles) = {
+            let (prev_id, prev_id_alt) = cx
+                .block
                 .construct_prev_id()
-                .context("Failed to construct prev id")?;
+                .context("failed to construct prev id")?;
 
-            let prev_state = storage
-                .shard_state_storage()
+            let prev_state = state_storage
                 .load_state(&prev_id)
                 .await
-                .context("Prev state should exist")?;
+                .context("failed to load prev shard state")?;
 
-            let start = std::time::Instant::now();
-            let new_state = Self::compute_and_store_state_update(
-                &block,
-                &min_ref_mc_state_tracker,
-                &storage,
-                &block_h,
-                prev_state,
+            match &prev_id_alt {
+                Some(prev_id) => {
+                    let prev_state_alt = state_storage
+                        .load_state(prev_id)
+                        .await
+                        .context("failed to load alt prev shard state")?;
+
+                    let cell = ShardStateStuff::construct_split_root(
+                        prev_state.root_cell().clone(),
+                        prev_state_alt.root_cell().clone(),
+                    )?;
+                    let left_handle = prev_state.ref_mc_state_handle().clone();
+                    let right_handle = prev_state_alt.ref_mc_state_handle().clone();
+                    (cell, RefMcStateHandles::Split(left_handle, right_handle))
+                }
+                None => {
+                    let cell = prev_state.root_cell().clone();
+                    let handle = prev_state.ref_mc_state_handle().clone();
+                    (cell, RefMcStateHandles::Single(handle))
+                }
+            }
+        };
+
+        // Apply state
+        let started_at = std::time::Instant::now();
+        let state = self
+            .compute_and_store_state_update(
+                &cx.block,
+                &self.inner.mc_state_tracker,
+                &handle,
+                prev_root_cell,
             )
             .await?;
-            let elapsed = start.elapsed();
-            metrics::histogram!("tycho_subscriber_compute_and_store_state_update_seconds")
-                .record(elapsed);
+        metrics::histogram!("tycho_apply_block_time").record(started_at.elapsed());
 
-            let gen_utime = block_h.meta().gen_utime() as f64;
-            let seqno = block_h.id().seqno as f64;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64();
+        // Update metrics
+        let gen_utime = handle.meta().gen_utime() as f64;
+        let seqno = handle.id().seqno as f64;
+        let now = tycho_util::time::now_millis() as f64 / 1000.0;
 
-            if block.id().is_masterchain() {
-                metrics::gauge!("tycho_last_mc_block_utime").set(gen_utime);
-                metrics::gauge!("tycho_last_mc_block_seqno").set(seqno);
-                metrics::gauge!("tycho_last_mc_block_applied").set(now);
-            } else {
-                metrics::gauge!("tycho_last_shard_block_utime").set(gen_utime);
-                metrics::gauge!("tycho_last_shard_block_seqno").set(seqno);
-                metrics::gauge!("tycho_last_shard_block_applied").set(now);
-            }
-
-            let start = std::time::Instant::now();
-            subscriber
-                .handle_block(&block, Some(&new_state))
-                .await
-                .context("Failed to notify subscriber")?;
-            let elapsed = start.elapsed();
-            metrics::histogram!("tycho_subscriber_handle_block_seconds").record(elapsed);
-
-            block_h.meta().set_is_applied();
-            storage
-                .block_handle_storage()
-                .store_handle(&block_h)
-                .context("Failed to store block handle")?;
-
-            Ok(())
+        if cx.block.id().is_masterchain() {
+            metrics::gauge!("tycho_last_mc_block_utime").set(gen_utime);
+            metrics::gauge!("tycho_last_mc_block_seqno").set(seqno);
+            metrics::gauge!("tycho_last_mc_block_applied").set(now);
+        } else {
+            // TODO: only store max
+            metrics::gauge!("tycho_last_shard_block_utime").set(gen_utime);
+            metrics::gauge!("tycho_last_shard_block_seqno").set(seqno);
+            metrics::gauge!("tycho_last_shard_block_applied").set(now);
         }
-        .boxed()
+
+        // Process state
+        let started_at = std::time::Instant::now();
+        let cx = StateSubscriberContext {
+            mc_block_id: cx.mc_block_id,
+            block: cx.block.clone(), // TODO: rewrite without clone
+            archive_data: cx.archive_data.clone(), // TODO: rewrite without clone
+            state,
+        };
+        self.inner.state_subscriber.handle_state(&cx).await?;
+        metrics::histogram!("tycho_subscriber_handle_block_seconds").record(started_at.elapsed());
+
+        // Mark block as applied
+        handle.meta().set_is_applied();
+        let handle_storage = self.inner.storage.block_handle_storage();
+        handle_storage.store_handle(&handle)?;
+
+        // Done
+        Ok(())
     }
-}
 
-impl<S> ShardStateUpdater<S>
-where
-    S: BlockSubscriber,
-{
     async fn get_block_handle(
-        block: &BlockStuffAug,
-        storage: &Arc<Storage>,
+        &self,
+        mc_block_id: &BlockId,
+        block: &BlockStuff,
+        archive_data: &ArchiveData,
     ) -> Result<Arc<BlockHandle>> {
-        let info = block
-            .block()
-            .info
-            .load()
-            .context("Failed to load block info")?;
+        let block_storage = self.inner.storage.block_storage();
 
-        let h = storage
-            .block_storage()
+        let info = block.load_info()?;
+        let res = block_storage
             .store_block_data(
                 block,
+                archive_data,
                 BlockMetaData {
                     is_key_block: info.key_block,
                     gen_utime: info.gen_utime,
-                    mc_ref_seqno: info
-                        .master_ref
-                        .map(|r| {
-                            r.load()
-                                .context("Failed to load master ref")
-                                .map(|mr| mr.seqno)
-                        })
-                        .transpose()
-                        .context("Failed to process master ref")?,
+                    mc_ref_seqno: mc_block_id.seqno,
                 },
             )
             .await?;
 
-        Ok(h.handle)
+        Ok(res.handle)
     }
 
     async fn compute_and_store_state_update(
+        &self,
         block: &BlockStuff,
-        min_ref_mc_state_tracker: &MinRefMcStateTracker,
-        storage: &Arc<Storage>,
-        block_h: &Arc<BlockHandle>,
-        prev_state: Arc<ShardStateStuff>,
-    ) -> Result<Arc<ShardStateStuff>> {
+        mc_state_tracker: &MinRefMcStateTracker,
+        handle: &BlockHandle,
+        prev_root: Cell,
+    ) -> Result<ShardStateStuff> {
         let update = block
             .block()
             .load_state_update()
             .context("Failed to load state update")?;
 
-        let new_state =
-            tokio::task::spawn_blocking(move || update.apply(&prev_state.root_cell().clone()))
-                .await
-                .context("Failed to join blocking task")?
-                .context("Failed to apply state update")?;
-        let new_state = ShardStateStuff::new(*block.id(), new_state, min_ref_mc_state_tracker)
+        let new_state = tokio::task::spawn_blocking(move || update.apply(&prev_root))
+            .await
+            .context("Failed to join blocking task")?
+            .context("Failed to apply state update")?;
+        let new_state = ShardStateStuff::new(*block.id(), new_state, mc_state_tracker)
             .context("Failed to create new state")?;
 
-        storage
-            .shard_state_storage()
-            .store_state(block_h, &new_state)
+        let state_storage = self.inner.storage.shard_state_storage();
+        state_storage
+            .store_state(handle, &new_state)
             .await
             .context("Failed to store new state")?;
 
-        Ok(Arc::new(new_state))
+        Ok(new_state)
     }
+}
+
+impl<S> Clone for ShardStateApplier<S> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<S> BlockSubscriber for ShardStateApplier<S>
+where
+    S: StateSubscriber,
+{
+    type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
+        Box::pin(self.handle_block_impl(cx))
+    }
+}
+
+struct Inner<S> {
+    mc_state_tracker: MinRefMcStateTracker,
+    storage: Arc<Storage>,
+    state_subscriber: S,
 }
 
 #[cfg(any(test, feature = "test"))]
@@ -207,9 +242,9 @@ pub mod test {
 
         let block_strider = BlockStrider::builder()
             .with_provider(provider)
-            .with_subscriber(PrintSubscriber)
             .with_state(storage.clone())
-            .build_with_state_applier(MinRefMcStateTracker::default(), storage.clone());
+            .with_state_subscriber(Default::default(), storage.clone(), PrintSubscriber)
+            .build();
 
         block_strider.run().await?;
 

@@ -10,7 +10,7 @@ use crate::util::{StoredValue, StoredValueBuffer};
 pub struct BlockMetaData {
     pub is_key_block: bool,
     pub gen_utime: u32,
-    pub mc_ref_seqno: Option<u32>,
+    pub mc_ref_seqno: u32,
 }
 
 impl BlockMetaData {
@@ -18,7 +18,7 @@ impl BlockMetaData {
         Self {
             is_key_block: true,
             gen_utime,
-            mc_ref_seqno: Some(0),
+            mc_ref_seqno: 0,
         }
     }
 }
@@ -53,7 +53,7 @@ impl BlockMeta {
                     BLOCK_META_FLAG_IS_KEY_BLOCK
                 } else {
                     0
-                } | data.mc_ref_seqno.unwrap_or_default() as u64,
+                } | data.mc_ref_seqno as u64,
             ),
             gen_utime: data.gen_utime,
         }

@@ -32,13 +32,6 @@ impl BlockHandleStorage {
         }
     }
 
-    pub fn assign_mc_ref_seqno(&self, handle: &Arc<BlockHandle>, mc_ref_seqno: u32) -> Result<()> {
-        if handle.set_masterchain_ref_seqno(mc_ref_seqno)? {
-            self.store_handle(handle)?;
-        }
-        Ok(())
-    }
-
     pub fn create_or_load_handle(
         &self,
         block_id: &BlockId,
@@ -256,7 +249,7 @@ impl BlockHandleStorage {
 
         let handle = match self.cache.entry(block_id) {
             Entry::Vacant(entry) => {
-                let handle = Arc::new(BlockHandle::with_values(block_id, meta, self.cache.clone()));
+                let handle = Arc::new(BlockHandle::new(block_id, meta, self.cache.clone()));
                 entry.insert(Arc::downgrade(&handle));
                 handle
             }

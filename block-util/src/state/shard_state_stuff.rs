@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -7,12 +9,9 @@ use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
 /// Parsed shard state.
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct ShardStateStuff {
-    block_id: BlockId,
-    shard_state: ShardStateUnsplit,
-    shard_state_extra: Option<McStateExtra>,
-    handle: RefMcStateHandle,
-    root: Cell,
+    inner: Arc<Inner>,
 }
 
 impl ShardStateStuff {
@@ -48,11 +47,13 @@ impl ShardStateStuff {
 
         let handle = tracker.insert(shard_state.min_ref_mc_seqno);
         Ok(Self {
-            block_id,
-            shard_state_extra: shard_state.load_custom()?,
-            shard_state,
-            root,
-            handle,
+            inner: Arc::new(Inner {
+                block_id,
+                shard_state_extra: shard_state.load_custom()?,
+                shard_state,
+                root,
+                handle,
+            }),
         })
     }
 
@@ -84,26 +85,26 @@ impl ShardStateStuff {
     }
 
     pub fn block_id(&self) -> &BlockId {
-        &self.block_id
+        &self.inner.block_id
     }
 
     pub fn state(&self) -> &ShardStateUnsplit {
-        &self.shard_state
+        &self.inner.shard_state
     }
 
     pub fn state_extra(&self) -> Result<&McStateExtra> {
-        let Some(extra) = self.shard_state_extra.as_ref() else {
+        let Some(extra) = self.inner.shard_state_extra.as_ref() else {
             anyhow::bail!("given state is not a masterchain state");
         };
         Ok(extra)
     }
 
     pub fn ref_mc_state_handle(&self) -> &RefMcStateHandle {
-        &self.handle
+        &self.inner.handle
     }
 
     pub fn root_cell(&self) -> &Cell {
-        &self.root
+        &self.inner.root
     }
 
     pub fn shards(&self) -> Result<&ShardHashes> {
@@ -113,6 +114,14 @@ impl ShardStateStuff {
     pub fn config_params(&self) -> Result<&BlockchainConfig> {
         Ok(&self.state_extra()?.config)
     }
+}
+
+struct Inner {
+    block_id: BlockId,
+    shard_state: ShardStateUnsplit,
+    shard_state_extra: Option<McStateExtra>,
+    handle: RefMcStateHandle,
+    root: Cell,
 }
 
 pub fn is_persistent_state(block_utime: u32, prev_utime: u32) -> bool {

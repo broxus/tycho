@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use tempfile::TempDir;
 use tycho_block_util::archive::ArchiveData;
-use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
+use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
 
 use crate::common::*;
@@ -54,30 +54,14 @@ pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
             let meta = BlockMetaData {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: info
-                    .master_ref
-                    .map(|r| {
-                        r.load()
-                            .context("Failed to load master ref")
-                            .map(|mr| mr.seqno)
-                    })
-                    .transpose()
-                    .context("Failed to process master ref")?,
+                mc_ref_seqno: 0, // TODO: set mc ref seqno
             };
 
-            let block_archive_data = match block.archive_data {
-                ArchiveData::New(archive_data) => archive_data,
-                ArchiveData::Existing => anyhow::bail!("invalid block archive data"),
-            };
-
-            let block_stuff = BlockStuffAug::new(
-                BlockStuff::with_block(block_id, block.data.clone()),
-                block_archive_data,
-            );
+            let block_stuff = BlockStuff::with_block(block_id, block.data);
 
             let block_result = storage
                 .block_storage()
-                .store_block_data(&block_stuff, meta)
+                .store_block_data(&block_stuff, &block.archive_data, meta)
                 .await?;
 
             assert!(block_result.new);
@@ -87,7 +71,7 @@ pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
                 .load_handle(&block_id)?
                 .unwrap();
 
-            assert_eq!(handle.id(), block_stuff.data.id());
+            assert_eq!(handle.id(), block_stuff.id());
 
             let bs = storage
                 .block_storage()
@@ -95,7 +79,7 @@ pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
                 .await?;
 
             assert_eq!(bs.id(), &block_id);
-            assert_eq!(bs.block(), &block.data);
+            assert_eq!(bs.block(), block_stuff.block());
 
             let proof_archive_data = match proof.archive_data {
                 ArchiveData::New(archive_data) => archive_data,

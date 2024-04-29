@@ -10,7 +10,8 @@ use everscale_types::models::*;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::{
-    make_archive_entry, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier, GetFileName,
+    make_archive_entry, ArchiveData, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier,
+    GetFileName, WithArchiveData,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
@@ -84,7 +85,8 @@ impl BlockStorage {
 
     pub async fn store_block_data(
         &self,
-        block: &BlockStuffAug,
+        block: &BlockStuff,
+        archive_data: &ArchiveData,
         meta_data: BlockMetaData,
     ) -> Result<StoreBlockResult> {
         let _lock = self.block_subscriptions_lock.lock().await;
@@ -97,7 +99,7 @@ impl BlockStorage {
         let archive_id = ArchiveEntryId::Block(block_id);
         let mut updated = false;
         if !handle.meta().has_data() {
-            let data = block.new_archive_data()?;
+            let data = archive_data.as_new_archive_data()?;
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.meta().has_data() {
@@ -109,18 +111,22 @@ impl BlockStorage {
             }
         }
 
-        let mut block_subscriptions = self.block_subscriptions.lock();
-        block_subscriptions.retain(|block_id, subscribers| {
-            if block.id() == block_id {
-                while let Some(tx) = subscribers.pop() {
-                    tx.send(block.clone()).ok();
+        self.block_subscriptions
+            .lock()
+            .retain(|block_id, subscribers| {
+                if block.id() == block_id {
+                    while let Some(tx) = subscribers.pop() {
+                        tx.send(WithArchiveData {
+                            data: block.clone(),
+                            archive_data: archive_data.clone(),
+                        })
+                        .ok();
+                    }
+                    false
+                } else {
+                    true
                 }
-                false
-            } else {
-                true
-            }
-        });
-        drop(block_subscriptions);
+            });
 
         Ok(StoreBlockResult {
             handle,
@@ -174,7 +180,7 @@ impl BlockStorage {
         if proof.is_link() {
             let archive_id = ArchiveEntryId::ProofLink(block_id);
             if !handle.meta().has_proof_link() {
-                let data = proof.new_archive_data()?;
+                let data = proof.as_new_archive_data()?;
 
                 let _lock = handle.proof_data_lock().write().await;
                 if !handle.meta().has_proof_link() {
@@ -188,7 +194,7 @@ impl BlockStorage {
         } else {
             let archive_id = ArchiveEntryId::Proof(block_id);
             if !handle.meta().has_proof() {
-                let data = proof.new_archive_data()?;
+                let data = proof.as_new_archive_data()?;
 
                 let _lock = handle.proof_data_lock().write().await;
                 if !handle.meta().has_proof() {

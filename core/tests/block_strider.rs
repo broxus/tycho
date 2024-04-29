@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tycho_core::block_strider::provider::BlockProvider;
+use tycho_core::block_strider::BlockProvider;
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
