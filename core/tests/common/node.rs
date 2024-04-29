@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use everscale_crypto::ed25519;
-use tycho_core::overlay_server::OverlayServer;
+use tycho_core::blockchain_rpc::BlockchainRpcService;
 
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService,
@@ -103,7 +103,7 @@ impl Node {
         } = NodeBase::with_random_key();
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
             .with_peer_resolver(peer_resolver)
-            .build(OverlayServer::new(storage, true));
+            .build(BlockchainRpcService::new(storage, Default::default()));
         overlay_service.add_public_overlay(&public_overlay);
 
         let dht_client = dht_service.make_client(&network);

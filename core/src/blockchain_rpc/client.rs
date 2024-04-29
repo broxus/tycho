@@ -5,15 +5,14 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 
 use crate::overlay_client::{PublicOverlayClient, QueryResponse};
-use crate::proto::overlay::rpc::*;
-use crate::proto::overlay::*;
+use crate::proto::blockchain::*;
 
-pub struct BlockchainClientConfig {
+pub struct BlockchainRpcClientConfig {
     pub get_next_block_polling_interval: Duration,
     pub get_block_polling_interval: Duration,
 }
 
-impl Default for BlockchainClientConfig {
+impl Default for BlockchainRpcClientConfig {
     fn default() -> Self {
         Self {
             get_block_polling_interval: Duration::from_millis(50),
@@ -24,17 +23,17 @@ impl Default for BlockchainClientConfig {
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct BlockchainClient {
+pub struct BlockchainRpcClient {
     inner: Arc<Inner>,
 }
 
 struct Inner {
     overlay_client: PublicOverlayClient,
-    config: BlockchainClientConfig,
+    config: BlockchainRpcClientConfig,
 }
 
-impl BlockchainClient {
-    pub fn new(overlay_client: PublicOverlayClient, config: BlockchainClientConfig) -> Self {
+impl BlockchainRpcClient {
+    pub fn new(overlay_client: PublicOverlayClient, config: BlockchainRpcClientConfig) -> Self {
         Self {
             inner: Arc::new(Inner {
                 overlay_client,
@@ -47,7 +46,7 @@ impl BlockchainClient {
         &self.inner.overlay_client
     }
 
-    pub fn config(&self) -> &BlockchainClientConfig {
+    pub fn config(&self) -> &BlockchainRpcClientConfig {
         &self.inner.config
     }
 
@@ -58,8 +57,8 @@ impl BlockchainClient {
     ) -> Result<QueryResponse<KeyBlockIds>> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, KeyBlockIds>(&GetNextKeyBlockIds {
-                block: *block,
+            .query::<_, KeyBlockIds>(&rpc::GetNextKeyBlockIds {
+                block_id: *block,
                 max_size,
             })
             .await?;
@@ -69,7 +68,7 @@ impl BlockchainClient {
     pub async fn get_block_full(&self, block: &BlockId) -> Result<QueryResponse<BlockFull>> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, BlockFull>(GetBlockFull { block: *block })
+            .query::<_, BlockFull>(&rpc::GetBlockFull { block_id: *block })
             .await?;
         Ok(data)
     }
@@ -80,8 +79,8 @@ impl BlockchainClient {
     ) -> Result<QueryResponse<BlockFull>> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, BlockFull>(GetNextBlockFull {
-                prev_block: *prev_block,
+            .query::<_, BlockFull>(&rpc::GetNextBlockFull {
+                prev_block_id: *prev_block,
             })
             .await?;
         Ok(data)
@@ -90,7 +89,7 @@ impl BlockchainClient {
     pub async fn get_archive_info(&self, mc_seqno: u32) -> Result<QueryResponse<ArchiveInfo>> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, ArchiveInfo>(GetArchiveInfo { mc_seqno })
+            .query::<_, ArchiveInfo>(&rpc::GetArchiveInfo { mc_seqno })
             .await?;
         Ok(data)
     }
@@ -103,7 +102,7 @@ impl BlockchainClient {
     ) -> Result<QueryResponse<Data>> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, Data>(GetArchiveSlice {
+            .query::<_, Data>(&rpc::GetArchiveSlice {
                 archive_id,
                 offset,
                 max_size,
@@ -121,9 +120,9 @@ impl BlockchainClient {
     ) -> Result<QueryResponse<PersistentStatePart>> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, PersistentStatePart>(GetPersistentStatePart {
-                block: *block,
-                mc_block: *mc_block,
+            .query::<_, PersistentStatePart>(&rpc::GetPersistentStatePart {
+                block_id: *block,
+                mc_block_id: *mc_block,
                 offset,
                 max_size,
             })

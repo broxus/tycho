@@ -4,7 +4,7 @@ use std::time::Duration;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tycho_core::block_strider::provider::BlockProvider;
-use tycho_core::blockchain_client::BlockchainClient;
+use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
 
@@ -110,7 +110,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     tracing::info!("making overlay requests...");
     let node = nodes.first().unwrap();
 
-    let client = BlockchainClient::new(
+    let client = BlockchainRpcClient::new(
         PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),

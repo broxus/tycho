@@ -7,8 +7,8 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_storage::Storage;
 
-use crate::blockchain_client::BlockchainClient;
-use crate::proto::overlay::BlockFull;
+use crate::blockchain_rpc::BlockchainRpcClient;
+use crate::proto::blockchain::BlockFull;
 
 pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
 
@@ -82,7 +82,7 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
     }
 }
 
-impl BlockProvider for BlockchainClient {
+impl BlockProvider for BlockchainRpcClient {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 

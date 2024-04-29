@@ -5,10 +5,9 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tycho_core::blockchain_client::BlockchainClient;
+use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::PublicOverlayClient;
-use tycho_core::overlay_server::DEFAULT_ERROR_CODE;
-use tycho_core::proto::overlay::{BlockFull, KeyBlockIds, PersistentStatePart};
+use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStatePart};
 use tycho_network::PeerId;
 
 use crate::common::archive::*;
@@ -89,7 +88,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     let node = nodes.first().unwrap();
 
-    let client = BlockchainClient::new(
+    let client = BlockchainRpcClient::new(
         PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
@@ -117,7 +116,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     if let Ok(response) = &result {
         let ids = KeyBlockIds {
-            blocks: vec![],
+            block_ids: vec![],
             incomplete: true,
         };
         assert_eq!(response.data(), &ids);
@@ -135,22 +134,8 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     let result = client.get_archive_info(0).await;
     assert!(result.is_err());
 
-    if let Err(e) = &result {
-        assert_eq!(
-            e.to_string(),
-            format!("Failed to get response: {DEFAULT_ERROR_CODE}")
-        );
-    }
-
     let result = client.get_archive_slice(0, 0, 100).await;
     assert!(result.is_err());
-
-    if let Err(e) = &result {
-        assert_eq!(
-            e.to_string(),
-            format!("Failed to get response: {DEFAULT_ERROR_CODE}")
-        );
-    }
 
     tmp_dir.close()?;
 
@@ -232,7 +217,7 @@ async fn overlay_server_blocks() -> Result<()> {
 
     let node = nodes.first().unwrap();
 
-    let client = BlockchainClient::new(
+    let client = BlockchainRpcClient::new(
         PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
