@@ -1,4 +1,4 @@
-pub use self::client::{BlockchainRpcClient, BlockchainRpcClientConfig};
+pub use self::client::BlockchainRpcClient;
 pub use self::service::{BlockchainRpcService, BlockchainRpcServiceConfig};
 
 mod client;

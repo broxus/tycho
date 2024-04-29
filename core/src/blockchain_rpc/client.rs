@@ -1,25 +1,10 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
 
 use crate::overlay_client::{PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
-
-pub struct BlockchainRpcClientConfig {
-    pub get_next_block_polling_interval: Duration,
-    pub get_block_polling_interval: Duration,
-}
-
-impl Default for BlockchainRpcClientConfig {
-    fn default() -> Self {
-        Self {
-            get_block_polling_interval: Duration::from_millis(50),
-            get_next_block_polling_interval: Duration::from_millis(50),
-        }
-    }
-}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -29,25 +14,17 @@ pub struct BlockchainRpcClient {
 
 struct Inner {
     overlay_client: PublicOverlayClient,
-    config: BlockchainRpcClientConfig,
 }
 
 impl BlockchainRpcClient {
-    pub fn new(overlay_client: PublicOverlayClient, config: BlockchainRpcClientConfig) -> Self {
+    pub fn new(overlay_client: PublicOverlayClient) -> Self {
         Self {
-            inner: Arc::new(Inner {
-                overlay_client,
-                config,
-            }),
+            inner: Arc::new(Inner { overlay_client }),
         }
     }
 
     pub fn overlay_client(&self) -> &PublicOverlayClient {
         &self.inner.overlay_client
-    }
-
-    pub fn config(&self) -> &BlockchainRpcClientConfig {
-        &self.inner.config
     }
 
     pub async fn get_next_key_block_ids(

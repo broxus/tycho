@@ -42,7 +42,7 @@ pub struct BlockchainRpcService {
 }
 
 impl BlockchainRpcService {
-    pub fn new(storage: Arc<Storage>, config: BlockchainRpcServiceConfig) -> Self {
+    pub fn new(storage: Storage, config: BlockchainRpcServiceConfig) -> Self {
         Self {
             inner: Arc::new(Inner { storage, config }),
         }
@@ -158,13 +158,13 @@ impl Service<ServiceRequest> for BlockchainRpcService {
 }
 
 struct Inner {
-    storage: Arc<Storage>,
+    storage: Storage,
     config: BlockchainRpcServiceConfig,
 }
 
 impl Inner {
     fn storage(&self) -> &Storage {
-        self.storage.as_ref()
+        &self.storage
     }
 
     fn try_handle_prefix<'a>(

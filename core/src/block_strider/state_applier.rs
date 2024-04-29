@@ -25,7 +25,7 @@ where
 {
     pub fn new(
         mc_state_tracker: MinRefMcStateTracker,
-        storage: Arc<Storage>,
+        storage: Storage,
         state_subscriber: S,
     ) -> Self {
         Self {
@@ -212,24 +212,22 @@ where
 
 struct Inner<S> {
     mc_state_tracker: MinRefMcStateTracker,
-    storage: Arc<Storage>,
+    storage: Storage,
     state_subscriber: S,
 }
 
-#[cfg(any(test, feature = "test"))]
+#[cfg(test)]
 pub mod test {
-    use super::super::test_provider::archive_provider::ArchiveProvider;
-    use super::*;
-
-    use crate::block_strider::subscriber::test::PrintSubscriber;
-    use crate::block_strider::BlockStrider;
-    use everscale_types::cell::HashBytes;
-    use everscale_types::models::BlockId;
-    use everscale_types::models::ShardIdent;
-    use itertools::Itertools;
     use std::str::FromStr;
+
+    use everscale_types::cell::HashBytes;
+    use everscale_types::models::*;
     use tracing_test::traced_test;
     use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+
+    use super::*;
+    use crate::block_strider::subscriber::test::PrintSubscriber;
+    use crate::block_strider::{ArchiveBlockProvider, BlockStrider};
 
     #[traced_test]
     #[tokio::test]
@@ -237,7 +235,7 @@ pub mod test {
         let (provider, storage) = prepare_state_apply().await?;
 
         let last_mc = *provider.mc_block_ids.last_key_value().unwrap().1;
-        let blocks = provider.blocks.keys().copied().collect_vec();
+        let blocks = provider.blocks.keys().copied().collect::<Vec<_>>();
 
         let block_strider = BlockStrider::builder()
             .with_provider(provider)
@@ -270,9 +268,9 @@ pub mod test {
         Ok(())
     }
 
-    pub async fn prepare_state_apply() -> Result<(ArchiveProvider, Arc<Storage>)> {
+    pub async fn prepare_state_apply() -> Result<(ArchiveBlockProvider, Storage)> {
         let data = include_bytes!("../../tests/data/00001");
-        let provider = ArchiveProvider::new(data).unwrap();
+        let provider = ArchiveBlockProvider::new(data).unwrap();
         let temp = tempfile::tempdir().unwrap();
         let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
         let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();

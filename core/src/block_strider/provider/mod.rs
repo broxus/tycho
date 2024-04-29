@@ -4,11 +4,18 @@ use std::sync::Arc;
 
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
-use tycho_storage::Storage;
+use tycho_block_util::block::BlockStuffAug;
 
-use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::proto::blockchain::BlockFull;
+pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
+
+#[cfg(any(test, feature = "test"))]
+pub use self::archive_provider::ArchiveBlockProvider;
+
+mod blockchain_provider;
+mod storage_provider;
+
+#[cfg(any(test, feature = "test"))]
+mod archive_provider;
 
 pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
 
@@ -78,138 +85,6 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
                 return res;
             }
             self.right.get_block(block_id).await
-        })
-    }
-}
-
-impl BlockProvider for BlockchainRpcClient {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async {
-            let config = self.config();
-
-            loop {
-                let res = self.get_next_block_full(prev_block_id).await;
-
-                let block = match res {
-                    Ok(res) if matches!(res.data(), BlockFull::Found { .. }) => {
-                        let (block_id, data) = match res.data() {
-                            BlockFull::Found {
-                                block_id, block, ..
-                            } => (*block_id, block.clone()),
-                            BlockFull::Empty => unreachable!(),
-                        };
-
-                        match BlockStuff::deserialize_checked(block_id, &data) {
-                            Ok(block) => {
-                                res.accept();
-                                Some(Ok(BlockStuffAug::new(block, data)))
-                            }
-                            Err(e) => {
-                                tracing::error!("failed to deserialize block: {:?}", e);
-                                res.reject();
-                                None
-                            }
-                        }
-                    }
-                    Ok(_) => None,
-                    Err(e) => {
-                        tracing::error!("failed to get next block: {:?}", e);
-                        None
-                    }
-                };
-
-                if block.is_some() {
-                    break block;
-                }
-
-                tokio::time::sleep(config.get_next_block_polling_interval).await;
-            }
-        })
-    }
-
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(async {
-            let config = self.config();
-
-            loop {
-                let res = match self.get_block_full(block_id).await {
-                    Ok(res) => res,
-                    Err(e) => {
-                        tracing::error!("failed to get block: {:?}", e);
-                        tokio::time::sleep(config.get_block_polling_interval).await;
-                        continue;
-                    }
-                };
-
-                let block = match res.data() {
-                    BlockFull::Found {
-                        block_id,
-                        block: data,
-                        ..
-                    } => match BlockStuff::deserialize_checked(*block_id, data) {
-                        Ok(block) => Some(Ok(BlockStuffAug::new(block, data.clone()))),
-                        Err(e) => {
-                            res.accept();
-                            tracing::error!("failed to deserialize block: {:?}", e);
-                            tokio::time::sleep(config.get_block_polling_interval).await;
-                            continue;
-                        }
-                    },
-                    BlockFull::Empty => {
-                        tokio::time::sleep(config.get_block_polling_interval).await;
-                        continue;
-                    }
-                };
-
-                break block;
-            }
-        })
-    }
-}
-
-impl BlockProvider for Storage {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        Box::pin(async {
-            let block_storage = self.block_storage();
-
-            let get_next_block = || async {
-                let rx = block_storage
-                    .subscribe_to_next_block(*prev_block_id)
-                    .await?;
-
-                let block = rx.await?;
-
-                Ok::<_, anyhow::Error>(block)
-            };
-
-            match get_next_block().await {
-                Ok(block) => Some(Ok(block)),
-                Err(e) => Some(Err(e)),
-            }
-        })
-    }
-
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(async {
-            let block_storage = self.block_storage();
-
-            let get_block = || async {
-                let rx = block_storage.subscribe_to_block(*block_id).await?;
-                let block = rx.await?;
-
-                Ok::<_, anyhow::Error>(block)
-            };
-
-            match get_block().await {
-                Ok(block) => Some(Ok(block)),
-                Err(e) => Some(Err(e)),
-            }
         })
     }
 }
@@ -293,7 +168,7 @@ mod test {
     }
 
     fn get_empty_block() -> BlockStuffAug {
-        let block_data = include_bytes!("../../tests/data/empty_block.bin");
+        let block_data = include_bytes!("../../../tests/data/empty_block.bin");
         let block = everscale_types::boc::BocRepr::decode(block_data).unwrap();
         BlockStuffAug::new(
             BlockStuff::with_block(get_default_block_id(), block),

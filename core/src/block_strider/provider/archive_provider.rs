@@ -14,40 +14,16 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff};
 
-pub struct ArchiveProvider {
+pub struct ArchiveBlockProvider {
     pub mc_block_ids: BTreeMap<u32, BlockId>,
     pub blocks: BTreeMap<BlockId, ArchiveDataEntry>,
 }
 
-impl BlockProvider for ArchiveProvider {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        let id = match self.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
-            Some(id) => id,
-            None => return Box::pin(futures_util::future::ready(None)),
-        };
-
-        self.get_block(id)
-    }
-
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(self.get_block_by_id(block_id).map(|b| {
-            Ok(BlockStuffAug::new(
-                BlockStuff::with_block(*block_id, b.clone()),
-                everscale_types::boc::BocRepr::encode(b).unwrap(),
-            ))
-        }))
-        .boxed()
-    }
-}
-
-impl ArchiveProvider {
-    pub(crate) fn new(data: &[u8]) -> Result<Self> {
+impl ArchiveBlockProvider {
+    pub fn new(data: &[u8]) -> Result<Self> {
         let reader = ArchiveReader::new(data)?;
 
-        let mut res = ArchiveProvider {
+        let mut res = ArchiveBlockProvider {
             mc_block_ids: Default::default(),
             blocks: Default::default(),
         };
@@ -94,6 +70,30 @@ impl ArchiveProvider {
             .get(id)
             .map(|entry| entry.block.as_ref().unwrap())
             .cloned()
+    }
+}
+
+impl BlockProvider for ArchiveBlockProvider {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        let id = match self.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
+            Some(id) => id,
+            None => return Box::pin(futures_util::future::ready(None)),
+        };
+
+        self.get_block(id)
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        futures_util::future::ready(self.get_block_by_id(block_id).map(|b| {
+            Ok(BlockStuffAug::new(
+                BlockStuff::with_block(*block_id, b.clone()),
+                everscale_types::boc::BocRepr::encode(b).unwrap(),
+            ))
+        }))
+        .boxed()
     }
 }
 

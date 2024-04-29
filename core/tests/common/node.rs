@@ -94,7 +94,7 @@ impl Node {
         &self.public_overlay
     }
 
-    fn with_random_key(storage: Arc<Storage>) -> Self {
+    fn with_random_key(storage: Storage) -> Self {
         let NodeBase {
             network,
             dht_service,
@@ -116,7 +116,7 @@ impl Node {
     }
 }
 
-pub fn make_network(storage: Arc<Storage>, node_count: usize) -> Vec<Node> {
+pub fn make_network(storage: Storage, node_count: usize) -> Vec<Node> {
     let nodes = (0..node_count)
         .map(|_| Node::with_random_key(storage.clone()))
         .collect::<Vec<_>>();

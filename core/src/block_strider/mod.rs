@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -9,7 +7,7 @@ use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
 
-pub use self::provider::BlockProvider;
+pub use self::provider::{BlockProvider, BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::state::{BlockStriderState, InMemoryBlockStriderState};
 pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::{
@@ -17,13 +15,13 @@ pub use self::subscriber::{
     StateSubscriberContext,
 };
 
+#[cfg(any(test, feature = "test"))]
+pub use self::provider::ArchiveBlockProvider;
+
 mod provider;
 mod state;
 mod state_applier;
 mod subscriber;
-
-#[cfg(any(test, feature = "test"))]
-pub mod test_provider;
 
 pub struct BlockStriderBuilder<T, P, B>(BlockStrider<T, P, B>);
 
@@ -67,7 +65,7 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
     pub fn with_state_subscriber<S>(
         self,
         mc_state_tracker: MinRefMcStateTracker,
-        storage: Arc<Storage>,
+        storage: Storage,
         state_subscriber: S,
     ) -> BlockStriderBuilder<T1, T2, ShardStateApplier<S>>
     where
@@ -262,30 +260,5 @@ where
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::state::InMemoryBlockStriderState;
-    use super::subscriber::test::PrintSubscriber;
-    use super::test_provider::TestBlockProvider;
-    use crate::block_strider::BlockStrider;
-
-    #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_block_strider() {
-        let provider = TestBlockProvider::new(3);
-        provider.validate();
-
-        let subscriber = PrintSubscriber;
-        let state = InMemoryBlockStriderState::with_initial_id(provider.first_master_block());
-
-        let strider = BlockStrider::builder()
-            .with_state(state)
-            .with_provider(provider)
-            .with_block_subscriber(subscriber)
-            .build();
-        strider.run().await.unwrap();
     }
 }

@@ -88,14 +88,11 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     let node = nodes.first().unwrap();
 
-    let client = BlockchainRpcClient::new(
-        PublicOverlayClient::new(
-            node.network().clone(),
-            node.public_overlay().clone(),
-            Default::default(),
-        ),
+    let client = BlockchainRpcClient::new(PublicOverlayClient::new(
+        node.network().clone(),
+        node.public_overlay().clone(),
         Default::default(),
-    );
+    ));
 
     let result = client.get_block_full(&BlockId::default()).await;
     assert!(result.is_ok());
@@ -217,14 +214,11 @@ async fn overlay_server_blocks() -> Result<()> {
 
     let node = nodes.first().unwrap();
 
-    let client = BlockchainRpcClient::new(
-        PublicOverlayClient::new(
-            node.network().clone(),
-            node.public_overlay().clone(),
-            Default::default(),
-        ),
+    let client = BlockchainRpcClient::new(PublicOverlayClient::new(
+        node.network().clone(),
+        node.public_overlay().clone(),
         Default::default(),
-    );
+    ));
 
     let archive = common::storage::get_archive()?;
     for (block_id, archive_data) in archive.blocks {

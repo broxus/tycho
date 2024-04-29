@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use everscale_types::models::BlockId;
 
 use tycho_storage::Storage;
@@ -12,7 +10,7 @@ pub trait BlockStriderState: Send + Sync + 'static {
     fn commit_traversed(&self, block_id: &BlockId);
 }
 
-impl BlockStriderState for Arc<Storage> {
+impl BlockStriderState for Storage {
     fn load_last_traversed_master_block_id(&self) -> BlockId {
         self.node_state()
             .load_last_mc_block_id()

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tycho_core::block_strider::BlockProvider;
+use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
@@ -50,7 +50,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     let (storage, tmp_dir) = common::storage::init_storage().await?;
 
     const NODE_COUNT: usize = 10;
-    let nodes = common::node::make_network(storage, NODE_COUNT);
+    let nodes = common::node::make_network(storage.clone(), NODE_COUNT);
 
     tracing::info!("discovering nodes");
     loop {
@@ -110,19 +110,17 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     tracing::info!("making overlay requests...");
     let node = nodes.first().unwrap();
 
-    let client = BlockchainRpcClient::new(
-        PublicOverlayClient::new(
-            node.network().clone(),
-            node.public_overlay().clone(),
-            PublicOverlayClientConfig::default(),
-        ),
-        Default::default(),
-    );
+    let client = BlockchainRpcClient::new(PublicOverlayClient::new(
+        node.network().clone(),
+        node.public_overlay().clone(),
+        PublicOverlayClientConfig::default(),
+    ));
+    let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
 
     let archive = common::storage::get_archive()?;
     for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
-            let block = client.get_block(&block_id).await;
+            let block = provider.get_block(&block_id).await;
             assert!(block.is_some());
 
             if let Some(block) = block {

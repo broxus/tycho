@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use tempfile::TempDir;
@@ -9,7 +7,7 @@ use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
 
 use crate::common::*;
 
-pub(crate) async fn init_empty_storage() -> Result<(Arc<Storage>, TempDir)> {
+pub(crate) async fn init_empty_storage() -> Result<(Storage, TempDir)> {
     let tmp_dir = tempfile::tempdir()?;
     let root_path = tmp_dir.path();
 
@@ -38,7 +36,7 @@ pub(crate) fn get_archive() -> Result<archive::Archive> {
     Ok(archive)
 }
 
-pub(crate) async fn init_storage() -> Result<(Arc<Storage>, TempDir)> {
+pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let (storage, tmp_dir) = init_empty_storage().await?;
 
     let data = include_bytes!("../../tests/data/00001");
