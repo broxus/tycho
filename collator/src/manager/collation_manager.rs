@@ -83,7 +83,7 @@ where
     ST: StateNodeAdapter,
 {
     CollationManagerGenImpl::<
-        CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
+        CollatorStdImpl<CollatorProcessorStdImpl<_, _, _>, _, _, _>,
         ValidatorStdImpl<ValidatorProcessorStdImpl<_>, _>,
         MessageQueueAdapterStdImpl,
         MP,
@@ -108,7 +108,7 @@ where
     V: ValidatorProcessor<ST>,
 {
     CollationManagerGenImpl::<
-        CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
+        CollatorStdImpl<CollatorProcessorStdImpl<_, _, _>, _, _, _>,
         ValidatorStdImpl<V, _>,
         MessageQueueAdapterStdImpl,
         MP,

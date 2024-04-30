@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Add, sync::Arc};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 
 use everscale_types::{
     cell::{Cell, CellBuilder, HashBytes, UsageTree},
@@ -8,23 +8,29 @@ use everscale_types::{
     merkle::MerkleUpdate,
     models::{
         AddSub, Block, BlockExtraBuilder, BlockId, BlockInfoBuilder, BlockRef, BlockchainConfig,
-        CreatorStats, GlobalCapability, GlobalVersion, KeyBlockRef, KeyMaxLt, Lazy, LibDescr,
-        McBlockExtra, McStateExtra, ShardHashes, ShardStateUnsplit, ShardStateUnsplitBuilder,
-        WorkchainDescription,
+        CreatorStats, GlobalCapability, GlobalVersion, Lazy, LibDescr, McBlockExtra, McStateExtra,
+        ShardHashes, ShardStateUnsplitBuilder, WorkchainDescription,
     },
 };
 use sha2::Digest;
 use tycho_block_util::{config::BlockchainConfigExt, state::ShardStateStuff};
+use tycho_core::internal_queue::iterator::QueueIterator;
 
-use crate::types::BlockCandidate;
-
-use super::super::types::{
-    AccountBlocksDict, BlockCollationData, McData, PrevData, ShardAccountStuff,
+use crate::{
+    mempool::MempoolAdapter, msg_queue::MessageQueueAdapter, state_node::StateNodeAdapter,
+    types::BlockCandidate,
 };
+
+use super::super::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
 
 use super::{execution_manager::ExecutionManager, CollatorProcessorStdImpl};
 
-impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
+impl<MQ, MP, ST> CollatorProcessorStdImpl<MQ, MP, ST>
+where
+    MQ: MessageQueueAdapter,
+    MP: MempoolAdapter,
+    ST: StateNodeAdapter,
+{
     pub(super) async fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,

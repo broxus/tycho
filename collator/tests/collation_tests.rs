@@ -12,6 +12,7 @@ use tycho_collator::{
 };
 use tycho_core::block_strider::{subscriber::test::PrintSubscriber, BlockStrider};
 
+/// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
 #[tokio::test]
 async fn test_collation_process_on_stubs() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
