@@ -51,8 +51,9 @@ pub(super) struct ExecutionManager {
     messages_set: Vec<(MsgInfo, Cell)>,
     /// group limit
     group_limit: u32,
-    /// shard state provider
+    /// shard accounts
     pub shard_accounts: ShardAccounts,
+    /// changed accounts
     pub changed_accounts: FastHashMap<AccountId, ShardAccountStuff>,
 }
 
@@ -93,7 +94,10 @@ impl ExecutionManager {
     }
 
     /// tick
-    pub async fn tick(&mut self, offset: u32) -> Result<(u32, Vec<(AccountId, Box<Transaction>)>)> {
+    pub async fn tick(
+        &mut self,
+        offset: u32,
+    ) -> Result<(u32, Vec<(AccountId, MsgInfo, Box<Transaction>)>)> {
         tracing::trace!("execute manager messages set tick with {offset}");
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
@@ -132,7 +136,7 @@ impl ExecutionManager {
         let mut result = vec![];
         for (transaction, shard_account) in executed_messages {
             self.update_shard_account(shard_account.account_addr, shard_account.clone());
-            result.push((shard_account.account_addr, transaction?));
+            result.push((shard_account.account_addr, msg, transaction?));
         }
 
         let duration = now.elapsed().as_micros() as u64;
@@ -175,7 +179,9 @@ impl ExecutionManager {
                 execute_ordinary_message(&msg, &new_msg_cell, &mut account_root, params, &config);
             // TODO replace with batch set
             if let Ok(transaction) = transaction_res.as_mut() {
-                shard_account.add_transaction(transaction, account_root)?;
+                // TODO calculate key
+                let key = 0;
+                shard_account.add_transaction(key, transaction, account_root)?;
             }
             Ok((transaction_res, shard_account))
         })
