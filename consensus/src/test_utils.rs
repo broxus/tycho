@@ -151,7 +151,7 @@ mod tests {
     async fn engine_works() -> Result<(), ()> {
         // tracing_subscriber::fmt::try_init().ok();
         // tracing::info!("engine_works");
-        tycho_util::test::init_logger("engine_works");
+        tycho_util::test::init_logger("engine_works", "info,tycho_consensus=debug");
 
         check_parking_lot();
         heart_beat();
