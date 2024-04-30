@@ -3,6 +3,8 @@ use std::{collections::HashMap, ops::Add, sync::Arc};
 
 use anyhow::{anyhow, bail, Result};
 
+use everscale_types::cell::{Load, Store};
+use everscale_types::models::{AccountBlock, CurrencyCollection};
 use everscale_types::{
     cell::{Cell, CellBuilder, HashBytes, UsageTree},
     dict::Dict,
@@ -39,13 +41,38 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         let mut account_blocks = AccountBlocksDict::default();
 
         for (account_id, updated_shard_account) in exec_manager.changed_accounts.drain() {
-            //TODO: read account
             //TODO: get updated blockchain config if it stored in account
-            //TODO: if have transactions, build AccountBlock and add to account_blocks
-            // let acc_block = shard_accounts.set(account_id, updated_shard_account.shard_account)?;
-            // if !acc_block.transactions().is_empty() {
-            //     accounts.insert(&acc_block)?;
-            // }
+            let account = updated_shard_account.shard_account.load_account()?;
+            match account {
+                None => {
+                    shard_accounts.remove(updated_shard_account.account_addr)?;
+                }
+                Some(account) => {
+                    shard_accounts.set(
+                        updated_shard_account.account_addr,
+                        &account,
+                        &account.balance,
+                    )?;
+                }
+            }
+            let acc_block = AccountBlock {
+                account: updated_shard_account.account_addr,
+                transactions: updated_shard_account.transactions,
+                state_update: updated_shard_account.state_update, // TODO: fix state update
+            };
+
+            if !acc_block.transactions.is_empty() {
+                account_blocks.set(
+                    account_id,
+                    &acc_block,
+                    acc_block.transactions.root_extra(),
+                    |left, right, b, cx| {
+                        let mut left = CurrencyCollection::load_from(left)?;
+                        let right = CurrencyCollection::load_from(right)?;
+                        left.checked_add(&right)?.store_into(b, cx)
+                    },
+                )?;
+            }
         }
 
         let mut new_config_opt: Option<BlockchainConfig> = None;

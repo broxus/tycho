@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 
+use everscale_types::cell::Cell;
+use everscale_types::models::in_message::InMsg;
+use everscale_types::models::out_message::OutMsg;
+use everscale_types::models::Transaction;
 use everscale_types::{
     cell::HashBytes,
     models::{
@@ -160,8 +164,14 @@ where
             prev_shard_data.observable_accounts().clone(),
         );
 
+        //STUB: just remove fisrt anchor from cache
+        let _ext_msg = self.get_next_external();
+        self.set_has_pending_externals(false);
+
         // TODO: load from DAG
         let msgs_set = vec![];
+
+        // TODO check externals is not exist accounts needed ?
 
         exec_manager.execute_msgs_set(msgs_set);
         let mut offset = 0;
@@ -169,27 +179,29 @@ where
         let mut result = HashMap::new();
         while !finish {
             let (new_offset, group) = exec_manager.tick(offset).await?;
-            for (account_id, transaction) in group {
+            for (account_id, msg_info, transaction) in group {
                 result
                     .entry(&account_id)
                     .and_modify(|v: &mut Vec<_>| v.push(transaction))
                     .or_default();
+
+                // TODO: finalize
+                // let internal_msgs = new_transaction(&mut collation_data, &tr, tr_cell, in_msg_opt.as_ref())?;
+                // collation_data.max_lt = execution_manager.max_lt.load(Ordering::Relaxed);
+                // if !check_limits(tick_res) {
+                //     break;
+                // }
+                // TODO: check our for internal
+                // our  = shard ident contain msg src
+                //
             }
             offset = new_offset;
             if offset == msgs_set.len() as u32 {
                 finish = true;
             }
-
-            // TODO:
-            // finilize_txs(tick_re.txts);
-            // if !check_limits(tick_res) {
-            //     break;
-            // }
         }
 
-        //STUB: just remove fisrt anchor from cache
-        let _ext_msg = self.get_next_external();
-        self.set_has_pending_externals(false);
+        // TODO: check internals queue
 
         //STUB: do not execute transactions and produce empty block
 
@@ -410,4 +422,63 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
 
         Ok(to_mint)
     }
+}
+
+/// add in and out messages from to block, and to new message queue
+fn new_transaction(
+    colator_data: &mut BlockCollationData,
+    transaction: &Transaction,
+    tr_cell: Cell,
+    in_msg_opt: Option<&InMsg>,
+) -> Result<Vec<OutMsg>> {
+    // log::trace!(
+    //     "new transaction, message {:x}\n{}",
+    //     in_msg_opt.map(|m| m.message_cell().unwrap().repr_hash()).unwrap_or_default(),
+    //     ever_block_json::debug_transaction(transaction.clone()).unwrap_or_default(),
+    // );
+    colator_data.execute_count += 1;
+    let gas_used = transaction.gas_used().unwrap_or(0);
+    colator_data
+        .block_limit_status
+        .add_gas_used(gas_used as u32);
+    colator_data
+        .block_limit_status
+        .add_transaction(transaction.logical_time() == colator_data.start_lt()? + 1);
+    if let Some(in_msg) = in_msg_opt {
+        colator_data.add_in_msg_to_block(in_msg)?;
+    }
+    transaction.out_msgs.iterate_slices(|slice| {
+        let msg_cell = slice.reference(0)?;
+        let msg_hash = msg_cell.repr_hash();
+        let msg = Message::construct_from_cell(msg_cell.clone())?;
+        match msg.header() {
+            CommonMsgInfo::IntMsgInfo(info) => {
+                // Add out message to state for counting time and it may be removed if used
+                let use_hypercube = !colator_data
+                    .config
+                    .has_capability(GlobalCapabilities::CapOffHypercube);
+                let fwd_fee = *info.fwd_fee();
+                let enq = MsgEnqueueStuff::new(
+                    msg.clone(),
+                    colator_data.out_msg_queue_info.shard(),
+                    fwd_fee,
+                    use_hypercube,
+                )?;
+                colator_data.enqueue_count += 1;
+                colator_data.msg_queue_depth_sum +=
+                    colator_data.out_msg_queue_info.add_message(&enq)?;
+                // TODO: add message to internal queue
+                // Add to message block here for counting time later it may be replaced
+                let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                colator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+            }
+            CommonMsgInfo::ExtOutMsgInfo(_) => {
+                let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
+                colator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
+            }
+            CommonMsgInfo::ExtInMsgInfo(_) => fail!("External inbound message cannot be output"),
+        };
+        Ok(true)
+    })?;
+    Ok(())
 }
