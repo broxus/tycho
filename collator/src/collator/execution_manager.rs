@@ -32,9 +32,9 @@ pub(super) struct ExecutionManager {
     // block's start logical time
     start_lt: u64,
     // actual maximum logical time
-    max_lt: Arc<AtomicU64>,
+    pub max_lt: Arc<AtomicU64>,
     // this time is used if account's lt is smaller
-    min_lt: Arc<AtomicU64>,
+    pub min_lt: Arc<AtomicU64>,
     // block random seed
     seed_block: HashBytes,
     /// blockchain config
@@ -46,7 +46,9 @@ pub(super) struct ExecutionManager {
     /// messages set
     messages_set: Vec<(MsgInfo, Cell)>,
     /// group limit
-    pub group_limit: u32,
+    group_limit: u32,
+    /// shard state provider
+    pub shard_state_provider: Arc<dyn ShardStateProvider>,
 }
 
 impl ExecutionManager {
@@ -60,6 +62,7 @@ impl ExecutionManager {
         config: BlockchainConfig,
         block_version: u32,
         group_limit: u32,
+        shard_state_provider: Arc<dyn ShardStateProvider>,
     ) -> Self {
         Self {
             libraries,
@@ -73,6 +76,7 @@ impl ExecutionManager {
             group_limit,
             total_trans_duration: Arc::new(AtomicU64::new(0)),
             messages_set: Vec::new(),
+            shard_state_provider,
         }
     }
 
@@ -86,7 +90,6 @@ impl ExecutionManager {
     pub async fn tick(
         &mut self,
         offset: u32,
-        shard_state_provider: Arc<dyn ShardStateProvider>,
     ) -> Result<(u32, Vec<(Result<Box<Transaction>>, ShardAccount)>)> {
         tracing::trace!("execute manager messages set tick with {offset}");
 
@@ -96,13 +99,18 @@ impl ExecutionManager {
         let total_trans_duration = self.total_trans_duration.clone();
 
         for (account_id, msg) in group {
-            futures.push(self.execute_message(account_id, msg, shard_state_provider.clone()));
+            futures.push(self.execute_message(account_id, msg));
         }
         let now = std::time::Instant::now();
 
         let mut executed_messages = vec![];
         while let Some(executed_message) = futures.next().await {
-            executed_messages.push(executed_message?);
+            let (transaction_res, shard_account) = executed_message?;
+            self.shard_state_provider.update_account_state(
+                &shard_account.account_addr,
+                shard_account.shard_account.clone(),
+            );
+            executed_messages.push((transaction_res, shard_account.shard_account));
         }
 
         let duration = now.elapsed().as_micros() as u64;
@@ -118,8 +126,7 @@ impl ExecutionManager {
         &self,
         account_id: AccountId,
         new_msg: (MsgInfo, Cell),
-        shard_state_provider: Arc<dyn ShardStateProvider>,
-    ) -> Result<(Result<Box<Transaction>>, ShardAccount)> {
+    ) -> Result<(Result<Box<Transaction>>, ShardAccountStuff)> {
         let (msg, new_msg_cell) = new_msg;
         tracing::trace!("execute message for account {account_id}");
 
@@ -130,10 +137,11 @@ impl ExecutionManager {
         let block_lt = self.start_lt;
         let seed_block = self.seed_block.clone();
         let block_version = self.block_version;
+        let shard_state_provider = self.shard_state_provider.clone();
 
         let (mut transaction_res, shard_account_stuff) = tokio::task::spawn_blocking(move || {
             let shard_account =
-                if let Some(shard_account) = shard_state_provider.get_shard_state(&account_id) {
+                if let Some(shard_account) = shard_state_provider.get_account_state(&account_id) {
                     shard_account
                 } else {
                     ShardAccount {
@@ -171,7 +179,7 @@ impl ExecutionManager {
             Ordering::Relaxed,
         );
 
-        Ok((transaction_res, shard_account_stuff.shard_account))
+        Ok((transaction_res, shard_account_stuff))
     }
 }
 
@@ -184,13 +192,9 @@ fn execute_ordinary_message(
     config: &BlockchainConfig,
 ) -> Result<Box<Transaction>> {
     let executor = OrdinaryTransactionExecutor::new();
-    Box::new(executor.execute_with_libs_and_params(
-        new_msg_info,
-        new_msg_cell,
-        account_root,
-        params,
-        config,
-    ))
+    executor
+        .execute_with_libs_and_params(new_msg_info, new_msg_cell, account_root, &params, config)
+        .map(Box::new)
 }
 
 /// execute tick tock message
@@ -201,7 +205,9 @@ fn execute_ticktock_message(
     config: &BlockchainConfig,
 ) -> Result<Box<Transaction>> {
     let executor = TickTockTransactionExecutor::new(tick_tock);
-    Box::new(executor.execute_with_libs_and_params(None, account_root, params, config))
+    executor
+        .execute_with_libs_and_params(None, account_root, &params, config)
+        .map(Box::new)
 }
 
 /// calculate group

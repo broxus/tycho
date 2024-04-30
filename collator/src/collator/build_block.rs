@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::{collections::HashMap, ops::Add, sync::Arc};
 
 use anyhow::{anyhow, bail, Result};
@@ -36,6 +37,23 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         // update shard accounts tree and prepare accounts blocks
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
+
+        //TODO: read account
+        //TODO: get updated blockchain config if it stored in account
+        //TODO: if have transactions, build AccountBlock and add to account_blocks
+        let updated_shard_accounts: Result<Vec<_>> = exec_manager
+            .shard_state_provider
+            .get_updated_accounts()
+            .into_iter()
+            .map(|(id, account)| {
+                ShardAccountStuff::new(
+                    id,
+                    account,
+                    exec_manager.max_lt.load(Ordering::Acquire),
+                    exec_manager.min_lt.load(Ordering::Acquire),
+                )
+            })
+            .collect();
 
         let mut new_config_opt: Option<BlockchainConfig> = None;
 
@@ -141,8 +159,10 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         let _ = new_state.total_validator_fees.sub(&value_flow.recovered);
 
         if self.shard_id.is_masterchain() {
-            new_state.libraries =
-                self.update_public_libraries(exec_manager.libraries.clone(), &changed_accounts)?;
+            new_state.libraries = self.update_public_libraries(
+                exec_manager.libraries.clone(),
+                &updated_shard_accounts?,
+            )?;
         }
 
         new_state.master_ref = master_ref;
@@ -402,9 +422,9 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
     fn update_public_libraries(
         &self,
         mut libraries: Dict<HashBytes, LibDescr>,
-        accounts: &HashMap<HashBytes, ShardAccountStuff>,
+        accounts: &[ShardAccountStuff],
     ) -> Result<Dict<HashBytes, LibDescr>> {
-        for (_, acc) in accounts.iter() {
+        for acc in accounts.iter() {
             acc.update_public_libraries(&mut libraries)?;
         }
         Ok(libraries)
