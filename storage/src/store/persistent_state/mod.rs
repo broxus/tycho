@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
@@ -166,12 +166,15 @@ impl PersistentStateStorage {
         // Keep 2 days of states + 1 state before
         let block = {
             let now = tycho_util::time::now_sec();
-            let mut key_block = self.block_handle_storage.find_last_key_block()?;
+            let mut key_block = self
+                .block_handle_storage
+                .find_last_key_block()
+                .context("no key blocks found")?;
 
             loop {
                 match self
                     .block_handle_storage
-                    .find_prev_persistent_key_block(key_block.id().seqno)?
+                    .find_prev_persistent_key_block(key_block.id().seqno)
                 {
                     Some(prev_key_block) => {
                         if prev_key_block.meta().gen_utime() + 2 * KEY_BLOCK_UTIME_STEP < now {

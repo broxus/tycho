@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use everscale_types::models::*;
 
 use crate::db::*;
@@ -22,72 +21,62 @@ impl BlockConnectionStorage {
         handle: &BlockHandle,
         direction: BlockConnection,
         connected_block_id: &BlockId,
-    ) -> Result<()> {
+    ) {
         // Use strange match because all columns have different types
         let store = match direction {
-            BlockConnection::Prev1 => {
-                if handle.meta().has_prev1() {
-                    return Ok(());
-                }
-                store_block_connection_impl(&self.db.prev1, handle, connected_block_id)?;
+            BlockConnection::Prev1 if !handle.meta().has_prev1() => {
+                store_block_connection_impl(&self.db.prev1, handle, connected_block_id);
                 handle.meta().set_has_prev1()
             }
-            BlockConnection::Prev2 => {
-                if handle.meta().has_prev2() {
-                    return Ok(());
-                }
-                store_block_connection_impl(&self.db.prev2, handle, connected_block_id)?;
+            BlockConnection::Prev2 if !handle.meta().has_prev2() => {
+                store_block_connection_impl(&self.db.prev2, handle, connected_block_id);
                 handle.meta().set_has_prev2()
             }
-            BlockConnection::Next1 => {
-                if handle.meta().has_next1() {
-                    return Ok(());
-                }
-                store_block_connection_impl(&self.db.next1, handle, connected_block_id)?;
+            BlockConnection::Next1 if !handle.meta().has_next1() => {
+                store_block_connection_impl(&self.db.next1, handle, connected_block_id);
                 handle.meta().set_has_next1()
             }
-            BlockConnection::Next2 => {
-                if handle.meta().has_next2() {
-                    return Ok(());
-                }
-                store_block_connection_impl(&self.db.next2, handle, connected_block_id)?;
+            BlockConnection::Next2 if !handle.meta().has_next2() => {
+                store_block_connection_impl(&self.db.next2, handle, connected_block_id);
                 handle.meta().set_has_next2()
             }
+            _ => return,
         };
 
-        if store {
-            let id = handle.id();
-
-            if handle.is_key_block() {
-                let mut write_batch = weedb::rocksdb::WriteBatch::default();
-
-                write_batch.put_cf(
-                    &self.db.block_handles.cf(),
-                    id.root_hash.as_slice(),
-                    handle.meta().to_vec(),
-                );
-                write_batch.put_cf(
-                    &self.db.key_blocks.cf(),
-                    id.seqno.to_be_bytes(),
-                    id.to_vec(),
-                );
-
-                self.db.raw().write(write_batch)?;
-            } else {
-                self.db
-                    .block_handles
-                    .insert(id.root_hash.as_slice(), handle.meta().to_vec())?;
-            }
+        if !store {
+            return;
         }
 
-        Ok(())
+        let id = handle.id();
+
+        if handle.is_key_block() {
+            let mut write_batch = weedb::rocksdb::WriteBatch::default();
+
+            write_batch.put_cf(
+                &self.db.block_handles.cf(),
+                id.root_hash.as_slice(),
+                handle.meta().to_vec(),
+            );
+            write_batch.put_cf(
+                &self.db.key_blocks.cf(),
+                id.seqno.to_be_bytes(),
+                id.to_vec(),
+            );
+
+            self.db.raw().write(write_batch).unwrap();
+        } else {
+            self.db
+                .block_handles
+                .insert(id.root_hash.as_slice(), handle.meta().to_vec())
+                .unwrap();
+        }
     }
 
     pub fn load_connection(
         &self,
         block_id: &BlockId,
         direction: BlockConnection,
-    ) -> Result<BlockId> {
+    ) -> Option<BlockId> {
         match direction {
             BlockConnection::Prev1 => load_block_connection_impl(&self.db.prev1, block_id),
             BlockConnection::Prev2 => load_block_connection_impl(&self.db.prev2, block_id),
@@ -106,11 +95,7 @@ pub enum BlockConnection {
 }
 
 #[inline]
-fn store_block_connection_impl<T>(
-    db: &Table<T>,
-    handle: &BlockHandle,
-    block_id: &BlockId,
-) -> Result<(), weedb::rocksdb::Error>
+fn store_block_connection_impl<T>(db: &Table<T>, handle: &BlockHandle, block_id: &BlockId)
 where
     T: ColumnFamily,
 {
@@ -118,24 +103,13 @@ where
         handle.id().root_hash.as_slice(),
         write_block_id_le(block_id),
     )
+    .unwrap()
 }
 
-#[inline]
-fn load_block_connection_impl<T>(db: &Table<T>, block_id: &BlockId) -> Result<BlockId>
+fn load_block_connection_impl<T>(db: &Table<T>, block_id: &BlockId) -> Option<BlockId>
 where
     T: ColumnFamily,
 {
-    match db.get(block_id.root_hash.as_slice())? {
-        Some(value) => read_block_id_le(value.as_ref())
-            .ok_or_else(|| BlockConnectionStorageError::InvalidBlockId.into()),
-        None => Err(BlockConnectionStorageError::NotFound.into()),
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-enum BlockConnectionStorageError {
-    #[error("Invalid connection block id")]
-    InvalidBlockId,
-    #[error("Block connection not found")]
-    NotFound,
+    let data = db.get(block_id.root_hash.as_slice()).unwrap()?;
+    Some(read_block_id_le(&data))
 }

@@ -7,15 +7,14 @@ use std::task::{Context, Poll};
 
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-type PermitFuture =
-    dyn Future<Output = Result<OwnedSemaphorePermit, AcquireError>> + Send + Sync + 'static;
-
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct Shared<Fut: Future> {
     inner: Option<Arc<Inner<Fut>>>,
-    permit_fut: Option<Pin<Box<PermitFuture>>>,
+    permit_fut: Option<SyncBoxFuture<Result<OwnedSemaphorePermit, AcquireError>>>,
     permit: Option<OwnedSemaphorePermit>,
 }
+
+type SyncBoxFuture<T> = Pin<Box<dyn Future<Output = T> + Sync + Send + 'static>>;
 
 impl<Fut: Future> Clone for Shared<Fut> {
     fn clone(&self) -> Self {
@@ -224,21 +223,6 @@ where
         }
     }
 }
-/* FIXME remove if test will work
-unsafe impl<Fut: Send> Send for Shared<Fut>
-where
-    Fut: Future + Send,
-    Fut::Output: Send + Sync,
-{
-}
-
-unsafe impl<Fut: Send> Sync for Shared<Fut>
-where
-    Fut: Future + Send,
-    Fut::Output: Send + Sync,
-{
-}
-*/
 
 unsafe impl<Fut> Send for Inner<Fut>
 where

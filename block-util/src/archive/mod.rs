@@ -18,6 +18,16 @@ pub enum ArchiveData {
     Existing,
 }
 
+impl ArchiveData {
+    /// Assumes that the object is constructed with known raw data.
+    pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
+        match self {
+            ArchiveData::New(data) => Ok(data),
+            ArchiveData::Existing => Err(WithArchiveDataError),
+        }
+    }
+}
+
 /// Parsed data wrapper, augmented with the optional raw data.
 ///
 /// Stores the raw data only in the context of the archive parser, or received block.
@@ -52,11 +62,8 @@ impl<T> WithArchiveData<T> {
     }
 
     /// Assumes that the object is constructed with known raw data.
-    pub fn new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
-        match &self.archive_data {
-            ArchiveData::New(data) => Ok(data),
-            ArchiveData::Existing => Err(WithArchiveDataError),
-        }
+    pub fn as_new_archive_data(&self) -> Result<&[u8], WithArchiveDataError> {
+        self.archive_data.as_new_archive_data()
     }
 }
 
@@ -94,10 +101,10 @@ mod tests {
 
         assert_eq!(
             WithArchiveData::new((), DATA.to_vec())
-                .new_archive_data()
+                .as_new_archive_data()
                 .unwrap(),
             DATA
         );
-        assert!(WithArchiveData::loaded(()).new_archive_data().is_err());
+        assert!(WithArchiveData::loaded(()).as_new_archive_data().is_err());
     }
 }
