@@ -13,6 +13,7 @@ license.workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
+parking_lot = { workspace = true }
 rand = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "signal"] }
@@ -29,6 +30,11 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
+
+#TODO: should be here?
+tycho-consensus = {workspace = true}
+
+
 
 [dev-dependencies]
 tracing-test = { workspace = true }

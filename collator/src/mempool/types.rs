@@ -1,18 +1,33 @@
 use std::sync::Arc;
 
-use everscale_types::models::OwnedMessage;
+use everscale_types::models::{ExtInMsgInfo, OwnedMessage};
+use everscale_types::prelude::Cell;
 
 // TYPES
 
 pub(crate) type MempoolAnchorId = u32;
 
+pub(crate) struct ExternalMessage {
+    message_cell: Cell,
+    message_info: ExtInMsgInfo
+}
+
+impl ExternalMessage {
+    pub fn new(message_cell: Cell, message_info: ExtInMsgInfo) -> ExternalMessage {
+        Self {
+            message_cell,
+            message_info,
+        }
+    }
+}
+
 pub(crate) struct MempoolAnchor {
     id: MempoolAnchorId,
     chain_time: u64,
-    externals: Vec<Arc<OwnedMessage>>,
+    externals: Vec<Arc<ExternalMessage>>,
 }
 impl MempoolAnchor {
-    pub fn new(id: MempoolAnchorId, chain_time: u64, externals: Vec<Arc<OwnedMessage>>) -> Self {
+    pub fn new(id: MempoolAnchorId, chain_time: u64, externals: Vec<Arc<ExternalMessage>>) -> Self {
         Self {
             id,
             chain_time,
@@ -34,7 +49,7 @@ impl MempoolAnchor {
     pub fn externals_iterator(
         &self,
         from_idx: usize,
-    ) -> impl Iterator<Item = Arc<OwnedMessage>> + '_ {
+    ) -> impl Iterator<Item = Arc<ExternalMessage>> + '_ {
         self.externals.iter().skip(from_idx).cloned()
     }
 }

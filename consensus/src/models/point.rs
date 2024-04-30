@@ -86,6 +86,10 @@ impl UnixTime {
             .expect("current Unix time in millis as u64"),
         )
     }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
 }
 
 impl Add for UnixTime {
