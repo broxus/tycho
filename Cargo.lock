@@ -2297,6 +2297,7 @@ dependencies = [
  "everscale-types 0.1.0-rc.6 (git+https://github.com/broxus/everscale-types.git?branch=tycho)",
  "futures-util",
  "log",
+ "once_cell",
  "rand",
  "sha2 0.10.8",
  "tempfile",

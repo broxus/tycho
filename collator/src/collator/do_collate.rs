@@ -7,7 +7,6 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use sha2::Digest;
 
-use crate::collator::types::ShardStateProviderImpl;
 use crate::{
     collator::{
         collator_processor::execution_manager::ExecutionManager,
@@ -122,9 +121,6 @@ impl CollatorStdImpl {
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // init execution manager
-        let shard_state_provider = Arc::new(ShardStateProviderImpl::new(
-            prev_shard_data.observable_accounts(),
-        ));
         let exec_manager = ExecutionManager::new(
             collation_data.chain_time,
             collation_data.start_lt,
@@ -134,8 +130,10 @@ impl CollatorStdImpl {
             mc_data.config().clone(),
             self.config.supported_block_version,
             self.config.max_collate_threads as u32,
-            shard_state_provider,
+            prev_shard_data.observable_accounts().clone(),
         );
+
+
 
         //STUB: just remove fisrt anchor from cache
         let _ext_msg = self.get_next_external();

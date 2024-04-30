@@ -7,7 +7,8 @@ use std::{
 use anyhow::Result;
 use everscale_types::cell::Cell;
 use everscale_types::models::{
-    ExtInMsgInfo, IntMsgInfo, Lazy, MsgInfo, OptionalAccount, ShardAccount, TickTock, Transaction,
+    ExtInMsgInfo, IntMsgInfo, Lazy, MsgInfo, OptionalAccount, ShardAccount, ShardAccounts,
+    TickTock, Transaction,
 };
 use everscale_types::{
     cell::HashBytes,
@@ -16,12 +17,15 @@ use everscale_types::{
 };
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use once_cell::sync::OnceCell;
 use ton_executor::{
     ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
 };
+use tycho_util::FastHashMap;
 
 use super::super::types::{AccountId, ShardAccountStuff};
-use crate::collator::types::ShardStateProvider;
+
+static EMPTY_SHARD_ACCOUNT: OnceCell<ShardAccount> = OnceCell::new();
 
 /// Execution manager
 pub(super) struct ExecutionManager {
@@ -48,7 +52,8 @@ pub(super) struct ExecutionManager {
     /// group limit
     group_limit: u32,
     /// shard state provider
-    pub shard_state_provider: Arc<dyn ShardStateProvider>,
+    pub shard_accounts: ShardAccounts,
+    pub changed_accounts: FastHashMap<AccountId, ShardAccountStuff>,
 }
 
 impl ExecutionManager {
@@ -62,7 +67,7 @@ impl ExecutionManager {
         config: BlockchainConfig,
         block_version: u32,
         group_limit: u32,
-        shard_state_provider: Arc<dyn ShardStateProvider>,
+        shard_accounts: ShardAccounts,
     ) -> Self {
         Self {
             libraries,
@@ -76,7 +81,8 @@ impl ExecutionManager {
             group_limit,
             total_trans_duration: Arc::new(AtomicU64::new(0)),
             messages_set: Vec::new(),
-            shard_state_provider,
+            shard_accounts,
+            changed_accounts: FastHashMap::default(),
         }
     }
 
@@ -90,7 +96,7 @@ impl ExecutionManager {
     pub async fn tick(
         &mut self,
         offset: u32,
-    ) -> Result<(u32, Vec<(Result<Box<Transaction>>, ShardAccount)>)> {
+    ) -> Result<(u32, Vec<(Result<Box<Transaction>>, ShardAccountStuff)>)> {
         tracing::trace!("execute manager messages set tick with {offset}");
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
@@ -99,18 +105,35 @@ impl ExecutionManager {
         let total_trans_duration = self.total_trans_duration.clone();
 
         for (account_id, msg) in group {
-            futures.push(self.execute_message(account_id, msg));
+            let max_lt = self.max_lt.load(Ordering::Acquire);
+            let shard_account = if let Some(a) = self.changed_accounts.get(&account_id) {
+                a.clone()
+            } else if let Ok(Some(shard_account)) = self.shard_accounts.get(account_id) {
+                ShardAccountStuff::new(account_id, shard_account.clone(), max_lt)?
+            } else {
+                let shard_account = EMPTY_SHARD_ACCOUNT
+                    .get_or_init(|| ShardAccount {
+                        account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
+                        last_trans_hash: Default::default(),
+                        last_trans_lt: 0,
+                    })
+                    .clone();
+                ShardAccountStuff::new(account_id, shard_account, max_lt)?
+            };
+
+            futures.push(self.execute_message(account_id, msg, shard_account));
         }
         let now = std::time::Instant::now();
 
         let mut executed_messages = vec![];
         while let Some(executed_message) = futures.next().await {
-            let (transaction_res, shard_account) = executed_message?;
-            self.shard_state_provider.update_account_state(
-                &shard_account.account_addr,
-                shard_account.shard_account.clone(),
-            );
-            executed_messages.push((transaction_res, shard_account.shard_account));
+            executed_messages.push(executed_message?);
+        }
+
+        drop(futures);
+
+        for (_, shard_account) in &executed_messages {
+            self.update_shard_account(shard_account.account_addr, shard_account.clone());
         }
 
         let duration = now.elapsed().as_micros() as u64;
@@ -126,51 +149,36 @@ impl ExecutionManager {
         &self,
         account_id: AccountId,
         new_msg: (MsgInfo, Cell),
+        mut shard_account: ShardAccountStuff,
     ) -> Result<(Result<Box<Transaction>>, ShardAccountStuff)> {
         let (msg, new_msg_cell) = new_msg;
         tracing::trace!("execute message for account {account_id}");
 
         let state_libs = self.libraries.clone();
-        let max_lt = self.max_lt.load(Ordering::Acquire);
-        let min_lt = self.min_lt.load(Ordering::Acquire);
         let block_unixtime = self.gen_utime;
         let block_lt = self.start_lt;
         let seed_block = self.seed_block.clone();
         let block_version = self.block_version;
-        let shard_state_provider = self.shard_state_provider.clone();
 
         let (mut transaction_res, shard_account_stuff) = tokio::task::spawn_blocking(move || {
-            let shard_account =
-                if let Some(shard_account) = shard_state_provider.get_account_state(&account_id) {
-                    shard_account
-                } else {
-                    ShardAccount {
-                        account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
-                        last_trans_hash: Default::default(),
-                        last_trans_lt: 0,
-                    }
-                };
-
-            let mut shard_acc = ShardAccountStuff::new(account_id, shard_account, max_lt, min_lt)?;
-
             let params = ExecuteParams {
                 state_libs,
                 block_unixtime,
                 block_lt,
-                last_tr_lt: shard_acc.lt.clone(),
+                last_tr_lt: shard_account.lt.clone(),
                 seed_block,
                 block_version,
                 ..ExecuteParams::default()
             };
             let config = self.config.clone();
-            let mut account_root = shard_acc.account_root.clone();
-            // TODO move spawn blocking upper level and result Box<Transacton>
+            let mut account_root = shard_account.account_root.clone();
             let mut transaction_res =
                 execute_ordinary_message(&msg, &new_msg_cell, &mut account_root, params, &config);
+            // TODO replace with batch set
             if let Ok(transaction) = transaction_res.as_mut() {
-                shard_acc.add_transaction(transaction, account_root)?;
+                shard_account.add_transaction(transaction, account_root)?;
             }
-            Ok((transaction_res, shard_acc))
+            Ok((transaction_res, shard_account))
         })
         .await??;
 
@@ -180,6 +188,12 @@ impl ExecutionManager {
         );
 
         Ok((transaction_res, shard_account_stuff))
+    }
+
+    fn update_shard_account(&mut self, account_id: AccountId, account_stuff: ShardAccountStuff) {
+        tracing::trace!("update shard account for account {account_id}");
+        // TODO: save old state
+        self.changed_accounts.insert(account_id, account_stuff);
     }
 }
 
