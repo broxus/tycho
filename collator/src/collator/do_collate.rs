@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
@@ -121,7 +120,7 @@ impl CollatorStdImpl {
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // init execution manager
-        let exec_manager = ExecutionManager::new(
+        let mut exec_manager = ExecutionManager::new(
             collation_data.chain_time,
             collation_data.start_lt,
             collation_data.max_lt,
@@ -133,7 +132,32 @@ impl CollatorStdImpl {
             prev_shard_data.observable_accounts().clone(),
         );
 
+        // TODO: load from DAG
+        let msgs_set = vec![];
 
+        exec_manager.execute_msgs_set(msgs_set);
+        let mut offset = 0;
+        let mut finish = false;
+        let mut result = HashMap::new();
+        while !finish {
+            let (new_offset, group) = exec_manager.tick(offset).await?;
+            for (account_id, transaction) in group {
+                result
+                    .entry(&account_id)
+                    .and_modify(|v: &mut Vec<_>| v.push(transaction))
+                    .or_default();
+            }
+            offset = new_offset;
+            if offset == msgs_set.len() as u32 {
+                finish = true;
+            }
+
+            // TODO:
+            // finilize_txs(tick_re.txts);
+            // if !check_limits(tick_res) {
+            //     break;
+            // }
+        }
 
         //STUB: just remove fisrt anchor from cache
         let _ext_msg = self.get_next_external();

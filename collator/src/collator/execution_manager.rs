@@ -93,10 +93,7 @@ impl ExecutionManager {
     }
 
     /// tick
-    pub async fn tick(
-        &mut self,
-        offset: u32,
-    ) -> Result<(u32, Vec<(Result<Box<Transaction>>, ShardAccountStuff)>)> {
+    pub async fn tick(&mut self, offset: u32) -> Result<(u32, Vec<(AccountId, Box<Transaction>)>)> {
         tracing::trace!("execute manager messages set tick with {offset}");
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
@@ -132,8 +129,10 @@ impl ExecutionManager {
 
         drop(futures);
 
-        for (_, shard_account) in &executed_messages {
+        let mut result = vec![];
+        for (transaction, shard_account) in executed_messages {
             self.update_shard_account(shard_account.account_addr, shard_account.clone());
+            result.push((shard_account.account_addr, transaction?));
         }
 
         let duration = now.elapsed().as_micros() as u64;
@@ -141,7 +140,7 @@ impl ExecutionManager {
 
         total_trans_duration.fetch_add(duration, Ordering::Relaxed);
 
-        Ok((new_offset, executed_messages))
+        Ok((new_offset, result))
     }
 
     /// execute message
