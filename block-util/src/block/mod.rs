@@ -3,7 +3,7 @@ pub use self::block_proof_stuff::{
     ValidatorSubsetInfo,
 };
 pub use self::block_stuff::{BlockStuff, BlockStuffAug};
-pub use self::top_blocks::{TopBlocks, TopBlocksShortIdsIter};
+pub use self::top_blocks::{ShardHeights, TopBlocks, TopBlocksShortIdsIter};
 
 mod block_proof_stuff;
 mod block_stuff;

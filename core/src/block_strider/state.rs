@@ -1,66 +1,94 @@
-use everscale_types::models::BlockId;
+use std::sync::Mutex;
 
+use everscale_types::models::BlockId;
+use tycho_block_util::block::ShardHeights;
 use tycho_storage::Storage;
 
 pub trait BlockStriderState: Send + Sync + 'static {
-    fn load_last_traversed_master_block_id(&self) -> BlockId;
+    fn load_last_mc_block_id(&self) -> BlockId;
 
-    fn is_traversed(&self, block_id: &BlockId) -> bool;
+    fn is_commited(&self, block_id: &BlockId) -> bool;
 
-    fn commit_traversed(&self, block_id: &BlockId);
+    fn commit_master(&self, block_id: &BlockId, shard_heights: &ShardHeights);
+    fn commit_shard(&self, block_id: &BlockId);
 }
 
-impl BlockStriderState for Storage {
-    fn load_last_traversed_master_block_id(&self) -> BlockId {
-        self.node_state()
-            .load_last_mc_block_id()
-            .expect("db is not initialized")
-    }
-
-    fn is_traversed(&self, block_id: &BlockId) -> bool {
-        self.block_handle_storage().load_handle(block_id).is_some()
-    }
-
-    fn commit_traversed(&self, block_id: &BlockId) {
-        if block_id.is_masterchain() {
-            self.node_state().store_last_mc_block_id(block_id);
-        }
-        // other blocks are stored with state applier: todo rework this?
-    }
+pub struct PersistentBlockStriderState {
+    zerostate_id: BlockId,
+    storage: Storage,
 }
 
-pub struct InMemoryBlockStriderState {
-    last_traversed_master_block_id: parking_lot::Mutex<BlockId>,
-    // TODO: Use topblocks here.
-    traversed_blocks: tycho_util::FastDashSet<BlockId>,
-}
-
-impl InMemoryBlockStriderState {
-    pub fn with_initial_id(id: BlockId) -> Self {
-        let traversed_blocks = tycho_util::FastDashSet::default();
-        traversed_blocks.insert(id);
-
+impl PersistentBlockStriderState {
+    pub fn new(zerostate_id: BlockId, storage: Storage) -> Self {
         Self {
-            last_traversed_master_block_id: parking_lot::Mutex::new(id),
-            traversed_blocks,
+            zerostate_id,
+            storage,
         }
     }
 }
 
-impl BlockStriderState for InMemoryBlockStriderState {
-    fn load_last_traversed_master_block_id(&self) -> BlockId {
-        *self.last_traversed_master_block_id.lock()
-    }
-
-    fn is_traversed(&self, block_id: &BlockId) -> bool {
-        self.traversed_blocks.contains(block_id)
-    }
-
-    fn commit_traversed(&self, block_id: &BlockId) {
-        if block_id.is_masterchain() {
-            *self.last_traversed_master_block_id.lock() = *block_id;
+impl BlockStriderState for PersistentBlockStriderState {
+    fn load_last_mc_block_id(&self) -> BlockId {
+        match self.storage.node_state().load_last_mc_block_id() {
+            Some(block_id) => block_id,
+            None => self.zerostate_id,
         }
+    }
 
-        self.traversed_blocks.insert(*block_id);
+    fn is_commited(&self, block_id: &BlockId) -> bool {
+        match self.storage.block_handle_storage().load_handle(block_id) {
+            Some(handle) => handle.meta().is_applied(),
+            None => false,
+        }
+    }
+
+    fn commit_master(&self, block_id: &BlockId, _shard_heights: &ShardHeights) {
+        assert!(block_id.is_masterchain());
+        self.storage.node_state().store_last_mc_block_id(block_id);
+    }
+
+    fn commit_shard(&self, block_id: &BlockId) {
+        assert!(!block_id.is_masterchain());
+    }
+}
+
+pub struct TempBlockStriderState {
+    top_blocks: Mutex<(BlockId, ShardHeights)>,
+}
+
+impl TempBlockStriderState {
+    pub fn new(mc_block_id: BlockId, shard_heights: ShardHeights) -> Self {
+        Self {
+            top_blocks: Mutex::new((mc_block_id, shard_heights)),
+        }
+    }
+}
+
+impl BlockStriderState for TempBlockStriderState {
+    fn load_last_mc_block_id(&self) -> BlockId {
+        self.top_blocks.lock().unwrap().0
+    }
+
+    fn is_commited(&self, block_id: &BlockId) -> bool {
+        let commited = self.top_blocks.lock().unwrap();
+        let (mc_block_id, shard_heights) = &*commited;
+        if block_id.is_masterchain() {
+            block_id.seqno <= mc_block_id.seqno
+        } else {
+            shard_heights.contains_ext(block_id, |top_block, seqno| seqno <= top_block)
+        }
+    }
+
+    fn commit_master(&self, block_id: &BlockId, shard_heights: &ShardHeights) {
+        assert!(block_id.is_masterchain());
+        let mut commited = self.top_blocks.lock().unwrap();
+        if commited.0.seqno < block_id.seqno {
+            *commited = (block_id.clone(), shard_heights.clone());
+        }
+    }
+
+    fn commit_shard(&self, block_id: &BlockId) {
+        assert!(!block_id.is_masterchain());
+        // TODO: Update shard height
     }
 }

@@ -3,16 +3,17 @@ use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::time::Instant;
 use tycho_block_util::archive::ArchiveData;
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::block::{BlockStuff, BlockStuffAug, ShardHeights};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
+use tycho_util::FastHashMap;
 
 pub use self::provider::{BlockProvider, BlockchainBlockProvider, BlockchainBlockProviderConfig};
-pub use self::state::{BlockStriderState, InMemoryBlockStriderState};
+pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
 pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::{
-    BlockSubscriber, BlockSubscriberContext, FanoutSubscriber, StateSubscriber,
-    StateSubscriberContext,
+    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, NoopSubscriber,
+    StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 
 #[cfg(any(test, feature = "test"))]
@@ -136,9 +137,12 @@ where
         let started_at = Instant::now();
 
         // Start downloading shard blocks
+        let mut shard_heights = FastHashMap::default();
         let mut download_futures = FuturesUnordered::new();
         for entry in block.load_custom()?.shards.latest_blocks() {
-            download_futures.push(Box::pin(self.download_shard_blocks(entry?)));
+            let top_block_id = entry?;
+            shard_heights.insert(top_block_id.shard, top_block_id.seqno);
+            download_futures.push(Box::pin(self.download_shard_blocks(top_block_id)));
         }
 
         // Start processing shard blocks in parallel
@@ -159,7 +163,9 @@ where
             archive_data,
         };
         self.subscriber.handle_block(&cx).await?;
-        self.state.commit_traversed(&mc_block_id);
+
+        let shard_heights = ShardHeights::from(shard_heights);
+        self.state.commit_master(&mc_block_id, &shard_heights);
 
         Ok(())
     }
@@ -172,7 +178,7 @@ where
 
         let mut depth = 0;
         let mut result = Vec::new();
-        while top_block_id.seqno > 0 && !self.state.is_traversed(&top_block_id) {
+        while top_block_id.seqno > 0 && !self.state.is_commited(&top_block_id) {
             // Download block
             let started_at = Instant::now();
             let block = self.fetch_block(&top_block_id).await?;
@@ -226,14 +232,14 @@ where
             self.subscriber.handle_block(&cx).await?;
             metrics::histogram!("tycho_process_shard_block_time").record(started_at.elapsed());
 
-            self.state.commit_traversed(&block_id);
+            self.state.commit_shard(&block_id);
         }
 
         Ok(())
     }
 
     async fn fetch_next_master_block(&self) -> Option<BlockStuffAug> {
-        let prev_block_id = self.state.load_last_traversed_master_block_id();
+        let prev_block_id = self.state.load_last_mc_block_id();
         tracing::debug!(%prev_block_id, "fetching next master block");
 
         loop {

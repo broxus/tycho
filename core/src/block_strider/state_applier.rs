@@ -227,7 +227,7 @@ pub mod test {
 
     use super::*;
     use crate::block_strider::subscriber::test::PrintSubscriber;
-    use crate::block_strider::{ArchiveBlockProvider, BlockStrider};
+    use crate::block_strider::{ArchiveBlockProvider, BlockStrider, PersistentBlockStriderState};
 
     #[traced_test]
     #[tokio::test]
@@ -239,7 +239,7 @@ pub mod test {
 
         let block_strider = BlockStrider::builder()
             .with_provider(provider)
-            .with_state(storage.clone())
+            .with_state(PersistentBlockStriderState::new(last_mc, storage.clone()))
             .with_state_subscriber(Default::default(), storage.clone(), PrintSubscriber)
             .build();
 

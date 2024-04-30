@@ -29,6 +29,19 @@ impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
     }
 }
 
+pub trait BlockSubscriberExt: Sized {
+    fn chain<T: BlockSubscriber>(self, other: T) -> ChainSubscriber<Self, T>;
+}
+
+impl<B: BlockSubscriber> BlockSubscriberExt for B {
+    fn chain<T: BlockSubscriber>(self, other: T) -> ChainSubscriber<Self, T> {
+        ChainSubscriber {
+            left: self,
+            right: other,
+        }
+    }
+}
+
 // === trait StateSubscriber ===
 
 pub struct StateSubscriberContext {
@@ -49,6 +62,19 @@ impl<T: StateSubscriber> StateSubscriber for Box<T> {
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         <T as StateSubscriber>::handle_state(self, cx)
+    }
+}
+
+pub trait StateSubscriberExt: Sized {
+    fn chain<T: StateSubscriber>(self, other: T) -> ChainSubscriber<Self, T>;
+}
+
+impl<B: StateSubscriber> StateSubscriberExt for B {
+    fn chain<T: StateSubscriber>(self, other: T) -> ChainSubscriber<Self, T> {
+        ChainSubscriber {
+            left: self,
+            right: other,
+        }
     }
 }
 
@@ -73,19 +99,49 @@ impl StateSubscriber for NoopSubscriber {
     }
 }
 
-// === FanoutSubscriber ===
+// === ChainSubscriber ===
 
-pub struct FanoutSubscriber<T1, T2> {
-    pub left: T1,
-    pub right: T2,
+pub struct ChainSubscriber<T1, T2> {
+    left: T1,
+    right: T2,
 }
 
-impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for FanoutSubscriber<T1, T2> {
-    type HandleBlockFut<'a> = BoxFuture<'a, anyhow::Result<()>>;
+impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for ChainSubscriber<T1, T2> {
+    type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
         let left = self.left.handle_block(cx);
         let right = self.right.handle_block(cx);
+
+        Box::pin(async move {
+            left.await?;
+            right.await
+        })
+    }
+}
+
+impl<T1: StateSubscriber, T2: StateSubscriber> StateSubscriber for ChainSubscriber<T1, T2> {
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        let left = self.left.handle_state(cx);
+        let right = self.right.handle_state(cx);
+
+        Box::pin(async move {
+            left.await?;
+            right.await
+        })
+    }
+}
+
+// === (T1, T2) aka `join` ===
+
+impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for (T1, T2) {
+    type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
+        let left = self.0.handle_block(cx);
+        let right = self.1.handle_block(cx);
 
         Box::pin(async move {
             let (l, r) = future::join(left, right).await;
@@ -94,12 +150,12 @@ impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for FanoutSubscri
     }
 }
 
-impl<T1: StateSubscriber, T2: StateSubscriber> StateSubscriber for FanoutSubscriber<T1, T2> {
-    type HandleStateFut<'a> = BoxFuture<'a, anyhow::Result<()>>;
+impl<T1: StateSubscriber, T2: StateSubscriber> StateSubscriber for (T1, T2) {
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        let left = self.left.handle_state(cx);
-        let right = self.right.handle_state(cx);
+        let left = self.0.handle_state(cx);
+        let right = self.1.handle_state(cx);
 
         Box::pin(async move {
             let (l, r) = future::join(left, right).await;
@@ -116,7 +172,7 @@ pub mod test {
     pub struct PrintSubscriber;
 
     impl BlockSubscriber for PrintSubscriber {
-        type HandleBlockFut<'a> = future::Ready<anyhow::Result<()>>;
+        type HandleBlockFut<'a> = future::Ready<Result<()>>;
 
         fn handle_block(&self, cx: &BlockSubscriberContext) -> Self::HandleBlockFut<'_> {
             tracing::info!(

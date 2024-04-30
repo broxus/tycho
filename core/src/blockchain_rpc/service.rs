@@ -357,23 +357,9 @@ impl Inner {
         let mc_seqno = req.mc_seqno;
         let node_state = self.storage.node_state();
 
-        let get_archive_id = || {
-            let last_applied_mc_block = node_state
-                .load_last_mc_block_id()
-                .context("last mc block not found")?;
-            let shards_client_mc_block_id = node_state
-                .load_shards_client_mc_block_id()
-                .context("shard client mc block not found")?;
-            Ok::<_, anyhow::Error>((last_applied_mc_block, shards_client_mc_block_id))
-        };
-
-        match get_archive_id() {
-            Ok((last_applied_mc_block, shards_client_mc_block_id)) => {
+        match node_state.load_last_mc_block_id() {
+            Some(last_applied_mc_block) => {
                 if mc_seqno > last_applied_mc_block.seqno {
-                    return overlay::Response::Ok(ArchiveInfo::NotFound);
-                }
-
-                if mc_seqno > shards_client_mc_block_id.seqno {
                     return overlay::Response::Ok(ArchiveInfo::NotFound);
                 }
 
@@ -384,8 +370,8 @@ impl Inner {
                     None => ArchiveInfo::NotFound,
                 })
             }
-            Err(e) => {
-                tracing::warn!("get_archive_id failed: {e:?}");
+            None => {
+                tracing::warn!("get_archive_id failed: no blocks applied");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
