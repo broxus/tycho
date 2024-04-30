@@ -23,7 +23,7 @@ impl MempoolConfig {
     /// we try to gather as many points and signatures as we can within some time frame;
     /// this is a tradeoff between breaking on exactly 2F+1 elements
     /// (dependencies and/or signatures), and waiting for slow nodes
-    pub const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+    pub const RETRY_INTERVAL: Duration = Duration::from_millis(150);
 
     /// the least amount of [Round]s that are kept in DAG until they are discarded
     pub const COMMIT_DEPTH: u8 = 20;
@@ -38,5 +38,5 @@ impl MempoolConfig {
 
     /// every failed response is accounted as point is not found;
     /// 1/3+1 failed responses leads to invalidation of the point and all its dependants
-    pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_millis(200);
+    pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_millis(50);
 }

@@ -91,15 +91,10 @@ impl Producer {
                     .point()
                     .map(|dag_point| dag_point.trusted())
                     .flatten()
-                    .filter(|_| {
-                        loc.state()
-                            .signed()
-                            .map(|r| {
-                                r.as_ref()
-                                    .map_or(false, |s| &s.at == finished_round.round())
-                            })
-                            .unwrap_or(true)
-                    })
+                    // TODO refactor Signable: we are interested not in the round of signature,
+                    //   but whether was a point already included or not (just in order not to
+                    //   include it twice); repeating inclusions are suboptimal but still correct
+                    .filter(|_| loc.state().signed().map_or(true, |r| r.is_ok()))
                     .map(|dag_point| dag_point.point.clone())
             })
             .collect::<Vec<_>>();
@@ -252,7 +247,11 @@ impl Producer {
                 }
             }
         }
-        // TODO maybe take the greatest time among all point's dependencies - as they must be signed
+        // No need to take the greatest time among all point's dependencies -
+        // only leader's time is significant and every node will have its chance
+        // (or its chain will be rejected). Better throw away a single node's point
+        // than requiring the whole consensus to wait once the point was included.
+        // Todo: use proven anchor candidate's time, as it is unique
         time
     }
 }

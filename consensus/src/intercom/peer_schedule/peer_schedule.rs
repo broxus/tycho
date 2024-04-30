@@ -54,7 +54,7 @@ impl PeerSchedule {
 
     /// Does not return updates on local peer_id
     pub fn updates(&self) -> broadcast::Receiver<(PeerId, PeerState)> {
-        tracing::info!("subscribing to peer updates");
+        tracing::debug!("subscribing to peer updates");
         self.updates.subscribe()
     }
 

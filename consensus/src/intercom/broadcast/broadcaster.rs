@@ -11,11 +11,11 @@ use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::intercom::broadcast::collector::CollectorSignal;
-use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
+use crate::intercom::dto::{PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{NodeCount, Point, Round, Signature};
 
-type BcastResult = anyhow::Result<BroadcastResponse>;
+type BcastResult = anyhow::Result<()>;
 type SigResult = anyhow::Result<SignatureResponse>;
 
 #[derive(Debug)]
@@ -25,7 +25,7 @@ pub enum BroadcasterSignal {
 }
 
 pub struct Broadcaster {
-    local_id: Arc<String>,
+    log_id: Arc<String>,
     current_round: Round,
 
     point_body: Vec<u8>,
@@ -52,7 +52,7 @@ pub struct Broadcaster {
 
 impl Broadcaster {
     pub fn new(
-        local_id: &Arc<String>,
+        log_id: Arc<String>,
         point: &Point,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
@@ -68,15 +68,15 @@ impl Broadcaster {
             .collect::<FastHashSet<_>>();
         let signers_count = NodeCount::new(signers.len());
         let collectors = peer_schedule.all_resolved();
-        tracing::info!(
-            "{local_id} @ {:?} collectors count = {}",
+        tracing::debug!(
+            "{log_id} @ {:?} collectors count = {}",
             point.body.location.round,
             collectors.len()
         );
         let bcast_request = Dispatcher::broadcast_request(&point);
         let sig_request = Dispatcher::signature_request(&point.body.location.round);
         Self {
-            local_id: local_id.clone(),
+            log_id,
             current_round: point.body.location.round,
             point_body,
             dispatcher: dispatcher.clone(),
@@ -144,9 +144,9 @@ impl Broadcaster {
     }
 
     async fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
-        tracing::info!(
+        tracing::debug!(
             "{} @ {:?} bcaster <= Collector::{collector_signal:?} : sigs {} of {}, rejects {} of {}",
-            self.local_id,
+            self.log_id,
             self.current_round,
             self.signatures.len(),
             self.signers_count.majority_of_others(),
@@ -183,33 +183,17 @@ impl Broadcaster {
                 self.sig_peers.insert(peer_id); // lighter weight retry loop
                 tracing::error!(
                     "{} @ {:?} bcaster <= collector {peer_id:.4?} broadcast error : {error}",
-                    self.local_id,
+                    self.log_id,
                     self.current_round
                 );
             }
-            Ok(response) => {
-                if response == BroadcastResponse::Rejected {
-                    tracing::warn!(
-                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:?}",
-                        self.local_id,
-                        self.current_round
-                    );
-                } else {
-                    tracing::info!(
-                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:?}",
-                        self.local_id,
-                        self.current_round
-                    );
-                }
-                match response {
-                    BroadcastResponse::Accepted => self.request_signature(&peer_id),
-                    BroadcastResponse::TryLater => _ = self.sig_peers.insert(peer_id),
-                    BroadcastResponse::Rejected => {
-                        if self.signers.contains(&peer_id) {
-                            self.rejections.insert(peer_id);
-                        }
-                    }
-                }
+            Ok(_) => {
+                tracing::debug!(
+                    "{} @ {:?} bcaster <= collector {peer_id:.4?} : broadcast accepted",
+                    self.log_id,
+                    self.current_round
+                );
+                self.request_signature(&peer_id);
             }
         }
     }
@@ -221,7 +205,7 @@ impl Broadcaster {
                 self.sig_peers.insert(peer_id); // let it retry
                 tracing::error!(
                     "{} @ {:?} bcaster <= collector {peer_id:.4?} signature request error : {error}",
-                    self.local_id,
+                    self.log_id,
                     self.current_round
                 );
             }
@@ -229,13 +213,13 @@ impl Broadcaster {
                 if response == SignatureResponse::Rejected {
                     tracing::warn!(
                         "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:.4?}",
-                        self.local_id,
+                        self.log_id,
                         self.current_round
                     );
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:.4?}",
-                        self.local_id,
+                        self.log_id,
                         self.current_round
                     );
                 };
@@ -266,16 +250,16 @@ impl Broadcaster {
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
             self.bcast_futs
-                .push(self.dispatcher.request(&peer_id, &self.bcast_request));
-            tracing::info!(
+                .push(self.dispatcher.send(&peer_id, &self.bcast_request));
+            tracing::debug!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast",
-                self.local_id,
+                self.log_id,
                 self.current_round
             );
         } else {
             tracing::warn!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast impossible",
-                self.local_id,
+                self.log_id,
                 self.current_round
             );
         }
@@ -284,16 +268,16 @@ impl Broadcaster {
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
             self.sig_futs
-                .push(self.dispatcher.request(&peer_id, &self.sig_request));
-            tracing::info!(
+                .push(self.dispatcher.query(&peer_id, &self.sig_request));
+            tracing::debug!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request",
-                self.local_id,
+                self.log_id,
                 self.current_round
             );
         } else {
             tracing::warn!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request impossible",
-                self.local_id,
+                self.log_id,
                 self.current_round
             );
         }
@@ -314,7 +298,7 @@ impl Broadcaster {
             Ok((peer_id, new_state)) => {
                 tracing::info!(
                     "{} @ {:?} bcaster peer update: {peer_id:?} -> {new_state:?}",
-                    self.local_id,
+                    self.log_id,
                     self.current_round
                 );
                 match new_state {

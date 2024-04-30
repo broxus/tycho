@@ -132,7 +132,9 @@ mod tests {
                 if info.id == dht_client.network().peer_id() {
                     continue;
                 }
-                assert!(dht_client.add_peer(info.clone()).unwrap(), "peer added");
+                dht_client
+                    .add_peer(info.clone())
+                    .expect("add peer to dht client");
             }
         }
         let mut engines = vec![];
