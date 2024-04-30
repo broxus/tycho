@@ -1,7 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
-
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{

@@ -34,6 +34,7 @@ tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
 log = "0.4.21"
+once_cell = "1.19.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }

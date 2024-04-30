@@ -6,7 +6,8 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
-use everscale_types::cell::{CellFamily, Store};
+use everscale_types::cell::{CellBuilder, CellContext, CellFamily, CellSlice, Load, Store};
+use everscale_types::error::Error;
 use everscale_types::merkle::MerkleUpdate;
 use everscale_types::models::{Lazy, StateInit, TickTock, Transaction};
 use everscale_types::{
@@ -407,6 +408,7 @@ pub(super) type AccountId = HashBytes;
 
 pub(super) type InMsgDescr = AugDict<HashBytes, ImportFees, InMsg>;
 pub(super) type OutMsgDescr = AugDict<HashBytes, CurrencyCollection, OutMsg>;
+pub(super) type Transactions = AugDict<u64, CurrencyCollection, Lazy<Transaction>>;
 
 pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, AccountBlock>;
 
@@ -420,7 +422,7 @@ pub(super) struct ShardAccountStuff {
     pub state_update: HashBytes,
     pub last_trans_lt: u64,
     pub lt: Arc<AtomicU64>,
-    pub transactions: Vec<Transaction>,
+    pub transactions: Transactions,
 }
 
 impl ShardAccountStuff {
@@ -460,12 +462,7 @@ impl ShardAccountStuff {
         Ok(())
     }
 
-    pub fn new(
-        account_addr: AccountId,
-        shard_account: ShardAccount,
-        max_lt: u64,
-        min_lt: u64,
-    ) -> Result<Self> {
+    pub fn new(account_addr: AccountId, shard_account: ShardAccount, max_lt: u64) -> Result<Self> {
         let account_root = shard_account.account.clone().inner();
         let state_update = account_root.repr_hash();
         let last_trans_hash = shard_account.last_trans_hash.clone();
@@ -481,8 +478,7 @@ impl ShardAccountStuff {
             })
             .unwrap_or_default();
 
-        let mut lt = Arc::new(max_lt.into());
-        lt.fetch_max(min_lt, Ordering::Release);
+        let mut lt: Arc<AtomicU64> = Arc::new(max_lt.into());
         lt.fetch_max(last_trans_lt + 1, Ordering::Release);
         Ok(Self {
             account_addr,
@@ -498,6 +494,7 @@ impl ShardAccountStuff {
     }
     pub fn add_transaction(
         &mut self,
+        key: u64,
         transaction: &mut Transaction,
         account_root: Cell,
     ) -> Result<()> {
@@ -514,12 +511,17 @@ impl ShardAccountStuff {
         self.last_trans_hash = tr_root.repr_hash().clone();
         self.last_trans_lt = transaction.lt;
 
-        // TODO! setref
-        // self.transactions.setref(
-        //     &transaction.logical_time(),
-        //     &tr_root,
-        //     transaction.total_fees()
-        // )?;
+        self.transactions.set(
+            key,
+            &transaction.total_fees,
+            &*transaction,
+            |left, right, b, cx| {
+                let mut left = CurrencyCollection::load_from(left)?;
+                let right = CurrencyCollection::load_from(right)?;
+                left.checked_add(&right)?
+                    .store_into(b, cx)
+            },
+        )?;
 
         Ok(())
     }
@@ -599,41 +601,4 @@ pub trait ShardStateProvider {
     fn get_account_state(&self, account_id: &AccountId) -> Option<ShardAccount>;
     fn get_updated_accounts(&self) -> Vec<(AccountId, ShardAccount)>;
     fn update_account_state(&self, account_id: &AccountId, account: ShardAccount);
-}
-
-#[derive(Debug)]
-pub(super) struct ShardStateProviderImpl<'a> {
-    pub changed_accounts: FastDashMap<AccountId, ShardAccount>,
-    pub shard_accounts: &'a ShardAccounts,
-}
-
-impl ShardStateProviderImpl<'_> {
-    pub fn new(shard_accounts: &ShardAccounts) -> Self {
-        Self {
-            changed_accounts: Default::default(),
-            shard_accounts,
-        }
-    }
-}
-
-impl ShardStateProvider for ShardStateProviderImpl<'_> {
-    fn get_account_state(&self, account_id: &AccountId) -> Option<ShardAccount> {
-        if let Some(a) = self.changed_accounts.get(account_id) {
-            return Some(a.clone());
-        } else if let Some(a) = self.shard_accounts.get(account_id) {
-            self.changed_accounts.insert(account_id.clone(), a.clone());
-            return Some(a.clone());
-        } else {
-            None
-        }
-    }
-    fn get_updated_accounts(&self) -> Vec<(AccountId, ShardAccount)> {
-        self.changed_accounts
-            .iter()
-            .map(|kv| (kv.key().clone(), kv.value().clone()))
-            .collect()
-    }
-    fn update_account_state(&self, account_id: &AccountId, account: ShardAccount) {
-        self.changed_accounts.insert(account_id.clone(), account);
-    }
 }

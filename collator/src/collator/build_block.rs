@@ -38,22 +38,16 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
 
-        //TODO: read account
-        //TODO: get updated blockchain config if it stored in account
-        //TODO: if have transactions, build AccountBlock and add to account_blocks
-        let updated_shard_accounts: Result<Vec<_>> = exec_manager
-            .shard_state_provider
-            .get_updated_accounts()
-            .into_iter()
-            .map(|(id, account)| {
-                ShardAccountStuff::new(
-                    id,
-                    account,
-                    exec_manager.max_lt.load(Ordering::Acquire),
-                    exec_manager.min_lt.load(Ordering::Acquire),
-                )
-            })
-            .collect();
+        for (account_id, updated_shard_accounts) in &exec_manager.changed_accounts {
+
+            //TODO: read account
+            //TODO: get updated blockchain config if it stored in account
+            //TODO: if have transactions, build AccountBlock and add to account_blocks
+            // let acc_block = shard_acc.update_shard_state(&mut new_accounts)?;
+            // if !acc_block.transactions().is_empty() {
+            //     accounts.insert(&acc_block)?;
+            // }
+        }
 
         let mut new_config_opt: Option<BlockchainConfig> = None;
 
@@ -159,10 +153,10 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         let _ = new_state.total_validator_fees.sub(&value_flow.recovered);
 
         if self.shard_id.is_masterchain() {
-            new_state.libraries = self.update_public_libraries(
-                exec_manager.libraries.clone(),
-                &updated_shard_accounts?,
-            )?;
+            let changed_accounts: Vec<_> =
+                exec_manager.changed_accounts.values().cloned().collect();
+            new_state.libraries =
+                self.update_public_libraries(exec_manager.libraries.clone(), &changed_accounts)?;
         }
 
         new_state.master_ref = master_ref;
