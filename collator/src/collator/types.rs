@@ -22,6 +22,7 @@ use everscale_types::{
 
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
+use tycho_util::FastDashMap;
 
 use crate::mempool::MempoolAnchorId;
 
@@ -517,8 +518,6 @@ impl ShardAccountStuff {
 
         Ok(())
     }
-
-    pub fn set_lt(&mut self, lt: u64) {}
 }
 
 #[derive(Debug, Default)]
@@ -592,6 +591,44 @@ pub(super) enum AsyncMessage {
 pub mod ext_types_stubs {}
 
 pub trait ShardStateProvider {
-    fn get_shard_state(&self, account_id: &AccountId) -> Option<ShardAccount>;
-    fn set_shard_state(&mut self, account_id: &AccountId, account: ShardAccount);
+    fn get_account_state(&self, account_id: &AccountId) -> Option<ShardAccount>;
+    fn get_updated_accounts(&self) -> Vec<(AccountId, ShardAccount)>;
+    fn update_account_state(&self, account_id: &AccountId, account: ShardAccount);
+}
+
+#[derive(Debug)]
+pub(super) struct ShardStateProviderImpl<'a> {
+    pub changed_accounts: FastDashMap<AccountId, ShardAccount>,
+    pub shard_accounts: &'a ShardAccounts,
+}
+
+impl ShardStateProviderImpl<'_> {
+    pub fn new(shard_accounts: &ShardAccounts) -> Self {
+        Self {
+            changed_accounts: Default::default(),
+            shard_accounts,
+        }
+    }
+}
+
+impl ShardStateProvider for ShardStateProviderImpl<'_> {
+    fn get_account_state(&self, account_id: &AccountId) -> Option<ShardAccount> {
+        if let Some(a) = self.changed_accounts.get(account_id) {
+            return Some(a.clone());
+        } else if let Some(a) = self.shard_accounts.get(account_id) {
+            self.changed_accounts.insert(account_id.clone(), a.clone());
+            return Some(a.clone());
+        } else {
+            None
+        }
+    }
+    fn get_updated_accounts(&self) -> Vec<(AccountId, ShardAccount)> {
+        self.changed_accounts
+            .iter()
+            .map(|kv| (kv.key().clone(), kv.value().clone()))
+            .collect()
+    }
+    fn update_account_state(&self, account_id: &AccountId, account: ShardAccount) {
+        self.changed_accounts.insert(account_id.clone(), account);
+    }
 }

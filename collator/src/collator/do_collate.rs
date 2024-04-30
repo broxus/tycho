@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
@@ -6,10 +7,17 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use sha2::Digest;
 
-use super::CollatorStdImpl;
-use crate::collator::execution_manager::ExecutionManager;
-use crate::collator::types::{
-    BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt,
+use crate::collator::types::ShardStateProviderImpl;
+use crate::{
+    collator::{
+        collator_processor::execution_manager::ExecutionManager,
+        types::{BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt},
+    },
+    mempool::MempoolAdapter,
+    msg_queue::{MessageQueueAdapter, QueueIterator},
+    state_node::StateNodeAdapter,
+    tracing_targets,
+    types::BlockCollationResult,
 };
 use crate::tracing_targets;
 use crate::types::BlockCollationResult;
@@ -114,6 +122,9 @@ impl CollatorStdImpl {
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // init execution manager
+        let shard_state_provider = Arc::new(ShardStateProviderImpl::new(
+            prev_shard_data.observable_accounts(),
+        ));
         let exec_manager = ExecutionManager::new(
             collation_data.chain_time,
             collation_data.start_lt,
@@ -121,8 +132,9 @@ impl CollatorStdImpl {
             collation_data.rand_seed,
             mc_data.mc_state_stuff().state().libraries.clone(),
             mc_data.config().clone(),
-            self.config.max_collate_threads,
             self.config.supported_block_version,
+            self.config.max_collate_threads as u32,
+            shard_state_provider,
         );
 
         //STUB: just remove fisrt anchor from cache
