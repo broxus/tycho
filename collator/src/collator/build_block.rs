@@ -38,12 +38,11 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
 
-        for (account_id, updated_shard_accounts) in &exec_manager.changed_accounts {
-
+        for (account_id, updated_shard_account) in exec_manager.changed_accounts.drain() {
             //TODO: read account
             //TODO: get updated blockchain config if it stored in account
             //TODO: if have transactions, build AccountBlock and add to account_blocks
-            // let acc_block = shard_acc.update_shard_state(&mut new_accounts)?;
+            // let acc_block = shard_accounts.set(account_id, updated_shard_account.shard_account)?;
             // if !acc_block.transactions().is_empty() {
             //     accounts.insert(&acc_block)?;
             // }

@@ -25,7 +25,6 @@ use everscale_types::{
 
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
-use tycho_util::FastDashMap;
 
 use crate::mempool::MempoolAnchorId;
 
@@ -426,16 +425,27 @@ pub(super) struct ShardAccountStuff {
 }
 
 impl ShardAccountStuff {
-    // pub fn update_shard_state(&mut self, shard_accounts: &mut ShardAccounts) -> Result<AccountBlock> {
-    //     let account = self.shard_account.load_account()?;
-    //     if account.is_none() {
-    //         new_accounts.remove(self.account_addr().clone())?;
-    //     } else {
-    //         let shard_acc = ShardAccount::with_account_root(self.account_root(), self.last_trans_hash.clone(), self.last_trans_lt);
-    //         let value = shard_acc.write_to_new_cell()?;
-    //         new_accounts.set_builder_serialized(self.account_addr().clone(), &value, &account.aug()?)?;
-    //     }
-    //     AccountBlock::with_params(&self.account_addr, &self.transactions, &self.state_update)
+    // pub fn update_shard_state(
+    //     &mut self,
+    //     shard_accounts: &mut ShardAccounts,
+    // ) -> Result<AccountBlock> {
+    // let account = self.shard_account.load_account()?;
+    // if account.is_none() {
+    //     // shard_accounts.remove(self.account_addr.clone())?;
+    // } else {
+    //     let shard_acc = ShardAccount::with_account_root(
+    //         self.account_root(),
+    //         self.last_trans_hash.clone(),
+    //         self.last_trans_lt,
+    //     );
+    //     let value = shard_acc.write_to_new_cell()?;
+    //     shard_accounts.set_builder_serialized(
+    //         self.account_addr().clone(),
+    //         &value,
+    //         &account.aug()?,
+    //     )?;
+    // }
+    // AccountBlock::with_params(&self.account_addr, &self.transactions, &self.state_update)
     // }
 
     pub fn update_public_libraries(&self, libraries: &mut Dict<HashBytes, LibDescr>) -> Result<()> {
@@ -446,18 +456,27 @@ impl ShardAccountStuff {
         };
         let new_libs = state_init.map(|v| v.libraries.clone()).unwrap_or_default();
         if new_libs.root() != self.orig_libs.root() {
-            //TODO: implement when scan_diff be added
-            //STUB: just do nothing, no accounts, no libraries updates in prototype
-            // new_libs.scan_diff(&self.orig_libs, |key: UInt256, old, new| {
-            //     let old = old.unwrap_or_default();
-            //     let new = new.unwrap_or_default();
-            //     if old.is_public_library() && !new.is_public_library() {
-            //         self.remove_public_library(key, libraries)?;
-            //     } else if !old.is_public_library() && new.is_public_library() {
-            //         self.add_public_library(key, new.root, libraries)?;
-            //     }
-            //     Ok(true)
-            // })?;
+            for entry in new_libs.iter_union(&self.orig_libs) {
+                let (key, new_value, old_value) = entry?;
+                match (new_value, old_value) {
+                    (Some(new), Some(old)) => {
+                        if new.public && !old.public {
+                            self.add_public_library(key, new.root, libraries)?;
+                        } else if !new.public && old.public {
+                            self.remove_public_library(key, libraries)?;
+                        }
+                    }
+                    (Some(new), None) if new.public => {
+                        self.add_public_library(key, new.root, libraries)?;
+                    }
+                    (None, Some(old)) if old.public => {
+                        self.remove_public_library(key, libraries)?;
+                    }
+                    _ => {
+                        continue;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -514,16 +533,112 @@ impl ShardAccountStuff {
         self.transactions.set(
             key,
             &transaction.total_fees,
-            &*transaction,
+            Lazy::new(transaction)?,
             |left, right, b, cx| {
                 let mut left = CurrencyCollection::load_from(left)?;
                 let right = CurrencyCollection::load_from(right)?;
-                left.checked_add(&right)?
-                    .store_into(b, cx)
+                left.checked_add(&right)?.store_into(b, cx)
             },
         )?;
 
         Ok(())
+    }
+
+    pub fn remove_public_library(
+        &self,
+        key: HashBytes,
+        libraries: &mut Dict<HashBytes, LibDescr>,
+    ) -> Result<()> {
+        log::trace!(
+            "Removing public library {} of account {}",
+            key,
+            self.account_addr
+        );
+
+        let mut lib_descr = match libraries.get(&key)? {
+            Some(ld) => ld,
+            None => bail!(
+                "cannot remove public library {} of account {} because this public \
+                library did not exist",
+                key,
+                self.account_addr
+            ),
+        };
+
+        if *lib_descr.lib.repr_hash() != key {
+            bail!(
+                "cannot remove public library {} of account {} because this public library \
+                LibDescr record does not contain a library root cell with required hash",
+                key,
+                self.account_addr
+            );
+        }
+
+        if !lib_descr.publishers.remove(&self.account_addr)?.is_some() {
+            bail!(
+                "cannot remove public library {} of account {} because this public library \
+                LibDescr record does not list this account as one of publishers",
+                key,
+                self.account_addr
+            );
+        }
+
+        if lib_descr.publishers.is_empty() {
+            log::debug!(
+                "library {} has no publishers left, removing altogether",
+                key
+            );
+            libraries.remove(&key)?;
+        } else {
+            libraries.set(&key, &lib_descr)?;
+        }
+
+        return Ok(());
+    }
+    pub fn add_public_library(
+        &self,
+        key: HashBytes,
+        library: Cell,
+        libraries: &mut Dict<HashBytes, LibDescr>,
+    ) -> Result<()> {
+        log::trace!(
+            "Adding public library {} of account {}",
+            key,
+            self.account_addr
+        );
+
+        if key != library.repr_hash().clone() {
+            bail!("Can't add library {} because it mismatch given key", key);
+        }
+
+        let lib_descr = if let Some(mut old_lib_descr) = libraries.get(&key)? {
+            if old_lib_descr.lib.repr_hash() != library.repr_hash() {
+                bail!("cannot add public library {} of account {} because existing LibDescr \
+                    record for this library does not contain a library root cell with required hash",
+                    key, self.account_addr);
+            }
+            if old_lib_descr.publishers.get(&self.account_addr)?.is_some() {
+                bail!(
+                    "cannot add public library {} of account {} because this public library's \
+                    LibDescr record already lists this account as a publisher",
+                    key,
+                    self.account_addr
+                );
+            }
+            old_lib_descr.publishers.set(&self.account_addr, &())?;
+            old_lib_descr
+        } else {
+            let mut dict = Dict::new();
+            dict.set(&self.account_addr, &())?;
+            LibDescr {
+                lib: library.clone(),
+                publishers: dict,
+            }
+        };
+
+        libraries.set(&key, &lib_descr)?;
+
+        return Ok(());
     }
 }
 
