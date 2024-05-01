@@ -14,7 +14,7 @@ use everscale_types::{
     models::{
         Block, BlockId, BlockRef, BlockchainConfig, CreatorStats, GlobalCapability, GlobalVersion,
         KeyBlockRef, KeyMaxLt, Lazy, LibDescr, McBlockExtra, McStateExtra, ShardHashes,
-        ShardStateUnsplit, ShardStateUnsplitBuilder, WorkchainDescription,
+        ShardStateUnsplit, WorkchainDescription,
     },
 };
 use sha2::Digest;
