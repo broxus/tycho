@@ -5,9 +5,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
-use everscale_types::models::{
-    BlockId, BlockInfo, ShardIdent, ValidatorDescription, ValidatorSet, ValueFlow,
-};
+use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::{
     block::ValidatorSubsetInfo,
     state::{MinRefMcStateTracker, ShardStateStuff},
@@ -560,7 +558,7 @@ where
 
                 // notify validator, it will start overlay initialization
                 self.validator
-                    .enqueue_add_session(Arc::new(new_session_info.clone().try_into()?))
+                    .add_session(Arc::new(new_session_info.clone().try_into()?))
                     .await?;
             } else {
                 tracing::info!(
@@ -683,13 +681,9 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        let current_collator_keypair = self.config.key_pair;
-        self.validator
-            .enqueue_candidate_validation(
-                candidate_id,
-                session_info.seqno(),
-                current_collator_keypair,
-            )
+        let _handle = self
+            .validator
+            .validate(candidate_id, session_info.seqno())
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block

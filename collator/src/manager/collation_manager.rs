@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use tycho_block_util::state::ShardStateStuff;
 
 use tycho_core::internal_queue::iterator::QueueIteratorImpl;
 
+use crate::validator::config::ValidatorConfig;
 use crate::{
     collator::{
         collator_processor::CollatorProcessorStdImpl, Collator, CollatorEventListener,
@@ -26,10 +28,7 @@ use crate::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
-    validator::{
-        validator_processor::{ValidatorProcessor, ValidatorProcessorStdImpl},
-        Validator, ValidatorEventListener, ValidatorStdImpl,
-    },
+    validator::{Validator, ValidatorEventListener, ValidatorStdImpl},
 };
 
 use super::collation_processor::CollationProcessor;
@@ -84,7 +83,7 @@ where
 {
     CollationManagerGenImpl::<
         CollatorStdImpl<CollatorProcessorStdImpl<_, _, _>, _, _, _>,
-        ValidatorStdImpl<ValidatorProcessorStdImpl<_>, _>,
+        ValidatorStdImpl<_>,
         MessageQueueAdapterStdImpl,
         MP,
         ST,
@@ -96,7 +95,7 @@ where
     )
 }
 #[allow(private_bounds)]
-pub fn create_std_manager_with_validator<MP, ST, V>(
+pub fn create_std_manager_with_validator<MP, ST>(
     config: CollationConfig,
     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
@@ -105,11 +104,10 @@ pub fn create_std_manager_with_validator<MP, ST, V>(
 where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
-    V: ValidatorProcessor<ST>,
 {
     CollationManagerGenImpl::<
         CollatorStdImpl<CollatorProcessorStdImpl<_, _, _>, _, _, _>,
-        ValidatorStdImpl<V, _>,
+        ValidatorStdImpl<_>,
         MessageQueueAdapterStdImpl,
         MP,
         ST,
@@ -152,11 +150,18 @@ where
         let state_node_adapter = state_adapter_builder.build(dispatcher.clone());
         let state_node_adapter = Arc::new(state_node_adapter);
 
+        let validator_config = ValidatorConfig {
+            base_loop_delay: Duration::from_millis(50),
+            max_loop_delay: Duration::from_secs(10),
+        };
+
         // create validator and start its tasks queue
         let validator = Validator::create(
-            dispatcher.clone(),
+            vec![dispatcher.clone()],
             state_node_adapter.clone(),
             node_network.into(),
+            config.key_pair,
+            validator_config,
         );
 
         // create collation processor that will use these adapters
