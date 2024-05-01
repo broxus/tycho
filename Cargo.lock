@@ -178,9 +178,9 @@ checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "base64"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9475866fec1451be56a3c2400fd081ff546538961565ccb5b7142cbd22bc7a51"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64ct"
@@ -293,9 +293,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.0.95"
+version = "1.0.96"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d32a725bc159af97c3e629873bb9f88fb8cf8a4867175f76dc987815ea07c83b"
+checksum = "065a29261d53ba54260972629f9ca6bffa69bac13cd1fed61420f7fa68b9f8bd"
 dependencies = [
  "jobserver",
  "libc",
@@ -621,7 +621,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#2fe1048125269cc0ff94a37cb4a5d78def71b9fd"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#ffc69509be4446cb59087c23e8615300385233b9"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -661,7 +661,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#2fe1048125269cc0ff94a37cb4a5d78def71b9fd"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#ffc69509be4446cb59087c23e8615300385233b9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1210,7 +1210,7 @@ version = "3.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e459365e590736a54c3fa561947c84837534b8e9af6fc5bf781307e82658fae"
 dependencies = [
- "base64 0.22.0",
+ "base64 0.22.1",
  "serde",
 ]
 
@@ -2326,7 +2326,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bytes",
  "castaway",
  "clap",
@@ -2379,7 +2379,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bumpalo",
  "bytes",
  "bytesize",

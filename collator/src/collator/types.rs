@@ -9,17 +9,15 @@ use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{CellBuilder, CellContext, CellFamily, CellSlice, Load, Store};
 use everscale_types::error::Error;
 use everscale_types::merkle::MerkleUpdate;
-use everscale_types::models::{Lazy, StateInit, TickTock, Transaction};
+use everscale_types::models::{HashUpdate, Lazy, StateInit, TickTock, Transaction};
 use everscale_types::{
     cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
     dict::{AugDict, Dict},
     models::{
-        in_message::{ImportFees, InMsg},
-        out_message::OutMsg,
         AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-        CurrencyCollection, LibDescr, McStateExtra, OutMsgQueueInfo, OwnedMessage, PrevBlockRef,
-        ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription, ShardFees, ShardIdent,
-        SimpleLib, ValueFlow,
+        CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OutMsgQueueInfo,
+        OwnedMessage, PrevBlockRef, ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription,
+        ShardFees, ShardIdent, SimpleLib, ValueFlow,
     },
 };
 
@@ -333,6 +331,9 @@ pub(super) struct BlockCollationData {
     //block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
     pub chain_time: u32,
+    pub execute_count: u32,
+    pub enqueue_count: u32,
+    pub msg_queue_depth_sum: u32,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt
@@ -418,10 +419,11 @@ pub(super) struct ShardAccountStuff {
     pub orig_libs: Dict<HashBytes, SimpleLib>,
     pub account_root: Cell,
     pub last_trans_hash: HashBytes,
-    pub state_update: HashBytes,
+    pub state_update: Lazy<HashUpdate>,
     pub last_trans_lt: u64,
     pub lt: Arc<AtomicU64>,
     pub transactions: Transactions,
+    pub transactions_count: u64,
 }
 
 impl ShardAccountStuff {
@@ -483,7 +485,7 @@ impl ShardAccountStuff {
 
     pub fn new(account_addr: AccountId, shard_account: ShardAccount, max_lt: u64) -> Result<Self> {
         let account_root = shard_account.account.clone().inner();
-        let state_update = account_root.repr_hash();
+        let shard_account_state = account_root.repr_hash();
         let last_trans_hash = shard_account.last_trans_hash.clone();
         let last_trans_lt = shard_account.last_trans_lt;
         let orig_libs = shard_account
@@ -508,12 +510,15 @@ impl ShardAccountStuff {
             last_trans_lt,
             lt,
             transactions: Default::default(),
-            state_update: state_update.clone(),
+            state_update: Lazy::new(&HashUpdate {
+                old: shard_account_state.clone(),
+                new: shard_account_state.clone(),
+            })?,
+            transactions_count: 0,
         })
     }
     pub fn add_transaction(
         &mut self,
-        key: u64,
         transaction: &mut Transaction,
         account_root: Cell,
     ) -> Result<()> {
@@ -521,7 +526,11 @@ impl ShardAccountStuff {
         transaction.prev_trans_lt = self.last_trans_lt;
 
         self.account_root = account_root;
-        self.state_update = self.account_root.repr_hash().clone();
+        let old_state = self.state_update.load()?.old;
+        self.state_update = Lazy::new(&HashUpdate {
+            old: old_state,
+            new: account_root.repr_hash().clone(),
+        })?;
 
         let mut builder = everscale_types::cell::CellBuilder::new();
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
@@ -530,17 +539,12 @@ impl ShardAccountStuff {
         self.last_trans_hash = tr_root.repr_hash().clone();
         self.last_trans_lt = transaction.lt;
 
-        self.transactions.set(
-            key,
-            &transaction.total_fees,
-            Lazy::new(transaction)?,
-            |left, right, b, cx| {
-                let mut left = CurrencyCollection::load_from(left)?;
-                let right = CurrencyCollection::load_from(right)?;
-                left.checked_add(&right)?.store_into(b, cx)
-            },
-        )?;
+        // TODO calculate key
+        let key = self.transactions_count;
+        self.transactions
+            .set(key, &transaction.total_fees, Lazy::new(transaction)?)?;
 
+        self.transactions_count += 1;
         Ok(())
     }
 

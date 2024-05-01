@@ -4,16 +4,17 @@ use std::{collections::HashMap, ops::Add, sync::Arc};
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::cell::{Load, Store};
-use everscale_types::models::{AccountBlock, CurrencyCollection};
+use everscale_types::models::{
+    AccountBlock, BlockExtra, BlockInfo, CurrencyCollection, DepthBalanceInfo, PrevBlockRef,
+};
 use everscale_types::{
     cell::{Cell, CellBuilder, HashBytes, UsageTree},
     dict::Dict,
     merkle::MerkleUpdate,
     models::{
-        AddSub, Block, BlockExtraBuilder, BlockId, BlockInfoBuilder, BlockRef, BlockchainConfig,
-        CreatorStats, GlobalCapability, GlobalVersion, KeyBlockRef, KeyMaxLt, Lazy, LibDescr,
-        McBlockExtra, McStateExtra, ShardHashes, ShardStateUnsplit, ShardStateUnsplitBuilder,
-        WorkchainDescription,
+        Block, BlockId, BlockRef, BlockchainConfig, CreatorStats, GlobalCapability, GlobalVersion,
+        KeyBlockRef, KeyMaxLt, Lazy, LibDescr, McBlockExtra, McStateExtra, ShardHashes,
+        ShardStateUnsplit, ShardStateUnsplitBuilder, WorkchainDescription,
     },
 };
 use sha2::Digest;
@@ -50,8 +51,11 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                 Some(account) => {
                     shard_accounts.set(
                         updated_shard_account.account_addr,
-                        &account,
-                        &account.balance,
+                        &DepthBalanceInfo {
+                            split_depth: 0, // TODO: fix
+                            balance: account.balance,
+                        },
+                        &updated_shard_account.shard_account,
                     )?;
                 }
             }
@@ -62,16 +66,7 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
             };
 
             if !acc_block.transactions.is_empty() {
-                account_blocks.set(
-                    account_id,
-                    &acc_block,
-                    acc_block.transactions.root_extra(),
-                    |left, right, b, cx| {
-                        let mut left = CurrencyCollection::load_from(left)?;
-                        let right = CurrencyCollection::load_from(right)?;
-                        left.checked_add(&right)?.store_into(b, cx)
-                    },
-                )?;
+                account_blocks.set(account_id, acc_block.transactions.root_extra(), &acc_block)?;
             }
         }
 
@@ -91,8 +86,10 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
             .fees_collected
             .tokens
             .add(collation_data.in_msgs.root_extra().fees_collected);
-        let _ = value_flow.fees_collected.add(&value_flow.fees_imported);
-        let _ = value_flow.fees_collected.add(&value_flow.created);
+        let _ = value_flow
+            .fees_collected
+            .checked_add(&value_flow.fees_imported)?;
+        let _ = value_flow.fees_collected.checked_add(&value_flow.created)?;
         value_flow.to_next_block = shard_accounts.root_extra().balance.clone();
 
         // build master state extra or get a ref to last applied master block
@@ -110,9 +107,17 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         };
 
         // build block info
-        let mut new_block_info = BlockInfoBuilder::new()
-            .set_prev_ref(prev_shard_data.get_blocks_ref()?)
-            .build();
+        let mut new_block_info = BlockInfo::default();
+        let prev_block_ref = prev_shard_data.get_blocks_ref()?;
+        match prev_block_ref {
+            PrevBlockRef::Single(block_ref) => {
+                new_block_info.set_prev_ref(&block_ref);
+            }
+            PrevBlockRef::AfterMerge { left, right } => {
+                new_block_info.set_prev_ref_after_merge(&left, &right);
+            }
+        }
+
         new_block_info.version = 0;
 
         //TODO: should set when slpit/merge logic implemented
@@ -175,8 +180,10 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         new_state.total_validator_fees = prev_shard_data.total_validator_fees().clone();
         let _ = new_state
             .total_validator_fees
-            .add(&value_flow.fees_collected);
-        let _ = new_state.total_validator_fees.sub(&value_flow.recovered);
+            .checked_add(&value_flow.fees_collected);
+        let _ = new_state
+            .total_validator_fees
+            .checked_sub(&value_flow.recovered);
 
         if self.shard_id.is_masterchain() {
             let changed_accounts: Vec<_> =
@@ -205,12 +212,10 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         )?;
 
         // calc block extra
-        let mut new_block_extra = BlockExtraBuilder::new(Lazy::new(&account_blocks)?)
-            .set_msg_descriptions(
-                collation_data.in_msgs.clone(),
-                collation_data.out_msgs.clone(),
-            )
-            .build();
+        let mut new_block_extra = BlockExtra::default();
+        new_block_extra.account_blocks = Lazy::new(&account_blocks)?;
+        new_block_extra.in_msg_description = Lazy::new(&collation_data.in_msgs)?;
+        new_block_extra.out_msg_description = Lazy::new(&collation_data.out_msgs)?;
         new_block_extra.rand_seed = collation_data.rand_seed;
         //TODO: fill created_by
         //extra.created_by = self.created_by.clone();
@@ -224,13 +229,13 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                 mint_msg: collation_data
                     .mint_msg
                     .as_ref()
-                    .map(CellBuilder::build_from)
+                    .map(Lazy::new)
                     .transpose()?,
                 //TODO
                 recover_create_msg: collation_data
                     .recover_create_msg
                     .as_ref()
-                    .map(CellBuilder::build_from)
+                    .map(Lazy::new)
                     .transpose()?,
                 copyleft_msgs: Default::default(),
                 config: if mc_state_extra.after_key_block {
@@ -374,8 +379,8 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
 
         // 8. update global balance
         let mut global_balance = prev_state_extra.global_balance.clone();
-        global_balance.add(&collation_data.value_flow.created)?;
-        global_balance.add(&collation_data.value_flow.minted)?;
+        global_balance.checked_add(&collation_data.value_flow.created)?;
+        global_balance.checked_add(&collation_data.value_flow.minted)?;
         //TODO: update global balance from shard fees when AugDict be implemented
         // global_balance.add(&collation_data.shard_fees.root_extra().create)?;
 
