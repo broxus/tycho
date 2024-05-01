@@ -43,6 +43,9 @@ pub(crate) trait MempoolEventListener: Send + Sync {
 
 #[async_trait]
 pub(crate) trait MempoolAdapter: Send + Sync + 'static {
+    /// Create an adapter, that connects to mempool then starts to listen mempool for new anchors,
+    /// and handles requests to mempool from the collation process
+    fn create(listener: Arc<dyn MempoolEventListener>) -> Self;
     /// Schedule task to process new master block state (may perform gc or nodes rotation)
     async fn enqueue_process_new_mc_block_state(
         &self,
@@ -78,6 +81,52 @@ pub struct MempoolAdapterStdImpl {
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
+    fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
+
+        //TODO: make real implementation, currently runs stub task
+        //      that produces the repeating set of anchors
+        let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
+
+        tokio::spawn({
+            let listener = listener.clone();
+            let stub_anchors_cache = stub_anchors_cache.clone();
+            async move {
+                let mut anchor_id = 0;
+                loop {
+                    let rnd_round_interval = rand::thread_rng().gen_range(400..600);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(rnd_round_interval * 6))
+                        .await;
+                    anchor_id += 1;
+                    let anchor = _stub_create_random_anchor_with_stub_externals(anchor_id);
+                    {
+                        let mut anchor_cache_rw = stub_anchors_cache
+                            .write()
+                            .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))
+                            .unwrap();
+                        tracing::debug!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
+                            anchor.id(),
+                            anchor.chain_time(),
+                            anchor.externals_count(),
+                        );
+                        anchor_cache_rw.insert(anchor_id, anchor.clone());
+                    }
+                    listener.on_new_anchor(anchor).await.unwrap();
+                }
+            }
+        });
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Stub anchors generator started");
+
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
+
+        Self {
+            listener,
+            _stub_anchors_cache: stub_anchors_cache,
+        }
+    }
+
     async fn enqueue_process_new_mc_block_state(
         &self,
         mc_state: Arc<ShardStateStuff>,
@@ -215,54 +264,4 @@ fn _stub_create_random_anchor_with_stub_externals(
     }
 
     Arc::new(MempoolAnchor::new(anchor_id, chain_time, externals))
-}
-
-impl MempoolAdapterStdImpl {
-    fn new(
-        listener: Arc<dyn MempoolEventListener>,
-    ) -> Self {
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
-
-        //TODO: make real implementation, currently runs stub task
-        //      that produces the repeating set of anchors
-         let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
-
-        tokio::spawn({
-            let listener = listener.clone();
-            let stub_anchors_cache = stub_anchors_cache.clone();
-            async move {
-                let mut anchor_id = 0;
-                loop {
-                    let rnd_round_interval = rand::thread_rng().gen_range(400..600);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(rnd_round_interval * 6))
-                        .await;
-                    anchor_id += 1;
-                    let anchor = _stub_create_random_anchor_with_stub_externals(anchor_id);
-                    {
-                        let mut anchor_cache_rw = stub_anchors_cache
-                            .write()
-                            .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))
-                            .unwrap();
-                        tracing::debug!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
-                            anchor.id(),
-                            anchor.chain_time(),
-                            anchor.externals_count(),
-                        );
-                        anchor_cache_rw.insert(anchor_id, anchor.clone());
-                    }
-                    listener.on_new_anchor(anchor).await.unwrap();
-                }
-            }
-        });
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Stub anchors generator started");
-
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
-
-        Self {
-            listener,
-            _stub_anchors_cache: stub_anchors_cache,
-        }
-    }
 }

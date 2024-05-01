@@ -17,7 +17,7 @@ use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastDashMap;
 
 use crate::mempool::types::ExternalMessage;
-use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
+use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId, MempoolEventListener};
 use crate::tracing_targets;
 
 pub struct MempoolAdapterImpl {
@@ -117,6 +117,10 @@ pub async fn parse_points(
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterImpl {
+    fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
+        todo!()
+    }
+
     async fn enqueue_process_new_mc_block_state(
         &self,
         mc_state: Arc<ShardStateStuff>,
