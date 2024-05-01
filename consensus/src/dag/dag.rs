@@ -46,15 +46,21 @@ impl Dag {
         top
     }
 
-    // fixme must not be async
+    // Note: cannot be non-async, as we cannot use only InclusionState:
+    //   some committed point may be DagPoint::Suspicious thus not the first validated locally
     /// result is in historical order
     pub async fn commit(self, next_dag_round: DagRound) -> Vec<(Arc<Point>, Vec<Arc<Point>>)> {
+        // TODO finding the latest trigger must not take long, better try later
+        //   than wait long for some DagPoint::NotFound, slowing down whole Engine
         let Some(latest_trigger) = Self::latest_trigger(&next_dag_round).await else {
             return Vec::new();
         };
+        // when we have a valid trigger, its every point of it's subdag is validated successfully
         let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone()).await;
         let mut ordered = Vec::new();
         while let Some((anchor, anchor_round)) = anchor_stack.pop() {
+            // Note every next "little anchor candidate that could" must have at least full dag depth
+            // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
             self.drop_tail(anchor.point.body.location.round);
             let committed = Self::gather_uncommitted(&anchor.point, &anchor_round).await;
             ordered.push((anchor.point, committed));
@@ -80,8 +86,8 @@ impl Dag {
                         futs.push(version.clone())
                     }
                 });
-                // FIXME traversing the DAG must not be async: we need the way to determine completed tasks
-                //  its sufficient to use only ready futures at this point, must ignore downloading tasks
+                // Fixme We may take any first completed valid point, but we should not wait long;
+                //   can we determine the trigger some other way, maybe inside Collector?
                 while let Some((found, _)) = futs.next().await {
                     if let Some(valid) = found.into_valid() {
                         _ = latest_trigger.insert(valid);
@@ -172,11 +178,9 @@ impl Dag {
         anchor_stack
     }
 
-    // TODO the next "little anchor candidate that could" must have at least full dag depth
     fn drop_tail(&self, anchor_at: Round) {
         if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
             let mut rounds = self.rounds.lock();
-            // TODO if sync is implemented as a second sub-graph - drop up to last linked
             *rounds = rounds.split_off(&Round(tail));
         };
     }
@@ -207,15 +211,14 @@ impl Dag {
 
         let mut uncommitted = Vec::new();
 
-        // TODO visited rounds count must be equal to dag depth:
-        //  read/download non-existent rounds and drop too old ones
         while let Some(vertex_round /* r-1 */) = proof_round
             .prev()
             .get()
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
             // take points @ r+0, and select their vertices @ r-1 for commit
-            // the order is of NodeId (public key) TODO shuffle deterministically, eg with anchor digest as a seed
+            // the order is of NodeId (public key)
+            // TODO shuffle deterministically, eg with anchor digest as a seed
             while let Some((node, digest)) = &r[0].pop_first() {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.

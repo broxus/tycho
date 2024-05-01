@@ -9,17 +9,10 @@ use crate::models::Round;
 
 #[derive(Debug)]
 pub enum AnchorStage {
-    Candidate(PeerId), // TODO nothing special, remove
     /// if anchor is locally committed then it must be marked as used (and vice versa)
-    Proof {
-        leader: PeerId,
-        is_used: AtomicBool,
-    },
+    Proof { leader: PeerId, is_used: AtomicBool },
     /// trigger is not necessary used - proof may be included by the next anchor and its own trigger
-    Trigger {
-        leader: PeerId,
-        is_used: AtomicBool,
-    },
+    Trigger { leader: PeerId, is_used: AtomicBool },
 }
 
 impl AnchorStage {
@@ -43,8 +36,9 @@ impl AnchorStage {
             return None;
         };
         match round.0 % WAVE_SIZE {
-            0 => None, // both genesis and trailing (proof inclusion) round
-            1 => Some(AnchorStage::Candidate(leader.clone())),
+            // 0 is a leaderless support round (that actually follows every leader point chain)
+            // 1 is an anchor candidate (surprisingly, nothing special about this point)
+            0 | 1 => None,
             2 => Some(AnchorStage::Proof {
                 leader: leader.clone(),
                 is_used: AtomicBool::new(false),

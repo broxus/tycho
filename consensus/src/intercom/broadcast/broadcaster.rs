@@ -41,7 +41,7 @@ pub struct Broadcaster {
     // results
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
-    // TODO move generic logic close to dispatcher, also check DownloadTask
+
     bcast_request: tycho_network::Request,
     bcast_peers: FastHashSet<PeerId>,
     bcast_futs: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,

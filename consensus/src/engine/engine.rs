@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
 use crate::dag::{Dag, DagRound, InclusionState, Producer};
+use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, PeerScheduleUpdater, Responder, Uploader,
@@ -59,6 +60,13 @@ impl Engine {
         );
 
         let genesis = Arc::new(crate::test_utils::genesis());
+        // check only genesis round as it is widely used in point validation.
+        // if some nodes use distinct genesis data, their first points will be rejected
+        assert_eq!(
+            genesis.body.location.round,
+            MempoolConfig::GENESIS_ROUND,
+            "genesis point round must match genesis round from config"
+        );
         let peer_schedule_updater =
             PeerScheduleUpdater::new(dispatcher.overlay.clone(), peer_schedule.clone());
         // finished epoch
@@ -94,7 +102,7 @@ impl Engine {
         let downloader = Downloader::new(log_id.clone(), &dispatcher, &peer_schedule);
 
         let genesis_state = current_dag_round
-            .insert_exact_validate(&genesis, &peer_schedule, &downloader)
+            .insert_exact_sign(&genesis, &peer_schedule, &downloader)
             .await;
         let collector = Collector::new(
             log_id.clone(),
@@ -135,7 +143,7 @@ impl Engine {
                 Producer::new_point(&current_dag_round, prev_point.as_ref(), vec![]).await
             {
                 let state = current_dag_round
-                    .insert_exact_validate(&own_point, &peer_schedule, &downloader)
+                    .insert_exact_sign(&own_point, &peer_schedule, &downloader)
                     .await
                     .expect("own produced point must be valid");
                 own_point_state.send(state).ok();

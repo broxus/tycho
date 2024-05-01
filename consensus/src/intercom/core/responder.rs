@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 
-use tycho_network::{PeerId, Response, Service, ServiceRequest, Version};
+use tycho_network::{PeerId, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
 
-use crate::intercom::core::dto::{MPQuery, MPQueryResult, MPResponse};
+use crate::intercom::core::dto::{MPQuery, MPResponse};
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::intercom::BroadcastFilter;
 use crate::models::{Point, PointId, Round, Ugly};
@@ -65,32 +64,27 @@ struct ResponderInner {
 
 impl ResponderInner {
     async fn handle_query(self: Arc<Self>, req: ServiceRequest) -> Option<Response> {
-        let body = match bincode::deserialize::<MPQuery>(&req.body) {
-            Ok(body) => body,
-            Err(e) => {
-                tracing::error!("unexpected request from {:?}: {e:?}", req.metadata.peer_id);
-                // malformed request is a reason to ignore it
-                return None;
-            }
-        };
+        let body = MPQuery::try_from(&req)
+            .inspect_err(|e| {
+                tracing::error!("unexpected request from {:?}: {e:?}", req.metadata.peer_id)
+            })
+            .ok()?; // malformed request is a reason to ignore it
 
         let response = match body {
             MPQuery::PointById(point_id) => {
                 let (tx, rx) = oneshot::channel();
                 self.uploads.send((point_id.clone(), tx)).ok();
-                match rx.await {
-                    Ok(response) => {
-                        tracing::debug!(
-                            "{} upload to {:.4?} : {:?} {}",
-                            self.log_id,
-                            req.metadata.peer_id,
-                            point_id.ugly(),
-                            response.0.as_ref().map_or("not found", |_| "ok"),
-                        );
-                        MPResponse::PointById(response)
-                    }
-                    Err(e) => panic!("Responder point by id await of request failed: {e}"),
-                }
+                let response = rx
+                    .await // not recoverable, must be avoided, thus panic
+                    .expect("Responder point by id await of request failed");
+                tracing::debug!(
+                    "{} upload to {:.4?} : {:?} {}",
+                    self.log_id,
+                    req.metadata.peer_id,
+                    point_id.ugly(),
+                    response.0.as_ref().map_or("not found", |_| "ok"),
+                );
+                MPResponse::PointById(response)
             }
             MPQuery::Signature(round) => {
                 let (tx, rx) = oneshot::channel();
@@ -100,6 +94,7 @@ impl ResponderInner {
                 match rx.await {
                     Ok(response) => MPResponse::Signature(response),
                     Err(e) => {
+                        // it's a recoverable error
                         let response = SignatureResponse::TryLater;
                         tracing::error!(
                             "{} responder => collector {:.4?} @ {round:?} : \
@@ -113,17 +108,11 @@ impl ResponderInner {
             }
         };
 
-        Some(Response {
-            version: Version::default(),
-            body: Bytes::from(match bincode::serialize(&MPQueryResult::Ok(response)) {
-                Ok(data) => data,
-                Err(e) => {
-                    tracing::error!("failed to serialize response to {:?}: {e:?}", req.metadata);
-                    bincode::serialize(&MPQueryResult::Err("internal error".to_string()))
-                        .expect("must not fail")
-                }
-            }),
-        })
+        Response::try_from(&response)
+            .inspect_err(|e| {
+                tracing::error!("failed to serialize response to {:?}: {e:?}", req.metadata)
+            })
+            .ok()
     }
 
     fn handle_broadcast(self: Arc<Self>, req: ServiceRequest) {
