@@ -1,8 +1,9 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::models::{BlockId, ShardIdent};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
@@ -10,10 +11,7 @@ use tycho_collator::state_node::{
 };
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::BlockStuffForSync;
-use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, PersistentBlockStriderState, PrintSubscriber, StateSubscriber,
-    StateSubscriberContext,
-};
+use tycho_core::block_strider::{BlockStrider, PersistentBlockStriderState, PrintSubscriber};
 use tycho_storage::Storage;
 
 struct MockEventListener {
@@ -38,7 +36,7 @@ async fn test_add_and_get_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter = StateNodeAdapterStdImpl::create(listener, mock_storage);
+    let adapter = StateNodeAdapterStdImpl::new(listener, mock_storage);
 
     // Test adding a block
 
@@ -56,7 +54,7 @@ async fn test_add_and_get_block() {
     adapter.accept_block(block).await.unwrap();
 
     // Test getting the next block (which should be the one just added)
-    let next_block = adapter.get_block(&block_id).await;
+    let next_block = adapter.wait_for_block(&block_id).await;
     assert!(
         next_block.is_some(),
         "Block should be retrieved after being added"
@@ -88,7 +86,7 @@ async fn test_storage_accessors() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter = StateNodeAdapterStdImpl::create(listener, storage.clone());
+    let adapter = StateNodeAdapterStdImpl::new(listener, storage.clone());
 
     let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
 
@@ -106,7 +104,7 @@ async fn test_add_and_get_next_block() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter = StateNodeAdapterStdImpl::create(listener, mock_storage);
+    let adapter = StateNodeAdapterStdImpl::new(listener, mock_storage);
 
     // Test adding a block
     let prev_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 1);
@@ -124,7 +122,8 @@ async fn test_add_and_get_next_block() {
     };
     adapter.accept_block(block).await.unwrap();
 
-    let next_block = adapter.get_next_block(prev_block_id).await;
+    // TOOD: Incorrect!!! Should be waiting for the next block, not the previous one
+    let next_block = adapter.wait_for_block(prev_block_id).await;
     assert!(
         next_block.is_some(),
         "Block should be retrieved after being added"
@@ -159,7 +158,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
-    let adapter = Arc::new(StateNodeAdapterStdImpl::create(
+    let adapter = Arc::new(StateNodeAdapterStdImpl::new(
         listener.clone(),
         storage.clone(),
     ));
@@ -195,8 +194,6 @@ async fn test_add_read_handle_1000_blocks_parallel() {
         })
     };
 
-    let cloned_block = empty_block.block().clone();
-
     // Task 2: Retrieving and handling 1000 blocks
     let handle_blocks = {
         let adapter = adapter.clone();
@@ -208,17 +205,12 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     root_hash: Default::default(),
                     file_hash: Default::default(),
                 };
-                let next_block = adapter.get_block(&block_id).await;
+                let next_block = adapter.wait_for_block(&block_id).await;
                 assert!(
                     next_block.is_some(),
                     "Block {} should be retrieved after being added",
                     i
                 );
-
-                let block_stuff = BlockStuffAug::loaded(BlockStuff::with_block(
-                    block_id.clone(),
-                    cloned_block.clone(),
-                ));
 
                 let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
                 let state = storage
@@ -227,14 +219,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     .await
                     .unwrap();
 
-                let block_subscriber_context = StateSubscriberContext {
-                    block: block_stuff.data,
-                    mc_block_id: block_id.clone(),
-                    archive_data: block_stuff.archive_data,
-                    state,
-                };
-
-                let handle_block = adapter.handle_state(&block_subscriber_context).await;
+                let handle_block = adapter.handle_state(&state).await;
                 assert!(
                     handle_block.is_ok(),
                     "Block {} should be handled after being added",

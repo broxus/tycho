@@ -4,9 +4,9 @@ use everscale_types::models::OwnedMessage;
 
 // TYPES
 
-pub(crate) type MempoolAnchorId = u32;
+pub type MempoolAnchorId = u32;
 
-pub(crate) struct MempoolAnchor {
+pub struct MempoolAnchor {
     id: MempoolAnchorId,
     chain_time: u64,
     externals: Vec<Arc<OwnedMessage>>,

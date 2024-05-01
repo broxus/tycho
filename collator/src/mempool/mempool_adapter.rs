@@ -21,17 +21,30 @@ use super::types::{MempoolAnchor, MempoolAnchorId};
 #[path = "tests/mempool_adapter_tests.rs"]
 pub(super) mod tests;
 
-// EVENTS EMITTER AMD LISTENER
+// FACTORY
 
-//TODO: remove emitter
-#[async_trait]
-pub(crate) trait MempoolEventEmitter {
-    /// When mempool produced new committed anchor
-    async fn on_new_anchor_event(&self, anchor: Arc<MempoolAnchor>);
+pub trait MempoolAdapterFactory {
+    type Adapter: MempoolAdapter;
+
+    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Self::Adapter;
 }
 
+impl<F, R> MempoolAdapterFactory for F
+where
+    F: Fn(Arc<dyn MempoolEventListener>) -> R,
+    R: MempoolAdapter,
+{
+    type Adapter = R;
+
+    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Self::Adapter {
+        self(listener)
+    }
+}
+
+// EVENTS LISTENER
+
 #[async_trait]
-pub(crate) trait MempoolEventListener: Send + Sync {
+pub trait MempoolEventListener: Send + Sync {
     /// Process new anchor from mempool
     async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()>;
 }
@@ -39,7 +52,7 @@ pub(crate) trait MempoolEventListener: Send + Sync {
 // ADAPTER
 
 #[async_trait]
-pub(crate) trait MempoolAdapter: Send + Sync + 'static {
+pub trait MempoolAdapter: Send + Sync + 'static {
     /// Schedule task to process new master block state (may perform gc or nodes rotation)
     async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()>;
 

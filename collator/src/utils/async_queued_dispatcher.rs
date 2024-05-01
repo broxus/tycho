@@ -15,8 +15,16 @@ type AsyncTaskDesc<W, R> = TaskDesc<
     Result<R>,
 >;
 
-pub struct AsyncQueuedDispatcher<W, R> {
+pub struct AsyncQueuedDispatcher<W, R = ()> {
     tasks_queue: mpsc::Sender<AsyncTaskDesc<W, R>>,
+}
+
+impl<W, R> Clone for AsyncQueuedDispatcher<W, R> {
+    fn clone(&self) -> Self {
+        Self {
+            tasks_queue: self.tasks_queue.clone(),
+        }
+    }
 }
 
 impl<W, R> AsyncQueuedDispatcher<W, R>

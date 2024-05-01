@@ -13,14 +13,7 @@ pub trait QueueIterator {
     fn next(&mut self) -> Option<IterItem>;
     fn commit(&mut self);
     fn get_diff(&self, block_id_short: BlockIdShort) -> QueueDiff;
-    fn new(
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
-        snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
-        for_block: ShardIdent,
-    ) -> Result<Self, QueueError>
-    where
-        Self: Sized;
+
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> anyhow::Result<()>;
 }
 
@@ -29,6 +22,39 @@ pub struct QueueIteratorImpl {
     current_position: HashMap<ShardIdent, EnqueuedMessageKey>,
     messages: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     new_messages: HashMap<EnqueuedMessageKey, Arc<EnqueuedMessage>>,
+}
+
+impl QueueIteratorImpl {
+    pub fn new(
+        shards_from: Vec<IterRange>,
+        shards_to: Vec<IterRange>,
+        snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
+        for_block: ShardIdent,
+    ) -> Result<Self, QueueError> {
+        let shards_with_ranges: &mut HashMap<ShardIdent, ShardRange> = &mut HashMap::new();
+        for from in &shards_from {
+            for to in &shards_to {
+                Self::traverse_and_collect_ranges(shards_with_ranges, from, to);
+            }
+        }
+
+        let mut messages = BinaryHeap::default();
+
+        for snapshot in snapshots {
+            let snapshot_messages =
+                snapshot.get_outgoing_messages_by_shard(shards_with_ranges, &for_block)?;
+            for snapshot_message in snapshot_messages {
+                messages.push(Reverse(snapshot_message));
+            }
+        }
+
+        Ok(Self {
+            for_block,
+            messages,
+            current_position: Default::default(),
+            new_messages: Default::default(),
+        })
+    }
 }
 
 pub struct IterItem {
@@ -137,37 +163,6 @@ impl QueueIterator for QueueIteratorImpl {
             diff.messages.push(message.clone());
         }
         diff
-    }
-
-    fn new(
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
-        snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
-        for_block: ShardIdent,
-    ) -> Result<Self, QueueError> {
-        let shards_with_ranges: &mut HashMap<ShardIdent, ShardRange> = &mut HashMap::new();
-        for from in &shards_from {
-            for to in &shards_to {
-                Self::traverse_and_collect_ranges(shards_with_ranges, from, to);
-            }
-        }
-
-        let mut messages = BinaryHeap::default();
-
-        for snapshot in snapshots {
-            let snapshot_messages =
-                snapshot.get_outgoing_messages_by_shard(shards_with_ranges, &for_block)?;
-            for snapshot_message in snapshot_messages {
-                messages.push(Reverse(snapshot_message));
-            }
-        }
-
-        Ok(Self {
-            for_block,
-            messages,
-            current_position: Default::default(),
-            new_messages: Default::default(),
-        })
     }
 
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> anyhow::Result<()> {

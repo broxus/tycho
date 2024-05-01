@@ -1,38 +1,21 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Result};
+use everscale_types::models::*;
+use everscale_types::num::Tokens;
+use everscale_types::prelude::*;
 use sha2::Digest;
 
-use everscale_types::{
-    cell::HashBytes,
-    models::{
-        BlockId, BlockIdShort, BlockInfo, ConfigParam7, CurrencyCollection, ShardDescription,
-        ValueFlow,
-    },
-    num::Tokens,
-};
-
-use crate::{
-    collator::{
-        collator_processor::execution_manager::ExecutionManager,
-        types::{BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt},
-    },
-    mempool::MempoolAdapter,
-    msg_queue::MessageQueueAdapter,
-    state_node::StateNodeAdapter,
-    tracing_targets,
-    types::BlockCollationResult,
-};
-
 use super::CollatorProcessorStdImpl;
+use crate::collator::execution_manager::ExecutionManager;
+use crate::collator::types::{
+    BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt,
+};
+use crate::tracing_targets;
+use crate::types::BlockCollationResult;
 
-impl<MQ, MP, ST> CollatorProcessorStdImpl<MQ, MP, ST>
-where
-    MQ: MessageQueueAdapter,
-    MP: MempoolAdapter,
-    ST: StateNodeAdapter,
-{
-    pub(super) async fn do_collate_impl(
+impl CollatorProcessorStdImpl {
+    pub(super) async fn do_collate(
         &mut self,
         next_chain_time: u64,
         top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
