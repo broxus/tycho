@@ -7,8 +7,8 @@ use std::{
 use anyhow::Result;
 use everscale_types::cell::Cell;
 use everscale_types::models::{
-    ExtInMsgInfo, IntMsgInfo, Lazy, MsgInfo, OptionalAccount, ShardAccount, ShardAccounts,
-    TickTock, Transaction,
+    ExtInMsgInfo, HashUpdate, IntMsgInfo, Lazy, MsgInfo, OptionalAccount, ShardAccount,
+    ShardAccounts, TickTock, Transaction,
 };
 use everscale_types::{
     cell::HashBytes,
@@ -109,7 +109,7 @@ impl ExecutionManager {
             let max_lt = self.max_lt.load(Ordering::Acquire);
             let shard_account = if let Some(a) = self.changed_accounts.get(&account_id) {
                 a.clone()
-            } else if let Ok(Some(shard_account)) = self.shard_accounts.get(account_id) {
+            } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
                 ShardAccountStuff::new(account_id, shard_account.clone(), max_lt)?
             } else {
                 let shard_account = EMPTY_SHARD_ACCOUNT
@@ -134,7 +134,7 @@ impl ExecutionManager {
         drop(futures);
 
         let mut result = vec![];
-        for (transaction, shard_account) in executed_messages {
+        for (transaction, msg, shard_account) in executed_messages {
             self.update_shard_account(shard_account.account_addr, shard_account.clone());
             result.push((shard_account.account_addr, msg, transaction?));
         }
@@ -153,7 +153,7 @@ impl ExecutionManager {
         account_id: AccountId,
         new_msg: (MsgInfo, Cell),
         mut shard_account: ShardAccountStuff,
-    ) -> Result<(Result<Box<Transaction>>, ShardAccountStuff)> {
+    ) -> Result<(Result<Box<Transaction>>, MsgInfo, ShardAccountStuff)> {
         let (msg, new_msg_cell) = new_msg;
         tracing::trace!("execute message for account {account_id}");
 
@@ -179,9 +179,7 @@ impl ExecutionManager {
                 execute_ordinary_message(&msg, &new_msg_cell, &mut account_root, params, &config);
             // TODO replace with batch set
             if let Ok(transaction) = transaction_res.as_mut() {
-                // TODO calculate key
-                let key = 0;
-                shard_account.add_transaction(key, transaction, account_root)?;
+                shard_account.add_transaction(transaction, account_root)?;
             }
             Ok((transaction_res, shard_account))
         })
@@ -192,12 +190,21 @@ impl ExecutionManager {
             Ordering::Relaxed,
         );
 
-        Ok((transaction_res, shard_account_stuff))
+        Ok((transaction_res, msg, shard_account_stuff))
     }
 
-    fn update_shard_account(&mut self, account_id: AccountId, account_stuff: ShardAccountStuff) {
+    fn update_shard_account(
+        &mut self,
+        account_id: AccountId,
+        mut account_stuff: ShardAccountStuff,
+    ) {
         tracing::trace!("update shard account for account {account_id}");
-        // TODO: save old state
+        let old_state = account_stuff.state_update.load()?.old;
+        account_stuff.state_update = Lazy::new(&HashUpdate {
+            old: old_state,
+            new: account_stuff.account_root.repr_hash().clone(),
+        })?;
+
         self.changed_accounts.insert(account_id, account_stuff);
     }
 }

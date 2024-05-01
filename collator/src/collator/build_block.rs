@@ -4,16 +4,17 @@ use std::{collections::HashMap, ops::Add, sync::Arc};
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::cell::{Load, Store};
-use everscale_types::models::{AccountBlock, CurrencyCollection};
+use everscale_types::models::{
+    AccountBlock, BlockExtra, BlockInfo, CurrencyCollection, DepthBalanceInfo, PrevBlockRef,
+};
 use everscale_types::{
     cell::{Cell, CellBuilder, HashBytes, UsageTree},
     dict::Dict,
     merkle::MerkleUpdate,
     models::{
-        AddSub, Block, BlockExtraBuilder, BlockId, BlockInfoBuilder, BlockRef, BlockchainConfig,
-        CreatorStats, GlobalCapability, GlobalVersion, KeyBlockRef, KeyMaxLt, Lazy, LibDescr,
-        McBlockExtra, McStateExtra, ShardHashes, ShardStateUnsplit, ShardStateUnsplitBuilder,
-        WorkchainDescription,
+        Block, BlockId, BlockRef, BlockchainConfig, CreatorStats, GlobalCapability, GlobalVersion,
+        KeyBlockRef, KeyMaxLt, Lazy, LibDescr, McBlockExtra, McStateExtra, ShardHashes,
+        ShardStateUnsplit, ShardStateUnsplitBuilder, WorkchainDescription,
     },
 };
 use sha2::Digest;
@@ -48,8 +49,11 @@ impl CollatorStdImpl {
                 Some(account) => {
                     shard_accounts.set(
                         updated_shard_account.account_addr,
-                        &account,
-                        &account.balance,
+                        &DepthBalanceInfo {
+                            split_depth: 0, // TODO: fix
+                            balance: account.balance,
+                        },
+                        &updated_shard_account.shard_account,
                     )?;
                 }
             }
@@ -60,16 +64,7 @@ impl CollatorStdImpl {
             };
 
             if !acc_block.transactions.is_empty() {
-                account_blocks.set(
-                    account_id,
-                    &acc_block,
-                    acc_block.transactions.root_extra(),
-                    |left, right, b, cx| {
-                        let mut left = CurrencyCollection::load_from(left)?;
-                        let right = CurrencyCollection::load_from(right)?;
-                        left.checked_add(&right)?.store_into(b, cx)
-                    },
-                )?;
+                account_blocks.set(account_id, acc_block.transactions.root_extra(), &acc_block)?;
             }
         }
 
@@ -183,7 +178,7 @@ impl CollatorStdImpl {
 
         new_state
             .total_validator_fees
-            .checked_sub(&value_flow.recovered)?;
+            .try_sub_assign(&value_flow.recovered)?;
 
         if self.shard_id.is_masterchain() {
             let changed_accounts: Vec<_> =

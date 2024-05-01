@@ -1,17 +1,18 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 
 use everscale_types::cell::Cell;
-use everscale_types::models::in_message::InMsg;
-use everscale_types::models::out_message::OutMsg;
+use everscale_types::models::OutMsg;
 use everscale_types::models::Transaction;
+use everscale_types::models::{InMsg, Lazy, MsgEnvelope, MsgInfo, OutMsgNew};
 use everscale_types::{
     cell::HashBytes,
     models::{
-        AddSub, BlockId, BlockIdShort, BlockInfo, ConfigParam7, CurrencyCollection,
-        ShardDescription, ValueFlow,
+        BlockId, BlockIdShort, BlockInfo, ConfigParam7, CurrencyCollection, ShardDescription,
+        ValueFlow,
     },
     num::Tokens,
 };
@@ -166,8 +167,8 @@ impl CollatorStdImpl {
                     .or_default();
 
                 // TODO: finalize
-                // let internal_msgs = new_transaction(&mut collation_data, &tr, tr_cell, in_msg_opt.as_ref())?;
-                // collation_data.max_lt = execution_manager.max_lt.load(Ordering::Relaxed);
+                let internal_msgs = new_transaction(&mut collation_data, &transaction, msg_info)?;
+                collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
                 // if !check_limits(tick_res) {
                 //     break;
                 // }
@@ -406,8 +407,7 @@ impl CollatorStdImpl {
 fn new_transaction(
     colator_data: &mut BlockCollationData,
     transaction: &Transaction,
-    tr_cell: Cell,
-    in_msg_opt: Option<&InMsg>,
+    in_msg: MsgInfo,
 ) -> Result<Vec<OutMsg>> {
     // log::trace!(
     //     "new transaction, message {:x}\n{}",
@@ -415,48 +415,50 @@ fn new_transaction(
     //     ever_block_json::debug_transaction(transaction.clone()).unwrap_or_default(),
     // );
     colator_data.execute_count += 1;
-    let gas_used = transaction.gas_used().unwrap_or(0);
-    colator_data
-        .block_limit_status
-        .add_gas_used(gas_used as u32);
-    colator_data
-        .block_limit_status
-        .add_transaction(transaction.logical_time() == colator_data.start_lt()? + 1);
-    if let Some(in_msg) = in_msg_opt {
-        colator_data.add_in_msg_to_block(in_msg)?;
-    }
-    transaction.out_msgs.iterate_slices(|slice| {
-        let msg_cell = slice.reference(0)?;
-        let msg_hash = msg_cell.repr_hash();
-        let msg = Message::construct_from_cell(msg_cell.clone())?;
-        match msg.header() {
-            CommonMsgInfo::IntMsgInfo(info) => {
+    // let gas_used = transaction.gas_used().unwrap_or(0);
+    // colator_data
+    //     .block_limit_status
+    //     .add_gas_used(gas_used as u32);
+    // colator_data
+    //     .block_limit_status
+    //     .add_transaction(transaction.lt == colator_data.start_lt + 1);
+
+    // colator_data.in_msgs.set(in_msg)?;
+
+    for out_msg in transaction.iter_out_msgs() {
+        let msg = out_msg?;
+        match msg.info {
+            MsgInfo::Int(int_msg) => {
                 // Add out message to state for counting time and it may be removed if used
-                let use_hypercube = !colator_data
-                    .config
-                    .has_capability(GlobalCapabilities::CapOffHypercube);
-                let fwd_fee = *info.fwd_fee();
-                let enq = MsgEnqueueStuff::new(
-                    msg.clone(),
-                    colator_data.out_msg_queue_info.shard(),
-                    fwd_fee,
-                    use_hypercube,
-                )?;
+                // let fwd_fee = *int_msg.fwd_fee;
+                // let enq = OutMsgQueueInfoStuff::new(
+                //     msg.clone(),
+                //     colator_data.out_msg_queue_info.shard(),
+                //     fwd_fee,
+                //     use_hypercube,
+                // )?;
                 colator_data.enqueue_count += 1;
-                colator_data.msg_queue_depth_sum +=
-                    colator_data.out_msg_queue_info.add_message(&enq)?;
+                // colator_data.msg_queue_depth_sum += 1;
+                // colator_data.out_msgs.set(&enq)?;
                 // TODO: add message to internal queue
                 // Add to message block here for counting time later it may be replaced
-                let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
-                colator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                // let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
+                // colator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
             }
-            CommonMsgInfo::ExtOutMsgInfo(_) => {
-                let out_msg = OutMsg::external(msg_cell, tr_cell.clone());
-                colator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
+            MsgInfo::ExtOut(_) => {
+                // let out_msg = OutMsg::New(OutMsgNew {
+                //     out_msg_envelope: Lazy::new(MsgEnvelope {
+                //         cur_addr: (),
+                //         next_addr: (),
+                //         fwd_fee_remaining: Default::default(),
+                //         message: Lazy::new(msg.to_owned()),
+                //     }),
+                //     transaction: Lazy::new(transaction.clone()),
+                // });
+                // colator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
             }
-            CommonMsgInfo::ExtInMsgInfo(_) => fail!("External inbound message cannot be output"),
+            MsgInfo::ExtIn(_) => bail!("External inbound message cannot be output"),
         };
-        Ok(true)
-    })?;
-    Ok(())
+    }
+    Ok(vec![]) // TODO: fix
 }
