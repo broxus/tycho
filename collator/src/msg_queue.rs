@@ -14,7 +14,7 @@ use tycho_core::internal_queue::{
     types::QueueDiff,
 };
 
-pub(crate) use tycho_core::internal_queue::iterator::{IterItem, QueueIterator};
+pub(crate) use tycho_core::internal_queue::iterator::QueueIterator;
 
 use crate::{tracing_targets, utils::shard::SplitMergeAction};
 

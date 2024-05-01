@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::*;
@@ -22,6 +23,14 @@ pub trait BlockSubscriber: Send + Sync + 'static {
 }
 
 impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
+    type HandleBlockFut<'a> = T::HandleBlockFut<'a>;
+
+    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
+        <T as BlockSubscriber>::handle_block(self, cx)
+    }
+}
+
+impl<T: BlockSubscriber> BlockSubscriber for Arc<T> {
     type HandleBlockFut<'a> = T::HandleBlockFut<'a>;
 
     fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
@@ -58,6 +67,14 @@ pub trait StateSubscriber: Send + Sync + 'static {
 }
 
 impl<T: StateSubscriber> StateSubscriber for Box<T> {
+    type HandleStateFut<'a> = T::HandleStateFut<'a>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        <T as StateSubscriber>::handle_state(self, cx)
+    }
+}
+
+impl<T: StateSubscriber> StateSubscriber for Arc<T> {
     type HandleStateFut<'a> = T::HandleStateFut<'a>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {

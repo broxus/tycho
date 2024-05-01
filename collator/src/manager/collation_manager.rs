@@ -1,12 +1,15 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, ShardIdent};
+use tycho_block_util::state::ShardStateStuff;
 
 use tycho_core::internal_queue::iterator::QueueIteratorImpl;
 
+use crate::validator::config::ValidatorConfig;
 use crate::{
     collator::{
         collator_processor::CollatorProcessorStdImpl, Collator, CollatorEventListener,
@@ -25,10 +28,7 @@ use crate::{
         async_queued_dispatcher::{AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE},
         schedule_async_action,
     },
-    validator::{
-        validator_processor::{ValidatorProcessor, ValidatorProcessorStdImpl},
-        Validator, ValidatorEventListener, ValidatorStdImpl,
-    },
+    validator::{Validator, ValidatorEventListener, ValidatorStdImpl},
 };
 
 use super::collation_processor::CollationProcessor;
@@ -51,6 +51,8 @@ where
         state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
         node_network: NodeNetwork,
     ) -> Self;
+
+    fn get_state_node_adapter(&self) -> Arc<ST>;
 }
 
 /// Generic implementation of [`CollationManager`]
@@ -65,6 +67,7 @@ where
     config: Arc<CollationConfig>,
 
     dispatcher: Arc<AsyncQueuedDispatcher<CollationProcessor<C, V, MQ, MP, ST>, ()>>,
+    state_node_adapter: Arc<ST>,
 }
 
 #[allow(private_bounds)]
@@ -79,8 +82,8 @@ where
     ST: StateNodeAdapter,
 {
     CollationManagerGenImpl::<
-        CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
-        ValidatorStdImpl<ValidatorProcessorStdImpl<_>, _>,
+        CollatorStdImpl<CollatorProcessorStdImpl<_, _, _>, _, _, _>,
+        ValidatorStdImpl<_>,
         MessageQueueAdapterStdImpl,
         MP,
         ST,
@@ -92,7 +95,7 @@ where
     )
 }
 #[allow(private_bounds)]
-pub fn create_std_manager_with_validator<MP, ST, V>(
+pub fn create_std_manager_with_validator<MP, ST>(
     config: CollationConfig,
     mpool_adapter_builder: impl MempoolAdapterBuilder<MP> + Send,
     state_adapter_builder: impl StateNodeAdapterBuilder<ST> + Send,
@@ -101,11 +104,10 @@ pub fn create_std_manager_with_validator<MP, ST, V>(
 where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
-    V: ValidatorProcessor<ST>,
 {
     CollationManagerGenImpl::<
-        CollatorStdImpl<CollatorProcessorStdImpl<_, QueueIteratorImpl, _, _>, _, _, _>,
-        ValidatorStdImpl<V, _>,
+        CollatorStdImpl<CollatorProcessorStdImpl<_, _, _>, _, _, _>,
+        ValidatorStdImpl<_>,
         MessageQueueAdapterStdImpl,
         MP,
         ST,
@@ -148,12 +150,19 @@ where
         let state_node_adapter = state_adapter_builder.build(dispatcher.clone());
         let state_node_adapter = Arc::new(state_node_adapter);
 
+        let validator_config = ValidatorConfig {
+            base_loop_delay: Duration::from_millis(50),
+            max_loop_delay: Duration::from_secs(10),
+        };
+
         // create validator and start its tasks queue
-        let validator = Arc::new(Validator::create(
-            dispatcher.clone(),
+        let validator = Validator::create(
+            vec![dispatcher.clone()],
             state_node_adapter.clone(),
             node_network.into(),
-        ));
+            config.key_pair,
+            validator_config,
+        );
 
         // create collation processor that will use these adapters
         // and run dispatcher for its own tasks queue
@@ -171,6 +180,7 @@ where
         let mgr = Self {
             config,
             dispatcher: dispatcher.clone(),
+            state_node_adapter,
         };
 
         // start other async processes
@@ -194,6 +204,10 @@ where
 
         // return manager
         mgr
+    }
+
+    fn get_state_node_adapter(&self) -> Arc<ST> {
+        self.state_node_adapter.clone()
     }
 }
 
@@ -226,12 +240,27 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn on_mc_block(&self, mc_block_id: BlockId) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
-            process_mc_block_from_bc,
-            mc_block_id
-        ))
-        .await
+    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()> {
+        //TODO: remove accepted block from cache
+        //STUB: do nothing, currently we remove block from cache when it sent to state node
+        Ok(())
+    }
+
+    async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
+        //TODO: should store block info from blockchain if it was not already collated
+        //      and validated by ourself. Will use this info for faster validation further:
+        //      will consider that just collated block is already validated if it have the
+        //      same root hash and file hash
+        if state.block_id().is_masterchain() {
+            let mc_block_id = *state.block_id();
+            self.enqueue_task(method_to_async_task_closure!(
+                process_mc_block_from_bc,
+                mc_block_id
+            ))
+            .await
+        } else {
+            Ok(())
+        }
     }
 }
 

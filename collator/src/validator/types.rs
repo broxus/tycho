@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::sync::Arc;
 
-use anyhow::bail;
-use everscale_crypto::ed25519::{KeyPair, PublicKey};
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
@@ -13,15 +12,15 @@ use crate::types::CollationSessionInfo;
 
 pub(crate) type ValidatorsMap = HashMap<[u8; 32], Arc<ValidatorInfo>>;
 
-pub(crate) enum ValidatorInfoError {
+pub enum ValidatorInfoError {
     InvalidPublicKey,
 }
 
 #[derive(Clone)]
-pub(crate) struct ValidatorInfo {
+pub struct ValidatorInfo {
     pub public_key: PublicKey,
     pub weight: u64,
-    pub adnl_addr: Option<HashBytes>,
+    pub _adnl_addr: Option<HashBytes>,
 }
 
 impl TryFrom<&ValidatorDescription> for ValidatorInfo {
@@ -33,28 +32,20 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
         Ok(Self {
             public_key: pubkey,
             weight: value.weight,
-            adnl_addr: value.adnl_addr.map(|addr| HashBytes(addr.0)),
+            _adnl_addr: value.adnl_addr.map(|addr| HashBytes(addr.0)),
         })
     }
 }
 
-pub(crate) struct ValidationSessionInfo {
+pub struct ValidationSessionInfo {
     pub seqno: u32,
     pub validators: ValidatorsMap,
-    pub current_validator_keypair: KeyPair,
 }
 
 impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
     type Error = anyhow::Error;
 
     fn try_from(session_info: Arc<CollationSessionInfo>) -> std::result::Result<Self, Self::Error> {
-        let current_validator_keypair = match session_info.current_collator_keypair() {
-            Some(keypair) => *keypair,
-            None => {
-                bail!("Collator keypair is not set, skip candidate validation");
-            }
-        };
-
         let mut validators = HashMap::new();
         for validator_descr in session_info.collators().validators.iter() {
             let validator_info: anyhow::Result<ValidatorInfo, ValidatorInfoError> =
@@ -75,7 +66,6 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
         let validation_session = ValidationSessionInfo {
             seqno: session_info.seqno(),
             validators,
-            current_validator_keypair,
         };
         Ok(validation_session)
     }
@@ -113,8 +103,17 @@ pub(crate) struct OverlayNumber {
 }
 
 #[derive(Eq, PartialEq, Debug)]
-pub(crate) enum ValidationResult {
+pub enum ValidationResult {
     Valid,
     Invalid,
-    Insufficient,
+    Insufficient(u64, u64),
+}
+
+impl ValidationResult {
+    pub fn is_finished(&self) -> bool {
+        match self {
+            ValidationResult::Valid | ValidationResult::Invalid => true,
+            ValidationResult::Insufficient(..) => false,
+        }
+    }
 }
