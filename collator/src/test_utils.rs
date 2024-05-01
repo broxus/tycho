@@ -116,9 +116,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<(DummyArchiveProvider, Sto
 
     // shard state
     let shard_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_0:80.boc");
-
     let shard_root = Boc::decode(shard_bytes)?;
-
     let shard_state = shard_root.parse::<ShardStateUnsplit>()?;
     let shard_id = BlockId {
         shard: shard_info.0,
@@ -153,11 +151,11 @@ impl BlockProvider for DummyArchiveProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+    fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         futures_util::future::ready(None).boxed()
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
         futures_util::future::ready(None).boxed()
     }
 }

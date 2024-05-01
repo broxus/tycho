@@ -555,7 +555,7 @@ where
 
                 // notify validator, it will start overlay initialization
                 self.validator
-                    .enqueue_add_session(Arc::new(new_session_info.clone().try_into()?))
+                    .add_session(Arc::new(new_session_info.clone().try_into()?))
                     .await?;
             } else {
                 tracing::info!(
@@ -678,13 +678,9 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        let current_collator_keypair = self.config.key_pair;
-        self.validator
-            .enqueue_candidate_validation(
-                candidate_id,
-                session_info.seqno(),
-                current_collator_keypair,
-            )
+        let _handle = self
+            .validator
+            .validate(candidate_id, session_info.seqno())
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block

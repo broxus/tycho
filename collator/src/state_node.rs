@@ -67,6 +67,7 @@ pub trait StateNodeAdapter: BlockProvider + Send + Sync + 'static {
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: Arc<Mutex<HashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>>>,
+    blocks_mapping: Arc<Mutex<HashMap<BlockId, BlockId>>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
 }
@@ -95,6 +96,7 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             broadcaster,
+            blocks_mapping: Arc::new(Default::default()),
         }
     }
 
@@ -247,10 +249,16 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     .last()
                     .ok_or(anyhow!("no prev block"))?;
 
+                self.blocks_mapping
+                    .lock()
+                    .await
+                    .insert(block.block_id, prev_block_id);
+
                 blocks
                     .entry(block.block_id.shard)
                     .or_insert_with(BTreeMap::new)
                     .insert(prev_block_id.seqno, block);
+
                 prev_block_id
             }
             false => {
