@@ -108,3 +108,12 @@ pub enum ValidationResult {
     Invalid,
     Insufficient(u64, u64),
 }
+
+impl ValidationResult {
+    pub fn is_finished(&self) -> bool {
+        match self {
+            ValidationResult::Valid | ValidationResult::Invalid => true,
+            ValidationResult::Insufficient(..) => false,
+        }
+    }
+}

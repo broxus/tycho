@@ -2,7 +2,6 @@ use everscale_types::models::GlobalCapability;
 
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::test_utils::prepare_test_storage;
-use tycho_collator::validator_test_impl::ValidatorProcessorTestImpl;
 use tycho_collator::{
     manager::CollationManager,
     mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
@@ -52,11 +51,7 @@ async fn test_collation_process_on_stubs() {
 
     let node_network = tycho_collator::test_utils::create_node_network();
 
-    let _manager = tycho_collator::manager::create_std_manager_with_validator::<
-        _,
-        _,
-        ValidatorProcessorTestImpl<_>,
-    >(
+    let _manager = tycho_collator::manager::create_std_manager_with_validator::<_, _>(
         config,
         mpool_adapter_builder,
         state_node_adapter_builder,

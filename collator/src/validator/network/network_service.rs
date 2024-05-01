@@ -11,31 +11,27 @@ use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::handlers::handle_signatures_query;
-use crate::{
-    state_node::StateNodeAdapter,
-    utils::async_queued_dispatcher::AsyncQueuedDispatcher,
-    validator::validator_processor::{ValidatorProcessor, ValidatorTaskResult},
-};
+use crate::validator::state::{SessionInfo, ValidationState, ValidationStateStdImpl};
+use crate::validator::ValidatorEventListener;
+use crate::{state_node::StateNodeAdapter, utils::async_queued_dispatcher::AsyncQueuedDispatcher};
 
 #[derive(Clone)]
-pub struct NetworkService<W, ST>
-where
-    W: ValidatorProcessor<ST> + Send + Sync,
-    ST: StateNodeAdapter + Send + Sync,
-{
-    dispatcher: Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>,
-    _marker: PhantomData<ST>,
+pub struct NetworkService {
+    listeners: Vec<Arc<dyn ValidatorEventListener>>,
+    state: Arc<ValidationStateStdImpl>,
+    session_seqno: u32,
 }
 
-impl<W, ST> NetworkService<W, ST>
-where
-    W: ValidatorProcessor<ST> + Send + Sync,
-    ST: StateNodeAdapter + Send + Sync,
-{
-    pub fn new(dispatcher: Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>) -> Self {
+impl NetworkService {
+    pub fn new(
+        listeners: Vec<Arc<dyn ValidatorEventListener>>,
+        state: Arc<ValidationStateStdImpl>,
+        session_seqno: u32,
+    ) -> Self {
         Self {
-            dispatcher,
-            _marker: Default::default(),
+            listeners,
+            state,
+            session_seqno,
         }
     }
 }
@@ -44,11 +40,7 @@ where
 #[repr(transparent)]
 pub struct OverlayId(pub [u8; 32]);
 
-impl<W, ST> Service<ServiceRequest> for NetworkService<W, ST>
-where
-    W: ValidatorProcessor<ST> + Send + Sync,
-    ST: StateNodeAdapter + Send + Sync,
-{
+impl Service<ServiceRequest> for NetworkService {
     type QueryResponse = Response;
     type OnQueryFuture = Pin<Box<dyn Future<Output = Option<Self::QueryResponse>> + Send>>;
     type OnMessageFuture = Ready<()>;
@@ -57,8 +49,8 @@ where
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
         let query_result = req.parse_tl();
 
-        let dispatcher = Arc::clone(&self.dispatcher);
-
+        let state = self.state.clone();
+        let listeners = self.listeners.clone();
         async move {
             match query_result {
                 Ok(query) => {
@@ -68,17 +60,18 @@ where
                         signatures,
                     } = query;
                     {
+                        let session = state.get_session(session_seqno).await;
                         match handle_signatures_query(
-                            &dispatcher,
+                            session,
                             session_seqno,
                             block_id_short,
                             signatures,
+                            listeners,
                         )
                         .await
                         {
                             Ok(response_option) => response_option,
                             Err(e) => {
-                                error!("Error handling signatures query: {:?}", e);
                                 panic!("Error handling signatures query: {:?}", e);
                             }
                         }

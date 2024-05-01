@@ -1,67 +1,46 @@
-use std::sync::Arc;
-
-use anyhow::anyhow;
+use crate::validator::network::dto::SignaturesQuery;
+use crate::validator::state::SessionInfo;
+use crate::validator::{process_candidate_signature_response, ValidatorEventListener};
 use everscale_types::models::BlockIdShort;
-
+use std::sync::Arc;
 use tycho_network::Response;
 
-use crate::method_to_async_task_closure;
-use crate::state_node::StateNodeAdapter;
-use crate::utils::async_queued_dispatcher::AsyncQueuedDispatcher;
-use crate::validator::network::dto::SignaturesQuery;
-
-use crate::validator::validator_processor::{ValidatorProcessor, ValidatorTaskResult};
-
-pub async fn handle_signatures_query<W, ST>(
-    dispatcher: &Arc<AsyncQueuedDispatcher<W, ValidatorTaskResult>>,
+pub async fn handle_signatures_query(
+    session: Option<Arc<SessionInfo>>,
     session_seqno: u32,
     block_id_short: BlockIdShort,
     signatures: Vec<([u8; 32], [u8; 64])>,
+    listeners: Vec<Arc<dyn ValidatorEventListener>>,
 ) -> Result<Option<Response>, anyhow::Error>
 where
-    W: ValidatorProcessor<ST> + Send + Sync,
-    ST: StateNodeAdapter + Send + Sync,
 {
-    let receiver = dispatcher
-        .enqueue_task_with_responder(method_to_async_task_closure!(
-            get_block_signatures,
-            session_seqno,
-            &block_id_short
-        ))
-        .await
-        .map_err(|e| anyhow!("Error getting receiver: {:?}", e))?;
-
-    let task_result = receiver
-        .await
-        .map_err(|e| anyhow!("Receiver error: {:?}", e))?;
-
-    dispatcher
-        .enqueue_task(method_to_async_task_closure!(
-            process_candidate_signature_response,
+    let response = match session {
+        None => SignaturesQuery {
             session_seqno,
             block_id_short,
-            signatures
-        ))
-        .await
-        .map_err(|e| anyhow!("Error enqueueing task: {:?}", e))?;
+            signatures: vec![],
+        },
+        Some(session) => {
+            process_candidate_signature_response(
+                session.clone(),
+                block_id_short,
+                signatures,
+                listeners,
+            )
+            .await?;
 
-    match task_result {
-        Ok(ValidatorTaskResult::Signatures(received_signatures)) => {
-            let signatures = received_signatures
+            let signatures = session
+                .get_valid_signatures(&block_id_short)
+                .await
                 .into_iter()
                 .map(|(k, v)| (k.0, v.0))
                 .collect::<Vec<_>>();
-
-            let response = SignaturesQuery {
+            SignaturesQuery {
                 session_seqno,
                 block_id_short,
                 signatures,
-            };
-            Ok(Some(Response::from_tl(response)))
+            }
         }
-        Ok(ValidatorTaskResult::Void | ValidatorTaskResult::ValidationStatus(_)) => Err(anyhow!(
-            "Invalid response type received from get_block_signatures."
-        )),
-        Err(e) => Err(anyhow!("Error processing task result: {:?}", e)),
-    }
+    };
+    Ok(Some(Response::from_tl(response)))
 }

@@ -21,8 +21,8 @@ pub trait BlockchainConfigExt {
 impl BlockchainConfigExt for BlockchainConfig {
     fn valid_config_data(
         &self,
-        relax_par0: bool,
-        mandatory_params: Option<Dict<u32, ()>>,
+        _relax_par0: bool,
+        _mandatory_params: Option<Dict<u32, ()>>,
     ) -> Result<bool> {
         //TODO: refer to https://github.com/everx-labs/ever-block/blob/master/src/config_params.rs#L452
         //STUB: currently should not be invoked in prototype
