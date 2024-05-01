@@ -35,7 +35,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         min_ref_mc_state: &'a MinRefMcStateTracker,
         block_id: &BlockId,
     ) -> Result<Self> {
-        let file_ctx = FilesContext::new(downloads_dir, block_id)?;
+        let file_ctx =
+            FilesContext::new(downloads_dir, block_id).context("failed to create files context")?;
 
         Ok(Self {
             db,
@@ -599,13 +600,12 @@ mod test {
         tracing::info!("Decompressed the archive");
 
         let db = crate::db::Db::open(current_test_path.join("rocksdb"), DbOptions::default())?;
-        let file_db = crate::db::FileDb::new(current_test_path.join("file_db"));
+        let file_db = crate::db::FileDb::new(current_test_path.join("file_db"))?;
 
-        std::fs::create_dir_all(file_db.path())?; //todo: should be done in FileDb::new?
         let cells_storage = CellStorage::new(db.clone(), 100_000_000);
 
         let tracker = super::MinRefMcStateTracker::new();
-        let download_dir = file_db.subdir("downloads");
+        let download_dir = file_db.create_subdir("downloads")?;
 
         for file in std::fs::read_dir(current_test_path.join("states"))? {
             let file = file?;

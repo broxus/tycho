@@ -44,8 +44,7 @@ impl ShardStateStorage {
         block_storage: Arc<BlockStorage>,
         cache_size_bytes: u64,
     ) -> Result<Self> {
-        let downloads_dir = files_dir.subdir(DOWNLOADS_DIR);
-        downloads_dir.ensure_exists()?;
+        let downloads_dir = files_dir.create_subdir(DOWNLOADS_DIR)?;
 
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 

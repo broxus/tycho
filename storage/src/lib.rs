@@ -24,8 +24,12 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(db: Arc<Db>, file_db_path: PathBuf, max_cell_cache_size_bytes: u64) -> Result<Self> {
-        let files_dir = FileDb::new(file_db_path);
+    pub fn new(
+        db: Arc<Db>,
+        file_db_path: PathBuf,
+        max_cell_cache_size_bytes: u64,
+    ) -> anyhow::Result<Self> {
+        let files_dir = FileDb::new(file_db_path)?;
 
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
