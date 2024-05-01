@@ -173,7 +173,7 @@ where
         let msgs_set = vec![];
 
         // TODO check externals is not exist accounts needed ?
-
+        let msgs_len = msgs_set.len() as u32;
         exec_manager.execute_msgs_set(msgs_set);
         let mut offset = 0;
         let mut finish = false;
@@ -181,11 +181,6 @@ where
         while !finish {
             let (new_offset, group) = exec_manager.tick(offset).await?;
             for (account_id, msg_info, transaction) in group {
-                result
-                    .entry(&account_id)
-                    .and_modify(|v: &mut Vec<_>| v.push(transaction))
-                    .or_default();
-
                 // TODO: finalize
                 let internal_msgs = new_transaction(&mut collation_data, &transaction, msg_info)?;
                 collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
@@ -195,9 +190,11 @@ where
                 // TODO: check our for internal
                 // our  = shard ident contain msg src
                 //
+                let transactions: &mut Vec<_> = result.entry(account_id).or_default();
+                transactions.push(transaction);
             }
             offset = new_offset;
-            if offset == msgs_set.len() as u32 {
+            if offset == msgs_len {
                 finish = true;
             }
         }

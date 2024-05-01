@@ -484,7 +484,8 @@ impl ShardAccountStuff {
     }
 
     pub fn new(account_addr: AccountId, shard_account: ShardAccount, max_lt: u64) -> Result<Self> {
-        let account_root = shard_account.account.clone().inner();
+        let binding = shard_account.account.clone();
+        let account_root = binding.inner();
         let shard_account_state = account_root.repr_hash();
         let last_trans_hash = shard_account.last_trans_hash.clone();
         let last_trans_lt = shard_account.last_trans_lt;
@@ -525,13 +526,13 @@ impl ShardAccountStuff {
         transaction.prev_trans_hash = self.last_trans_hash.clone();
         transaction.prev_trans_lt = self.last_trans_lt;
 
-        self.account_root = account_root;
+        let new_state = account_root.repr_hash().clone();
         let old_state = self.state_update.load()?.old;
         self.state_update = Lazy::new(&HashUpdate {
             old: old_state,
-            new: account_root.repr_hash().clone(),
+            new: new_state,
         })?;
-
+        self.account_root = account_root;
         let mut builder = everscale_types::cell::CellBuilder::new();
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
         let tr_root = builder.build()?;

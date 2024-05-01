@@ -14,7 +14,7 @@ use everscale_types::{
     models::{
         Block, BlockId, BlockRef, BlockchainConfig, CreatorStats, GlobalCapability, GlobalVersion,
         KeyBlockRef, KeyMaxLt, Lazy, LibDescr, McBlockExtra, McStateExtra, ShardHashes,
-        ShardStateUnsplit, ShardStateUnsplitBuilder, WorkchainDescription,
+        ShardStateUnsplit, WorkchainDescription,
     },
 };
 use sha2::Digest;
@@ -108,15 +108,7 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
 
         // build block info
         let mut new_block_info = BlockInfo::default();
-        let prev_block_ref = prev_shard_data.get_blocks_ref()?;
-        match prev_block_ref {
-            PrevBlockRef::Single(block_ref) => {
-                new_block_info.set_prev_ref(&block_ref);
-            }
-            PrevBlockRef::AfterMerge { left, right } => {
-                new_block_info.set_prev_ref_after_merge(&left, &right);
-            }
-        }
+        new_block_info.set_prev_ref(&prev_shard_data.get_blocks_ref()?);
 
         new_block_info.version = 0;
 
@@ -154,9 +146,9 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
 
         // build new state
         let global_id = prev_shard_data.observable_states()[0].state().global_id;
-        let mut new_state =
-            ShardStateUnsplitBuilder::new(new_block_info.shard, Lazy::new(&shard_accounts)?)
-                .build();
+        let mut new_state = ShardStateUnsplit::default();
+        new_state.shard_ident = new_block_info.shard;
+        new_state.accounts = Lazy::new(&shard_accounts)?;
         new_state.global_id = global_id;
         new_state.seqno = new_block_info.seqno;
         new_state.gen_utime = new_block_info.gen_utime;

@@ -613,6 +613,10 @@ impl CellImpl for StorageCell {
 
         None
     }
+
+    fn stats(&self) -> CellTreeStats {
+        todo!()
+    }
 }
 
 impl Drop for StorageCell {

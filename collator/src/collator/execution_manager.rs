@@ -18,6 +18,7 @@ use everscale_types::{
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use once_cell::sync::OnceCell;
+use ton_executor::blockchain_config::PreloadedBlockchainConfig;
 use ton_executor::{
     ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
 };
@@ -135,7 +136,7 @@ impl ExecutionManager {
 
         let mut result = vec![];
         for (transaction, msg, shard_account) in executed_messages {
-            self.update_shard_account(shard_account.account_addr, shard_account.clone());
+            self.update_shard_account(shard_account.account_addr, shard_account.clone())?;
             result.push((shard_account.account_addr, msg, transaction?));
         }
 
@@ -162,8 +163,8 @@ impl ExecutionManager {
         let block_lt = self.start_lt;
         let seed_block = self.seed_block.clone();
         let block_version = self.block_version;
-
-        let (mut transaction_res, shard_account_stuff) = tokio::task::spawn_blocking(move || {
+        let config = PreloadedBlockchainConfig::with_config(self.config.clone(), 0)?; // TODO: fix global id
+        let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
             let params = ExecuteParams {
                 state_libs,
                 block_unixtime,
@@ -173,15 +174,15 @@ impl ExecutionManager {
                 block_version,
                 ..ExecuteParams::default()
             };
-            let config = self.config.clone();
             let mut account_root = shard_account.account_root.clone();
             let mut transaction_res =
-                execute_ordinary_message(&msg, &new_msg_cell, &mut account_root, params, &config);
+                execute_ordinary_message(&new_msg_cell, &mut account_root, params, &config);
             // TODO replace with batch set
             if let Ok(transaction) = transaction_res.as_mut() {
                 shard_account.add_transaction(transaction, account_root)?;
             }
-            Ok((transaction_res, shard_account))
+            Ok((transaction_res, msg, shard_account))
+                as Result<(Result<Box<Transaction>>, MsgInfo, ShardAccountStuff)>
         })
         .await??;
 
@@ -197,7 +198,7 @@ impl ExecutionManager {
         &mut self,
         account_id: AccountId,
         mut account_stuff: ShardAccountStuff,
-    ) {
+    ) -> Result<()> {
         tracing::trace!("update shard account for account {account_id}");
         let old_state = account_stuff.state_update.load()?.old;
         account_stuff.state_update = Lazy::new(&HashUpdate {
@@ -206,20 +207,20 @@ impl ExecutionManager {
         })?;
 
         self.changed_accounts.insert(account_id, account_stuff);
+        Ok(())
     }
 }
 
 /// execute ordinary message
 fn execute_ordinary_message(
-    new_msg_info: &MsgInfo,
     new_msg_cell: &Cell,
     account_root: &mut Cell,
     params: ExecuteParams,
-    config: &BlockchainConfig,
+    config: &PreloadedBlockchainConfig,
 ) -> Result<Box<Transaction>> {
     let executor = OrdinaryTransactionExecutor::new();
     executor
-        .execute_with_libs_and_params(new_msg_info, new_msg_cell, account_root, &params, config)
+        .execute_with_libs_and_params(Some(new_msg_cell), account_root, &params, config)
         .map(Box::new)
 }
 
@@ -228,7 +229,7 @@ fn execute_ticktock_message(
     tick_tock: TickTock,
     account_root: &mut Cell,
     params: ExecuteParams,
-    config: &BlockchainConfig,
+    config: &PreloadedBlockchainConfig,
 ) -> Result<Box<Transaction>> {
     let executor = TickTockTransactionExecutor::new(tick_tock);
     executor
