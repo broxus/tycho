@@ -4,7 +4,7 @@ use futures_util::FutureExt;
 
 use tycho_network::{DhtClient, Network, OverlayId, OverlayService, PeerId, PrivateOverlay};
 
-use crate::intercom::core::dto::{MPRequest, MPResponse};
+use crate::intercom::core::dto::{MPQuery, MPResponse};
 use crate::intercom::core::responder::Responder;
 use crate::models::{Point, PointId, Round};
 
@@ -40,19 +40,14 @@ impl Dispatcher {
     }
 
     pub fn point_by_id_request(&self, id: &PointId) -> tycho_network::Request {
-        (&MPRequest::PointById(id.clone())).into()
-    }
-
-    pub fn broadcast_request(point: &Point) -> tycho_network::Request {
-        // TODO use send message for broadcast, leave Rejected/TryLater only in sig request
-        (&MPRequest::Broadcast(point.clone())).into()
+        (&MPQuery::PointById(id.clone())).into()
     }
 
     pub fn signature_request(round: &Round) -> tycho_network::Request {
-        (&MPRequest::Signature(round.clone())).into()
+        (&MPQuery::Signature(round.clone())).into()
     }
 
-    pub fn request<T>(
+    pub fn query<T>(
         &self,
         peer_id: &PeerId,
         request: &tycho_network::Request,
@@ -72,6 +67,32 @@ impl Dispatcher {
                         .and_then(|r| MPResponse::try_from(&r))
                         .and_then(T::try_from)
                         .map_err(|e| anyhow!("response from peer {peer_id}: {e}"));
+                    (peer_id, response)
+                })
+                .await
+        }
+        .boxed()
+    }
+
+    pub fn broadcast_request(point: &Point) -> tycho_network::Request {
+        point.into()
+    }
+
+    pub fn send(
+        &self,
+        peer_id: &PeerId,
+        request: &tycho_network::Request,
+    ) -> BoxFuture<'static, (PeerId, Result<()>)> {
+        let peer_id = peer_id.clone();
+        let request = request.clone();
+        let overlay = self.overlay.clone();
+        let network = self.network.clone();
+        async move {
+            overlay
+                .send(&network, &peer_id, request)
+                .map(move |response| {
+                    let response =
+                        response.map_err(|e| anyhow!("response from peer {peer_id}: {e}"));
                     (peer_id, response)
                 })
                 .await

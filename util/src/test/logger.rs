@@ -1,6 +1,8 @@
-pub fn init_logger(test_name: &str) {
+use tracing_subscriber::EnvFilter;
+
+pub fn init_logger(test_name: &str, filter: &str) {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
+        .with_env_filter(EnvFilter::try_new(filter).expect("tracing directives"))
         .try_init()
         .ok();
 

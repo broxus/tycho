@@ -16,7 +16,7 @@ use crate::intercom::{
 use crate::models::{Point, PrevPoint, Ugly};
 
 pub struct Engine {
-    local_id: Arc<String>,
+    log_id: Arc<String>,
     dag: Dag,
     peer_schedule: Arc<PeerSchedule>,
     dispatcher: Dispatcher,
@@ -38,13 +38,13 @@ impl Engine {
 
     ) -> Self {
         let key_pair = KeyPair::from(secret_key);
-        let local_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
+        let log_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
         let peer_schedule = Arc::new(PeerSchedule::new(Arc::new(key_pair)));
 
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
 
         let broadcast_filter =
-            BroadcastFilter::new(local_id.clone(), peer_schedule.clone(), bcast_tx);
+            BroadcastFilter::new(log_id.clone(), peer_schedule.clone(), bcast_tx);
 
         let (sig_requests, sig_responses) = mpsc::unbounded_channel();
 
@@ -55,7 +55,7 @@ impl Engine {
             &overlay_service,
             peers,
             Responder::new(
-                local_id.clone(),
+                log_id.clone(),
                 broadcast_filter.clone(),
                 sig_requests,
                 uploader_tx,
@@ -81,21 +81,27 @@ impl Engine {
         let (top_dag_round_tx, top_dag_round_rx) = watch::channel(current_dag_round.clone());
 
         let mut tasks = JoinSet::new();
-        let uploader = Uploader::new(uploader_rx, top_dag_round_rx);
+        let uploader = Uploader::new(log_id.clone(), uploader_rx, top_dag_round_rx);
         tasks.spawn(async move {
             uploader.run().await;
         });
         tasks.spawn(async move {
             peer_schedule_updater.run().await;
         });
+        tasks.spawn({
+            let broadcast_filter = broadcast_filter.clone();
+            async move {
+                broadcast_filter.clear_cache().await;
+            }
+        });
 
-        let downloader = Downloader::new(local_id.clone(), &dispatcher, &peer_schedule);
+        let downloader = Downloader::new(log_id.clone(), &dispatcher, &peer_schedule);
 
         let genesis_state = current_dag_round
             .insert_exact_validate(&genesis, &peer_schedule, &downloader)
             .await;
         let collector = Collector::new(
-            local_id.clone(),
+            log_id.clone(),
             &downloader,
             bcast_rx,
             sig_responses,
@@ -104,7 +110,7 @@ impl Engine {
         );
 
         Self {
-            local_id,
+            log_id,
             dag,
             peer_schedule,
             dispatcher,
@@ -118,7 +124,7 @@ impl Engine {
     }
 
     async fn bcaster_run(
-        local_id: Arc<String>,
+        log_id: Arc<String>,
         produce_own_point: bool,
         dispatcher: Dispatcher,
         peer_schedule: Arc<PeerSchedule>,
@@ -139,7 +145,7 @@ impl Engine {
                     .expect("own produced point must be valid");
                 own_point_state.send(state).ok();
                 let evidence = Broadcaster::new(
-                    &local_id,
+                    log_id.clone(),
                     &own_point,
                     &dispatcher,
                     &peer_schedule,
@@ -171,12 +177,14 @@ impl Engine {
                 .top(&current_dag_round.round().next(), &self.peer_schedule);
             self.top_dag_round_watch.send(next_dag_round.clone()).ok();
 
+            tracing::info!("{} @ {:?}", self.log_id, current_dag_round.round());
+
             let (bcaster_ready_tx, bcaster_ready_rx) = mpsc::channel(1);
             // let this channel unbounded - there won't be many items, but every of them is essential
             let (collector_signal_tx, collector_signal_rx) = mpsc::unbounded_channel();
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
             let bcaster_run = tokio::spawn(Self::bcaster_run(
-                self.local_id.clone(),
+                self.log_id.clone(),
                 produce_own_point,
                 self.dispatcher.clone(),
                 self.peer_schedule.clone(),
@@ -191,7 +199,7 @@ impl Engine {
             let commit_run = tokio::spawn(self.dag.clone().commit(next_dag_round.clone()));
             let bcast_filter_upd = {
                 let bcast_filter = self.broadcast_filter.clone();
-                let round = next_dag_round.round().clone();
+                let round = current_dag_round.round().clone();
                 tokio::spawn(async move { bcast_filter.advance_round(&round) })
             };
 
@@ -208,25 +216,7 @@ impl Engine {
                         tracing::error!("Failed tp send anchor commit message tp mpsc channel. Err: {e:?}");
                     }
 
-                    let committed = committed
-                        .into_iter()
-                        .map(|(anchor, history)| {
-                            let history = history
-                                .into_iter()
-                                .map(|point| format!("{:?}", point.id().ugly()))
-                                .join(", ");
-                            format!(
-                                "anchor {:?} time {} : [ {history} ]",
-                                anchor.id().ugly(),
-                                anchor.body.time
-                            )
-                        })
-                        .join("  ;  ");
-                    tracing::info!(
-                        "{} @ {:?} committed {committed}",
-                        self.local_id,
-                        current_dag_round.round()
-                    );
+                    Self::log_committed(&self.log_id, &current_dag_round, &committed);
                     prev_point = new_prev_point;
                     produce_own_point = next_dag_round.round() == collector_upd.next_round();
                     self.collector = collector_upd;
@@ -246,6 +236,36 @@ impl Engine {
                     panic!("{}", msg)
                 }
             }
+        }
+    }
+
+    fn log_committed(
+        log_id: &String,
+        current_dag_round: &DagRound,
+        committed: &Vec<(Arc<Point>, Vec<Arc<Point>>)>,
+    ) {
+        if committed.is_empty() {
+            return;
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            let committed = committed
+                .into_iter()
+                .map(|(anchor, history)| {
+                    let history = history
+                        .iter()
+                        .map(|point| format!("{:?}", point.id().ugly()))
+                        .join(", ");
+                    format!(
+                        "anchor {:?} time {} : [ {history} ]",
+                        anchor.id().ugly(),
+                        anchor.body.time
+                    )
+                })
+                .join("  ;  ");
+            tracing::info!(
+                "{log_id} @ {:?} committed {committed}",
+                current_dag_round.round(),
+            );
         }
     }
 }

@@ -141,7 +141,7 @@ impl Verifier {
         for (author, digest, dag_round) in linked_with_round {
             // skip self links
             if dag_round.round() < &point.body.location.round {
-                // will add the same point from direct dependencies twice,
+                // TODO will add the same point from direct dependencies twice,
                 // we can do better but nothing terrible
                 Self::add_dependency(
                     &author,
@@ -256,12 +256,16 @@ impl Verifier {
                     }
                     if valid_point_id == anchor_proof_id && point.body.time < valid.point.body.time
                     {
-                        // Any point that (in)directly includes anchor candidate through its proof
+                        // Any point that includes anchor candidate through its proof
                         // must provide the time not less than candidate's to maintain
                         // non-decreasing time in committed anchor chain.
                         // The time of candidate's valid proof exactly satisfies such requirement:
-                        // it either will be signed by majority (what unblocks the commit trigger),
+                        // it either will be signed by majority (that unblocks the commit trigger),
                         // or the valid trigger will not be created.
+                        // FIXME better use the time from the proven anchor candidate -
+                        //   though it's an additional dependency during validation,
+                        //   it is proven and can't be manipulated
+                        //   (i.e. do not rely on anything unless 2F+1 signatures provided)
                         return DagPoint::Invalid(point.clone());
                     }
                 }

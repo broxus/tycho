@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -10,14 +12,16 @@ pub type BlockStuffAug = WithArchiveData<BlockStuff>;
 
 /// Deserialized block.
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct BlockStuff {
-    id: BlockId,
-    block: Block,
+    inner: Arc<Inner>,
 }
 
 impl BlockStuff {
     pub fn with_block(id: BlockId, block: Block) -> Self {
-        Self { id, block }
+        Self {
+            inner: Arc::new(Inner { id, block }),
+        }
     }
 
     pub fn deserialize_checked(id: BlockId, data: &[u8]) -> Result<Self> {
@@ -38,7 +42,9 @@ impl BlockStuff {
         );
 
         let block = root.parse::<Block>()?;
-        Ok(Self { id, block })
+        Ok(Self {
+            inner: Arc::new(Inner { id, block }),
+        })
     }
 
     pub fn with_archive_data(self, data: &[u8]) -> WithArchiveData<Self> {
@@ -46,19 +52,19 @@ impl BlockStuff {
     }
 
     pub fn id(&self) -> &BlockId {
-        &self.id
+        &self.inner.id
     }
 
     pub fn block(&self) -> &Block {
-        &self.block
+        &self.inner.block
     }
 
     pub fn into_block(self) -> Block {
-        self.block
+        self.inner.block.clone()
     }
 
     pub fn construct_prev_id(&self) -> Result<(BlockId, Option<BlockId>)> {
-        let header = self.block.load_info()?;
+        let header = self.inner.block.load_info()?;
         match header.load_prev_ref()? {
             PrevBlockRef::Single(prev) => {
                 let shard = if header.after_split {
@@ -103,8 +109,12 @@ impl BlockStuff {
         }
     }
 
+    pub fn load_info(&self) -> Result<BlockInfo> {
+        self.inner.block.load_info().map_err(Into::into)
+    }
+
     pub fn load_custom(&self) -> Result<McBlockExtra> {
-        let Some(data) = self.block.load_extra()?.load_custom()? else {
+        let Some(data) = self.inner.block.load_extra()?.load_custom()? else {
             anyhow::bail!("given block is not a master block");
         };
         Ok(data)
@@ -125,4 +135,9 @@ impl BlockStuff {
             .map(|id| id.map(|id| (id.shard, id.seqno)).map_err(From::from))
             .collect()
     }
+}
+
+struct Inner {
+    id: BlockId,
+    block: Block,
 }

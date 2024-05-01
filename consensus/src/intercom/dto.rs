@@ -6,17 +6,6 @@ use crate::models::{Point, Signature};
 pub struct PointByIdResponse(pub Option<Point>);
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
-pub enum BroadcastResponse {
-    /// peer will verify and maybe sign the point
-    Accepted,
-    // TimeOut (disconnect) is a reason to retry also
-    /// peer did not reach the point's round yet
-    TryLater,
-    /// malformed point or peer is on a later round
-    Rejected,
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum SignatureResponse {
     Signature(Signature),
     /// peer dropped its state or just reached point's round

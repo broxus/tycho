@@ -11,31 +11,27 @@ use tokio::sync::{broadcast, watch};
 use tokio::time::error::Elapsed;
 
 use tycho_network::PeerId;
-use tycho_util::FastHashMap;
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::{DagRound, Verifier, WeakDagRound};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{DagPoint, NodeCount, PointId};
+use crate::models::{DagPoint, NodeCount, PointId, Ugly};
 
 type DownloadResult = anyhow::Result<PointByIdResponse>;
 
 #[derive(Clone)]
 pub struct Downloader {
-    local_id: Arc<String>,
+    log_id: Arc<String>,
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
 }
 
 impl Downloader {
-    pub fn new(
-        local_id: Arc<String>,
-        dispatcher: &Dispatcher,
-        peer_schedule: &PeerSchedule,
-    ) -> Self {
+    pub fn new(log_id: Arc<String>, dispatcher: &Dispatcher, peer_schedule: &PeerSchedule) -> Self {
         Self {
-            local_id,
+            log_id,
             peer_schedule: peer_schedule.clone(),
             dispatcher: dispatcher.clone(),
         }
@@ -56,20 +52,34 @@ impl Downloader {
             "point and DAG round mismatch"
         );
         // request point from its signers (any dependant is among them as point is already verified)
-        let all_peers = self.peer_schedule.peers_for(&point_round.round().next());
+        let mut all_peers = self
+            .peer_schedule
+            .peers_for(&point_round.round().next())
+            .iter()
+            .map(|(peer_id, state)| (*peer_id, *state))
+            .collect::<FastHashMap<PeerId, PeerState>>();
         let Ok(node_count) = NodeCount::try_from(all_peers.len()) else {
             return DagPoint::NotExists(Arc::new(point_id));
         };
         // query author no matter if it is in the next round, but that can't affect 3F+1
-        let all_peers = iter::once((point_id.location.author, PeerState::Resolved))
-            // overwrite author's entry if it isn't really resolved;
-            .chain(all_peers.iter().map(|(peer_id, state)| (*peer_id, *state)))
-            .collect::<FastHashMap<PeerId, PeerState>>();
+        let completed = if all_peers.contains_key(&point_id.location.author) {
+            0
+        } else if self
+            .peer_schedule
+            .all_resolved()
+            .contains(&point_id.location.author)
+        {
+            all_peers.insert(point_id.location.author, PeerState::Resolved);
+            -1
+        } else {
+            0
+        };
         if all_peers.is_empty() {
             return DagPoint::NotExists(Arc::new(point_id));
         };
-        let mut priorities = vec![dependant, point_id.location.author];
-        priorities.dedup();
+        let mandatory = iter::once(dependant)
+            .chain(iter::once(point_id.location.author))
+            .collect();
         let (has_resolved_tx, has_resolved_rx) = watch::channel(false);
         DownloadTask {
             weak_dag_round: point_round.as_weak(),
@@ -80,11 +90,13 @@ impl Downloader {
             has_resolved_tx,
             has_resolved_rx,
             in_flight: FuturesUnordered::new(),
+            completed,
+            mandatory,
             all_peers,
             parent: self,
             attempt: 0,
         }
-        .run(&priorities)
+        .run()
         .await
     }
 }
@@ -99,20 +111,22 @@ struct DownloadTask {
     point_id: PointId,
 
     all_peers: FastHashMap<PeerId, PeerState>,
+    mandatory: FastHashSet<PeerId>,
     updates: broadcast::Receiver<(PeerId, PeerState)>,
     has_resolved_tx: watch::Sender<bool>,
     has_resolved_rx: watch::Receiver<bool>,
     in_flight: FuturesUnordered<
         BoxFuture<'static, (PeerId, Result<anyhow::Result<PointByIdResponse>, Elapsed>)>,
     >,
+    completed: i16,
     attempt: u8,
 }
 
 impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
-    pub async fn run(mut self, priorities: &Vec<PeerId>) -> DagPoint {
-        self.download_priorities(priorities);
+    pub async fn run(mut self) -> DagPoint {
+        self.download_mandatory();
         self.download();
         loop {
             tokio::select! {
@@ -126,18 +140,20 @@ impl DownloadTask {
         }
     }
 
-    fn download_priorities(&mut self, priorities: &Vec<PeerId>) {
-        let priorities = priorities
-            .into_iter()
+    fn download_mandatory(&mut self) {
+        let mandatory = self
+            .mandatory
+            .iter()
             .filter(|p| {
                 self.all_peers
                     .get(p)
                     .map_or(false, |&s| s == PeerState::Resolved)
             })
+            .cloned()
             .collect::<Vec<_>>();
-        for resolved_priority in priorities {
-            self.all_peers.remove_entry(resolved_priority);
-            self.download_one(resolved_priority);
+        for peer_id in mandatory {
+            self.all_peers.remove_entry(&peer_id);
+            self.download_one(&peer_id);
         }
     }
 
@@ -145,7 +161,8 @@ impl DownloadTask {
         self.attempt += 1;
         let count = (MempoolConfig::DOWNLOAD_PEERS as usize)
             .saturating_pow(self.attempt as u32)
-            .saturating_sub(self.in_flight.len());
+            .saturating_sub(self.in_flight.len())
+            .max(self.all_peers.len());
 
         for peer_id in self
             .all_peers
@@ -168,7 +185,7 @@ impl DownloadTask {
                 MempoolConfig::DOWNLOAD_TIMEOUT,
                 self.parent
                     .dispatcher
-                    .request::<PointByIdResponse>(&peer_id, &self.request),
+                    .query::<PointByIdResponse>(&peer_id, &self.request),
             )
             .map(move |result| (peer_id, result.map(|(_, r)| r)))
             .boxed(),
@@ -181,33 +198,89 @@ impl DownloadTask {
         resolved: Result<anyhow::Result<PointByIdResponse>, Elapsed>,
     ) -> Option<DagPoint> {
         match resolved {
-            Err(_timeout) => _ = self.all_peers.remove(&peer_id),
-            Ok(Err(_network_err)) => _ = self.all_peers.remove(&peer_id),
-            Ok(Ok(PointByIdResponse(None))) => _ = self.all_peers.remove(&peer_id),
+            Err(_timeout) => {
+                tracing::error!("{} : {peer_id:.4?} timed out", self.parent.log_id);
+            }
+            Ok(Err(network_err)) => {
+                tracing::error!(
+                    "{} : {peer_id:.4?} network error: {network_err}",
+                    self.parent.log_id
+                );
+            }
+            Ok(Ok(PointByIdResponse(None))) => {
+                if self.mandatory.remove(&peer_id) {
+                    // it's a ban
+                    tracing::error!(
+                        "{} : {peer_id:.4?} must have returned {:?}",
+                        self.parent.log_id,
+                        self.point_id.ugly()
+                    );
+                } else {
+                    tracing::debug!(
+                        "{} : {peer_id:.4?} didn't return {:?}",
+                        self.parent.log_id,
+                        self.point_id.ugly()
+                    );
+                }
+            }
             Ok(Ok(PointByIdResponse(Some(point)))) => {
                 if point.id() != self.point_id {
-                    _ = self.all_peers.remove(&peer_id);
+                    // it's a ban
+                    tracing::error!(
+                        "{} : {peer_id:.4?} returned wrong point",
+                        self.parent.log_id
+                    );
                 }
                 let Some(dag_round) = self.weak_dag_round.get() else {
-                    // no more retries, too late;
+                    tracing::warn!(
+                        "{} : {peer_id:.4?} no more retries, local DAG moved far forward",
+                        self.parent.log_id
+                    );
                     // DAG could not have moved if this point was needed for commit
                     return Some(DagPoint::NotExists(Arc::new(self.point_id.clone())));
                 };
                 let point = Arc::new(point);
                 match Verifier::verify(&point, &self.parent.peer_schedule) {
                     Ok(()) => {
-                        return Some(
-                            Verifier::validate(point, dag_round, self.parent.clone()).await,
-                        )
+                        let validated =
+                            Verifier::validate(point, dag_round, self.parent.clone()).await;
+                        if validated.trusted().is_some() {
+                            tracing::debug!(
+                                "{} : downloaded dependency {:?}",
+                                self.parent.log_id,
+                                validated.ugly()
+                            )
+                        } else {
+                            tracing::error!(
+                                "{} : downloaded dependency validated as {:?}",
+                                self.parent.log_id,
+                                validated.ugly()
+                            )
+                        }
+                        return Some(validated);
                     }
-                    Err(invalid @ DagPoint::Invalid(_)) => return Some(invalid),
-                    Err(_not_exists) => _ = self.all_peers.remove(&peer_id), // ain't reliable peer
+                    Err(invalid @ DagPoint::Invalid(_)) => {
+                        tracing::error!(
+                            "{} : downloaded dependency {:?}",
+                            self.parent.log_id,
+                            invalid.ugly()
+                        );
+                        return Some(invalid);
+                    }
+                    Err(_not_exists) => {
+                        tracing::error!(
+                            "{} : downloaded dependency {:?}, peer is not reliable",
+                            self.parent.log_id,
+                            _not_exists.ugly()
+                        );
+                    }
                 }
             }
         };
-        // the point does not exist when only 1F left unqeried,
+        // the point does not exist when only 1F left unqueried,
         // assuming author and dependant are queried or unavailable
-        if self.all_peers.len() < self.node_count.reliable_minority() {
+        self.completed += 1;
+        if self.completed >= self.node_count.majority() as i16 {
             return Some(DagPoint::NotExists(Arc::new(self.point_id.clone())));
         }
         if self.in_flight.is_empty() {

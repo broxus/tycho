@@ -32,8 +32,8 @@ impl NodeCount {
         // assuming the least possible amount of nodes is not in validator set
         let one_f = (total_peers + 1) / 3;
         assert!(
-            u8::try_from(one_f).is_ok(),
-            "node count 1F={one_f} overflows u8 after scaling {total_peers} up to 3F+1"
+            u8::try_from(one_f * 3 + 1).is_ok(),
+            "node count 3F+1={one_f} overflows u8 after ceiling {total_peers}"
         );
         NodeCount(one_f as u8)
     }

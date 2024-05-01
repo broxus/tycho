@@ -54,7 +54,12 @@ impl DagLocation {
         match self.versions.entry(digest.clone()) {
             btree_map::Entry::Occupied(entry) => entry.get().clone(),
             btree_map::Entry::Vacant(entry) => {
-                entry.insert(Shared::new(JoinTask::new(init()))).clone()
+                let state = self.state.clone();
+                entry
+                    .insert(Shared::new(JoinTask::new(
+                        init().inspect(move |dag_point| state.init(dag_point)),
+                    )))
+                    .clone()
             }
         }
     }
@@ -155,6 +160,14 @@ impl InclusionState {
         self.0.get().map(|signable| &signable.first_completed)
     }
 }
+
+// Todo actually we are not interested in the round of making a signature,
+//   but a round of the first (and only) reference.
+//   Since the single version of a point is decided as eligible for signature (trusted),
+//   it may be included immediately; no need to include it twice.
+//   One cannot include point with the time lesser than the proven anchor candidate -
+//   and that's all for the global time sequence, i.e. any node with a great time skew
+//   can produce points to be included and committed, but cannot accomplish leader's requirements.
 #[derive(Debug)]
 pub struct Signable {
     first_completed: DagPoint,
@@ -193,7 +206,7 @@ impl Signable {
         }
         this_call_signed
     }
-    pub fn reject(&self) {
+    fn reject(&self) {
         _ = self.signed.set(Err(()));
     }
     fn is_completed(&self) -> bool {

@@ -1,5 +1,5 @@
 use std::borrow::Borrow;
-use std::collections::BTreeSet;
+use std::collections::{hash_map, BTreeSet};
 use std::convert::TryInto;
 use std::hash::Hash;
 use std::ops::{Bound, RangeBounds};
@@ -7,31 +7,45 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::models::*;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::{
-    make_archive_entry, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier, GetFileName,
+    make_archive_entry, ArchiveData, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier,
+    GetFileName, WithArchiveData,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
+use tycho_util::FastHashMap;
 
 use crate::db::*;
 use crate::util::*;
-use crate::{models::*, BlockHandleStorage, HandleCreationStatus};
+use crate::{
+    models::*, BlockConnection, BlockConnectionStorage, BlockHandleStorage, HandleCreationStatus,
+};
 
 pub struct BlockStorage {
     db: Arc<Db>,
     block_handle_storage: Arc<BlockHandleStorage>,
+    block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
+    block_subscriptions: Mutex<FastHashMap<BlockId, Vec<BlockTx>>>,
+    block_subscriptions_lock: tokio::sync::Mutex<()>,
 }
 
 impl BlockStorage {
-    pub fn new(db: Arc<Db>, block_handle_storage: Arc<BlockHandleStorage>) -> Result<Self> {
+    pub fn new(
+        db: Arc<Db>,
+        block_handle_storage: Arc<BlockHandleStorage>,
+        block_connection_storage: Arc<BlockConnectionStorage>,
+    ) -> Result<Self> {
         let manager = Self {
             db,
             block_handle_storage,
+            block_connection_storage,
             archive_ids: Default::default(),
+            block_subscriptions: Default::default(),
+            block_subscriptions_lock: Default::default(),
         };
 
         manager.preload()?;
@@ -71,28 +85,48 @@ impl BlockStorage {
 
     pub async fn store_block_data(
         &self,
-        block: &BlockStuffAug,
+        block: &BlockStuff,
+        archive_data: &ArchiveData,
         meta_data: BlockMetaData,
     ) -> Result<StoreBlockResult> {
+        let _lock = self.block_subscriptions_lock.lock().await;
+
         let block_id = block.id();
         let (handle, status) = self
             .block_handle_storage
-            .create_or_load_handle(block_id, meta_data)?;
+            .create_or_load_handle(block_id, meta_data);
 
         let archive_id = ArchiveEntryId::Block(block_id);
         let mut updated = false;
         if !handle.meta().has_data() {
-            let data = block.new_archive_data()?;
+            let data = archive_data.as_new_archive_data()?;
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.meta().has_data() {
                 self.add_data(&archive_id, data)?;
                 if handle.meta().set_has_data() {
-                    self.block_handle_storage.store_handle(&handle)?;
+                    self.block_handle_storage.store_handle(&handle);
                     updated = true;
                 }
             }
         }
+
+        self.block_subscriptions
+            .lock()
+            .retain(|block_id, subscribers| {
+                if block.id() == block_id {
+                    while let Some(tx) = subscribers.pop() {
+                        tx.send(WithArchiveData {
+                            data: block.clone(),
+                            archive_data: archive_data.clone(),
+                        })
+                        .ok();
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
 
         Ok(StoreBlockResult {
             handle,
@@ -139,20 +173,20 @@ impl BlockStorage {
             BlockProofHandle::Existing(handle) => (handle, HandleCreationStatus::Fetched),
             BlockProofHandle::New(meta_data) => self
                 .block_handle_storage
-                .create_or_load_handle(block_id, meta_data)?,
+                .create_or_load_handle(block_id, meta_data),
         };
 
         let mut updated = false;
         if proof.is_link() {
             let archive_id = ArchiveEntryId::ProofLink(block_id);
             if !handle.meta().has_proof_link() {
-                let data = proof.new_archive_data()?;
+                let data = proof.as_new_archive_data()?;
 
                 let _lock = handle.proof_data_lock().write().await;
                 if !handle.meta().has_proof_link() {
                     self.add_data(&archive_id, data)?;
                     if handle.meta().set_has_proof_link() {
-                        self.block_handle_storage.store_handle(&handle)?;
+                        self.block_handle_storage.store_handle(&handle);
                         updated = true;
                     }
                 }
@@ -160,13 +194,13 @@ impl BlockStorage {
         } else {
             let archive_id = ArchiveEntryId::Proof(block_id);
             if !handle.meta().has_proof() {
-                let data = proof.new_archive_data()?;
+                let data = proof.as_new_archive_data()?;
 
                 let _lock = handle.proof_data_lock().write().await;
                 if !handle.meta().has_proof() {
                     self.add_data(&archive_id, data)?;
                     if handle.meta().set_has_proof() {
-                        self.block_handle_storage.store_handle(&handle)?;
+                        self.block_handle_storage.store_handle(&handle);
                         updated = true;
                     }
                 }
@@ -463,10 +497,10 @@ impl BlockStorage {
         let target_block = match gc_type {
             BlocksGcKind::BeforePreviousKeyBlock => self
                 .block_handle_storage
-                .find_prev_key_block(key_block_id.seqno)?,
+                .find_prev_key_block(key_block_id.seqno),
             BlocksGcKind::BeforePreviousPersistentState => self
                 .block_handle_storage
-                .find_prev_persistent_key_block(key_block_id.seqno)?,
+                .find_prev_persistent_key_block(key_block_id.seqno),
         };
 
         // Load target block data
@@ -567,6 +601,72 @@ impl BlockStorage {
 
         tracing::info!("archives GC: done");
         Ok(())
+    }
+
+    pub async fn subscribe_to_block(&self, block_id: BlockId) -> Result<BlockRx> {
+        let block_handle_storage = &self.block_handle_storage;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let lock = self.block_subscriptions_lock.lock().await;
+        match block_handle_storage.load_handle(&block_id) {
+            Some(handle) if handle.meta().has_data() => {
+                drop(lock);
+
+                let block = self.load_block_data(&handle).await?;
+                tx.send(BlockStuffAug::loaded(block)).ok();
+            }
+            _ => {
+                self.add_block_subscription(block_id, tx);
+            }
+        }
+
+        Ok(rx)
+    }
+
+    pub async fn subscribe_to_next_block(&self, prev_block_id: BlockId) -> Result<BlockRx> {
+        let block_handle_storage = &self.block_handle_storage;
+        let block_connection_storage = &self.block_connection_storage;
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        let lock = self.block_subscriptions_lock.lock().await;
+        let next_block_id = match block_handle_storage.load_handle(&prev_block_id) {
+            Some(handle) if handle.meta().has_next1() => block_connection_storage
+                .load_connection(&prev_block_id, BlockConnection::Next1)
+                .context("connection no found")?,
+            _ => {
+                self.add_block_subscription(prev_block_id, tx);
+                return Ok(rx);
+            }
+        };
+
+        match block_handle_storage.load_handle(&next_block_id) {
+            Some(handle) if handle.meta().has_data() => {
+                drop(lock);
+
+                let block = self.load_block_data(&handle).await?;
+                tx.send(BlockStuffAug::loaded(block)).ok();
+            }
+            _ => {
+                self.add_block_subscription(prev_block_id, tx);
+            }
+        }
+
+        Ok(rx)
+    }
+
+    fn add_block_subscription(&self, block_id: BlockId, tx: BlockTx) {
+        let mut block_subscriptions = self.block_subscriptions.lock();
+        match block_subscriptions.entry(block_id) {
+            hash_map::Entry::Occupied(mut entry) => {
+                let sibscribers = entry.get_mut();
+                sibscribers.push(tx);
+            }
+            hash_map::Entry::Vacant(entry) => {
+                entry.insert(vec![tx]);
+            }
+        }
     }
 
     fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
@@ -671,12 +771,12 @@ pub enum BlocksGcKind {
 
 #[derive(Clone)]
 pub enum BlockProofHandle {
-    Existing(Arc<BlockHandle>),
+    Existing(BlockHandle),
     New(BlockMetaData),
 }
 
-impl From<Arc<BlockHandle>> for BlockProofHandle {
-    fn from(handle: Arc<BlockHandle>) -> Self {
+impl From<BlockHandle> for BlockProofHandle {
+    fn from(handle: BlockHandle) -> Self {
         Self::Existing(handle)
     }
 }
@@ -688,7 +788,7 @@ impl From<BlockMetaData> for BlockProofHandle {
 }
 
 pub struct StoreBlockResult {
-    pub handle: Arc<BlockHandle>,
+    pub handle: BlockHandle,
     pub updated: bool,
     pub new: bool,
 }
@@ -723,8 +823,7 @@ fn remove_blocks(
         };
 
         // Read only prefix with shard ident and seqno
-        let BlockIdShort { shard, seqno } =
-            BlockIdShort::deserialize(&mut std::convert::identity(key))?;
+        let BlockIdShort { shard, seqno } = BlockIdShort::from_slice(key);
 
         // Don't gc latest blocks
         if top_blocks.contains_shard_seqno(&shard, seqno) {
@@ -808,6 +907,9 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 pub const ARCHIVE_SLICE_SIZE: u32 = 20_000;
+
+type BlockRx = tokio::sync::oneshot::Receiver<BlockStuffAug>;
+type BlockTx = tokio::sync::oneshot::Sender<BlockStuffAug>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {

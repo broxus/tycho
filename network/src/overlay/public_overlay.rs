@@ -91,6 +91,7 @@ impl PublicOverlayBuilder {
                 entries: RwLock::new(entries),
                 entries_added: Notify::new(),
                 entries_changed: Notify::new(),
+                entries_removed: Notify::new(),
                 entry_count: AtomicUsize::new(0),
                 banned_peer_ids: self.banned_peer_ids,
                 service: service.boxed(),
@@ -120,6 +121,10 @@ impl PublicOverlay {
     #[inline]
     pub fn overlay_id(&self) -> &OverlayId {
         &self.inner.overlay_id
+    }
+
+    pub fn entry_ttl_sec(&self) -> u32 {
+        self.inner.entry_ttl_sec
     }
 
     pub async fn query(
@@ -170,6 +175,10 @@ impl PublicOverlay {
     /// Notifies when entries are updated in the overlay (added or updated).
     pub fn entries_changed(&self) -> &Notify {
         &self.inner.entries_changed
+    }
+
+    pub fn entries_removed(&self) -> &Notify {
+        &self.inner.entries_removed
     }
 
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
@@ -300,11 +309,18 @@ impl PublicOverlay {
     pub(crate) fn remove_invalid_entries(&self, now: u32) {
         let this = self.inner.as_ref();
 
+        let mut should_notify = false;
         let mut entries = this.entries.write();
         entries.retain(|item| {
-            !item.entry.is_expired(now, this.entry_ttl_sec)
-                && !this.banned_peer_ids.contains(&item.entry.peer_id)
+            let retain = !item.entry.is_expired(now, this.entry_ttl_sec)
+                && !this.banned_peer_ids.contains(&item.entry.peer_id);
+            should_notify |= !retain;
+            retain
         });
+
+        if should_notify {
+            self.inner.entries_removed.notify_waiters();
+        }
     }
 
     fn prepend_prefix_to_body(&self, body: &mut Bytes) {
@@ -334,6 +350,7 @@ struct Inner {
     entry_count: AtomicUsize,
     entries_added: Notify,
     entries_changed: Notify,
+    entries_removed: Notify,
     banned_peer_ids: FastDashSet<PeerId>,
     service: BoxService<ServiceRequest, Response>,
     request_prefix: Box<[u8]>,
@@ -456,6 +473,16 @@ impl PublicOverlayEntries {
 pub struct PublicOverlayEntryData {
     pub entry: Arc<PublicEntry>,
     pub resolver_handle: PeerResolverHandle,
+}
+
+impl PublicOverlayEntryData {
+    pub fn is_expired(&self, now: u32, ttl: u32) -> bool {
+        self.entry.is_expired(now, ttl)
+    }
+
+    pub fn expires_at(&self, ttl: u32) -> u32 {
+        self.entry.created_at.saturating_add(ttl)
+    }
 }
 
 pub struct PublicOverlayEntriesReadGuard<'a> {
