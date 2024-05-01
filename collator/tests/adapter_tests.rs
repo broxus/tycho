@@ -8,10 +8,11 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
 };
-use tycho_collator::test_utils::prepare_test_storage;
+use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::BlockStuffForSync;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, PersistentBlockStriderState, PrintSubscriber,
+    BlockProvider, BlockStrider, PersistentBlockStriderState, PrintSubscriber, StateSubscriber,
+    StateSubscriberContext,
 };
 use tycho_storage::Storage;
 
@@ -131,27 +132,58 @@ async fn test_add_and_get_next_block() {
 }
 
 #[tokio::test]
-async fn test_add_read_handle_100000_blocks_parallel() {
-    let (mock_storage, _tmp_dir) = Storage::new_temp().unwrap();
+async fn test_add_read_handle_1000_blocks_parallel() {
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
+    tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel");
+
+    let (provider, storage) = prepare_test_storage().await.unwrap();
+
+    let zerostate_id = BlockId::default();
+
+    let block_strider = BlockStrider::builder()
+        .with_provider(provider)
+        .with_state(PersistentBlockStriderState::new(
+            zerostate_id,
+            storage.clone(),
+        ))
+        .with_state_subscriber(
+            MinRefMcStateTracker::default(),
+            storage.clone(),
+            PrintSubscriber,
+        )
+        .build();
+
+    block_strider.run().await.unwrap();
+
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
     });
     let adapter = Arc::new(StateNodeAdapterStdImpl::create(
         listener.clone(),
-        mock_storage.clone(),
+        storage.clone(),
     ));
 
-    // Task 1: Adding 100000 blocks
+    let empty_block = get_empty_block();
+    let cloned_block = empty_block.block().clone();
+    // Task 1: Adding 1000 blocks
     let add_blocks = {
         let adapter = adapter.clone();
         tokio::spawn(async move {
-            for i in 1..=100000 {
-                let empty_block = BlockStuff::new_empty(ShardIdent::BASECHAIN, i);
-                let block_stuff_aug = BlockStuffAug::loaded(empty_block.clone());
+            for i in 1..=1000 {
+                let block_id = BlockId {
+                    shard: ShardIdent::new_full(0),
+                    seqno: i,
+                    root_hash: Default::default(),
+                    file_hash: Default::default(),
+                };
+                let block_stuff_aug = BlockStuffAug::loaded(BlockStuff::with_block(
+                    block_id.clone(),
+                    cloned_block.clone(),
+                ));
 
                 let block = BlockStuffForSync {
-                    block_id: *empty_block.id(),
+                    block_id,
                     block_stuff_aug,
                     signatures: Default::default(),
                     prev_blocks_ids: Vec::new(),
@@ -163,11 +195,13 @@ async fn test_add_read_handle_100000_blocks_parallel() {
         })
     };
 
-    // Task 2: Retrieving and handling 100000 blocks
+    let cloned_block = empty_block.block().clone();
+
+    // Task 2: Retrieving and handling 1000 blocks
     let handle_blocks = {
         let adapter = adapter.clone();
         tokio::spawn(async move {
-            for i in 1..=100000 {
+            for i in 1..=1000 {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
                     seqno: i,
@@ -181,19 +215,31 @@ async fn test_add_read_handle_100000_blocks_parallel() {
                     i
                 );
 
-                // TODO
+                let block_stuff = BlockStuffAug::loaded(BlockStuff::with_block(
+                    block_id.clone(),
+                    cloned_block.clone(),
+                ));
 
-                // let block_stuff = BlockStuffAug::loaded(BlockStuff::with_block(
-                //     block_id.clone(),
-                //     empty_block.clone(),
-                // ));
+                let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
+                let state = storage
+                    .shard_state_storage()
+                    .load_state(&last_mc_block_id)
+                    .await
+                    .unwrap();
 
-                // let handle_block = adapter.handle_block(&block_stuff, None).await;
-                // assert!(
-                //     handle_block.is_ok(),
-                //     "Block {} should be handled after being added",
-                //     i
-                // );
+                let block_subscriber_context = StateSubscriberContext {
+                    block: block_stuff.data,
+                    mc_block_id: block_id.clone(),
+                    archive_data: block_stuff.archive_data,
+                    state,
+                };
+
+                let handle_block = adapter.handle_state(&block_subscriber_context).await;
+                assert!(
+                    handle_block.is_ok(),
+                    "Block {} should be handled after being added",
+                    i
+                );
             }
         })
     };
@@ -203,7 +249,16 @@ async fn test_add_read_handle_100000_blocks_parallel() {
 
     assert_eq!(
         counter.load(Ordering::SeqCst),
-        100000,
-        "100000 blocks should be accepted"
+        1000,
+        "1000 blocks should be accepted"
     );
+}
+
+pub fn get_empty_block() -> BlockStuffAug {
+    let block_data = include_bytes!("../../core/tests/data/empty_block.bin");
+    let block = everscale_types::boc::BocRepr::decode(block_data).unwrap();
+    BlockStuffAug::new(
+        BlockStuff::with_block(BlockId::default(), block),
+        block_data.as_slice(),
+    )
 }

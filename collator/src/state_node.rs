@@ -19,8 +19,8 @@ use crate::types::BlockStuffForSync;
 
 #[allow(private_bounds, private_interfaces)]
 pub trait StateNodeAdapterBuilder<T>
-where
-    T: StateNodeAdapter,
+    where
+        T: StateNodeAdapter,
 {
     fn new(storage: Storage) -> Self;
     fn build(self, listener: Arc<dyn StateNodeEventListener>) -> T;
@@ -142,16 +142,25 @@ impl StateSubscriber for StateNodeAdapterStdImpl {
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {:?}", cx.block.id());
         let block_id = *cx.block.id();
-        let shard = block_id.shard;
-        let seqno = block_id.seqno;
 
         let blocks_lock = self.blocks.clone();
         let listener = self.listener.clone();
+        let blocks_mapping = self.blocks_mapping.lock();
 
         Box::pin(async move {
-            let mut blocks_guard = blocks_lock.lock().await;
             let mut to_split = Vec::new();
             let mut to_remove = Vec::new();
+
+            let mut block_mapping_guard = blocks_mapping.await;
+            let block_id = match block_mapping_guard.remove(&block_id) {
+                None => block_id,
+                Some(some) => some.clone(),
+            };
+
+            let shard = block_id.shard;
+            let seqno = block_id.seqno;
+
+            let mut blocks_guard = blocks_lock.lock().await;
 
             let result_future = if let Some(shard_blocks) = blocks_guard.get(&shard) {
                 if let Some(block_data) = shard_blocks.get(&seqno) {
