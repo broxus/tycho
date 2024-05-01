@@ -17,29 +17,6 @@ use tycho_storage::{BlockHandle, Storage};
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
 
-#[allow(private_bounds, private_interfaces)]
-pub trait StateNodeAdapterBuilder<T>
-    where
-        T: StateNodeAdapter,
-{
-    fn new(storage: Storage) -> Self;
-    fn build(self, listener: Arc<dyn StateNodeEventListener>) -> T;
-}
-
-pub struct StateNodeAdapterBuilderStdImpl {
-    pub storage: Storage,
-}
-
-impl StateNodeAdapterBuilder<StateNodeAdapterStdImpl> for StateNodeAdapterBuilderStdImpl {
-    fn new(storage: Storage) -> Self {
-        Self { storage }
-    }
-    #[allow(private_interfaces)]
-    fn build(self, listener: Arc<dyn StateNodeEventListener>) -> StateNodeAdapterStdImpl {
-        StateNodeAdapterStdImpl::create(listener, self.storage)
-    }
-}
-
 #[async_trait]
 pub trait StateNodeEventListener: Send + Sync {
     /// When our collated block was accepted and applied in state node

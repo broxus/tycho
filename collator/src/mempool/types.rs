@@ -11,6 +11,7 @@ pub(crate) struct MempoolAnchor {
     chain_time: u64,
     externals: Vec<Arc<OwnedMessage>>,
 }
+
 impl MempoolAnchor {
     pub fn new(id: MempoolAnchorId, chain_time: u64, externals: Vec<Arc<OwnedMessage>>) -> Self {
         Self {
@@ -19,18 +20,23 @@ impl MempoolAnchor {
             externals,
         }
     }
+
     pub fn id(&self) -> MempoolAnchorId {
         self.id
     }
+
     pub fn chain_time(&self) -> u64 {
         self.chain_time
     }
+
     pub fn externals_count(&self) -> usize {
         self.externals.len()
     }
+
     pub fn has_externals(&self) -> bool {
         !self.externals.is_empty()
     }
+
     pub fn externals_iterator(
         &self,
         from_idx: usize,

@@ -4,8 +4,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use everscale_types::models::{BlockId, BlockIdShort, BlockInfo, ShardIdent, ValueFlow};
+use futures_util::Future;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
+use crate::collator::collator_processor::{
+    CollatorProcessor, CollatorProcessorFactory, CollatorProcessorContext,
+};
 use crate::{
     mempool::{MempoolAdapter, MempoolAnchor},
     method_to_async_task_closure,
@@ -18,7 +22,38 @@ use crate::{
     },
 };
 
-use super::collator_processor::CollatorProcessor;
+// FACTORY
+
+pub struct CollatorContext {
+    pub config: Arc<CollationConfig>,
+    pub collation_session: Arc<CollationSessionInfo>,
+    pub listener: Arc<dyn CollatorEventListener>,
+    pub shard_id: ShardIdent,
+    pub prev_blocks_ids: Vec<BlockId>,
+    pub mc_state: ShardStateStuff,
+    pub state_tracker: MinRefMcStateTracker,
+}
+
+#[async_trait]
+pub trait CollatorFactory: Send + Sync + 'static {
+    type Collator: Collator;
+
+    async fn start(&self, cx: CollatorContext) -> Self::Collator;
+}
+
+#[async_trait]
+impl<F, FT, R> CollatorFactory for F
+where
+    F: Fn(CollatorContext) -> FT + Send + Sync + 'static,
+    FT: Future<Output = R> + Send + 'static,
+    R: Collator,
+{
+    type Collator = R;
+
+    async fn start(&self, cx: CollatorContext) -> Self::Collator {
+        self(cx).await
+    }
+}
 
 // EVENTS LISTENER
 
@@ -39,22 +74,7 @@ pub(crate) trait CollatorEventListener: Send + Sync {
 // COLLATOR
 
 #[async_trait]
-pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
-    //TODO: use factory that takes CollationManager and creates Collator impl
-
-    /// Create collator, start its tasks queue, and equeue first initialization task
-    async fn start(
-        config: Arc<CollationConfig>,
-        collation_session: Arc<CollationSessionInfo>,
-        listener: Arc<dyn CollatorEventListener>,
-        mq_adapter: Arc<MQ>,
-        mpool_adapter: Arc<MP>,
-        state_node_adapter: Arc<ST>,
-        shard_id: ShardIdent,
-        prev_blocks_ids: Vec<BlockId>,
-        mc_state: ShardStateStuff,
-        state_tracker: MinRefMcStateTracker,
-    ) -> Self;
+pub(crate) trait Collator: Send + Sync + 'static {
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
     /// Enqueue update of McData in working state and run attempt to collate shard block
@@ -72,44 +92,27 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-#[allow(private_bounds)]
-pub(crate) struct CollatorStdImpl<W, MQ, MP, ST>
-where
-    W: CollatorProcessor<MQ, MP, ST>,
-    ST: StateNodeAdapter,
-{
-    collator_descr: Arc<String>,
-
-    _marker_mq_adapter: std::marker::PhantomData<MQ>,
-    _marker_mpool_adapter: std::marker::PhantomData<MP>,
-    _marker_state_node_adapter: std::marker::PhantomData<ST>,
-
-    dispatcher: Arc<AsyncQueuedDispatcher<W, ()>>,
+pub struct CollatorStdFactory<MQ, MP, ST, CPF> {
+    pub mq_adapter: Arc<MQ>,
+    pub mpool_adapter: Arc<MP>,
+    pub state_node_adapter: Arc<ST>,
+    pub collator_processor_factory: CPF,
 }
 
 #[async_trait]
-impl<W, MQ, MP, ST> Collator<MQ, MP, ST> for CollatorStdImpl<W, MQ, MP, ST>
+impl<MQ, MP, ST, CPF> CollatorFactory for CollatorStdFactory<MQ, MP, ST, CPF>
 where
-    W: CollatorProcessor<MQ, MP, ST>,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
+    CPF: CollatorProcessorFactory,
 {
-    async fn start(
-        config: Arc<CollationConfig>,
-        collation_session: Arc<CollationSessionInfo>,
-        listener: Arc<dyn CollatorEventListener>,
-        mq_adapter: Arc<MQ>,
-        mpool_adapter: Arc<MP>,
-        state_node_adapter: Arc<ST>,
-        shard_id: ShardIdent,
-        prev_blocks_ids: Vec<BlockId>,
-        mc_state: ShardStateStuff,
-        state_tracker: MinRefMcStateTracker,
-    ) -> Self {
-        let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
+    type Collator = CollatorStdImpl<CPF::CollatorProcessor>;
+
+    async fn start(&self, cx: CollatorContext) -> Self::Collator {
+        let max_prev_seqno = cx.prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
         let next_block_id = BlockIdShort {
-            shard: shard_id,
+            shard: cx.shard_id,
             seqno: max_prev_seqno + 1,
         };
         let collator_descr = Arc::new(format!("next block: {}", next_block_id));
@@ -121,27 +124,24 @@ where
         let dispatcher = Arc::new(dispatcher);
 
         // create processor and run dispatcher for own tasks queue
-        let processor = W::new(
-            collator_descr.clone(),
-            config,
-            collation_session,
-            dispatcher.clone(),
-            listener,
-            mq_adapter,
-            mpool_adapter,
-            state_node_adapter,
-            shard_id,
-            state_tracker,
-        );
+        let processor = self
+            .collator_processor_factory
+            .build(CollatorProcessorContext {
+                collator_descr,
+                config: cx.config,
+                collation_session: cx.collation_session,
+                dispatcher,
+                listener: cx.listener,
+                shard_id: cx.shard_id,
+                state_tracker: cx.state_tracker,
+            });
+
         AsyncQueuedDispatcher::run(processor, receiver);
         tracing::trace!(target: tracing_targets::COLLATOR, "Tasks queue dispatcher started");
 
         // create instance
-        let res = Self {
+        let res = CollatorStdImpl {
             collator_descr,
-            _marker_mq_adapter: std::marker::PhantomData,
-            _marker_mpool_adapter: std::marker::PhantomData,
-            _marker_state_node_adapter: std::marker::PhantomData,
             dispatcher: dispatcher.clone(),
         };
 
@@ -150,8 +150,8 @@ where
         dispatcher
             .enqueue_task(method_to_async_task_closure!(
                 init,
-                prev_blocks_ids,
-                mc_state
+                cx.prev_blocks_ids,
+                cx.mc_state
             ))
             .await
             .expect("task receiver had to be not closed or dropped here");
@@ -161,7 +161,16 @@ where
 
         res
     }
+}
 
+#[allow(private_bounds)]
+pub(crate) struct CollatorStdImpl<W> {
+    collator_descr: Arc<String>,
+    dispatcher: Arc<AsyncQueuedDispatcher<W, ()>>,
+}
+
+#[async_trait]
+impl<W: CollatorProcessor> Collator for CollatorStdImpl<W> {
     async fn equeue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
         todo!()
     }

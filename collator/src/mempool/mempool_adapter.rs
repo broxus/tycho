@@ -40,10 +40,6 @@ pub(crate) trait MempoolEventListener: Send + Sync {
 
 #[async_trait]
 pub(crate) trait MempoolAdapter: Send + Sync + 'static {
-    /// Create an adapter, that connects to mempool then starts to listen mempool for new anchors,
-    /// and handles requests to mempool from the collation process
-    fn create(listener: Arc<dyn MempoolEventListener>) -> Self;
-
     /// Schedule task to process new master block state (may perform gc or nodes rotation)
     async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()>;
 
@@ -74,9 +70,8 @@ pub struct MempoolAdapterStdImpl {
     _stub_anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
 }
 
-#[async_trait]
-impl MempoolAdapter for MempoolAdapterStdImpl {
-    fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
+impl MempoolAdapterStdImpl {
+    pub fn new(listener: Arc<dyn MempoolEventListener>) -> Self {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
         //TODO: make real implementation, currently runs stub task
@@ -121,7 +116,10 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
             _stub_anchors_cache: stub_anchors_cache,
         }
     }
+}
 
+#[async_trait]
+impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         tracing::info!(

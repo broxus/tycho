@@ -11,6 +11,7 @@ use tycho_block_util::{
     state::{MinRefMcStateTracker, ShardStateStuff},
 };
 
+use crate::collator::{CollatorContext, CollatorFactory};
 use crate::{
     collator::Collator,
     mempool::{MempoolAdapter, MempoolAnchor},
@@ -34,27 +35,24 @@ use super::{
     utils::{build_block_stuff_for_sync, find_us_in_collators_set},
 };
 
-pub(super) struct CollationProcessor<C, V, MQ, MP, ST>
+pub(super) struct CollationProcessor<ST, MQ, MP, CF, V>
 where
-    C: Collator<MQ, MP, ST>,
-    V: Validator<ST>,
-    MQ: MessageQueueAdapter,
-    MP: MempoolAdapter,
-    ST: StateNodeAdapter,
+    CF: CollatorFactory,
 {
     config: Arc<CollationConfig>,
 
     dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
-    mpool_adapter: Arc<MP>,
     state_node_adapter: Arc<ST>,
+    mpool_adapter: Arc<MP>,
     mq_adapter: Arc<MQ>,
 
+    collator_factory: CF,
     validator: V,
 
     active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
     collation_sessions_to_finish: HashMap<CollationSessionId, Arc<CollationSessionInfo>>,
-    active_collators: HashMap<ShardIdent, Arc<C>>,
-    collators_to_stop: HashMap<CollationSessionId, Arc<C>>,
+    active_collators: HashMap<ShardIdent, Arc<CF::Collator>>,
+    collators_to_stop: HashMap<CollationSessionId, Arc<CF::Collator>>,
 
     state_tracker: MinRefMcStateTracker,
 
@@ -69,27 +67,30 @@ where
     next_mc_block_chain_time: u64,
 }
 
-impl<C, V, MQ, MP, ST> CollationProcessor<C, V, MQ, MP, ST>
+impl<ST, MQ, MP, CF, V> CollationProcessor<ST, MQ, MP, CF, V>
 where
-    C: Collator<MQ, MP, ST>,
-    V: Validator<ST>,
+    ST: StateNodeAdapter,
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
-    ST: StateNodeAdapter,
+    CF: CollatorFactory,
+    V: Validator,
 {
     pub fn new(
         config: Arc<CollationConfig>,
         dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
-        mpool_adapter: Arc<MP>,
         state_node_adapter: Arc<ST>,
+        mpool_adapter: Arc<MP>,
+        mq_adapter: Arc<MQ>,
         validator: V,
+        collator_factory: CF,
     ) -> Self {
         Self {
             config,
             dispatcher,
-            mpool_adapter,
             state_node_adapter,
-            mq_adapter: Arc::new(MQ::new()),
+            mpool_adapter,
+            mq_adapter,
+            collator_factory,
             validator,
             state_tracker: MinRefMcStateTracker::default(),
             active_collation_sessions: HashMap::new(),
@@ -537,19 +538,18 @@ where
                         "There is no active collator for collation session {}. Will start it",
                         shard_id,
                     );
-                    let collator = C::start(
-                        self.config.clone(),
-                        new_session_info.clone(),
-                        self.dispatcher.clone(),
-                        self.mq_adapter.clone(),
-                        self.mpool_adapter.clone(),
-                        self.state_node_adapter.clone(),
-                        shard_id,
-                        prev_blocks_ids,
-                        mc_state.clone(),
-                        self.state_tracker.clone(),
-                    )
-                    .await;
+                    let collator = self
+                        .collator_factory
+                        .start(CollatorContext {
+                            config: todo!(),
+                            collation_session: todo!(),
+                            listener: todo!(),
+                            shard_id,
+                            prev_blocks_ids,
+                            mc_state,
+                            state_tracker: todo!(),
+                        })
+                        .await;
                     entry.insert(Arc::new(collator));
                 }
 

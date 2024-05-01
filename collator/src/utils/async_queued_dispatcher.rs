@@ -31,6 +31,7 @@ where
         };
         (dispatcher, receiver)
     }
+
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
         tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
@@ -70,6 +71,7 @@ where
             }
         });
     }
+
     pub fn create(worker: W, queue_buffer_size: usize) -> Self {
         let (sender, receiver) = mpsc::channel(queue_buffer_size);
 

@@ -32,23 +32,39 @@ mod do_collate;
 #[path = "./execution_manager.rs"]
 mod execution_manager;
 
+// FACTORY
+
+pub struct CollatorProcessorContext {
+    pub collator_descr: Arc<String>,
+    pub config: Arc<CollationConfig>,
+    pub collation_session: Arc<CollationSessionInfo>,
+    pub listener: Arc<dyn CollatorEventListener>,
+    pub shard_id: ShardIdent,
+    pub state_tracker: MinRefMcStateTracker,
+}
+
+pub trait CollatorProcessorFactory: Send + Sync + 'static {
+    type CollatorProcessor: CollatorProcessor;
+
+    fn build(&self, cx: CollatorProcessorContext) -> Self::CollatorProcessor;
+}
+
+impl<F, R> CollatorProcessorFactory for F
+where
+    F: Fn(CollatorProcessorContext) -> R + Send + Sync + 'static,
+    R: CollatorProcessor,
+{
+    type CollatorProcessor = R;
+
+    fn build(&self, cx: CollatorProcessorContext) -> Self::CollatorProcessor {
+        self(cx)
+    }
+}
+
 // COLLATOR PROCESSOR
 
 #[async_trait]
-pub(super) trait CollatorProcessor<MQ, MP, ST>: Sized + Send + 'static {
-    fn new(
-        collator_descr: Arc<String>,
-        config: Arc<CollationConfig>,
-        collation_session: Arc<CollationSessionInfo>,
-        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
-        listener: Arc<dyn CollatorEventListener>,
-        mq_adapter: Arc<MQ>,
-        mpool_adapter: Arc<MP>,
-        state_node_adapter: Arc<ST>,
-        shard_id: ShardIdent,
-        state_tracker: MinRefMcStateTracker,
-    ) -> Self;
-
+pub(super) trait CollatorProcessor: Sized + Send + 'static {
     // Initialize collator working state then run collation
     async fn init(
         &mut self,
@@ -77,48 +93,42 @@ pub(super) trait CollatorProcessor<MQ, MP, ST>: Sized + Send + 'static {
     ) -> Result<()>;
 }
 
-#[async_trait]
-impl<MQ, MP, ST> CollatorProcessor<MQ, MP, ST> for CollatorProcessorStdImpl<MQ, MP, ST>
+pub struct CollatorProcessorStdImplFactory<MQ, MP, ST> {
+    pub mq_adapter: Arc<MQ>,
+    pub mpool_adapter: Arc<MP>,
+    pub state_node_adapter: Arc<ST>,
+}
+
+impl<MQ, MP, ST> CollatorProcessorFactory for CollatorProcessorStdImplFactory<MQ, MP, ST>
 where
     MQ: MessageQueueAdapter,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    fn new(
-        collator_descr: Arc<String>,
-        config: Arc<CollationConfig>,
-        collation_session: Arc<CollationSessionInfo>,
-        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
-        listener: Arc<dyn CollatorEventListener>,
-        mq_adapter: Arc<MQ>,
-        mpool_adapter: Arc<MP>,
-        state_node_adapter: Arc<ST>,
-        shard_id: ShardIdent,
-        state_tracker: MinRefMcStateTracker,
-    ) -> Self {
-        Self {
-            collator_descr,
-            config,
-            collation_session,
-            dispatcher,
-            listener,
-            mq_adapter,
-            mpool_adapter,
-            state_node_adapter,
-            shard_id,
-            working_state: None,
+    type CollatorProcessor = CollatorProcessorStdImpl<MQ, MP, ST>;
 
-            anchors_cache: BTreeMap::new(),
-            last_imported_anchor_id: None,
-            last_imported_anchor_chain_time: None,
-
-            externals_read_upto: BTreeMap::new(),
-            has_pending_externals: false,
-
-            state_tracker,
-        }
+    fn build(&self, cx: CollatorProcessorContext) -> Self::CollatorProcessor {
+        CollatorProcessorStdImpl::new(
+            cx.collator_descr,
+            cx.config,
+            cx.collation_session,
+            cx.listener,
+            self.mq_adapter.clone(),
+            self.mpool_adapter.clone(),
+            self.state_node_adapter.clone(),
+            cx.shard_id,
+            cx.state_tracker,
+        )
     }
+}
 
+#[async_trait]
+impl<MQ, MP, ST> CollatorProcessor for CollatorProcessorStdImpl<MQ, MP, ST>
+where
+    MQ: MessageQueueAdapter,
+    MP: MempoolAdapter,
+    ST: StateNodeAdapter,
+{
     // Initialize collator working state then run collation
     async fn init(
         &mut self,
@@ -315,6 +325,41 @@ where
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
+    pub fn new(
+        collator_descr: Arc<String>,
+        config: Arc<CollationConfig>,
+        collation_session: Arc<CollationSessionInfo>,
+        dispatcher: Arc<AsyncQueuedDispatcher<Self, ()>>,
+        listener: Arc<dyn CollatorEventListener>,
+        mq_adapter: Arc<MQ>,
+        mpool_adapter: Arc<MP>,
+        state_node_adapter: Arc<ST>,
+        shard_id: ShardIdent,
+        state_tracker: MinRefMcStateTracker,
+    ) -> Self {
+        Self {
+            collator_descr,
+            config,
+            collation_session,
+            dispatcher,
+            listener,
+            mq_adapter,
+            mpool_adapter,
+            state_node_adapter,
+            shard_id,
+            working_state: None,
+
+            anchors_cache: BTreeMap::new(),
+            last_imported_anchor_id: None,
+            last_imported_anchor_chain_time: None,
+
+            externals_read_upto: BTreeMap::new(),
+            has_pending_externals: false,
+
+            state_tracker,
+        }
+    }
+
     fn collator_descr(&self) -> &str {
         &self.collator_descr
     }
