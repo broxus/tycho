@@ -1,35 +1,24 @@
-use std::mem::take;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
-use futures_util::future::join_all;
-use tokio::select;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
-use tycho_util::FastHashMap;
 
-use crate::state_node::StateNodeAdapterStdImpl;
-use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
+use crate::types::{OnValidatedBlockEvent, ValidatorNetwork};
+use crate::validator::config::ValidatorConfig;
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::network_service::NetworkService;
 use crate::validator::state::{SessionInfo, ValidationState, ValidationStateStdImpl};
 use crate::validator::types::{
     BlockValidationCandidate, OverlayNumber, ValidationResult, ValidationSessionInfo, ValidatorInfo,
 };
-use crate::{
-    method_to_async_task_closure,
-    state_node::StateNodeAdapter,
-    tracing_targets,
-    utils::async_queued_dispatcher::{
-        AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
-    },
-};
+use crate::{state_node::StateNodeAdapter, tracing_targets};
 
 #[async_trait]
 pub trait ValidatorEventEmitter {
@@ -61,6 +50,7 @@ where
         state_node_adapter: Arc<ST>,
         network: ValidatorNetwork,
         keypair: KeyPair,
+        config: ValidatorConfig,
     ) -> Self;
 
     /// Enqueue block candidate validation task
@@ -78,11 +68,11 @@ where
 {
     _marker_state_node_adapter: std::marker::PhantomData<ST>,
     validation_state: Arc<ValidationStateStdImpl>,
-    validation_semaphore: Arc<tokio::sync::Semaphore>,
     listeners: Vec<Arc<dyn ValidatorEventListener>>,
     network: ValidatorNetwork,
     state_node_adapter: Arc<ST>,
     keypair: KeyPair,
+    config: ValidatorConfig,
 }
 
 #[async_trait]
@@ -95,6 +85,7 @@ where
         state_node_adapter: Arc<ST>,
         network: ValidatorNetwork,
         keypair: KeyPair,
+        config: ValidatorConfig,
     ) -> Self {
         tracing::info!(target: tracing_targets::VALIDATOR, "Creating validator...");
 
@@ -102,12 +93,12 @@ where
 
         Self {
             _marker_state_node_adapter: std::marker::PhantomData,
-            validation_semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             validation_state,
             listeners,
             network,
             state_node_adapter,
             keypair,
+            config,
         }
     }
 
@@ -125,9 +116,10 @@ where
             candidate,
             session,
             &self.keypair,
-            self.listeners.clone(),
-            self.network.clone(),
-            self.state_node_adapter.clone(),
+            &self.listeners,
+            &self.network,
+            &self.state_node_adapter,
+            &self.config,
         )
         .await?;
         Ok(())
@@ -157,10 +149,8 @@ where
         trace!(target: tracing_targets::VALIDATOR, overlay_id = ?validators_session_info.seqno, "Creating private overlay");
         let overlay_id = OverlayId(tl_proto::hash(overlay_id));
 
-        let seqno = validators_session_info.seqno;
-
         let network_service =
-            NetworkService::new(self.listeners.clone(), self.validation_state.clone(), seqno);
+            NetworkService::new(self.listeners.clone(), self.validation_state.clone());
 
         let private_overlay = PrivateOverlay::builder(overlay_id)
             .with_peer_resolver(peer_resolver)
@@ -208,11 +198,11 @@ async fn start_candidate_validation<ST: StateNodeAdapter>(
     block_id: BlockId,
     session: Arc<SessionInfo>,
     current_validator_keypair: &KeyPair,
-    listeners: Vec<Arc<dyn ValidatorEventListener>>,
-    network: ValidatorNetwork,
-    state_node_adapter: Arc<ST>,
+    listeners: &[Arc<dyn ValidatorEventListener>],
+    network: &ValidatorNetwork,
+    state_node_adapter: &Arc<ST>,
+    config: &ValidatorConfig,
 ) -> Result<()> {
-    let base_delay_ms = 100;
     let cancellation_token = tokio_util::sync::CancellationToken::new();
     let short_id = block_id.as_short_id();
     let our_signature = sign_block(current_validator_keypair, &block_id)?;
@@ -232,7 +222,7 @@ async fn start_candidate_validation<ST: StateNodeAdapter>(
         session.clone(),
         short_id,
         vec![(current_validator_pubkey.0, our_signature.0)],
-        listeners.clone(),
+        listeners,
     )
     .await?;
     trace!(target: tracing_targets::VALIDATOR, "Validation finished: {:?}", is_validation_finished);
@@ -268,6 +258,9 @@ async fn start_candidate_validation<ST: StateNodeAdapter>(
 
     let mut handlers: Vec<JoinHandle<Result<(), anyhow::Error>>> = Vec::new();
 
+    let delay = config.base_loop_delay;
+    let max_delay = config.max_loop_delay;
+    let listeners = listeners.to_vec();
     for validator in filtered_validators {
         let cloned_private_overlay = session.get_overlay().clone();
         let cloned_network = network.dht_client.network().clone();
@@ -326,7 +319,7 @@ async fn start_candidate_validation<ST: StateNodeAdapter>(
                                 cloned_session.clone(),
                                 short_id,
                                 signatures.signatures,
-                                cloned_listeners.clone(),
+                                &cloned_listeners,
                             )
                             .await?;
 
@@ -338,19 +331,21 @@ async fn start_candidate_validation<ST: StateNodeAdapter>(
                         }
                     }
                     Err(e) => {
-                        warn!(target: tracing_targets::VALIDATOR, "Error receiving signatures from validator {:?}: {:?}", validator.public_key.to_bytes(), e);
-                        let delay = base_delay_ms * 2_u64.pow(attempt);
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        warn!(target: tracing_targets::VALIDATOR, "Elapsed validator response {:?}: {:?}", validator.public_key.to_bytes(), e);
+                        let delay = delay * 2_u32.pow(attempt);
+                        let delay = std::cmp::min(delay, max_delay);
+                        tokio::time::sleep(delay).await;
                         attempt += 1;
                     }
                     Ok(Err(e)) => {
                         warn!(target: tracing_targets::VALIDATOR, "Error receiving signatures from validator {:?}: {:?}", validator.public_key.to_bytes(), e);
-                        let delay = base_delay_ms * 2_u64.pow(attempt);
-                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        let delay = delay * 2_u32.pow(attempt);
+                        let delay = std::cmp::min(delay, max_delay);
+                        tokio::time::sleep(delay).await;
                         attempt += 1;
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(base_delay_ms)).await;
+                tokio::time::sleep(delay).await;
             }
         });
 
@@ -369,7 +364,7 @@ pub async fn process_candidate_signature_response(
     session: Arc<SessionInfo>,
     block_id_short: BlockIdShort,
     signatures: Vec<([u8; 32], [u8; 64])>,
-    listeners: Vec<Arc<dyn ValidatorEventListener>>,
+    listeners: &[Arc<dyn ValidatorEventListener>],
 ) -> Result<bool> {
     trace!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Processing candidate signature response");
     let validation_status = session.get_validation_status(&block_id_short).await?;

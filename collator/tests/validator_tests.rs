@@ -1,41 +1,37 @@
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
-use async_trait::async_trait;
-use bytesize::ByteSize;
 use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use everscale_crypto::ed25519;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, ValidatorDescription};
 use rand::prelude::ThreadRng;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
-
-use tracing::{debug, error};
+use tracing::debug;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
-    StateNodeAdapter, StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl,
-    StateNodeAdapterStdImpl, StateNodeEventListener,
+    StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeAdapterStdImpl,
+    StateNodeEventListener,
 };
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{CollationSessionInfo, OnValidatedBlockEvent, ValidatorNetwork};
+use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::state::{ValidationState, ValidationStateStdImpl};
 use tycho_collator::validator::types::ValidationSessionInfo;
 use tycho_collator::validator::validator::{Validator, ValidatorEventListener, ValidatorStdImpl};
 use tycho_core::block_strider::state::BlockStriderState;
 use tycho_core::block_strider::subscriber::test::PrintSubscriber;
-use tycho_core::block_strider::{prepare_state_apply, BlockStrider};
+use tycho_core::block_strider::BlockStrider;
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
 };
-use tycho_storage::{build_tmp_storage, Db, DbOptions, Storage};
+use tycho_storage::build_tmp_storage;
 
 pub struct TestValidatorEventListener {
     validated_blocks: Mutex<Vec<BlockId>>,
@@ -59,11 +55,6 @@ impl TestValidatorEventListener {
     pub async fn increment_and_check(&self) {
         let mut received = self.received_notifications.lock().await;
         *received += 1;
-        error!(
-            "received: {}, expected: {}",
-            *received,
-            *self.expected_notifications.lock().await
-        );
         if *received == *self.expected_notifications.lock().await {
             self.notify.notify_one();
         }
@@ -80,10 +71,11 @@ impl ValidatorEventListener for TestValidatorEventListener {
         let mut validated_blocks = self.validated_blocks.lock().await;
         if validated_blocks.contains(&block_id) {
             return Ok(());
+        } else {
+            validated_blocks.push(block_id);
         }
 
-        let current_count = self.global_validated_blocks.fetch_add(1, Ordering::SeqCst);
-        debug!("Block validated, new global count: {}", current_count);
+        self.global_validated_blocks.fetch_add(1, Ordering::SeqCst);
 
         self.increment_and_check().await;
         Ok(())
@@ -92,7 +84,7 @@ impl ValidatorEventListener for TestValidatorEventListener {
 
 #[async_trait]
 impl StateNodeEventListener for TestValidatorEventListener {
-    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()> {
+    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
         unimplemented!("Not implemented");
     }
 
@@ -232,6 +224,10 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         state_node_adapter,
         validator_network,
         KeyPair::generate(&mut ThreadRng::default()),
+        ValidatorConfig {
+            base_loop_delay: Duration::from_millis(50),
+            max_loop_delay: Duration::from_secs(10),
+        },
     );
 
     let validator_description = ValidatorDescription {
@@ -343,12 +339,17 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
             dht_client: node.dht_client.clone(),
             peer_resolver: node.peer_resolver.clone(),
         };
+        let validator_config = ValidatorConfig {
+            base_loop_delay: Duration::from_millis(50),
+            max_loop_delay: Duration::from_secs(10),
+        };
 
         let validator = Arc::new(ValidatorStdImpl::<_>::create(
             vec![test_listener.clone()],
             state_node_adapter,
             network,
             node.keypair.clone(),
+            validator_config,
         ));
 
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_blocks));
@@ -367,7 +368,7 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
 
     // Await all validator tasks to complete
     for task in tasks {
-        task.await?;
+        task.await.unwrap().unwrap();
     }
 
     // Assert that all validations are completed as expected
@@ -395,7 +396,7 @@ async fn handle_validator(
         let collator_session_info = Arc::new(CollationSessionInfo::new(
             session,
             validators_subset_info.clone(),
-            Some(validator.get_keypair().clone()), // Assuming you have access to node's keypair here
+            Some(*validator.get_keypair()), // Assuming you have access to node's keypair here
         ));
 
         validator

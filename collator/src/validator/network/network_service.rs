@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -11,28 +10,21 @@ use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::network::handlers::handle_signatures_query;
-use crate::validator::state::{SessionInfo, ValidationState, ValidationStateStdImpl};
+use crate::validator::state::{ValidationState, ValidationStateStdImpl};
 use crate::validator::ValidatorEventListener;
-use crate::{state_node::StateNodeAdapter, utils::async_queued_dispatcher::AsyncQueuedDispatcher};
 
 #[derive(Clone)]
 pub struct NetworkService {
     listeners: Vec<Arc<dyn ValidatorEventListener>>,
     state: Arc<ValidationStateStdImpl>,
-    session_seqno: u32,
 }
 
 impl NetworkService {
     pub fn new(
         listeners: Vec<Arc<dyn ValidatorEventListener>>,
         state: Arc<ValidationStateStdImpl>,
-        session_seqno: u32,
     ) -> Self {
-        Self {
-            listeners,
-            state,
-            session_seqno,
-        }
+        Self { listeners, state }
     }
 }
 
@@ -66,7 +58,7 @@ impl Service<ServiceRequest> for NetworkService {
                             session_seqno,
                             block_id_short,
                             signatures,
-                            listeners,
+                            &listeners,
                         )
                         .await
                         {

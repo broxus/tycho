@@ -1,4 +1,6 @@
-struct ValidatorConfig {
-    base_elapsed_time: u64,
+use std::time::Duration;
 
+pub struct ValidatorConfig {
+    pub base_loop_delay: Duration,
+    pub max_loop_delay: Duration,
 }

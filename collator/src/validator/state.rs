@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
-use async_trait::async_trait;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
@@ -129,10 +128,6 @@ impl SessionInfo {
             .map(|ref_data| ref_data.0)
     }
 
-    pub(crate) async fn blocks_count(&self) -> usize {
-        self.blocks_signatures.len()
-    }
-
     /// Determines the validation status of a block.
     pub async fn get_validation_status(
         &self,
@@ -202,13 +197,8 @@ impl SessionInfo {
         &self,
         block_id_short: &BlockIdShort,
     ) -> FastHashMap<HashBytes, Signature> {
-        let cached_signatures = self.cached_signatures.len();
-        let normal_signatures = self.blocks_signatures.len();
         let block_signatures = self.blocks_signatures.get(block_id_short);
-        let valid_signatures = block_signatures.map(|ref_data| ref_data.1.valid_signatures.clone());
-        let block_signatures = self.blocks_signatures.get(block_id_short);
-        let invalid_signatures =
-            block_signatures.map(|ref_data| ref_data.1.invalid_signatures.clone());
+        block_signatures.map(|ref_data| ref_data.1.invalid_signatures.clone());
 
         if let Some(ref_data) = self.blocks_signatures.get(block_id_short) {
             ref_data.1.valid_signatures.clone()
@@ -248,33 +238,11 @@ impl SessionInfo {
         }
     }
 
-    /// Determines if a block is considered invalid based on the signatures.
-    fn is_invalid(&self, signature_maps: &SignatureMaps, valid_weight: u64) -> bool {
-        let total_invalid_weight: u64 = signature_maps
-            .invalid_signatures
-            .keys()
-            .map(|validator_id| {
-                self.validation_session_info
-                    .validators
-                    .get(validator_id)
-                    .map_or(0, |vi| vi.weight)
-            })
-            .sum();
-
-        let total_possible_weight = self
-            .validation_session_info
-            .validators
-            .values()
-            .map(|vi| vi.weight)
-            .sum::<u64>();
-        total_possible_weight - total_invalid_weight < valid_weight
-    }
-
     pub async fn process_signatures_and_update_status(
         &self,
         block_id_short: BlockIdShort,
         signatures: Vec<([u8; 32], [u8; 64])>,
-        listeners: Vec<Arc<dyn ValidatorEventListener>>,
+        listeners: &[Arc<dyn ValidatorEventListener>],
     ) -> anyhow::Result<()> {
         trace!(
             "Processing signatures for block in state {:?}",
@@ -294,7 +262,7 @@ impl SessionInfo {
                 )
             });
 
-        let mut event_guard = entry.1.event_dispatched.lock().await;
+        let event_guard = entry.1.event_dispatched.lock().await;
         if *event_guard {
             debug!(
                 "Validation event already dispatched for block {:?}",
@@ -391,10 +359,11 @@ impl SessionInfo {
     fn notify_listeners(
         block: BlockId,
         event: OnValidatedBlockEvent,
-        listeners: Vec<Arc<dyn ValidatorEventListener>>,
+        listeners: &[Arc<dyn ValidatorEventListener>],
     ) {
         for listener in listeners {
             let cloned_event = event.clone();
+            let listener = listener.clone();
             tokio::spawn(async move {
                 listener
                     .on_block_validated(block, cloned_event)

@@ -10,7 +10,7 @@ pub async fn handle_signatures_query(
     session_seqno: u32,
     block_id_short: BlockIdShort,
     signatures: Vec<([u8; 32], [u8; 64])>,
-    listeners: Vec<Arc<dyn ValidatorEventListener>>,
+    listeners: &[Arc<dyn ValidatorEventListener>],
 ) -> Result<Option<Response>, anyhow::Error>
 where
 {

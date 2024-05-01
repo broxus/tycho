@@ -5,9 +5,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
-use everscale_types::models::{
-    BlockId, BlockInfo, ShardIdent, ValidatorDescription, ValidatorSet, ValueFlow,
-};
+use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::{
     block::ValidatorSubsetInfo,
     state::{MinRefMcStateTracker, ShardStateStuff},
