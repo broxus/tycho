@@ -11,9 +11,9 @@ use tycho_block_util::state::ShardStateStuff;
 use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
 use crate::types::BlockCandidate;
 
-use super::{execution_manager::ExecutionManager, CollatorProcessorStdImpl};
+use super::{execution_manager::ExecutionManager, CollatorStdImpl};
 
-impl CollatorProcessorStdImpl {
+impl CollatorStdImpl {
     pub(super) async fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,

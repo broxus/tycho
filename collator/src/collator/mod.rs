@@ -98,14 +98,14 @@ pub trait Collator: Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-pub struct CollatorStdFactory;
+pub struct CollatorStdImplFactory;
 
 #[async_trait]
-impl CollatorFactory for CollatorStdFactory {
-    type Collator = AsyncQueuedDispatcher<CollatorProcessorStdImpl>;
+impl CollatorFactory for CollatorStdImplFactory {
+    type Collator = AsyncQueuedDispatcher<CollatorStdImpl>;
 
     async fn start(&self, cx: CollatorContext) -> Self::Collator {
-        CollatorProcessorStdImpl::start(
+        CollatorStdImpl::start(
             cx.mq_adapter,
             cx.mpool_adapter,
             cx.state_node_adapter,
@@ -122,7 +122,7 @@ impl CollatorFactory for CollatorStdFactory {
 }
 
 #[async_trait]
-impl Collator for AsyncQueuedDispatcher<CollatorProcessorStdImpl> {
+impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
     async fn equeue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
         todo!()
     }
@@ -157,7 +157,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorProcessorStdImpl> {
     }
 }
 
-pub struct CollatorProcessorStdImpl {
+pub struct CollatorStdImpl {
     collator_descr: Arc<String>,
 
     config: Arc<CollationConfig>,
@@ -192,7 +192,7 @@ pub struct CollatorProcessorStdImpl {
     state_tracker: MinRefMcStateTracker,
 }
 
-impl CollatorProcessorStdImpl {
+impl CollatorStdImpl {
     pub async fn start(
         mq_adapter: Arc<dyn MessageQueueAdapter>,
         mpool_adapter: Arc<dyn MempoolAdapter>,

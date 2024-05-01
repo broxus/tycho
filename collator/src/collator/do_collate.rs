@@ -6,7 +6,7 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use sha2::Digest;
 
-use super::CollatorProcessorStdImpl;
+use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
     BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt,
@@ -14,7 +14,7 @@ use crate::collator::types::{
 use crate::tracing_targets;
 use crate::types::BlockCollationResult;
 
-impl CollatorProcessorStdImpl {
+impl CollatorStdImpl {
     pub(super) async fn do_collate(
         &mut self,
         next_chain_time: u64,

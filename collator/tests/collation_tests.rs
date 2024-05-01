@@ -5,7 +5,7 @@ use anyhow::Result;
 use everscale_types::models::{BlockId, GlobalCapability};
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
-use tycho_collator::collator::CollatorStdFactory;
+use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
@@ -105,7 +105,7 @@ async fn test_collation_process_on_stubs() {
                 max_loop_delay: Duration::from_secs(10),
             },
         },
-        CollatorStdFactory,
+        CollatorStdImplFactory,
     );
 
     let state_node_adapter = StrangeBlockProvider {
