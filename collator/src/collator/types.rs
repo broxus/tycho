@@ -8,8 +8,8 @@ use everscale_types::{
     models::{
         AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
         CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OutMsgQueueInfo,
-        OwnedMessage, PrevBlockRef, ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription,
-        ShardFees, ShardIdent, SimpleLib, ValueFlow,
+        OwnedMessage, PrevBlockRef, ProcessedUpto, ProcessedUptoInfo, ShardAccount, ShardAccounts,
+        ShardDescription, ShardFees, ShardIdent, SimpleLib, ValueFlow,
     },
 };
 
@@ -333,6 +333,10 @@ pub(super) struct BlockCollationData {
     pub out_msg_queue_stuff: OutMsgQueueInfoStuff,
     /// Index of the highest external processed from the anchor: (anchor, index)
     pub externals_processed_upto: Dict<u32, u64>,
+
+    pub processed_upto: ProcessedUptoInfo,
+    pub externals_reading_started: bool,
+    pub internals_reading_started: bool,
 
     /// Ids of top blocks from shards that be included in the master block
     pub top_shard_blocks_ids: Vec<BlockId>,

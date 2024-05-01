@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Deref};
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
@@ -11,6 +11,7 @@ use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
     BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt,
 };
+use crate::internal_queue::iterator::QueueIterator;
 use crate::tracing_targets;
 use crate::types::BlockCollationResult;
 
@@ -98,10 +99,13 @@ impl CollatorStdImpl {
         collation_data.max_lt = collation_data.start_lt + 1;
 
         //TODO: should consider split/merge in future
+        collation_data.processed_upto = prev_shard_data.observable_states()[0]
+            .state()
+            .processed_upto
+            .load()?;
         let out_msg_queue_info = prev_shard_data.observable_states()[0]
             .state()
-            .load_out_msg_queue_info()
-            .unwrap_or_default(); //TODO: should not fail there
+            .load_out_msg_queue_info()?;
         collation_data.out_msg_queue_stuff = OutMsgQueueInfoStuff {
             proc_info: out_msg_queue_info.proc_info,
         };
@@ -124,53 +128,141 @@ impl CollatorStdImpl {
             self.config.max_collate_threads,
         );
 
-        //STUB: just remove fisrt anchor from cache
-        let _ext_msg = self.get_next_external();
-        self.has_pending_externals = false;
+        // prepare to read and execute internals and externals
+        let (max_messages_per_set, min_externals_per_set, group_size) =
+            self.get_msgs_execution_params();
+        let mut all_existing_internals_finished = false;
+        let mut all_new_internals_finished = false;
 
-        //STUB: do not execute transactions and produce empty block
+        let mut block_limits_reached = false;
+        let mut block_transactions_count = 0;
+
+        let mut int_msgs_iter = self.init_internal_mq_iterator().await?;
+
+        // temporary buffer to store first received new internals
+        // because we should not take them until existing internals not processed
+        let mut new_int_msgs_tmp_buffer: Vec<(MsgInfo, Cell)> = vec![];
+
+        loop {
+            // build messages set
+            let mut msgs_set: Vec<(MsgInfo, Cell)> = vec![];
+
+            // 1. First try to read min externals amount
+            let mut ext_msgs = if self.has_pending_externals {
+                self.read_next_externals(min_externals_per_set, &mut collation_data)
+                    .await?
+            } else {
+                vec![]
+            };
+
+            // 2. Then iterate through existing internals and try to fill the set
+            let mut remaining_capacity = max_messages_per_set - ext_msgs.len();
+            while remaining_capacity > 0 && !all_existing_internals_finished {
+                match int_msgs_iter.next() {
+                    Some(int_msg) if !int_msg.is_new => {
+                        //TODO: add existing internal message to set
+                        // msgs_set.push((..., ...));
+                        remaining_capacity -= 1;
+                    }
+                    Some(int_msg) => {
+                        //TODO: store new internal in the buffer
+                        // because we should not take it until existing internals not processed
+                        // new_int_msgs_tmp_buffer.push((..., ...));
+                        all_existing_internals_finished = true;
+                        //TODO: we should pass `return_new: bool` into `QueueIterator::next()` and
+                        //      do not return new internal if `return_new == false`
+                    }
+                    None => {
+                        all_existing_internals_finished = true;
+                    }
+                }
+            }
+
+            // 3. Join existing internals and externals
+            //    If not enough existing internals to fill the set then try read more externals
+            msgs_set.append(&mut ext_msgs);
+            remaining_capacity = max_messages_per_set - msgs_set.len();
+            if remaining_capacity > 0 && self.has_pending_externals {
+                ext_msgs = self
+                    .read_next_externals(remaining_capacity, &mut collation_data)
+                    .await?;
+                msgs_set.append(&mut ext_msgs);
+            }
+
+            // 4. When all externals and existing internals finished (the collected set is empty here)
+            //    fill next messages sets with new internals
+            if msgs_set.is_empty() {
+                if !new_int_msgs_tmp_buffer.is_empty() {
+                    remaining_capacity -= new_int_msgs_tmp_buffer.len();
+                    msgs_set.append(&mut new_int_msgs_tmp_buffer);
+                }
+                while remaining_capacity > 0 && !all_new_internals_finished {
+                    match int_msgs_iter.next() {
+                        Some(int_msg) => {
+                            //TODO: add internal message to set
+                            // msgs_set.push((..., ...));
+                            remaining_capacity -= 1;
+                        }
+                        None => {
+                            all_new_internals_finished = true;
+                        }
+                    }
+                }
+            }
+
+            if msgs_set.is_empty() {
+                // no any messages to process - exit loop
+                break;
+            }
+
+            //TODO: here use exec_manager to execute msgs set, get transactions,
+            //      and update collation_data from them
+            let mut msgs_set_offset: u32 = 0;
+            let mut msgs_set_full_processed = false;
+            //STUB: currently emulate msgs processing by groups
+            //      check block limits by transactions count
+            while !msgs_set_full_processed {
+                let one_tick_processed_msgs: Vec<_> = if msgs_set.len() > group_size {
+                    msgs_set.drain(..group_size).collect()
+                } else {
+                    msgs_set.drain(..).collect()
+                };
+
+                msgs_set_offset += one_tick_processed_msgs.len() as u32;
+
+                //TODO: when processing transactions we should check block limits
+                //      currently we simply check only transactions count
+                //      but needs to make good implementation futher
+                block_transactions_count += one_tick_processed_msgs.len();
+                if block_transactions_count >= 14 {
+                    block_limits_reached = true;
+                    break;
+                }
+
+                if msgs_set.is_empty() {
+                    msgs_set_full_processed = true;
+                }
+            }
+
+            // store how many msgs from the set were processed (offset)
+            Self::update_processed_upto_execution_offset(
+                &mut collation_data,
+                msgs_set_full_processed,
+                msgs_set_offset,
+            );
+
+            if block_limits_reached {
+                // block is full - exit loop
+                break;
+            }
+        }
 
         // build block candidate and new state
         let (candidate, new_state_stuff) = self
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
 
-        /*
-        //STUB: just send dummy block to collation manager
-        let prev_blocks_ids = prev_shard_data.blocks_ids().clone();
-        let prev_block_id = prev_blocks_ids[0];
-        let collated_block_id_short = BlockIdShort {
-            shard: prev_block_id.shard,
-            seqno: prev_block_id.seqno + 1,
-        };
-        let mut builder = CellBuilder::new();
-        builder.store_bit(collated_block_id_short.shard.workchain().is_negative())?;
-        builder.store_u32(collated_block_id_short.shard.workchain().unsigned_abs())?;
-        builder.store_u64(collated_block_id_short.shard.prefix())?;
-        builder.store_u32(collated_block_id_short.seqno)?;
-        let cell = builder.build()?;
-        let hash = cell.repr_hash();
-        let collated_block_id = BlockId {
-            shard: collated_block_id_short.shard,
-            seqno: collated_block_id_short.seqno,
-            root_hash: *hash,
-            file_hash: *hash,
-        };
-        let mut new_state = prev_shard_data.pure_states()[0]
-            .state()
-            .clone();
-        new_state.seqno = collated_block_id.seqno;
-        let candidate = BlockCandidate::new(
-            collated_block_id,
-            prev_blocks_ids,
-            top_shard_blocks_ids,
-            vec![],
-            vec![],
-            collated_block_id.file_hash,
-            next_chain_time,
-        );
-        */
-
+        // return collation result
         let collation_result = BlockCollationResult {
             candidate,
             new_state_stuff: new_state_stuff.clone(),
@@ -183,11 +275,140 @@ impl CollatorStdImpl {
             _tracing_top_shard_blocks_descr,
         );
 
+        // update PrevData in working state
         self.update_working_state(new_state_stuff)?;
 
         Ok(())
     }
 
+    /// `(set_size, min_externals_per_set, group_size)`
+    /// * `set_size` - max num of messages to be processed in one iteration;
+    /// * `min_externals_per_set` - min num of externals that should be included in the set
+    ///                           when there are a lot of internals and externals
+    /// * `group_size` - max num of accounts to be processed in one tick
+    fn get_msgs_execution_params(&self) -> (usize, usize, usize) {
+        //TODO: should get this from BlockchainConfig
+        (10, 4, 3)
+    }
+
+    /// Read specified number of externals from imported anchors
+    /// using actual `processed_upto` info
+    async fn read_next_externals(
+        &mut self,
+        count: usize,
+        collation_data: &mut BlockCollationData,
+    ) -> Result<Vec<(MsgInfo, Cell)>> {
+        //TODO: was written in a hurry, should be reviewed and optimized
+
+        // when we already read externals in this collation then continue from read_to
+        let read_from_opt = if collation_data.externals_reading_started {
+            collation_data
+                .processed_upto
+                .externals
+                .as_ref()
+                .map(|upto| upto.read_to)
+        } else {
+            collation_data
+                .processed_upto
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to)
+        };
+        collation_data.externals_reading_started = true;
+
+        let read_from = read_from_opt.unwrap_or_default();
+
+        // when read_from is not defined on the blockchain start
+        // then read from the first available anchor
+        let mut read_from_anchor_opt = None;
+        let mut last_read_anchor_opt = None;
+        let mut read_next_anchor_from_msg_idx = read_from.1 as usize;
+        let mut msgs_read_from_last_anchor = 0;
+        let mut total_msgs_read = 0;
+        let mut ext_messages = vec![];
+        let mut unread_msgs_left_in_last_read_anchor = false;
+        'read_anchors: while let Some(entry) = self.anchors_cache.first_entry() {
+            let key = *entry.key();
+            if key < read_from.0 {
+                // skip already read anchors
+                let _ = entry.remove();
+                continue;
+            } else {
+                if read_from_anchor_opt.is_none() {
+                    read_from_anchor_opt = Some(key);
+                }
+                last_read_anchor_opt = Some(key);
+
+                // get iterator and read messages
+                let anchor = entry.get();
+                let mut iter = anchor.externals_iterator(read_next_anchor_from_msg_idx);
+                read_next_anchor_from_msg_idx = 0;
+                msgs_read_from_last_anchor = 0;
+                while let Some(ext_msg) = iter.next() {
+                    ext_messages.push(ext_msg.deref().into());
+                    msgs_read_from_last_anchor += 1;
+                    total_msgs_read += 1;
+
+                    // stop reading if target msgs count reached
+                    if total_msgs_read == count {
+                        unread_msgs_left_in_last_read_anchor = iter.count() > 0;
+                        break 'read_anchors;
+                    }
+                }
+            }
+        }
+
+        // update read up to info
+        if let Some(last_read_anchor) = last_read_anchor_opt {
+            if let Some(externals_upto) = collation_data.processed_upto.externals.as_mut() {
+                externals_upto.read_to = (last_read_anchor, msgs_read_from_last_anchor);
+            } else {
+                collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
+                    processed_to: (read_from_anchor_opt.unwrap(), read_from.1),
+                    read_to: (last_read_anchor, msgs_read_from_last_anchor),
+                });
+            }
+        }
+
+        // check if we still have pending externals
+        if unread_msgs_left_in_last_read_anchor {
+            self.has_pending_externals = true;
+        } else {
+            //TODO: should make other implementation without iterating through all anchors in cache
+            self.has_pending_externals = self.anchors_cache.iter().any(|(id, anchor)| {
+                if let Some(ref last_read_anchor) = last_read_anchor_opt {
+                    id != last_read_anchor && anchor.has_externals()
+                } else {
+                    anchor.has_externals()
+                }
+            });
+        }
+
+        Ok(ext_messages)
+    }
+
+    /// (TODO) Update `processed_upto` info in `collation_data`
+    /// from the processed offset info
+    fn update_processed_upto_execution_offset(
+        collation_data: &mut BlockCollationData,
+        msgs_set_full_processed: bool,
+        msgs_set_offset: u32,
+    ) {
+        if msgs_set_full_processed {
+            // externals read window full processed
+            let ext_proc_upto = collation_data.processed_upto.externals.as_mut().unwrap();
+            ext_proc_upto.processed_to = ext_proc_upto.read_to;
+
+            //TODO: set internals read window full pocessed
+
+            collation_data.processed_upto.processed_offset = 0;
+        } else {
+            // otherwise read windows stay unchanged, only update processed offset
+            collation_data.processed_upto.processed_offset = msgs_set_offset;
+        }
+    }
+
+    /// Get max LT from masterchain (and shardchain) then calc start LT
     fn calc_start_lt(
         collator_descr: &str,
         mc_data: &McData,

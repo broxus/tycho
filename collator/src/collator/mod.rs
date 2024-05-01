@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -8,6 +8,7 @@ use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use self::types::{McData, PrevData, WorkingState};
+use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::method_to_async_task_closure;
 use crate::msg_queue::MessageQueueAdapter;
@@ -178,14 +179,9 @@ pub struct CollatorStdImpl {
     last_imported_anchor_id: Option<MempoolAnchorId>,
     last_imported_anchor_chain_time: Option<u64>,
 
-    /// Pointers that show what externals were read from anchors in the cache before
-    /// committingthe `externals_processed_upto` on block candidate finalization.
+    /// TRUE - when exist imported anchors in cache and not all their externals were read.
     ///
-    /// Updated in the `get_next_external()` method
-    externals_read_upto: BTreeMap<MempoolAnchorId, usize>,
-    /// TRUE - when exist imported anchors in cache and not all their externals were processed.
-    ///
-    /// Updated in the `get_next_external()` method
+    /// Updated in the `import_next_anchor()` and `read_next_externals()`
     has_pending_externals: bool,
 
     /// State tracker for creating ShardStateStuff locally
@@ -233,7 +229,6 @@ impl CollatorStdImpl {
             last_imported_anchor_id: None,
             last_imported_anchor_chain_time: None,
 
-            externals_read_upto: BTreeMap::new(),
             has_pending_externals: false,
 
             state_tracker,
@@ -438,16 +433,35 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// 1. (TODO) Get last imported anchor from cache or last processed from `externals_processed_upto`
+    /// 1. Get last imported anchor from cache or last processed from `externals_processed_upto`
     /// 2. Await next anchor via mempool adapter
     /// 3. Store anchor in cache and return it
     async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>> {
         //TODO: make real implementation
 
-        //STUB: take 0 as last imported without checking `externals_processed_upto`
-        let prev_anchor_id = self.last_imported_anchor_id.unwrap_or(0);
-
-        let next_anchor = self.mpool_adapter.get_next_anchor(prev_anchor_id).await?;
+        //TODO: use get_next_anchor() only once
+        let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
+            self.mpool_adapter.get_next_anchor(prev_anchor_id).await?
+        } else {
+            //TODO: should consider split/merge logic
+            let prev_shard_data = &self.working_state().prev_shard_data;
+            let processed_upto = prev_shard_data.observable_states()[0]
+                .state()
+                .processed_upto
+                .load()?;
+            match self
+                .mpool_adapter
+                .get_anchor_by_id(
+                    processed_upto
+                        .externals
+                        .map_or(0, |upto| upto.processed_to.0),
+                )
+                .await?
+            {
+                Some(anchor) => anchor,
+                None => self.mpool_adapter.get_next_anchor(0).await?,
+            }
+        };
         tracing::debug!(
             target: tracing_targets::COLLATOR,
             "Collator ({}): imported next anchor (id: {}, chain_time: {}, externals: {})",
@@ -473,21 +487,18 @@ impl CollatorStdImpl {
         self.last_imported_anchor_chain_time.unwrap()
     }
 
-    /// (TODO) Should consider parallel processing for different accounts
-    fn get_next_external(&mut self) -> Option<Arc<OwnedMessage>> {
-        //TODO: make real implementation
-
-        //STUB: just remove first anchor from cache to force next anchor import on `try_collate` run
-        self.anchors_cache.pop_first();
-
-        None
-    }
-
     /// (TODO) TRUE - when internal messages queue has internals
     fn has_internals(&self) -> Result<bool> {
         //TODO: make real implementation
         //STUB: always return false emulating that all internals were processed in prev block
         Ok(false)
+    }
+
+    /// Create and return internal message queue iterator
+    async fn init_internal_mq_iterator(&self) -> Result<impl QueueIterator> {
+        //TODO: should use McData and PrevData from working state
+        //      to calculate params for getting snapshot from message queue
+        Ok(QueueIteratorStubImpl::create_stub())
     }
 
     async fn update_mc_data_and_resume_collation(
@@ -538,9 +549,9 @@ impl CollatorStdImpl {
             }
         };
 
+        //TODO: import next anchor every time when there is no pending externals to update chain time
+
         // import next anchor if no internals and no pending externals for collation
-        // otherwise it will be imported during collation when the parallel slot is free
-        // or may be imported at the end of collation to update chain time
         let next_anchor = if !has_internals && !has_externals {
             tracing::debug!(
                 target: tracing_targets::COLLATOR,
@@ -597,5 +608,31 @@ impl CollatorStdImpl {
         }
 
         Ok(())
+    }
+}
+
+struct QueueIteratorStubImpl;
+impl QueueIteratorStubImpl {
+    pub fn create_stub() -> Self {
+        Self
+    }
+}
+impl QueueIterator for QueueIteratorStubImpl {
+    fn add_message(
+        &mut self,
+        message: Arc<crate::internal_queue::types::ext_types_stubs::EnqueuedMessage>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn commit(&mut self) {}
+    fn get_diff(&self, block_id_short: BlockIdShort) -> crate::internal_queue::types::QueueDiff {
+        crate::internal_queue::types::QueueDiff {
+            id: block_id_short,
+            messages: vec![],
+            processed_upto: HashMap::new(),
+        }
+    }
+    fn next(&mut self) -> Option<crate::internal_queue::iterator::IterItem> {
+        None
     }
 }

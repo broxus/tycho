@@ -4,5 +4,5 @@ pub mod persistent;
 pub mod queue;
 pub mod session;
 mod shard;
-mod snapshot;
+pub mod snapshot;
 pub mod types;

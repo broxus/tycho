@@ -125,6 +125,7 @@ impl CollatorStdImpl {
             gen_utime_ms: info.gen_utime_ms,
             gen_lt: new_block_info.end_lt,
             min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
+            processed_upto: Lazy::new(&collation_data.processed_upto)?,
             out_msg_queue_info: Lazy::new(&out_msg_queue_info)?,
             // TODO: Check if total fits into 4 refs
             externals_processed_upto: collation_data.externals_processed_upto.clone(),
@@ -145,6 +146,9 @@ impl CollatorStdImpl {
             .total_balance
             .try_add_assign(&value_flow.fees_collected)?;
 
+        new_state
+            .total_validator_fees
+            .checked_add(&value_flow.fees_collected)?;
         new_state
             .total_validator_fees
             .checked_sub(&value_flow.recovered)?;
