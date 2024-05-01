@@ -1,6 +1,7 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, usize};
 
 use anyhow::{anyhow, Result};
+use log::trace;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::tracing_targets;
@@ -33,6 +34,11 @@ where
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
         tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
+                trace!(
+                    target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
+                    "Task #{} ({}): received",
+                    task.id(),
+                    task.get_descr());
                 let (task_id, task_descr) = (task.id(), task.get_descr());
                 let (func, responder) = task.extract();
                 tracing::trace!(

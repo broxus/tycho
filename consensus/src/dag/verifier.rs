@@ -79,7 +79,7 @@ impl Verifier {
         // existence of proofs in leader points is a part of point's well-form-ness check
         match &dag_round.anchor_stage() {
             // no one may link to self
-            None | Some(AnchorStage::Candidate(_)) => {
+            None => {
                 (point.body.anchor_proof != Link::ToSelf
                     && point.body.anchor_trigger != Link::ToSelf)
                     || point.body.location.round == MempoolConfig::GENESIS_ROUND

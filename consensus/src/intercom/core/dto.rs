@@ -2,23 +2,12 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-use tycho_network::Version;
+use tycho_network::{Response, ServiceRequest, Version};
 
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
 
-#[derive(Serialize, Deserialize, Debug)]
-pub enum MPQueryResult {
-    Ok(MPResponse),
-    Err(String),
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub enum MPQuery {
-    PointById(PointId),
-    Signature(Round),
-}
-
+// broadcast uses simple send_message with () return value
 impl From<&Point> for tycho_network::Request {
     fn from(value: &Point) -> Self {
         tycho_network::Request {
@@ -26,6 +15,12 @@ impl From<&Point> for tycho_network::Request {
             body: Bytes::from(bincode::serialize(value).expect("shouldn't happen")),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum MPQuery {
+    PointById(PointId),
+    Signature(Round),
 }
 
 impl From<&MPQuery> for tycho_network::Request {
@@ -38,23 +33,43 @@ impl From<&MPQuery> for tycho_network::Request {
     }
 }
 
+impl TryFrom<&ServiceRequest> for MPQuery {
+    type Error = anyhow::Error;
+
+    fn try_from(request: &ServiceRequest) -> Result<Self, Self::Error> {
+        Ok(bincode::deserialize::<MPQuery>(&request.body)?)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub enum MPResponse {
     PointById(PointByIdResponse),
     Signature(SignatureResponse),
 }
 
-impl TryFrom<&tycho_network::Response> for MPResponse {
+impl TryFrom<&MPResponse> for Response {
     type Error = anyhow::Error;
 
-    fn try_from(response: &tycho_network::Response) -> Result<Self, Self::Error> {
-        match bincode::deserialize::<MPQueryResult>(&response.body) {
-            Ok(MPQueryResult::Ok(response)) => Ok(response),
-            Ok(MPQueryResult::Err(e)) => Err(anyhow::Error::msg(e)),
+    fn try_from(value: &MPResponse) -> Result<Self, Self::Error> {
+        let body = Bytes::from(bincode::serialize(value)?);
+        Ok(Response {
+            version: Version::default(),
+            body,
+        })
+    }
+}
+
+impl TryFrom<&Response> for MPResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(response: &Response) -> Result<Self, Self::Error> {
+        match bincode::deserialize::<MPResponse>(&response.body) {
+            Ok(response) => Ok(response),
             Err(e) => Err(anyhow!("failed to deserialize: {e:?}")),
         }
     }
 }
+
 impl TryFrom<MPResponse> for PointByIdResponse {
     type Error = anyhow::Error;
 

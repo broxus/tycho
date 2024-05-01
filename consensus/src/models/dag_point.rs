@@ -20,7 +20,6 @@ impl ValidPoint {
 
 #[derive(Clone, Debug)]
 pub enum DagPoint {
-    // FIXME time skew is determined at the moment of signature response and is not reentrant
     /// valid without demur, needed to blame equivocation or graph connectivity violations
     Trusted(ValidPoint),
     /// is a valid container, but we doubt author's fairness at the moment of validating;

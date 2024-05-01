@@ -185,8 +185,8 @@ impl DagRound {
         })
     }
 
-    // Todo leave for genesis, use for own points in tests
-    pub async fn insert_exact_validate(
+    /// for genesis and own points
+    pub async fn insert_exact_sign(
         &self,
         point: &Arc<Point>,
         peer_schedule: &PeerSchedule,
@@ -199,10 +199,7 @@ impl DagRound {
         if point.valid().is_none() {
             panic!("Coding error: not a valid point")
         }
-        let Some(state) = self.insert_exact(&point) else {
-            return None;
-        };
-        let state = state.await;
+        let state = self.insert_exact(&point)?.await;
         if let Some(signable) = state.signable() {
             signable.sign(
                 self.round(),

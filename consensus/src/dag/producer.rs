@@ -9,7 +9,6 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::models::{Link, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime};
 
-// FIXME make it PointBuilder
 pub struct Producer;
 
 impl Producer {

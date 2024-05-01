@@ -12,11 +12,15 @@ license.workspace = true
 # crates.io deps
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+bytesize = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 tl-proto = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "signal"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -30,6 +34,7 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
+log = "0.4.21"
 
 #TODO: should be here?
 tycho-consensus = {workspace = true}
@@ -37,7 +42,16 @@ tycho-consensus = {workspace = true}
 
 
 [dev-dependencies]
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-test = { workspace = true }
+tycho-block-util = { workspace = true, features = ["test"] }
+tycho-core = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["test"] }
+tycho-util = { workspace = true, features = ["test"] }
+
+[features]
+test = []
 
 [lints]
 workspace = true

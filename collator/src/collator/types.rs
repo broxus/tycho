@@ -1,13 +1,20 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::{BTreeMap, HashMap};
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 
 use everscale_types::{
-    cell::{Cell, UsageTree, UsageTreeMode},
-    models::{BlockId, CurrencyCollection, McStateExtra, ShardAccounts, ShardIdent},
+    cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
+    dict::{AugDict, Dict},
+    models::{
+        AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
+        CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OutMsgQueueInfo,
+        OwnedMessage, PrevBlockRef, ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription,
+        ShardFees, ShardIdent, SimpleLib, ValueFlow,
+    },
 };
 
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
 
 use crate::mempool::MempoolAnchorId;
 
@@ -96,15 +103,18 @@ pub(super) struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
     prev_key_block: Option<BlockId>,
-    state: Arc<ShardStateStuff>,
+    mc_state_stuff: ShardStateStuff,
 }
 impl McData {
-    pub fn new(mc_state: Arc<ShardStateStuff>) -> Result<Self> {
-        let mc_state_extra = mc_state.state_extra()?;
+    pub fn build(mc_state_stuff: ShardStateStuff) -> Result<Self> {
+        let mc_state_extra = mc_state_stuff.state_extra()?;
 
         // prev key block
         let (prev_key_block_seqno, prev_key_block) = if mc_state_extra.after_key_block {
-            (mc_state.block_id().seqno, Some(*mc_state.block_id()))
+            (
+                mc_state_stuff.block_id().seqno,
+                Some(*mc_state_stuff.block_id()),
+            )
         } else if let Some(block_ref) = mc_state_extra.last_key_block.as_ref() {
             (
                 block_ref.seqno,
@@ -123,26 +133,53 @@ impl McData {
             mc_state_extra: mc_state_extra.clone(),
             prev_key_block,
             prev_key_block_seqno,
-            state: mc_state,
+            mc_state_stuff,
         })
     }
 
-    pub fn state(&self) -> Arc<ShardStateStuff> {
-        self.state.clone()
+    pub fn prev_key_block_seqno(&self) -> u32 {
+        self.prev_key_block_seqno
+    }
+
+    pub fn mc_state_stuff(&self) -> ShardStateStuff {
+        self.mc_state_stuff.clone()
     }
 
     pub fn mc_state_extra(&self) -> &McStateExtra {
         &self.mc_state_extra
     }
+
+    pub fn get_master_ref(&self) -> BlockRef {
+        let end_lt = self.mc_state_stuff.state().gen_lt;
+        let block_id = self.mc_state_stuff.block_id();
+        BlockRef {
+            end_lt,
+            seqno: block_id.seqno,
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
+        }
+    }
+
+    pub fn config(&self) -> &BlockchainConfig {
+        &self.mc_state_extra.config
+    }
+
+    pub fn libraries(&self) -> &Dict<HashBytes, LibDescr> {
+        &self.mc_state_stuff.state().libraries
+    }
+
+    pub fn get_lt_align(&self) -> u64 {
+        1000000
+    }
 }
 
 pub(super) struct PrevData {
-    observable_states: Vec<Arc<ShardStateStuff>>,
+    observable_states: Vec<ShardStateStuff>,
     observable_accounts: ShardAccounts,
 
     blocks_ids: Vec<BlockId>,
 
-    pure_states: Vec<Arc<ShardStateStuff>>,
+    pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
 
     gen_utime: u32,
@@ -151,30 +188,27 @@ pub(super) struct PrevData {
     overload_history: u64,
     underload_history: u64,
 
-    externals_processed_upto: BTreeMap<MempoolAnchorId, usize>,
+    externals_processed_upto: BTreeMap<MempoolAnchorId, u64>,
 }
 impl PrevData {
-    pub fn build(
-        _mc_data: &McData,
-        prev_states: &Vec<Arc<ShardStateStuff>>,
-        prev_blocks_ids: Vec<BlockId>,
-    ) -> Result<(Self, UsageTree)> {
+    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Self, UsageTree)> {
         //TODO: make real implementation
-        // refer to the old node impl:
+        // consider split/merge logic
         //  Collator::prepare_data()
         //  Collator::unpack_last_state()
 
+        let prev_blocks_ids: Vec<_> = prev_states.iter().map(|s| *s.block_id()).collect();
         let pure_prev_state_root = prev_states[0].root_cell();
         let pure_prev_states = prev_states.clone();
 
         let usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess);
         let observable_root = usage_tree.track(pure_prev_state_root);
         let tracker = MinRefMcStateTracker::new();
-        let observable_states = vec![Arc::new(ShardStateStuff::new(
+        let observable_states = vec![ShardStateStuff::new(
             *pure_prev_states[0].block_id(),
             observable_root,
             &tracker,
-        )?)];
+        )?];
 
         let gen_utime = observable_states[0].state().gen_utime;
         let gen_lt = observable_states[0].state().gen_lt;
@@ -182,6 +216,12 @@ impl PrevData {
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let overload_history = observable_states[0].state().overload_history;
         let underload_history = observable_states[0].state().underload_history;
+        let iter = pure_prev_states[0]
+            .state()
+            .externals_processed_upto
+            .iter()
+            .filter_map(|kv| kv.ok());
+        let externals_processed_upto = BTreeMap::from_iter(iter);
 
         let prev_data = Self {
             observable_states,
@@ -198,7 +238,7 @@ impl PrevData {
             overload_history,
             underload_history,
 
-            externals_processed_upto: BTreeMap::new(),
+            externals_processed_upto,
         };
 
         Ok((prev_data, usage_tree))
@@ -212,19 +252,258 @@ impl PrevData {
         Ok(())
     }
 
+    pub fn observable_states(&self) -> &Vec<ShardStateStuff> {
+        &self.observable_states
+    }
+
+    pub fn observable_accounts(&self) -> &ShardAccounts {
+        &self.observable_accounts
+    }
+
     pub fn blocks_ids(&self) -> &Vec<BlockId> {
         &self.blocks_ids
     }
 
-    pub fn pure_states(&self) -> &Vec<Arc<ShardStateStuff>> {
+    pub fn get_blocks_ref(&self) -> Result<PrevBlockRef> {
+        if self.pure_states.is_empty() || self.pure_states.len() > 2 {
+            bail!(
+                "There should be 1 or 2 prev states. Actual count is {}",
+                self.pure_states.len()
+            )
+        }
+
+        let mut block_refs = vec![];
+        for state in self.pure_states.iter() {
+            block_refs.push(BlockRef {
+                end_lt: state.state().gen_lt,
+                seqno: state.block_id().seqno,
+                root_hash: state.block_id().root_hash,
+                file_hash: state.block_id().file_hash,
+            });
+        }
+
+        let prev_ref = if block_refs.len() == 2 {
+            PrevBlockRef::AfterMerge {
+                left: block_refs.remove(0),
+                right: block_refs.remove(0),
+            }
+        } else {
+            PrevBlockRef::Single(block_refs.remove(0))
+        };
+
+        Ok(prev_ref)
+    }
+
+    pub fn pure_states(&self) -> &Vec<ShardStateStuff> {
         &self.pure_states
     }
 
-    pub fn externals_processed_upto(&self) -> &BTreeMap<MempoolAnchorId, usize> {
+    pub fn pure_state_root(&self) -> &Cell {
+        &self.pure_state_root
+    }
+
+    pub fn gen_lt(&self) -> u64 {
+        self.gen_lt
+    }
+
+    pub fn total_validator_fees(&self) -> &CurrencyCollection {
+        &self.total_validator_fees
+    }
+
+    pub fn externals_processed_upto(&self) -> &BTreeMap<MempoolAnchorId, u64> {
         &self.externals_processed_upto
     }
 }
 
+#[derive(Debug, Default)]
 pub(super) struct BlockCollationData {
-    block_descr: Arc<String>,
+    //block_descr: Arc<String>,
+    pub block_id_short: BlockIdShort,
+    pub chain_time: u32,
+
+    pub start_lt: u64,
+    // Should be updated on each tx finalization from ExecutionManager.max_lt
+    // which is updating during tx execution
+    pub max_lt: u64,
+
+    pub in_msgs: InMsgDescr,
+    pub out_msgs: OutMsgDescr,
+
+    // should read from prev_shard_state
+    pub out_msg_queue_stuff: OutMsgQueueInfoStuff,
+    /// Index of the highest external processed from the anchor: (anchor, index)
+    pub externals_processed_upto: Dict<u32, u64>,
+
+    /// Ids of top blocks from shards that be included in the master block
+    pub top_shard_blocks_ids: Vec<BlockId>,
+
+    shards: Option<HashMap<ShardIdent, Box<ShardDescription>>>,
+    shards_max_end_lt: u64,
+
+    //TODO: setup update logic when ShardFees would be implemented
+    pub shard_fees: ShardFees,
+
+    pub mint_msg: Option<InMsg>,
+    pub recover_create_msg: Option<InMsg>,
+
+    pub value_flow: ValueFlow,
+
+    min_ref_mc_seqno: Option<u32>,
+
+    pub rand_seed: HashBytes,
 }
+
+impl BlockCollationData {
+    pub fn shards(&self) -> Result<&HashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards
+            .as_ref()
+            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
+    }
+    pub fn set_shards(&mut self, shards: HashMap<ShardIdent, Box<ShardDescription>>) {
+        self.shards = Some(shards);
+    }
+    pub fn shards_mut(&mut self) -> Result<&mut HashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards
+            .as_mut()
+            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
+    }
+
+    pub fn shards_max_end_lt(&self) -> u64 {
+        self.shards_max_end_lt
+    }
+    pub fn update_shards_max_end_lt(&mut self, val: u64) {
+        if val > self.shards_max_end_lt {
+            self.shards_max_end_lt = val;
+        }
+    }
+
+    pub fn update_ref_min_mc_seqno(&mut self, mc_seqno: u32) -> u32 {
+        let min_ref_mc_seqno =
+            std::cmp::min(self.min_ref_mc_seqno.unwrap_or(std::u32::MAX), mc_seqno);
+        self.min_ref_mc_seqno = Some(min_ref_mc_seqno);
+        min_ref_mc_seqno
+    }
+
+    pub fn min_ref_mc_seqno(&self) -> Result<u32> {
+        self.min_ref_mc_seqno
+            .ok_or_else(|| anyhow!("`min_ref_mc_seqno` is not initialized yet"))
+    }
+}
+
+pub(super) type AccountId = HashBytes;
+
+pub(super) type InMsgDescr = AugDict<HashBytes, ImportFees, InMsg>;
+pub(super) type OutMsgDescr = AugDict<HashBytes, CurrencyCollection, OutMsg>;
+
+pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, AccountBlock>;
+
+pub(super) struct ShardAccountStuff {
+    pub account_addr: AccountId,
+    pub shard_account: ShardAccount,
+    pub orig_libs: Dict<HashBytes, SimpleLib>,
+}
+
+impl ShardAccountStuff {
+    // pub fn update_shard_state(&mut self, shard_accounts: &mut ShardAccounts) -> Result<AccountBlock> {
+    //     let account = self.shard_account.load_account()?;
+    //     if account.is_none() {
+    //         new_accounts.remove(self.account_addr().clone())?;
+    //     } else {
+    //         let shard_acc = ShardAccount::with_account_root(self.account_root(), self.last_trans_hash.clone(), self.last_trans_lt);
+    //         let value = shard_acc.write_to_new_cell()?;
+    //         new_accounts.set_builder_serialized(self.account_addr().clone(), &value, &account.aug()?)?;
+    //     }
+    //     AccountBlock::with_params(&self.account_addr, &self.transactions, &self.state_update)
+    // }
+
+    pub fn update_public_libraries(&self, libraries: &mut Dict<HashBytes, LibDescr>) -> Result<()> {
+        let opt_account = self.shard_account.account.load()?;
+        let state_init = match opt_account.state() {
+            Some(AccountState::Active(ref state_init)) => Some(state_init),
+            _ => None,
+        };
+        let new_libs = state_init.map(|v| v.libraries.clone()).unwrap_or_default();
+        if new_libs.root() != self.orig_libs.root() {
+            //TODO: implement when scan_diff be added
+            //STUB: just do nothing, no accounts, no libraries updates in prototype
+            // new_libs.scan_diff(&self.orig_libs, |key: UInt256, old, new| {
+            //     let old = old.unwrap_or_default();
+            //     let new = new.unwrap_or_default();
+            //     if old.is_public_library() && !new.is_public_library() {
+            //         self.remove_public_library(key, libraries)?;
+            //     } else if !old.is_public_library() && new.is_public_library() {
+            //         self.add_public_library(key, new.root, libraries)?;
+            //     }
+            //     Ok(true)
+            // })?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct OutMsgQueueInfoStuff {
+    ///  Dict (shard, seq_no): processed up to info
+    pub proc_info: Dict<(u64, u32), ProcessedUpto>,
+}
+
+impl OutMsgQueueInfoStuff {
+    ///TODO: make real implementation
+    pub fn get_out_msg_queue_info(&self) -> (OutMsgQueueInfo, u32) {
+        let mut min_ref_mc_seqno = u32::MAX;
+        //STUB: just clone existing
+        let msg_queue_info = OutMsgQueueInfo {
+            proc_info: self.proc_info.clone(),
+        };
+        (msg_queue_info, min_ref_mc_seqno)
+    }
+}
+
+pub trait ShardDescriptionExt {
+    fn from_block_info(
+        block_id: BlockId,
+        block_info: &BlockInfo,
+        value_flow: &ValueFlow,
+    ) -> ShardDescription;
+}
+impl ShardDescriptionExt for ShardDescription {
+    fn from_block_info(
+        block_id: BlockId,
+        block_info: &BlockInfo,
+        value_flow: &ValueFlow,
+    ) -> ShardDescription {
+        ShardDescription {
+            seqno: block_id.seqno,
+            reg_mc_seqno: 0,
+            start_lt: block_info.start_lt,
+            end_lt: block_info.end_lt,
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
+            before_split: block_info.before_split,
+            before_merge: false, //TODO: by t-node, needs to review
+            want_split: block_info.want_split,
+            want_merge: block_info.want_merge,
+            nx_cc_updated: false, //TODO: by t-node, needs to review
+            next_catchain_seqno: block_info.gen_catchain_seqno,
+            next_validator_shard: block_info.shard.prefix(), // eq to `shard_prefix_with_tag` in old node
+            min_ref_mc_seqno: block_info.min_ref_mc_seqno,
+            gen_utime: block_info.gen_utime,
+            split_merge_at: None, //TODO: check if we really should not use it here
+            fees_collected: value_flow.fees_collected.clone(),
+            funds_created: value_flow.created.clone(),
+            copyleft_rewards: Default::default(),
+            proof_chain: None,
+            #[cfg(feature = "venom")]
+            collators: None,
+        }
+    }
+}
+
+pub(super) enum AsyncMessage {
+    /// 0 - message; 1 - message.id_hash()
+    Ext(OwnedMessage, HashBytes),
+    /// 0 - message in execution queue; 1 - TRUE when from the same shard
+    Int(EnqueuedMessage, bool),
+}
+
+pub mod ext_types_stubs {}
