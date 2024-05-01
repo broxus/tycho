@@ -1,16 +1,13 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Result};
 
 use everscale_types::{
-    cell::{Cell, CellBuilder, CellFamily, HashBytes, Store},
-    models::{BlockId, BlockIdShort, ShardIdent, ShardStateUnsplit, Signature},
+    cell::HashBytes,
+    models::{Block, BlockId, BlockIdShort, ShardIdent, Signature},
 };
 
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_util::FastHashMap;
 
 use crate::types::BlockCandidate;
 
@@ -25,7 +22,7 @@ pub(super) struct BlocksCache {
 pub struct BlockCandidateEntry {
     pub key: BlockCacheKey,
     pub candidate: BlockCandidate,
-    pub signatures: HashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<HashBytes, Signature>,
 }
 
 pub enum SendSyncStatus {
@@ -110,7 +107,7 @@ impl BlockCandidateContainer {
         &mut self,
         is_valid: bool,
         already_synced: bool,
-        signatures: HashMap<HashBytes, Signature>,
+        signatures: FastHashMap<HashBytes, Signature>,
     ) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;
@@ -172,6 +169,14 @@ impl BlockCandidateContainer {
         }
         Ok(())
     }
+
+    pub fn get_block(&self) -> Result<&Block> {
+        let entry = self
+            .entry
+            .as_ref()
+            .ok_or_else(|| anyhow!("`entry` was extracted"))?;
+        Ok(entry.candidate.block())
+    }
 }
 
 pub struct BlockCandidateToSend {
@@ -182,31 +187,4 @@ pub struct BlockCandidateToSend {
 pub struct McBlockSubgraphToSend {
     pub mc_block: BlockCandidateToSend,
     pub shard_blocks: Vec<BlockCandidateToSend>,
-}
-
-pub(in crate::manager) trait ShardStateStuffExt {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Arc<Self>>;
-}
-impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Arc<Self>> {
-        let mut builder = CellBuilder::new();
-        let mut cell_context = Cell::empty_context();
-        shard_state.store_into(&mut builder, &mut cell_context)?;
-        let root = builder.build_ext(&mut cell_context)?;
-
-        Ok(Arc::new(ShardStateStuff::from_state_and_root(
-            block_id,
-            shard_state,
-            root,
-            tracker,
-        )?))
-    }
 }

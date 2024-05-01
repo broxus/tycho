@@ -36,11 +36,12 @@ tycho-util = { workspace = true }
 bytesize = { workspace = true }
 everscale-crypto = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["test"] }
 tempfile = { workspace = true }
 tracing-test = { workspace = true }
 
-[lints]
-workspace = true
-
 [features]
 test = []
+
+[lints]
+workspace = true

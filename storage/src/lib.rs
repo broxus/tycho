@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Result;
+
 pub use self::db::*;
 pub use self::models::*;
 pub use self::store::*;
@@ -22,11 +24,7 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(
-        db: Arc<Db>,
-        file_db_path: PathBuf,
-        max_cell_cache_size_bytes: u64,
-    ) -> anyhow::Result<Self> {
+    pub fn new(db: Arc<Db>, file_db_path: PathBuf, max_cell_cache_size_bytes: u64) -> Result<Self> {
         let files_dir = FileDb::new(file_db_path);
 
         let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
@@ -59,6 +57,34 @@ impl Storage {
                 runtime_storage,
             }),
         })
+    }
+
+    /// Creates a new temporary storage with potato config.
+    ///
+    /// NOTE: Temp dir must live longer than the storage,
+    /// otherwise compaction filter will not work.
+    #[cfg(any(test, feature = "test"))]
+    pub fn new_temp() -> Result<(Self, tempfile::TempDir)> {
+        use bytesize::ByteSize;
+
+        let tmp_dir = tempfile::tempdir()?;
+        let root_path = tmp_dir.path();
+
+        // Init rocksdb
+        let db_options = DbOptions {
+            rocksdb_lru_capacity: ByteSize::kb(1024),
+            cells_cache_size: ByteSize::kb(1024),
+        };
+        let db = Db::open(root_path.join("db_storage"), db_options)?;
+
+        // Init storage
+        let storage = Storage::new(
+            db,
+            root_path.join("file_storage"),
+            db_options.cells_cache_size.as_u64(),
+        )?;
+
+        Ok((storage, tmp_dir))
     }
 
     pub fn runtime_storage(&self) -> &RuntimeStorage {

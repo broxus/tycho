@@ -343,21 +343,9 @@ fn make_shard_state(global_id: i32, shard_ident: ShardIdent, now: u32) -> ShardS
     ShardStateUnsplit {
         global_id,
         shard_ident,
-        seqno: 0,
-        vert_seqno: 0,
         gen_utime: now,
-        gen_lt: 0,
         min_ref_mc_seqno: u32::MAX,
-        out_msg_queue_info: Default::default(),
-        before_split: false,
-        accounts: Lazy::new(&Default::default()).unwrap(),
-        overload_history: 0,
-        underload_history: 0,
-        total_balance: CurrencyCollection::ZERO,
-        total_validator_fees: CurrencyCollection::ZERO,
-        libraries: Dict::new(),
-        master_ref: None,
-        custom: None,
+        ..Default::default()
     }
 }
 

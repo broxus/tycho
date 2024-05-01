@@ -8,7 +8,9 @@ use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 
-pub use self::provider::{BlockProvider, BlockchainBlockProvider, BlockchainBlockProviderConfig};
+pub use self::provider::{
+    BlockProvider, BlockchainBlockProvider, BlockchainBlockProviderConfig, OptionalBlockStuff,
+};
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
 pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::{
@@ -18,6 +20,8 @@ pub use self::subscriber::{
 
 #[cfg(any(test, feature = "test"))]
 pub use self::provider::ArchiveBlockProvider;
+#[cfg(any(test, feature = "test"))]
+pub use self::subscriber::test::PrintSubscriber;
 
 mod provider;
 mod state;

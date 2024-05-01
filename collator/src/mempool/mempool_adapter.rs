@@ -45,10 +45,7 @@ pub(crate) trait MempoolAdapter: Send + Sync + 'static {
     fn create(listener: Arc<dyn MempoolEventListener>) -> Self;
 
     /// Schedule task to process new master block state (may perform gc or nodes rotation)
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()>;
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
     /// Return None if the requested anchor does not exist.
@@ -125,10 +122,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         }
     }
 
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
@@ -237,11 +231,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 fn _stub_create_random_anchor_with_stub_externals(
     anchor_id: MempoolAnchorId,
 ) -> Arc<MempoolAnchor> {
-    let chain_time = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let externals_count: i32 = rand::thread_rng().gen_range(-10..10).max(0);
+    let chain_time = anchor_id as u64 * 471 * 6 % 1000000000;
+    let externals_count = chain_time as i32 % 10;
     let mut externals = vec![];
     for i in 0..externals_count {
         let rand_addr = (0..32).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();

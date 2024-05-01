@@ -18,6 +18,39 @@ pub struct BlockStuff {
 }
 
 impl BlockStuff {
+    #[cfg(any(test, feature = "test"))]
+    pub fn new_empty(shard: ShardIdent, seqno: u32) -> Self {
+        use everscale_types::merkle::MerkleUpdate;
+
+        let block_info = BlockInfo {
+            shard,
+            seqno,
+            ..Default::default()
+        };
+
+        let block = Block {
+            global_id: 0,
+            info: Lazy::new(&BlockInfo::default()).unwrap(),
+            value_flow: Lazy::new(&ValueFlow::default()).unwrap(),
+            state_update: Lazy::new(&MerkleUpdate::default()).unwrap(),
+            out_msg_queue_updates: None,
+            extra: Lazy::new(&BlockExtra::default()).unwrap(),
+        };
+
+        let cell = CellBuilder::build_from(&block).unwrap();
+        let root_hash = *cell.repr_hash();
+        let file_hash = sha2::Sha256::digest(Boc::encode(&cell)).into();
+
+        let block_id = BlockId {
+            shard: block_info.shard,
+            seqno: block_info.seqno,
+            root_hash,
+            file_hash,
+        };
+
+        Self::with_block(block_id, block)
+    }
+
     pub fn with_block(id: BlockId, block: Block) -> Self {
         Self {
             inner: Arc::new(Inner { id, block }),

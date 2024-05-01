@@ -5,15 +5,15 @@ use anyhow::{bail, Context};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 
-use tycho_network::PrivateOverlay;
-
 use crate::validator::types::{
     BlockValidationCandidate, ValidationResult, ValidationSessionInfo, ValidatorInfo,
 };
+use tycho_network::PrivateOverlay;
+use tycho_util::FastHashMap;
 
 struct SignatureMaps {
-    valid_signatures: HashMap<HashBytes, Signature>,
-    invalid_signatures: HashMap<HashBytes, Signature>,
+    valid_signatures: FastHashMap<HashBytes, Signature>,
+    invalid_signatures: FastHashMap<HashBytes, Signature>,
 }
 
 /// Represents the state of validation for blocks and sessions.
@@ -32,11 +32,11 @@ pub trait ValidationState: Send + Sync + 'static {
 }
 
 /// Holds information about a validation session.
-pub(crate) struct SessionInfo {
+pub struct SessionInfo {
     session_id: u32,
     max_weight: u64,
-    blocks_signatures: HashMap<BlockIdShort, (BlockId, SignatureMaps)>,
-    cached_signatures: HashMap<BlockIdShort, HashMap<HashBytes, Signature>>,
+    blocks_signatures: FastHashMap<BlockIdShort, (BlockId, SignatureMaps)>,
+    cached_signatures: FastHashMap<BlockIdShort, FastHashMap<HashBytes, Signature>>,
     validation_session_info: Arc<ValidationSessionInfo>,
     private_overlay: PrivateOverlay,
 }
@@ -108,6 +108,7 @@ impl SessionInfo {
 
     /// Determines the validation status of a block.
     pub fn validation_status(&self, block_id_short: &BlockIdShort) -> ValidationResult {
+        let valid_weight = self.max_weight * 2 / 3 + 1;
         if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {
             let total_valid_weight: u64 = signature_maps
                 .valid_signatures
@@ -120,16 +121,15 @@ impl SessionInfo {
                 })
                 .sum();
 
-            let valid_weight = self.max_weight * 2 / 3 + 1;
             if total_valid_weight >= valid_weight {
                 ValidationResult::Valid
             } else if self.is_invalid(signature_maps, valid_weight) {
                 ValidationResult::Invalid
             } else {
-                ValidationResult::Insufficient
+                ValidationResult::Insufficient(total_valid_weight, valid_weight)
             }
         } else {
-            ValidationResult::Insufficient
+            ValidationResult::Insufficient(0, valid_weight)
         }
     }
     /// Lists validators without signatures for a given block.
@@ -187,23 +187,11 @@ impl SessionInfo {
     pub fn get_valid_signatures(
         &self,
         block_id_short: &BlockIdShort,
-    ) -> HashMap<HashBytes, Signature> {
+    ) -> FastHashMap<HashBytes, Signature> {
         if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {
             signature_maps.valid_signatures.clone()
         } else {
-            HashMap::new()
-        }
-    }
-
-    /// Retrieves valid signatures for a block.
-    pub fn get_invalid_signatures(
-        &self,
-        block_id_short: &BlockIdShort,
-    ) -> HashMap<HashBytes, Signature> {
-        if let Some((_, signature_maps)) = self.blocks_signatures.get(block_id_short) {
-            signature_maps.invalid_signatures.clone()
-        } else {
-            HashMap::new()
+            FastHashMap::default()
         }
     }
 
@@ -223,8 +211,8 @@ impl SessionInfo {
                 (
                     *block_id,
                     SignatureMaps {
-                        valid_signatures: HashMap::new(),
-                        invalid_signatures: HashMap::new(),
+                        valid_signatures: FastHashMap::default(),
+                        invalid_signatures: FastHashMap::default(),
                     },
                 )
             });

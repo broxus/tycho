@@ -25,5 +25,8 @@ tycho-util = { workspace = true }
 [dev-dependencies]
 rand = { workspace = true }
 
+[features]
+test = []
+
 [lints]
 workspace = true
