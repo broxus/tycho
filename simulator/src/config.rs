@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
-use std::process::Command;
+use tycho_util::project_root;
 
 pub struct ServiceConfig {
     pub project_root: PathBuf,
@@ -11,17 +11,7 @@ pub struct ServiceConfig {
 
 impl ServiceConfig {
     pub fn new(network_subnet: String) -> Result<Self> {
-        let project_root = Command::new("git")
-            .arg("rev-parse")
-            .arg("--show-toplevel")
-            .output()?
-            .stdout;
-        // won't work on windows but we don't care
-        let project_root = PathBuf::from(
-            String::from_utf8(project_root)
-                .context("Invalid project root")?
-                .trim(),
-        );
+        let project_root = project_root()?;
         let scratch_dir = project_root.join(".scratch");
         Ok(Self {
             project_root,

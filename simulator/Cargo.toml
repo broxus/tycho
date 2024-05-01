@@ -21,6 +21,7 @@ hex = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tycho-util = { path = "../util" }
 
 [lints]
 workspace = true

@@ -558,3 +558,140 @@ enum FilesContextError {
 }
 
 const MAX_LEVEL: u8 = 3;
+
+#[cfg(test)]
+mod test {
+    use crate::rocksdb::IteratorMode;
+    use crate::store::shard_state::cell_storage::CellStorage;
+    use crate::store::shard_state::replace_transaction::{ShardStateReplaceTransaction, MAX_LEVEL};
+    use crate::{Db, DbOptions};
+    use anyhow::Context;
+    use everscale_types::cell::{CellImpl, HashBytes};
+    use everscale_types::models::{BlockId, ShardIdent};
+    use std::io::{BufReader, Read};
+    use std::sync::Arc;
+    use tycho_util::progress_bar::ProgressBar;
+    use tycho_util::project_root;
+    use weedb::rocksdb::WriteBatch;
+
+    #[test]
+    #[ignore]
+    fn insert_and_delete_of_several_shards() -> anyhow::Result<()> {
+        tycho_util::test::init_logger("insert_and_delete_of_several_shards");
+        let project_root = project_root()?.join(".scratch");
+        let integration_test_path = project_root.join("integration_tests");
+        let current_test_path = integration_test_path.join("insert_and_delete_of_several_shards");
+        std::fs::remove_dir_all(&current_test_path).ok();
+        std::fs::create_dir_all(&current_test_path)?;
+        // decompressing the archive
+        let archive_path = integration_test_path.join("states.tar.zst");
+        let res = std::process::Command::new("tar")
+            .arg("-I")
+            .arg("zstd")
+            .arg("-xf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(&current_test_path)
+            .status()?;
+        if !res.success() {
+            return Err(anyhow::anyhow!("Failed to decompress the archive"));
+        }
+        tracing::info!("Decompressed the archive");
+
+        let db = crate::db::Db::open(current_test_path.join("rocksdb"), DbOptions::default())?;
+        let file_db = crate::db::FileDb::new(current_test_path.join("file_db"));
+
+        std::fs::create_dir_all(file_db.path())?; //todo: should be done in FileDb::new?
+        let cells_storage = CellStorage::new(db.clone(), 100_000_000);
+
+        let tracker = super::MinRefMcStateTracker::new();
+        let download_dir = file_db.subdir("downloads");
+
+        for file in std::fs::read_dir(current_test_path.join("states"))? {
+            let file = file?;
+            let filename = file.file_name().to_string_lossy().to_string();
+
+            let block_id = parse_filename(filename.as_ref());
+            let mut replace_transaction: ShardStateReplaceTransaction<'_> =
+                ShardStateReplaceTransaction::new(
+                    &db,
+                    &download_dir,
+                    &cells_storage,
+                    &tracker,
+                    &block_id,
+                )
+                .context("Failed to create ShardStateReplaceTransaction")?;
+            let file = std::fs::File::open(file.path())?;
+            let mut file = BufReader::new(file);
+            let chunk_size = 10_000_000; // size of each chunk in bytes
+            let mut buffer = vec![0u8; chunk_size];
+            let mut pg = ProgressBar::builder("downloading state")
+                .exact_unit("cells")
+                .build();
+
+            loop {
+                let bytes_read = file.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break; // End of file
+                }
+
+                let packet = buffer[..bytes_read].to_vec();
+                replace_transaction.process_packet(packet, &mut pg)?;
+            }
+
+            let mut pg = ProgressBar::builder("processing state")
+                .with_mapper(|x| bytesize::to_string(x, false))
+                .build();
+            replace_transaction.finalize(block_id, &mut pg)?;
+        }
+        tracing::info!("Finished processing all states");
+        tracing::info!("Starting gc");
+        states_gc(&cells_storage, &db)?;
+
+        Ok(())
+    }
+
+    fn states_gc(cell_storage: &Arc<CellStorage>, db: &Db) -> anyhow::Result<()> {
+        let states_iterator = db.shard_states.iterator(IteratorMode::Start);
+        let bump = bumpalo::Bump::new();
+
+        let total_states = db.shard_states.iterator(IteratorMode::Start).count();
+
+        for (deleted, state) in states_iterator.enumerate() {
+            let (_, value) = state?;
+
+            // check that state actually exists
+            let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
+
+            let mut batch = WriteBatch::default();
+            cell_storage.remove_cell(&mut batch, &bump, cell.hash(MAX_LEVEL))?;
+
+            //execute batch
+            db.raw().write_opt(batch, db.cells.write_config())?;
+            tracing::info!("State deleted. Progress: {deleted}/{total_states}",);
+        }
+
+        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        tracing::info!("States GC finished. Cells left: {cells_left}");
+        assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+
+        Ok(())
+    }
+
+    fn parse_filename(name: &str) -> BlockId {
+        // Split the remaining string by commas into components
+        let parts: Vec<&str> = name.split(',').collect();
+
+        // Parse each part
+        let workchain: i32 = parts[0].parse().unwrap();
+        let prefix = u64::from_str_radix(parts[1], 16).unwrap();
+        let seqno: u32 = parts[2].parse().unwrap();
+
+        BlockId {
+            shard: ShardIdent::new(workchain, prefix).unwrap(),
+            seqno,
+            root_hash: Default::default(),
+            file_hash: Default::default(),
+        }
+    }
+}

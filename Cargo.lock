@@ -2254,6 +2254,7 @@ dependencies = [
  "rand",
  "serde",
  "serde_json",
+ "tycho-util",
 ]
 
 [[package]]
@@ -2301,6 +2302,7 @@ name = "tycho-util"
 version = "0.0.1"
 dependencies = [
  "ahash",
+ "anyhow",
  "castaway",
  "dashmap",
  "everscale-crypto",
