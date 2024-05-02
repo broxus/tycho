@@ -1,18 +1,15 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Result};
-
-use everscale_types::{
-    cell::HashBytes,
-    models::{Block, BlockId, BlockIdShort, ShardIdent, Signature},
-};
-
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
+use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
 
 use crate::types::BlockCandidate;
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
+
 #[derive(Default)]
 pub(super) struct BlocksCache {
     pub master: BTreeMap<BlockCacheKey, BlockCandidateContainer>,
@@ -55,6 +52,7 @@ pub struct BlockCandidateContainer {
     /// Hash id of master block that includes current shard block in his subgraph
     pub containing_mc_block: Option<BlockCacheKey>,
 }
+
 impl BlockCandidateContainer {
     pub fn new(candidate: BlockCandidate) -> Self {
         let block_id = *candidate.block_id();
@@ -64,6 +62,7 @@ impl BlockCandidateContainer {
             candidate,
             signatures: Default::default(),
         };
+
         Self {
             key,
             block_id,

@@ -15,10 +15,7 @@ use tracing::debug;
 
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_collator::state_node::{
-    StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl, StateNodeAdapterStdImpl,
-    StateNodeEventListener,
-};
+use tycho_collator::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{CollationSessionInfo, OnValidatedBlockEvent, ValidatorNetwork};
 use tycho_collator::validator::config::ValidatorConfig;
@@ -93,7 +90,7 @@ impl StateNodeEventListener for TestValidatorEventListener {
 
 struct Node {
     network: Network,
-    keypair: KeyPair,
+    keypair: Arc<KeyPair>,
     overlay_service: OverlayService,
     dht_client: DhtClient,
     peer_resolver: PeerResolver,
@@ -101,7 +98,7 @@ struct Node {
 
 impl Node {
     fn new(key: &ed25519::SecretKey) -> Self {
-        let keypair = ed25519::KeyPair::from(key);
+        let keypair = Arc::new(ed25519::KeyPair::from(key));
         let local_id = PeerId::from(keypair.public_key);
 
         let (dht_tasks, dht_service) = DhtService::builder(local_id)
@@ -185,8 +182,10 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
 
     block_strider.run().await.unwrap();
 
-    let state_node_adapter =
-        Arc::new(StateNodeAdapterBuilderStdImpl::new(storage.clone()).build(test_listener.clone()));
+    let state_node_adapter = Arc::new(StateNodeAdapterStdImpl::new(
+        test_listener.clone(),
+        storage.clone(),
+    ));
     let _validation_state = ValidationStateStdImpl::new();
 
     let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
@@ -222,11 +221,11 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         dht_client,
     };
 
-    let validator = ValidatorStdImpl::<_>::create(
+    let validator = ValidatorStdImpl::new(
         vec![test_listener.clone()],
         state_node_adapter,
         validator_network,
-        KeyPair::generate(&mut ThreadRng::default()),
+        Arc::new(KeyPair::generate(&mut ThreadRng::default())),
         ValidatorConfig {
             base_loop_delay: Duration::from_millis(50),
             max_loop_delay: Duration::from_secs(10),
@@ -261,7 +260,7 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         validators: vec![validator_description, validator_description2],
         short_hash: 0,
     };
-    let keypair = KeyPair::generate(&mut ThreadRng::default());
+    let keypair = Arc::new(KeyPair::generate(&mut ThreadRng::default()));
     let collator_session_info = Arc::new(CollationSessionInfo::new(0, validators, Some(keypair)));
 
     let validation_session =
@@ -339,7 +338,7 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
             global_validated_blocks.clone(),
         );
         let state_node_adapter =
-            Arc::new(StateNodeAdapterBuilderStdImpl::new(storage).build(test_listener.clone()));
+            Arc::new(StateNodeAdapterStdImpl::new(test_listener.clone(), storage));
 
         let network = ValidatorNetwork {
             overlay_service: node.overlay_service.clone(),
@@ -351,7 +350,7 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
             max_loop_delay: Duration::from_secs(10),
         };
 
-        let validator = Arc::new(ValidatorStdImpl::<_>::create(
+        let validator = Arc::new(ValidatorStdImpl::new(
             vec![test_listener.clone()],
             state_node_adapter,
             network,
@@ -389,7 +388,7 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
 }
 
 async fn handle_validator(
-    validator: Arc<ValidatorStdImpl<StateNodeAdapterStdImpl>>,
+    validator: Arc<ValidatorStdImpl>,
     semaphore: Arc<tokio::sync::Semaphore>,
     listener: Arc<TestValidatorEventListener>,
     blocks_amount: u32,
@@ -403,7 +402,7 @@ async fn handle_validator(
         let collator_session_info = Arc::new(CollationSessionInfo::new(
             session,
             validators_subset_info.clone(),
-            Some(*validator.get_keypair()), // Assuming you have access to node's keypair here
+            Some(validator.get_keypair()), // Assuming you have access to node's keypair here
         ));
 
         validator

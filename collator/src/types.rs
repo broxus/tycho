@@ -14,7 +14,7 @@ use tycho_network::{DhtClient, OverlayService, PeerResolver};
 use tycho_util::FastHashMap;
 
 pub struct CollationConfig {
-    pub key_pair: KeyPair,
+    pub key_pair: Arc<KeyPair>,
     pub mc_block_min_interval_ms: u64,
     pub max_mc_block_delta_from_bc_to_await_own: i32,
 
@@ -24,16 +24,16 @@ pub struct CollationConfig {
     pub max_collate_threads: u16,
 
     #[cfg(feature = "test")]
-    pub test_validators_keypairs: Vec<KeyPair>,
+    pub test_validators_keypairs: Vec<Arc<KeyPair>>,
 }
 
-pub(crate) struct BlockCollationResult {
+pub struct BlockCollationResult {
     pub candidate: BlockCandidate,
     pub new_state_stuff: ShardStateStuff,
 }
 
 #[derive(Clone)]
-pub(crate) struct BlockCandidate {
+pub struct BlockCandidate {
     block_id: BlockId,
     block: Block,
     prev_blocks_ids: Vec<BlockId>,
@@ -43,6 +43,7 @@ pub(crate) struct BlockCandidate {
     collated_file_hash: HashBytes,
     chain_time: u64,
 }
+
 impl BlockCandidate {
     pub fn new(
         block_id: BlockId,
@@ -88,7 +89,7 @@ impl BlockCandidate {
     }
 }
 
-pub(crate) trait ShardStateStuffExt {
+pub trait ShardStateStuffExt {
     fn from_state(
         block_id: BlockId,
         shard_state: ShardStateUnsplit,
@@ -97,6 +98,7 @@ pub(crate) trait ShardStateStuffExt {
     where
         Self: Sized;
 }
+
 impl ShardStateStuffExt for ShardStateStuff {
     fn from_state(
         block_id: BlockId,
@@ -178,13 +180,13 @@ pub struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,
-    current_collator_keypair: Option<KeyPair>,
+    current_collator_keypair: Option<Arc<KeyPair>>,
 }
 impl CollationSessionInfo {
     pub fn new(
         seqno: u32,
         collators: ValidatorSubsetInfo,
-        current_collator_keypair: Option<KeyPair>,
+        current_collator_keypair: Option<Arc<KeyPair>>,
     ) -> Self {
         Self {
             seqno,
@@ -199,7 +201,7 @@ impl CollationSessionInfo {
         &self.collators
     }
 
-    pub fn current_collator_keypair(&self) -> Option<&KeyPair> {
+    pub fn current_collator_keypair(&self) -> Option<&Arc<KeyPair>> {
         self.current_collator_keypair.as_ref()
     }
 }

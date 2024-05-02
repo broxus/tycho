@@ -1,36 +1,19 @@
 use std::collections::HashMap;
 
 use anyhow::{bail, Result};
-
-use everscale_types::models::{BlockExtra, BlockInfo, ShardStateUnsplit};
-use everscale_types::{
-    cell::{Cell, CellBuilder, HashBytes, UsageTree},
-    dict::Dict,
-    merkle::MerkleUpdate,
-    models::{
-        Block, BlockId, BlockRef, BlockchainConfig, CreatorStats, GlobalCapability, GlobalVersion,
-        Lazy, LibDescr, McBlockExtra, McStateExtra, ShardHashes, WorkchainDescription,
-    },
-};
+use everscale_types::merkle::*;
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use sha2::Digest;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::{
-    mempool::MempoolAdapter, msg_queue::MessageQueueAdapter, state_node::StateNodeAdapter,
-    types::BlockCandidate,
-};
+use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
+use crate::types::BlockCandidate;
 
-use super::super::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
+use super::{execution_manager::ExecutionManager, CollatorStdImpl};
 
-use super::{execution_manager::ExecutionManager, CollatorProcessorStdImpl};
-
-impl<MQ, MP, ST> CollatorProcessorStdImpl<MQ, MP, ST>
-where
-    MQ: MessageQueueAdapter,
-    MP: MempoolAdapter,
-    ST: StateNodeAdapter,
-{
+impl CollatorStdImpl {
     pub(super) async fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,
@@ -74,7 +57,7 @@ where
             .try_add_assign(&value_flow.fees_imported)?;
         value_flow
             .fees_collected
-            .try_add_assign(&value_flow.created);
+            .try_add_assign(&value_flow.created)?;
         value_flow.to_next_block = shard_accounts.root_extra().balance.clone();
 
         // build master state extra or get a ref to last applied master block

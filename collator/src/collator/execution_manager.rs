@@ -1,17 +1,12 @@
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 
-use everscale_types::{
-    cell::HashBytes,
-    dict::Dict,
-    models::{BlockchainConfig, LibDescr},
-};
-
-use super::super::types::{AccountId, AsyncMessage, ShardAccountStuff};
+use crate::collator::types::{AccountId, AsyncMessage, ShardAccountStuff};
 
 pub(super) struct ExecutionManager {
     #[allow(clippy::type_complexity)]
