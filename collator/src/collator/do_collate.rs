@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
+use sha2::Digest;
 
 use everscale_types::cell::{Cell, CellBuilder, Load};
 use everscale_types::models::{
@@ -18,8 +18,6 @@ use everscale_types::{
     },
     num::Tokens,
 };
-use rand::Rng;
-use sha2::Digest;
 
 use crate::{
     collator::{
@@ -33,30 +31,15 @@ use crate::{
     types::BlockCollationResult,
 };
 
-use super::super::CollatorEventEmitter;
+use super::CollatorProcessorStdImpl;
 
-use super::{CollatorProcessorSpecific, CollatorProcessorStdImpl};
-
-#[async_trait]
-pub trait DoCollate<MQ, MP, ST>:
-    CollatorProcessorSpecific<MQ, MP, ST> + CollatorEventEmitter + Sized + Send + Sync + 'static
-{
-    async fn do_collate(
-        &mut self,
-        next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
-    ) -> Result<()>;
-}
-
-#[async_trait]
-impl<MQ, QI, MP, ST> DoCollate<MQ, MP, ST> for CollatorProcessorStdImpl<MQ, QI, MP, ST>
+impl<MQ, MP, ST> CollatorProcessorStdImpl<MQ, MP, ST>
 where
     MQ: MessageQueueAdapter,
-    QI: QueueIterator + Send + Sync + 'static,
     MP: MempoolAdapter,
     ST: StateNodeAdapter,
 {
-    async fn do_collate(
+    pub(super) async fn do_collate_impl(
         &mut self,
         mut next_chain_time: u64,
         top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
@@ -169,7 +152,7 @@ where
 
         //STUB: just remove fisrt anchor from cache
         let _ext_msg = self.get_next_external();
-        self.set_has_pending_externals(false);
+        self.has_pending_externals = false;
 
         // TODO: load from DAG
         let msgs_set = vec![];
@@ -248,7 +231,7 @@ where
             candidate,
             new_state_stuff: new_state_stuff.clone(),
         };
-        self.on_block_candidate_event(collation_result).await?;
+        self.listener.on_block_candidate(collation_result).await?;
         tracing::info!(
             target: tracing_targets::COLLATOR,
             "Collator ({}{}): STUB: created and sent empty block candidate...",
@@ -260,9 +243,7 @@ where
 
         Ok(())
     }
-}
 
-impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
     fn calc_start_lt(
         collator_descr: &str,
         mc_data: &McData,

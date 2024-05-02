@@ -163,8 +163,8 @@ impl McData {
         BlockRef {
             end_lt,
             seqno: block_id.seqno,
-            root_hash: block_id.root_hash.clone(),
-            file_hash: block_id.file_hash.clone(),
+            root_hash: block_id.root_hash,
+            file_hash: block_id.file_hash,
         }
     }
 
@@ -199,12 +199,9 @@ pub(super) struct PrevData {
     externals_processed_upto: BTreeMap<MempoolAnchorId, u64>,
 }
 impl PrevData {
-    pub fn build(
-        _mc_data: &McData,
-        prev_states: &Vec<Arc<ShardStateStuff>>,
-    ) -> Result<(Self, UsageTree)> {
+    pub fn build(prev_states: Vec<Arc<ShardStateStuff>>) -> Result<(Self, UsageTree)> {
         //TODO: make real implementation
-        // refer to the old node impl:
+        // consider split/merge logic
         //  Collator::prepare_data()
         //  Collator::unpack_last_state()
 
@@ -276,7 +273,7 @@ impl PrevData {
     }
 
     pub fn get_blocks_ref(&self) -> Result<PrevBlockRef> {
-        if self.pure_states.len() < 1 || self.pure_states.len() > 2 {
+        if self.pure_states.is_empty() || self.pure_states.len() > 2 {
             bail!(
                 "There should be 1 or 2 prev states. Actual count is {}",
                 self.pure_states.len()
@@ -288,8 +285,8 @@ impl PrevData {
             block_refs.push(BlockRef {
                 end_lt: state.state().gen_lt,
                 seqno: state.block_id().seqno,
-                root_hash: state.block_id().root_hash.clone(),
-                file_hash: state.block_id().file_hash.clone(),
+                root_hash: state.block_id().root_hash,
+                file_hash: state.block_id().file_hash,
             });
         }
 

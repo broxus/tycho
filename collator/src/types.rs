@@ -107,6 +107,7 @@ impl ShardStateStuffExt for ShardStateStuff {
     }
 }
 
+#[derive(Clone)]
 pub enum OnValidatedBlockEvent {
     ValidByState,
     Invalid,

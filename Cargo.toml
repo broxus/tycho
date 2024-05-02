@@ -101,7 +101,6 @@ tycho-util = { path = "./util" }
 castaway = { git = "https://github.com/sagebind/castaway.git" }
 everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "tycho" }
 
-
 [workspace.lints.rust]
 future_incompatible = "warn"
 nonstandard_style = "warn"

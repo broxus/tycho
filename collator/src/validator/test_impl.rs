@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
+use tokio::sync::Semaphore;
 
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
@@ -13,9 +14,9 @@ use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
 use crate::validator::types::ValidationSessionInfo;
 use crate::{state_node::StateNodeAdapter, utils::async_queued_dispatcher::AsyncQueuedDispatcher};
+use crate::validator::state::SessionInfo;
 
 use super::{
-    validator_processor::{ValidatorProcessor, ValidatorTaskResult},
     ValidatorEventEmitter, ValidatorEventListener,
 };
 
@@ -57,7 +58,6 @@ where
     }
 
     fn new(
-        _dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
         listener: Arc<dyn ValidatorEventListener>,
         _state_node_adapter: Arc<ST>,
         _network: ValidatorNetwork,
@@ -71,11 +71,12 @@ where
     }
 
     async fn start_candidate_validation(
-        &mut self,
+        // &self,
         candidate_id: BlockId,
-        _session_seqno: u32,
+        session: &Arc<SessionInfo>,
         current_validator_keypair: KeyPair,
-    ) -> Result<ValidatorTaskResult> {
+        listener: Vec<Arc<dyn ValidatorEventListener>>,
+    ) -> Result<()> {
         let mut signatures = FastHashMap::default();
         signatures.insert(
             current_validator_keypair.public_key.to_bytes().into(),
@@ -86,64 +87,15 @@ where
             "Validator (block: {}): STUB: emulated validation via signatures request",
             candidate_id.as_short_id(),
         );
-        self.listener
-            .on_block_validated(
-                candidate_id,
-                OnValidatedBlockEvent::Valid(BlockSignatures { signatures }),
-            )
-            .await?;
+        for listener in listener.iter() {
+            listener
+                .on_block_validated(
+                    candidate_id,
+                    OnValidatedBlockEvent::Valid(BlockSignatures { signatures: signatures.clone() }),
+                )
+                .await?;
+        }
 
-        Ok(ValidatorTaskResult::Void)
-    }
-
-    fn get_dispatcher(&self) -> Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>> {
-        self._dispatcher.clone()
-    }
-
-    async fn try_add_session(
-        &mut self,
-        _session: Arc<ValidationSessionInfo>,
-    ) -> Result<ValidatorTaskResult> {
-        Ok(ValidatorTaskResult::Void)
-    }
-
-    async fn stop_candidate_validation(
-        &self,
-        _candidate_id: BlockId,
-    ) -> Result<ValidatorTaskResult> {
-        todo!()
-    }
-
-    async fn get_block_signatures(
-        &mut self,
-        _session_seqno: u32,
-        _block_id_short: &BlockIdShort,
-    ) -> Result<ValidatorTaskResult> {
-        todo!()
-    }
-    async fn process_candidate_signature_response(
-        &mut self,
-        _session_seqno: u32,
-        _block_id_short: BlockIdShort,
-        _signatures: Vec<([u8; 32], [u8; 64])>,
-    ) -> Result<ValidatorTaskResult> {
-        todo!()
-    }
-
-    async fn validate_candidate(
-        &mut self,
-        _candidate_id: BlockId,
-        _session_seqno: u32,
-        _current_validator_pubkey: PublicKey,
-    ) -> Result<ValidatorTaskResult> {
-        todo!()
-    }
-
-    async fn get_validation_status(
-        &mut self,
-        _session_seqno: u32,
-        _block_id_short: &BlockIdShort,
-    ) -> Result<ValidatorTaskResult> {
-        todo!()
+        Ok(())
     }
 }

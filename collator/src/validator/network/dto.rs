@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, Signature};
 use tl_proto::{TlRead, TlWrite};

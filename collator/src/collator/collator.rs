@@ -20,24 +20,7 @@ use crate::{
 
 use super::collator_processor::CollatorProcessor;
 
-// EVENTS EMITTER AMD LISTENER
-
-//TODO: remove emitter
-#[async_trait]
-pub(crate) trait CollatorEventEmitter {
-    /// When there are no internals and an empty anchor was received from mempool
-    /// collator skips such anchor and notify listener. Manager may schedule
-    /// a master block collation when the corresponding interval elapsed
-    async fn on_skipped_empty_anchor_event(
-        &self,
-        shard_id: ShardIdent,
-        anchor: Arc<MempoolAnchor>,
-    ) -> Result<()>;
-    /// When new shard or master block was collated
-    async fn on_block_candidate_event(&self, collation_result: BlockCollationResult) -> Result<()>;
-    /// When collator was stopped
-    async fn on_collator_stopped_event(&self, stop_key: CollationSessionId) -> Result<()>;
-}
+// EVENTS LISTENER
 
 #[async_trait]
 pub(crate) trait CollatorEventListener: Send + Sync {
@@ -58,6 +41,7 @@ pub(crate) trait CollatorEventListener: Send + Sync {
 #[async_trait]
 pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     //TODO: use factory that takes CollationManager and creates Collator impl
+
     /// Create collator, start its tasks queue, and equeue first initialization task
     async fn start(
         config: Arc<CollationConfig>,
@@ -73,6 +57,13 @@ pub(crate) trait Collator<MQ, MP, ST>: Send + Sync + 'static {
     ) -> Self;
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
+    /// Enqueue update of McData in working state and run attempt to collate shard block
+    async fn equeue_update_mc_data_and_resume_shard_collation(
+        &self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()>;
+    /// Enqueue next attemt to collate block
+    async fn equeue_try_collate(&self) -> Result<()>;
     /// Enqueue new block collation
     async fn equeue_do_collate(
         &self,
@@ -173,6 +164,24 @@ where
 
     async fn equeue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
         todo!()
+    }
+
+    async fn equeue_update_mc_data_and_resume_shard_collation(
+        &self,
+        mc_state: Arc<ShardStateStuff>,
+    ) -> Result<()> {
+        self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(
+                update_mc_data_and_resume_collation,
+                mc_state
+            ))
+            .await
+    }
+
+    async fn equeue_try_collate(&self) -> Result<()> {
+        self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(try_collate_next_shard_block,))
+            .await
     }
 
     async fn equeue_do_collate(

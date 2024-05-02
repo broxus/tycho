@@ -5,9 +5,7 @@ use std::{
 
 use anyhow::{anyhow, bail, Result};
 
-use everscale_types::models::{
-    BlockId, BlockInfo, ShardIdent, ValidatorDescription, ValidatorSet, ValueFlow,
-};
+use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::{
     block::ValidatorSubsetInfo,
     state::{MinRefMcStateTracker, ShardStateStuff},
@@ -155,7 +153,7 @@ where
     pub async fn process_mc_block_from_bc(&self, mc_block_id: BlockId) -> Result<()> {
         // check if we should skip this master block from the blockchain
         // because it is not far ahead of last collated by ourselves
-        if !self.should_process_mc_block_from_bc(&mc_block_id) {
+        if !self.check_should_process_mc_block_from_bc(&mc_block_id) {
             return Ok(());
         }
 
@@ -184,36 +182,68 @@ where
         Ok(())
     }
 
-    /// 1. Skip if it was already processed before
-    /// 2. Skip if it is not far ahead of last collated by ourselves
-    fn should_process_mc_block_from_bc(&self, mc_block_id: &BlockId) -> bool {
-        let (seqno_delta, is_equal) =
-            Self::compare_mc_block_with(mc_block_id, self.last_processed_mc_block_id());
-        // check if already processed before
-        let already_processed_before = is_equal || seqno_delta < 0;
-        if already_processed_before {
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Should NOT process mc block ({}) from bc: it was already processed before",
-                mc_block_id.as_short_id(),
-            );
+    /// 1. Skip if it is equal or not far ahead from last collated by ourselves
+    /// 2. Skip if it was already processed before
+    /// 3. Skip if waiting for the first own master block collation less then `max_mc_block_delta_from_bc_to_await_own`
+    fn check_should_process_mc_block_from_bc(&self, mc_block_id: &BlockId) -> bool {
+        let last_collated_mc_block_id_opt = self.last_collated_mc_block_id();
+        let last_processed_mc_block_id_opt = self.last_processed_mc_block_id();
+        if last_collated_mc_block_id_opt.is_some() {
+            // when we have last own collated master block then skip if incoming one is equal
+            // or not far ahead from last own collated
+            // then will wait for next own collated master block
+            let (seqno_delta, is_equal) =
+                Self::compare_mc_block_with(mc_block_id, self.last_collated_mc_block_id());
+            if is_equal || seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    r#"Should NOT process mc block ({}) from bc: should wait for next own collated:
+                    is_equal = {}, seqno_delta = {}, max_mc_block_delta_from_bc_to_await_own = {}"#,
+                    mc_block_id.as_short_id(), is_equal, seqno_delta,
+                    self.config.max_mc_block_delta_from_bc_to_await_own,
+                );
 
-            return false;
+                return false;
+            } else if !is_equal {
+                //STUB: skip processing master block from bc even if it is far away from own last collated
+                //      because the logic for updating collators in this case is not implemented yet
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "STUB: skip processing mc block ({}) from bc anyway if we are collating by ourselves",
+                    mc_block_id.as_short_id(),
+                );
+                return false;
+            }
         } else {
-            let last_collated_mc_block_id_opt = self.last_collated_mc_block_id();
-            if last_collated_mc_block_id_opt.is_some() {
-                let (seqno_delta, _) =
-                    Self::compare_mc_block_with(mc_block_id, self.last_collated_mc_block_id());
-                // check if need await own collated block
-                if seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
+            // When we do not have last own collated master block then check last processed master block
+            // If None then we should process incoming master block anyway to init collation process
+            // If we have already processed some previous incoming master block and colaltions were started
+            // then we should wait for the first own collated master block
+            // but not more then `max_mc_block_delta_from_bc_to_await_own`
+            if last_processed_mc_block_id_opt.is_some() {
+                let (seqno_delta, is_equal) =
+                    Self::compare_mc_block_with(mc_block_id, last_processed_mc_block_id_opt);
+                let already_processed_before = is_equal || seqno_delta < 0;
+                if already_processed_before {
                     tracing::info!(
                         target: tracing_targets::COLLATION_MANAGER,
-                        r#"Should NOT process mc block ({}) from bc: seqno_delta = {}",
-                        max_mc_block_delta_from_bc_to_await_own = {}"#,
+                        "Should NOT process mc block ({}) from bc: it was already processed before",
+                        mc_block_id.as_short_id(),
+                    );
+
+                    return false;
+                }
+                let should_wait_for_next_own_collated = seqno_delta
+                    <= self.config.max_mc_block_delta_from_bc_to_await_own
+                    && self.active_collators.contains_key(&ShardIdent::MASTERCHAIN);
+                if should_wait_for_next_own_collated {
+                    tracing::info!(
+                        target: tracing_targets::COLLATION_MANAGER,
+                        r#"Should NOT process mc block ({}) from bc: should wait for first own collated:
+                        seqno_delta = {}, max_mc_block_delta_from_bc_to_await_own = {}"#,
                         mc_block_id.as_short_id(), seqno_delta,
                         self.config.max_mc_block_delta_from_bc_to_await_own,
                     );
-
                     return false;
                 }
             }
@@ -231,7 +261,7 @@ where
             None => (0, false),
             Some(other_mc_block_id) => (
                 mc_block_id.seqno as i32 - other_mc_block_id.seqno as i32,
-                mc_block_id != other_mc_block_id,
+                mc_block_id == other_mc_block_id,
             ),
         };
         if seqno_delta < 0 || is_equal {
@@ -423,14 +453,40 @@ where
             sessions_to_start.iter().map(|(k, _)| k).collect::<Vec<_>>(),
         );
 
-        // store existing sessions that we should keep
-        self.active_collation_sessions = sessions_to_keep;
+        let cc_config = mc_state_extra.config.get_catchain_config()?;
+
+        // update master state in the collators of the existing sessions
+        for (shard_id, session_info) in sessions_to_keep {
+            self.active_collation_sessions
+                .insert(shard_id, session_info);
+
+            // skip collator of masterchain because it's working state already updated
+            // after master block collation
+            if shard_id.is_masterchain() {
+                continue;
+            }
+
+            // if there is no active collator then current node does not collate this shard
+            // so we do not need to do anything
+            let Some(collator) = self.active_collators.get(&shard_id) else {
+                continue;
+            };
+
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Updating McData in active collator for shard {} and resuming collation in it...",
+                shard_id,
+            );
+
+            collator
+                .equeue_update_mc_data_and_resume_shard_collation(mc_state.clone())
+                .await?;
+        }
 
         // we may have sessions to finish, collators to stop, and sessions to start
         // additionally we may have some active collators
         // for each new session we should check if current node should collate,
         // then stop collators if should not, otherwise start missing collators
-        let cc_config = mc_state_extra.config.get_catchain_config()?;
         for (shard_id, prev_blocks_ids) in sessions_to_start {
             let (subset, hash_short) = full_validators_set
                 .compute_subset(shard_id, &cc_config, new_session_seqno)
@@ -502,10 +558,17 @@ where
 
                 // notify validator, it will start overlay initialization
                 self.validator
-                    .enqueue_add_session(Arc::new(new_session_info.clone().try_into()?))
+                    .add_session(Arc::new(new_session_info.clone().try_into()?))
                     .await?;
-            } else if let Some(collator) = self.active_collators.remove(&shard_id) {
-                to_stop_collators.insert((shard_id, new_session_seqno), collator);
+            } else {
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Node was not athorized to collate shard {}",
+                    shard_id,
+                );
+                if let Some(collator) = self.active_collators.remove(&shard_id) {
+                    to_stop_collators.insert((shard_id, new_session_seqno), collator);
+                }
             }
 
             //TODO: possibly do not need to store collation sessions if we do not collate in them
@@ -618,13 +681,9 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        let current_collator_keypair = self.config.key_pair;
-        self.validator
-            .enqueue_candidate_validation(
-                candidate_id,
-                session_info.seqno(),
-                current_collator_keypair,
-            )
+        let _handle = self
+            .validator
+            .validate(candidate_id, session_info.seqno())
             .await?;
 
         // chek if master block min interval elapsed and it needs to collate new master block
@@ -642,6 +701,11 @@ where
                 )
             {
                 self.enqueue_mc_block_collation(next_mc_block_chain_time, Some(candidate_id))
+                    .await?;
+            } else {
+                // if do not need to collate master block then can continue to collate shard blocks
+                // otherwise next shard block will be scheduled after master block collation
+                self.enqueue_try_collate_next_shard_block(&candidate_id.shard)
                     .await?;
             }
         } else {
@@ -694,6 +758,7 @@ where
 
     /// 1. Store last collated chain time from anchor and check if master block interval elapsed in each shard
     /// 2. If true, schedule master block collation
+    /// 3. If no, schedule next shard block collation attempt
     pub async fn process_empty_skipped_anchor(
         &mut self,
         shard_id: ShardIdent,
@@ -713,6 +778,10 @@ where
         {
             self.enqueue_mc_block_collation(next_mc_block_chain_time, None)
                 .await?;
+        } else {
+            // if do not need to collate master block then run next attempt to collate shard block
+            // otherwise next shard block will be scheduled after master block collation
+            self.enqueue_try_collate_next_shard_block(&shard_id).await?;
         }
         Ok(())
     }
@@ -829,6 +898,28 @@ where
             "Master block collation enqueued (next_chain_time: {}, top_shard_blocks_ids: {:?})",
             next_mc_block_chain_time,
             _tracing_top_shard_blocks_descr.as_slice(),
+        );
+
+        Ok(())
+    }
+
+    async fn enqueue_try_collate_next_shard_block(&self, shard_id: &ShardIdent) -> Result<()> {
+        // get shardchain collator if exists
+        let Some(collator) = self.active_collators.get(shard_id).cloned() else {
+            tracing::warn!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Node does not collate blocks for shard {}",
+                shard_id,
+            );
+            return Ok(());
+        };
+
+        collator.equeue_try_collate().await?;
+
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Equeued next attempt to collate shard block for {}",
+            shard_id,
         );
 
         Ok(())
