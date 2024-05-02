@@ -4,9 +4,9 @@ use std::sync::atomic::Ordering;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 
-use everscale_types::cell::Cell;
-use everscale_types::models::OutMsg;
+use everscale_types::cell::{Cell, CellBuilder, Load};
 use everscale_types::models::Transaction;
+use everscale_types::models::{ExtInMsgInfo, ImportFees, IntMsgInfo, OutMsg};
 use everscale_types::models::{InMsg, Lazy, MsgEnvelope, MsgInfo, OutMsgNew};
 use everscale_types::{
     cell::HashBytes,
@@ -442,12 +442,19 @@ fn new_transaction(
     //     .block_limit_status
     //     .add_transaction(transaction.lt == colator_data.start_lt + 1);
 
-    // colator_data.in_msgs.set(in_msg)?;
-
+    if let Some(ref in_msg_cell) = transaction.in_msg {
+        let in_msg = InMsg::load_from(&mut in_msg_cell.as_slice()?)?;
+        colator_data.in_msgs.set(
+            in_msg_cell.repr_hash().clone(),
+            in_msg.compute_fees()?,
+            in_msg,
+        )?;
+    }
     for out_msg in transaction.iter_out_msgs() {
-        let msg = out_msg?;
-        match msg.info {
-            MsgInfo::Int(int_msg) => {
+        let message = out_msg?;
+        let msg_cell = CellBuilder::build_from(&message)?;
+        match message.info {
+            MsgInfo::Int(IntMsgInfo { value, .. }) => {
                 // Add out message to state for counting time and it may be removed if used
                 // let fwd_fee = *int_msg.fwd_fee;
                 // let enq = OutMsgQueueInfoStuff::new(
@@ -478,6 +485,13 @@ fn new_transaction(
             }
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be output"),
         };
+
+        let out_msg = OutMsg::load_from(&mut msg_cell.as_slice()?)?;
+        colator_data.out_msgs.set(
+            msg_cell.repr_hash().clone(),
+            out_msg.compute_exported_value()?,
+            out_msg,
+        )?;
     }
     Ok(vec![]) // TODO: fix
 }
