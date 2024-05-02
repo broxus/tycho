@@ -21,20 +21,27 @@ clap = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 hex = { workspace = true }
+public-ip = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 serde_path_to_error = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ], optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # local deps
+tycho-collator = { workspace = true }
+tycho-core = { workspace = true }
 tycho-network = { workspace = true }
+tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [build-dependencies]

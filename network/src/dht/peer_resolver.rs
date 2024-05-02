@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use exponential_backoff::Backoff;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, Semaphore};
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
-use tycho_util::FastDashMap;
+use tycho_util::{serde_helpers, FastDashMap};
 
 use crate::dht::DhtService;
 use crate::network::{KnownPeerHandle, KnownPeersError, Network, PeerBannedError, WeakNetwork};
@@ -20,51 +21,8 @@ pub struct PeerResolverBuilder {
 }
 
 impl PeerResolverBuilder {
-    /// Minimal time-to-live for the resolved peer info.
-    ///
-    /// Default: 600 seconds.
-    pub fn with_min_ttl_sec(mut self, ttl_sec: u32) -> Self {
-        self.inner.min_ttl_sec = ttl_sec;
-        self
-    }
-
-    /// Time before the expiration when the peer info should be updated.
-    ///
-    /// Default: 1200 seconds.
-    pub fn with_update_before_sec(mut self, update_before_sec: u32) -> Self {
-        self.inner.update_before_sec = update_before_sec;
-        self
-    }
-
-    /// Number of fast retries before switching to the stale retry interval.
-    ///
-    /// Default: 10.
-    pub fn with_fast_retry_count(mut self, fast_retry_count: u32) -> Self {
-        self.inner.fast_retry_count = fast_retry_count;
-        self
-    }
-
-    /// Minimal interval between the fast retries.
-    ///
-    /// Default: 1 second.
-    pub fn with_min_retry_interval(mut self, min_retry_interval: Duration) -> Self {
-        self.inner.min_retry_interval = min_retry_interval;
-        self
-    }
-
-    /// Maximal interval between the fast retries.
-    ///
-    /// Default: 120 seconds.
-    pub fn with_max_retry_interval(mut self, max_retry_interval: Duration) -> Self {
-        self.inner.max_retry_interval = max_retry_interval;
-        self
-    }
-
-    /// Interval between the stale retries.
-    ///
-    /// Default: 600 seconds.
-    pub fn with_stale_retry_interval(mut self, stale_retry_interval: Duration) -> Self {
-        self.inner.stale_retry_interval = stale_retry_interval;
+    pub fn with_config(mut self, config: PeerResolverConfig) -> Self {
+        self.inner = config;
         self
     }
 
@@ -83,14 +41,46 @@ impl PeerResolverBuilder {
     }
 }
 
-struct PeerResolverConfig {
-    max_parallel_resolve_requests: usize,
-    min_ttl_sec: u32,
-    update_before_sec: u32,
-    fast_retry_count: u32,
-    min_retry_interval: Duration,
-    max_retry_interval: Duration,
-    stale_retry_interval: Duration,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PeerResolverConfig {
+    /// Maximum number of parallel resolve requests.
+    ///
+    /// Default: 100.
+    pub max_parallel_resolve_requests: usize,
+
+    /// Minimal time-to-live for the resolved peer info.
+    ///
+    /// Default: 600 seconds.
+    pub min_ttl_sec: u32,
+
+    /// Time before the expiration when the peer info should be updated.
+    ///
+    /// Default: 1200 seconds.
+    pub update_before_sec: u32,
+
+    /// Number of fast retries before switching to the stale retry interval.
+    ///
+    /// Default: 10.
+    pub fast_retry_count: u32,
+
+    /// Minimal interval between the fast retries.
+    ///
+    /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
+    pub min_retry_interval: Duration,
+
+    /// Maximal interval between the fast retries.
+    ///
+    /// Default: 120 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub max_retry_interval: Duration,
+
+    /// Interval between the stale retries.
+    ///
+    /// Default: 600 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub stale_retry_interval: Duration,
 }
 
 impl Default for PeerResolverConfig {

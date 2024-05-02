@@ -38,11 +38,17 @@ pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
 #[derive(Default)]
 struct BuilderFields {
     config: Option<NetworkConfig>,
+    remote_addr: Option<Address>,
 }
 
 impl<MandatoryFields> NetworkBuilder<MandatoryFields> {
     pub fn with_config(mut self, config: NetworkConfig) -> Self {
         self.optional_fields.config = Some(config);
+        self
+    }
+
+    pub fn with_remote_addr<T: Into<Address>>(mut self, addr: T) -> Self {
+        self.optional_fields.remote_addr = Some(addr.into());
         self
     }
 }
@@ -129,6 +135,12 @@ impl NetworkBuilder {
         let weak_active_peers = ActivePeers::downgrade(&active_peers);
         let known_peers = KnownPeers::new();
 
+        let remote_addr = self.optional_fields.remote_addr.unwrap_or_else(|| {
+            let addr = endpoint.local_addr();
+            tracing::debug!(%addr, "using local address as remote address");
+            addr.into()
+        });
+
         let inner = Arc::new_cyclic(move |_weak| {
             let service = service.boxed_clone();
 
@@ -144,6 +156,7 @@ impl NetworkBuilder {
 
             NetworkInner {
                 config,
+                remote_addr,
                 endpoint,
                 active_peers: weak_active_peers,
                 known_peers,
@@ -179,6 +192,10 @@ impl Network {
             mandatory_fields: ((), ()),
             optional_fields: Default::default(),
         }
+    }
+
+    pub fn remote_addr(&self) -> &Address {
+        self.0.remote_addr()
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -232,7 +249,7 @@ impl Network {
     pub fn sign_peer_info(&self, now: u32, ttl: u32) -> PeerInfo {
         let mut res = PeerInfo {
             id: *self.0.peer_id(),
-            address_list: vec![self.local_addr().into()].into_boxed_slice(),
+            address_list: vec![self.remote_addr().clone()].into_boxed_slice(),
             created_at: now,
             expires_at: now.saturating_add(ttl),
             signature: Box::new([0; 64]),
@@ -248,6 +265,7 @@ impl Network {
 
 struct NetworkInner {
     config: Arc<NetworkConfig>,
+    remote_addr: Address,
     endpoint: Arc<Endpoint>,
     active_peers: WeakActivePeers,
     known_peers: KnownPeers,
@@ -256,6 +274,10 @@ struct NetworkInner {
 }
 
 impl NetworkInner {
+    fn remote_addr(&self) -> &Address {
+        &self.remote_addr
+    }
+
     fn local_addr(&self) -> SocketAddr {
         self.endpoint.local_addr()
     }
@@ -355,7 +377,7 @@ mod tests {
     fn make_peer_info(network: &Network) -> Arc<PeerInfo> {
         Arc::new(PeerInfo {
             id: *network.peer_id(),
-            address_list: vec![network.local_addr().into()].into_boxed_slice(),
+            address_list: vec![network.remote_addr().clone()].into_boxed_slice(),
             created_at: 0,
             expires_at: u32::MAX,
             signature: Box::new([0; 64]),

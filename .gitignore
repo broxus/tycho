@@ -14,3 +14,9 @@ perf.data*
 
 zerostate.json
 zerostate.boc
+
+config.json
+global-config.json
+keys.json
+db/
+temp/

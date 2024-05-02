@@ -52,6 +52,7 @@ num-traits = "0.2.18"
 parking_lot = "0.12.1"
 parking_lot_core = "0.9.9"
 pin-project-lite = "0.2"
+public-ip = "0.2"
 pkcs8 = "0.10"
 quick_cache = "0.4.1"
 quinn = { version = "0.10", default-features = false, features = ["runtime-tokio", "tls-rustls"] }

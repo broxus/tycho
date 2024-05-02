@@ -5,13 +5,11 @@ use everscale_crypto::ed25519;
 use everscale_types::boc::Boc;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
-use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
 use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
-use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+use tycho_storage::{BlockMetaData, Storage};
 
 use crate::types::NodeNetwork;
 
@@ -68,9 +66,7 @@ pub fn create_node_network() -> NodeNetwork {
 }
 
 pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
-    let temp = tempfile::tempdir().unwrap();
-    let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
-    let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();
+    let (storage, _tmp_dir) = Storage::new_temp()?;
     let tracker = MinRefMcStateTracker::default();
 
     // master state

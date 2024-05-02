@@ -12,12 +12,17 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::util::compute_storage_used;
+use crate::util::error::ResultExt;
 
 /// Generate a zero state for a network.
 #[derive(clap::Parser)]
 pub struct Cmd {
     /// dump the template of the zero state config
-    #[clap(short = 'i', long, exclusive = true)]
+    #[clap(
+        short = 'i',
+        long,
+        conflicts_with_all = ["config", "output", "now"]
+    )]
     init_config: Option<PathBuf>,
 
     /// path to the zero state config
@@ -78,25 +83,23 @@ fn generate_zerostate(
 
     config
         .prepare_config_params(now)
-        .map_err(|e| GenError::new("validator config is invalid", e))?;
+        .wrap_err("validator config is invalid")?;
 
     config
         .add_required_accounts()
-        .map_err(|e| GenError::new("failed to add required accounts", e))?;
+        .wrap_err("failed to add required accounts")?;
 
     let state = config
         .build_masterchain_state(now)
-        .map_err(|e| GenError::new("failed to build masterchain zerostate", e))?;
+        .wrap_err("failed to build masterchain zerostate")?;
 
-    let boc = CellBuilder::build_from(&state)
-        .map_err(|e| GenError::new("failed to serialize zerostate", e))?;
+    let boc = CellBuilder::build_from(&state).wrap_err("failed to serialize zerostate")?;
 
     let root_hash = *boc.repr_hash();
     let data = Boc::encode(&boc);
     let file_hash = HashBytes::from(sha2::Sha256::digest(&data));
 
-    std::fs::write(output_path, data)
-        .map_err(|e| GenError::new("failed to write masterchain zerostate", e))?;
+    std::fs::write(output_path, data).wrap_err("failed to write masterchain zerostate")?;
 
     let hashes = serde_json::json!({
         "root_hash": root_hash,
@@ -297,7 +300,7 @@ impl ZerostateConfig {
                 state.total_balance = state
                     .total_balance
                     .checked_add(&account.balance)
-                    .map_err(|e| GenError::new("failed ot compute total balance", e))?;
+                    .wrap_err("failed ot compute total balance")?;
             }
         }
 
@@ -706,23 +709,6 @@ fn build_minter_account(pubkey: &ed25519::PublicKey, address: &HashBytes) -> Res
 fn zero_public_key() -> &'static ed25519::PublicKey {
     static KEY: OnceLock<ed25519::PublicKey> = OnceLock::new();
     KEY.get_or_init(|| ed25519::PublicKey::from_bytes([0; 32]).unwrap())
-}
-
-#[derive(thiserror::Error, Debug)]
-#[error("{context}: {source}")]
-struct GenError {
-    context: String,
-    #[source]
-    source: anyhow::Error,
-}
-
-impl GenError {
-    fn new(context: impl Into<String>, source: impl Into<anyhow::Error>) -> Self {
-        Self {
-            context: context.into(),
-            source: source.into(),
-        }
-    }
 }
 
 mod serde_account_states {

@@ -9,6 +9,7 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStatePart};
 use tycho_network::PeerId;
+use tycho_storage::Storage;
 
 use crate::common::archive::*;
 
@@ -24,7 +25,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         known_by: usize,
     }
 
-    let (storage, tmp_dir) = common::storage::init_empty_storage().await?;
+    let (storage, _tmp_dir) = Storage::new_temp()?;
 
     const NODE_COUNT: usize = 10;
     let nodes = common::node::make_network(storage, NODE_COUNT);
@@ -133,8 +134,6 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     let result = client.get_archive_slice(0, 0, 100).await;
     assert!(result.is_err());
-
-    tmp_dir.close()?;
 
     tracing::info!("done!");
     Ok(())
