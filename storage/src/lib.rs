@@ -1,8 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
-
 pub use self::db::*;
 pub use self::models::*;
 pub use self::store::*;
@@ -111,7 +109,7 @@ impl Storage {
         &self.inner.block_connection_storage
     }
 
-    pub fn shard_state_storage(&self) -> &ShardStateStorage {
+    pub fn shard_state_storage(&self) -> &Arc<ShardStateStorage> {
         &self.inner.shard_state_storage
     }
 
@@ -125,7 +123,7 @@ struct Inner {
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     block_storage: Arc<BlockStorage>,
-    shard_state_storage: ShardStateStorage,
+    shard_state_storage: Arc<ShardStateStorage>,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
 }

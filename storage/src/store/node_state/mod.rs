@@ -22,7 +22,7 @@ impl NodeStateStorage {
     }
 
     pub fn store_last_mc_block_id(&self, id: &BlockId) {
-        self.store_block_id(&self.last_mc_block_id, id)
+        self.store_block_id(&self.last_mc_block_id, id);
     }
 
     pub fn load_last_mc_block_id(&self) -> Option<BlockId> {
@@ -30,7 +30,7 @@ impl NodeStateStorage {
     }
 
     pub fn store_init_mc_block_id(&self, id: &BlockId) {
-        self.store_block_id(&self.init_mc_block_id, id)
+        self.store_block_id(&self.init_mc_block_id, id);
     }
 
     pub fn load_init_mc_block_id(&self) -> Option<BlockId> {

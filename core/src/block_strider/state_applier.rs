@@ -182,7 +182,7 @@ where
 
         let state_storage = self.inner.storage.shard_state_storage();
         state_storage
-            .store_state(handle, &new_state)
+            .store_state(handle, new_state.clone())
             .await
             .context("Failed to store new state")?;
 

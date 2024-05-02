@@ -109,7 +109,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &master_state_stuff)
+        .store_state(&handle, master_state_stuff)
         .await?;
 
     // shard state
@@ -136,7 +136,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &shard_state_stuff)
+        .store_state(&handle, shard_state_stuff)
         .await?;
 
     storage.node_state().store_last_mc_block_id(&master_id);

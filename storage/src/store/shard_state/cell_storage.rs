@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use anyhow::{Context, Result};
 use bumpalo::Bump;
@@ -17,6 +17,7 @@ pub struct CellStorage {
     db: Arc<Db>,
     cells_cache: Arc<FastDashMap<HashBytes, Weak<StorageCell>>>,
     raw_cells_cache: RawCellsCache,
+    pending: PendingOperations,
 }
 
 impl CellStorage {
@@ -28,6 +29,7 @@ impl CellStorage {
             db,
             cells_cache,
             raw_cells_cache,
+            pending: PendingOperations::default(),
         })
     }
 
@@ -35,7 +37,7 @@ impl CellStorage {
         &self,
         batch: &mut rocksdb::WriteBatch,
         root: Cell,
-    ) -> Result<usize, CellStorageError> {
+    ) -> Result<(PendingOperation<'_>, usize), CellStorageError> {
         struct CellWithRefs<'a> {
             rc: u32,
             data: Option<&'a [u8]>,
@@ -131,6 +133,7 @@ impl CellStorage {
 
         // Prepare context and handles
         let alloc = Bump::new();
+        let pending_op = self.pending.begin();
 
         let mut ctx = Context {
             db: &self.db,
@@ -145,7 +148,7 @@ impl CellStorage {
             let key = root.repr_hash();
 
             if !ctx.insert_cell(key, root.as_ref(), 0)? {
-                return Ok(0);
+                return Ok((pending_op, 0));
             }
         }
 
@@ -175,7 +178,7 @@ impl CellStorage {
         drop(stack);
 
         // Write transaction to the `WriteBatch`
-        Ok(ctx.finalize(batch))
+        Ok((pending_op, ctx.finalize(batch)))
     }
 
     pub fn load_cell(
@@ -188,7 +191,10 @@ impl CellStorage {
             }
         }
 
-        let cell = match self.raw_cells_cache.get_raw(self.db.as_ref(), &hash) {
+        let cell = match self
+            .raw_cells_cache
+            .get_raw(self.db.as_ref(), &hash, &self.pending)
+        {
             Ok(value) => 'cell: {
                 if let Some(value) = value {
                     let rc = &value.header.header;
@@ -210,10 +216,10 @@ impl CellStorage {
 
     pub fn remove_cell(
         &self,
-        batch: &mut weedb::rocksdb::WriteBatch,
+        batch: &mut rocksdb::WriteBatch,
         alloc: &Bump,
         hash: &HashBytes,
-    ) -> Result<usize, CellStorageError> {
+    ) -> Result<(PendingOperation<'_>, usize), CellStorageError> {
         #[derive(Clone, Copy)]
         struct CellState<'a> {
             rc: i64,
@@ -239,6 +245,8 @@ impl CellStorage {
                 }
             }
         }
+
+        let pending_op = self.pending.begin();
 
         let cells = &self.db.cells;
         let cells_cf = &cells.cf();
@@ -302,7 +310,7 @@ impl CellStorage {
                 refcount::encode_negative_refcount(removes),
             );
         }
-        Ok(total)
+        Ok((pending_op, total))
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
@@ -729,6 +737,7 @@ impl RawCellsCache {
         &self,
         db: &Db,
         key: &HashBytes,
+        pending: &PendingOperations,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
         use quick_cache::GuardResult;
 
@@ -738,7 +747,11 @@ impl RawCellsCache {
                 let (rc, data) = refcount::decode_value_with_rc(value.as_ref());
                 data.map(|value| {
                     let value = RawCellsCacheItem::from_header_and_slice(AtomicI64::new(rc), value);
-                    _ = g.insert(value.clone());
+                    pending.run_if_none(|| {
+                        // Insert value to the cache only if there are no pending operations
+                        _ = g.insert(value.clone());
+                    });
+
                     value
                 })
             } else {
@@ -802,5 +815,39 @@ impl RawCellsCache {
             let old_refs = v.header.header.fetch_sub(refs as i64, Ordering::Release);
             debug_assert!(old_refs >= refs as i64);
         }
+    }
+}
+
+#[derive(Default)]
+struct PendingOperations {
+    // TODO: Replace with two atomic counters for inserts and pending operations
+    pending_count: Mutex<usize>,
+}
+
+impl PendingOperations {
+    fn begin(&self) -> PendingOperation<'_> {
+        *self.pending_count.lock().unwrap() += 1;
+        PendingOperation { operations: self }
+    }
+
+    #[inline]
+    fn run_if_none<F: FnOnce()>(&self, f: F) {
+        let guard = self.pending_count.lock().unwrap();
+        if *guard == 0 {
+            f();
+        }
+
+        // NOTE: Make sure to drop the lock only after the operation is executed
+        drop(guard);
+    }
+}
+
+pub struct PendingOperation<'a> {
+    operations: &'a PendingOperations,
+}
+
+impl Drop for PendingOperation<'_> {
+    fn drop(&mut self) {
+        *self.operations.pending_count.lock().unwrap() -= 1;
     }
 }
