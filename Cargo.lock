@@ -2237,6 +2237,7 @@ dependencies = [
  "tempfile",
  "tl-proto",
  "tokio",
+ "tokio-util",
  "ton_executor",
  "tracing",
  "tracing-subscriber",
