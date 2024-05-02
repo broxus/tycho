@@ -73,14 +73,14 @@ pub(crate) trait MempoolAdapter: Send + Sync + 'static {
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
 }
 
-pub struct MempoolAdapterStdImpl {
+pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
 
     _stub_anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
 }
 
 #[async_trait]
-impl MempoolAdapter for MempoolAdapterStdImpl {
+impl MempoolAdapter for MempoolAdapterStubImpl {
     fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 

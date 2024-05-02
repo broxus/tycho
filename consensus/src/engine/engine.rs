@@ -26,7 +26,7 @@ pub struct Engine {
     broadcast_filter: BroadcastFilter,
     top_dag_round_watch: watch::Sender<DagRound>,
     tasks: JoinSet<()>, // should be JoinSet<!>
-    tx: UnboundedSender<Vec<(Arc<Point>, Vec<Arc<Point>>)>>
+    committed_anchors_sender: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>
 }
 
 impl Engine {
@@ -35,7 +35,7 @@ impl Engine {
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         peers: &Vec<PeerId>,
-        tx: UnboundedSender<Vec<(Arc<Point>, Vec<Arc<Point>>)>>
+        tx: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>
 
     ) -> Self {
         let key_pair = KeyPair::from(secret_key);
@@ -127,7 +127,7 @@ impl Engine {
             broadcast_filter,
             top_dag_round_watch: top_dag_round_tx,
             tasks,
-            tx
+            committed_anchors_sender: tx
         }
     }
 
@@ -204,7 +204,9 @@ impl Engine {
                 collector_signal_rx,
             ));
 
-            let commit_run = tokio::spawn(self.dag.clone().commit(next_dag_round.clone()));
+            let commit_run = tokio::spawn(
+                self.dag.clone().commit(next_dag_round.clone(), self.committed_anchors_sender.clone())
+            );
             let bcast_filter_upd = {
                 let bcast_filter = self.broadcast_filter.clone();
                 let round = current_dag_round.round().clone();
@@ -220,10 +222,6 @@ impl Engine {
 
             match tokio::join!(collector_run, bcaster_run, commit_run, bcast_filter_upd) {
                 (Ok(collector_upd), Ok(new_prev_point), Ok(committed), Ok(_bcast_filter_upd)) => {
-                    if let Err(e) = self.tx.send(committed.clone()) {
-                        tracing::error!("Failed tp send anchor commit message tp mpsc channel. Err: {e:?}");
-                    }
-
                     Self::log_committed(&self.log_id, &current_dag_round, &committed);
                     prev_point = new_prev_point;
                     produce_own_point = next_dag_round.round() == collector_upd.next_round();

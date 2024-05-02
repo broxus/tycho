@@ -749,7 +749,7 @@ where
         //TODO: in current implementation CollationProcessor should not notify mempool
         //      about one master block more than once, but better to handle repeated request here or at mempool
         mpool_adapter
-            .enqueue_process_new_mc_block_state(mc_state)
+            .enqueue_process_new_mc_block_state(Arc::new(mc_state))
             .await
     }
 

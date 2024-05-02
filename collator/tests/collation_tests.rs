@@ -4,7 +4,7 @@ use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_collator::{
     manager::CollationManager,
-    mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStdImpl},
+    mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStubImpl},
     state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
     test_utils::try_init_test_tracing,
     types::CollationConfig,
@@ -35,7 +35,7 @@ async fn test_collation_process_on_stubs() {
 
     block_strider.run().await.unwrap();
 
-    let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStdImpl>::new();
+    let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStubImpl>::new();
     let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new(storage.clone());
 
     let mut rnd = rand::thread_rng();

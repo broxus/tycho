@@ -35,10 +35,10 @@ impl MempoolAdapterImpl {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
         let anchors = Arc::new(RwLock::new(BTreeMap::new()));
 
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(Arc<Point>, Vec<Arc<Point>>)>>();
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
 
         let engine =
-            tycho_consensus::Engine::new(&secret_key, &dht_client, &overlay_service, &peers, tx)
+            tycho_consensus::Engine::new(&secret_key, &dht_client, &overlay_service, &peers, sender)
                 .await;
 
         tokio::spawn(async move { engine.run() });
@@ -48,7 +48,7 @@ impl MempoolAdapterImpl {
         let mempool_adapter = Arc::new(Self { anchors });
 
         //start handling mempool anchors
-        tokio::spawn(parse_points(mempool_adapter.clone(), rx));
+        tokio::spawn(parse_points(mempool_adapter.clone(), receiver));
 
         mempool_adapter
     }
@@ -61,57 +61,55 @@ impl MempoolAdapterImpl {
 
 pub async fn parse_points(
     adapter: Arc<MempoolAdapterImpl>,
-    mut rx: UnboundedReceiver<Vec<(Arc<Point>, Vec<Arc<Point>>)>>,
+    mut rx: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
 ) {
-    while let Some(commited) = rx.recv().await {
-        commited.into_iter().for_each(|(anchor, points)| {
-            let mut external_messages = HashMap::<HashBytes, ExternalMessage>::new();
+    while let Some((anchor, points)) = rx.recv().await {
+        let mut external_messages = HashMap::<HashBytes, ExternalMessage>::new();
 
-            for point in points {
-                'message: for message in &point.body.payload {
-                    let cell = match Boc::decode(message) {
-                        Ok(cell) => cell,
-                        Err(e) => {
-                            tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Failed to deserialize bytes into cell. Error: {e:?}"); //TODO: should handle errors properly?
-                            continue 'message;
-                        }
-                    };
+        for point in points {
+            'message: for message in &point.body.payload {
+                let cell = match Boc::decode(message) {
+                    Ok(cell) => cell,
+                    Err(e) => {
+                        tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Failed to deserialize bytes into cell. Error: {e:?}"); //TODO: should handle errors properly?
+                        continue 'message;
+                    }
+                };
 
-                    let mut slice = match cell.as_slice() {
-                        Ok(slice) => slice,
-                        Err(e) => {
-                            tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Failed to make slice from cell. Error: {e:?}");
-                            continue 'message;
-                        }
-                    };
+                let mut slice = match cell.as_slice() {
+                    Ok(slice) => slice,
+                    Err(e) => {
+                        tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Failed to make slice from cell. Error: {e:?}");
+                        continue 'message;
+                    }
+                };
 
-                    let ext_in_message = match ExtInMsgInfo::load_from(&mut slice) {
-                        Ok(message) => message,
-                        Err(e) => {
-                            tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Bad cell. Failed to deserialize to ExtInMsgInfo. Err: {e:?}");
-                            continue 'message;
-                        }
-                    };
+                let ext_in_message = match ExtInMsgInfo::load_from(&mut slice) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Bad cell. Failed to deserialize to ExtInMsgInfo. Err: {e:?}");
+                        continue 'message;
+                    }
+                };
 
-                    let external_message = ExternalMessage::new(cell.clone(), ext_in_message );
-                    external_messages.insert(*cell.repr_hash(), external_message);
+                let external_message = ExternalMessage::new(cell.clone(), ext_in_message );
+                external_messages.insert(*cell.repr_hash(), external_message);
 
-                }
             }
+        }
 
-            let messages = external_messages
-                .into_iter()
-                .map(|m| Arc::new(m.1))
-                .collect::<Vec<_>>();
+        let messages = external_messages
+            .into_iter()
+            .map(|m| Arc::new(m.1))
+            .collect::<Vec<_>>();
 
-            let anchor = Arc::new(MempoolAnchor::new(
-                anchor.body.location.round.0,
-                anchor.body.time.as_u64(),
-                messages
-            ));
+        let anchor = Arc::new(MempoolAnchor::new(
+            anchor.body.location.round.0,
+            anchor.body.time.as_u64(),
+            messages
+        ));
 
-            adapter.add_anchor(anchor);
-        })
+        adapter.add_anchor(anchor);
     }
 }
 

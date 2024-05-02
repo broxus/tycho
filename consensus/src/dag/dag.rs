@@ -4,13 +4,15 @@ use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use itertools::Itertools;
 use parking_lot::Mutex;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{Point, Round, ValidPoint};
+use crate::models::{Point, Round, Ugly, ValidPoint};
 
 #[derive(Clone)]
 pub struct Dag {
@@ -49,7 +51,11 @@ impl Dag {
     // Note: cannot be non-async, as we cannot use only InclusionState:
     //   some committed point may be DagPoint::Suspicious thus not the first validated locally
     /// result is in historical order
-    pub async fn commit(self, next_dag_round: DagRound) -> Vec<(Arc<Point>, Vec<Arc<Point>>)> {
+    pub async fn commit(
+        self,
+        next_dag_round: DagRound,
+        commit_sender: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+    ) -> Vec<(Arc<Point>, Vec<Arc<Point>>)> {
         // TODO finding the latest trigger must not take long, better try later
         //   than wait long for some DagPoint::NotFound, slowing down whole Engine
         let Some(latest_trigger) = Self::latest_trigger(&next_dag_round).await else {
@@ -65,6 +71,13 @@ impl Dag {
             let committed = Self::gather_uncommitted(&anchor.point, &anchor_round).await;
             ordered.push((anchor.point, committed));
         }
+
+        ordered.iter().for_each(|x| {
+            if let Err(e) = commit_sender.send(x.clone()) {
+                tracing::error!("Failed to send anchor commit message tp mpsc channel. Err: {e:?}"); //TODO: handle error properly
+            }
+        });
+
         ordered
     }
 
