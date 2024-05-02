@@ -75,7 +75,7 @@ async fn test_collation_process_on_stubs() {
     let node_1_keypair = Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd));
 
     let config = CollationConfig {
-        key_pair: node_1_keypair,
+        key_pair: node_1_keypair.clone(),
         mc_block_min_interval_ms: 10000,
         max_mc_block_delta_from_bc_to_await_own: 2,
         supported_block_version: 50,
@@ -85,7 +85,7 @@ async fn test_collation_process_on_stubs() {
         #[cfg(feature = "test")]
         test_validators_keypairs: vec![
             node_1_keypair,
-            everscale_crypto::ed25519::KeyPair::generate(&mut rnd),
+            everscale_crypto::ed25519::KeyPair::generate(&mut rnd).into(),
         ],
     };
 
