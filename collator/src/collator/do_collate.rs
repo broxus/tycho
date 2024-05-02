@@ -2,35 +2,15 @@ use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 
 use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
-
-use everscale_types::cell::{Cell, CellBuilder, Load};
-use everscale_types::models::{
-    ExtInMsgInfo, ImportFees, InMsgExternal, InMsgFinal, IntMsgInfo, OutMsg, OutMsgExternal,
-};
-use everscale_types::models::{InMsg, Lazy, MsgEnvelope, MsgInfo, OutMsgNew};
-use everscale_types::models::{IntermediateAddr, OutMsgImmediate, OwnedMessage, Transaction};
-use everscale_types::{
-    cell::HashBytes,
-    models::{
-        BlockId, BlockIdShort, BlockInfo, ConfigParam7, CurrencyCollection, ShardDescription,
-        ValueFlow,
-    },
-    num::Tokens,
-};
-use rand::Rng;
+use everscale_types::models::*;
+use everscale_types::num::Tokens;
+use everscale_types::prelude::*;
 use sha2::Digest;
 
-use crate::{
-    collator::{
-        collator_processor::execution_manager::ExecutionManager,
-        types::{BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt},
-    },
-    mempool::MempoolAdapter,
-    msg_queue::{MessageQueueAdapter, QueueIterator},
-    state_node::StateNodeAdapter,
-    tracing_targets,
-    types::BlockCollationResult,
+use super::CollatorStdImpl;
+use crate::collator::execution_manager::ExecutionManager;
+use crate::collator::types::{
+    BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt,
 };
 use crate::tracing_targets;
 use crate::types::BlockCollationResult;
@@ -149,7 +129,7 @@ impl CollatorStdImpl {
 
         //STUB: just remove fisrt anchor from cache
         let _ext_msg = self.get_next_external();
-        self.set_has_pending_externals(false);
+        self.has_pending_externals = false;
 
         // TODO: load from DAG
         let msgs_set = vec![];

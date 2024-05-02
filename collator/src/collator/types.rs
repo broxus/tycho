@@ -552,7 +552,7 @@ impl ShardAccountStuff {
         key: HashBytes,
         libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<()> {
-        log::trace!(
+        tracing::trace!(
             "Removing public library {} of account {}",
             key,
             self.account_addr
@@ -587,7 +587,7 @@ impl ShardAccountStuff {
         }
 
         if lib_descr.publishers.is_empty() {
-            log::debug!(
+            tracing::debug!(
                 "library {} has no publishers left, removing altogether",
                 key
             );
@@ -598,13 +598,14 @@ impl ShardAccountStuff {
 
         return Ok(());
     }
+
     pub fn add_public_library(
         &self,
         key: HashBytes,
         library: Cell,
         libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<()> {
-        log::trace!(
+        tracing::trace!(
             "Adding public library {} of account {}",
             key,
             self.account_addr

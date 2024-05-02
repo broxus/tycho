@@ -1,27 +1,13 @@
-use std::sync::atomic::Ordering;
-use std::{collections::HashMap, ops::Add, sync::Arc};
+use anyhow::{bail, Result};
 
-use anyhow::{anyhow, bail, Result};
-
-use everscale_types::cell::{Load, Store};
-use everscale_types::models::{
-    AccountBlock, BlockExtra, BlockInfo, CurrencyCollection, DepthBalanceInfo, PrevBlockRef,
-};
-use everscale_types::{
-    cell::{Cell, CellBuilder, HashBytes, UsageTree},
-    dict::Dict,
-    merkle::MerkleUpdate,
-    models::{
-        Block, BlockId, BlockRef, BlockchainConfig, CreatorStats, GlobalCapability, GlobalVersion,
-        KeyBlockRef, KeyMaxLt, Lazy, LibDescr, McBlockExtra, McStateExtra, ShardHashes,
-        ShardStateUnsplit, WorkchainDescription,
-    },
-};
+use everscale_types::merkle::*;
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use sha2::Digest;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
+use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData};
 use crate::types::BlockCandidate;
 
 use super::{execution_manager::ExecutionManager, CollatorStdImpl};

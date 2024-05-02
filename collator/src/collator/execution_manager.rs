@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 use std::{
     collections::HashMap,
     sync::{atomic::AtomicU64, Arc},
@@ -17,16 +18,15 @@ use everscale_types::{
 };
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use once_cell::sync::OnceCell;
 use ton_executor::blockchain_config::PreloadedBlockchainConfig;
 use ton_executor::{
     ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
 };
 use tycho_util::FastHashMap;
 
-use super::super::types::{AccountId, ShardAccountStuff};
+use crate::collator::types::{AccountId, ShardAccountStuff};
 
-static EMPTY_SHARD_ACCOUNT: OnceCell<ShardAccount> = OnceCell::new();
+static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 
 /// Execution manager
 pub(super) struct ExecutionManager {
