@@ -10,7 +10,6 @@ use tycho_util::serde_helpers;
 use crate::block_strider::provider::OptionalBlockStuff;
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::overlay_client::Error;
 use crate::proto::blockchain::BlockFull;
 
 // TODO: Use backoff instead of simple polling.

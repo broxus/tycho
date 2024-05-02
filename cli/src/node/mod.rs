@@ -177,6 +177,15 @@ fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
         });
     }
 
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+
+        tracing::error!("PANIC: {}", info);
+        std::io::stderr().flush().ok();
+        std::io::stdout().flush().ok();
+        std::process::exit(1);
+    }));
+
     Ok(())
 }
 

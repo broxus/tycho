@@ -136,12 +136,39 @@ impl Clone for Inner {
 
 impl Inner {
     async fn ping_neighbours_task(self) {
+        let req = Request::from_tl(overlay::Ping);
+
+        // Start pinging neighbours
         let mut interval = tokio::time::interval(self.config.neighbours_ping_interval);
         loop {
             interval.tick().await;
 
-            if let Err(e) = self.query::<_, overlay::Pong>(overlay::Ping).await {
-                tracing::warn!("failed to ping random neighbour: {e}");
+            let Some(neighbour) = self.neighbours.choose().await else {
+                continue;
+            };
+
+            let peer_id = *neighbour.peer_id();
+            match self.query_impl(neighbour.clone(), req.clone()).await {
+                Ok(res) => match tl_proto::deserialize::<overlay::Pong>(&res.data) {
+                    Ok(_) => {
+                        res.accept();
+                        tracing::debug!(%peer_id, "pinged neighbour");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            %peer_id,
+                            "received an invalid ping response: {e}",
+                        );
+                        res.reject();
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        %peer_id,
+                        "failed to ping neighbour: {e}",
+                    );
+                    continue;
+                }
             }
         }
     }

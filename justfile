@@ -22,11 +22,12 @@ docs: check_format
 test: lint
     cargo test --all-targets --all-features --workspace
 
-gen_network n:
+gen_network n: build_debug
     #!/usr/bin/env bash
-    cargo build --bin tycho
     TEMP_DIR="./.temp"
     TYCHO_BIN="./target/debug/tycho"
+
+    mkdir -p "$TEMP_DIR"
 
     N={{n}}
 
@@ -65,9 +66,8 @@ gen_network n:
     GLOBAL_CONFIG=$(echo "$GLOBAL_CONFIG" | jq ".zerostate = $ZEROSTATE_ID")
     echo "$GLOBAL_CONFIG" > "$TEMP_DIR/global-config.json"
 
-node n:
+node n: build_debug
     #!/usr/bin/env bash
-    cargo build --bin tycho
     TEMP_DIR="./.temp"
     TYCHO_BIN="./target/debug/tycho"
 
@@ -78,6 +78,15 @@ node n:
         --import-zerostate "$TEMP_DIR/zerostate.boc" \
         --logger-config ./logger.json \
 
-init_node_config:
+init_node_config: build_debug
     #!/usr/bin/env bash
-    cargo run --bin tycho -- --init-config "./config.json"
+    TYCHO_BIN="./target/debug/tycho"
+    $TYCHO_BIN node run --init-config "./config.json"
+
+init_zerostate_config: build_debug
+    #!/usr/bin/env bash
+    TYCHO_BIN="./target/debug/tycho"
+    $TYCHO_BIN tool gen-zerostate --init-config "./zerostate.json"
+
+build_debug:
+    cargo build --bin tycho
