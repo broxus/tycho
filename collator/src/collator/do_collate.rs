@@ -8,9 +8,7 @@ use sha2::Digest;
 
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
-use crate::collator::types::{
-    BlockCollationData, McData, OutMsgQueueInfoStuff, PrevData, ShardDescriptionExt,
-};
+use crate::collator::types::{BlockCollationData, McData, PrevData, ShardDescriptionExt};
 use crate::internal_queue::iterator::QueueIterator;
 use crate::tracing_targets;
 use crate::types::BlockCollationResult;
@@ -98,21 +96,7 @@ impl CollatorStdImpl {
         )?;
         collation_data.max_lt = collation_data.start_lt + 1;
 
-        //TODO: should consider split/merge in future
-        collation_data.processed_upto = prev_shard_data.observable_states()[0]
-            .state()
-            .processed_upto
-            .load()?;
-        let out_msg_queue_info = prev_shard_data.observable_states()[0]
-            .state()
-            .load_out_msg_queue_info()?;
-        collation_data.out_msg_queue_stuff = OutMsgQueueInfoStuff {
-            proc_info: out_msg_queue_info.proc_info,
-        };
-        collation_data.externals_processed_upto = prev_shard_data.observable_states()[0]
-            .state()
-            .externals_processed_upto
-            .clone();
+        collation_data.processed_upto = prev_shard_data.processed_upto().clone();
 
         // compute created / minted / recovered / from_prev_block
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
