@@ -12,19 +12,17 @@ use tycho_util::FastHashMap;
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent, ValidatorNetwork};
+use crate::validator::state::SessionInfo;
 use crate::validator::types::ValidationSessionInfo;
 use crate::{state_node::StateNodeAdapter, utils::async_queued_dispatcher::AsyncQueuedDispatcher};
-use crate::validator::state::SessionInfo;
 
-use super::{
-    ValidatorEventEmitter, ValidatorEventListener,
-};
+use super::{ValidatorEventEmitter, ValidatorEventListener};
 
 pub struct ValidatorProcessorTestImpl<ST>
 where
     ST: StateNodeAdapter,
 {
-    _dispatcher: Arc<AsyncQueuedDispatcher<Self, ValidatorTaskResult>>,
+    _dispatcher: AsyncQueuedDispatcher<Self, ValidatorTaskResult>,
     listener: Arc<dyn ValidatorEventListener>,
     _state_node_adapter: Arc<ST>,
 
@@ -91,7 +89,9 @@ where
             listener
                 .on_block_validated(
                     candidate_id,
-                    OnValidatedBlockEvent::Valid(BlockSignatures { signatures: signatures.clone() }),
+                    OnValidatedBlockEvent::Valid(BlockSignatures {
+                        signatures: signatures.clone(),
+                    }),
                 )
                 .await?;
         }

@@ -26,14 +26,11 @@ type MsgQueueStdImpl =
 // ADAPTER
 
 #[async_trait]
-pub(crate) trait MessageQueueAdapter: Send + Sync + 'static {
-    fn new() -> Self;
+pub trait MessageQueueAdapter: Send + Sync + 'static {
     /// Perform split and merge in the current queue state in accordance with the new shards set
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()>;
     /// Create iterator for specified shard and return it
-    async fn get_iterator<QI>(&self, shard_id: &ShardIdent) -> Result<QI>
-    where
-        QI: QueueIterator;
+    async fn get_iterator(&self, shard_id: &ShardIdent) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
@@ -41,19 +38,21 @@ pub(crate) trait MessageQueueAdapter: Send + Sync + 'static {
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<()>>;
 }
 
-pub(crate) struct MessageQueueAdapterStdImpl {
+pub struct MessageQueueAdapterStdImpl {
     msg_queue: MsgQueueStdImpl,
 }
 
-#[async_trait]
-impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
-    fn new() -> Self {
+impl MessageQueueAdapterStdImpl {
+    pub fn new() -> Self {
         let base_shard = ShardIdent::new_full(0);
         Self {
             msg_queue: MsgQueueStdImpl::new(base_shard),
         }
     }
+}
 
+#[async_trait]
+impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
         for sma in split_merge_actions {
             match sma {
@@ -79,10 +78,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(())
     }
 
-    async fn get_iterator<QI>(&self, _shard_id: &ShardIdent) -> Result<QI>
-    where
-        QI: QueueIterator,
-    {
+    async fn get_iterator(&self, _shard_id: &ShardIdent) -> Result<Box<dyn QueueIterator>> {
         todo!()
     }
 

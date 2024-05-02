@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::{mempool::MempoolAnchor, test_utils::try_init_test_tracing};
 
-use super::{MempoolAdapter, MempoolAdapterStubImpl, MempoolEventListener};
+use super::{MempoolAdapter, MempoolAdapterStdImpl, MempoolEventListener};
 
 struct MempoolEventStubListener;
 #[async_trait]
@@ -25,7 +25,7 @@ impl MempoolEventListener for MempoolEventStubListener {
 async fn test_stub_anchors_generator() -> Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
-    let adapter = MempoolAdapterStubImpl::create(Arc::new(MempoolEventStubListener {}));
+    let adapter = MempoolAdapterStdImpl::new(Arc::new(MempoolEventStubListener {}));
 
     // try get not existing anchor by id
     let opt_anchor = adapter.get_anchor_by_id(10).await?;

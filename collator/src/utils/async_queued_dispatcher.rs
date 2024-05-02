@@ -15,8 +15,16 @@ type AsyncTaskDesc<W, R> = TaskDesc<
     Result<R>,
 >;
 
-pub struct AsyncQueuedDispatcher<W, R> {
+pub struct AsyncQueuedDispatcher<W, R = ()> {
     tasks_queue: mpsc::Sender<AsyncTaskDesc<W, R>>,
+}
+
+impl<W, R> Clone for AsyncQueuedDispatcher<W, R> {
+    fn clone(&self) -> Self {
+        Self {
+            tasks_queue: self.tasks_queue.clone(),
+        }
+    }
 }
 
 impl<W, R> AsyncQueuedDispatcher<W, R>
@@ -31,6 +39,7 @@ where
         };
         (dispatcher, receiver)
     }
+
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
         tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
@@ -70,6 +79,7 @@ where
             }
         });
     }
+
     pub fn create(worker: W, queue_buffer_size: usize) -> Self {
         let (sender, receiver) = mpsc::channel(queue_buffer_size);
 

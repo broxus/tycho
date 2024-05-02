@@ -20,6 +20,32 @@ use crate::validator::types::{
 };
 use crate::{state_node::StateNodeAdapter, tracing_targets};
 
+// FACTORY
+
+pub struct ValidatorContext {
+    pub listeners: Vec<Arc<dyn ValidatorEventListener>>,
+    pub state_node_adapter: Arc<dyn StateNodeAdapter>,
+    pub keypair: Arc<KeyPair>,
+}
+
+pub trait ValidatorFactory {
+    type Validator: Validator;
+
+    fn create(&self, cx: ValidatorContext) -> Self::Validator;
+}
+
+impl<F, R> ValidatorFactory for F
+where
+    F: Fn(ValidatorContext) -> R,
+    R: Validator,
+{
+    type Validator = R;
+
+    fn create(&self, cx: ValidatorContext) -> Self::Validator {
+        self(cx)
+    }
+}
+
 #[async_trait]
 pub trait ValidatorEventEmitter {
     /// When shard or master block was validated by validator
@@ -41,50 +67,49 @@ pub trait ValidatorEventListener: Send + Sync {
 }
 
 #[async_trait]
-pub trait Validator<ST>: Send + Sync + 'static
-where
-    ST: StateNodeAdapter,
-{
-    fn create(
-        listeners: Vec<Arc<dyn ValidatorEventListener>>,
-        state_node_adapter: Arc<ST>,
-        network: ValidatorNetwork,
-        keypair: KeyPair,
-        config: ValidatorConfig,
-    ) -> Self;
-
+pub trait Validator: Send + Sync + 'static {
     /// Enqueue block candidate validation task
     async fn validate(&self, candidate: BlockId, session_seqno: u32) -> Result<()>;
     async fn enqueue_stop_candidate_validation(&self, candidate: BlockId) -> Result<()>;
 
     async fn add_session(&self, validators_session_info: Arc<ValidationSessionInfo>) -> Result<()>;
-    fn get_keypair(&self) -> &KeyPair;
+    fn get_keypair(&self) -> Arc<KeyPair>;
 }
 
-#[allow(private_bounds)]
-pub struct ValidatorStdImpl<ST>
-where
-    ST: StateNodeAdapter,
-{
-    _marker_state_node_adapter: std::marker::PhantomData<ST>,
+pub struct ValidatorStdImplFactory {
+    pub network: ValidatorNetwork,
+    pub config: ValidatorConfig,
+}
+
+impl ValidatorFactory for ValidatorStdImplFactory {
+    type Validator = ValidatorStdImpl;
+
+    fn create(&self, cx: ValidatorContext) -> Self::Validator {
+        ValidatorStdImpl::new(
+            cx.listeners,
+            cx.state_node_adapter,
+            self.network.clone(),
+            cx.keypair,
+            self.config.clone(),
+        )
+    }
+}
+
+pub struct ValidatorStdImpl {
     validation_state: Arc<ValidationStateStdImpl>,
     listeners: Vec<Arc<dyn ValidatorEventListener>>,
     network: ValidatorNetwork,
-    state_node_adapter: Arc<ST>,
-    keypair: KeyPair,
+    state_node_adapter: Arc<dyn StateNodeAdapter>,
+    keypair: Arc<KeyPair>,
     config: ValidatorConfig,
 }
 
-#[async_trait]
-impl<ST> Validator<ST> for ValidatorStdImpl<ST>
-where
-    ST: StateNodeAdapter,
-{
-    fn create(
+impl ValidatorStdImpl {
+    pub fn new(
         listeners: Vec<Arc<dyn ValidatorEventListener>>,
-        state_node_adapter: Arc<ST>,
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
         network: ValidatorNetwork,
-        keypair: KeyPair,
+        keypair: Arc<KeyPair>,
         config: ValidatorConfig,
     ) -> Self {
         tracing::info!(target: tracing_targets::VALIDATOR, "Creating validator...");
@@ -92,7 +117,6 @@ where
         let validation_state = Arc::new(ValidationStateStdImpl::new());
 
         Self {
-            _marker_state_node_adapter: std::marker::PhantomData,
             validation_state,
             listeners,
             network,
@@ -101,7 +125,10 @@ where
             config,
         }
     }
+}
 
+#[async_trait]
+impl Validator for ValidatorStdImpl {
     async fn validate(&self, candidate: BlockId, session_seqno: u32) -> Result<()> {
         let session = self
             .validation_state
@@ -129,8 +156,8 @@ where
         Ok(())
     }
 
-    fn get_keypair(&self) -> &KeyPair {
-        &self.keypair
+    fn get_keypair(&self) -> Arc<KeyPair> {
+        self.keypair.clone()
     }
 
     async fn add_session(&self, validators_session_info: Arc<ValidationSessionInfo>) -> Result<()> {
@@ -194,13 +221,13 @@ fn sign_block(key_pair: &KeyPair, block: &BlockId) -> anyhow::Result<Signature> 
     Ok(signature)
 }
 
-async fn start_candidate_validation<ST: StateNodeAdapter>(
+async fn start_candidate_validation(
     block_id: BlockId,
     session: Arc<SessionInfo>,
     current_validator_keypair: &KeyPair,
     listeners: &[Arc<dyn ValidatorEventListener>],
     network: &ValidatorNetwork,
-    state_node_adapter: &Arc<ST>,
+    state_node_adapter: &Arc<dyn StateNodeAdapter>,
     config: &ValidatorConfig,
 ) -> Result<()> {
     let cancellation_token = tokio_util::sync::CancellationToken::new();

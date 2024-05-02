@@ -1,15 +1,51 @@
-use everscale_types::models::{BlockId, GlobalCapability};
+use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Result;
+use everscale_types::models::{BlockId, GlobalCapability};
+use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
-use tycho_collator::test_utils::prepare_test_storage;
-use tycho_collator::{
-    manager::CollationManager,
-    mempool::{MempoolAdapterBuilder, MempoolAdapterBuilderStdImpl, MempoolAdapterStubImpl},
-    state_node::{StateNodeAdapterBuilder, StateNodeAdapterBuilderStdImpl},
-    test_utils::try_init_test_tracing,
-    types::CollationConfig,
+use tycho_collator::collator::CollatorStdImplFactory;
+use tycho_collator::manager::CollationManager;
+use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
+use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
+use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
+use tycho_collator::types::CollationConfig;
+use tycho_collator::validator::config::ValidatorConfig;
+use tycho_collator::validator::validator::ValidatorStdImplFactory;
+use tycho_core::block_strider::{
+    BlockProvider, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState, PrintSubscriber,
+    StateSubscriber, StateSubscriberContext,
 };
-use tycho_core::block_strider::{BlockStrider, PersistentBlockStriderState, PrintSubscriber};
+
+#[derive(Clone)]
+struct StrangeBlockProvider {
+    adapter: Arc<dyn StateNodeAdapter>,
+}
+
+impl BlockProvider for StrangeBlockProvider {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        tracing::info!("Get next block: {:?}", prev_block_id);
+        self.adapter.wait_for_block(prev_block_id)
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        tracing::info!("Get block: {:?}", block_id);
+        self.adapter.wait_for_block(block_id)
+    }
+}
+
+impl StateSubscriber for StrangeBlockProvider {
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        self.adapter.handle_state(&cx.state)
+    }
+}
 
 /// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
 #[tokio::test]
@@ -35,11 +71,8 @@ async fn test_collation_process_on_stubs() {
 
     block_strider.run().await.unwrap();
 
-    let mpool_adapter_builder = MempoolAdapterBuilderStdImpl::<MempoolAdapterStubImpl>::new();
-    let state_node_adapter_builder = StateNodeAdapterBuilderStdImpl::new(storage.clone());
-
     let mut rnd = rand::thread_rng();
-    let node_1_keypair = everscale_crypto::ed25519::KeyPair::generate(&mut rnd);
+    let node_1_keypair = Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd));
 
     let config = CollationConfig {
         key_pair: node_1_keypair,
@@ -60,14 +93,24 @@ async fn test_collation_process_on_stubs() {
 
     let node_network = tycho_collator::test_utils::create_node_network();
 
-    let _manager = tycho_collator::manager::create_std_manager_with_validator::<_, _>(
+    let manager = CollationManager::start(
         config,
-        mpool_adapter_builder,
-        state_node_adapter_builder,
-        node_network,
+        Arc::new(MessageQueueAdapterStdImpl::new()),
+        |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
+        |listener| MempoolAdapterStdImpl::new(listener),
+        ValidatorStdImplFactory {
+            network: node_network.clone().into(),
+            config: ValidatorConfig {
+                base_loop_delay: Duration::from_millis(50),
+                max_loop_delay: Duration::from_secs(10),
+            },
+        },
+        CollatorStdImplFactory,
     );
 
-    let state_node_adapter = _manager.get_state_node_adapter();
+    let state_node_adapter = StrangeBlockProvider {
+        adapter: manager.state_node_adapter().clone(),
+    };
 
     let block_strider = BlockStrider::builder()
         .with_provider(state_node_adapter.clone())
