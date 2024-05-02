@@ -2,10 +2,8 @@ use std::fmt::Debug;
 
 use anyhow::Result;
 
-use super::{
-    cache_persistent::PersistentCacheService, state_persistent::PersistentStateService,
-    MessageQueueImpl,
-};
+use super::queue::MessageQueueImpl;
+use super::{cache_persistent::PersistentCacheService, state_persistent::PersistentStateService};
 
 pub trait StorageService: Debug + Sized {
     fn new() -> Result<Self>;

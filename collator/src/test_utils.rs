@@ -9,7 +9,6 @@ use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_core::block_strider::{BlockProvider, OptionalBlockStuff};
 
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
 use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
@@ -68,8 +67,7 @@ pub fn create_node_network() -> NodeNetwork {
     }
 }
 
-pub async fn prepare_test_storage() -> anyhow::Result<(DummyArchiveProvider, Storage)> {
-    let provider = DummyArchiveProvider;
+pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let temp = tempfile::tempdir().unwrap();
     let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
     let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();
@@ -143,19 +141,5 @@ pub async fn prepare_test_storage() -> anyhow::Result<(DummyArchiveProvider, Sto
 
     storage.node_state().store_last_mc_block_id(&master_id);
 
-    Ok((provider, storage))
-}
-
-pub struct DummyArchiveProvider;
-impl BlockProvider for DummyArchiveProvider {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-
-    fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        futures_util::future::ready(None).boxed()
-    }
-
-    fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(None).boxed()
-    }
+    Ok(storage)
 }

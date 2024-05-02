@@ -14,9 +14,9 @@ use everscale_types::{
 };
 
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
 
 use crate::mempool::MempoolAnchorId;
+use crate::msg_queue::types::EnqueuedMessage;
 
 /*
 В текущем коллаторе перед коллацией блока импортируется:

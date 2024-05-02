@@ -27,13 +27,11 @@ everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
 
 # local deps
-tycho-core = { workspace = true }
 #tycho-consensus = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
-log = "0.4.21"
 
 [dev-dependencies]
 tempfile = { workspace = true }

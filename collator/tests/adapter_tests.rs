@@ -11,7 +11,9 @@ use tycho_collator::state_node::{
 };
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::BlockStuffForSync;
-use tycho_core::block_strider::{BlockStrider, PersistentBlockStriderState, PrintSubscriber};
+use tycho_core::block_strider::{
+    BlockStrider, EmptyBlockProvider, PersistentBlockStriderState, PrintSubscriber,
+};
 use tycho_storage::Storage;
 
 struct MockEventListener {
@@ -63,12 +65,12 @@ async fn test_add_and_get_block() {
 
 #[tokio::test]
 async fn test_storage_accessors() {
-    let (provider, storage) = prepare_test_storage().await.unwrap();
+    let storage = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
     let block_strider = BlockStrider::builder()
-        .with_provider(provider)
+        .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
             zerostate_id,
             storage.clone(),
@@ -135,12 +137,12 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
     tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel");
 
-    let (provider, storage) = prepare_test_storage().await.unwrap();
+    let storage = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
     let block_strider = BlockStrider::builder()
-        .with_provider(provider)
+        .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
             zerostate_id,
             storage.clone(),
