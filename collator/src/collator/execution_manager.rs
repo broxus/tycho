@@ -106,6 +106,7 @@ impl ExecutionManager {
         let mut futures: FuturesUnordered<_> = Default::default();
         let total_trans_duration = self.total_trans_duration.clone();
 
+        // TODO check externals is not exist accounts needed ?
         for (account_id, msg) in group {
             let max_lt = self.max_lt.load(Ordering::Acquire);
             let shard_account = if let Some(a) = self.changed_accounts.get(&account_id) {

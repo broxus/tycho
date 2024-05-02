@@ -333,6 +333,7 @@ pub(super) struct BlockCollationData {
     pub chain_time: u32,
     pub execute_count: u32,
     pub enqueue_count: u32,
+    pub out_msg_count: u32,
     pub msg_queue_depth_sum: u32,
 
     pub start_lt: u64,

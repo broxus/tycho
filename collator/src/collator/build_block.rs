@@ -41,6 +41,8 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
 
+        let mut new_config_opt: Option<BlockchainConfig> = None;
+
         for (account_id, updated_shard_account) in exec_manager.changed_accounts.drain() {
             //TODO: get updated blockchain config if it stored in account
             let account = updated_shard_account.shard_account.load_account()?;
@@ -72,8 +74,6 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                 account_blocks.set(account_id, acc_block.transactions.root_extra(), &acc_block)?;
             }
         }
-
-        let mut new_config_opt: Option<BlockchainConfig> = None;
 
         //TODO: update new_config_opt from hard fork
 

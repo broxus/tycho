@@ -5,9 +5,11 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 
 use everscale_types::cell::{Cell, CellBuilder, Load};
-use everscale_types::models::Transaction;
-use everscale_types::models::{ExtInMsgInfo, ImportFees, IntMsgInfo, OutMsg};
+use everscale_types::models::{
+    ExtInMsgInfo, ImportFees, InMsgExternal, InMsgFinal, IntMsgInfo, OutMsg, OutMsgExternal,
+};
 use everscale_types::models::{InMsg, Lazy, MsgEnvelope, MsgInfo, OutMsgNew};
+use everscale_types::models::{IntermediateAddr, OutMsgImmediate, OwnedMessage, Transaction};
 use everscale_types::{
     cell::HashBytes,
     models::{
@@ -172,7 +174,6 @@ where
         // TODO: load from DAG
         let msgs_set = vec![];
 
-        // TODO check externals is not exist accounts needed ?
         let msgs_len = msgs_set.len() as u32;
         exec_manager.execute_msgs_set(msgs_set);
         let mut offset = 0;
@@ -181,7 +182,6 @@ where
         while !finish {
             let (new_offset, group) = exec_manager.tick(offset).await?;
             for (account_id, msg_info, transaction) in group {
-                // TODO: finalize
                 let internal_msgs = new_transaction(&mut collation_data, &transaction, msg_info)?;
                 collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
                 // if !check_limits(tick_res) {
@@ -428,11 +428,7 @@ fn new_transaction(
     transaction: &Transaction,
     in_msg: MsgInfo,
 ) -> Result<Vec<OutMsg>> {
-    // log::trace!(
-    //     "new transaction, message {:x}\n{}",
-    //     in_msg_opt.map(|m| m.message_cell().unwrap().repr_hash()).unwrap_or_default(),
-    //     ever_block_json::debug_transaction(transaction.clone()).unwrap_or_default(),
-    // );
+    tracing::trace!("new transaction, message {:?}\n{:?}", in_msg, transaction,);
     colator_data.execute_count += 1;
     // let gas_used = transaction.gas_used().unwrap_or(0);
     // colator_data
@@ -443,55 +439,68 @@ fn new_transaction(
     //     .add_transaction(transaction.lt == colator_data.start_lt + 1);
 
     if let Some(ref in_msg_cell) = transaction.in_msg {
-        let in_msg = InMsg::load_from(&mut in_msg_cell.as_slice()?)?;
+        let in_msg = match in_msg {
+            // TODO: fix routing
+            MsgInfo::Int(IntMsgInfo { fwd_fee, .. }) => InMsg::Immediate(InMsgFinal {
+                in_msg_envelope: Lazy::new(&MsgEnvelope {
+                    cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
+                    next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
+                    fwd_fee_remaining: Default::default(),               // TODO: fix calculation
+                    message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
+                })?,
+                transaction: Lazy::new(&transaction.clone())?,
+                fwd_fee,
+            }),
+            MsgInfo::ExtIn(_) => InMsg::External(InMsgExternal {
+                in_msg: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
+                transaction: Lazy::new(&transaction.clone())?,
+            }),
+            MsgInfo::ExtOut(_) => {
+                bail!("External outbound message cannot be input")
+            }
+        };
         colator_data.in_msgs.set(
             in_msg_cell.repr_hash().clone(),
             in_msg.compute_fees()?,
             in_msg,
         )?;
     }
+    let mut result = vec![];
     for out_msg in transaction.iter_out_msgs() {
         let message = out_msg?;
         let msg_cell = CellBuilder::build_from(&message)?;
-        match message.info {
-            MsgInfo::Int(IntMsgInfo { value, .. }) => {
-                // Add out message to state for counting time and it may be removed if used
-                // let fwd_fee = *int_msg.fwd_fee;
-                // let enq = OutMsgQueueInfoStuff::new(
-                //     msg.clone(),
-                //     colator_data.out_msg_queue_info.shard(),
-                //     fwd_fee,
-                //     use_hypercube,
-                // )?;
+        let out_msg = match message.info {
+            MsgInfo::Int(_) => {
                 colator_data.enqueue_count += 1;
-                // colator_data.msg_queue_depth_sum += 1;
-                // colator_data.out_msgs.set(&enq)?;
-                // TODO: add message to internal queue
+                colator_data.out_msg_count += 1;
+                // TODO: fix routing
                 // Add to message block here for counting time later it may be replaced
-                // let out_msg = OutMsg::new(enq.envelope_cell(), tr_cell.clone());
-                // colator_data.add_out_msg_to_block(msg_hash.clone(), &out_msg)?;
+                OutMsg::New(OutMsgNew {
+                    out_msg_envelope: Lazy::new(&MsgEnvelope {
+                        cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
+                        next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
+                        fwd_fee_remaining: Default::default(), // TODO: fix calculation
+                        message: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
+                    })?,
+                    transaction: Lazy::new(&transaction.clone())?,
+                })
             }
             MsgInfo::ExtOut(_) => {
-                // let out_msg = OutMsg::New(OutMsgNew {
-                //     out_msg_envelope: Lazy::new(MsgEnvelope {
-                //         cur_addr: (),
-                //         next_addr: (),
-                //         fwd_fee_remaining: Default::default(),
-                //         message: Lazy::new(msg.to_owned()),
-                //     }),
-                //     transaction: Lazy::new(transaction.clone()),
-                // });
-                // colator_data.add_out_msg_to_block(out_msg.read_message_hash()?, &out_msg)?;
+                colator_data.out_msg_count += 1;
+                OutMsg::External(OutMsgExternal {
+                    out_msg: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
+                    transaction: Lazy::new(&transaction.clone())?,
+                })
             }
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be output"),
         };
 
-        let out_msg = OutMsg::load_from(&mut msg_cell.as_slice()?)?;
         colator_data.out_msgs.set(
             msg_cell.repr_hash().clone(),
             out_msg.compute_exported_value()?,
-            out_msg,
+            out_msg.clone(),
         )?;
+        result.push(out_msg);
     }
-    Ok(vec![]) // TODO: fix
+    Ok(result)
 }
