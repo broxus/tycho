@@ -1,8 +1,9 @@
 use anyhow::Result;
 
+use super::queue::MessageQueueImpl;
 use super::{
     cache_persistent::PersistentCacheService, state_persistent::PersistentStateService,
-    storage::StorageService, MessageQueueImpl,
+    storage::StorageService,
 };
 
 /*

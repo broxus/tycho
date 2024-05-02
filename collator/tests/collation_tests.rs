@@ -15,8 +15,8 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState, PrintSubscriber,
-    StateSubscriber, StateSubscriberContext,
+    BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
+    PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
 
 #[derive(Clone)]
@@ -52,12 +52,12 @@ impl StateSubscriber for StrangeBlockProvider {
 async fn test_collation_process_on_stubs() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
-    let (provider, storage) = prepare_test_storage().await.unwrap();
+    let storage = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
     let block_strider = BlockStrider::builder()
-        .with_provider(provider)
+        .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
             zerostate_id,
             storage.clone(),

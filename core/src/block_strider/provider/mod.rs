@@ -55,6 +55,22 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
 }
 
 // === Provider combinators ===
+#[derive(Debug, Clone, Copy)]
+pub struct EmptyBlockProvider;
+
+impl BlockProvider for EmptyBlockProvider {
+    type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        futures_util::future::ready(None)
+    }
+
+    fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        futures_util::future::ready(None)
+    }
+}
+
 struct ChainBlockProvider<T1, T2> {
     left: T1,
     right: T2,

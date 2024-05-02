@@ -1,12 +1,10 @@
 use std::{future::Future, pin::Pin, usize};
 
 use anyhow::{anyhow, Result};
-use log::trace;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::tracing_targets;
-
 use super::task_descr::{TaskDesc, TaskResponder};
+use crate::tracing_targets;
 
 pub const STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE: usize = 10;
 
@@ -43,7 +41,7 @@ where
     pub fn run(mut worker: W, mut receiver: mpsc::Receiver<AsyncTaskDesc<W, R>>) {
         tokio::spawn(async move {
             while let Some(task) = receiver.recv().await {
-                trace!(
+                tracing::trace!(
                     target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
                     "Task #{} ({}): received",
                     task.id(),

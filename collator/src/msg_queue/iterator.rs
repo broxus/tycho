@@ -22,7 +22,8 @@ the source MessageQueue to lazy load more items chunks. After the iteration, we 
 convert the iterator into MessageQueue back.
  */
 
-use super::{cache_persistent::*, state_persistent::*, storage::*, types::*, MessageQueue};
+use super::queue::MessageQueue;
+use super::{cache_persistent::*, state_persistent::*, storage::*, types::*};
 
 // Option (1) - MessageQueue implement iterator by itself
 
