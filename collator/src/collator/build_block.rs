@@ -59,6 +59,9 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
                     )?;
                 }
             }
+            if self.shard_id.is_masterchain() {
+                updated_shard_account.update_public_libraries(&mut exec_manager.libraries)?;
+            }
             let acc_block = AccountBlock {
                 account: updated_shard_account.account_addr,
                 transactions: updated_shard_account.transactions,
@@ -178,10 +181,7 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
             .checked_sub(&value_flow.recovered);
 
         if self.shard_id.is_masterchain() {
-            let changed_accounts: Vec<_> =
-                exec_manager.changed_accounts.values().cloned().collect();
-            new_state.libraries =
-                self.update_public_libraries(exec_manager.libraries.clone(), &changed_accounts)?;
+            new_state.libraries = exec_manager.libraries;
         }
 
         new_state.master_ref = master_ref;
@@ -434,17 +434,6 @@ impl<MQ, QI, MP, ST> CollatorProcessorStdImpl<MQ, QI, MP, ST> {
         //TODO: implement if we really need it
         //STUB: do not update anything
         Ok(())
-    }
-
-    fn update_public_libraries(
-        &self,
-        mut libraries: Dict<HashBytes, LibDescr>,
-        accounts: &[ShardAccountStuff],
-    ) -> Result<Dict<HashBytes, LibDescr>> {
-        for acc in accounts.iter() {
-            acc.update_public_libraries(&mut libraries)?;
-        }
-        Ok(libraries)
     }
 
     fn create_merkle_update(
