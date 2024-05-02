@@ -5,7 +5,6 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use everscale_crypto::ed25519::SecretKey;
 
 use everscale_types::{
     cell::{CellBuilder, CellSliceRange, HashBytes},
@@ -13,10 +12,9 @@ use everscale_types::{
 };
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_network::{DhtClient, OverlayService, PeerId};
+use crate::mempool::{MempoolAdapter, MempoolEventListener};
 
 use crate::tracing_targets;
-use crate::validator::types::OverlayNumber;
 
 use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 
@@ -24,54 +22,7 @@ use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 #[path = "tests/mempool_adapter_tests.rs"]
 pub(super) mod tests;
 
-// EVENTS EMITTER AMD LISTENER
-
-//TODO: remove emitter
-#[async_trait]
-pub(crate) trait MempoolEventEmitter {
-    /// When mempool produced new committed anchor
-    async fn on_new_anchor_event(&self, anchor: Arc<MempoolAnchor>);
-}
-
-#[async_trait]
-pub(crate) trait MempoolEventListener: Send + Sync {
-    /// Process new anchor from mempool
-    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()>;
-}
-
-// ADAPTER
-
-#[async_trait]
-pub(crate) trait MempoolAdapter: Send + Sync + 'static {
-    /// Create an adapter, that connects to mempool then starts to listen mempool for new anchors,
-    /// and handles requests to mempool from the collation process
-    fn create(listener: Arc<dyn MempoolEventListener>) -> Self;
-    /// Schedule task to process new master block state (may perform gc or nodes rotation)
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()>;
-
-    /// Request, await, and return anchor from connected mempool by id.
-    /// Return None if the requested anchor does not exist.
-    ///
-    /// (TODO) Cache anchor to handle similar request from collator of another shard
-    async fn get_anchor_by_id(
-        &self,
-        anchor_id: MempoolAnchorId,
-    ) -> Result<Option<Arc<MempoolAnchor>>>;
-
-    /// Request, await, and return the next anchor after the specified previous one.
-    /// If anchor was not produced yet then await until mempool does this.
-    ///
-    /// (TODO) ? Should return Error if mempool does not reply fro a long timeout
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>>;
-
-    /// Clean cache from all anchors that before specified.
-    /// We can do this for anchors that processed in blocks
-    /// which included in signed master - we do not need them anymore
-    async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
-}
+// FACTORY
 
 pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
@@ -79,9 +30,8 @@ pub struct MempoolAdapterStubImpl {
     _stub_anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
 }
 
-#[async_trait]
-impl MempoolAdapter for MempoolAdapterStubImpl {
-    fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
+impl MempoolAdapterStubImpl {
+    pub fn new(listener: Arc<dyn MempoolEventListener>) -> Self {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
         //TODO: make real implementation, currently runs stub task
@@ -126,11 +76,11 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
             _stub_anchors_cache: stub_anchors_cache,
         }
     }
+}
 
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: Arc<ShardStateStuff>,
-    ) -> Result<()> {
+#[async_trait]
+impl MempoolAdapter for MempoolAdapterStubImpl {
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
@@ -239,11 +189,8 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
 fn _stub_create_random_anchor_with_stub_externals(
     anchor_id: MempoolAnchorId,
 ) -> Arc<MempoolAnchor> {
-    let chain_time = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    let externals_count: i32 = rand::thread_rng().gen_range(-10..10).max(0);
+    let chain_time = anchor_id as u64 * 471 * 6 % 1000000000;
+    let externals_count = chain_time as i32 % 10;
     let mut externals = vec![];
     for i in 0..externals_count {
         let rand_addr = (0..32).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
@@ -253,13 +200,11 @@ fn _stub_create_random_anchor_with_stub_externals(
         msg_cell_builder.store_u64(chain_time).unwrap();
         msg_cell_builder.store_u32(i as u32).unwrap();
         let msg_cell = msg_cell_builder.build().unwrap();
-        let msg = ExternalMessage::new(
-            msg_cell,
-            ExtInMsgInfo {
-                dst: IntAddr::Std(StdAddr::new(0, rand_addr)),
-                ..Default::default()
-            },
-        );
+        let msg_cell_range = CellSliceRange::full(&*msg_cell);
+        let msg = ExternalMessage::new(msg_cell, ExtInMsgInfo {
+            dst: IntAddr::Std(StdAddr::new(0, rand_addr)),
+            ..Default::default()
+        });
         externals.push(Arc::new(msg));
     }
 

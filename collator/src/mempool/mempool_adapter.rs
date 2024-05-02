@@ -17,8 +17,63 @@ use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastDashMap;
 
 use crate::mempool::types::ExternalMessage;
-use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId, MempoolEventListener};
+use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
+
+pub trait MempoolAdapterFactory {
+    type Adapter: MempoolAdapter;
+
+    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Self::Adapter;
+}
+
+impl<F, R> MempoolAdapterFactory for F
+    where
+        F: Fn(Arc<dyn MempoolEventListener>) -> R,
+        R: MempoolAdapter,
+{
+    type Adapter = R;
+
+    fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Self::Adapter {
+        self(listener)
+    }
+}
+
+// EVENTS LISTENER
+
+#[async_trait]
+pub trait MempoolEventListener: Send + Sync {
+    /// Process new anchor from mempool
+    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()>;
+}
+
+// ADAPTER
+
+#[async_trait]
+pub trait MempoolAdapter: Send + Sync + 'static {
+    /// Schedule task to process new master block state (may perform gc or nodes rotation)
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()>;
+
+    /// Request, await, and return anchor from connected mempool by id.
+    /// Return None if the requested anchor does not exist.
+    ///
+    /// (TODO) Cache anchor to handle similar request from collator of another shard
+    async fn get_anchor_by_id(
+        &self,
+        anchor_id: MempoolAnchorId,
+    ) -> Result<Option<Arc<MempoolAnchor>>>;
+
+    /// Request, await, and return the next anchor after the specified previous one.
+    /// If anchor was not produced yet then await until mempool does this.
+    ///
+    /// (TODO) ? Should return Error if mempool does not reply fro a long timeout
+    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>>;
+
+    /// Clean cache from all anchors that before specified.
+    /// We can do this for anchors that processed in blocks
+    /// which included in signed master - we do not need them anymore
+    async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
+}
+
 
 pub struct MempoolAdapterImpl {
     //TODO: replace with rocksdb
@@ -115,13 +170,10 @@ pub async fn parse_points(
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterImpl {
-    fn create(listener: Arc<dyn MempoolEventListener>) -> Self {
-        todo!()
-    }
 
     async fn enqueue_process_new_mc_block_state(
         &self,
-        mc_state: Arc<ShardStateStuff>,
+        mc_state: ShardStateStuff,
     ) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         tracing::info!(
