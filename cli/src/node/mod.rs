@@ -1,14 +1,13 @@
-use std::io::IsTerminal;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use tracing_subscriber::EnvFilter;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::block_strider::{
     BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig, NoopSubscriber,
@@ -39,7 +38,7 @@ pub struct CmdRun {
     #[clap(
         short = 'i',
         long,
-        conflicts_with_all = ["config", "global_config", "keys", "logger_config"]
+        conflicts_with_all = ["config", "global_config", "keys", "logger_config", "import_zerostate"]
     )]
     init_config: Option<PathBuf>,
 
@@ -114,21 +113,68 @@ impl CmdRun {
 }
 
 fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
-    let filter = match logger_config {
-        None => EnvFilter::builder()
-            .with_default_directive(tracing::Level::INFO.into())
-            .from_env_lossy(),
-        Some(path) => LoggerConfig::load_from(path)
-            .wrap_err("failed to load logger config")?
-            .build_subscriber(),
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::{fmt, reload, EnvFilter};
+
+    let try_make_filter = {
+        let logger_config = logger_config.clone();
+        move || {
+            Ok::<_, anyhow::Error>(match &logger_config {
+                None => EnvFilter::builder()
+                    .with_default_directive(tracing::Level::INFO.into())
+                    .from_env_lossy(),
+                Some(path) => LoggerConfig::load_from(path)
+                    .wrap_err("failed to load logger config")?
+                    .build_subscriber(),
+            })
+        }
     };
 
-    let logger = tracing_subscriber::fmt().with_env_filter(filter);
+    let (layer, handle) = reload::Layer::new(try_make_filter()?);
 
-    if std::io::stdout().is_terminal() {
-        logger.init();
-    } else {
-        logger.without_time().init();
+    let subscriber = tracing_subscriber::registry()
+        .with(layer)
+        .with(fmt::layer());
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    if let Some(logger_config) = logger_config {
+        tokio::spawn(async move {
+            tracing::info!(
+                logger_config = %logger_config.display(),
+                "started watching for changes in logger config"
+            );
+
+            let get_metadata = move || {
+                std::fs::metadata(&logger_config)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+            };
+
+            let mut last_modified = get_metadata();
+
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+
+                let modified = get_metadata();
+                if last_modified == modified {
+                    continue;
+                }
+                last_modified = modified;
+
+                match try_make_filter() {
+                    Ok(filter) => {
+                        if handle.reload(filter).is_err() {
+                            break;
+                        }
+                        tracing::info!("reloaded logger config");
+                    }
+                    Err(e) => tracing::error!(%e, "failed to reload logger config"),
+                }
+            }
+
+            tracing::info!("stopped watching for changes in logger config");
+        });
     }
 
     Ok(())
@@ -386,6 +432,14 @@ impl Node {
     }
 
     async fn run(&self, _init_block_id: &BlockId) -> Result<()> {
+        tracing::info!("waiting for initial neighbours");
+        self.blockchain_rpc_client
+            .overlay_client()
+            .neighbours()
+            .wait_for_peers(1)
+            .await;
+        tracing::info!("found initial neighbours");
+
         let blockchain_block_provider = BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
             self.storage.clone(),

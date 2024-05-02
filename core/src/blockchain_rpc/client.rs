@@ -4,7 +4,7 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 use tycho_network::PublicOverlay;
 
-use crate::overlay_client::{PublicOverlayClient, QueryResponse};
+use crate::overlay_client::{Error, PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
 
 #[derive(Clone)]
@@ -36,7 +36,7 @@ impl BlockchainRpcClient {
         &self,
         block: &BlockId,
         max_size: u32,
-    ) -> Result<QueryResponse<KeyBlockIds>> {
+    ) -> Result<QueryResponse<KeyBlockIds>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, KeyBlockIds>(&rpc::GetNextKeyBlockIds {
@@ -47,7 +47,7 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
-    pub async fn get_block_full(&self, block: &BlockId) -> Result<QueryResponse<BlockFull>> {
+    pub async fn get_block_full(&self, block: &BlockId) -> Result<QueryResponse<BlockFull>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, BlockFull>(&rpc::GetBlockFull { block_id: *block })
@@ -58,7 +58,7 @@ impl BlockchainRpcClient {
     pub async fn get_next_block_full(
         &self,
         prev_block: &BlockId,
-    ) -> Result<QueryResponse<BlockFull>> {
+    ) -> Result<QueryResponse<BlockFull>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, BlockFull>(&rpc::GetNextBlockFull {
@@ -68,7 +68,10 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
-    pub async fn get_archive_info(&self, mc_seqno: u32) -> Result<QueryResponse<ArchiveInfo>> {
+    pub async fn get_archive_info(
+        &self,
+        mc_seqno: u32,
+    ) -> Result<QueryResponse<ArchiveInfo>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, ArchiveInfo>(&rpc::GetArchiveInfo { mc_seqno })
@@ -81,7 +84,7 @@ impl BlockchainRpcClient {
         archive_id: u64,
         offset: u64,
         max_size: u32,
-    ) -> Result<QueryResponse<Data>> {
+    ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, Data>(&rpc::GetArchiveSlice {
@@ -99,7 +102,7 @@ impl BlockchainRpcClient {
         block: &BlockId,
         offset: u64,
         max_size: u64,
-    ) -> Result<QueryResponse<PersistentStatePart>> {
+    ) -> Result<QueryResponse<PersistentStatePart>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, PersistentStatePart>(&rpc::GetPersistentStatePart {

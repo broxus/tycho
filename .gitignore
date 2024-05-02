@@ -21,4 +21,4 @@ keys.json
 logger.json
 
 db/
-temp/
+.temp/

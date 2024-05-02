@@ -141,7 +141,7 @@ impl Inner {
             interval.tick().await;
 
             if let Err(e) = self.query::<_, overlay::Pong>(overlay::Ping).await {
-                tracing::error!("failed to ping random neighbour: {e}");
+                tracing::warn!("failed to ping random neighbour: {e}");
             }
         }
     }
@@ -151,10 +151,22 @@ impl Inner {
         let max_neighbours = self.config.max_neighbours;
         let default_roundtrip = self.config.default_roundtrip;
 
+        let mut overlay_peers_added = self.overlay.entires_added().notified();
+        let mut overlay_peer_count = self.overlay.read_entries().len();
+
         let mut interval = tokio::time::interval(self.config.neighbours_update_interval);
 
         loop {
-            interval.tick().await;
+            if overlay_peer_count < max_neighbours {
+                tracing::info!("not enough neighbours, waiting for more");
+
+                overlay_peers_added.await;
+                overlay_peers_added = self.overlay.entires_added().notified();
+
+                overlay_peer_count = self.overlay.read_entries().len();
+            } else {
+                interval.tick().await;
+            }
 
             let active_neighbours = self.neighbours.get_active_neighbours().await.len();
             let neighbours_to_get = max_neighbours + (max_neighbours - active_neighbours);

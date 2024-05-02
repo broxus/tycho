@@ -5,10 +5,12 @@ use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_storage::Storage;
+use tycho_util::serde_helpers;
 
 use crate::block_strider::provider::OptionalBlockStuff;
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::BlockchainRpcClient;
+use crate::overlay_client::Error;
 use crate::proto::blockchain::BlockFull;
 
 // TODO: Use backoff instead of simple polling.
@@ -20,11 +22,13 @@ pub struct BlockchainBlockProviderConfig {
     /// Polling interval for `get_next_block` method.
     ///
     /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
     pub get_next_block_polling_interval: Duration,
 
     /// Polling interval for `get_block` method.
     ///
     /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
     pub get_block_polling_interval: Duration,
 }
 
@@ -59,6 +63,7 @@ impl BlockchainBlockProvider {
     // TODO: Validate block with proof.
     async fn get_next_block_impl(&self, prev_block_id: &BlockId) -> OptionalBlockStuff {
         let mut interval = tokio::time::interval(self.config.get_next_block_polling_interval);
+
         loop {
             let res = self.client.get_next_block_full(prev_block_id).await;
             let block = match res {
