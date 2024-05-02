@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
+use tycho_network::PublicOverlay;
 
 use crate::overlay_client::{PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
@@ -21,6 +22,10 @@ impl BlockchainRpcClient {
         Self {
             inner: Arc::new(Inner { overlay_client }),
         }
+    }
+
+    pub fn overlay(&self) -> &PublicOverlay {
+        self.inner.overlay_client.overlay()
     }
 
     pub fn overlay_client(&self) -> &PublicOverlayClient {

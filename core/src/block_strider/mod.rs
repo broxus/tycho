@@ -9,8 +9,8 @@ use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 
 pub use self::provider::{
-    BlockProvider, BlockchainBlockProvider, BlockchainBlockProviderConfig, EmptyBlockProvider,
-    OptionalBlockStuff,
+    BlockProvider, BlockProviderExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
+    ChainBlockProvider, EmptyBlockProvider, OptionalBlockStuff, StorageBlockProvider,
 };
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
 pub use self::state_applier::ShardStateApplier;

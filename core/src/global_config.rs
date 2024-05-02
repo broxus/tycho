@@ -4,7 +4,9 @@ use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardIdent};
 use serde::{Deserialize, Serialize};
-use tycho_network::PeerInfo;
+use tycho_network::{OverlayId, PeerInfo};
+
+use crate::proto::blockchain::OverlayIdData;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct GlobalConfig {
@@ -39,5 +41,12 @@ impl ZerostateId {
             root_hash: self.root_hash,
             file_hash: self.file_hash,
         }
+    }
+
+    pub fn compute_public_overlay_id(&self) -> OverlayId {
+        OverlayId(tl_proto::hash(OverlayIdData {
+            zerostate_root_hash: self.root_hash.0,
+            zerostate_file_hash: self.file_hash.0,
+        }))
     }
 }

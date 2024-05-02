@@ -2545,6 +2545,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "tycho-block-util",
  "tycho-collator",
  "tycho-core",
  "tycho-network",

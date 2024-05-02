@@ -7,8 +7,17 @@ use anyhow::Result;
 use clap::Parser;
 use everscale_crypto::ed25519;
 use tracing_subscriber::EnvFilter;
-use tycho_core::global_config::GlobalConfig;
-use tycho_network::{DhtClient, DhtService, Network, OverlayService, PeerResolver, Router};
+use tycho_block_util::state::MinRefMcStateTracker;
+use tycho_core::block_strider::{
+    BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig, NoopSubscriber,
+    PersistentBlockStriderState, StorageBlockProvider,
+};
+use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
+use tycho_core::global_config::{GlobalConfig, ZerostateId};
+use tycho_core::overlay_client::PublicOverlayClient;
+use tycho_network::{
+    DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
+};
 use tycho_storage::Storage;
 
 use crate::util::error::ResultExt;
@@ -69,19 +78,23 @@ impl CmdRun {
 
         init_logger(self.logger_config)?;
 
-        let node_config =
-            NodeConfig::from_file(self.config.unwrap()).wrap_err("failed to load node config")?;
+        let node = {
+            let node_config = NodeConfig::from_file(self.config.unwrap())
+                .wrap_err("failed to load node config")?;
 
-        let global_config = GlobalConfig::from_file(self.global_config.unwrap())
-            .wrap_err("failed to load global config")?;
+            let global_config = GlobalConfig::from_file(self.global_config.unwrap())
+                .wrap_err("failed to load global config")?;
 
-        let keys = config::NodeKeys::from_file(&self.keys.unwrap())
-            .wrap_err("failed to load node keys")?;
+            let keys = config::NodeKeys::from_file(&self.keys.unwrap())
+                .wrap_err("failed to load node keys")?;
 
-        let public_ip = resolve_public_ip(node_config.public_ip).await?;
-        let socket_addr = SocketAddr::new(public_ip.into(), node_config.port);
+            let public_ip = resolve_public_ip(node_config.public_ip).await?;
+            let socket_addr = SocketAddr::new(public_ip.into(), node_config.port);
 
-        let _node = Node::new(socket_addr, keys, node_config, global_config)?;
+            Node::new(socket_addr, keys, node_config, global_config)?
+        };
+
+        node.run().await?;
 
         Ok(())
     }
@@ -119,11 +132,17 @@ async fn resolve_public_ip(ip: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
 }
 
 pub struct Node {
+    pub zerostate: ZerostateId,
+
     pub network: Network,
     pub dht_client: DhtClient,
     pub peer_resolver: PeerResolver,
     pub overlay_service: OverlayService,
     pub storage: Storage,
+    pub blockchain_rpc_client: BlockchainRpcClient,
+
+    pub state_tracker: MinRefMcStateTracker,
+    pub blockchain_block_provider_config: BlockchainBlockProviderConfig,
 }
 
 impl Node {
@@ -191,12 +210,70 @@ impl Node {
             "initialized storage"
         );
 
+        // Setup blockchain rpc
+        let blockchain_rpc_service =
+            BlockchainRpcService::new(storage.clone(), node_config.blockchain_rpc_service);
+
+        let public_overlay =
+            PublicOverlay::builder(global_config.zerostate.compute_public_overlay_id())
+                .with_peer_resolver(peer_resolver.clone())
+                .build(blockchain_rpc_service);
+        overlay_service.add_public_overlay(&public_overlay);
+
+        let blockchain_rpc_client = BlockchainRpcClient::new(PublicOverlayClient::new(
+            network.clone(),
+            public_overlay,
+            node_config.public_overlay_client,
+        ));
+
+        tracing::info!(
+            overlay_id = %blockchain_rpc_client.overlay().overlay_id(),
+            "initialized blockchain rpc"
+        );
+
+        // Setup block strider
+        let state_tracker = MinRefMcStateTracker::default();
+
         Ok(Self {
+            zerostate: global_config.zerostate,
             network,
             dht_client,
             peer_resolver,
             overlay_service,
+            blockchain_rpc_client,
             storage,
+            state_tracker,
+            blockchain_block_provider_config: node_config.blockchain_block_provider,
         })
+    }
+
+    async fn run(&self) -> Result<()> {
+        let blockchain_block_provider = BlockchainBlockProvider::new(
+            self.blockchain_rpc_client.clone(),
+            self.storage.clone(),
+            self.blockchain_block_provider_config.clone(),
+        );
+
+        let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
+
+        let strider_state =
+            PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
+
+        let block_strider = BlockStrider::builder()
+            .with_provider((blockchain_block_provider, storage_block_provider))
+            .with_state(strider_state)
+            .with_state_subscriber(
+                self.state_tracker.clone(),
+                self.storage.clone(),
+                NoopSubscriber,
+            )
+            .build();
+
+        tracing::info!("block strider started");
+
+        block_strider.run().await?;
+
+        tracing::info!("block strider finished");
+        Ok(())
     }
 }

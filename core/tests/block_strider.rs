@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider};
+use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider, StorageBlockProvider};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
@@ -14,12 +14,14 @@ mod common;
 async fn storage_block_strider() -> anyhow::Result<()> {
     tycho_util::test::init_logger("storage_block_strider");
 
-    let (storage, tmp_dir) = common::storage::init_storage().await?;
+    let (storage, _tmp_dir) = common::storage::init_storage().await?;
+
+    let storage_provider = StorageBlockProvider::new(storage);
 
     let archive = common::storage::get_archive()?;
     for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
-            let block = storage.get_block(&block_id).await;
+            let block = storage_provider.get_block(&block_id).await;
             assert!(block.is_some());
 
             if let Some(block) = block {
@@ -30,8 +32,6 @@ async fn storage_block_strider() -> anyhow::Result<()> {
             }
         }
     }
-
-    tmp_dir.close()?;
 
     tracing::info!("done!");
     Ok(())

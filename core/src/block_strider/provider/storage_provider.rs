@@ -7,13 +7,23 @@ use crate::block_strider::BlockProvider;
 
 // TODO: Add an explicit storage provider type
 
-impl BlockProvider for Storage {
+pub struct StorageBlockProvider {
+    storage: Storage,
+}
+
+impl StorageBlockProvider {
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
+    }
+}
+
+impl BlockProvider for StorageBlockProvider {
     type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
-            let block_storage = self.block_storage();
+            let block_storage = self.storage.block_storage();
 
             let get_next_block = || async {
                 let rx = block_storage
@@ -34,7 +44,7 @@ impl BlockProvider for Storage {
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
         Box::pin(async {
-            let block_storage = self.block_storage();
+            let block_storage = self.storage.block_storage();
 
             let get_block = || async {
                 let rx = block_storage.subscribe_to_block(*block_id).await?;

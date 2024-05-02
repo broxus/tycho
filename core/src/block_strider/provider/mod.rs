@@ -1,12 +1,14 @@
 use std::future::Future;
+use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use everscale_types::models::BlockId;
-use futures_util::future::BoxFuture;
+use futures_util::future::{self, BoxFuture};
 use tycho_block_util::block::BlockStuffAug;
 
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
+pub use self::storage_provider::StorageBlockProvider;
 
 #[cfg(any(test, feature = "test"))]
 pub use self::archive_provider::ArchiveBlockProvider;
@@ -54,6 +56,20 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
     }
 }
 
+pub trait BlockProviderExt: Sized {
+    fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T>;
+}
+
+impl<B: BlockProvider> BlockProviderExt for B {
+    fn chain<T: BlockProvider>(self, other: T) -> ChainBlockProvider<Self, T> {
+        ChainBlockProvider {
+            left: self,
+            right: other,
+            is_right: AtomicBool::new(false),
+        }
+    }
+}
+
 // === Provider combinators ===
 #[derive(Debug, Clone, Copy)]
 pub struct EmptyBlockProvider;
@@ -71,7 +87,7 @@ impl BlockProvider for EmptyBlockProvider {
     }
 }
 
-struct ChainBlockProvider<T1, T2> {
+pub struct ChainBlockProvider<T1, T2> {
     left: T1,
     right: T2,
     is_right: AtomicBool,
@@ -101,6 +117,47 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
                 return res;
             }
             self.right.get_block(block_id).await
+        })
+    }
+}
+
+impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for (T1, T2) {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        let left = self.0.get_next_block(prev_block_id);
+        let right = self.1.get_next_block(prev_block_id);
+
+        Box::pin(async move {
+            match future::select(pin!(left), pin!(right)).await {
+                future::Either::Left((res, right)) => match res {
+                    Some(res) => Some(res),
+                    None => right.await,
+                },
+                future::Either::Right((res, left)) => match res {
+                    Some(res) => Some(res),
+                    None => left.await,
+                },
+            }
+        })
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        let left = self.0.get_block(block_id);
+        let right = self.1.get_block(block_id);
+
+        Box::pin(async move {
+            match future::select(pin!(left), pin!(right)).await {
+                future::Either::Left((res, right)) => match res {
+                    Some(res) => Some(res),
+                    None => right.await,
+                },
+                future::Either::Right((res, left)) => match res {
+                    Some(res) => Some(res),
+                    None => left.await,
+                },
+            }
         })
     }
 }

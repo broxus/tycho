@@ -18,5 +18,7 @@ zerostate.boc
 config.json
 global-config.json
 keys.json
+logger.json
+
 db/
 temp/

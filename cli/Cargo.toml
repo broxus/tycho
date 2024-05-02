@@ -38,6 +38,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # local deps
+tycho-block-util = { workspace = true }
 tycho-collator = { workspace = true }
 tycho-core = { workspace = true }
 tycho-network = { workspace = true }

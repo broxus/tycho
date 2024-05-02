@@ -5,6 +5,9 @@ use anyhow::Result;
 use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
 use serde::{Deserialize, Serialize};
+use tycho_core::block_strider::BlockchainBlockProviderConfig;
+use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
+use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
 use tycho_storage::StorageConfig;
 
@@ -40,10 +43,20 @@ pub struct NodeConfig {
     pub port: u16,
 
     pub network: NetworkConfig,
+
     pub dht: DhtConfig,
+
     pub peer_resolver: PeerResolverConfig,
+
     pub overlay: OverlayConfig,
+
+    pub public_overlay_client: PublicOverlayClientConfig,
+
     pub storage: StorageConfig,
+
+    pub blockchain_rpc_service: BlockchainRpcServiceConfig,
+
+    pub blockchain_block_provider: BlockchainBlockProviderConfig,
 }
 
 impl Default for NodeConfig {
@@ -56,7 +69,10 @@ impl Default for NodeConfig {
             dht: DhtConfig::default(),
             peer_resolver: PeerResolverConfig::default(),
             overlay: OverlayConfig::default(),
+            public_overlay_client: PublicOverlayClientConfig::default(),
             storage: StorageConfig::default(),
+            blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
+            blockchain_block_provider: BlockchainBlockProviderConfig::default(),
         }
     }
 }

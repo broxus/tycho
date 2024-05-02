@@ -3,6 +3,14 @@ use tl_proto::{TlRead, TlWrite};
 
 use crate::proto::{tl_block_id, tl_block_id_vec};
 
+/// Data for computing a public overlay id.
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, id = "blockchain.overlayIdData", scheme = "proto.tl")]
+pub struct OverlayIdData {
+    pub zerostate_root_hash: [u8; 32],
+    pub zerostate_file_hash: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "blockchain.data", scheme = "proto.tl")]
 pub struct Data {
