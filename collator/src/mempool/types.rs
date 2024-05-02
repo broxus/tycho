@@ -9,7 +9,7 @@ pub type MempoolAnchorId = u32;
 
 pub(crate) struct ExternalMessage {
     message_cell: Cell,
-    message_info: ExtInMsgInfo
+    message_info: ExtInMsgInfo,
 }
 
 impl ExternalMessage {

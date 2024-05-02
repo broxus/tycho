@@ -27,9 +27,9 @@ pub trait MempoolAdapterFactory {
 }
 
 impl<F, R> MempoolAdapterFactory for F
-    where
-        F: Fn(Arc<dyn MempoolEventListener>) -> R,
-        R: MempoolAdapter,
+where
+    F: Fn(Arc<dyn MempoolEventListener>) -> R,
+    R: MempoolAdapter,
 {
     type Adapter = R;
 
@@ -74,7 +74,6 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
 }
 
-
 pub struct MempoolAdapterImpl {
     //TODO: replace with rocksdb
     anchors: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
@@ -90,11 +89,17 @@ impl MempoolAdapterImpl {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
         let anchors = Arc::new(RwLock::new(BTreeMap::new()));
 
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
+        let (sender, receiver) =
+            tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
 
-        let engine =
-            tycho_consensus::Engine::new(&secret_key, &dht_client, &overlay_service, &peers, sender)
-                .await;
+        let engine = tycho_consensus::Engine::new(
+            &secret_key,
+            &dht_client,
+            &overlay_service,
+            &peers,
+            sender,
+        )
+        .await;
 
         tokio::spawn(async move { engine.run() });
 
@@ -147,9 +152,8 @@ pub async fn parse_points(
                     }
                 };
 
-                let external_message = ExternalMessage::new(cell.clone(), ext_in_message );
+                let external_message = ExternalMessage::new(cell.clone(), ext_in_message);
                 external_messages.insert(*cell.repr_hash(), external_message);
-
             }
         }
 
@@ -161,7 +165,7 @@ pub async fn parse_points(
         let anchor = Arc::new(MempoolAnchor::new(
             anchor.body.location.round.0,
             anchor.body.time.as_u64(),
-            messages
+            messages,
         ));
 
         adapter.add_anchor(anchor);
@@ -170,11 +174,7 @@ pub async fn parse_points(
 
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterImpl {
-
-    async fn enqueue_process_new_mc_block_state(
-        &self,
-        mc_state: ShardStateStuff,
-    ) -> Result<()> {
+    async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()> {
         //TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
@@ -222,9 +222,7 @@ impl MempoolAdapter for MempoolAdapterImpl {
         let mut request_timer = std::time::Instant::now();
         loop {
             {
-                let anchors_cache_r = self
-                    .anchors
-                    .read();
+                let anchors_cache_r = self.anchors.read();
 
                 let mut range = anchors_cache_r.range((
                     std::ops::Bound::Excluded(prev_anchor_id),
@@ -268,9 +266,7 @@ impl MempoolAdapter for MempoolAdapterImpl {
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
-        let mut anchors_cache_rw = self
-            .anchors
-            .write();
+        let mut anchors_cache_rw = self.anchors.write();
 
         anchors_cache_rw.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
         Ok(())

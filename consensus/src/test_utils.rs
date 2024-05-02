@@ -1,10 +1,15 @@
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
-use std::time::Duration;
 
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinHandle;
 
-use tycho_network::{DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
+use tycho_network::{
+    Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
+    PeerInfo, Router,
+};
+use tycho_util::time::now_sec;
 
 use crate::engine::MempoolConfig;
 use crate::models::{Link, Location, Point, PointBody, UnixTime};
@@ -31,23 +36,35 @@ pub fn genesis() -> Point {
     .wrap(&genesis_keys)
 }
 
+pub fn make_peer_info(key: &SecretKey, address: Address, ttl: Option<u32>) -> PeerInfo {
+    let keypair = KeyPair::from(key);
+    let peer_id = PeerId::from(keypair.public_key);
+
+    let now = now_sec();
+    let mut peer_info = PeerInfo {
+        id: peer_id,
+        address_list: vec![address.clone()].into_boxed_slice(),
+        created_at: now,
+        expires_at: ttl.unwrap_or(u32::MAX),
+        signature: Box::new([0; 64]),
+    };
+    *peer_info.signature = keypair.sign(&peer_info);
+    peer_info
+}
+
 // TODO receive configured services from general node,
 //  move current setup to tests as it provides acceptable timing
 // This dependencies should be passed from validator module to init mempool
-fn from_validator<T: ToSocketAddrs>(
+pub fn from_validator<T: ToSocketAddrs>(
     socket_addr: T,
     secret_key: &SecretKey,
+    dht_config: DhtConfig,
+    network_config: NetworkConfig,
 ) -> (DhtClient, OverlayService) {
     let local_id = PeerId::from(PublicKey::from(secret_key));
 
     let (dht_tasks, dht_service) = DhtService::builder(local_id)
-        .with_config(DhtConfig {
-            local_info_announce_period: Duration::from_secs(1),
-            local_info_announce_period_max_jitter: Duration::from_secs(1),
-            routing_table_refresh_period: Duration::from_secs(1),
-            routing_table_refresh_period_max_jitter: Duration::from_secs(1),
-            ..Default::default()
-        })
+        .with_config(dht_config)
         .build();
 
     let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
@@ -60,6 +77,7 @@ fn from_validator<T: ToSocketAddrs>(
         .build();
 
     let network = Network::builder()
+        .with_config(network_config)
         .with_private_key(secret_key.to_bytes())
         .with_service_name("mempool-test-network-service")
         .build(socket_addr, router)
@@ -71,37 +89,33 @@ fn from_validator<T: ToSocketAddrs>(
     (dht_service.make_client(&network), overlay_service)
 }
 
+pub fn drain_anchors(
+    mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            _ = committed
+                .recv()
+                .await
+                .expect("committed anchor reader must be alive");
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
     use parking_lot::deadlock;
+    use tokio::sync::mpsc;
     use tokio::task::JoinSet;
-
-    use tycho_network::{Address, PeerInfo};
-    use tycho_util::time::now_sec;
 
     use crate::engine::Engine;
 
     use super::*;
-
-    fn make_peer_info(key: &SecretKey, address: Address) -> PeerInfo {
-        let keypair = KeyPair::from(key);
-        let peer_id = PeerId::from(keypair.public_key);
-
-        let now = now_sec();
-        let mut peer_info = PeerInfo {
-            id: peer_id,
-            address_list: vec![address.clone()].into_boxed_slice(),
-            created_at: now,
-            expires_at: u32::MAX,
-            signature: Box::new([0; 64]),
-        };
-        *peer_info.signature = keypair.sign(&peer_info);
-        peer_info
-    }
 
     async fn make_network(node_count: usize) -> Vec<Engine> {
         let keys = (0..node_count)
@@ -115,7 +129,20 @@ mod tests {
 
         let from_validators = keys
             .iter()
-            .map(|secret| from_validator((Ipv4Addr::LOCALHOST, 0), secret))
+            .map(|secret| {
+                from_validator(
+                    (Ipv4Addr::LOCALHOST, 0),
+                    secret,
+                    DhtConfig {
+                        local_info_announce_period: Duration::from_secs(1),
+                        local_info_announce_period_max_jitter: Duration::from_secs(1),
+                        routing_table_refresh_period: Duration::from_secs(1),
+                        routing_table_refresh_period_max_jitter: Duration::from_secs(1),
+                        ..Default::default()
+                    },
+                    NetworkConfig::default(),
+                )
+            })
             .collect::<Vec<_>>();
 
         let peer_info = std::iter::zip(&keys, &from_validators)
@@ -123,6 +150,7 @@ mod tests {
                 Arc::new(make_peer_info(
                     key,
                     dht_client.network().local_addr().into(),
+                    None,
                 ))
             })
             .collect::<Vec<_>>();
@@ -138,11 +166,20 @@ mod tests {
             }
         }
         let mut engines = vec![];
+        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         for (secret_key, (dht_client, overlay_service)) in keys.iter().zip(from_validators.iter()) {
-            let engine = Engine::new(secret_key, &dht_client, &overlay_service, &all_peers).await;
+            let engine = Engine::new(
+                secret_key,
+                &dht_client,
+                &overlay_service,
+                &all_peers,
+                committed_tx.clone(),
+            )
+            .await;
             tracing::info!("created engine {}", dht_client.network().peer_id());
             engines.push(engine);
         }
+        drain_anchors(committed_rx);
 
         engines
     }

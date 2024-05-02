@@ -53,13 +53,14 @@ impl Dag {
     /// result is in historical order
     pub async fn commit(
         self,
+        log_id: Arc<String>,
         next_dag_round: DagRound,
-        commit_sender: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
-    ) -> Vec<(Arc<Point>, Vec<Arc<Point>>)> {
+        committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+    ) {
         // TODO finding the latest trigger must not take long, better try later
         //   than wait long for some DagPoint::NotFound, slowing down whole Engine
         let Some(latest_trigger) = Self::latest_trigger(&next_dag_round).await else {
-            return Vec::new();
+            return;
         };
         // when we have a valid trigger, its every point of it's subdag is validated successfully
         let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone()).await;
@@ -72,13 +73,13 @@ impl Dag {
             ordered.push((anchor.point, committed));
         }
 
-        ordered.iter().for_each(|x| {
-            if let Err(e) = commit_sender.send(x.clone()) {
-                tracing::error!("Failed to send anchor commit message tp mpsc channel. Err: {e:?}"); //TODO: handle error properly
-            }
-        });
+        Self::log_committed(&log_id, next_dag_round.round().prev(), &ordered);
 
-        ordered
+        for anchor_with_history in ordered {
+            committed
+                .send(anchor_with_history) // not recoverable
+                .expect("Failed to send anchor commit message tp mpsc channel");
+        }
     }
 
     async fn latest_trigger(next_round: &DagRound) -> Option<ValidPoint> {
@@ -270,5 +271,32 @@ impl Dag {
         }
         uncommitted.reverse();
         uncommitted
+    }
+
+    fn log_committed(
+        log_id: &str,
+        current_round: Round,
+        committed: &Vec<(Arc<Point>, Vec<Arc<Point>>)>,
+    ) {
+        if committed.is_empty() {
+            return;
+        }
+        if tracing::enabled!(tracing::Level::INFO) {
+            let committed = committed
+                .into_iter()
+                .map(|(anchor, history)| {
+                    let history = history
+                        .iter()
+                        .map(|point| format!("{:?}", point.id().ugly()))
+                        .join(", ");
+                    format!(
+                        "anchor {:?} time {} : [ {history} ]",
+                        anchor.id().ugly(),
+                        anchor.body.time
+                    )
+                })
+                .join("  ;  ");
+            tracing::info!("{log_id} @ {current_round:?} committed {committed}");
+        }
     }
 }

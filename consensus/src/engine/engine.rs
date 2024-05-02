@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use itertools::Itertools;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::task::JoinSet;
 
 use tycho_network::{DhtClient, OverlayService, PeerId};
@@ -26,7 +26,7 @@ pub struct Engine {
     broadcast_filter: BroadcastFilter,
     top_dag_round_watch: watch::Sender<DagRound>,
     tasks: JoinSet<()>, // should be JoinSet<!>
-    committed_anchors_sender: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>
+    committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
 }
 
 impl Engine {
@@ -35,8 +35,7 @@ impl Engine {
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         peers: &Vec<PeerId>,
-        tx: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>
-
+        committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
     ) -> Self {
         let key_pair = KeyPair::from(secret_key);
         let log_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
@@ -127,7 +126,7 @@ impl Engine {
             broadcast_filter,
             top_dag_round_watch: top_dag_round_tx,
             tasks,
-            committed_anchors_sender: tx
+            committed,
         }
     }
 
@@ -191,6 +190,7 @@ impl Engine {
             // let this channel unbounded - there won't be many items, but every of them is essential
             let (collector_signal_tx, collector_signal_rx) = mpsc::unbounded_channel();
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
+
             let bcaster_run = tokio::spawn(Self::bcaster_run(
                 self.log_id.clone(),
                 produce_own_point,
@@ -204,10 +204,13 @@ impl Engine {
                 collector_signal_rx,
             ));
 
-            let commit_run = tokio::spawn(
-                self.dag.clone().commit(next_dag_round.clone(), self.committed_anchors_sender.clone())
-            );
-            let bcast_filter_upd = {
+            let commit_run = tokio::spawn(self.dag.clone().commit(
+                self.log_id.clone(),
+                next_dag_round.clone(),
+                self.committed.clone(),
+            ));
+
+            let bcast_filter_run = {
                 let bcast_filter = self.broadcast_filter.clone();
                 let round = current_dag_round.round().clone();
                 tokio::spawn(async move { bcast_filter.advance_round(&round) })
@@ -220,9 +223,8 @@ impl Engine {
                 bcaster_ready_rx,
             ));
 
-            match tokio::join!(collector_run, bcaster_run, commit_run, bcast_filter_upd) {
-                (Ok(collector_upd), Ok(new_prev_point), Ok(committed), Ok(_bcast_filter_upd)) => {
-                    Self::log_committed(&self.log_id, &current_dag_round, &committed);
+            match tokio::join!(collector_run, bcaster_run, commit_run, bcast_filter_run) {
+                (Ok(collector_upd), Ok(new_prev_point), Ok(()), Ok(())) => {
                     prev_point = new_prev_point;
                     produce_own_point = next_dag_round.round() == collector_upd.next_round();
                     self.collector = collector_upd;
@@ -242,36 +244,6 @@ impl Engine {
                     panic!("{}", msg)
                 }
             }
-        }
-    }
-
-    fn log_committed(
-        log_id: &String,
-        current_dag_round: &DagRound,
-        committed: &Vec<(Arc<Point>, Vec<Arc<Point>>)>,
-    ) {
-        if committed.is_empty() {
-            return;
-        }
-        if tracing::enabled!(tracing::Level::INFO) {
-            let committed = committed
-                .into_iter()
-                .map(|(anchor, history)| {
-                    let history = history
-                        .iter()
-                        .map(|point| format!("{:?}", point.id().ugly()))
-                        .join(", ");
-                    format!(
-                        "anchor {:?} time {} : [ {history} ]",
-                        anchor.id().ugly(),
-                        anchor.body.time
-                    )
-                })
-                .join("  ;  ");
-            tracing::info!(
-                "{log_id} @ {:?} committed {committed}",
-                current_dag_round.round(),
-            );
         }
     }
 }

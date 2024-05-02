@@ -8,6 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[[example]]
+name = "consensus-node"
+path = "examples/consensus_node.rs"
+
 [dependencies]
 ahash = { workspace = true }
 anyhow = { workspace = true }
@@ -19,14 +23,20 @@ futures-util = { workspace = true }
 itertools = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true, features = ["small_rng"] }
+rand_pcg = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, default-features = false }
 tracing = { workspace = true }
 weedb = { workspace = true }
 
+# examples' dependencies
+clap = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tracing-appender = { workspace = true }
+
 # local deps
-rand_pcg = { version = "0.3" }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
