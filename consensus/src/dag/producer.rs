@@ -118,10 +118,9 @@ impl Producer {
     fn link_from_includes(
         local_id: &PeerId,
         current_round: &DagRound,
-        includes: &[Arc<Point>], // Use slice instead of Vec
+        includes: &[Arc<Point>],
         is_for_trigger: bool,
     ) -> Link {
-        // Determine if the local node is the leader
         let is_leader = match current_round.anchor_stage() {
             Some(AnchorStage::Trigger { leader, .. }) => is_for_trigger && leader == local_id,
             Some(AnchorStage::Proof { leader, .. }) => !is_for_trigger && leader == local_id,
@@ -132,11 +131,10 @@ impl Producer {
             return Link::ToSelf;
         }
 
-        // Get the point with the highest anchor round, differentiating between trigger and proof
         let point = includes
             .iter()
             .max_by_key(|p| {
-                let to = p.last_round(is_for_trigger); // Get round ID for the path
+                let to = p.last_round(is_for_trigger);
             })
             .expect("includes should contain at least one point");
 
@@ -152,7 +150,7 @@ impl Producer {
             }
         }
 
-        let to = point.last_round_id(is_for_trigger); // Get round ID for the path
+        let to = point.last_round_id(is_for_trigger);
 
         Link::Indirect {
             to,
@@ -174,7 +172,7 @@ impl Producer {
         if let Some(point) = witness
             .iter()
             .filter(|p| p.last_round(is_for_trigger) > link_round) // Condition check
-            .max_by_key(|p| p.last_round(is_for_trigger)) // Get max round
+            .max_by_key(|p| p.last_round(is_for_trigger))
         {
             let last_round = point.body.location.round;
 
@@ -184,10 +182,10 @@ impl Producer {
             if last_round == finished_round.prev() && (is_trigger_match || is_proof_match) {
                 *link = Link::Direct(Through::Witness(point.body.location.author));
             } else {
-                let to = point.last_round_id(is_for_trigger); // Get round ID for the path
+                let to = point.last_round_id(is_for_trigger);
                 *link = Link::Indirect {
                     to,
-                    path: Through::Witness(point.body.location.author), // Path details
+                    path: Through::Witness(point.body.location.author),
                 };
             }
         }
