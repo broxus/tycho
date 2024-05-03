@@ -2533,6 +2533,7 @@ dependencies = [
  "everscale-types",
  "futures-util",
  "hex",
+ "libc",
  "public-ip",
  "rand",
  "rustc_version",

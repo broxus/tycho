@@ -34,6 +34,7 @@ use tycho_util::FastHashMap;
 
 use crate::util::error::ResultExt;
 use crate::util::logger::LoggerConfig;
+use crate::util::signal;
 
 use self::config::{NodeConfig, NodeKeys};
 
@@ -82,7 +83,20 @@ impl CmdRun {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(self.run_impl())
+            .block_on(async move {
+                let run_fut = tokio::spawn(self.run_impl());
+                let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
+                tokio::select! {
+                    res = run_fut => res.unwrap(),
+                    signal = stop_fut => match signal {
+                        Ok(signal) => {
+                            tracing::info!(?signal, "received termination signal");
+                            Ok(())
+                        }
+                        Err(e) => Err(e.into()),
+                    }
+                }
+            })
     }
 
     async fn run_impl(self) -> Result<()> {
