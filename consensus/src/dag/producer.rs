@@ -134,7 +134,7 @@ impl Producer {
         let point = includes
             .iter()
             .max_by_key(|p| {
-                let to = p.last_round(is_for_trigger);
+                p.last_round(is_for_trigger)
             })
             .expect("non-empty list of includes for own point");
 
@@ -146,7 +146,7 @@ impl Producer {
                     (!is_for_trigger && point.body.anchor_proof == Link::ToSelf);
 
             if is_self_anchor {
-                return Link::Direct(Through { source: point.body.location.author.clone() });
+                return Link::Direct(Through::Includes( point.body.location.author.clone()));
             }
         }
 
@@ -154,7 +154,7 @@ impl Producer {
 
         Link::Indirect {
             to,
-            path: Through { source: point.body.location.author.clone() },
+            path: Through::Includes(point.body.location.author.clone()),
         }
     }
 
