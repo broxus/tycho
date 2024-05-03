@@ -408,10 +408,8 @@ async fn handle_error_and_backoff(
     error_message: &str,
 ) {
     warn!(target: tracing_targets::VALIDATOR, "Error validator response: validator: {:x?}: {} ", validator_public_key, error_message);
-    let exponential_backoff = 2_u32.pow(*attempt);
-
-    let safe_delay = delay.checked_mul(exponential_backoff).unwrap_or(max_delay);
-
+    let exponential_backoff = 2_u32.saturating_pow(*attempt);
+    let safe_delay = delay.saturating_mul(exponential_backoff);
     let new_delay = std::cmp::min(safe_delay, max_delay);
     tokio::time::sleep(new_delay).await;
     *attempt += 1;
