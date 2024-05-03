@@ -147,7 +147,12 @@ impl CollatorStdImpl {
 
         new_state
             .total_validator_fees
-            .checked_sub(&value_flow.recovered)?;
+            .try_add_assign(&value_flow.fees_collected)?;
+
+        // TODO:
+        // new_state
+        //     .total_validator_fees
+        //     .try_sub_assign(&value_flow.recovered)?;
 
         if self.shard_id.is_masterchain() {
             new_state.libraries =

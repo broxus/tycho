@@ -132,7 +132,7 @@ impl Validator for ValidatorStdImpl {
     async fn validate(&self, candidate: BlockId, session_seqno: u32) -> Result<()> {
         let session = self
             .validation_state
-            .get_session(session_seqno)
+            .get_session(candidate.shard.workchain(), session_seqno)
             .await
             .ok_or_else(|| {
                 anyhow::anyhow!("Validation session not found for seqno: {}", session_seqno)
@@ -171,6 +171,7 @@ impl Validator for ValidatorStdImpl {
         };
 
         let overlay_id = OverlayNumber {
+            workchain: validators_session_info.workchain,
             session_seqno: validators_session_info.seqno,
         };
         trace!(target: tracing_targets::VALIDATOR, overlay_id = ?validators_session_info.seqno, "Creating private overlay");
@@ -193,6 +194,7 @@ impl Validator for ValidatorStdImpl {
         }
 
         let session_info = SessionInfo::new(
+            validators_session_info.workchain,
             validators_session_info.seqno,
             validators_session_info.clone(),
             private_overlay.clone(),
@@ -340,7 +342,7 @@ async fn start_candidate_validation(
                 match response {
                     Ok(Ok(response)) => {
                         if let Ok(signatures) = response.parse_tl::<SignaturesQuery>() {
-                            trace!(target: tracing_targets::VALIDATOR, "Received signatures from validator {:?}", validator.public_key.to_bytes());
+                            trace!(target: tracing_targets::VALIDATOR, "Received signatures from validator {}", validator.public_key);
 
                             let is_finished = process_candidate_signature_response(
                                 cloned_session.clone(),
@@ -358,14 +360,14 @@ async fn start_candidate_validation(
                         }
                     }
                     Err(e) => {
-                        warn!(target: tracing_targets::VALIDATOR, "Elapsed validator response {:?}: {:?}", validator.public_key.to_bytes(), e);
+                        warn!(target: tracing_targets::VALIDATOR, "Elapsed validator response {}: {e}", validator.public_key);
                         let delay = delay * 2_u32.pow(attempt);
                         let delay = std::cmp::min(delay, max_delay);
                         tokio::time::sleep(delay).await;
                         attempt += 1;
                     }
                     Ok(Err(e)) => {
-                        warn!(target: tracing_targets::VALIDATOR, "Error receiving signatures from validator {:?}: {:?}", validator.public_key.to_bytes(), e);
+                        warn!(target: tracing_targets::VALIDATOR, "Error receiving signatures from validator {}: {e}", validator.public_key);
                         let delay = delay * 2_u32.pow(attempt);
                         let delay = std::cmp::min(delay, max_delay);
                         tokio::time::sleep(delay).await;

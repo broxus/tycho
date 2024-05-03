@@ -38,6 +38,7 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
 }
 
 pub struct ValidationSessionInfo {
+    pub workchain: i32,
     pub seqno: u32,
     pub validators: ValidatorsMap,
 }
@@ -64,6 +65,7 @@ impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
         }
 
         let validation_session = ValidationSessionInfo {
+            workchain: session_info.workchain(),
             seqno: session_info.seqno(),
             validators,
         };
@@ -99,6 +101,7 @@ impl BlockValidationCandidate {
 #[derive(TlWrite, TlRead)]
 #[tl(boxed, id = 0x12341111)]
 pub(crate) struct OverlayNumber {
+    pub workchain: i32,
     pub session_seqno: u32,
 }
 

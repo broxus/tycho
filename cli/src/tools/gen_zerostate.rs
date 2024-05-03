@@ -304,8 +304,39 @@ impl ZerostateConfig {
             }
         }
 
+        let workchains = self.params.get::<ConfigParam12>()?.unwrap();
+        let mut shards = Vec::new();
+        for entry in workchains.iter() {
+            let (workchain, descr) = entry?;
+            shards.push((
+                ShardIdent::new_full(workchain),
+                ShardDescription {
+                    seqno: 0,
+                    reg_mc_seqno: 0,
+                    start_lt: 0,
+                    end_lt: 0,
+                    root_hash: descr.zerostate_root_hash,
+                    file_hash: descr.zerostate_file_hash,
+                    before_split: false,
+                    before_merge: false,
+                    want_split: false,
+                    want_merge: false,
+                    nx_cc_updated: true,
+                    next_catchain_seqno: 0,
+                    next_validator_shard: ShardIdent::PREFIX_FULL,
+                    min_ref_mc_seqno: u32::MAX,
+                    gen_utime: now,
+                    split_merge_at: None,
+                    fees_collected: CurrencyCollection::ZERO,
+                    funds_created: CurrencyCollection::ZERO,
+                    copyleft_rewards: Dict::new(),
+                    proof_chain: None,
+                },
+            ));
+        }
+
         state.custom = Some(Lazy::new(&McStateExtra {
-            shards: Default::default(),
+            shards: ShardHashes::from_shards(shards.iter().map(|(ident, descr)| (ident, descr)))?,
             config: BlockchainConfig {
                 address: self.params.get::<ConfigParam0>()?.unwrap(),
                 params: self.params.clone(),

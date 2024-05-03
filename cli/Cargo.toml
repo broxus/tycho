@@ -20,6 +20,7 @@ base64 = { workspace = true }
 clap = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
+futures-util = { workspace = true }
 hex = { workspace = true }
 public-ip = { workspace = true }
 rand = { workspace = true }

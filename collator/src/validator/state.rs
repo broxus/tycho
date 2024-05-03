@@ -34,12 +34,14 @@ pub trait ValidationState: Send + Sync {
     /// Retrieves an immutable reference to a session by its ID.
     fn get_session(
         &self,
+        workchain: i32,
         session_id: u32,
     ) -> impl std::future::Future<Output = Option<Arc<SessionInfo>>> + Send;
 }
 
 /// Holds information about a validation session.
 pub struct SessionInfo {
+    workchain: i32,
     seqno: u32,
     max_weight: u64,
     blocks_signatures: FastDashMap<BlockIdShort, (BlockId, SignatureMaps)>,
@@ -50,6 +52,7 @@ pub struct SessionInfo {
 
 impl SessionInfo {
     pub fn new(
+        workchain: i32,
         seqno: u32,
         validation_session_info: Arc<ValidationSessionInfo>,
         private_overlay: PrivateOverlay,
@@ -60,6 +63,7 @@ impl SessionInfo {
             .map(|vi| vi.weight)
             .sum();
         Arc::new(Self {
+            workchain,
             seqno,
             max_weight,
             blocks_signatures: Default::default(),
@@ -67,6 +71,10 @@ impl SessionInfo {
             validation_session_info,
             private_overlay,
         })
+    }
+
+    pub fn workchain(&self) -> i32 {
+        self.workchain
     }
 
     pub fn get_seqno(&self) -> u32 {
@@ -376,7 +384,7 @@ impl SessionInfo {
 
 /// Standard implementation of `ValidationState`.
 pub struct ValidationStateStdImpl {
-    sessions: RwLock<HashMap<u32, Arc<SessionInfo>>>,
+    sessions: RwLock<HashMap<(i32, u32), Arc<SessionInfo>>>,
 }
 
 impl ValidationState for ValidationStateStdImpl {
@@ -387,18 +395,27 @@ impl ValidationState for ValidationStateStdImpl {
     }
 
     async fn try_add_session(&self, session: Arc<SessionInfo>) -> anyhow::Result<()> {
+        let workchain = session.workchain;
         let seqno = session.seqno;
 
-        let session = self.sessions.write().await.insert(seqno, session);
+        let session = self
+            .sessions
+            .write()
+            .await
+            .insert((workchain, seqno), session);
 
         if session.is_some() {
-            bail!("Session already exists with seqno: {seqno}");
+            bail!("Session already exists with seqno: ({workchain}, {seqno})");
         }
 
         Ok(())
     }
 
-    async fn get_session(&self, session_id: u32) -> Option<Arc<SessionInfo>> {
-        self.sessions.read().await.get(&session_id).cloned()
+    async fn get_session(&self, workchain: i32, session_id: u32) -> Option<Arc<SessionInfo>> {
+        self.sessions
+            .read()
+            .await
+            .get(&(workchain, session_id))
+            .cloned()
     }
 }

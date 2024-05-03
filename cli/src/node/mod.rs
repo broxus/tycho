@@ -8,10 +8,20 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use futures_util::future::BoxFuture;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_collator::collator::CollatorStdImplFactory;
+use tycho_collator::manager::CollationManager;
+use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
+use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
+use tycho_collator::types::{CollationConfig, ValidatorNetwork};
+use tycho_collator::validator::config::ValidatorConfig;
+use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
-    BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig, NoopSubscriber,
-    PersistentBlockStriderState, StorageBlockProvider,
+    BlockProvider, BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig,
+    OptionalBlockStuff, PersistentBlockStriderState, StateSubscriber, StateSubscriberContext,
+    StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
@@ -200,6 +210,8 @@ async fn resolve_public_ip(ip: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
 }
 
 pub struct Node {
+    pub keypair: Arc<ed25519::KeyPair>,
+
     pub zerostate: ZerostateId,
 
     pub network: Network,
@@ -303,6 +315,7 @@ impl Node {
         let state_tracker = MinRefMcStateTracker::default();
 
         Ok(Self {
+            keypair,
             zerostate: global_config.zerostate,
             network,
             dht_client,
@@ -335,6 +348,10 @@ impl Node {
                 };
 
                 node_state.store_init_mc_block_id(&zerostate_id);
+
+                // TODO: Only store this if it is a zerostate
+                node_state.store_last_mc_block_id(&zerostate_id);
+
                 Ok(zerostate_id)
             }
         }
@@ -441,6 +458,7 @@ impl Node {
     }
 
     async fn run(&self, _init_block_id: &BlockId) -> Result<()> {
+        // Ensure that there are some neighbours
         tracing::info!("waiting for initial neighbours");
         self.blockchain_rpc_client
             .overlay_client()
@@ -449,6 +467,61 @@ impl Node {
             .await;
         tracing::info!("found initial neighbours");
 
+        // Create collator
+        tracing::info!("starting collator");
+
+        // TODO: move into config
+        let collation_config = CollationConfig {
+            key_pair: self.keypair.clone(),
+            mc_block_min_interval_ms: 10000,
+            max_mc_block_delta_from_bc_to_await_own: 2,
+            supported_block_version: 50,
+            supported_capabilities: supported_capabilities(),
+            max_collate_threads: 1,
+            // test_validators_keypairs: vec![],
+        };
+
+        let collation_manager = CollationManager::start(
+            collation_config,
+            Arc::new(MessageQueueAdapterStdImpl::new()),
+            |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
+            MempoolAdapterStdImpl::new,
+            ValidatorStdImplFactory {
+                network: ValidatorNetwork {
+                    overlay_service: self.overlay_service.clone(),
+                    peer_resolver: self.peer_resolver.clone(),
+                    dht_client: self.dht_client.clone(),
+                },
+                // TODO: Move into node config
+                config: ValidatorConfig {
+                    base_loop_delay: Duration::from_millis(50),
+                    max_loop_delay: Duration::from_secs(10),
+                },
+            },
+            CollatorStdImplFactory,
+        );
+
+        let collator_state_subscriber = CollatorStateSubscriber {
+            adapter: collation_manager.state_node_adapter().clone(),
+        };
+
+        // TEMP
+        {
+            let masterchain_zerostate = self
+                .storage
+                .shard_state_storage()
+                .load_state(&self.zerostate.as_block_id())
+                .await?;
+
+            collator_state_subscriber
+                .adapter
+                .handle_state(&masterchain_zerostate)
+                .await?;
+        }
+
+        tracing::info!("collator started");
+
+        // Create block strider
         let blockchain_block_provider = BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
             self.storage.clone(),
@@ -457,25 +530,61 @@ impl Node {
 
         let storage_block_provider = StorageBlockProvider::new(self.storage.clone());
 
+        let collator_block_provider = CollatorBlockProvider {
+            adapter: collation_manager.state_node_adapter().clone(),
+        };
+
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
         let block_strider = BlockStrider::builder()
-            .with_provider((blockchain_block_provider, storage_block_provider))
+            .with_provider((
+                (blockchain_block_provider, storage_block_provider),
+                collator_block_provider,
+            ))
             .with_state(strider_state)
             .with_state_subscriber(
                 self.state_tracker.clone(),
                 self.storage.clone(),
-                NoopSubscriber,
+                collator_state_subscriber,
             )
             .build();
 
+        // Run block strider
         tracing::info!("block strider started");
-
         block_strider.run().await?;
-
         tracing::info!("block strider finished");
+
         Ok(())
+    }
+}
+
+struct CollatorStateSubscriber {
+    adapter: Arc<dyn StateNodeAdapter>,
+}
+
+impl StateSubscriber for CollatorStateSubscriber {
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        self.adapter.handle_state(&cx.state)
+    }
+}
+
+struct CollatorBlockProvider {
+    adapter: Arc<dyn StateNodeAdapter>,
+}
+
+impl BlockProvider for CollatorBlockProvider {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        self.adapter.wait_for_block(prev_block_id)
+    }
+
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        self.adapter.wait_for_block(block_id)
     }
 }
 
@@ -528,4 +637,29 @@ fn make_shard_state(
     };
 
     ShardStateStuff::new(block_id, root, &tracker)
+}
+
+fn supported_capabilities() -> u64 {
+    GlobalCapabilities::from([
+        GlobalCapability::CapCreateStatsEnabled,
+        GlobalCapability::CapBounceMsgBody,
+        GlobalCapability::CapReportVersion,
+        GlobalCapability::CapShortDequeue,
+        GlobalCapability::CapInitCodeHash,
+        GlobalCapability::CapOffHypercube,
+        GlobalCapability::CapFixTupleIndexBug,
+        GlobalCapability::CapFastStorageStat,
+        GlobalCapability::CapMyCode,
+        GlobalCapability::CapFullBodyInBounced,
+        GlobalCapability::CapStorageFeeToTvm,
+        GlobalCapability::CapWorkchains,
+        GlobalCapability::CapStcontNewFormat,
+        GlobalCapability::CapFastStorageStatBugfix,
+        GlobalCapability::CapResolveMerkleCell,
+        GlobalCapability::CapFeeInGasUnits,
+        GlobalCapability::CapBounceAfterFailedAction,
+        GlobalCapability::CapSuspendedList,
+        GlobalCapability::CapsTvmBugfixes2022,
+    ])
+    .into_inner()
 }
