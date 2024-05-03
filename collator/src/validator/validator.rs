@@ -364,11 +364,25 @@ async fn start_candidate_validation(
                     }
                     Err(e) => {
                         let error_message = format!("Elapsed validator response: {}", e);
-                        handle_error_and_backoff(delay, max_delay, &mut attempt, &validator.public_key, &error_message).await;
+                        handle_error_and_backoff(
+                            delay,
+                            max_delay,
+                            &mut attempt,
+                            &validator.public_key,
+                            &error_message,
+                        )
+                        .await;
                     }
                     Ok(Err(e)) => {
                         let error_message = format!("Error receiving signatures: {}", e);
-                        handle_error_and_backoff(delay, max_delay, &mut attempt, &validator.public_key, &error_message).await;
+                        handle_error_and_backoff(
+                            delay,
+                            max_delay,
+                            &mut attempt,
+                            &validator.public_key,
+                            &error_message,
+                        )
+                        .await;
                     }
                 }
                 tokio::time::sleep(delay).await;
@@ -402,7 +416,6 @@ async fn handle_error_and_backoff(
     tokio::time::sleep(new_delay).await;
     *attempt += 1;
 }
-
 
 pub async fn process_candidate_signature_response(
     session: Arc<SessionInfo>,

@@ -261,7 +261,9 @@ impl SessionInfo {
             let validator = self
                 .get_validation_session_info()
                 .validators
-                .get(&validator_id).context("Validator not found")?.clone();
+                .get(&validator_id)
+                .context("Validator not found")?
+                .clone();
 
             let is_valid = validator
                 .public_key
