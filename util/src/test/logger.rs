@@ -1,3 +1,5 @@
+#![allow(clippy::exit)]
+
 pub fn init_logger(test_name: &str) {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))

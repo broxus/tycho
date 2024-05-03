@@ -66,7 +66,7 @@ impl Storage {
     /// NOTE: Temp dir must live longer than the storage,
     /// otherwise compaction filter will not work.
     #[cfg(any(test, feature = "test"))]
-    pub fn new_temp() -> Result<(Self, tempfile::TempDir)> {
+    pub fn new_temp() -> anyhow::Result<(Self, tempfile::TempDir)> {
         use bytesize::ByteSize;
 
         let tmp_dir = tempfile::tempdir()?;

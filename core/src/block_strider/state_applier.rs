@@ -303,7 +303,7 @@ pub mod test {
 
         storage
             .shard_state_storage()
-            .store_state(&handle, &master)
+            .store_state(&handle, master)
             .await?;
 
         let shard_id = BlockId {
@@ -327,7 +327,7 @@ pub mod test {
         );
         storage
             .shard_state_storage()
-            .store_state(&handle, &shard)
+            .store_state(&handle, shard)
             .await?;
 
         storage.node_state().store_last_mc_block_id(&master_id);

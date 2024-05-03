@@ -24,6 +24,7 @@ pub struct Db {
     pub package_entries: Table<tables::PackageEntries>,
     pub shard_states: Table<tables::ShardStates>,
     pub cells: Table<tables::Cells>,
+    pub temp_cells: Table<tables::TempCells>,
     pub node_states: Table<tables::NodeStates>,
     pub prev1: Table<tables::Prev1>,
     pub prev2: Table<tables::Prev2>,
@@ -99,6 +100,7 @@ impl Db {
             .with_table::<tables::KeyBlocks>()
             .with_table::<tables::ShardStates>()
             .with_table::<tables::Cells>()
+            .with_table::<tables::TempCells>()
             .with_table::<tables::NodeStates>()
             .with_table::<tables::Prev1>()
             .with_table::<tables::Prev2>()
@@ -117,6 +119,7 @@ impl Db {
             package_entries: inner.instantiate_table(),
             shard_states: inner.instantiate_table(),
             cells: inner.instantiate_table(),
+            temp_cells: inner.instantiate_table(),
             node_states: inner.instantiate_table(),
             prev1: inner.instantiate_table(),
             prev2: inner.instantiate_table(),
@@ -224,6 +227,7 @@ impl Db {
                 package_entries => tables::PackageEntries,
                 shard_states => tables::ShardStates,
                 cells => tables::Cells,
+                temp_cells => tables::TempCells,
                 node_states => tables::NodeStates,
                 prev1 => tables::Prev1,
                 prev2 => tables::Prev2,

@@ -95,7 +95,7 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     storage
         .shard_state_storage()
-        .store_state(&handle, &zerostate)
+        .store_state(&handle, zerostate.clone())
         .await?;
 
     // Check seqno

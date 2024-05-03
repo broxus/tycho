@@ -17,6 +17,8 @@ use tycho_block_util::state::*;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
 
+pub const MAX_DEPTH: u16 = u16::MAX - 1;
+
 pub struct ShardStateReplaceTransaction<'a> {
     db: &'a Db,
     cell_storage: &'a Arc<CellStorage>,
@@ -144,6 +146,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
         let mut tail = [0; 4];
         let mut ctx = FinalizationContext::new(self.db);
+        ctx.clear_temp_cells(self.db)?;
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -220,6 +223,9 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         // Current entry contains root cell
         let root_hash = ctx.entries_buffer.repr_hash();
         ctx.final_check(root_hash)?;
+
+        self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
+        ctx.clear_temp_cells(self.db)?;
 
         let shard_state_key = block_id.as_short_id().to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
@@ -299,7 +305,12 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
         let mut max_depths = [0u16; 4];
         let mut temp_descriptor = cell.descriptor;
-        for i in 0..hash_count {
+
+        let mut i = 0;
+        for level in 0..4 {
+            if level != 0 && (is_pruned_cell || ((1 << (level - 1)) & level_mask.to_byte()) == 0) {
+                continue;
+            }
             let mut hasher = Sha256::new();
 
             let level_mask = if is_pruned_cell {
@@ -332,9 +343,15 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 hasher.update(child_depth.to_be_bytes());
 
                 let depth = &mut max_depths[i as usize];
-                *depth = std::cmp::max(*depth, child_depth + 1);
+                *depth = child_depth
+                    .checked_add(1)
+                    .map(|next_depth| next_depth.max(*depth))
+                    .filter(|&depth| depth <= MAX_DEPTH)
+                    .ok_or(ReplaceTransactionError::InvalidCell)
+                    .context("Max tree depth exceeded")?;
 
                 current_entry.set_depth(i, *depth);
+                i += 1;
             }
 
             for (index, child) in children.iter() {
@@ -354,6 +371,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             }
 
             current_entry.set_hash(i, hasher.finalize().as_slice());
+
+            i += 1;
         }
 
         // Update pruned branches
@@ -365,28 +384,20 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         let output_buffer = &mut ctx.output_buffer;
         output_buffer.clear();
 
-        output_buffer.extend_from_slice(&[
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            cell.descriptor.d1,
-            cell.descriptor.d2,
-        ]);
+        output_buffer.extend_from_slice(&[cell.descriptor.d1, cell.descriptor.d2]);
         output_buffer.extend_from_slice(&cell.bit_len.to_le_bytes());
         output_buffer.extend_from_slice(cell.data);
 
-        let hash_count = cell.descriptor.hash_count();
         for i in 0..hash_count {
             output_buffer.extend_from_slice(current_entry.get_hash_slice(i));
+        }
+        output_buffer.extend_from_slice(&[1, hash_count]); // has_depths, depth_count(same as hash_count)
+        for i in 0..hash_count {
             output_buffer.extend_from_slice(current_entry.get_depth_slice(i));
         }
 
         // Write cell references
+        output_buffer.extend_from_slice(&[cell.reference_indices.len() as u8]);
         for (index, child) in children.iter() {
             let child_hash = if child.cell_type().is_pruned_branch() {
                 let child_data = ctx
@@ -405,8 +416,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             output_buffer.extend_from_slice(child_hash);
         }
 
-        // // Write counters
-        // output_buffer.extend_from_slice(current_entry.get_tree_counters());
+        // Write counters
+        output_buffer.extend_from_slice(current_entry.get_tree_counters());
 
         // Save serialized data
         let repr_hash = if is_pruned_cell {
@@ -419,7 +430,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         };
 
         ctx.write_batch
-            .merge_cf(&ctx.cells_cf, repr_hash, output_buffer.as_slice());
+            .put_cf(&ctx.temp_cells_cf, repr_hash, output_buffer.as_slice());
         ctx.cell_usages.insert(*repr_hash, -1);
 
         // Done
@@ -432,7 +443,7 @@ struct FinalizationContext<'a> {
     cell_usages: FastHashMap<[u8; 32], i32>,
     entries_buffer: EntriesBuffer,
     output_buffer: Vec<u8>,
-    cells_cf: BoundedCfHandle<'a>,
+    temp_cells_cf: BoundedCfHandle<'a>,
     write_batch: rocksdb::WriteBatch,
 }
 
@@ -443,26 +454,25 @@ impl<'a> FinalizationContext<'a> {
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            cells_cf: db.cells.cf(),
+            temp_cells_cf: db.temp_cells.cf(),
             write_batch: rocksdb::WriteBatch::default(),
         }
     }
 
-    fn finalize_cell_usages(&mut self) {
-        self.cell_usages.retain(|key, &mut rc| {
-            if rc > 0 {
-                self.write_batch.merge_cf(
-                    &self.cells_cf,
-                    key,
-                    refcount::encode_positive_refcount(rc as u32),
-                );
-            }
+    fn clear_temp_cells(&self, db: &Db) -> std::result::Result<(), rocksdb::Error> {
+        let from = &[0x00; 32];
+        let to = &[0xff; 32];
+        db.raw().delete_range_cf(&self.temp_cells_cf, from, to)
+    }
 
-            rc < 0
-        });
+    fn finalize_cell_usages(&mut self) {
+        self.cell_usages.retain(|_, &mut rc| rc < 0);
     }
 
     fn final_check(&self, root_hash: &[u8; 32]) -> Result<()> {
+        tracing::info!(?root_hash, "Final check");
+        tracing::info!(len=?self.cell_usages.len(), "Cell usages");
+
         anyhow::ensure!(
             self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
             "Invalid shard state cell"
@@ -599,7 +609,7 @@ mod test {
         }
         tracing::info!("Decompressed the archive");
 
-        let db = crate::db::Db::open(current_test_path.join("rocksdb"), DbOptions::default())?;
+        let db = Db::open(current_test_path.join("rocksdb"), DbOptions::default())?;
         let file_db = crate::db::FileDb::new(current_test_path.join("file_db"))?;
 
         let cells_storage = CellStorage::new(db.clone(), 100_000_000);
