@@ -136,7 +136,7 @@ impl Producer {
             .max_by_key(|p| {
                 let to = p.last_round(is_for_trigger);
             })
-            .expect("includes should contain at least one point");
+            .expect("non-empty list of includes for own point");
 
         let last_round = point.body.location.round;
 
