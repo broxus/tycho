@@ -142,7 +142,6 @@ impl SessionInfo {
         &self,
         block_id_short: &BlockIdShort,
     ) -> anyhow::Result<ValidationResult> {
-        trace!("Getting validation status for block {:?}", block_id_short);
         // Bind the lock result to a variable to extend its lifetime
         // let block_signatures_guard = self.blocks_signatures;
         let signatures = self.blocks_signatures.get(block_id_short);
@@ -216,44 +215,14 @@ impl SessionInfo {
         }
     }
 
-    /// Adds a signature for a block.
-    pub async fn add_signature(
-        &self,
-        block_id: &BlockId,
-        validator_id: HashBytes,
-        signature: Signature,
-        is_valid: bool,
-    ) {
-        let block_header = block_id.as_short_id();
-        // let mut write_guard = self.blocks_signatures.write().await; // Hold onto the lock
-        let mut entry = self
-            .blocks_signatures
-            .entry(block_header) // Use the guard to access the map
-            .or_insert_with(|| {
-                (
-                    *block_id,
-                    SignatureMaps {
-                        valid_signatures: FastHashMap::default(),
-                        invalid_signatures: FastHashMap::default(),
-                        event_dispatched: Mutex::new(false),
-                    },
-                )
-            });
-
-        if is_valid {
-            entry.1.valid_signatures.insert(validator_id, signature);
-        } else {
-            entry.1.invalid_signatures.insert(validator_id, signature);
-        }
-    }
-
     pub async fn process_signatures_and_update_status(
         &self,
         block_id_short: BlockIdShort,
         signatures: Vec<([u8; 32], [u8; 64])>,
         listeners: &[Arc<dyn ValidatorEventListener>],
     ) -> anyhow::Result<()> {
-        trace!(
+        debug!(
+            target: tracing_targets::VALIDATOR,
             "Processing signatures for block in state {:?}",
             block_id_short
         );
@@ -289,13 +258,19 @@ impl SessionInfo {
             let signature = Signature(sig_bytes);
             let block_validation_candidate = BlockValidationCandidate::from(entry.0);
 
-            let is_valid = self
+            let validator = self
                 .get_validation_session_info()
                 .validators
-                .get(&validator_id)
-                .context("Validator not found")?
+                .get(&validator_id).context("Validator not found")?.clone();
+
+            let is_valid = validator
                 .public_key
                 .verify(block_validation_candidate.as_bytes(), &signature.0);
+
+            trace!(
+                target: tracing_targets::VALIDATOR,
+                "Adding signature for block {:?} from validator {:?} valid {}",
+                block_id_short, validator_id, is_valid);
 
             if is_valid {
                 entry.1.valid_signatures.insert(validator_id, signature);
@@ -305,6 +280,7 @@ impl SessionInfo {
         }
 
         let validation_status = self.validation_status(&entry.1).await;
+
         // Check if the validation status qualifies for dispatching the event
         match validation_status {
             ValidationResult::Valid => {
@@ -370,6 +346,7 @@ impl SessionInfo {
         event: OnValidatedBlockEvent,
         listeners: &[Arc<dyn ValidatorEventListener>],
     ) {
+        trace!(target: tracing_targets::VALIDATOR, "Notifying listeners about block validation");
         for listener in listeners {
             let cloned_event = event.clone();
             let listener = listener.clone();
