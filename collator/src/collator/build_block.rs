@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use sha2::digest::typenum::private::IsGreaterPrivate;
 use sha2::Digest;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::state::ShardStateStuff;
@@ -142,12 +143,24 @@ impl CollatorStdImpl {
         };
 
         new_state
+            .total_validator_fees
+            .checked_add(&value_flow.fees_collected)?;
+
+        new_state
             .total_balance
             .try_add_assign(&value_flow.fees_collected)?;
 
-        new_state
+        // TODO got error 'result error! underlying integer is too large to fit in target type' without checking
+        if let Err(err) = new_state
             .total_validator_fees
-            .checked_sub(&value_flow.recovered)?;
+            .checked_sub(&value_flow.recovered)
+        {
+            tracing::warn!("Error: {}", err);
+
+            new_state
+                .total_validator_fees
+                .checked_sub(&new_state.total_validator_fees)?;
+        }
 
         if self.shard_id.is_masterchain() {
             new_state.libraries =

@@ -7,6 +7,7 @@ use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, trace, warn};
 
+use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
 use crate::validator::types::{
     BlockValidationCandidate, ValidationResult, ValidationSessionInfo, ValidatorInfo,
@@ -14,7 +15,6 @@ use crate::validator::types::{
 use crate::validator::ValidatorEventListener;
 use tycho_network::PrivateOverlay;
 use tycho_util::{FastDashMap, FastHashMap};
-use crate::tracing_targets;
 
 struct SignatureMaps {
     valid_signatures: FastHashMap<HashBytes, Signature>,
