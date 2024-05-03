@@ -148,7 +148,7 @@ impl ComposeRunner {
 
         {
             for i in self.get_running_nodes_list()? {
-                let index = usize::from_str(&i[5..6])?;
+                let index = i.split("-").collect::<Vec<&str>>().last().unwrap().parse::<usize>()?;
                 let info = self.node_info(index)?;
                 if info.delay > 0 {
                     self.set_delay(index, info.delay)?;

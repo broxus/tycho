@@ -44,8 +44,8 @@ impl Simulator {
             ips.push(ip)
         }
 
-        self.add_grafana()?;
-        self.add_prometheus(ips)?;
+        //self.add_grafana()?;
+        //self.add_prometheus(ips)?;
 
         self.finalize()?;
         Ok(())
