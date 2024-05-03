@@ -1,12 +1,11 @@
 use std::str::FromStr;
 
 use anyhow::Result;
-use bytesize::ByteSize;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, DynCell};
 use everscale_types::models::{BlockId, ShardState};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+use tycho_storage::{BlockMetaData, Storage};
 
 #[derive(Clone)]
 struct ShardStateCombined {
@@ -57,22 +56,7 @@ fn compare_cells(orig_cell: &DynCell, stored_cell: &DynCell) {
 async fn persistent_storage_everscale() -> Result<()> {
     tracing_subscriber::fmt::try_init().ok();
 
-    let tmp_dir = tempfile::tempdir()?;
-    let root_path = tmp_dir.path();
-
-    // Init rocksdb
-    let db_options = DbOptions {
-        rocksdb_lru_capacity: ByteSize::kb(1024),
-        cells_cache_size: ByteSize::kb(1024),
-    };
-    let db = Db::open(root_path.join("db_storage"), db_options)?;
-
-    // Init storage
-    let storage = Storage::new(
-        db,
-        root_path.join("file_storage"),
-        db_options.cells_cache_size.as_u64(),
-    )?;
+    let (storage, _tmp_dir) = Storage::new_temp()?;
     assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     // Read zerostate
@@ -158,9 +142,6 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Check state
     let cell = Boc::decode(&persistent_state_data)?;
     assert_eq!(&cell, zerostate.root_cell());
-
-    // Clear files for test
-    tmp_dir.close()?;
 
     Ok(())
 }

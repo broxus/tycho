@@ -178,21 +178,27 @@ pub(crate) type CollationSessionId = (ShardIdent, u32);
 #[derive(Clone)]
 pub struct CollationSessionInfo {
     /// Sequence number of the collation session
+    workchain: i32,
     seqno: u32,
     collators: ValidatorSubsetInfo,
     current_collator_keypair: Option<Arc<KeyPair>>,
 }
 impl CollationSessionInfo {
     pub fn new(
+        workchain: i32,
         seqno: u32,
         collators: ValidatorSubsetInfo,
         current_collator_keypair: Option<Arc<KeyPair>>,
     ) -> Self {
         Self {
+            workchain,
             seqno,
             collators,
             current_collator_keypair,
         }
+    }
+    pub fn workchain(&self) -> i32 {
+        self.workchain
     }
     pub fn seqno(&self) -> u32 {
         self.seqno

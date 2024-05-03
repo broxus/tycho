@@ -4,18 +4,21 @@ use std::thread::available_parallelism;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
+use serde::{Deserialize, Serialize};
 use weedb::{Caches, WeeDb};
 
 pub use weedb::Stats as RocksdbStats;
 pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Table};
 
-pub use self::config::DbOptions;
-
 pub mod refcount;
 pub mod tables;
 
-mod config;
 mod migrations;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbConfig {
+    pub rocksdb_lru_capacity: ByteSize,
+}
 
 pub struct Db {
     pub archives: Table<tables::Archives>,
@@ -35,10 +38,9 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(path: PathBuf, options: DbOptions) -> Result<Arc<Self>> {
+    pub fn open(path: PathBuf, options: DbConfig) -> Result<Arc<Self>> {
         tracing::info!(
             rocksdb_lru_capacity = %options.rocksdb_lru_capacity,
-            cells_cache_size = %options.cells_cache_size,
             "opening DB"
         );
 

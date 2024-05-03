@@ -38,6 +38,7 @@ tempfile = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-test = { workspace = true }
 tycho-block-util = { workspace = true, features = ["test"] }
+tycho-collator = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }

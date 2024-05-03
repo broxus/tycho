@@ -23,6 +23,14 @@ overlay.response.err code:int = overlay.Response T;
 ---types---
 
 /**
+* Data for computing a public overlay id
+*/
+blockchain.overlayIdData
+    zerostate_root_hash:int256
+    zerostate_file_hash:int256
+    = blockchain.OverlayIdData;
+
+/**
 * A full block id
 */
 blockchain.blockId

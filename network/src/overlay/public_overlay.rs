@@ -202,7 +202,12 @@ impl PublicOverlay {
     /// Adds the given entries to the overlay.
     ///
     /// NOTE: Will deadlock if called while `PublicOverlayEntriesReadGuard` is held.
-    pub(crate) fn add_untrusted_entries(&self, entries: &[Arc<PublicEntry>], now: u32) {
+    pub(crate) fn add_untrusted_entries(
+        &self,
+        local_id: &PeerId,
+        entries: &[Arc<PublicEntry>],
+        now: u32,
+    ) {
         if entries.is_empty() {
             return;
         }
@@ -239,6 +244,7 @@ impl PublicOverlay {
         for (entry, is_valid) in std::iter::zip(entries, is_valid.iter_mut()) {
             if entry.is_expired(now, this.entry_ttl_sec)
                 || self.inner.banned_peer_ids.contains(&entry.peer_id)
+                || entry.peer_id == local_id
             {
                 // Skip expired or banned peers early
                 continue;
@@ -579,16 +585,17 @@ mod tests {
     #[test]
     fn min_capacity_works_with_single_thread() {
         let now = now_sec();
+        let local_id: PeerId = rand::random();
 
         // Add with small portions
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
 
-            overlay.add_untrusted_entries(&entries[..5], now);
+            overlay.add_untrusted_entries(&local_id, &entries[..5], now);
             assert_eq!(count_entries(&overlay), 5);
 
-            overlay.add_untrusted_entries(&entries[5..], now);
+            overlay.add_untrusted_entries(&local_id, &entries[5..], now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -596,7 +603,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&entries, now);
+            overlay.add_untrusted_entries(&local_id, &entries, now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -604,7 +611,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(10);
             let entries = generate_public_entries(&overlay, now, 20);
-            overlay.add_untrusted_entries(&entries, now);
+            overlay.add_untrusted_entries(&local_id, &entries, now);
             assert_eq!(count_entries(&overlay), 10);
         }
 
@@ -612,7 +619,7 @@ mod tests {
         {
             let overlay = make_overlay_with_min_capacity(0);
             let entries = generate_public_entries(&overlay, now, 10);
-            overlay.add_untrusted_entries(&entries, now);
+            overlay.add_untrusted_entries(&local_id, &entries, now);
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -622,7 +629,7 @@ mod tests {
             let entries = (0..10)
                 .map(|_| generate_invalid_public_entry(now))
                 .collect::<Vec<_>>();
-            overlay.add_untrusted_entries(&entries, now);
+            overlay.add_untrusted_entries(&local_id, &entries, now);
             assert_eq!(count_entries(&overlay), 0);
         }
 
@@ -641,7 +648,7 @@ mod tests {
                 generate_invalid_public_entry(now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&entries, now);
+            overlay.add_untrusted_entries(&local_id, &entries, now);
             assert_eq!(count_entries(&overlay), 5);
         }
 
@@ -660,7 +667,7 @@ mod tests {
                 generate_public_entry(&overlay, now),
                 generate_public_entry(&overlay, now),
             ];
-            overlay.add_untrusted_entries(&entries, now);
+            overlay.add_untrusted_entries(&local_id, &entries, now);
             assert_eq!(count_entries(&overlay), 3);
         }
     }
@@ -668,6 +675,7 @@ mod tests {
     #[test]
     fn min_capacity_works_with_multi_thread() {
         let now = now_sec();
+        let local_id: PeerId = rand::random();
 
         let overlay = make_overlay_with_min_capacity(201);
         let entries = generate_public_entries(&overlay, now, 7 * 3 * 10);
@@ -676,7 +684,7 @@ mod tests {
             for entries in entries.chunks_exact(7 * 3) {
                 s.spawn(|| {
                     for entries in entries.chunks_exact(7) {
-                        overlay.add_untrusted_entries(entries, now);
+                        overlay.add_untrusted_entries(&local_id, entries, now);
                     }
                 });
             }

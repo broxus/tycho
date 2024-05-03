@@ -52,7 +52,9 @@ impl Service<ServiceRequest> for NetworkService {
                         signatures,
                     } = query;
                     {
-                        let session = state.get_session(session_seqno).await;
+                        let session = state
+                            .get_session(block_id_short.shard.workchain(), session_seqno)
+                            .await;
                         match handle_signatures_query(
                             session,
                             session_seqno,

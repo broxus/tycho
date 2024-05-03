@@ -1,12 +1,13 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
+pub use self::config::*;
 pub use self::db::*;
 pub use self::models::*;
 pub use self::store::*;
 
+mod config;
 mod db;
 mod models;
 mod store;
@@ -17,6 +18,9 @@ mod util {
     mod stored_value;
 }
 
+const DB_SUBDIR: &str = "rocksdb";
+const FILES_SUBDIR: &str = "files";
+
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Storage {
@@ -24,30 +28,35 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(db: Arc<Db>, file_db_path: PathBuf, max_cell_cache_size_bytes: u64) -> Result<Self> {
-        let files_dir = FileDb::new(file_db_path);
+    pub fn new(config: StorageConfig) -> Result<Self> {
+        let root = FileDb::new(&config.root_dir);
 
-        let block_handle_storage = Arc::new(BlockHandleStorage::new(db.clone()));
-        let block_connection_storage = Arc::new(BlockConnectionStorage::new(db.clone()));
+        let files_db = root.subdir(FILES_SUBDIR);
+        let kv_db = Db::open(config.root_dir.join(DB_SUBDIR), config.db_config)
+            .context("failed to open a rocksdb")?;
+
+        let block_handle_storage = Arc::new(BlockHandleStorage::new(kv_db.clone()));
+        let block_connection_storage = Arc::new(BlockConnectionStorage::new(kv_db.clone()));
         let runtime_storage = Arc::new(RuntimeStorage::new(block_handle_storage.clone()));
         let block_storage = Arc::new(BlockStorage::new(
-            db.clone(),
+            kv_db.clone(),
             block_handle_storage.clone(),
             block_connection_storage.clone(),
         )?);
         let shard_state_storage = ShardStateStorage::new(
-            db.clone(),
-            &files_dir,
+            kv_db.clone(),
+            &files_db,
             block_handle_storage.clone(),
             block_storage.clone(),
-            max_cell_cache_size_bytes,
+            config.cells_cache_size.as_u64(),
         )?;
         let persistent_state_storage =
-            PersistentStateStorage::new(db.clone(), &files_dir, block_handle_storage.clone())?;
-        let node_state_storage = NodeStateStorage::new(db);
+            PersistentStateStorage::new(kv_db.clone(), &files_db, block_handle_storage.clone())?;
+        let node_state_storage = NodeStateStorage::new(kv_db);
 
         Ok(Self {
             inner: Arc::new(Inner {
+                root,
                 block_handle_storage,
                 block_storage,
                 shard_state_storage,
@@ -65,26 +74,13 @@ impl Storage {
     /// otherwise compaction filter will not work.
     #[cfg(any(test, feature = "test"))]
     pub fn new_temp() -> Result<(Self, tempfile::TempDir)> {
-        use bytesize::ByteSize;
-
         let tmp_dir = tempfile::tempdir()?;
-        let root_path = tmp_dir.path();
-
-        // Init rocksdb
-        let db_options = DbOptions {
-            rocksdb_lru_capacity: ByteSize::kb(1024),
-            cells_cache_size: ByteSize::kb(1024),
-        };
-        let db = Db::open(root_path.join("db_storage"), db_options)?;
-
-        // Init storage
-        let storage = Storage::new(
-            db,
-            root_path.join("file_storage"),
-            db_options.cells_cache_size.as_u64(),
-        )?;
-
+        let storage = Storage::new(StorageConfig::new_potato(tmp_dir.path()))?;
         Ok((storage, tmp_dir))
+    }
+
+    pub fn root(&self) -> &FileDb {
+        &self.inner.root
     }
 
     pub fn runtime_storage(&self) -> &RuntimeStorage {
@@ -117,6 +113,7 @@ impl Storage {
 }
 
 struct Inner {
+    root: FileDb,
     runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,

@@ -1,33 +1,10 @@
 use anyhow::{Context, Result};
-use bytesize::ByteSize;
 use tempfile::TempDir;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
-use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+use tycho_storage::{BlockMetaData, Storage};
 
 use crate::common::*;
-
-pub(crate) async fn init_empty_storage() -> Result<(Storage, TempDir)> {
-    let tmp_dir = tempfile::tempdir()?;
-    let root_path = tmp_dir.path();
-
-    // Init rocksdb
-    let db_options = DbOptions {
-        rocksdb_lru_capacity: ByteSize::kb(1024),
-        cells_cache_size: ByteSize::kb(1024),
-    };
-    let db = Db::open(root_path.join("db_storage"), db_options)?;
-
-    // Init storage
-    let storage = Storage::new(
-        db,
-        root_path.join("file_storage"),
-        db_options.cells_cache_size.as_u64(),
-    )?;
-    assert!(storage.node_state().load_init_mc_block_id().is_none());
-
-    Ok((storage, tmp_dir))
-}
 
 pub(crate) fn get_archive() -> Result<archive::Archive> {
     let data = include_bytes!("../../tests/data/00001");
@@ -37,7 +14,7 @@ pub(crate) fn get_archive() -> Result<archive::Archive> {
 }
 
 pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
-    let (storage, tmp_dir) = init_empty_storage().await?;
+    let (storage, tmp_dir) = Storage::new_temp()?;
 
     let data = include_bytes!("../../tests/data/00001");
     let provider = archive::Archive::new(data)?;

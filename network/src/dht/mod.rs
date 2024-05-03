@@ -20,7 +20,9 @@ use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest}
 use crate::util::{NetworkExt, Routable};
 
 pub use self::config::DhtConfig;
-pub use self::peer_resolver::{PeerResolver, PeerResolverBuilder, PeerResolverHandle};
+pub use self::peer_resolver::{
+    PeerResolver, PeerResolverBuilder, PeerResolverConfig, PeerResolverHandle,
+};
 pub use self::query::DhtQueryMode;
 pub use self::storage::{DhtValueMerger, DhtValueSource, StorageError};
 

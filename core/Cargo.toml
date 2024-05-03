@@ -35,10 +35,10 @@ tycho-util = { workspace = true }
 [dev-dependencies]
 bytesize = { workspace = true }
 everscale-crypto = { workspace = true }
-tycho-util = { workspace = true, features = ["test"] }
-tycho-storage = { workspace = true, features = ["test"] }
 tempfile = { workspace = true }
 tracing-test = { workspace = true }
+tycho-storage = { workspace = true, features = ["test"] }
+tycho-util = { workspace = true, features = ["test"] }
 
 [features]
 test = []

@@ -8,7 +8,8 @@ pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterB
 pub use dht::{
     xor_distance, DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryMode, DhtQueryWithDataBuilder,
     DhtService, DhtServiceBackgroundTasks, DhtServiceBuilder, DhtValueMerger, DhtValueSource,
-    FindValueError, PeerResolver, PeerResolverBuilder, PeerResolverHandle, StorageError,
+    FindValueError, PeerResolver, PeerResolverBuilder, PeerResolverConfig, PeerResolverHandle,
+    StorageError,
 };
 pub use network::{
     ActivePeers, Connection, KnownPeerHandle, KnownPeers, KnownPeersError, Network, NetworkBuilder,

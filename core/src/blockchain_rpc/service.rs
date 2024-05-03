@@ -71,6 +71,9 @@ impl Service<ServiceRequest> for BlockchainRpcService {
         };
 
         tycho_network::match_tl_request!(body, tag = constructor, {
+            overlay::Ping as _ => BoxFutureOrNoop::future(async {
+                Some(Response::from_tl(overlay::Pong))
+            }),
             rpc::GetNextKeyBlockIds as req => {
                 tracing::debug!(
                     block_id = %req.block_id,

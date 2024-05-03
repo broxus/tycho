@@ -5,6 +5,9 @@ use everscale_types::models::{Account, StorageUsed};
 use everscale_types::num::VarUint56;
 use everscale_types::prelude::*;
 
+pub mod error;
+pub mod logger;
+
 // TODO: move into types
 pub fn compute_storage_used(account: &Account) -> Result<StorageUsed> {
     let cell = {

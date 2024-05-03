@@ -150,17 +150,10 @@ impl CollatorStdImpl {
             .total_balance
             .try_add_assign(&value_flow.fees_collected)?;
 
-        // TODO got error 'result error! underlying integer is too large to fit in target type' without checking
-        if let Err(err) = new_state
-            .total_validator_fees
-            .checked_sub(&value_flow.recovered)
-        {
-            tracing::warn!("Error: {}", err);
-
-            new_state
-                .total_validator_fees
-                .checked_sub(&new_state.total_validator_fees)?;
-        }
+        // TODO:
+        // new_state
+        //     .total_validator_fees
+        //     .try_sub_assign(&value_flow.recovered)?;
 
         if self.shard_id.is_masterchain() {
             new_state.libraries =

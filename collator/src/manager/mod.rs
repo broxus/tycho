@@ -668,6 +668,8 @@ where
                     new_session_seqno,
                 ))?;
 
+            tracing::warn!("SUBSET: {subset:?}");
+
             //TEST: override with test subset with test keypairs defined on test run
             #[cfg(feature = "test")]
             let subset = if self.config.test_validators_keypairs.is_empty() {
@@ -697,6 +699,7 @@ where
             let local_pubkey_opt = find_us_in_collators_set(&self.config, &subset);
 
             let new_session_info = Arc::new(CollationSessionInfo::new(
+                shard_id.workchain(),
                 new_session_seqno,
                 ValidatorSubsetInfo {
                     validators: subset,

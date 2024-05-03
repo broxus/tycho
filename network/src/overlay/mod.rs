@@ -317,7 +317,7 @@ impl OverlayServiceInner {
         };
 
         // Add proposed entries to the overlay
-        overlay.add_untrusted_entries(&req.entries, now_sec());
+        overlay.add_untrusted_entries(&self.local_id, &req.entries, now_sec());
 
         // Collect proposed entries to exclude from the response
         let requested_ids = req

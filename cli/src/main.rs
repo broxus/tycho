@@ -11,6 +11,7 @@ mod tools {
     pub mod gen_zerostate;
 }
 
+mod node;
 mod util;
 
 #[cfg(feature = "jemalloc")]
@@ -50,9 +51,8 @@ impl App {
 
 #[derive(Subcommand)]
 enum Cmd {
-    Init(InitCmd),
-
-    Run(RunCmd),
+    #[clap(subcommand)]
+    Node(NodeCmd),
 
     #[clap(subcommand)]
     Tool(ToolCmd),
@@ -61,20 +61,25 @@ enum Cmd {
 impl Cmd {
     fn run(self) -> Result<()> {
         match self {
-            Cmd::Init(_cmd) => Ok(()), // todo
-            Cmd::Run(_cmd) => Ok(()),  // todo
+            Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
         }
     }
 }
 
-/// Initialize a node environment
-#[derive(Parser)]
-struct InitCmd {}
+/// Node commands
+#[derive(Subcommand)]
+enum NodeCmd {
+    Run(node::CmdRun),
+}
 
-/// Run a node
-#[derive(Parser)]
-struct RunCmd {}
+impl NodeCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            NodeCmd::Run(cmd) => cmd.run(),
+        }
+    }
+}
 
 /// A collection of tools
 #[derive(Subcommand)]

@@ -11,6 +11,7 @@ license.workspace = true
 [dependencies]
 # crates.io deps
 ahash = { workspace = true }
+anyhow = { workspace = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
 everscale-crypto = { workspace = true }
@@ -20,6 +21,8 @@ humantime = { workspace = true }
 libc = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt"] }
 tracing = { workspace = true }

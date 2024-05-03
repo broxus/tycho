@@ -658,6 +658,7 @@ impl StorageCellReferenceData {
 struct RawCellsCache(Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>);
 
 impl RawCellsCache {
+    #[allow(unused)]
     pub(crate) fn hit_ratio(&self) -> f64 {
         (if self.0.hits() > 0 {
             self.0.hits() as f64 / (self.0.hits() + self.0.misses()) as f64
