@@ -46,14 +46,14 @@ impl ComposeRunner {
     }
 
     pub fn add_prometheus(&mut self) -> Result<()> {
-        let prom_data = serde_json::json!(r#"
+        let prom_data = serde_json::json!(
         {
             "image": "prom/prometheus",
             "ports": ["9090:9090"],
             "restart": "unless-stopped",
             "volumes": ["./prometheus:/etc/prometheus"],
             "command": ["--config.file=/etc/prometheus/prometheus.yml"]
-        }"#);
+        });
         self.compose
             .services
             .insert("prometheus".to_string(), prom_data);
@@ -61,14 +61,14 @@ impl ComposeRunner {
     }
 
     pub fn add_grafana(&mut self) -> Result<()> {
-        let prom_data = serde_json::json!(r#"
+        let prom_data = serde_json::json!(
         {
             "image": "grafana/grafana",
             "ports": ["3000:3000"],
             "restart": "unless-stopped",
             "volumes": ["./grafana:/etc/grafana/provisioning/datasources"],
             "environment": ["GF_SECURITY_ADMIN_USER=admin", "GF_SECURITY_ADMIN_PASSWORD=grafana"]
-        }"#);
+        });
         self.compose
             .services
             .insert("grafana".to_string(), prom_data);
