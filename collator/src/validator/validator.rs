@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
-use everscale_crypto::ed25519::KeyPair;
+use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::task::JoinHandle;
@@ -190,7 +190,7 @@ impl Validator for ValidatorStdImpl {
             .add_private_overlay(&private_overlay.clone());
 
         if !overlay_added {
-            warn!(target: tracing_targets::VALIDATOR, "Failed to add private overlay")
+            warn!(target: tracing_targets::VALIDATOR, "Failed to add private overlay");
             // bail!("Failed to add private overlay");
         }
 
@@ -244,18 +244,20 @@ async fn start_candidate_validation(
 
     let cached_signatures = session.get_cached_signatures_by_block(&block_id.as_short_id());
 
+    trace!(target: tracing_targets::VALIDATOR, "Cached signatures len: {:?}", cached_signatures.as_ref().map(|x| x.1.len()));
+
     if let Some(cached_signatures) = cached_signatures {
         initial_signatures.extend(cached_signatures.1.into_iter().map(|(k, v)| (k.0, v.0)));
     }
 
+    trace!(target: tracing_targets::VALIDATOR, "Initial signatures: {:?}", initial_signatures);
     let is_validation_finished = process_candidate_signature_response(
         session.clone(),
         short_id,
-        vec![(current_validator_pubkey.0, our_signature.0)],
+        initial_signatures,
         listeners,
     )
     .await?;
-    trace!(target: tracing_targets::VALIDATOR, "Validation finished: {:?}", is_validation_finished);
 
     if is_validation_finished {
         cancellation_token.cancel(); // Cancel all tasks if validation is finished
@@ -361,18 +363,12 @@ async fn start_candidate_validation(
                         }
                     }
                     Err(e) => {
-                        warn!(target: tracing_targets::VALIDATOR, "Elapsed validator response {}: {e}", validator.public_key);
-                        let delay = delay * 2_u32.pow(attempt);
-                        let delay = std::cmp::min(delay, max_delay);
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
+                        let error_message = format!("Elapsed validator response: {}", e);
+                        handle_error_and_backoff(delay, max_delay, &mut attempt, &validator.public_key, &error_message).await;
                     }
                     Ok(Err(e)) => {
-                        warn!(target: tracing_targets::VALIDATOR, "Error receiving signatures from validator {}: {e}", validator.public_key);
-                        let delay = delay * 2_u32.pow(attempt);
-                        let delay = std::cmp::min(delay, max_delay);
-                        tokio::time::sleep(delay).await;
-                        attempt += 1;
+                        let error_message = format!("Error receiving signatures: {}", e);
+                        handle_error_and_backoff(delay, max_delay, &mut attempt, &validator.public_key, &error_message).await;
                     }
                 }
                 tokio::time::sleep(delay).await;
@@ -390,19 +386,37 @@ async fn start_candidate_validation(
     Ok(())
 }
 
+async fn handle_error_and_backoff(
+    delay: Duration,
+    max_delay: Duration,
+    attempt: &mut u32,
+    validator_public_key: &PublicKey,
+    error_message: &str,
+) {
+    warn!(target: tracing_targets::VALIDATOR, "Error validator response: validator: {:x?}: {} ", validator_public_key, error_message);
+    let exponential_backoff = 2_u32.pow(*attempt);
+
+    let safe_delay = delay.checked_mul(exponential_backoff).unwrap_or(max_delay);
+
+    let new_delay = std::cmp::min(safe_delay, max_delay);
+    tokio::time::sleep(new_delay).await;
+    *attempt += 1;
+}
+
+
 pub async fn process_candidate_signature_response(
     session: Arc<SessionInfo>,
     block_id_short: BlockIdShort,
     signatures: Vec<([u8; 32], [u8; 64])>,
     listeners: &[Arc<dyn ValidatorEventListener>],
 ) -> Result<bool> {
-    trace!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Processing candidate signature response");
+    debug!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Processing candidate signature response");
     let validation_status = session.get_validation_status(&block_id_short).await?;
     trace!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Validation status: {:?}", validation_status);
     if validation_status == ValidationResult::Valid
         || validation_status == ValidationResult::Invalid
     {
-        debug!(
+        trace!(
             "Validation status is already set for block {:?}.",
             block_id_short
         );
@@ -410,11 +424,14 @@ pub async fn process_candidate_signature_response(
     }
 
     if session.get_block(&block_id_short).await.is_some() {
+        trace!(target: tracing_targets::VALIDATOR,
+            "Block {:?} is already in the session. Processing signatures.",
+            block_id_short);
         session
             .process_signatures_and_update_status(block_id_short, signatures, listeners)
             .await?;
     } else {
-        trace!(target: tracing_targets::VALIDATOR, "Caching signatures for block {:?}", block_id_short);
+        debug!(target: tracing_targets::VALIDATOR, "Caching signatures for block {:?}", block_id_short);
         if block_id_short.seqno > 0 {
             let previous_block =
                 BlockIdShort::from((block_id_short.shard, block_id_short.seqno - 1));

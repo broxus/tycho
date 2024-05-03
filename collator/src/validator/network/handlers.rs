@@ -3,7 +3,9 @@ use crate::validator::state::SessionInfo;
 use crate::validator::{process_candidate_signature_response, ValidatorEventListener};
 use everscale_types::models::BlockIdShort;
 use std::sync::Arc;
+use tracing::trace;
 use tycho_network::Response;
+use crate::tracing_targets;
 
 pub async fn handle_signatures_query(
     session: Option<Arc<SessionInfo>>,
@@ -21,6 +23,7 @@ where
             signatures: vec![],
         },
         Some(session) => {
+            trace!(target: tracing_targets::VALIDATOR, "Processing signatures query for block {:?} with {} signatures", block_id_short, signatures.len());
             process_candidate_signature_response(
                 session.clone(),
                 block_id_short,
@@ -29,12 +32,14 @@ where
             )
             .await?;
 
+            trace!(target: tracing_targets::VALIDATOR, "Getting valid signatures for block {:?}", block_id_short);
             let signatures = session
                 .get_valid_signatures(&block_id_short)
                 .await
                 .into_iter()
                 .map(|(k, v)| (k.0, v.0))
                 .collect::<Vec<_>>();
+
             SignaturesQuery {
                 session_seqno,
                 block_id_short,
