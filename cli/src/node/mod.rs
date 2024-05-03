@@ -332,7 +332,7 @@ impl Node {
     async fn try_init(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
-        match node_state.load_init_mc_block_id() {
+        match node_state.load_last_mc_block_id() {
             Some(block_id) => {
                 tracing::info!("warm init");
                 Ok(block_id)
@@ -341,17 +341,14 @@ impl Node {
                 tracing::info!("cold init");
 
                 let zerostate_id = if let Some(zerostates) = zerostates {
-                    self.import_zerostates(zerostates).await?
+                    let zerostate_id = self.import_zerostates(zerostates).await?;
+                    node_state.store_init_mc_block_id(&zerostate_id);
+                    node_state.store_last_mc_block_id(&zerostate_id);
+                    zerostate_id
                 } else {
                     // TODO: Download zerostates
                     anyhow::bail!("zerostates not provided (STUB)");
                 };
-
-                node_state.store_init_mc_block_id(&zerostate_id);
-
-                // TODO: Only store this if it is a zerostate
-                node_state.store_last_mc_block_id(&zerostate_id);
-
                 Ok(zerostate_id)
             }
         }
@@ -457,7 +454,7 @@ impl Node {
         Ok(zerostate_id)
     }
 
-    async fn run(&self, _init_block_id: &BlockId) -> Result<()> {
+    async fn run(&self, last_block_id: &BlockId) -> Result<()> {
         // Ensure that there are some neighbours
         tracing::info!("waiting for initial neighbours");
         self.blockchain_rpc_client
@@ -505,17 +502,17 @@ impl Node {
             adapter: collation_manager.state_node_adapter().clone(),
         };
 
-        // TEMP
         {
-            let masterchain_zerostate = self
+            // Force load last applied state
+            let mc_state = self
                 .storage
                 .shard_state_storage()
-                .load_state(&self.zerostate.as_block_id())
+                .load_state(&last_block_id)
                 .await?;
 
             collator_state_subscriber
                 .adapter
-                .handle_state(&masterchain_zerostate)
+                .handle_state(&mc_state)
                 .await?;
         }
 
