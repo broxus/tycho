@@ -189,7 +189,8 @@ impl Validator for ValidatorStdImpl {
             .add_private_overlay(&private_overlay.clone());
 
         if !overlay_added {
-            bail!("Failed to add private overlay");
+            warn!(target: tracing_targets::VALIDATOR, "Failed to add private overlay")
+            // bail!("Failed to add private overlay");
         }
 
         let session_info = SessionInfo::new(

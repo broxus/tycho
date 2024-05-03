@@ -5,7 +5,7 @@ use anyhow::{bail, Context};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
 use crate::validator::types::{
@@ -14,6 +14,7 @@ use crate::validator::types::{
 use crate::validator::ValidatorEventListener;
 use tycho_network::PrivateOverlay;
 use tycho_util::{FastDashMap, FastHashMap};
+use crate::tracing_targets;
 
 struct SignatureMaps {
     valid_signatures: FastHashMap<HashBytes, Signature>,
@@ -392,7 +393,8 @@ impl ValidationState for ValidationStateStdImpl {
         let session = self.sessions.write().await.insert(seqno, session);
 
         if session.is_some() {
-            bail!("Session already exists with seqno: {seqno}");
+            warn!(target: tracing_targets::VALIDATOR, "Session already exists with seqno: {seqno}");
+            // bail!("Session already exists with seqno: {seqno}");
         }
 
         Ok(())

@@ -223,14 +223,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                 } else {
                     to_remove.push((shard, seqno));
                 }
-                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {:?}", block_id);
+                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
                 self.listener.on_block_accepted(&block_id)
             } else {
-                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted external: {:?}", block_id);
+                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
                 self.listener.on_block_accepted_external(state)
             }
         } else {
-            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted external: {:?}", block_id);
+            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
             self.listener.on_block_accepted_external(state)
         };
 

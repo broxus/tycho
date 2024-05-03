@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
+use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValidatorDescription, ValueFlow};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
