@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::str;
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ServiceConfig;
+use crate::node::NodeOptions;
 
 pub struct ComposeRunner {
     compose_path: PathBuf,
@@ -42,8 +45,40 @@ impl ComposeRunner {
         })
     }
 
-    pub fn add_service(&mut self, name: String, service: Service) {
-        self.compose.services.insert(name, service);
+    pub fn add_prometheus(&mut self) -> Result<()> {
+        let prom_data = serde_json::json!(
+        {
+            "image": "prom/prometheus",
+            "ports": ["9090:9090"],
+            "restart": "unless-stopped",
+            "volumes": ["./prometheus:/etc/prometheus"],
+            "command": ["--config.file=/etc/prometheus/prometheus.yml"]
+        });
+        self.compose
+            .services
+            .insert("prometheus".to_string(), prom_data);
+        Ok(())
+    }
+
+    pub fn add_grafana(&mut self) -> Result<()> {
+        let prom_data = serde_json::json!(
+        {
+            "image": "grafana/grafana",
+            "ports": ["3000:3000"],
+            "restart": "unless-stopped",
+            "volumes": ["./grafana:/etc/grafana/provisioning/datasources"],
+            "environment": ["GF_SECURITY_ADMIN_USER=admin", "GF_SECURITY_ADMIN_PASSWORD=grafana"]
+        });
+        self.compose
+            .services
+            .insert("grafana".to_string(), prom_data);
+        Ok(())
+    }
+
+    pub fn add_service(&mut self, name: String, service: Service) -> Result<()> {
+        let value = serde_json::to_value(service)?;
+        self.compose.services.insert(name, value);
+        Ok(())
     }
 
     pub fn finalize(&self) -> Result<()> {
@@ -55,7 +90,7 @@ impl ComposeRunner {
     }
 
     /// Executes a Docker Compose command with the given arguments.
-    pub fn execute_compose_command<T>(&self, args: &[T]) -> Result<()>
+    pub fn execute_compose_command<T>(&self, args: &[T]) -> Result<Output>
     where
         T: AsRef<OsStr>,
     {
@@ -66,16 +101,16 @@ impl ComposeRunner {
             command = command.arg(arg);
         }
 
-        command
-            .stdout(Stdio::inherit())
+        let result = command
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .stdin(Stdio::inherit())
             .spawn()
             .context("Failed to spawn Docker Compose command")?
-            .wait()
+            .wait_with_output()
             .context("Failed to wait on Docker Compose command")?;
 
-        Ok(())
+        Ok(result)
     }
 
     pub fn logs(&self, follow: bool, node: Option<usize>) -> Result<()> {
@@ -89,7 +124,8 @@ impl ComposeRunner {
             args.push(format!("node-{}", node_index));
         }
 
-        self.execute_compose_command(&args)
+        self.execute_compose_command(&args)?;
+        Ok(())
     }
 
     pub fn stop_node(&self, node_index: Option<usize>) -> Result<()> {
@@ -97,7 +133,8 @@ impl ComposeRunner {
         if let Some(node_index) = node_index {
             args.push(format!("node-{}", node_index));
         }
-        self.execute_compose_command(&args)
+        self.execute_compose_command(&args)?;
+        Ok(())
     }
 
     pub fn start_node(&self, node_index: Option<usize>) -> Result<()> {
@@ -107,16 +144,75 @@ impl ComposeRunner {
         }
         args.push("-d".to_string());
 
-        self.execute_compose_command(&args)
+        self.execute_compose_command(&args)?;
+
+        {
+            for i in self.get_running_nodes_list()? {
+                let index = usize::from_str(&i[5..6])?;
+                let info = self.node_info(index)?;
+                if info.delay > 0 {
+                    self.set_delay(index, info.delay)?;
+                }
+                if info.packet_loss > 0 {
+                    self.set_packet_loss(index, info.packet_loss)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    pub fn exec_command(&self, node_index: usize, cmd: &str, args: Vec<String>) -> Result<()> {
+    pub fn get_running_nodes_list(&self) -> Result<Vec<String>> {
+        let docker_compose_command = vec!["config".to_string(), "--services".to_string()];
+        let output = self.execute_compose_command(&docker_compose_command)?;
+        let x = String::from_utf8(output.stdout)?
+            .split("\n")
+            .map(|x| x.to_string())
+            .collect();
+        Ok(x)
+    }
+
+    pub fn node_info(&self, node_index: usize) -> Result<NodeOptions> {
+        let command = "cat";
+        let output = self.exec_command(
+            node_index,
+            command,
+            vec!["/options/options.json".to_string()],
+        )?;
+        let node_options = serde_json::from_slice(output.stdout.as_slice())?;
+        Ok(node_options)
+    }
+
+    pub fn set_delay(&self, node_index: usize, delay: u16) -> Result<()> {
+        println!("Setting delay {delay}ms for node {node_index}");
+        let command = "sh";
+        let args = format!("tc qdisc add dev eth0 root netem delay {delay}ms");
+        self.exec_command(
+            node_index,
+            command,
+            vec!["-c".to_string(), format!("{args}")],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_packet_loss(&self, node_index: usize, loss: u16) -> Result<()> {
+        println!("Setting packet loss {loss}% for node {node_index}");
+        let command = "sh";
+        let args = format!("tc qdisc change dev eth0 root netem loss {loss}%");
+        self.exec_command(
+            node_index,
+            command,
+            vec!["-c".to_string(), format!("{args}")],
+        )?;
+        Ok(())
+    }
+
+    pub fn exec_command(&self, node_index: usize, cmd: &str, args: Vec<String>) -> Result<Output> {
         let service_name = format!("node-{}", node_index);
         let mut docker_compose_command = vec!["exec".to_string(), service_name, cmd.to_string()];
         docker_compose_command.extend(args);
-        self.execute_compose_command(&docker_compose_command)?;
-
-        Ok(())
+        let output = self.execute_compose_command(&docker_compose_command)?;
+        Ok(output)
     }
 
     pub fn down(&self) -> Result<()> {
@@ -128,7 +224,7 @@ impl ComposeRunner {
 #[derive(Serialize, Deserialize, Debug)]
 struct DockerCompose {
     version: String,
-    services: HashMap<String, Service>,
+    services: HashMap<String, serde_json::value::Value>,
     networks: HashMap<String, Network>,
 }
 
