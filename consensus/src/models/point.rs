@@ -117,7 +117,7 @@ impl UnixTime {
         )
     }
 
-    pub fn as_u64(&self) -> u64 {
+    pub fn to_millis(&self) -> u64 {
         self.0
     }
 }
@@ -324,6 +324,20 @@ impl Point {
     }
 
     // TODO maybe implement field accessors parameterized by combination of enums
+
+    pub fn last_round(&self, is_for_trigger: bool) -> Round {
+        match (self, is_for_trigger) {
+            (p, true) => p.anchor_trigger_round(),
+            (p, false) => p.anchor_proof_round()
+        }
+    }
+
+    pub fn last_round_id(&self, is_for_trigger: bool) -> PointId {
+        match (self, is_for_trigger) {
+            (p, true) => p.anchor_trigger_id(),
+            (p, false) => p.anchor_proof_id()
+        }
+    }
 
     pub fn anchor_trigger_round(&self) -> Round {
         self.get_linked_to_round(&self.body.anchor_trigger)

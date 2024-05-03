@@ -196,7 +196,7 @@ pub async fn parse_points(
 
         let anchor = Arc::new(MempoolAnchor::new(
             anchor.body.location.round.0,
-            anchor.body.time.as_u64(),
+            anchor.body.time.to_millis(),
             messages,
         ));
 
