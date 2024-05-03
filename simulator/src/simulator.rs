@@ -61,7 +61,6 @@ impl Simulator {
         Ok(())
     }
 
-
     // updates the next_node_ip and adds a new node to the network
     pub fn add_node(
         &mut self,
@@ -123,8 +122,7 @@ impl Simulator {
 
     fn write_grafana_data(&self) -> Result<()> {
         std::fs::create_dir_all(self.config.grafana())?;
-        let grafana_data =
-            r#"apiVersion: 1
+        let grafana_data = r#"apiVersion: 1
 
 datasources:
 - name: Prometheus
@@ -145,10 +143,11 @@ datasources:
         let nodes = node_addresses
             .iter()
             .map(|x| format!("- {x}:9081"))
-            .reduce(|left, right| format!("{}\n    {}", left, right)).unwrap_or_default();
+            .reduce(|left, right| format!("{}\n    {}", left, right))
+            .unwrap_or_default();
         std::fs::create_dir_all(self.config.prometheus())?;
-        let prometheus_data =
-            format!(r#"global:
+        let prometheus_data = format!(
+            r#"global:
   scrape_interval: 15s
   scrape_timeout: 10s
   evaluation_interval: 15s
@@ -169,7 +168,9 @@ scrape_configs:
   static_configs:
   - targets:
     {}
-            "#, nodes);
+            "#,
+            nodes
+        );
         let prometheus_datasource_config = self.config.prometheus().join("prometheus.yml");
         std::fs::write(&prometheus_datasource_config, prometheus_data)
             .context("Failed to write prometheus data")?;

@@ -176,7 +176,7 @@ struct AddCommand {
     #[clap(short, long)]
     pub delay: Option<u16>,
     #[clap(short, long)]
-    pub loss: Option<u16>
+    pub loss: Option<u16>,
 }
 
 impl AddCommand {
@@ -252,9 +252,12 @@ struct NodeInfoCommand {
 }
 
 impl NodeInfoCommand {
-    fn run (self, compose: ComposeRunner) -> Result<()> {
+    fn run(self, compose: ComposeRunner) -> Result<()> {
         let output = compose.node_info(self.node_index)?;
-        println!("Node {} artificial delay: {} ms and packet loss: {}% ", self.node_index, output.delay, output.packet_loss);
+        println!(
+            "Node {} artificial delay: {} ms and packet loss: {}% ",
+            self.node_index, output.delay, output.packet_loss
+        );
         Ok(())
     }
 }

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::{str};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+use std::str;
 use std::str::FromStr;
 
 use anyhow::{Context, Result};
@@ -55,7 +55,9 @@ impl ComposeRunner {
             "command": ["--config.file=/etc/prometheus/prometheus.yml"]
         }"#;
         let prom_value = serde_json::Value::from_str(prom_data)?;
-        self.compose.services.insert("prometheus".to_string(), prom_value);
+        self.compose
+            .services
+            .insert("prometheus".to_string(), prom_value);
         Ok(())
     }
 
@@ -69,7 +71,9 @@ impl ComposeRunner {
             "environment": ["GF_SECURITY_ADMIN_USER=admin", "GF_SECURITY_ADMIN_PASSWORD=grafana"]
         }"#;
         let prom_value = serde_json::Value::from_str(prom_data)?;
-        self.compose.services.insert("grafana".to_string(), prom_value);
+        self.compose
+            .services
+            .insert("grafana".to_string(), prom_value);
         Ok(())
     }
 
@@ -163,13 +167,20 @@ impl ComposeRunner {
     pub fn get_running_nodes_list(&self) -> Result<Vec<String>> {
         let docker_compose_command = vec!["config".to_string(), "--services".to_string()];
         let output = self.execute_compose_command(&docker_compose_command)?;
-        let x = String::from_utf8(output.stdout)?.split("\n").map(|x| x.to_string()).collect();
+        let x = String::from_utf8(output.stdout)?
+            .split("\n")
+            .map(|x| x.to_string())
+            .collect();
         Ok(x)
     }
 
     pub fn node_info(&self, node_index: usize) -> Result<NodeOptions> {
         let command = "cat";
-        let output = self.exec_command(node_index, command, vec!["/options/options.json".to_string()])?;
+        let output = self.exec_command(
+            node_index,
+            command,
+            vec!["/options/options.json".to_string()],
+        )?;
         let node_options = serde_json::from_slice(output.stdout.as_slice())?;
         Ok(node_options)
     }
@@ -178,7 +189,11 @@ impl ComposeRunner {
         println!("Setting delay {delay}ms for node {node_index}");
         let command = "sh";
         let args = format!("tc qdisc add dev eth0 root netem delay {delay}ms");
-        self.exec_command(node_index, command, vec!["-c".to_string(), format!("{args}")])?;
+        self.exec_command(
+            node_index,
+            command,
+            vec!["-c".to_string(), format!("{args}")],
+        )?;
         Ok(())
     }
 
@@ -186,7 +201,11 @@ impl ComposeRunner {
         println!("Setting packet loss {loss}% for node {node_index}");
         let command = "sh";
         let args = format!("tc qdisc change dev eth0 root netem loss {loss}%");
-        self.exec_command(node_index, command, vec!["-c".to_string(), format!("{args}")])?;
+        self.exec_command(
+            node_index,
+            command,
+            vec!["-c".to_string(), format!("{args}")],
+        )?;
         Ok(())
     }
 
