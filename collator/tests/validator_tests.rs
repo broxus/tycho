@@ -263,7 +263,8 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         short_hash: 0,
     };
     let keypair = Arc::new(KeyPair::generate(&mut ThreadRng::default()));
-    let collator_session_info = Arc::new(CollationSessionInfo::new(0, validators, Some(keypair)));
+    let collator_session_info =
+        Arc::new(CollationSessionInfo::new(-1, 0, validators, Some(keypair)));
 
     let validation_session =
         Arc::new(ValidationSessionInfo::try_from(collator_session_info.clone()).unwrap());
@@ -402,6 +403,7 @@ async fn handle_validator(
     for session in 1..=sessions {
         let blocks = create_blocks(blocks_amount);
         let collator_session_info = Arc::new(CollationSessionInfo::new(
+            -1,
             session,
             validators_subset_info.clone(),
             Some(validator.get_keypair()), // Assuming you have access to node's keypair here
