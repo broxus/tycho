@@ -2,21 +2,35 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_types::models::*;
 
-use everscale_types::models::{BlockIdShort, ShardIdent};
+use crate::internal_queue::iterator::QueueIterator;
+use crate::internal_queue::persistent::persistent_state::PersistentStateImpl;
+use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
+use crate::internal_queue::queue::{Queue, QueueImpl};
+use crate::internal_queue::session::session_state::SessionStateImpl;
+use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
+use crate::tracing_targets;
+use crate::utils::shard::SplitMergeAction;
 
-use tycho_core::internal_queue::{
-    persistent::{
-        persistent_state::PersistentStateImpl, persistent_state_snapshot::PersistentStateSnapshot,
-    },
-    queue::{Queue, QueueImpl},
-    session::{session_state::SessionStateImpl, session_state_snapshot::SessionStateSnapshot},
-    types::QueueDiff,
-};
+use self::types::QueueDiff;
 
-pub(crate) use tycho_core::internal_queue::iterator::{IterItem, QueueIterator};
+pub mod config;
+pub mod types;
 
-use crate::{tracing_targets, utils::shard::SplitMergeAction};
+mod diff_mgmt;
+mod iterator;
+mod loader;
+mod queue;
+
+pub mod cache_persistent;
+mod cache_persistent_fs;
+
+pub mod state_persistent;
+mod state_persistent_fs;
+
+pub mod storage;
+mod storage_rocksdb;
 
 // TYPES
 
@@ -26,14 +40,11 @@ type MsgQueueStdImpl =
 // ADAPTER
 
 #[async_trait]
-pub(crate) trait MessageQueueAdapter: Send + Sync + 'static {
-    fn new() -> Self;
+pub trait MessageQueueAdapter: Send + Sync + 'static {
     /// Perform split and merge in the current queue state in accordance with the new shards set
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()>;
     /// Create iterator for specified shard and return it
-    async fn get_iterator<QI>(&self, shard_id: &ShardIdent) -> Result<QI>
-    where
-        QI: QueueIterator;
+    async fn get_iterator(&self, shard_id: &ShardIdent) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
@@ -41,19 +52,21 @@ pub(crate) trait MessageQueueAdapter: Send + Sync + 'static {
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<()>>;
 }
 
-pub(crate) struct MessageQueueAdapterStdImpl {
+pub struct MessageQueueAdapterStdImpl {
     msg_queue: MsgQueueStdImpl,
 }
 
-#[async_trait]
-impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
-    fn new() -> Self {
+impl MessageQueueAdapterStdImpl {
+    pub fn new() -> Self {
         let base_shard = ShardIdent::new_full(0);
         Self {
             msg_queue: MsgQueueStdImpl::new(base_shard),
         }
     }
+}
 
+#[async_trait]
+impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
         for sma in split_merge_actions {
             match sma {
@@ -79,10 +92,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(())
     }
 
-    async fn get_iterator<QI>(&self, _shard_id: &ShardIdent) -> Result<QI>
-    where
-        QI: QueueIterator,
-    {
+    async fn get_iterator(&self, _shard_id: &ShardIdent) -> Result<Box<dyn QueueIterator>> {
         todo!()
     }
 

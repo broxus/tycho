@@ -1,36 +1,39 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use everscale_types::models::{BlockId, PrevBlockRef};
-use futures_util::future::BoxFuture;
-use futures_util::stream::FuturesOrdered;
-use futures_util::{FutureExt, TryStreamExt};
-use itertools::Itertools;
-use std::sync::Arc;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::time::Instant;
-
-pub mod provider;
-pub mod state;
-pub mod subscriber;
-
-mod state_applier;
-
-#[cfg(any(test, feature = "test"))]
-pub mod test_provider;
-#[cfg(any(test, feature = "test"))]
-pub use state_applier::test::prepare_state_apply;
-
-use crate::block_strider::state_applier::ShardStateUpdater;
-use provider::BlockProvider;
-use state::BlockStriderState;
-use subscriber::BlockSubscriber;
-use tycho_block_util::block::BlockStuffAug;
+use tycho_block_util::archive::ArchiveData;
+use tycho_block_util::block::{BlockStuff, BlockStuffAug, ShardHeights};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
-use tycho_util::FastDashMap;
+use tycho_util::FastHashMap;
 
-pub struct BlockStriderBuilder<S, P, B>(BlockStrider<S, P, B>);
+pub use self::provider::{
+    BlockProvider, BlockchainBlockProvider, BlockchainBlockProviderConfig, EmptyBlockProvider,
+    OptionalBlockStuff,
+};
+pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
+pub use self::state_applier::ShardStateApplier;
+pub use self::subscriber::{
+    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, NoopSubscriber,
+    StateSubscriber, StateSubscriberContext, StateSubscriberExt,
+};
+
+#[cfg(any(test, feature = "test"))]
+pub use self::provider::ArchiveBlockProvider;
+#[cfg(any(test, feature = "test"))]
+pub use self::subscriber::test::PrintSubscriber;
+
+mod provider;
+mod state;
+mod state_applier;
+mod subscriber;
+
+pub struct BlockStriderBuilder<T, P, B>(BlockStrider<T, P, B>);
 
 impl<T2, T3> BlockStriderBuilder<(), T2, T3> {
-    pub fn with_state<S: BlockStriderState>(self, state: S) -> BlockStriderBuilder<S, T2, T3> {
+    #[inline]
+    pub fn with_state<T: BlockStriderState>(self, state: T) -> BlockStriderBuilder<T, T2, T3> {
         BlockStriderBuilder(BlockStrider {
             state,
             provider: self.0.provider,
@@ -40,6 +43,7 @@ impl<T2, T3> BlockStriderBuilder<(), T2, T3> {
 }
 
 impl<T1, T3> BlockStriderBuilder<T1, (), T3> {
+    #[inline]
     pub fn with_provider<P: BlockProvider>(self, provider: P) -> BlockStriderBuilder<T1, P, T3> {
         BlockStriderBuilder(BlockStrider {
             state: self.0.state,
@@ -50,10 +54,11 @@ impl<T1, T3> BlockStriderBuilder<T1, (), T3> {
 }
 
 impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
-    pub fn with_subscriber<B: BlockSubscriber>(
-        self,
-        subscriber: B,
-    ) -> BlockStriderBuilder<T1, T2, B> {
+    #[inline]
+    pub fn with_block_subscriber<B>(self, subscriber: B) -> BlockStriderBuilder<T1, T2, B>
+    where
+        B: BlockSubscriber,
+    {
         BlockStriderBuilder(BlockStrider {
             state: self.0.state,
             provider: self.0.provider,
@@ -62,35 +67,37 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
     }
 }
 
-impl<S, P, B> BlockStriderBuilder<S, P, B>
-where
-    S: BlockStriderState,
-    P: BlockProvider,
-    B: BlockSubscriber,
-{
-    pub fn build(self) -> BlockStrider<S, P, B> {
-        self.0
-    }
-
-    pub fn build_with_state_applier(
+impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
+    pub fn with_state_subscriber<S>(
         self,
-        min_ref_mc_state_tracker: MinRefMcStateTracker,
-        storage: Arc<Storage>,
-    ) -> BlockStrider<S, P, ShardStateUpdater<B>> {
-        BlockStrider {
+        mc_state_tracker: MinRefMcStateTracker,
+        storage: Storage,
+        state_subscriber: S,
+    ) -> BlockStriderBuilder<T1, T2, ShardStateApplier<S>>
+    where
+        S: StateSubscriber,
+    {
+        BlockStriderBuilder(BlockStrider {
             state: self.0.state,
             provider: self.0.provider,
-            subscriber: ShardStateUpdater::new(
-                min_ref_mc_state_tracker,
-                storage,
-                self.0.subscriber,
-            ),
-        }
+            subscriber: ShardStateApplier::new(mc_state_tracker, storage, state_subscriber),
+        })
     }
 }
 
-pub struct BlockStrider<S, P, B> {
-    state: S,
+impl<T, P, B> BlockStriderBuilder<T, P, B>
+where
+    T: BlockStriderState,
+    P: BlockProvider,
+    B: BlockSubscriber,
+{
+    pub fn build(self) -> BlockStrider<T, P, B> {
+        self.0
+    }
+}
+
+pub struct BlockStrider<T, P, B> {
+    state: T,
     provider: P,
     subscriber: B,
 }
@@ -117,130 +124,134 @@ where
     pub async fn run(self) -> Result<()> {
         tracing::info!("block strider loop started");
 
-        let mut map = BlocksGraph::new();
-        while let Some(master_block) = self.fetch_next_master_block().await {
-            let master_id = master_block.id();
-            tracing::debug!(id=?master_id, "Fetched next master block");
-            let extra = master_block.block().load_extra()?;
-            let mc_extra = extra
-                .load_custom()?
-                .with_context(|| format!("failed to load custom for block: {:?}", master_id))?;
-            let shard_hashes = mc_extra.shards.latest_blocks();
-            // todo: is order important?
-            let mut futures = FuturesOrdered::new();
-
-            let start = Instant::now();
-            for shard_block_id in shard_hashes {
-                let this = &self;
-                let blocks_graph = &map;
-                let block_id = shard_block_id.expect("Invalid shard block id");
-                futures.push_back(async move {
-                    this.find_prev_shard_blocks(block_id, blocks_graph).await
-                });
-            }
-            let blocks: Vec<_> = futures
-                .try_collect()
-                .await
-                .expect("failed to collect shard blocks");
-            let blocks = blocks.into_iter().flatten().collect_vec();
-            let elapsed = start.elapsed();
-            metrics::histogram!("tycho_find_prev_shard_blocks_seconds").record(elapsed);
-
-            self.subscriber
-                .handle_block(&master_block, None)
-                .await
-                .expect("subscriber failed");
-
-            map.set_bottom_blocks(blocks);
-            map.walk_topo(&self.subscriber, &self.state).await;
-            self.state.commit_traversed(*master_id);
+        while let Some(next) = self.fetch_next_master_block().await {
+            let started_at = Instant::now();
+            self.process_mc_block(next.data, next.archive_data).await?;
+            metrics::histogram!("tycho_process_mc_block_time").record(started_at.elapsed());
         }
 
         tracing::info!("block strider loop finished");
         Ok(())
     }
 
-    fn find_prev_shard_blocks<'a>(
-        &'a self,
-        mut shard_block_id: BlockId,
-        blocks: &'a BlocksGraph,
-    ) -> BoxFuture<'a, Result<Vec<BlockId>>> {
-        async move {
-            let mut prev_shard_block_id = shard_block_id;
-            let mut traversed_blocks = Vec::new();
+    /// Processes a single masterchain block and its shard blocks.
+    async fn process_mc_block(&self, block: BlockStuff, archive_data: ArchiveData) -> Result<()> {
+        let mc_block_id = *block.id();
+        tracing::debug!(%mc_block_id, "processing masterchain block");
 
-            tracing::debug!(id=?shard_block_id, "Finding prev shard blocks");
-            while shard_block_id.seqno > 0 && !self.state.is_traversed(&shard_block_id) {
-                prev_shard_block_id = shard_block_id;
+        let started_at = Instant::now();
 
-                let start = Instant::now();
-                let block = self
-                    .fetch_block(&shard_block_id)
-                    .await
-                    .expect("provider failed to fetch shard block");
-                let elapsed = start.elapsed();
-                metrics::histogram!("tycho_fetch_block_time").record(elapsed);
-
-                tracing::debug!(id=?block.id(), "Fetched shard block");
-                let info = block.block().load_info()?;
-
-                match info.load_prev_ref()? {
-                    PrevBlockRef::Single(id) => {
-                        let shard = if info.after_split {
-                            info.shard
-                                .merge()
-                                .expect("Merge should succeed after split")
-                        } else {
-                            info.shard
-                        };
-                        shard_block_id = id.as_block_id(shard);
-                        blocks.add_connection(shard_block_id, prev_shard_block_id);
-                    }
-                    PrevBlockRef::AfterMerge { left, right } => {
-                        let (left_shard, right_shard) =
-                            info.shard.split().expect("split on unsplitable shard");
-                        let left_block_id = left.as_block_id(left_shard);
-                        let right_block_id = right.as_block_id(right_shard);
-                        blocks.add_connection(left_block_id, prev_shard_block_id);
-                        blocks.add_connection(right_block_id, prev_shard_block_id);
-
-                        let left_blocks =
-                            self.find_prev_shard_blocks(left_block_id, blocks).await?;
-                        let right_blocks =
-                            self.find_prev_shard_blocks(right_block_id, blocks).await?;
-                        traversed_blocks.extend(left_blocks);
-                        traversed_blocks.extend(right_blocks);
-                        break;
-                    }
-                }
-
-                blocks.store_block(block);
-            }
-
-            if prev_shard_block_id.seqno > 0 {
-                traversed_blocks.push(prev_shard_block_id);
-            }
-
-            Ok(traversed_blocks)
+        // Start downloading shard blocks
+        let mut shard_heights = FastHashMap::default();
+        let mut download_futures = FuturesUnordered::new();
+        for entry in block.load_custom()?.shards.latest_blocks() {
+            let top_block_id = entry?;
+            shard_heights.insert(top_block_id.shard, top_block_id.seqno);
+            download_futures.push(Box::pin(self.download_shard_blocks(top_block_id)));
         }
-        .boxed()
+
+        // Start processing shard blocks in parallel
+        let mut process_futures = FuturesUnordered::new();
+        while let Some(blocks) = download_futures.next().await.transpose()? {
+            process_futures.push(Box::pin(self.process_shard_blocks(&mc_block_id, blocks)));
+        }
+        metrics::histogram!("tycho_download_shard_blocks_time").record(started_at.elapsed());
+
+        // Wait for all shard blocks to be processed
+        while process_futures.next().await.transpose()?.is_some() {}
+        metrics::histogram!("tycho_process_shard_blocks_time").record(started_at.elapsed());
+
+        // Process masterchain block
+        let cx = BlockSubscriberContext {
+            mc_block_id,
+            block,
+            archive_data,
+        };
+        self.subscriber.handle_block(&cx).await?;
+
+        let shard_heights = ShardHeights::from(shard_heights);
+        self.state.commit_master(&mc_block_id, &shard_heights);
+
+        Ok(())
+    }
+
+    /// Downloads blocks for the single shard in descending order starting from the top block.
+    async fn download_shard_blocks(&self, mut top_block_id: BlockId) -> Result<Vec<BlockStuffAug>> {
+        const MAX_DEPTH: u32 = 32;
+
+        tracing::debug!(%top_block_id, "downloading shard blocks");
+
+        let mut depth = 0;
+        let mut result = Vec::new();
+        while top_block_id.seqno > 0 && !self.state.is_commited(&top_block_id) {
+            // Download block
+            let started_at = Instant::now();
+            let block = self.fetch_block(&top_block_id).await?;
+            tracing::debug!(block_id = %top_block_id, "fetched shard block");
+            debug_assert_eq!(block.id(), &top_block_id);
+
+            metrics::histogram!("tycho_fetch_shard_block_time").record(started_at.elapsed());
+
+            // Parse info in advance to make borrow checker happy
+            let info = block.data.load_info()?;
+
+            // Add new block to result
+            result.push(block);
+
+            // Process block refs
+            if info.after_split || info.after_merge {
+                // Blocks after split or merge are always the first blocks after
+                // the previous master block
+                break;
+            }
+
+            match info.load_prev_ref()? {
+                PrevBlockRef::Single(id) => top_block_id = id.as_block_id(top_block_id.shard),
+                PrevBlockRef::AfterMerge { .. } => anyhow::bail!("unexpected `AfterMerge` ref"),
+            }
+
+            depth += 1;
+            if depth >= MAX_DEPTH {
+                anyhow::bail!("max depth reached");
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn process_shard_blocks(
+        &self,
+        mc_block_id: &BlockId,
+        mut blocks: Vec<BlockStuffAug>,
+    ) -> Result<()> {
+        while let Some(block) = blocks.pop() {
+            let block_id = *block.id();
+
+            let cx: BlockSubscriberContext = BlockSubscriberContext {
+                mc_block_id: *mc_block_id,
+                block: block.data,
+                archive_data: block.archive_data,
+            };
+
+            let started_at = Instant::now();
+            self.subscriber.handle_block(&cx).await?;
+            metrics::histogram!("tycho_process_shard_block_time").record(started_at.elapsed());
+
+            self.state.commit_shard(&block_id);
+        }
+
+        Ok(())
     }
 
     async fn fetch_next_master_block(&self) -> Option<BlockStuffAug> {
-        let last_traversed_master_block = self.state.load_last_traversed_master_block_id();
-        tracing::debug!(?last_traversed_master_block, "Fetching next master block");
+        let prev_block_id = self.state.load_last_mc_block_id();
+        tracing::debug!(%prev_block_id, "fetching next master block");
+
         loop {
-            match self
-                .provider
-                .get_next_block(&last_traversed_master_block)
-                .await?
-            {
+            match self.provider.get_next_block(&prev_block_id).await? {
                 Ok(block) => break Some(block),
                 Err(e) => {
-                    tracing::error!(
-                        ?last_traversed_master_block,
-                        "error while fetching master block: {e:?}",
-                    );
+                    tracing::error!(?prev_block_id, "error while fetching master block: {e:?}",);
                     // TODO: backoff
                 }
             }
@@ -260,89 +271,5 @@ where
                 }
             }
         }
-    }
-}
-
-struct BlocksGraph {
-    block_store_map: FastDashMap<BlockId, BlockStuffAug>,
-    connections: FastDashMap<BlockId, BlockId>,
-    bottom_blocks: Vec<BlockId>,
-}
-
-impl BlocksGraph {
-    fn new() -> Self {
-        Self {
-            block_store_map: FastDashMap::default(),
-            connections: FastDashMap::default(),
-            bottom_blocks: Vec::new(),
-        }
-    }
-
-    fn store_block(&self, block: BlockStuffAug) {
-        self.block_store_map.insert(*block.id(), block);
-    }
-
-    // connection between the block and it child
-    fn add_connection(&self, id: BlockId, prev: BlockId) {
-        self.connections.insert(id, prev);
-    }
-
-    fn set_bottom_blocks(&mut self, blocks: Vec<BlockId>) {
-        self.bottom_blocks = blocks;
-    }
-
-    async fn walk_topo<Sub>(&mut self, subscriber: &Sub, state: &dyn BlockStriderState)
-    where
-        Sub: BlockSubscriber + Send + Sync + 'static,
-    {
-        let mut next_blocks = Vec::with_capacity(self.bottom_blocks.len());
-        loop {
-            if self.bottom_blocks.is_empty() {
-                break;
-            }
-            self.bottom_blocks.sort_unstable();
-            for block_id in &self.bottom_blocks {
-                let block = self
-                    .block_store_map
-                    .get(block_id)
-                    .expect("should be in map");
-                subscriber
-                    .handle_block(&block, None)
-                    .await
-                    .expect("subscriber failed");
-                state.commit_traversed(*block_id);
-                let next_block = self.connections.get(block_id);
-                if let Some(next_block) = next_block {
-                    next_blocks.push(*next_block.value());
-                }
-            }
-            std::mem::swap(&mut next_blocks, &mut self.bottom_blocks);
-            next_blocks.clear();
-        }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::state::InMemoryBlockStriderState;
-    use super::subscriber::test::PrintSubscriber;
-    use super::test_provider::TestBlockProvider;
-    use crate::block_strider::BlockStrider;
-
-    #[tokio::test]
-    #[tracing_test::traced_test]
-    async fn test_block_strider() {
-        let provider = TestBlockProvider::new(3);
-        provider.validate();
-
-        let subscriber = PrintSubscriber;
-        let state = InMemoryBlockStriderState::with_initial_id(provider.first_master_block());
-
-        let strider = BlockStrider::builder()
-            .with_state(state)
-            .with_provider(provider)
-            .with_subscriber(subscriber)
-            .build();
-        strider.run().await.unwrap();
     }
 }

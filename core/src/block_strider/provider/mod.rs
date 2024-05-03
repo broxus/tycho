@@ -1,9 +1,21 @@
-use everscale_types::models::BlockId;
-use futures_util::future::BoxFuture;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use everscale_types::models::BlockId;
+use futures_util::future::BoxFuture;
 use tycho_block_util::block::BlockStuffAug;
+
+pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
+
+#[cfg(any(test, feature = "test"))]
+pub use self::archive_provider::ArchiveBlockProvider;
+
+mod blockchain_provider;
+mod storage_provider;
+
+#[cfg(any(test, feature = "test"))]
+mod archive_provider;
 
 pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
 
@@ -43,6 +55,22 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
 }
 
 // === Provider combinators ===
+#[derive(Debug, Clone, Copy)]
+pub struct EmptyBlockProvider;
+
+impl BlockProvider for EmptyBlockProvider {
+    type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        futures_util::future::ready(None)
+    }
+
+    fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        futures_util::future::ready(None)
+    }
+}
+
 struct ChainBlockProvider<T1, T2> {
     left: T1,
     right: T2,
@@ -66,7 +94,7 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
         })
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'_> {
         Box::pin(async {
             let res = self.left.get_block(block_id).await;
             if res.is_some() {
@@ -93,7 +121,7 @@ mod test {
         type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
         type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
-        fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        fn get_next_block(&self, _prev_block_id: &BlockId) -> Self::GetNextBlockFut<'_> {
             Box::pin(async {
                 if self.has_block.load(Ordering::Acquire) {
                     Some(Ok(get_empty_block()))
@@ -103,7 +131,7 @@ mod test {
             })
         }
 
-        fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        fn get_block(&self, _block_id: &BlockId) -> Self::GetBlockFut<'_> {
             Box::pin(async {
                 if self.has_block.load(Ordering::Acquire) {
                     Some(Ok(get_empty_block()))
@@ -156,7 +184,7 @@ mod test {
     }
 
     fn get_empty_block() -> BlockStuffAug {
-        let block_data = include_bytes!("../../tests/empty_block.bin");
+        let block_data = include_bytes!("../../../tests/data/empty_block.bin");
         let block = everscale_types::boc::BocRepr::decode(block_data).unwrap();
         BlockStuffAug::new(
             BlockStuff::with_block(get_default_block_id(), block),

@@ -25,7 +25,7 @@ impl MempoolEventListener for MempoolEventStubListener {
 async fn test_stub_anchors_generator() -> Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
-    let adapter = MempoolAdapterStdImpl::create(Arc::new(MempoolEventStubListener {}));
+    let adapter = MempoolAdapterStdImpl::new(Arc::new(MempoolEventStubListener {}));
 
     // try get not existing anchor by id
     let opt_anchor = adapter.get_anchor_by_id(10).await?;

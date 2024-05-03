@@ -1,28 +1,41 @@
-use everscale_crypto::ed25519::KeyPair;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature};
-use std::collections::HashMap;
-
-use tycho_block_util::block::ValidatorSubsetInfo;
-use tycho_network::{DhtClient, OverlayService, PeerResolver};
-
 use std::sync::Arc;
 
-use tycho_block_util::block::BlockStuff;
+use anyhow::Result;
+
+use everscale_crypto::ed25519::KeyPair;
+use everscale_types::cell::{CellBuilder, HashBytes};
+use everscale_types::models::{
+    Block, BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature,
+};
+
+use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
+use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_network::{DhtClient, OverlayService, PeerResolver};
+use tycho_util::FastHashMap;
 
 pub struct CollationConfig {
-    pub key_pair: KeyPair,
+    pub key_pair: Arc<KeyPair>,
     pub mc_block_min_interval_ms: u64,
+    pub max_mc_block_delta_from_bc_to_await_own: i32,
+
+    pub supported_block_version: u32,
+    pub supported_capabilities: u64,
+
+    pub max_collate_threads: u16,
+
+    #[cfg(feature = "test")]
+    pub test_validators_keypairs: Vec<Arc<KeyPair>>,
 }
 
-pub(crate) struct BlockCollationResult {
+pub struct BlockCollationResult {
     pub candidate: BlockCandidate,
-    pub new_state: ShardStateUnsplit,
+    pub new_state_stuff: ShardStateStuff,
 }
 
 #[derive(Clone)]
-pub(crate) struct BlockCandidate {
+pub struct BlockCandidate {
     block_id: BlockId,
+    block: Block,
     prev_blocks_ids: Vec<BlockId>,
     top_shard_blocks_ids: Vec<BlockId>,
     data: Vec<u8>,
@@ -30,9 +43,11 @@ pub(crate) struct BlockCandidate {
     collated_file_hash: HashBytes,
     chain_time: u64,
 }
+
 impl BlockCandidate {
     pub fn new(
         block_id: BlockId,
+        block: Block,
         prev_blocks_ids: Vec<BlockId>,
         top_shard_blocks_ids: Vec<BlockId>,
         data: Vec<u8>,
@@ -42,6 +57,7 @@ impl BlockCandidate {
     ) -> Self {
         Self {
             block_id,
+            block,
             prev_blocks_ids,
             top_shard_blocks_ids,
             data,
@@ -52,6 +68,9 @@ impl BlockCandidate {
     }
     pub fn block_id(&self) -> &BlockId {
         &self.block_id
+    }
+    pub fn block(&self) -> &Block {
+        &self.block
     }
     pub fn shard_id(&self) -> &ShardIdent {
         &self.block_id.shard
@@ -65,9 +84,34 @@ impl BlockCandidate {
     pub fn top_shard_blocks_ids(&self) -> &[BlockId] {
         &self.top_shard_blocks_ids
     }
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
 }
 
-pub(crate) enum OnValidatedBlockEvent {
+pub trait ShardStateStuffExt {
+    fn from_state(
+        block_id: BlockId,
+        shard_state: ShardStateUnsplit,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self>
+    where
+        Self: Sized;
+}
+
+impl ShardStateStuffExt for ShardStateStuff {
+    fn from_state(
+        block_id: BlockId,
+        shard_state: ShardStateUnsplit,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self> {
+        let root = CellBuilder::build_from(&shard_state)?;
+        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
+    }
+}
+
+#[derive(Clone)]
+pub enum OnValidatedBlockEvent {
     ValidByState,
     Invalid,
     Valid(BlockSignatures),
@@ -83,8 +127,8 @@ impl OnValidatedBlockEvent {
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct BlockSignatures {
-    pub signatures: HashMap<HashBytes, Signature>,
+pub struct BlockSignatures {
+    pub signatures: FastHashMap<HashBytes, Signature>,
 }
 
 pub struct ValidatedBlock {
@@ -118,30 +162,31 @@ impl ValidatedBlock {
     }
 }
 
-pub(crate) struct BlockStuffForSync {
+pub struct BlockStuffForSync {
     //STUB: will not parse Block because candidate does not contain real block
     //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
-    pub block_stuff: Option<BlockStuff>,
-    pub signatures: HashMap<HashBytes, Signature>,
+    pub block_stuff_aug: BlockStuffAug,
+    pub signatures: FastHashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks_ids: Vec<BlockId>,
 }
 
 /// (`ShardIdent`, seqno)
 pub(crate) type CollationSessionId = (ShardIdent, u32);
 
 #[derive(Clone)]
-pub(crate) struct CollationSessionInfo {
+pub struct CollationSessionInfo {
     /// Sequence number of the collation session
     seqno: u32,
     collators: ValidatorSubsetInfo,
-    current_collator_keypair: Option<KeyPair>,
+    current_collator_keypair: Option<Arc<KeyPair>>,
 }
 impl CollationSessionInfo {
     pub fn new(
         seqno: u32,
         collators: ValidatorSubsetInfo,
-        current_collator_keypair: Option<KeyPair>,
+        current_collator_keypair: Option<Arc<KeyPair>>,
     ) -> Self {
         Self {
             seqno,
@@ -156,7 +201,7 @@ impl CollationSessionInfo {
         &self.collators
     }
 
-    pub fn current_collator_keypair(&self) -> Option<&KeyPair> {
+    pub fn current_collator_keypair(&self) -> Option<&Arc<KeyPair>> {
         self.current_collator_keypair.as_ref()
     }
 }

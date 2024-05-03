@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use arc_swap::ArcSwapOption;
+use arc_swap::ArcSwapAny;
 use tokio::sync::Notify;
 
 use tycho_block_util::state::*;
@@ -14,7 +14,7 @@ pub struct PersistentStateKeeper {
     block_handle_storage: Arc<BlockHandleStorage>,
     initialized: AtomicBool,
     persistent_state_changed: Notify,
-    current_persistent_state: ArcSwapOption<BlockHandle>,
+    current_persistent_state: ArcSwapAny<Option<BlockHandle>>,
     last_utime: AtomicU32,
 }
 
@@ -29,13 +29,11 @@ impl PersistentStateKeeper {
         }
     }
 
-    pub fn update(&self, block_handle: &Arc<BlockHandle>) -> Result<()> {
-        println!("UPDATE");
-
+    pub fn update(&self, block_handle: &BlockHandle) -> Result<()> {
         if !self.initialized.load(Ordering::Acquire) {
             let prev_persistent_key_block = self
                 .block_handle_storage
-                .find_prev_persistent_key_block(block_handle.id().seqno)?;
+                .find_prev_persistent_key_block(block_handle.id().seqno);
 
             if let Some(handle) = &prev_persistent_key_block {
                 self.last_utime
@@ -74,7 +72,7 @@ impl PersistentStateKeeper {
         self.last_utime.load(Ordering::Acquire)
     }
 
-    pub fn current(&self) -> Option<Arc<BlockHandle>> {
+    pub fn current(&self) -> Option<BlockHandle> {
         self.current_persistent_state.load_full()
     }
 
