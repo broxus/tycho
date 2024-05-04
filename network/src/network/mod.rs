@@ -345,10 +345,12 @@ struct NetworkShutdownError;
 
 #[cfg(test)]
 mod tests {
+    use futures_util::stream::FuturesUnordered;
+    use futures_util::StreamExt;
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::types::{service_query_fn, BoxCloneService, PeerInfo, Request};
+    use crate::types::{service_message_fn, service_query_fn, BoxCloneService, PeerInfo, Request};
     use crate::util::NetworkExt;
 
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
@@ -443,6 +445,61 @@ mod tests {
             let (res1, res2) = futures_util::future::join(peer1_fut, peer2_fut).await;
             assert_eq!(res1?.body, req.body);
             assert_eq!(res2?.body, req.body);
+        }
+
+        Ok(())
+    }
+
+    #[traced_test]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uni_message_handler() -> Result<()> {
+        std::panic::set_hook(Box::new(|info| {
+            use std::io::Write;
+
+            tracing::error!("{}", info);
+            std::io::stderr().flush().ok();
+            std::io::stdout().flush().ok();
+            std::process::exit(1);
+        }));
+
+        fn noop_service() -> BoxCloneService<ServiceRequest, Response> {
+            let handle = |request: ServiceRequest| async move {
+                tracing::trace!("received: {} bytes", request.body.len());
+            };
+            service_message_fn(handle).boxed_clone()
+        }
+
+        fn make_network() -> Result<Network> {
+            Network::builder()
+                .with_config(NetworkConfig {
+                    enable_0rtt: true,
+                    ..Default::default()
+                })
+                .with_random_private_key()
+                .with_service_name("tycho")
+                .build("127.0.0.1:0", noop_service())
+        }
+
+        let left = make_network()?;
+        let right = make_network()?;
+
+        let _left_to_right = left.known_peers().insert(make_peer_info(&right), false)?;
+        let _right_to_left = right.known_peers().insert(make_peer_info(&left), false)?;
+
+        let req = Request {
+            version: Default::default(),
+            body: vec![0xff; 750 * 1024].into(),
+        };
+
+        for _ in 0..10 {
+            let mut futures = FuturesUnordered::new();
+            for _ in 0..100 {
+                futures.push(left.send(&right.peer_id(), req.clone()));
+            }
+
+            while let Some(res) = futures.next().await {
+                res?;
+            }
         }
 
         Ok(())
