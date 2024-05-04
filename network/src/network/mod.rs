@@ -78,13 +78,11 @@ impl<T1> NetworkBuilder<(T1, ())> {
 }
 
 impl NetworkBuilder {
-    pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
+    pub fn build<T: ToSocket, S>(self, bind_address: T, service: S) -> Result<Network>
     where
         S: Send + Sync + Clone + 'static,
         S: Service<ServiceRequest, QueryResponse = Response>,
     {
-        use socket2::{Domain, Protocol, Socket, Type};
-
         let config = self.optional_fields.config.unwrap_or_default();
         let quic_config = config.quic.clone().unwrap_or_default();
         let (service_name, private_key) = self.mandatory_fields;
@@ -98,18 +96,7 @@ impl NetworkBuilder {
             .with_transport_config(quic_config.make_transport_config())
             .build()?;
 
-        let socket = 'socket: {
-            let mut err = anyhow::anyhow!("no addresses to bind to");
-            for addr in bind_address.to_socket_addrs()? {
-                let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-                if let Err(e) = s.bind(&socket2::SockAddr::from(addr)) {
-                    err = e.into();
-                } else {
-                    break 'socket s;
-                }
-            }
-            return Err(err);
-        };
+        let socket = bind_address.to_socket().map(socket2::Socket::from)?;
 
         if let Some(send_buffer_size) = quic_config.socket_send_buffer_size {
             if let Err(e) = socket.set_send_buffer_size(send_buffer_size) {
@@ -337,6 +324,56 @@ impl Drop for NetworkInner {
     fn drop(&mut self) {
         tracing::debug!("network dropped");
     }
+}
+
+pub trait ToSocket {
+    fn to_socket(self) -> Result<std::net::UdpSocket>;
+}
+
+impl ToSocket for std::net::UdpSocket {
+    fn to_socket(self) -> Result<std::net::UdpSocket> {
+        Ok(self)
+    }
+}
+
+macro_rules! impl_to_socket_for_addr {
+    ($($ty:ty),*$(,)?) => {$(
+        impl ToSocket for $ty {
+            fn to_socket(self) -> Result<std::net::UdpSocket> {
+                bind_socket_to_addr(self)
+            }
+        }
+    )*};
+}
+
+impl_to_socket_for_addr! {
+    SocketAddr,
+    std::net::SocketAddrV4,
+    std::net::SocketAddrV6,
+    (std::net::IpAddr, u16),
+    (std::net::Ipv4Addr, u16),
+    (std::net::Ipv6Addr, u16),
+    (&str, u16),
+    (String, u16),
+    &str,
+    String,
+    &[SocketAddr],
+    Address,
+}
+
+fn bind_socket_to_addr<T: ToSocketAddrs>(bind_address: T) -> Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let mut err = anyhow::anyhow!("no addresses to bind to");
+    for addr in bind_address.to_socket_addrs()? {
+        let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        if let Err(e) = s.bind(&socket2::SockAddr::from(addr)) {
+            err = e.into();
+        } else {
+            return Ok(s.into());
+        }
+    }
+    return Err(err);
 }
 
 #[derive(thiserror::Error, Debug)]
