@@ -1,4 +1,4 @@
-#![allow(clippy::unused_self)]
+#![allow(clippy::unused_self, clippy::print_stdout, clippy::print_stderr)]
 
 use std::process::Command;
 

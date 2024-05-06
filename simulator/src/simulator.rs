@@ -1,11 +1,10 @@
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
-use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::compose::{ComposeRunner, Service};
+use crate::compose::ComposeRunner;
 use crate::config::ServiceConfig;
 use crate::node::{Node, NodeOptions};
 
@@ -41,7 +40,7 @@ impl Simulator {
         let mut ips = Vec::new();
         for node_index in 0..nodes {
             let ip = self.add_node(node_index, None, None)?;
-            ips.push(ip)
+            ips.push(ip);
         }
 
         //self.add_grafana()?;
@@ -133,7 +132,7 @@ datasources:
   editable: true
         "#;
         let grafana_datasource_config = self.config.grafana().join("datasource.yml");
-        std::fs::write(&grafana_datasource_config, grafana_data)
+        std::fs::write(grafana_datasource_config, grafana_data)
             .context("Failed to write grafana data")?;
 
         Ok(())
@@ -172,7 +171,7 @@ scrape_configs:
             nodes
         );
         let prometheus_datasource_config = self.config.prometheus().join("prometheus.yml");
-        std::fs::write(&prometheus_datasource_config, prometheus_data)
+        std::fs::write(prometheus_datasource_config, prometheus_data)
             .context("Failed to write prometheus data")?;
         Ok(())
     }

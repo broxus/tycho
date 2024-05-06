@@ -3,7 +3,6 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::str;
-use std::str::FromStr;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -152,7 +151,7 @@ impl ComposeRunner {
             for i in self.get_running_nodes_list()? {
                 println!("node {i}");
                 let index = i
-                    .split("-")
+                    .split('-')
                     .collect::<Vec<&str>>()
                     .last()
                     .unwrap()
@@ -175,7 +174,7 @@ impl ComposeRunner {
         let output = self.execute_compose_command(&docker_compose_command)?;
         let x = String::from_utf8(output.stdout)?
             .trim()
-            .split("\n")
+            .lines()
             .map(|x| x.to_string())
             .collect();
         Ok(x)
