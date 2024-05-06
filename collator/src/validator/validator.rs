@@ -320,6 +320,7 @@ async fn start_candidate_validation(
                     .get_validation_status(&short_id)
                     .await?
                     .is_finished();
+
                 if validation_finished {
                     trace!(target: tracing_targets::VALIDATOR, "Validation is finished");
                     token_clone.cancel(); // Signal cancellation to all tasks
@@ -424,8 +425,7 @@ pub async fn process_candidate_signature_response(
     debug!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Processing candidate signature response");
     let validation_status = session.get_validation_status(&block_id_short).await?;
     trace!(target: tracing_targets::VALIDATOR, block = %block_id_short, "Validation status: {:?}", validation_status);
-    if validation_status == ValidationResult::Valid
-        || validation_status == ValidationResult::Invalid
+    if validation_status.is_finished()
     {
         trace!(
             "Validation status is already set for block {:?}.",
@@ -440,7 +440,7 @@ pub async fn process_candidate_signature_response(
             block_id_short);
         session
             .process_signatures_and_update_status(block_id_short, signatures, listeners)
-            .await?;
+            .await
     } else {
         debug!(target: tracing_targets::VALIDATOR, "Caching signatures for block {:?}", block_id_short);
         if block_id_short.seqno > 0 {
@@ -460,6 +460,6 @@ pub async fn process_candidate_signature_response(
                     .await;
             }
         }
+        Ok(false)
     }
-    Ok(false)
 }
