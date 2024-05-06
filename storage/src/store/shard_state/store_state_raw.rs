@@ -11,7 +11,7 @@ use super::cell_storage::*;
 use super::entries_buffer::*;
 use super::shard_state_reader::*;
 use crate::db::*;
-use crate::util::*;
+use crate::store::shard_state::StoredValue;
 
 use tycho_block_util::state::*;
 use tycho_util::progress_bar::*;
@@ -19,7 +19,8 @@ use tycho_util::FastHashMap;
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
-pub struct ShardStateReplaceTransaction<'a> {
+pub struct StoreStateRaw<'a> {
+    block_id: BlockId,
     db: &'a Db,
     cell_storage: &'a Arc<CellStorage>,
     min_ref_mc_state: &'a MinRefMcStateTracker,
@@ -29,18 +30,19 @@ pub struct ShardStateReplaceTransaction<'a> {
     file_ctx: FilesContext,
 }
 
-impl<'a> ShardStateReplaceTransaction<'a> {
-    pub fn new(
+impl<'a> StoreStateRaw<'a> {
+    pub(crate) fn new(
+        block_id: &BlockId,
         db: &'a Db,
         downloads_dir: &FileDb,
         cell_storage: &'a Arc<CellStorage>,
         min_ref_mc_state: &'a MinRefMcStateTracker,
-        block_id: &BlockId,
     ) -> Result<Self> {
         let file_ctx =
             FilesContext::new(downloads_dir, block_id).context("failed to create files context")?;
 
         Ok(Self {
+            block_id: *block_id,
             db,
             file_ctx,
             cell_storage,
@@ -55,14 +57,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         &self.header
     }
 
-    pub fn process_packet(
-        &mut self,
-        packet: Vec<u8>,
-        progress_bar: &mut ProgressBar,
-    ) -> Result<bool> {
+    pub fn process_part(&mut self, part: Vec<u8>, progress_bar: &mut ProgressBar) -> Result<bool> {
         let cells_file = self.file_ctx.cells_file()?;
 
-        self.reader.set_next_packet(packet);
+        self.reader.set_next_packet(part);
 
         let header = loop {
             if let Some(header) = &self.header {
@@ -118,11 +116,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         Ok(true)
     }
 
-    pub fn finalize(
-        mut self,
-        block_id: BlockId,
-        progress_bar: &mut ProgressBar,
-    ) -> Result<ShardStateStuff> {
+    pub fn finalize(mut self, progress_bar: &mut ProgressBar) -> Result<ShardStateStuff> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -193,7 +187,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                ShardStateReplaceTransaction::finalize_cell(&mut ctx, cell_index as u32, cell)?;
+                StoreStateRaw::finalize_cell(&mut ctx, cell_index as u32, cell)?;
 
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
@@ -227,7 +221,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
         ctx.clear_temp_cells(self.db)?;
 
-        let shard_state_key = block_id.as_short_id().to_vec();
+        let shard_state_key = self.block_id.as_short_id().to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
 
         progress_bar.complete();
@@ -238,8 +232,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
                 let cell = self.cell_storage.load_cell(cell_id)?;
-                Ok(ShardStateStuff::new(
-                    block_id,
+                Ok(ShardStateStuff::from_root(
+                    &self.block_id,
                     Cell::from(cell as Arc<_>),
                     self.min_ref_mc_state,
                 )?)
@@ -401,10 +395,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                     .ok_or(ReplaceTransactionError::InvalidCell)
                     .context("Pruned branch data not found")?;
                 child
-                    .pruned_branch_hash(MAX_LEVEL, child_data)
+                    .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
                     .context("Invalid pruned branch")?
             } else {
-                child.hash(MAX_LEVEL)
+                child.hash(LevelMask::MAX_LEVEL)
             };
 
             *ctx.cell_usages.entry(*child_hash).or_default() += 1;
@@ -418,10 +412,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         let repr_hash = if is_pruned_cell {
             current_entry
                 .as_reader()
-                .pruned_branch_hash(MAX_LEVEL, cell.data)
+                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
                 .context("Invalid pruned branch")?
         } else {
-            current_entry.as_reader().hash(MAX_LEVEL)
+            current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
         };
 
         ctx.write_batch
@@ -563,26 +557,17 @@ enum FilesContextError {
     AlreadyFinalized,
 }
 
-const MAX_LEVEL: u8 = 3;
-
 #[cfg(test)]
 mod test {
+
     use std::io::{BufReader, Read};
-    use std::sync::Arc;
 
-    use anyhow::Context;
     use bytesize::ByteSize;
-    use everscale_types::cell::{CellImpl, HashBytes};
-    use everscale_types::models::{BlockId, ShardIdent};
-    use tycho_block_util::state::MinRefMcStateTracker;
-    use tycho_util::progress_bar::ProgressBar;
+    use everscale_types::models::ShardIdent;
     use tycho_util::project_root;
-    use weedb::rocksdb::WriteBatch;
+    use weedb::rocksdb::{IteratorMode, WriteBatch};
 
-    use crate::rocksdb::IteratorMode;
-    use crate::store::shard_state::cell_storage::CellStorage;
-    use crate::store::shard_state::replace_transaction::{ShardStateReplaceTransaction, MAX_LEVEL};
-    use crate::{Db, DbConfig, FileDb};
+    use super::*;
 
     #[test]
     #[ignore]
@@ -626,21 +611,10 @@ mod test {
             let filename = file.file_name().to_string_lossy().to_string();
 
             let block_id = parse_filename(filename.as_ref());
-            let mut replace_transaction: ShardStateReplaceTransaction<'_> =
-                ShardStateReplaceTransaction::new(
-                    &db,
-                    &download_dir,
-                    &cells_storage,
-                    &tracker,
-                    &block_id,
-                )
-                .context("Failed to create ShardStateReplaceTransaction")?;
 
-            {
-                let data = std::fs::read(file.path())?;
-                let _state: everscale_types::models::ShardStateUnsplit =
-                    everscale_types::boc::BocRepr::decode(data)?;
-            }
+            let mut store_state =
+                StoreStateRaw::new(&block_id, &db, &download_dir, &cells_storage, &tracker)
+                    .context("Failed to create ShardStateReplaceTransaction")?;
 
             let file = std::fs::File::open(file.path())?;
             let mut file = BufReader::new(file);
@@ -657,13 +631,13 @@ mod test {
                 }
 
                 let packet = buffer[..bytes_read].to_vec();
-                replace_transaction.process_packet(packet, &mut pg)?;
+                store_state.process_part(packet, &mut pg)?;
             }
 
             let mut pg = ProgressBar::builder("processing state")
                 .with_mapper(|x| bytesize::to_string(x, false))
                 .build();
-            replace_transaction.finalize(block_id, &mut pg)?;
+            store_state.finalize(&mut pg)?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
@@ -685,7 +659,7 @@ mod test {
             let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
 
             let mut batch = WriteBatch::default();
-            cell_storage.remove_cell(&mut batch, &bump, cell.hash(MAX_LEVEL))?;
+            cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             //execute batch
             db.raw().write_opt(batch, db.cells.write_config())?;

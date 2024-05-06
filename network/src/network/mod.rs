@@ -373,7 +373,7 @@ fn bind_socket_to_addr<T: ToSocketAddrs>(bind_address: T) -> Result<std::net::Ud
             return Ok(s.into());
         }
     }
-    return Err(err);
+    Err(err)
 }
 
 #[derive(thiserror::Error, Debug)]

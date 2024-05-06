@@ -333,7 +333,7 @@ impl<'de> Visitor<'de> for HexVisitor {
     }
 
     fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
-        hex::decode(value).map_err(|_| E::invalid_type(serde::de::Unexpected::Str(value), &self))
+        hex::decode(value).map_err(|_e| E::invalid_type(serde::de::Unexpected::Str(value), &self))
     }
 
     fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
