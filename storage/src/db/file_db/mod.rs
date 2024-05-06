@@ -1,7 +1,12 @@
+#![allow(clippy::disallowed_methods)]
+#![allow(clippy::disallowed_types)] // it's wrapper around Files so
+
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use anyhow::{Context, Result};
 
 pub use self::mapped_file::MappedFile;
 pub use self::temp_file::TempFile;
@@ -13,7 +18,21 @@ mod temp_file;
 pub struct FileDb(Arc<FileDbInner>);
 
 impl FileDb {
-    pub fn new<P>(root: P) -> Self
+    /// Creates a new `FileDb` instance.
+    /// If the `root` directory does not exist, it will be created.
+    pub fn new<P>(root: P) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        std::fs::create_dir_all(root.as_ref())
+            .with_context(|| format!("failed to create {}", root.as_ref().display()))?;
+        Ok(Self(Arc::new(FileDbInner {
+            base_dir: root.as_ref().to_path_buf(),
+        })))
+    }
+
+    /// Creates a new `FileDb` without creating the root directory tree
+    pub fn new_readonly<P>(root: P) -> Self
     where
         P: AsRef<Path>,
     {
@@ -26,7 +45,7 @@ impl FileDb {
         &self.0.base_dir
     }
 
-    pub fn ensure_exists(&self) -> std::io::Result<()> {
+    pub fn create_if_not_exists(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.0.base_dir)
     }
 
@@ -46,10 +65,19 @@ impl FileDb {
         }
     }
 
-    pub fn subdir<P: AsRef<Path>>(&self, rel_path: P) -> Self {
+    /// Creates `FileDb` instance for a subdirectory of the current one.
+    /// **Note**: The subdirectory will not be created if it does not exist.
+    /// Use `create_subdir` to create it.
+    pub fn subdir_readonly<P: AsRef<Path>>(&self, rel_path: P) -> Self {
         Self(Arc::new(FileDbInner {
             base_dir: self.0.base_dir.join(rel_path),
         }))
+    }
+
+    /// Creates `FileDb` instance for a subdirectory of the current one.
+    /// The subdirectory will be created if it does not exist.
+    pub fn create_subdir<P: AsRef<Path>>(&self, rel_path: P) -> Result<Self> {
+        Self::new(self.0.base_dir.join(rel_path))
     }
 
     pub fn file_exists<P: AsRef<Path>>(&self, rel_path: P) -> bool {
@@ -72,24 +100,27 @@ pub struct FileBuilder {
 }
 
 impl FileBuilder {
-    pub fn open(&self) -> std::io::Result<File> {
-        let file = self.options.open(&self.path)?;
+    pub fn open(&self) -> Result<File> {
+        let file = self
+            .options
+            .open(&self.path)
+            .with_context(|| format!("failed to open {}", self.path.display()))?;
         if let Some(prealloc) = self.prealloc {
             alloc_file(&file, prealloc)?;
         }
         Ok(file)
     }
 
-    pub fn open_as_temp(&self) -> std::io::Result<TempFile> {
+    pub fn open_as_temp(&self) -> Result<TempFile> {
         let file = self.open()?;
         Ok(TempFile::new(self.path.clone(), file))
     }
 
-    pub fn open_as_mapped(&self) -> std::io::Result<MappedFile> {
-        match self.prealloc {
-            Some(length) => MappedFile::new(&self.path, length),
-            None => MappedFile::from_existing_file(self.open()?),
-        }
+    pub fn open_as_mapped(&self) -> Result<MappedFile> {
+        Ok(match self.prealloc {
+            Some(length) => MappedFile::new(&self.path, length)?,
+            None => MappedFile::from_existing_file(self.open()?)?,
+        })
     }
 
     pub fn append(&mut self, append: bool) -> &mut Self {
@@ -125,6 +156,10 @@ impl FileBuilder {
     pub fn prealloc(&mut self, prealloc: usize) -> &mut Self {
         self.prealloc = Some(prealloc);
         self
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 

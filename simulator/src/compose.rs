@@ -173,7 +173,8 @@ impl ComposeRunner {
     pub fn get_running_nodes_list(&self) -> Result<Vec<String>> {
         let docker_compose_command = vec!["config".to_string(), "--services".to_string()];
         let output = self.execute_compose_command(&docker_compose_command)?;
-        let x = String::from_utf8(output.stdout)?.trim()
+        let x = String::from_utf8(output.stdout)?
+            .trim()
             .split("\n")
             .map(|x| x.to_string())
             .collect();

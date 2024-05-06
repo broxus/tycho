@@ -22,5 +22,7 @@ rand = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+tycho-util = { workspace = true }
+
 [lints]
 workspace = true

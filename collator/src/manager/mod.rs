@@ -678,7 +678,7 @@ where
                 let mut test_subset = vec![];
                 for (i, keypair) in self.config.test_validators_keypairs.iter().enumerate() {
                     let val_descr = &subset[i];
-                    test_subset.push(ValidatorDescription {
+                    test_subset.push(everscale_types::models::ValidatorDescription {
                         public_key: keypair.public_key.to_bytes().into(),
                         adnl_addr: val_descr.adnl_addr,
                         weight: val_descr.weight,

@@ -44,12 +44,11 @@ impl ShardStateStorage {
         block_storage: Arc<BlockStorage>,
         cache_size_bytes: u64,
     ) -> Result<Self> {
-        let downloads_dir = files_dir.subdir(DOWNLOADS_DIR);
-        downloads_dir.ensure_exists()?;
+        let downloads_dir = files_dir.create_subdir(DOWNLOADS_DIR)?;
 
         let cell_storage = CellStorage::new(db.clone(), cache_size_bytes);
 
-        let res = Self {
+        Ok(Self {
             db,
             block_handle_storage,
             block_storage,
@@ -59,10 +58,7 @@ impl ShardStateStorage {
             min_ref_mc_state: Default::default(),
             max_new_mc_cell_count: AtomicUsize::new(0),
             max_new_sc_cell_count: AtomicUsize::new(0),
-        };
-
-        // Done
-        Ok(res)
+        })
     }
 
     pub fn metrics(&self) -> ShardStateStorageMetrics {
@@ -97,47 +93,61 @@ impl ShardStateStorage {
             return Ok(false);
         }
 
-        let block_id = handle.id();
-        let cell_id = state.root_cell().repr_hash();
-
-        let mut batch = weedb::rocksdb::WriteBatch::default();
+        let block_id = *handle.id();
+        let root_cell = state.root_cell().clone();
 
         let _gc_lock = self.gc_lock.lock().await;
 
-        // todo: spawn_blocking
-        let len = self
-            .cell_storage
-            .store_cell(&mut batch, state.root_cell().clone())?;
+        let raw_db = self.db.raw().clone();
+        let cf = self.db.shard_states.get_unbounded_cf();
+        let cell_storage = self.cell_storage.clone();
+        let block_handle_storage = self.block_handle_storage.clone();
+        let handle = handle.clone();
 
-        if block_id.shard.is_masterchain() {
-            self.max_new_mc_cell_count.fetch_max(len, Ordering::Release);
-        } else {
-            self.max_new_sc_cell_count.fetch_max(len, Ordering::Release);
-        }
+        let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+            let root_hash = *root_cell.repr_hash();
 
-        let mut value = [0; 32 * 3];
-        value[..32].copy_from_slice(cell_id.as_slice());
-        value[32..64].copy_from_slice(block_id.root_hash.as_slice());
-        value[64..96].copy_from_slice(block_id.file_hash.as_slice());
+            let mut batch = rocksdb::WriteBatch::default();
 
-        batch.put_cf(
-            &self.db.shard_states.cf(),
-            BlockIdShort {
-                shard: block_id.shard,
-                seqno: block_id.seqno,
+            let (pending_op, new_cell_count) = cell_storage.store_cell(&mut batch, root_cell)?;
+
+            let mut value = [0; 32 * 3];
+            value[..32].copy_from_slice(root_hash.as_slice());
+            value[32..64].copy_from_slice(block_id.root_hash.as_slice());
+            value[64..96].copy_from_slice(block_id.file_hash.as_slice());
+
+            batch.put_cf(
+                &cf.bound(),
+                BlockIdShort {
+                    shard: block_id.shard,
+                    seqno: block_id.seqno,
+                }
+                .to_vec(),
+                value,
+            );
+
+            raw_db.write(batch)?;
+
+            let updated = handle.meta().set_has_state();
+            if updated {
+                block_handle_storage.store_handle(&handle);
             }
-            .to_vec(),
-            value,
-        );
 
-        self.db.raw().write(batch)?;
-
-        Ok(if handle.meta().set_has_state() {
-            self.block_handle_storage.store_handle(handle);
-            true
-        } else {
-            false
+            // Ensure that pending operation guard is dropped after the batch is written
+            drop(pending_op);
+            Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
+        .await??;
+
+        let count = if block_id.shard.is_masterchain() {
+            &self.max_new_mc_cell_count
+        } else {
+            &self.max_new_sc_cell_count
+        };
+
+        count.fetch_max(new_cell_count, Ordering::Release);
+
+        Ok(updated)
     }
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
@@ -219,11 +229,14 @@ impl ShardStateStorage {
             let mut batch = weedb::rocksdb::WriteBatch::default();
             {
                 let _guard = self.gc_lock.lock().await;
-                let total = self
+                let (pending_op, total) = self
                     .cell_storage
                     .remove_cell(&mut batch, &alloc, root_hash)?;
                 batch.delete_cf(&shard_states_cf.bound(), key);
                 raw.write_opt(batch, cells_write_options)?;
+
+                // Ensure that pending operation guard is dropped after the batch is written
+                drop(pending_op);
 
                 removed_cells += total;
                 tracing::debug!(

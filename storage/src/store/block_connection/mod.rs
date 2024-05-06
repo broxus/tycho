@@ -103,7 +103,7 @@ where
         handle.id().root_hash.as_slice(),
         write_block_id_le(block_id),
     )
-    .unwrap()
+    .unwrap();
 }
 
 fn load_block_connection_impl<T>(db: &Table<T>, block_id: &BlockId) -> Option<BlockId>

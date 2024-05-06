@@ -29,9 +29,9 @@ pub struct Storage {
 
 impl Storage {
     pub fn new(config: StorageConfig) -> Result<Self> {
-        let root = FileDb::new(&config.root_dir);
+        let root = FileDb::new(&config.root_dir)?;
 
-        let files_db = root.subdir(FILES_SUBDIR);
+        let files_db = root.create_subdir(FILES_SUBDIR)?;
         let kv_db = Db::open(config.root_dir.join(DB_SUBDIR), config.db_config)
             .context("failed to open a rocksdb")?;
 
