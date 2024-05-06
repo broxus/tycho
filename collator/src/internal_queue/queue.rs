@@ -8,7 +8,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-pub trait Queue<SS, PS>
+#[trait_variant::make(Queue: Send)]
+pub trait LocalQueue<SS, PS>
 where
     SS: StateSnapshot + 'static,
     PS: StateSnapshot + 'static,
@@ -24,6 +25,7 @@ where
         diff_id: &BlockIdShort,
     ) -> Result<Option<Arc<QueueDiff>>, QueueError>;
 }
+
 pub struct QueueImpl<S, P, SS, PS>
 where
     S: SessionState<SS>,
@@ -39,10 +41,10 @@ where
 
 impl<S, P, SS, PS> Queue<SS, PS> for QueueImpl<S, P, SS, PS>
 where
-    S: SessionState<SS>,
-    P: PersistentState<PS>,
-    SS: StateSnapshot + 'static,
-    PS: StateSnapshot + 'static,
+    S: SessionState<SS> + Send,
+    P: PersistentState<PS> + Send + Sync,
+    SS: StateSnapshot + 'static + Send + Sync,
+    PS: StateSnapshot + 'static + Send + Sync,
 {
     fn new(base_shard: ShardIdent) -> Self {
         let session_state = Mutex::new(S::new(base_shard));
@@ -106,8 +108,8 @@ mod tests {
             PersistentStateImpl,
             SessionStateSnapshot,
             PersistentStateSnapshot,
-        > = QueueImpl::new(base_shard);
+        > = <QueueImpl<_, _, _, _> as Queue<_, _>>::new(base_shard);
 
-        queue.split_shard(&base_shard).await.unwrap();
+        Queue::split_shard(&queue, &base_shard).await.unwrap();
     }
 }

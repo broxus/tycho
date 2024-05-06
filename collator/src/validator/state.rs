@@ -5,7 +5,7 @@ use anyhow::{bail, Context};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};

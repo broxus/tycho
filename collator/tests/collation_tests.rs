@@ -96,7 +96,7 @@ async fn test_collation_process_on_stubs() {
 
     let manager = CollationManager::start(
         config,
-        Arc::new(MessageQueueAdapterStdImpl::new()),
+        Arc::new(MessageQueueAdapterStdImpl::default()),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
         |listener| MempoolAdapterStdImpl::new(listener),
         ValidatorStdImplFactory {

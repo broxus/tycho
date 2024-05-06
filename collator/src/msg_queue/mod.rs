@@ -1,3 +1,6 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -56,8 +59,8 @@ pub struct MessageQueueAdapterStdImpl {
     msg_queue: MsgQueueStdImpl,
 }
 
-impl MessageQueueAdapterStdImpl {
-    pub fn new() -> Self {
+impl Default for MessageQueueAdapterStdImpl {
+    fn default() -> Self {
         let base_shard = ShardIdent::new_full(0);
         Self {
             msg_queue: MsgQueueStdImpl::new(base_shard),

@@ -4,7 +4,6 @@ use anyhow::{bail, Result};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use sha2::digest::typenum::private::IsGreaterPrivate;
 use sha2::Digest;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::state::ShardStateStuff;
@@ -433,8 +432,6 @@ impl CollatorStdImpl {
             collator_descr,
             timer.elapsed().as_millis(),
         );
-
-        // do not need to calc out_queue_updates
 
         Ok(state_update)
     }

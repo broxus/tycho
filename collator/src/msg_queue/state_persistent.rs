@@ -20,10 +20,10 @@ where
     ST: PersistentStateService,
     DB: StorageService,
 {
-    fn some_internal_method_for_persistent_state(&mut self) -> Result<()> {
+    fn _some_internal_method_for_persistent_state(&mut self) -> Result<()> {
         todo!()
     }
-    pub(super) fn some_module_internal_method_for_persistent_state(&mut self) -> Result<()> {
+    pub(super) fn _some_module_internal_method_for_persistent_state(&mut self) -> Result<()> {
         todo!()
     }
 }
