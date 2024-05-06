@@ -99,7 +99,7 @@ impl PersistentStateStorage {
 
             file.seek(SeekFrom::Start(offset)).with_context(|| {
                 format!(
-                    "failed to seek state file offset. Path: {}",
+                    "failed to seek state file offset, path: {}",
                     file_path.display()
                 )
             })?;
@@ -113,7 +113,7 @@ impl PersistentStateStorage {
             loop {
                 match buf_reader.read(&mut result[result_cursor..]) {
                     Ok(bytes_read) => {
-                        tracing::info!(bytes_read, "Reading state file");
+                        tracing::debug!(bytes_read, "reading state file");
                         if bytes_read == 0 || bytes_read == size as usize {
                             break;
                         }
@@ -127,14 +127,15 @@ impl PersistentStateStorage {
                     }
                 }
             }
-            tracing::info!(
-                "Finished reading buffer after: {} ms",
+            tracing::debug!(
+                "finished reading buffer after: {} ms",
                 now.elapsed().as_millis()
             );
 
             Ok(result.freeze())
         })
-        .await?
+        .await
+        .unwrap()
     }
 
     pub fn state_exists(&self, mc_block_id: &BlockId, block_id: &BlockId) -> bool {
