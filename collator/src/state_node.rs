@@ -156,9 +156,6 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         let mut to_split = Vec::new();
 
-        let mut block_mapping_guard = self.blocks_mapping.lock().await;
-        let block_id = block_mapping_guard.remove(&block_id).unwrap_or(block_id);
-
         let shard = block_id.shard;
         let seqno = block_id.seqno;
 
