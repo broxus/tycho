@@ -4,6 +4,9 @@ default:
 install_fmt:
     rustup component add rustfmt --toolchain nightly
 
+install_lychee:
+    cargo install lychee
+
 
 integration_test_dir := justfile_directory() / ".scratch/integration_tests"
 integration_test_base_url := "https://tycho-test.broxus.cc"
@@ -45,7 +48,10 @@ fmt: install_fmt
     cargo +nightly fmt --all
 
 # ci checks
-ci: fmt lint docs test
+ci: check_dev_docs check_format lint docs test
+
+check_dev_docs:
+    lychee {{justfile_directory()}}/docs
 
 check_format: install_fmt
     cargo +nightly fmt --all -- --check

@@ -22,6 +22,13 @@ To interactivly choose what to run:
 just
 ```
 
+To format code:
+
+```bash
+just fmt
+```
+
+
 ## Prebuilt RocksDB
 
 By default, we compile RocksDB (a C++ project) from source during the build.
@@ -49,3 +56,4 @@ git checkout v8.10.0
 make -j 10 static_lib
 export ROCKSDB_LIB_DIR=/path/to/rocksdb
 ```
+
