@@ -4,7 +4,8 @@ use crate::internal_queue::types::ext_types_stubs::EnqueuedMessage;
 use everscale_types::models::BlockIdShort;
 use std::sync::Arc;
 
-pub trait PersistentState<S>
+#[trait_variant::make(PersistentState: Send)]
+pub trait LocalPersistentState<S>
 where
     S: StateSnapshot,
 {

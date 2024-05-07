@@ -494,7 +494,7 @@ impl Node {
 
         let collation_manager = CollationManager::start(
             collation_config,
-            Arc::new(MessageQueueAdapterStdImpl::new()),
+            Arc::new(MessageQueueAdapterStdImpl::default()),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
             MempoolAdapterStdImpl::new,
             ValidatorStdImplFactory {
@@ -591,7 +591,7 @@ impl BlockProvider for CollatorBlockProvider {
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        self.adapter.wait_for_block(prev_block_id)
+        self.adapter.wait_for_block_next(prev_block_id)
     }
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {

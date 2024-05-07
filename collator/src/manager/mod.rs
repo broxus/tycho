@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValidatorDescription, ValueFlow};
+use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
@@ -112,7 +112,7 @@ where
     CF: CollatorFactory,
     V: Validator,
 {
-    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()> {
+    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
         //TODO: remove accepted block from cache
         //STUB: do nothing, currently we remove block from cache when it sent to state node
         Ok(())
@@ -453,7 +453,7 @@ where
 
     /// * TRUE - provided `mc_block_id` is before or equal to last processed
     /// * FALSE - provided `mc_block_id` is ahead of last processed
-    fn check_if_mc_block_not_ahead_last_processed(&self, mc_block_id: &BlockId) -> bool {
+    fn _check_if_mc_block_not_ahead_last_processed(&self, mc_block_id: &BlockId) -> bool {
         //TODO: consider block shard?
         let last_processed_mc_block_id_opt = self.last_processed_mc_block_id();
         let is_not_ahead = matches!(last_processed_mc_block_id_opt, Some(last_processed_mc_block_id)
@@ -858,8 +858,7 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        let _handle = self
-            .validator
+        self.validator
             .validate(candidate_id, session_info.seqno())
             .await?;
 

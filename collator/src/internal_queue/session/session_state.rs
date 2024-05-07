@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub trait SessionState<S>
+#[trait_variant::make(SessionState: Send)]
+pub trait LocalSessionState<S>
 where
     S: StateSnapshot,
 {

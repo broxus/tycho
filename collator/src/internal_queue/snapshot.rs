@@ -40,7 +40,7 @@ pub struct ShardRange {
     pub to_lt: Option<Lt>,
 }
 
-pub trait StateSnapshot {
+pub trait StateSnapshot: Send {
     fn get_outgoing_messages_by_shard(
         &self,
         shards: &mut HashMap<ShardIdent, ShardRange>,

@@ -5,7 +5,7 @@ use anyhow::{bail, Context};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
@@ -220,7 +220,7 @@ impl SessionInfo {
         block_id_short: BlockIdShort,
         signatures: Vec<([u8; 32], [u8; 64])>,
         listeners: &[Arc<dyn ValidatorEventListener>],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
         debug!(
             target: tracing_targets::VALIDATOR,
             "Processing signatures for block in state {:?}",
@@ -231,7 +231,7 @@ impl SessionInfo {
             .entry(block_id_short)
             .or_insert_with(|| {
                 (
-                    BlockId::default(), // Default should be replaced with actual block retrieval logic if necessary
+                    BlockId::default(),
                     SignatureMaps {
                         valid_signatures: FastHashMap::default(),
                         invalid_signatures: FastHashMap::default(),
@@ -246,7 +246,7 @@ impl SessionInfo {
                 "Validation event already dispatched for block {:?}",
                 block_id_short
             );
-            return Ok(());
+            return Ok(true);
         }
 
         // Drop the guard to allow mutable access below
@@ -302,10 +302,12 @@ impl SessionInfo {
                 Self::notify_listeners(entry.0, event, listeners);
             }
 
-            ValidationResult::Insufficient(_, _) => {}
+            ValidationResult::Insufficient(total_valid_weight, valid_weight_threshold) => {
+                debug!(total_valid_weight, valid_weight_threshold);
+            }
         }
 
-        Ok(())
+        Ok(validation_status.is_finished())
     }
 
     async fn validation_status(&self, signature_maps: &SignatureMaps) -> ValidationResult {

@@ -22,7 +22,7 @@ tokio = { workspace = true, features = ["macros", "rt", "signal"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
+trait-variant = { workspace = true }
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
 
@@ -32,6 +32,7 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
+
 
 [dev-dependencies]
 tempfile = { workspace = true }

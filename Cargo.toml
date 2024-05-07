@@ -83,6 +83,7 @@ tracing = "0.1"
 tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
+trait-variant = "0.1.2"
 triomphe = "0.1.11"
 weedb = "0.1.1"
 x509-parser = "0.15"
