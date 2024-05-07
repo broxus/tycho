@@ -204,7 +204,7 @@ impl PrevData {
         let usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess);
         let observable_root = usage_tree.track(pure_prev_state_root);
         let tracker = MinRefMcStateTracker::new();
-        let observable_states = vec![ShardStateStuff::new(
+        let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
             &tracker,
