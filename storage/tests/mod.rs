@@ -71,8 +71,8 @@ async fn persistent_storage_everscale() -> Result<()> {
         BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap()),
     );
 
-    let zerostate = ShardStateStuff::new(
-        block_id,
+    let zerostate = ShardStateStuff::from_root(
+        &block_id,
         zero_state_raw.cell.clone(),
         storage.shard_state_storage().min_ref_mc_state(),
     )?;

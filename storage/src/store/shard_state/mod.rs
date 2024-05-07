@@ -9,7 +9,7 @@ use tycho_block_util::block::*;
 use tycho_block_util::state::*;
 
 use self::cell_storage::*;
-use self::replace_transaction::ShardStateReplaceTransaction;
+use self::store_state_raw::StoreStateRaw;
 
 use crate::db::*;
 use crate::util::*;
@@ -17,8 +17,8 @@ use crate::{models::BlockHandle, BlockHandleStorage, BlockStorage};
 
 mod cell_storage;
 mod entries_buffer;
-mod replace_transaction;
 mod shard_state_reader;
+mod store_state_raw;
 
 const DOWNLOADS_DIR: &str = "downloads";
 
@@ -150,25 +150,21 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
-        let cell_id = self.load_state_root(block_id.as_short_id())?;
-        let cell = self.cell_storage.load_cell(cell_id)?;
-
-        ShardStateStuff::new(
-            *block_id,
-            Cell::from(cell as Arc<_>),
-            &self.min_ref_mc_state,
-        )
-    }
-
-    pub fn begin_replace(&'_ self, block_id: &BlockId) -> Result<ShardStateReplaceTransaction<'_>> {
-        ShardStateReplaceTransaction::new(
+    pub fn begin_store_state_raw(&'_ self, block_id: &BlockId) -> Result<StoreStateRaw<'_>> {
+        StoreStateRaw::new(
+            block_id,
             &self.db,
             &self.downloads_dir,
             &self.cell_storage,
             &self.min_ref_mc_state,
-            block_id,
         )
+    }
+
+    pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+        let cell_id = self.load_state_root(block_id.as_short_id())?;
+        let cell = self.cell_storage.load_cell(cell_id)?;
+
+        ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }
 
     pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<TopBlocks> {

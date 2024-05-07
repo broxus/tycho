@@ -619,7 +619,7 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
         file_hash,
     };
 
-    ShardStateStuff::new(block_id, root, &tracker)
+    ShardStateStuff::from_root(&block_id, root, &tracker)
 }
 
 fn make_shard_state(
@@ -647,7 +647,7 @@ fn make_shard_state(
         file_hash,
     };
 
-    ShardStateStuff::new(block_id, root, &tracker)
+    ShardStateStuff::from_root(&block_id, root, &tracker)
 }
 
 fn supported_capabilities() -> u64 {

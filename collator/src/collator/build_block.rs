@@ -115,7 +115,7 @@ impl CollatorStdImpl {
 
         // build new state
         let global_id = prev_shard_data.observable_states()[0].state().global_id;
-        let mut new_state = ShardStateUnsplit {
+        let mut new_state = Box::new(ShardStateUnsplit {
             global_id,
             shard_ident: new_block_info.shard,
             seqno: new_block_info.seqno,
@@ -139,7 +139,7 @@ impl CollatorStdImpl {
             custom: mc_state_extra.as_ref().map(Lazy::new).transpose()?,
             #[cfg(feature = "venom")]
             shard_block_refs: None,
-        };
+        });
 
         new_state
             .total_validator_fees
@@ -242,7 +242,7 @@ impl CollatorStdImpl {
         );
 
         let new_state_stuff = ShardStateStuff::from_state_and_root(
-            new_block_id,
+            &new_block_id,
             new_state,
             new_state_root,
             &self.state_tracker,

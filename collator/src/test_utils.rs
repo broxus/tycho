@@ -74,7 +74,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let master_file_hash: HashBytes = sha2::Sha256::digest(master_bytes).into();
     let master_root = Boc::decode(master_bytes)?;
     let master_root_hash = *master_root.repr_hash();
-    let master_state = master_root.parse::<ShardStateUnsplit>()?;
+    let master_state = master_root.parse::<Box<ShardStateUnsplit>>()?;
 
     let mc_state_extra = master_state.load_custom()?;
     let mc_state_extra = mc_state_extra.unwrap();
@@ -92,7 +92,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
         file_hash: master_file_hash,
     };
     let master_state_stuff =
-        ShardStateStuff::from_state_and_root(master_id, master_state, master_root, &tracker)?;
+        ShardStateStuff::from_state_and_root(&master_id, master_state, master_root, &tracker)?;
 
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
         &master_id,
@@ -111,7 +111,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     // shard state
     let shard_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_0:80.boc");
     let shard_root = Boc::decode(shard_bytes)?;
-    let shard_state = shard_root.parse::<ShardStateUnsplit>()?;
+    let shard_state = shard_root.parse::<Box<ShardStateUnsplit>>()?;
     let shard_id = BlockId {
         shard: shard_info.0,
         seqno: shard_info.1.seqno,
@@ -119,7 +119,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
         file_hash: shard_info.1.file_hash,
     };
     let shard_state_stuff =
-        ShardStateStuff::from_state_and_root(shard_id, shard_state, shard_root, &tracker)?;
+        ShardStateStuff::from_state_and_root(&shard_id, shard_state, shard_root, &tracker)?;
 
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
         &shard_id,

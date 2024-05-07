@@ -177,7 +177,7 @@ where
             .await
             .context("Failed to join blocking task")?
             .context("Failed to apply state update")?;
-        let new_state = ShardStateStuff::new(*block.id(), new_state, mc_state_tracker)
+        let new_state = ShardStateStuff::from_root(block.id(), new_state, mc_state_tracker)
             .context("Failed to create new state")?;
 
         let state_storage = self.inner.storage.shard_state_storage();
@@ -289,7 +289,7 @@ pub mod test {
             shard: ShardIdent::MASTERCHAIN,
             seqno: 0,
         };
-        let master = ShardStateStuff::deserialize_zerostate(master_id, master).unwrap();
+        let master = ShardStateStuff::deserialize_zerostate(&master_id, master).unwrap();
 
         // Parse block id
         let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
@@ -319,7 +319,7 @@ pub mod test {
         };
 
         //store workchain zerostate
-        let shard = ShardStateStuff::deserialize_zerostate(shard_id, shard).unwrap();
+        let shard = ShardStateStuff::deserialize_zerostate(&shard_id, shard).unwrap();
         let (handle, _) = storage.block_handle_storage().create_or_load_handle(
             &shard_id,
             BlockMetaData::zero_state(shard.state().gen_utime),

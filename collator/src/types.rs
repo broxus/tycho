@@ -89,27 +89,6 @@ impl BlockCandidate {
     }
 }
 
-pub trait ShardStateStuffExt {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
-        let root = CellBuilder::build_from(&shard_state)?;
-        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
-    }
-}
-
 #[derive(Clone)]
 pub enum OnValidatedBlockEvent {
     ValidByState,
