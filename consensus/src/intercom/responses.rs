@@ -15,7 +15,7 @@ pub struct PointResponse {
     pub current_round: RoundId,
     pub point: Option<Point>,
 }
-//PointLast(Option<Point>),
+// PointLast(Option<Point>),
 #[derive(Serialize, Deserialize, Debug)]
 pub struct VertexResponse {
     pub current_round: RoundId,

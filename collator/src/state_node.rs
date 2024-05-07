@@ -3,12 +3,10 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tokio::sync::{broadcast, Mutex};
-
-use tycho_block_util::block::BlockStuffAug;
-use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, Storage};
 
 use crate::tracing_targets;

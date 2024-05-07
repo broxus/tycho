@@ -85,12 +85,9 @@ impl Node {
         Ok(Service {
             entrypoint,
             image: "tycho-network".to_string(),
-            networks: HashMap::from([(
-                "default".to_string(),
-                ServiceNetwork {
-                    ipv4_address: Some(self.ip.to_string()),
-                },
-            )]),
+            networks: HashMap::from([("default".to_string(), ServiceNetwork {
+                ipv4_address: Some(self.ip.to_string()),
+            })]),
             stop_grace_period: "1s".to_string(),
             stop_signal: "KILL".to_string(),
             volumes,

@@ -9,16 +9,15 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use self::types::{McData, PrevData, WorkingState};
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
-use crate::method_to_async_task_closure;
 use crate::msg_queue::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
-use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
 };
+use crate::{method_to_async_task_closure, tracing_targets};
 
 mod build_block;
 mod do_collate;
@@ -412,7 +411,7 @@ impl CollatorStdImpl {
         prev_states: Vec<ShardStateStuff>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<WorkingState> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
         let mc_data = McData::build(mc_state)?;
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
@@ -432,7 +431,7 @@ impl CollatorStdImpl {
         _mc_data: &McData,
         _prev_states: &[ShardStateStuff],
     ) -> Result<()> {
-        //TODO: make real implementation
+        // TODO: make real implementation
         // refer to the old node impl:
         //  Collator::unpack_last_state()
         Ok(())
@@ -442,9 +441,9 @@ impl CollatorStdImpl {
     /// 2. Await next anchor via mempool adapter
     /// 3. Store anchor in cache and return it
     async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
-        //STUB: take 0 as last imported without checking `externals_processed_upto`
+        // STUB: take 0 as last imported without checking `externals_processed_upto`
         let prev_anchor_id = self.last_imported_anchor_id.unwrap_or(0);
 
         let next_anchor = self.mpool_adapter.get_next_anchor(prev_anchor_id).await?;
@@ -475,9 +474,9 @@ impl CollatorStdImpl {
 
     /// (TODO) Should consider parallel processing for different accounts
     fn get_next_external(&mut self) -> Option<Arc<OwnedMessage>> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
-        //STUB: just remove first anchor from cache to force next anchor import on `try_collate` run
+        // STUB: just remove first anchor from cache to force next anchor import on `try_collate` run
         self.anchors_cache.pop_first();
 
         None
@@ -485,8 +484,8 @@ impl CollatorStdImpl {
 
     /// (TODO) TRUE - when internal messages queue has internals
     fn has_internals(&self) -> Result<bool> {
-        //TODO: make real implementation
-        //STUB: always return false emulating that all internals were processed in prev block
+        // TODO: make real implementation
+        // STUB: always return false emulating that all internals were processed in prev block
         Ok(false)
     }
 
@@ -513,7 +512,7 @@ impl CollatorStdImpl {
             self.collator_descr(),
         );
 
-        //TODO: fix the work with internals
+        // TODO: fix the work with internals
 
         // check internals
         let has_internals = self.has_internals()?;

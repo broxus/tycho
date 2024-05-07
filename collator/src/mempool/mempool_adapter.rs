@@ -1,21 +1,15 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, RwLock},
-};
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-
-use everscale_types::{
-    cell::{CellBuilder, CellSliceRange, HashBytes},
-    models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr},
-};
+use everscale_types::cell::{CellBuilder, CellSliceRange, HashBytes};
+use everscale_types::models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr};
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
 
-use crate::tracing_targets;
-
 use super::types::{MempoolAnchor, MempoolAnchorId};
+use crate::tracing_targets;
 
 #[cfg(test)]
 #[path = "tests/mempool_adapter_tests.rs"]
@@ -87,7 +81,7 @@ impl MempoolAdapterStdImpl {
     pub fn new(listener: Arc<dyn MempoolEventListener>) -> Self {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
-        //TODO: make real implementation, currently runs stub task
+        // TODO: make real implementation, currently runs stub task
         //      that produces the repeating set of anchors
         let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
 
@@ -134,7 +128,7 @@ impl MempoolAdapterStdImpl {
 #[async_trait]
 impl MempoolAdapter for MempoolAdapterStdImpl {
     async fn enqueue_process_new_mc_block_state(&self, mc_state: ShardStateStuff) -> Result<()> {
-        //TODO: make real implementation, currently does nothing
+        // TODO: make real implementation, currently does nothing
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
             "STUB: New masterchain state (block_id: {}) processing enqueued to mempool",
@@ -147,7 +141,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         &self,
         anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>> {
-        //TODO: make real implementation, currently only return anchor from local cache
+        // TODO: make real implementation, currently only return anchor from local cache
         let res = {
             let anchors_cache_r = self
                 ._stub_anchors_cache
@@ -177,7 +171,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     }
 
     async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
-        //TODO: make real implementation, currently only return anchor from local cache
+        // TODO: make real implementation, currently only return anchor from local cache
 
         let mut stub_first_attempt = true;
         let mut request_timer = std::time::Instant::now();

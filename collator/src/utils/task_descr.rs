@@ -5,14 +5,14 @@ use tokio::sync::oneshot;
 pub struct TaskDesc<F: ?Sized, R> {
     id: u64,
     descr: String,
-    closure: Box<F>,                      //closure for execution
-    creation_time: std::time::SystemTime, //time of task creation
+    closure: Box<F>,                      // closure for execution
+    creation_time: std::time::SystemTime, // time of task creation
     responder: Option<oneshot::Sender<R>>,
 }
 
 impl<F: ?Sized, R> TaskDesc<F, R> {
     pub fn create(descr: &str, closure: Box<F>) -> Self {
-        //TODO: better to use global atomic counter
+        // TODO: better to use global atomic counter
         let id = std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -94,7 +94,7 @@ where
         }
     }
     pub async fn try_recv(self) -> anyhow::Result<R> {
-        //TODO: awaiting error and error in result are merged here, need to fix
+        // TODO: awaiting error and error in result are merged here, need to fix
         self.inner_receiver.await?
     }
 
@@ -121,7 +121,7 @@ where
                 Ok(res) => {
                     if let Err(e) = process_callback(res).await {
                         tracing::error!("Error processing task response: {e:?}");
-                        //TODO: may be unwind panic?
+                        // TODO: may be unwind panic?
                     }
                 }
                 Err(err) => tracing::error!("Error in task result or on receiving: {err:?}"),
@@ -149,7 +149,7 @@ where
         }
     }
     pub async fn try_recv(self) -> anyhow::Result<T> {
-        //TODO: awaiting error and error in result are merged here, need to fix
+        // TODO: awaiting error and error in result are merged here, need to fix
         self.inner_receiver.await?.and_then(|res| res.try_into())
     }
 
@@ -176,7 +176,7 @@ where
                 Ok(res) => {
                     if let Err(e) = process_callback(res).await {
                         tracing::error!("Error processing task response: {e:?}");
-                        //TODO: may be unwind panic?
+                        // TODO: may be unwind panic?
                     }
                 }
                 Err(err) => tracing::error!("Error in task result or on receiving: {err:?}"),

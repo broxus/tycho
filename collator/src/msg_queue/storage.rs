@@ -2,18 +2,17 @@ use std::fmt::Debug;
 
 use anyhow::Result;
 
+use super::cache_persistent::PersistentCacheService;
 use super::queue::MessageQueueImpl;
-use super::{cache_persistent::PersistentCacheService, state_persistent::PersistentStateService};
+use super::state_persistent::PersistentStateService;
 
 pub trait StorageService: Debug + Sized {
     fn new() -> Result<Self>;
 }
 
-/*
-This part of the code contains logic of working with storage.
-
-We use partials just to separate the codebase on smaller and easier maintainable parts.
- */
+// This part of the code contains logic of working with storage.
+//
+// We use partials just to separate the codebase on smaller and easier maintainable parts.
 impl<CH, ST, DB> MessageQueueImpl<CH, ST, DB>
 where
     CH: PersistentCacheService,

@@ -1,9 +1,11 @@
-use crate::internal_queue::error::QueueError;
-use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, Lt};
-use everscale_types::models::ShardIdent;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use everscale_types::models::ShardIdent;
+
+use crate::internal_queue::error::QueueError;
+use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, Lt};
 
 #[derive(Eq)]
 pub struct MessageWithSource {

@@ -10,10 +10,10 @@ use tycho_block_util::state::*;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateRaw;
-
 use crate::db::*;
+use crate::models::BlockHandle;
 use crate::util::*;
-use crate::{models::BlockHandle, BlockHandleStorage, BlockStorage};
+use crate::{BlockHandleStorage, BlockStorage};
 
 mod cell_storage;
 mod entries_buffer;
@@ -76,9 +76,9 @@ impl ShardStateStorage {
     }
 
     // TODO: implement metrics
-    /*pub fn cache_metrics(&self) -> CacheStats {
-        self.cell_storage.cache_stats()
-    }*/
+    // pub fn cache_metrics(&self) -> CacheStats {
+    // self.cell_storage.cache_stats()
+    // }
 
     pub fn min_ref_mc_state(&self) -> &MinRefMcStateTracker {
         &self.min_ref_mc_state

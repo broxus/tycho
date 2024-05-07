@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-
 use tycho_network::{
     service_query_fn, Network, NetworkConfig, NetworkExt, PeerId, Response, ServiceRequest, Version,
 };
@@ -32,7 +31,7 @@ enum MPRequest {
 enum MPResponse {
     Broadcast(BroadcastResponse),
     Point(PointResponse),
-    //PointLast(Option<Point>),
+    // PointLast(Option<Point>),
     Vertex(VertexResponse),
     Evidence(EvidenceResponse),
     Vertices(VerticesResponse),
@@ -246,13 +245,10 @@ mod tests {
             .connect(node2.local_addr(), PeerId::wrap(&[0u8; 32]))
             .await?;
         let response = node1
-            .query(
-                &peer2,
-                tycho_network::Request {
-                    version: Version::V1,
-                    body: Bytes::from("bites"),
-                },
-            )
+            .query(&peer2, tycho_network::Request {
+                version: Version::V1,
+                body: Bytes::from("bites"),
+            })
             .await?;
         let response = parse_response(&response.body);
 

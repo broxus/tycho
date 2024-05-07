@@ -20,7 +20,7 @@ impl CollatorStdImpl {
         next_chain_time: u64,
         top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
     ) -> Result<()> {
-        //TODO: make real implementation
+        // TODO: make real implementation
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 
@@ -57,7 +57,7 @@ impl CollatorStdImpl {
         );
 
         // prepare block collation data
-        //STUB: consider split/merge in future for taking prev_block_id
+        // STUB: consider split/merge in future for taking prev_block_id
         let prev_block_id = prev_shard_data.blocks_ids()[0];
         let mut collation_data = BlockCollationData::default();
         collation_data.block_id_short = BlockIdShort {
@@ -84,7 +84,7 @@ impl CollatorStdImpl {
             }
             collation_data.set_shards(shards);
 
-            //TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
+            // TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
         }
 
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
@@ -97,11 +97,11 @@ impl CollatorStdImpl {
         )?;
         collation_data.max_lt = collation_data.start_lt + 1;
 
-        //TODO: should consider split/merge in future
+        // TODO: should consider split/merge in future
         let out_msg_queue_info = prev_shard_data.observable_states()[0]
             .state()
             .load_out_msg_queue_info()
-            .unwrap_or_default(); //TODO: should not fail there
+            .unwrap_or_default(); // TODO: should not fail there
         collation_data.out_msg_queue_stuff = OutMsgQueueInfoStuff {
             proc_info: out_msg_queue_info.proc_info,
         };
@@ -124,52 +124,50 @@ impl CollatorStdImpl {
             self.config.max_collate_threads,
         );
 
-        //STUB: just remove fisrt anchor from cache
+        // STUB: just remove fisrt anchor from cache
         let _ext_msg = self.get_next_external();
         self.has_pending_externals = false;
 
-        //STUB: do not execute transactions and produce empty block
+        // STUB: do not execute transactions and produce empty block
 
         // build block candidate and new state
         let (candidate, new_state_stuff) = self
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
 
-        /*
-        //STUB: just send dummy block to collation manager
-        let prev_blocks_ids = prev_shard_data.blocks_ids().clone();
-        let prev_block_id = prev_blocks_ids[0];
-        let collated_block_id_short = BlockIdShort {
-            shard: prev_block_id.shard,
-            seqno: prev_block_id.seqno + 1,
-        };
-        let mut builder = CellBuilder::new();
-        builder.store_bit(collated_block_id_short.shard.workchain().is_negative())?;
-        builder.store_u32(collated_block_id_short.shard.workchain().unsigned_abs())?;
-        builder.store_u64(collated_block_id_short.shard.prefix())?;
-        builder.store_u32(collated_block_id_short.seqno)?;
-        let cell = builder.build()?;
-        let hash = cell.repr_hash();
-        let collated_block_id = BlockId {
-            shard: collated_block_id_short.shard,
-            seqno: collated_block_id_short.seqno,
-            root_hash: *hash,
-            file_hash: *hash,
-        };
-        let mut new_state = prev_shard_data.pure_states()[0]
-            .state()
-            .clone();
-        new_state.seqno = collated_block_id.seqno;
-        let candidate = BlockCandidate::new(
-            collated_block_id,
-            prev_blocks_ids,
-            top_shard_blocks_ids,
-            vec![],
-            vec![],
-            collated_block_id.file_hash,
-            next_chain_time,
-        );
-        */
+        // STUB: just send dummy block to collation manager
+        // let prev_blocks_ids = prev_shard_data.blocks_ids().clone();
+        // let prev_block_id = prev_blocks_ids[0];
+        // let collated_block_id_short = BlockIdShort {
+        // shard: prev_block_id.shard,
+        // seqno: prev_block_id.seqno + 1,
+        // };
+        // let mut builder = CellBuilder::new();
+        // builder.store_bit(collated_block_id_short.shard.workchain().is_negative())?;
+        // builder.store_u32(collated_block_id_short.shard.workchain().unsigned_abs())?;
+        // builder.store_u64(collated_block_id_short.shard.prefix())?;
+        // builder.store_u32(collated_block_id_short.seqno)?;
+        // let cell = builder.build()?;
+        // let hash = cell.repr_hash();
+        // let collated_block_id = BlockId {
+        // shard: collated_block_id_short.shard,
+        // seqno: collated_block_id_short.seqno,
+        // root_hash: *hash,
+        // file_hash: *hash,
+        // };
+        // let mut new_state = prev_shard_data.pure_states()[0]
+        // .state()
+        // .clone();
+        // new_state.seqno = collated_block_id.seqno;
+        // let candidate = BlockCandidate::new(
+        // collated_block_id,
+        // prev_blocks_ids,
+        // top_shard_blocks_ids,
+        // vec![],
+        // vec![],
+        // collated_block_id.file_hash,
+        // next_chain_time,
+        // );
 
         let collation_result = BlockCollationResult {
             candidate,
@@ -283,7 +281,7 @@ impl CollatorStdImpl {
         } else {
             collation_data.value_flow.created.tokens =
                 mc_data.config().get_block_creation_reward(false)?;
-            //TODO: should check if it is good to cast `prefix_len` from u16 to u8
+            // TODO: should check if it is good to cast `prefix_len` from u16 to u8
             collation_data.value_flow.created.tokens >>=
                 collation_data.block_id_short.shard.prefix_len() as u8;
         }
@@ -297,7 +295,7 @@ impl CollatorStdImpl {
     }
 
     fn compute_minted_amount(&self, mc_data: &McData) -> Result<CurrencyCollection> {
-        //TODO: just copied from old node, needs to review
+        // TODO: just copied from old node, needs to review
         tracing::trace!("Collator ({}): compute_minted_amount", self.collator_descr);
 
         let mut to_mint = CurrencyCollection::default();

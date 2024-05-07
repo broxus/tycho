@@ -1,12 +1,14 @@
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use everscale_types::models::{BlockIdShort, ShardIdent};
+use tokio::sync::{Mutex, RwLock};
+
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::persistent::persistent_state::PersistentState;
 use crate::internal_queue::session::session_state::SessionState;
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::QueueDiff;
-use everscale_types::models::{BlockIdShort, ShardIdent};
-use std::marker::PhantomData;
-use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 
 #[trait_variant::make(Queue: Send)]
 pub trait LocalQueue<SS, PS>
@@ -92,12 +94,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use everscale_types::models::ShardIdent;
+
     use super::*;
     use crate::internal_queue::persistent::persistent_state::PersistentStateImpl;
     use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
     use crate::internal_queue::session::session_state::SessionStateImpl;
     use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
-    use everscale_types::models::ShardIdent;
 
     #[tokio::test]
     async fn test_new_queue() {

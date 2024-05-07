@@ -1,17 +1,14 @@
 use anyhow::Result;
 
+use super::cache_persistent::PersistentCacheService;
 use super::queue::MessageQueueImpl;
-use super::{
-    cache_persistent::PersistentCacheService, state_persistent::PersistentStateService,
-    storage::StorageService,
-};
+use super::state_persistent::PersistentStateService;
+use super::storage::StorageService;
 
-/*
-This code part contains the logic of messages loading to the queue state,
-including lazy loading, etc.
-
-We use partials just to separate the codebase on smaller and easier maintainable parts.
- */
+// This code part contains the logic of messages loading to the queue state,
+// including lazy loading, etc.
+//
+// We use partials just to separate the codebase on smaller and easier maintainable parts.
 impl<CH, ST, DB> MessageQueueImpl<CH, ST, DB>
 where
     CH: PersistentCacheService,

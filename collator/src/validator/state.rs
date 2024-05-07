@@ -6,6 +6,8 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, trace};
+use tycho_network::PrivateOverlay;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
@@ -13,8 +15,6 @@ use crate::validator::types::{
     BlockValidationCandidate, ValidationResult, ValidationSessionInfo, ValidatorInfo,
 };
 use crate::validator::ValidatorEventListener;
-use tycho_network::PrivateOverlay;
-use tycho_util::{FastDashMap, FastHashMap};
 
 struct SignatureMaps {
     valid_signatures: FastHashMap<HashBytes, Signature>,
@@ -119,14 +119,11 @@ impl SessionInfo {
         self.blocks_signatures
             .entry(block_header)
             .or_insert_with(|| {
-                (
-                    block,
-                    SignatureMaps {
-                        valid_signatures: FastHashMap::default(),
-                        invalid_signatures: FastHashMap::default(),
-                        event_dispatched: Mutex::new(false),
-                    },
-                )
+                (block, SignatureMaps {
+                    valid_signatures: FastHashMap::default(),
+                    invalid_signatures: FastHashMap::default(),
+                    event_dispatched: Mutex::new(false),
+                })
             });
         Ok(())
     }
@@ -230,14 +227,11 @@ impl SessionInfo {
             .blocks_signatures
             .entry(block_id_short)
             .or_insert_with(|| {
-                (
-                    BlockId::default(),
-                    SignatureMaps {
-                        valid_signatures: FastHashMap::default(),
-                        invalid_signatures: FastHashMap::default(),
-                        event_dispatched: Mutex::new(false),
-                    },
-                )
+                (BlockId::default(), SignatureMaps {
+                    valid_signatures: FastHashMap::default(),
+                    invalid_signatures: FastHashMap::default(),
+                    event_dispatched: Mutex::new(false),
+                })
             });
 
         let event_guard = entry.1.event_dispatched.lock().await;

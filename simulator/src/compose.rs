@@ -182,11 +182,9 @@ impl ComposeRunner {
 
     pub fn node_info(&self, node_index: usize) -> Result<NodeOptions> {
         let command = "cat";
-        let output = self.exec_command(
-            node_index,
-            command,
-            vec!["/options/options.json".to_string()],
-        )?;
+        let output = self.exec_command(node_index, command, vec![
+            "/options/options.json".to_string()
+        ])?;
         let node_options = serde_json::from_slice(output.stdout.as_slice())?;
         Ok(node_options)
     }
@@ -195,11 +193,10 @@ impl ComposeRunner {
         println!("Setting delay {delay}ms for node {node_index}");
         let command = "sh";
         let args = format!("tc qdisc add dev eth0 root netem delay {delay}ms");
-        self.exec_command(
-            node_index,
-            command,
-            vec!["-c".to_string(), format!("{args}")],
-        )?;
+        self.exec_command(node_index, command, vec![
+            "-c".to_string(),
+            format!("{args}"),
+        ])?;
         Ok(())
     }
 
@@ -207,11 +204,10 @@ impl ComposeRunner {
         println!("Setting packet loss {loss}% for node {node_index}");
         let command = "sh";
         let args = format!("tc qdisc change dev eth0 root netem loss {loss}%");
-        self.exec_command(
-            node_index,
-            command,
-            vec!["-c".to_string(), format!("{args}")],
-        )?;
+        self.exec_command(node_index, command, vec![
+            "-c".to_string(),
+            format!("{args}"),
+        ])?;
         Ok(())
     }
 

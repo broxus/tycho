@@ -1,7 +1,11 @@
 use anyhow::Result;
 
+use super::cache_persistent::*;
+use super::config::*;
+use super::state_persistent::*;
+use super::storage::*;
 use super::types::ext_types_stubs::*;
-use super::{cache_persistent::*, config::*, state_persistent::*, storage::*, types::*};
+use super::types::*;
 
 #[cfg(test)]
 #[path = "tests/test_queue.rs"]
@@ -237,12 +241,10 @@ where
     }
 }
 
-/*
-This part of the code contains logic that cannot be attributed specifically
-to the persistent state and cache, storage, loader, diff management.
-
-We use partials just to separate the codebase on smaller and easier maintainable parts.
- */
+// This part of the code contains logic that cannot be attributed specifically
+// to the persistent state and cache, storage, loader, diff management.
+//
+// We use partials just to separate the codebase on smaller and easier maintainable parts.
 impl<CH, ST, DB> MessageQueueImpl<CH, ST, DB>
 where
     CH: PersistentCacheService,

@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
@@ -147,15 +146,11 @@ where
 
         let info = block.load_info()?;
         let res = block_storage
-            .store_block_data(
-                block,
-                archive_data,
-                BlockMetaData {
-                    is_key_block: info.key_block,
-                    gen_utime: info.gen_utime,
-                    mc_ref_seqno: mc_block_id.seqno,
-                },
-            )
+            .store_block_data(block, archive_data, BlockMetaData {
+                is_key_block: info.key_block,
+                gen_utime: info.gen_utime,
+                mc_ref_seqno: mc_block_id.seqno,
+            })
             .await?;
 
         Ok(res.handle)
@@ -318,7 +313,7 @@ pub mod test {
             seqno: 0,
         };
 
-        //store workchain zerostate
+        // store workchain zerostate
         let shard = ShardStateStuff::deserialize_zerostate(&shard_id, shard).unwrap();
         let (handle, _) = storage.block_handle_storage().create_or_load_handle(
             &shard_id,

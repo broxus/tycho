@@ -3,9 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::{mempool::MempoolAnchor, test_utils::try_init_test_tracing};
-
 use super::{MempoolAdapter, MempoolAdapterStdImpl, MempoolEventListener};
+use crate::mempool::MempoolAnchor;
+use crate::test_utils::try_init_test_tracing;
 
 struct MempoolEventStubListener;
 #[async_trait]

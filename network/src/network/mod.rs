@@ -6,20 +6,19 @@ use everscale_crypto::ed25519;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use self::config::EndpointConfig;
-use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
-use self::endpoint::Endpoint;
-use crate::types::{
-    Address, DisconnectReason, PeerEvent, PeerId, PeerInfo, Response, Service, ServiceExt,
-    ServiceRequest,
-};
-
 pub use self::config::{NetworkConfig, QuicConfig};
 pub use self::connection::{Connection, RecvStream, SendStream};
 pub use self::connection_manager::{
     ActivePeers, KnownPeerHandle, KnownPeers, KnownPeersError, PeerBannedError, WeakActivePeers,
     WeakKnownPeerHandle,
 };
+use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
+use self::endpoint::Endpoint;
 pub use self::peer::Peer;
+use crate::types::{
+    Address, DisconnectReason, PeerEvent, PeerId, PeerInfo, Response, Service, ServiceExt,
+    ServiceRequest,
+};
 
 mod config;
 mod connection;

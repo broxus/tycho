@@ -8,10 +8,10 @@ use sha2::Digest;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::state::ShardStateStuff;
 
+use super::execution_manager::ExecutionManager;
+use super::CollatorStdImpl;
 use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
 use crate::types::BlockCandidate;
-
-use super::{execution_manager::ExecutionManager, CollatorStdImpl};
 
 impl CollatorStdImpl {
     pub(super) async fn finalize_block(
@@ -33,20 +33,20 @@ impl CollatorStdImpl {
             // drop sender to stop the task that process messages and force it to return updated shard account
             std::mem::drop(sender);
             let shard_acc_stuff = handle.await??;
-            //TODO: read account
-            //TODO: get updated blockchain config if it stored in account
-            //TODO: if have transactions, build AccountBlock and add to account_blocks
+            // TODO: read account
+            // TODO: get updated blockchain config if it stored in account
+            // TODO: if have transactions, build AccountBlock and add to account_blocks
             changed_accounts.insert(account_id, shard_acc_stuff);
         }
 
-        //TODO: update new_config_opt from hard fork
+        // TODO: update new_config_opt from hard fork
 
         // calc value flow
-        //TODO: init collation_data.value_flow
+        // TODO: init collation_data.value_flow
         let mut value_flow = collation_data.value_flow.clone();
-        //TODO: init collation_data.in_msgs
+        // TODO: init collation_data.in_msgs
         value_flow.imported = collation_data.in_msgs.root_extra().value_imported.clone();
-        //TODO: init collation_data.out_msgs
+        // TODO: init collation_data.out_msgs
         value_flow.exported = collation_data.out_msgs.root_extra().clone();
         value_flow.fees_collected = account_blocks.root_extra().clone();
         value_flow
@@ -61,10 +61,10 @@ impl CollatorStdImpl {
         value_flow.to_next_block = shard_accounts.root_extra().balance.clone();
 
         // build master state extra or get a ref to last applied master block
-        //TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
+        // TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
         let (out_msg_queue_info, _min_ref_mc_seqno) =
             collation_data.out_msg_queue_stuff.get_out_msg_queue_info();
-        //collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
+        // collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
         let (mc_state_extra, master_ref) = if self.shard_id.is_masterchain() {
             let (extra, min_ref_mc_seqno) =
                 self.create_mc_state_extra(collation_data, new_config_opt)?;
@@ -81,7 +81,7 @@ impl CollatorStdImpl {
         };
         new_block_info.set_prev_ref(&prev_shard_data.get_blocks_ref()?);
 
-        //TODO: should set when slpit/merge logic implemented
+        // TODO: should set when slpit/merge logic implemented
         // info.after_merge = false;
         // info.before_split = false;
         // info.after_split = false;
@@ -159,7 +159,7 @@ impl CollatorStdImpl {
                 self.update_public_libraries(exec_manager.libraries.clone(), &changed_accounts)?;
         }
 
-        //TODO: update smc on hard fork
+        // TODO: update smc on hard fork
 
         // calc merkle update
         let new_state_root = CellBuilder::build_from(&new_state)?;
@@ -179,13 +179,13 @@ impl CollatorStdImpl {
             ..Default::default()
         };
 
-        //TODO: fill created_by
-        //extra.created_by = self.created_by.clone();
+        // TODO: fill created_by
+        // extra.created_by = self.created_by.clone();
         if let Some(mc_state_extra) = mc_state_extra {
             let new_mc_block_extra = McBlockExtra {
                 shards: mc_state_extra.shards.clone(),
                 fees: collation_data.shard_fees.clone(),
-                //TODO: Signatures for previous blocks
+                // TODO: Signatures for previous blocks
                 prev_block_signatures: Default::default(),
                 mint_msg: collation_data
                     .mint_msg
@@ -227,7 +227,7 @@ impl CollatorStdImpl {
             file_hash: sha2::Sha256::digest(&new_block_boc).into(),
         };
 
-        //TODO: build collated data from collation_data.shard_top_block_descriptors
+        // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
 
         let block_candidate = BlockCandidate::new(
@@ -301,8 +301,8 @@ impl CollatorStdImpl {
         // prev_state_extra.flags is checked in the McStateExtra::load_from
 
         // 5. update validator_info
-        //TODO: check `create_mc_state_extra()` for a reference implementation
-        //STUB: currently we do not use validator_info and just do nothing there
+        // TODO: check `create_mc_state_extra()` for a reference implementation
+        // STUB: currently we do not use validator_info and just do nothing there
         let validator_info = prev_state_extra.validator_info.clone();
 
         // 6. update prev_blocks (add prev block's id to the dictionary)
@@ -315,7 +315,7 @@ impl CollatorStdImpl {
             root_hash: prev_state.block_id().root_hash,
             file_hash: prev_state.block_id().file_hash,
         };
-        //TODO: use AugDict::set when it be implemented
+        // TODO: use AugDict::set when it be implemented
         // prev_blocks.set(
         //     &prev_state.block_id().seqno,
         //     &KeyBlockRef {
@@ -380,9 +380,9 @@ impl CollatorStdImpl {
         wc_set: &Dict<i32, WorkchainDescription>,
         update_cc: bool,
     ) -> Result<u32> {
-        //TODO: here should be the split/merge logic, refer to old node impl
+        // TODO: here should be the split/merge logic, refer to old node impl
 
-        //STUB: just do nothing for now: no split/merge, no session rotation
+        // STUB: just do nothing for now: no split/merge, no session rotation
         let mut min_ref_mc_seqno = u32::max_value();
         for (_shard_id, shard_descr) in collation_data.shards_mut()? {
             min_ref_mc_seqno = std::cmp::min(min_ref_mc_seqno, shard_descr.min_ref_mc_seqno);
@@ -396,8 +396,8 @@ impl CollatorStdImpl {
         collation_data: &BlockCollationData,
         block_create_stats: &mut Dict<HashBytes, CreatorStats>,
     ) -> Result<()> {
-        //TODO: implement if we really need it
-        //STUB: do not update anything
+        // TODO: implement if we really need it
+        // STUB: do not update anything
         Ok(())
     }
 

@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{
     Block, BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature,
 };
-
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
@@ -142,8 +140,8 @@ impl ValidatedBlock {
 }
 
 pub struct BlockStuffForSync {
-    //STUB: will not parse Block because candidate does not contain real block
-    //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
+    // STUB: will not parse Block because candidate does not contain real block
+    // TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
     pub block_stuff_aug: BlockStuffAug,
     pub signatures: FastHashMap<HashBytes, Signature>,

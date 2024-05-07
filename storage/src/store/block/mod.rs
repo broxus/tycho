@@ -19,10 +19,9 @@ use tycho_block_util::block::{
 use tycho_util::FastHashMap;
 
 use crate::db::*;
+use crate::models::*;
 use crate::util::*;
-use crate::{
-    models::*, BlockConnection, BlockConnectionStorage, BlockHandleStorage, HandleCreationStatus,
-};
+use crate::{BlockConnection, BlockConnectionStorage, BlockHandleStorage, HandleCreationStatus};
 
 pub struct BlockStorage {
     db: Arc<Db>,

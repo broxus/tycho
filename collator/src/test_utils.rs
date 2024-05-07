@@ -7,7 +7,6 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
 use tycho_storage::{BlockMetaData, Storage};
 
@@ -94,14 +93,14 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let master_state_stuff =
         ShardStateStuff::from_state_and_root(&master_id, master_state, master_root, &tracker)?;
 
-    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &master_id,
-        BlockMetaData {
-            is_key_block: mc_state_extra.after_key_block,
-            gen_utime: master_state_stuff.state().gen_utime,
-            mc_ref_seqno: 0,
-        },
-    );
+    let (handle, _) =
+        storage
+            .block_handle_storage()
+            .create_or_load_handle(&master_id, BlockMetaData {
+                is_key_block: mc_state_extra.after_key_block,
+                gen_utime: master_state_stuff.state().gen_utime,
+                mc_ref_seqno: 0,
+            });
 
     storage
         .shard_state_storage()
@@ -121,14 +120,14 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let shard_state_stuff =
         ShardStateStuff::from_state_and_root(&shard_id, shard_state, shard_root, &tracker)?;
 
-    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &shard_id,
-        BlockMetaData {
-            is_key_block: false,
-            gen_utime: shard_state_stuff.state().gen_utime,
-            mc_ref_seqno: 0,
-        },
-    );
+    let (handle, _) =
+        storage
+            .block_handle_storage()
+            .create_or_load_handle(&shard_id, BlockMetaData {
+                is_key_block: false,
+                gen_utime: shard_state_stuff.state().gen_utime,
+                mc_ref_seqno: 0,
+            });
 
     storage
         .shard_state_storage()

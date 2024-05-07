@@ -8,21 +8,20 @@ use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 
+#[cfg(any(test, feature = "test"))]
+pub use self::provider::ArchiveBlockProvider;
 pub use self::provider::{
     BlockProvider, BlockProviderExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     ChainBlockProvider, EmptyBlockProvider, OptionalBlockStuff, StorageBlockProvider,
 };
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
 pub use self::state_applier::ShardStateApplier;
+#[cfg(any(test, feature = "test"))]
+pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, NoopSubscriber,
     StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
-
-#[cfg(any(test, feature = "test"))]
-pub use self::provider::ArchiveBlockProvider;
-#[cfg(any(test, feature = "test"))]
-pub use self::subscriber::test::PrintSubscriber;
 
 mod provider;
 mod state;

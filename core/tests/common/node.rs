@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use everscale_crypto::ed25519;
 use tycho_core::blockchain_rpc::BlockchainRpcService;
-
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayConfig, OverlayId, OverlayService,
     PeerResolver, PublicOverlay, Router,

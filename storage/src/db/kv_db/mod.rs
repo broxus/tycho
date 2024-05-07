@@ -5,10 +5,8 @@ use std::thread::available_parallelism;
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
+pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Stats as RocksdbStats, Table};
 use weedb::{Caches, WeeDb};
-
-pub use weedb::Stats as RocksdbStats;
-pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Table};
 
 pub mod refcount;
 pub mod tables;

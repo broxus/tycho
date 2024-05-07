@@ -6,16 +6,15 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use everscale_types::cell::*;
 use everscale_types::models::BlockId;
+use tycho_block_util::state::*;
+use tycho_util::progress_bar::*;
+use tycho_util::FastHashMap;
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
 use super::shard_state_reader::*;
 use crate::db::*;
 use crate::store::shard_state::StoredValue;
-
-use tycho_block_util::state::*;
-use tycho_util::progress_bar::*;
-use tycho_util::FastHashMap;
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
@@ -593,12 +592,9 @@ mod test {
         }
         tracing::info!("Decompressed the archive");
 
-        let db = Db::open(
-            current_test_path.join("rocksdb"),
-            DbConfig {
-                rocksdb_lru_capacity: ByteSize::mb(256),
-            },
-        )?;
+        let db = Db::open(current_test_path.join("rocksdb"), DbConfig {
+            rocksdb_lru_capacity: ByteSize::mb(256),
+        })?;
         let file_db = FileDb::new(current_test_path.join("file_db"))?;
 
         let cells_storage = CellStorage::new(db.clone(), 100_000_000);
@@ -661,7 +657,7 @@ mod test {
             let mut batch = WriteBatch::default();
             cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
-            //execute batch
+            // execute batch
             db.raw().write_opt(batch, db.cells.write_config())?;
             tracing::info!("State deleted. Progress: {deleted}/{total_states}",);
         }

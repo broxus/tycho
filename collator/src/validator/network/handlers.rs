@@ -1,11 +1,13 @@
+use std::sync::Arc;
+
+use everscale_types::models::BlockIdShort;
+use tracing::trace;
+use tycho_network::Response;
+
 use crate::tracing_targets;
 use crate::validator::network::dto::SignaturesQuery;
 use crate::validator::state::SessionInfo;
 use crate::validator::{process_candidate_signature_response, ValidatorEventListener};
-use everscale_types::models::BlockIdShort;
-use std::sync::Arc;
-use tracing::trace;
-use tycho_network::Response;
 
 pub async fn handle_signatures_query(
     session: Option<Arc<SessionInfo>>,

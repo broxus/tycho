@@ -1,5 +1,6 @@
-use anyhow::Result;
 use std::path::PathBuf;
+
+use anyhow::Result;
 use tycho_util::project_root;
 
 pub struct ServiceConfig {

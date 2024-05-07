@@ -1,12 +1,14 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use everscale_types::models::{BlockIdShort, ShardIdent};
+use tokio::sync::RwLock;
+
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
 use crate::internal_queue::shard::Shard;
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::QueueDiff;
-use everscale_types::models::{BlockIdShort, ShardIdent};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[trait_variant::make(SessionState: Send)]
 pub trait LocalSessionState<S>
@@ -82,12 +84,14 @@ impl SessionState<SessionStateSnapshot> for SessionStateImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use everscale_types::models::BlockIdShort;
+
     use super::*;
     use crate::internal_queue::types::ext_types_stubs::{
         EnqueuedMessage, MessageContent, MessageEnvelope,
     };
-    use everscale_types::models::BlockIdShort;
-    use std::sync::Arc;
 
     fn test_shard_ident() -> ShardIdent {
         ShardIdent::new_full(0)

@@ -12,7 +12,6 @@ use rand::prelude::ThreadRng;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
 use tracing::debug;
-
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};

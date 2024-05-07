@@ -8,9 +8,15 @@ use tokio::sync::broadcast;
 use tycho_util::realloc_box_enum;
 use tycho_util::time::now_sec;
 
+pub use self::config::DhtConfig;
+pub use self::peer_resolver::{
+    PeerResolver, PeerResolverBuilder, PeerResolverConfig, PeerResolverHandle,
+};
+pub use self::query::DhtQueryMode;
 use self::query::{Query, QueryCache, StoreValue};
 use self::routing::HandlesRoutingTable;
 use self::storage::Storage;
+pub use self::storage::{DhtValueMerger, DhtValueSource, StorageError};
 use crate::network::Network;
 use crate::proto::dht::{
     rpc, NodeInfoResponse, NodeResponse, PeerValue, PeerValueKey, PeerValueKeyName,
@@ -18,13 +24,6 @@ use crate::proto::dht::{
 };
 use crate::types::{PeerId, PeerInfo, Request, Response, Service, ServiceRequest};
 use crate::util::{NetworkExt, Routable};
-
-pub use self::config::DhtConfig;
-pub use self::peer_resolver::{
-    PeerResolver, PeerResolverBuilder, PeerResolverConfig, PeerResolverHandle,
-};
-pub use self::query::DhtQueryMode;
-pub use self::storage::{DhtValueMerger, DhtValueSource, StorageError};
 
 mod background_tasks;
 mod config;

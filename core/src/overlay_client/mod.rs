@@ -9,7 +9,6 @@ use tycho_network::{Network, PublicOverlay, Request};
 pub use self::config::PublicOverlayClientConfig;
 pub use self::neighbour::{Neighbour, NeighbourStats};
 pub use self::neighbours::Neighbours;
-
 use crate::proto::overlay;
 
 mod config;

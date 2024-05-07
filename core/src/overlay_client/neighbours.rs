@@ -115,7 +115,7 @@ impl Neighbours {
         let now = tycho_util::time::now_sec();
 
         let mut guard = self.inner.entries.lock().await;
-        //remove unreliable and expired neighbours
+        // remove unreliable and expired neighbours
         guard.retain(|x| x.expires_at_secs() > now);
         drop(guard);
         self.update_selection_index().await;

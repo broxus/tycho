@@ -32,11 +32,10 @@ use tycho_network::{
 use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
+use self::config::{NodeConfig, NodeKeys};
 use crate::util::error::ResultExt;
 use crate::util::logger::LoggerConfig;
 use crate::util::signal;
-
-use self::config::{NodeConfig, NodeKeys};
 
 mod config;
 
@@ -440,14 +439,12 @@ impl Node {
         let state_storage = self.storage.shard_state_storage();
 
         for state in to_import {
-            let (handle, status) = handle_storage.create_or_load_handle(
-                state.block_id(),
-                BlockMetaData {
+            let (handle, status) =
+                handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
                     is_key_block: true,
                     gen_utime,
                     mc_ref_seqno: 0,
-                },
-            );
+                });
 
             let stored = state_storage
                 .store_state(&handle, &state)

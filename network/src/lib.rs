@@ -1,10 +1,3 @@
-pub use self::overlay::{
-    OverlayConfig, OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
-    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PublicOverlay,
-    PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
-};
-pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 pub use dht::{
     xor_distance, DhtClient, DhtConfig, DhtQueryBuilder, DhtQueryMode, DhtQueryWithDataBuilder,
     DhtService, DhtServiceBackgroundTasks, DhtServiceBuilder, DhtValueMerger, DhtValueSource,
@@ -16,6 +9,7 @@ pub use network::{
     NetworkConfig, Peer, PeerBannedError, QuicConfig, RecvStream, SendStream, ToSocket,
     WeakActivePeers, WeakKnownPeerHandle, WeakNetwork,
 };
+pub use quinn;
 pub use types::{
     service_datagram_fn, service_message_fn, service_query_fn, Address, BoxCloneService,
     BoxService, Direction, DisconnectReason, InboundRequestMeta, PeerAffinity, PeerEvent, PeerId,
@@ -23,7 +17,13 @@ pub use types::{
     ServiceMessageFn, ServiceQueryFn, ServiceRequest, Version,
 };
 
-pub use quinn;
+pub use self::overlay::{
+    OverlayConfig, OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
+    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
+    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PublicOverlay,
+    PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
+};
+pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 
 mod dht;
 mod network;

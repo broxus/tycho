@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use futures_util::future::{self, FutureExt, Ready};
 use tracing::error;
-
 use tycho_network::__internal::tl_proto::{TlRead, TlWrite};
 use tycho_network::{Response, Service, ServiceRequest};
 

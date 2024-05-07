@@ -10,6 +10,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, trace, warn};
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
 
+use crate::state_node::StateNodeAdapter;
+use crate::tracing_targets;
 use crate::types::{OnValidatedBlockEvent, ValidatorNetwork};
 use crate::validator::config::ValidatorConfig;
 use crate::validator::network::dto::SignaturesQuery;
@@ -18,7 +20,6 @@ use crate::validator::state::{SessionInfo, ValidationState, ValidationStateStdIm
 use crate::validator::types::{
     BlockValidationCandidate, OverlayNumber, ValidationSessionInfo, ValidatorInfo,
 };
-use crate::{state_node::StateNodeAdapter, tracing_targets};
 
 // FACTORY
 

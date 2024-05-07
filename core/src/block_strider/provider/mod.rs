@@ -7,11 +7,10 @@ use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
 use tycho_block_util::block::BlockStuffAug;
 
-pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
-pub use self::storage_provider::StorageBlockProvider;
-
 #[cfg(any(test, feature = "test"))]
 pub use self::archive_provider::ArchiveBlockProvider;
+pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
+pub use self::storage_provider::StorageBlockProvider;
 
 mod blockchain_provider;
 mod storage_provider;
@@ -164,10 +163,12 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for (T1, T2) {
 
 #[cfg(test)]
 mod test {
-    use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
     use tycho_block_util::block::BlockStuff;
+
+    use super::*;
 
     struct MockBlockProvider {
         // let's give it some state, pretending it's useful
