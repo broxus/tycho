@@ -14,8 +14,7 @@ struct ShardStateCombined {
 }
 
 impl ShardStateCombined {
-    fn from_file(path: impl AsRef<str>) -> Result<Self> {
-        let bytes = std::fs::read(path.as_ref())?;
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let cell = Boc::decode(&bytes)?;
         let state = cell.parse()?;
         Ok(Self { cell, state })
@@ -60,10 +59,11 @@ async fn persistent_storage_everscale() -> Result<()> {
     assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     // Read zerostate
-    let zero_state_raw = ShardStateCombined::from_file("tests/everscale_zerostate.boc")?;
+    let zero_state_raw =
+        ShardStateCombined::from_bytes(include_bytes!("../../test/test_state_2_master.boc"))?;
 
     // Parse block id
-    let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
+    let block_id = BlockId::from_str("-1:8000000000000000:2:4557702252a8fcec88387ab78407e5116e83222b213653911f86e6504cb7aa78:e2bc83d6be6975b9c68f56c5f6d4997d2a33226bfac6a431b47874e3ba18db75")?;
 
     // Write zerostate to db
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
@@ -107,13 +107,13 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     storage
         .persistent_state_storage()
-        .prepare_persistent_states_dir(&zerostate.block_id())?;
+        .prepare_persistent_states_dir(zerostate.block_id())?;
 
     storage
         .persistent_state_storage()
         .save_state(
-            &zerostate.block_id(),
-            &zerostate.block_id(),
+            zerostate.block_id(),
+            zerostate.block_id(),
             zero_state_raw.cell.repr_hash(),
         )
         .await?;
@@ -121,7 +121,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Check if state exists
     let exist = storage
         .persistent_state_storage()
-        .state_exists(&zerostate.block_id(), &zerostate.block_id());
+        .state_exists(zerostate.block_id(), zerostate.block_id());
     assert_eq!(exist, true);
 
     // Read persistent state
@@ -130,12 +130,7 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     let persistent_state_storage = storage.persistent_state_storage();
     let persistent_state_data = persistent_state_storage
-        .read_state_part(
-            &zerostate.block_id(),
-            &zerostate.block_id(),
-            offset,
-            max_size,
-        )
+        .read_state_part(zerostate.block_id(), zerostate.block_id(), offset, max_size)
         .await
         .unwrap();
 

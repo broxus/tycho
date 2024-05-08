@@ -154,15 +154,22 @@ impl Db {
             (self.archives.cf(), "archives"),
             (self.shard_states.cf(), "shard states"),
             (self.cells.cf(), "cells"),
+            (self.temp_cells.cf(), "temp cells"),
         ];
+
+        let mut compaction_options = rocksdb::CompactOptions::default();
+        compaction_options.set_exclusive_manual_compaction(true);
+        compaction_options
+            .set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::ForceOptimized);
 
         for (cf, title) in tables {
             tracing::info!("{title} compaction started");
 
             let instant = Instant::now();
-
             let bound = Option::<[u8; 0]>::None;
-            self.raw().compact_range_cf(&cf, bound, bound);
+
+            self.raw()
+                .compact_range_cf_opt(&cf, bound, bound, &compaction_options);
 
             tracing::info!(
                 elapsed = %humantime::format_duration(instant.elapsed()),
