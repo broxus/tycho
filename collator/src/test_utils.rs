@@ -69,7 +69,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let tracker = MinRefMcStateTracker::default();
 
     // master state
-    let master_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_master.boc");
+    let master_bytes = include_bytes!("../../test/test_state_2_master.boc");
     let master_file_hash: HashBytes = sha2::Sha256::digest(master_bytes).into();
     let master_root = Boc::decode(master_bytes)?;
     let master_root_hash = *master_root.repr_hash();
@@ -108,7 +108,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
         .await?;
 
     // shard state
-    let shard_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_0:80.boc");
+    let shard_bytes = include_bytes!("../../test/test_state_2_0:80.boc");
     let shard_root = Boc::decode(shard_bytes)?;
     let shard_state = shard_root.parse::<Box<ShardStateUnsplit>>()?;
     let shard_id = BlockId {

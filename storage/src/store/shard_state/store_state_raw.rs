@@ -568,9 +568,9 @@ mod test {
 
     use super::*;
 
-    #[test]
+    #[tokio::test]
     #[ignore]
-    fn insert_and_delete_of_several_shards() -> anyhow::Result<()> {
+    async fn insert_and_delete_of_several_shards() -> Result<()> {
         tycho_util::test::init_logger("insert_and_delete_of_several_shards");
         let project_root = project_root()?.join(".scratch");
         let integration_test_path = project_root.join("integration_tests");
@@ -612,7 +612,7 @@ mod test {
                 StoreStateRaw::new(&block_id, &db, &download_dir, &cells_storage, &tracker)
                     .context("Failed to create ShardStateReplaceTransaction")?;
 
-            let file = std::fs::File::open(file.path())?;
+            let file = File::open(file.path())?;
             let mut file = BufReader::new(file);
             let chunk_size = 10_000_000; // size of each chunk in bytes
             let mut buffer = vec![0u8; chunk_size];
@@ -637,12 +637,19 @@ mod test {
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
-        states_gc(&cells_storage, &db)?;
+        states_gc(&cells_storage, &db).await?;
+
+        drop(db);
+        drop(cells_storage);
+        rocksdb::DB::destroy(
+            &rocksdb::Options::default(),
+            current_test_path.join("rocksdb"),
+        )?;
 
         Ok(())
     }
 
-    fn states_gc(cell_storage: &Arc<CellStorage>, db: &Db) -> anyhow::Result<()> {
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &Db) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
@@ -659,8 +666,12 @@ mod test {
 
             // execute batch
             db.raw().write_opt(batch, db.cells.write_config())?;
-            tracing::info!("State deleted. Progress: {deleted}/{total_states}",);
+            tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
+
+        // two compactions in row. First one run merge operators, second one will remove all tombstones
+        db.trigger_compaction().await;
+        db.trigger_compaction().await;
 
         let cells_left = db.cells.iterator(IteratorMode::Start).count();
         tracing::info!("States GC finished. Cells left: {cells_left}");
