@@ -1,4 +1,5 @@
-use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -7,6 +8,11 @@ use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
+use self::types::{
+    BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache,
+    McBlockSubgraphToSend, SendSyncStatus,
+};
+use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
 use crate::msg_queue::MessageQueueAdapter;
@@ -18,15 +24,10 @@ use crate::types::{
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
 };
-use crate::utils::{schedule_async_action, shard::calc_split_merge_actions};
+use crate::utils::schedule_async_action;
+use crate::utils::shard::calc_split_merge_actions;
 use crate::validator::{Validator, ValidatorContext, ValidatorEventListener, ValidatorFactory};
 use crate::{method_to_async_task_closure, tracing_targets};
-
-use self::types::{
-    BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache,
-    McBlockSubgraphToSend, SendSyncStatus,
-};
-use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
 
 mod types;
 mod utils;
@@ -112,14 +113,14 @@ where
     CF: CollatorFactory,
     V: Validator,
 {
-    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()> {
-        //TODO: remove accepted block from cache
-        //STUB: do nothing, currently we remove block from cache when it sent to state node
+    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
+        // TODO: remove accepted block from cache
+        // STUB: do nothing, currently we remove block from cache when it sent to state node
         Ok(())
     }
 
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
-        //TODO: should store block info from blockchain if it was not already collated
+        // TODO: should store block info from blockchain if it was not already collated
         //      and validated by ourself. Will use this info for faster validation further:
         //      will consider that just collated block is already validated if it have the
         //      same root hash and file hash
@@ -317,7 +318,7 @@ where
         &mut self,
         _anchor: Arc<MempoolAnchor>,
     ) -> Result<()> {
-        //TODO: make real implementation, currently does nothing
+        // TODO: make real implementation, currently does nothing
         Ok(())
     }
 
@@ -333,7 +334,7 @@ where
         }
 
         // request mc state for this master block
-        //TODO: should await state and schedule processing in async task
+        // TODO: should await state and schedule processing in async task
         let mc_state = self.state_node_adapter.load_state(&mc_block_id).await?;
 
         // when state received execute master block processing routines
@@ -380,7 +381,7 @@ where
 
                 return false;
             } else if !is_equal {
-                //STUB: skip processing master block from bc even if it is far away from own last collated
+                // STUB: skip processing master block from bc even if it is far away from own last collated
                 //      because the logic for updating collators in this case is not implemented yet
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -431,7 +432,7 @@ where
         mc_block_id: &BlockId,
         other_mc_block_id_opt: Option<&BlockId>,
     ) -> (i32, bool) {
-        //TODO: consider block shard?
+        // TODO: consider block shard?
         let (seqno_delta, is_equal) = match other_mc_block_id_opt {
             None => (0, false),
             Some(other_mc_block_id) => (
@@ -453,8 +454,8 @@ where
 
     /// * TRUE - provided `mc_block_id` is before or equal to last processed
     /// * FALSE - provided `mc_block_id` is ahead of last processed
-    fn check_if_mc_block_not_ahead_last_processed(&self, mc_block_id: &BlockId) -> bool {
-        //TODO: consider block shard?
+    fn _check_if_mc_block_not_ahead_last_processed(&self, mc_block_id: &BlockId) -> bool {
+        // TODO: consider block shard?
         let last_processed_mc_block_id_opt = self.last_processed_mc_block_id();
         let is_not_ahead = matches!(last_processed_mc_block_id_opt, Some(last_processed_mc_block_id)
             if mc_block_id.seqno < last_processed_mc_block_id.seqno
@@ -512,7 +513,7 @@ where
             mc_state.block_id().as_short_id()
         );
 
-        //TODO: Possibly we have already updated collation sessions for this master block,
+        // TODO: Possibly we have already updated collation sessions for this master block,
         //      because we may have collated it by ourselves before receiving it from the blockchain
         //      or because we have received it from the blockchain before we collated it
         //
@@ -551,7 +552,7 @@ where
                 root_hash: descr.root_hash,
                 file_hash: descr.file_hash,
             };
-            //TODO: consider split and merge
+            // TODO: consider split and merge
             new_shards_info.insert(shard_id, vec![top_block]);
         }
 
@@ -668,7 +669,9 @@ where
                     new_session_seqno,
                 ))?;
 
-            //TEST: override with test subset with test keypairs defined on test run
+            tracing::warn!("SUBSET: {subset:?}");
+
+            // TEST: override with test subset with test keypairs defined on test run
             #[cfg(feature = "test")]
             let subset = if self.config.test_validators_keypairs.is_empty() {
                 subset
@@ -676,7 +679,7 @@ where
                 let mut test_subset = vec![];
                 for (i, keypair) in self.config.test_validators_keypairs.iter().enumerate() {
                     let val_descr = &subset[i];
-                    test_subset.push(ValidatorDescription {
+                    test_subset.push(everscale_types::models::ValidatorDescription {
                         public_key: keypair.public_key.to_bytes().into(),
                         adnl_addr: val_descr.adnl_addr,
                         weight: val_descr.weight,
@@ -697,6 +700,7 @@ where
             let local_pubkey_opt = find_us_in_collators_set(&self.config, &subset);
 
             let new_session_info = Arc::new(CollationSessionInfo::new(
+                shard_id.workchain(),
                 new_session_seqno,
                 ValidatorSubsetInfo {
                     validators: subset,
@@ -745,7 +749,7 @@ where
                 }
             }
 
-            //TODO: possibly do not need to store collation sessions if we do not collate in them
+            // TODO: possibly do not need to store collation sessions if we do not collate in them
             self.active_collation_sessions
                 .insert(shard_id, new_session_info);
         }
@@ -855,8 +859,7 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
-        let _handle = self
-            .validator
+        self.validator
             .validate(candidate_id, session_info.seqno())
             .await?;
 
@@ -923,7 +926,7 @@ where
         mpool_adapter: Arc<dyn MempoolAdapter>,
         mc_state: ShardStateStuff,
     ) -> Result<()> {
-        //TODO: in current implementation CollationProcessor should not notify mempool
+        // TODO: in current implementation CollationProcessor should not notify mempool
         //      about one master block more than once, but better to handle repeated request here or at mempool
         mpool_adapter
             .enqueue_process_new_mc_block_state(mc_state)
@@ -968,15 +971,15 @@ where
         _shard_id: ShardIdent,
         chain_time: u64,
     ) -> Option<u64> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
-        //TODO: idea is to store for each shard each chain time and related shard block
+        // TODO: idea is to store for each shard each chain time and related shard block
         //      that expired master block interval. So we will have a list of such chain times.
         //      Then we can collate master block if interval expired in all shards.
         //      We should take the max chain time among first that expired the masterblock interval in each shard
         //      then we take shard blocks which chain time less then determined max
 
-        //STUB: when we work with only one shard we can check for master block interval easier
+        // STUB: when we work with only one shard we can check for master block interval easier
         let elapsed = chain_time - self.last_mc_block_chain_time();
         let check = elapsed > self.config.mc_block_min_interval_ms;
 
@@ -1010,9 +1013,9 @@ where
         _next_mc_block_chain_time: u64,
         _trigger_shard_block_id: Option<BlockId>,
     ) -> Result<Vec<(BlockId, BlockInfo, ValueFlow)>> {
-        //TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
+        // TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
 
-        //STUB: when we work with only one shard we can just get the last shard block
+        // STUB: when we work with only one shard we can just get the last shard block
         //      because collator manager will try run master block collation before
         //      before processing any next candidate from the shard collator
         //      because of dispatcher tasks queue
@@ -1035,14 +1038,14 @@ where
         next_mc_block_chain_time: u64,
         trigger_shard_block_id: Option<BlockId>,
     ) -> Result<()> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
         // get masterchain collator if exists
         let Some(mc_collator) = self.active_collators.get(&ShardIdent::MASTERCHAIN) else {
             bail!("Masterchain collator is not started yet!");
         };
 
-        //TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
+        // TODO: How to choose top shard blocks for master block collation when they are collated async and in parallel?
         //      We know the last anchor (An) used in shard (ShA) block that causes master block collation,
         //      so we search for block from other shard (ShB) that includes the same anchor (An).
         //      Or the first from previouses (An-x) that includes externals for that shard (ShB)
@@ -1053,7 +1056,7 @@ where
             trigger_shard_block_id,
         )?;
 
-        //TODO: We should somehow collect externals for masterchain during the shard blocks collation
+        // TODO: We should somehow collect externals for masterchain during the shard blocks collation
         //      or pull them directly when collating master
 
         self.next_mc_block_chain_time = next_mc_block_chain_time;
@@ -1119,7 +1122,7 @@ where
 
         // execute required actions if block invalid
         if !validation_result.is_valid() {
-            //TODO: implement more graceful reaction on invalid block
+            // TODO: implement more graceful reaction on invalid block
             panic!("Block has collected more than 1/3 invalid signatures! Unable to continue collation process!")
         }
 
@@ -1143,7 +1146,7 @@ where
 
     /// Store block in a cache structure that allow to append signatures
     fn store_candidate(&mut self, candidate: BlockCandidate) -> Result<()> {
-        //TODO: in future we may store to cache a block received from blockchain before,
+        // TODO: in future we may store to cache a block received from blockchain before,
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
@@ -1237,7 +1240,7 @@ where
         &self,
         shard_block_id: &BlockId,
     ) -> Option<&BlockCandidateContainer> {
-        //TODO: handle when master block link exist but there is not block itself
+        // TODO: handle when master block link exist but there is not block itself
         if let Some(mc_block_key) = self
             .blocks_cache
             .shards
@@ -1419,7 +1422,7 @@ where
                     .await
                 }
             });
-            //TODO: make proper panic and error processing without waiting for spawned task
+            // TODO: make proper panic and error processing without waiting for spawned task
             join_handle.await??;
         } else {
             tracing::debug!(
@@ -1472,7 +1475,7 @@ where
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mut blocks_to_send: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
-        //TODO: it is better to send each block separately, but it will be more tricky to handle the correct cleanup
+        // TODO: it is better to send each block separately, but it will be more tricky to handle the correct cleanup
 
         let _tracing_blocks_to_send_descr = blocks_to_send
             .iter()
@@ -1493,7 +1496,7 @@ where
                 SendSyncStatus::Sent | SendSyncStatus::Synced => sent_blocks.push(block_to_send),
                 _ => {
                     let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
-                    //TODO: handle different errors types
+                    // TODO: handle different errors types
                     if let Err(err) = state_node_adapter.accept_block(block_for_sync).await {
                         tracing::warn!(
                             target: tracing_targets::COLLATION_MANAGER,
@@ -1519,7 +1522,7 @@ where
         if !should_restore_blocks_in_cache {
             // commit queue diffs for each block
             for sent_block in sent_blocks.iter() {
-                //TODO: handle if diff does not exist
+                // TODO: handle if diff does not exist
                 if let Err(err) = mq_adapter
                     .commit_diff(&sent_block.entry.candidate.block_id().as_short_id())
                     .await
@@ -1575,7 +1578,7 @@ where
                     blocks_to_send
                 ))
                 .await?;
-            //TODO: should implement resending for restored blocks
+            // TODO: should implement resending for restored blocks
         }
 
         Ok(())

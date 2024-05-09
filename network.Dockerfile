@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.2
-FROM rust:1.76-buster as builder
+FROM rust:1.77.2-buster as builder
 WORKDIR /build
 COPY . .
 

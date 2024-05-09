@@ -1,5 +1,6 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::process::Command;
 
 pub mod progress_bar;
 pub mod serde_helpers;
@@ -113,6 +114,23 @@ pub mod __internal {
 
         Box::from_raw(ptr)
     }
+}
+
+pub fn project_root() -> Result<PathBuf, anyhow::Error> {
+    use anyhow::Context;
+
+    let project_root = Command::new("git")
+        .arg("rev-parse")
+        .arg("--show-toplevel")
+        .output()?
+        .stdout;
+    // won't work on windows but we don't care
+    let project_root = PathBuf::from(
+        String::from_utf8(project_root)
+            .context("invalid project root")?
+            .trim(),
+    );
+    Ok(project_root)
 }
 
 #[cfg(test)]

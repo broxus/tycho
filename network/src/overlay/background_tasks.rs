@@ -230,7 +230,7 @@ impl OverlayServiceInner {
             entries.extend(
                 all_entries
                     .choose_multiple(rng, n)
-                    .filter(|&item| (item.entry.peer_id != target_peer_id))
+                    .filter(|&item| item.entry.peer_id != target_peer_id)
                     .map(|item| item.entry.clone())
                     .take(n - 1),
             );
@@ -259,7 +259,7 @@ impl OverlayServiceInner {
                     count = entries.len(),
                     "received public entries"
                 );
-                overlay.add_untrusted_entries(&entries, now_sec());
+                overlay.add_untrusted_entries(&self.local_id, &entries, now_sec());
             }
             PublicEntriesResponse::OverlayNotFound => {
                 tracing::debug!(
@@ -311,7 +311,7 @@ impl OverlayServiceInner {
             }
         };
 
-        overlay.add_untrusted_entries(&entries, now_sec());
+        overlay.add_untrusted_entries(&self.local_id, &entries, now_sec());
 
         tracing::debug!(count = entries.len(), "discovered public entries");
         Ok(())

@@ -12,12 +12,17 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use crate::util::compute_storage_used;
+use crate::util::error::ResultExt;
 
 /// Generate a zero state for a network.
 #[derive(clap::Parser)]
 pub struct Cmd {
     /// dump the template of the zero state config
-    #[clap(short = 'i', long, exclusive = true)]
+    #[clap(
+        short = 'i',
+        long,
+        conflicts_with_all = ["config", "output", "now"]
+    )]
     init_config: Option<PathBuf>,
 
     /// path to the zero state config
@@ -78,25 +83,23 @@ fn generate_zerostate(
 
     config
         .prepare_config_params(now)
-        .map_err(|e| GenError::new("validator config is invalid", e))?;
+        .wrap_err("validator config is invalid")?;
 
     config
         .add_required_accounts()
-        .map_err(|e| GenError::new("failed to add required accounts", e))?;
+        .wrap_err("failed to add required accounts")?;
 
     let state = config
         .build_masterchain_state(now)
-        .map_err(|e| GenError::new("failed to build masterchain zerostate", e))?;
+        .wrap_err("failed to build masterchain zerostate")?;
 
-    let boc = CellBuilder::build_from(&state)
-        .map_err(|e| GenError::new("failed to serialize zerostate", e))?;
+    let boc = CellBuilder::build_from(&state).wrap_err("failed to serialize zerostate")?;
 
     let root_hash = *boc.repr_hash();
     let data = Boc::encode(&boc);
     let file_hash = HashBytes::from(sha2::Sha256::digest(&data));
 
-    std::fs::write(output_path, data)
-        .map_err(|e| GenError::new("failed to write masterchain zerostate", e))?;
+    std::fs::write(output_path, data).wrap_err("failed to write masterchain zerostate")?;
 
     let hashes = serde_json::json!({
         "root_hash": root_hash,
@@ -297,12 +300,40 @@ impl ZerostateConfig {
                 state.total_balance = state
                     .total_balance
                     .checked_add(&account.balance)
-                    .map_err(|e| GenError::new("failed ot compute total balance", e))?;
+                    .wrap_err("failed ot compute total balance")?;
             }
         }
 
+        let workchains = self.params.get::<ConfigParam12>()?.unwrap();
+        let mut shards = Vec::new();
+        for entry in workchains.iter() {
+            let (workchain, descr) = entry?;
+            shards.push((ShardIdent::new_full(workchain), ShardDescription {
+                seqno: 0,
+                reg_mc_seqno: 0,
+                start_lt: 0,
+                end_lt: 0,
+                root_hash: descr.zerostate_root_hash,
+                file_hash: descr.zerostate_file_hash,
+                before_split: false,
+                before_merge: false,
+                want_split: false,
+                want_merge: false,
+                nx_cc_updated: true,
+                next_catchain_seqno: 0,
+                next_validator_shard: ShardIdent::PREFIX_FULL,
+                min_ref_mc_seqno: u32::MAX,
+                gen_utime: now,
+                split_merge_at: None,
+                fees_collected: CurrencyCollection::ZERO,
+                funds_created: CurrencyCollection::ZERO,
+                copyleft_rewards: Dict::new(),
+                proof_chain: None,
+            }));
+        }
+
         state.custom = Some(Lazy::new(&McStateExtra {
-            shards: Default::default(),
+            shards: ShardHashes::from_shards(shards.iter().map(|(ident, descr)| (ident, descr)))?,
             config: BlockchainConfig {
                 address: self.params.get::<ConfigParam0>()?.unwrap(),
                 params: self.params.clone(),
@@ -408,24 +439,21 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     // Param 12
     {
         let mut workchains = Dict::new();
-        workchains.set(
-            0,
-            WorkchainDescription {
-                enabled_since: 0,
-                actual_min_split: 0,
-                min_split: 0,
-                max_split: 3,
-                active: true,
-                accept_msgs: true,
-                zerostate_root_hash: HashBytes::ZERO,
-                zerostate_file_hash: HashBytes::ZERO,
-                version: 0,
-                format: WorkchainFormat::Basic(WorkchainFormatBasic {
-                    vm_version: 0,
-                    vm_mode: 0,
-                }),
-            },
-        )?;
+        workchains.set(0, WorkchainDescription {
+            enabled_since: 0,
+            actual_min_split: 0,
+            min_split: 0,
+            max_split: 3,
+            active: true,
+            accept_msgs: true,
+            zerostate_root_hash: HashBytes::ZERO,
+            zerostate_file_hash: HashBytes::ZERO,
+            version: 0,
+            format: WorkchainFormat::Basic(WorkchainFormatBasic {
+                vm_version: 0,
+                vm_mode: 0,
+            }),
+        })?;
         params.set::<ConfigParam12>(&workchains)?;
     }
 
@@ -468,106 +496,88 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     }])?;
 
     // Param 20 (masterchain)
-    params.set_gas_prices(
-        true,
-        &GasLimitsPrices {
-            gas_price: 655360000,
-            gas_limit: 1000000,
-            special_gas_limit: 100000000,
-            gas_credit: 10000,
-            block_gas_limit: 11000000,
-            freeze_due_limit: 100000000,
-            delete_due_limit: 1000000000,
-            flat_gas_limit: 1000,
-            flat_gas_price: 10000000,
-        },
-    )?;
+    params.set_gas_prices(true, &GasLimitsPrices {
+        gas_price: 655360000,
+        gas_limit: 1000000,
+        special_gas_limit: 100000000,
+        gas_credit: 10000,
+        block_gas_limit: 11000000,
+        freeze_due_limit: 100000000,
+        delete_due_limit: 1000000000,
+        flat_gas_limit: 1000,
+        flat_gas_price: 10000000,
+    })?;
 
     // Param 21 (basechain)
-    params.set_gas_prices(
-        false,
-        &GasLimitsPrices {
-            gas_price: 65536000,
-            gas_limit: 1000000,
-            special_gas_limit: 1000000,
-            gas_credit: 10000,
-            block_gas_limit: 10000000,
-            freeze_due_limit: 100000000,
-            delete_due_limit: 1000000000,
-            flat_gas_limit: 1000,
-            flat_gas_price: 1000000,
-        },
-    )?;
+    params.set_gas_prices(false, &GasLimitsPrices {
+        gas_price: 65536000,
+        gas_limit: 1000000,
+        special_gas_limit: 1000000,
+        gas_credit: 10000,
+        block_gas_limit: 10000000,
+        freeze_due_limit: 100000000,
+        delete_due_limit: 1000000000,
+        flat_gas_limit: 1000,
+        flat_gas_price: 1000000,
+    })?;
 
     // Param 22 (masterchain)
-    params.set_block_limits(
-        true,
-        &BlockLimits {
-            bytes: BlockParamLimits {
-                underload: 131072,
-                soft_limit: 524288,
-                hard_limit: 1048576,
-            },
-            gas: BlockParamLimits {
-                underload: 900000,
-                soft_limit: 1200000,
-                hard_limit: 2000000,
-            },
-            lt_delta: BlockParamLimits {
-                underload: 1000,
-                soft_limit: 5000,
-                hard_limit: 10000,
-            },
+    params.set_block_limits(true, &BlockLimits {
+        bytes: BlockParamLimits {
+            underload: 131072,
+            soft_limit: 524288,
+            hard_limit: 1048576,
         },
-    )?;
+        gas: BlockParamLimits {
+            underload: 900000,
+            soft_limit: 1200000,
+            hard_limit: 2000000,
+        },
+        lt_delta: BlockParamLimits {
+            underload: 1000,
+            soft_limit: 5000,
+            hard_limit: 10000,
+        },
+    })?;
 
     // Param 23 (basechain)
-    params.set_block_limits(
-        false,
-        &BlockLimits {
-            bytes: BlockParamLimits {
-                underload: 131072,
-                soft_limit: 524288,
-                hard_limit: 1048576,
-            },
-            gas: BlockParamLimits {
-                underload: 900000,
-                soft_limit: 1200000,
-                hard_limit: 2000000,
-            },
-            lt_delta: BlockParamLimits {
-                underload: 1000,
-                soft_limit: 5000,
-                hard_limit: 10000,
-            },
+    params.set_block_limits(false, &BlockLimits {
+        bytes: BlockParamLimits {
+            underload: 131072,
+            soft_limit: 524288,
+            hard_limit: 1048576,
         },
-    )?;
+        gas: BlockParamLimits {
+            underload: 900000,
+            soft_limit: 1200000,
+            hard_limit: 2000000,
+        },
+        lt_delta: BlockParamLimits {
+            underload: 1000,
+            soft_limit: 5000,
+            hard_limit: 10000,
+        },
+    })?;
 
     // Param 24 (masterchain)
-    params.set_msg_forward_prices(
-        true,
-        &MsgForwardPrices {
-            lump_price: 10000000,
-            bit_price: 655360000,
-            cell_price: 65536000000,
-            ihr_price_factor: 98304,
-            first_frac: 21845,
-            next_frac: 21845,
-        },
-    )?;
+    params.set_msg_forward_prices(true, &MsgForwardPrices {
+        lump_price: 10000000,
+        bit_price: 655360000,
+        cell_price: 65536000000,
+        ihr_price_factor: 98304,
+        first_frac: 21845,
+        next_frac: 21845,
+    })?;
 
     // Param 25 (basechain)
-    params.set_msg_forward_prices(
-        false,
-        &MsgForwardPrices {
-            lump_price: 1000000,
-            bit_price: 65536000,
-            cell_price: 6553600000,
-            ihr_price_factor: 98304,
-            first_frac: 21845,
-            next_frac: 21845,
-        },
-    )?;
+    params.set_msg_forward_prices(false, &MsgForwardPrices {
+        lump_price: 1000000,
+        bit_price: 65536000,
+        cell_price: 6553600000,
+        ihr_price_factor: 98304,
+        first_frac: 21845,
+        next_frac: 21845,
+    })?;
 
     // Param 28
     params.set_catchain_config(&CatchainConfig {
@@ -647,7 +657,7 @@ fn build_elector_code(address: &HashBytes, balance: Tokens) -> Result<Account> {
     let code = Boc::decode(ELECTOR_CODE)?;
 
     let mut data = CellBuilder::new();
-    data.store_small_uint(0, 3)?; //empty dict, empty dict, empty dict
+    data.store_small_uint(0, 3)?; // empty dict, empty dict, empty dict
     data.store_small_uint(0, 4)?; // tokens
     data.store_u32(0)?; // elections id
     data.store_zeros(256)?; // elections hash
@@ -708,28 +718,11 @@ fn zero_public_key() -> &'static ed25519::PublicKey {
     KEY.get_or_init(|| ed25519::PublicKey::from_bytes([0; 32]).unwrap())
 }
 
-#[derive(thiserror::Error, Debug)]
-#[error("{context}: {source}")]
-struct GenError {
-    context: String,
-    #[source]
-    source: anyhow::Error,
-}
-
-impl GenError {
-    fn new(context: impl Into<String>, source: impl Into<anyhow::Error>) -> Self {
-        Self {
-            context: context.into(),
-            source: source.into(),
-        }
-    }
-}
-
 mod serde_account_states {
-    use super::*;
-
     use serde::de::Deserializer;
     use serde::ser::{SerializeMap, Serializer};
+
+    use super::*;
 
     pub fn serialize<S>(
         value: &HashMap<HashBytes, OptionalAccount>,

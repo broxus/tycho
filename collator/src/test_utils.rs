@@ -5,13 +5,10 @@ use everscale_crypto::ed25519;
 use everscale_types::boc::Boc;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
-use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
 use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
-use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
+use tycho_storage::{BlockMetaData, Storage};
 
 use crate::types::NodeNetwork;
 
@@ -68,17 +65,15 @@ pub fn create_node_network() -> NodeNetwork {
 }
 
 pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
-    let temp = tempfile::tempdir().unwrap();
-    let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
-    let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();
+    let (storage, _tmp_dir) = Storage::new_temp()?;
     let tracker = MinRefMcStateTracker::default();
 
     // master state
-    let master_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_master.boc");
+    let master_bytes = include_bytes!("../../test/test_state_2_master.boc");
     let master_file_hash: HashBytes = sha2::Sha256::digest(master_bytes).into();
     let master_root = Boc::decode(master_bytes)?;
     let master_root_hash = *master_root.repr_hash();
-    let master_state = master_root.parse::<ShardStateUnsplit>()?;
+    let master_state = master_root.parse::<Box<ShardStateUnsplit>>()?;
 
     let mc_state_extra = master_state.load_custom()?;
     let mc_state_extra = mc_state_extra.unwrap();
@@ -96,16 +91,16 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
         file_hash: master_file_hash,
     };
     let master_state_stuff =
-        ShardStateStuff::from_state_and_root(master_id, master_state, master_root, &tracker)?;
+        ShardStateStuff::from_state_and_root(&master_id, master_state, master_root, &tracker)?;
 
-    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &master_id,
-        BlockMetaData {
-            is_key_block: mc_state_extra.after_key_block,
-            gen_utime: master_state_stuff.state().gen_utime,
-            mc_ref_seqno: 0,
-        },
-    );
+    let (handle, _) =
+        storage
+            .block_handle_storage()
+            .create_or_load_handle(&master_id, BlockMetaData {
+                is_key_block: mc_state_extra.after_key_block,
+                gen_utime: master_state_stuff.state().gen_utime,
+                mc_ref_seqno: 0,
+            });
 
     storage
         .shard_state_storage()
@@ -113,9 +108,9 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
         .await?;
 
     // shard state
-    let shard_bytes = include_bytes!("../src/state_node/tests/data/test_state_2_0:80.boc");
+    let shard_bytes = include_bytes!("../../test/test_state_2_0:80.boc");
     let shard_root = Boc::decode(shard_bytes)?;
-    let shard_state = shard_root.parse::<ShardStateUnsplit>()?;
+    let shard_state = shard_root.parse::<Box<ShardStateUnsplit>>()?;
     let shard_id = BlockId {
         shard: shard_info.0,
         seqno: shard_info.1.seqno,
@@ -123,16 +118,16 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
         file_hash: shard_info.1.file_hash,
     };
     let shard_state_stuff =
-        ShardStateStuff::from_state_and_root(shard_id, shard_state, shard_root, &tracker)?;
+        ShardStateStuff::from_state_and_root(&shard_id, shard_state, shard_root, &tracker)?;
 
-    let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-        &shard_id,
-        BlockMetaData {
-            is_key_block: false,
-            gen_utime: shard_state_stuff.state().gen_utime,
-            mc_ref_seqno: 0,
-        },
-    );
+    let (handle, _) =
+        storage
+            .block_handle_storage()
+            .create_or_load_handle(&shard_id, BlockMetaData {
+                is_key_block: false,
+                gen_utime: shard_state_stuff.state().gen_utime,
+                mc_ref_seqno: 0,
+            });
 
     storage
         .shard_state_storage()

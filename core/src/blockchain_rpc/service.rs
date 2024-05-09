@@ -71,6 +71,9 @@ impl Service<ServiceRequest> for BlockchainRpcService {
         };
 
         tycho_network::match_tl_request!(body, tag = constructor, {
+            overlay::Ping as _ => BoxFutureOrNoop::future(async {
+                Some(Response::from_tl(overlay::Pong))
+            }),
             rpc::GetNextKeyBlockIds as req => {
                 tracing::debug!(
                     block_id = %req.block_id,
@@ -345,8 +348,11 @@ impl Inner {
             .read_state_part(&req.mc_block_id, &req.block_id, req.offset, req.max_size)
             .await
         {
-            Some(data) => overlay::Response::Ok(PersistentStatePart::Found { data }),
-            None => overlay::Response::Ok(PersistentStatePart::NotFound),
+            Ok(data) => overlay::Response::Ok(PersistentStatePart::Found { data }),
+            Err(e) => {
+                tracing::debug!("failed to read persistent state part: {e}");
+                overlay::Response::Ok(PersistentStatePart::NotFound)
+            }
         }
     }
 

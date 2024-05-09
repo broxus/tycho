@@ -1,11 +1,14 @@
-use crate::internal_queue::error::QueueError;
-use crate::internal_queue::shard::Shard;
-use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
-use everscale_types::cell::HashBytes;
-use everscale_types::models::ShardIdent;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+
+use everscale_types::cell::HashBytes;
+use everscale_types::models::ShardIdent;
+use tracing::error;
+
+use crate::internal_queue::error::QueueError;
+use crate::internal_queue::shard::Shard;
+use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
 
 pub struct SessionStateSnapshot {
     pub flat_shards: HashMap<ShardIdent, Shard>,
@@ -39,7 +42,7 @@ impl StateSnapshot for SessionStateSnapshot {
                         }
                     }
                     Err(e) => {
-                        println!("failed to convert account to hashbytes {e:?}");
+                        error!("failed to convert account to hashbytes {e:?}");
                         return false;
                     }
                 }

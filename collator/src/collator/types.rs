@@ -1,97 +1,91 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Result};
-
-use everscale_types::{
-    cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
-    dict::{AugDict, Dict},
-    models::{
-        AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-        CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OutMsgQueueInfo,
-        OwnedMessage, PrevBlockRef, ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription,
-        ShardFees, ShardIdent, SimpleLib, ValueFlow,
-    },
+use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
+use everscale_types::dict::{AugDict, Dict};
+use everscale_types::models::{
+    AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
+    CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OutMsgQueueInfo,
+    OwnedMessage, PrevBlockRef, ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription,
+    ShardFees, ShardIdent, SimpleLib, ValueFlow,
 };
-
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use crate::mempool::MempoolAnchorId;
 use crate::msg_queue::types::EnqueuedMessage;
 
-/*
-В текущем коллаторе перед коллацией блока импортируется:
-    - предыдущий мастер стейт
-    - предыдущие стейты шарды (их может быть 2, если мерж)
-ImportedData {
-    mc_state: Arc<ShardStateStuff>,
-    prev_states: Vec<Arc<ShardStateStuff>>,
-    prev_ext_blocks_refs: Vec<ExtBlkRef>,
-    top_shard_blocks_descr: Vec<Arc<TopBlockDescrStuff>>,
-}
-top_shard_blocks_descr - список верхних новых шардблоков с последнего мастера, если будем коллировать мастер
-    берутся из prev_states
-prev_ext_blocks_refs - ссылки на предыдущие шард блоки, на момент которых загружаются стейты шарды,
-    они берутся на основании prev_blocks_ids коллатора, загружаются вместе с prev_states
-для мастерчейна выполняется проверка на номер блока (надо в ней разобраться)
-
-Что входит в стейт шарды
-ShardStateStuff {
-    block_id: BlockId,
-    shard_state: Option<ShardStateUnsplit>,
-    out_msg_queue: Option<ShardStateUnsplit>,
-    out_msg_queue_for: i32,
-    shard_state_extra: Option<McStateExtra>,
-    root: Cell
-}
-
-Затем из этих данных методом prepare_data() готовится: McData, PrevData и CollatorData
-pub struct McData {
-    mc_state_extra: McStateExtra,
-    prev_key_block_seqno: u32,
-    prev_key_block: Option<BlockId>,
-    state: Arc<ShardStateStuff>
-}
-pub struct PrevData {
-    states: Vec<Arc<ShardStateStuff>>, // предыдущие стейты с отслеживанием изменений через UsageTree
-    pure_states: Vec<Arc<ShardStateStuff>>, // исходные предыдущие стейты шарды без отслеживания посещений
-    state_root: Cell,   // рутовая ячейка предыдущего стейта шарды (при мерже там будет объединенная ячейка из двух шард)
-                        // без отслеживания изменений
-    accounts: ShardAccounts,    // предыдущие аккаунты шарды с отслеживанием (получены с учетом сплита/мержа)
-    gen_utime: u32,
-    gen_lt: u64,
-    total_validator_fees: CurrencyCollection,
-    overload_history: u64,
-    underload_history: u64,
-    state_copyleft_rewards: CopyleftRewards,
-}
-pub struct CollatorData {
-    usage_tree: UsageTree, // дерево посещенный ячеек стейта для вычисления меркл пруфа
-}
-
-Далее при коллации
-При инициализации ExecutionManager стейты, ячейки и аккаунты не используются
-При создании tick-tock транзакций McData используется для получения ИД контракта с конфигом и чтения конфига консенсуса
-В коллацию интерналов McData не передается, передается PrevData и CollatorData
-
-PrevData и CollatorData передаются в execute. Там берется аккаунт из PrevData и передается в таску выполнения сообщения.
-Там из аккаунта берется рутовая ячейка и передается в метод выполнения сообщения, где она изменяется.
-Затем подменяется рут в аккаунте, а предыдущее состояние аккаунта сохраняется в prev_account_stuff,
-то есть изменяемый аккаунт накапливает историю изменений
-При завершении таски она возвращает актуальный обновленный аккаунт - это происходит при финализации блока
-
-В методе финализации блока
-- запоминаем аккаунты из предыдущего стейта в new_accounts
-- берем все измененные аккаунты shard_acc и перименяем их изменения в стейт аккаунтов new_accounts
-- из измененного аккаунта делаем AccountBlock и сохраняем в accounts, если в нем есть транзакции
-- так же кладем измененный аккаунт shard_acc в список changed_accounts
-- создаем новый стейт шарды new_state с использованием обновленных аккаунтов new_accounts
-- из нового стейта делаем новую рут ячейку new_ss_root
-- вычисляем меркл апдейты
-- завершаем создание блока с использованием accounts с транзакциями
-
-Метод коллации блока возвращает новый стейт шарды типа ShardStateUnsplit
-из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
-*/
+// В текущем коллаторе перед коллацией блока импортируется:
+// - предыдущий мастер стейт
+// - предыдущие стейты шарды (их может быть 2, если мерж)
+// ImportedData {
+// mc_state: Arc<ShardStateStuff>,
+// prev_states: Vec<Arc<ShardStateStuff>>,
+// prev_ext_blocks_refs: Vec<ExtBlkRef>,
+// top_shard_blocks_descr: Vec<Arc<TopBlockDescrStuff>>,
+// }
+// top_shard_blocks_descr - список верхних новых шардблоков с последнего мастера, если будем коллировать мастер
+// берутся из prev_states
+// prev_ext_blocks_refs - ссылки на предыдущие шард блоки, на момент которых загружаются стейты шарды,
+// они берутся на основании prev_blocks_ids коллатора, загружаются вместе с prev_states
+// для мастерчейна выполняется проверка на номер блока (надо в ней разобраться)
+//
+// Что входит в стейт шарды
+// ShardStateStuff {
+// block_id: BlockId,
+// shard_state: Option<ShardStateUnsplit>,
+// out_msg_queue: Option<ShardStateUnsplit>,
+// out_msg_queue_for: i32,
+// shard_state_extra: Option<McStateExtra>,
+// root: Cell
+// }
+//
+// Затем из этих данных методом prepare_data() готовится: McData, PrevData и CollatorData
+// pub struct McData {
+// mc_state_extra: McStateExtra,
+// prev_key_block_seqno: u32,
+// prev_key_block: Option<BlockId>,
+// state: Arc<ShardStateStuff>
+// }
+// pub struct PrevData {
+// states: Vec<Arc<ShardStateStuff>>, // предыдущие стейты с отслеживанием изменений через UsageTree
+// pure_states: Vec<Arc<ShardStateStuff>>, // исходные предыдущие стейты шарды без отслеживания посещений
+// state_root: Cell,   // рутовая ячейка предыдущего стейта шарды (при мерже там будет объединенная ячейка из двух шард)
+// без отслеживания изменений
+// accounts: ShardAccounts,    // предыдущие аккаунты шарды с отслеживанием (получены с учетом сплита/мержа)
+// gen_utime: u32,
+// gen_lt: u64,
+// total_validator_fees: CurrencyCollection,
+// overload_history: u64,
+// underload_history: u64,
+// state_copyleft_rewards: CopyleftRewards,
+// }
+// pub struct CollatorData {
+// usage_tree: UsageTree, // дерево посещенный ячеек стейта для вычисления меркл пруфа
+// }
+//
+// Далее при коллации
+// При инициализации ExecutionManager стейты, ячейки и аккаунты не используются
+// При создании tick-tock транзакций McData используется для получения ИД контракта с конфигом и чтения конфига консенсуса
+// В коллацию интерналов McData не передается, передается PrevData и CollatorData
+//
+// PrevData и CollatorData передаются в execute. Там берется аккаунт из PrevData и передается в таску выполнения сообщения.
+// Там из аккаунта берется рутовая ячейка и передается в метод выполнения сообщения, где она изменяется.
+// Затем подменяется рут в аккаунте, а предыдущее состояние аккаунта сохраняется в prev_account_stuff,
+// то есть изменяемый аккаунт накапливает историю изменений
+// При завершении таски она возвращает актуальный обновленный аккаунт - это происходит при финализации блока
+//
+// В методе финализации блока
+// - запоминаем аккаунты из предыдущего стейта в new_accounts
+// - берем все измененные аккаунты shard_acc и перименяем их изменения в стейт аккаунтов new_accounts
+// - из измененного аккаунта делаем AccountBlock и сохраняем в accounts, если в нем есть транзакции
+// - так же кладем измененный аккаунт shard_acc в список changed_accounts
+// - создаем новый стейт шарды new_state с использованием обновленных аккаунтов new_accounts
+// - из нового стейта делаем новую рут ячейку new_ss_root
+// - вычисляем меркл апдейты
+// - завершаем создание блока с использованием accounts с транзакциями
+//
+// Метод коллации блока возвращает новый стейт шарды типа ShardStateUnsplit
+// из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
 
 pub(super) struct WorkingState {
     pub mc_data: McData,
@@ -192,7 +186,7 @@ pub(super) struct PrevData {
 }
 impl PrevData {
     pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Self, UsageTree)> {
-        //TODO: make real implementation
+        // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
         //  Collator::unpack_last_state()
@@ -204,8 +198,8 @@ impl PrevData {
         let usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess);
         let observable_root = usage_tree.track(pure_prev_state_root);
         let tracker = MinRefMcStateTracker::new();
-        let observable_states = vec![ShardStateStuff::new(
-            *pure_prev_states[0].block_id(),
+        let observable_states = vec![ShardStateStuff::from_root(
+            pure_prev_states[0].block_id(),
             observable_root,
             &tracker,
         )?];
@@ -245,8 +239,8 @@ impl PrevData {
     }
 
     pub fn update_state(&mut self, new_blocks_ids: Vec<BlockId>) -> Result<()> {
-        //TODO: make real implementation
-        //STUB: currently have stub signature and implementation
+        // TODO: make real implementation
+        // STUB: currently have stub signature and implementation
         self.blocks_ids = new_blocks_ids;
 
         Ok(())
@@ -317,7 +311,7 @@ impl PrevData {
 
 #[derive(Debug, Default)]
 pub(super) struct BlockCollationData {
-    //block_descr: Arc<String>,
+    // block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
     pub chain_time: u32,
 
@@ -340,7 +334,7 @@ pub(super) struct BlockCollationData {
     shards: Option<HashMap<ShardIdent, Box<ShardDescription>>>,
     shards_max_end_lt: u64,
 
-    //TODO: setup update logic when ShardFees would be implemented
+    // TODO: setup update logic when ShardFees would be implemented
     pub shard_fees: ShardFees,
 
     pub mint_msg: Option<InMsg>,
@@ -424,8 +418,8 @@ impl ShardAccountStuff {
         };
         let new_libs = state_init.map(|v| v.libraries.clone()).unwrap_or_default();
         if new_libs.root() != self.orig_libs.root() {
-            //TODO: implement when scan_diff be added
-            //STUB: just do nothing, no accounts, no libraries updates in prototype
+            // TODO: implement when scan_diff be added
+            // STUB: just do nothing, no accounts, no libraries updates in prototype
             // new_libs.scan_diff(&self.orig_libs, |key: UInt256, old, new| {
             //     let old = old.unwrap_or_default();
             //     let new = new.unwrap_or_default();
@@ -448,10 +442,10 @@ pub(super) struct OutMsgQueueInfoStuff {
 }
 
 impl OutMsgQueueInfoStuff {
-    ///TODO: make real implementation
+    /// TODO: make real implementation
     pub fn get_out_msg_queue_info(&self) -> (OutMsgQueueInfo, u32) {
         let mut min_ref_mc_seqno = u32::MAX;
-        //STUB: just clone existing
+        // STUB: just clone existing
         let msg_queue_info = OutMsgQueueInfo {
             proc_info: self.proc_info.clone(),
         };
@@ -480,15 +474,15 @@ impl ShardDescriptionExt for ShardDescription {
             root_hash: block_id.root_hash,
             file_hash: block_id.file_hash,
             before_split: block_info.before_split,
-            before_merge: false, //TODO: by t-node, needs to review
+            before_merge: false, // TODO: by t-node, needs to review
             want_split: block_info.want_split,
             want_merge: block_info.want_merge,
-            nx_cc_updated: false, //TODO: by t-node, needs to review
+            nx_cc_updated: false, // TODO: by t-node, needs to review
             next_catchain_seqno: block_info.gen_catchain_seqno,
-            next_validator_shard: block_info.shard.prefix(), // eq to `shard_prefix_with_tag` in old node
+            next_validator_shard: block_info.shard.prefix(), /* eq to `shard_prefix_with_tag` in old node */
             min_ref_mc_seqno: block_info.min_ref_mc_seqno,
             gen_utime: block_info.gen_utime,
-            split_merge_at: None, //TODO: check if we really should not use it here
+            split_merge_at: None, // TODO: check if we really should not use it here
             fees_collected: value_flow.fees_collected.clone(),
             funds_created: value_flow.created.clone(),
             copyleft_rewards: Default::default(),

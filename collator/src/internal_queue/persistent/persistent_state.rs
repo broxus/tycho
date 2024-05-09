@@ -1,10 +1,13 @@
+use std::sync::Arc;
+
+use everscale_types::models::BlockIdShort;
+
 use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::ext_types_stubs::EnqueuedMessage;
-use everscale_types::models::BlockIdShort;
-use std::sync::Arc;
 
-pub trait PersistentState<S>
+#[trait_variant::make(PersistentState: Send)]
+pub trait LocalPersistentState<S>
 where
     S: StateSnapshot,
 {

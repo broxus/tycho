@@ -4,12 +4,9 @@ pub fn init_test_config() -> MessageQueueConfig {
     use super::super::cache_persistent::PersistentCacheConfigStubImpl;
     use super::MessageQueueBaseConfig;
 
-    MessageQueueConfig::new(
-        MessageQueueBaseConfig {},
-        PersistentCacheConfigStubImpl {
-            cfg_value1: "test_value_1".to_owned(),
-        },
-    )
+    MessageQueueConfig::new(MessageQueueBaseConfig {}, PersistentCacheConfigStubImpl {
+        cfg_value1: "test_value_1".to_owned(),
+    })
 }
 
 #[test]

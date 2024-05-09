@@ -9,7 +9,6 @@ use tycho_network::{Network, PublicOverlay, Request};
 pub use self::config::PublicOverlayClientConfig;
 pub use self::neighbour::{Neighbour, NeighbourStats};
 pub use self::neighbours::Neighbours;
-
 use crate::proto::overlay;
 
 mod config;
@@ -136,12 +135,39 @@ impl Clone for Inner {
 
 impl Inner {
     async fn ping_neighbours_task(self) {
+        let req = Request::from_tl(overlay::Ping);
+
+        // Start pinging neighbours
         let mut interval = tokio::time::interval(self.config.neighbours_ping_interval);
         loop {
             interval.tick().await;
 
-            if let Err(e) = self.query::<_, overlay::Pong>(overlay::Ping).await {
-                tracing::error!("failed to ping random neighbour: {e}");
+            let Some(neighbour) = self.neighbours.choose().await else {
+                continue;
+            };
+
+            let peer_id = *neighbour.peer_id();
+            match self.query_impl(neighbour.clone(), req.clone()).await {
+                Ok(res) => match tl_proto::deserialize::<overlay::Pong>(&res.data) {
+                    Ok(_) => {
+                        res.accept();
+                        tracing::debug!(%peer_id, "pinged neighbour");
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            %peer_id,
+                            "received an invalid ping response: {e}",
+                        );
+                        res.reject();
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        %peer_id,
+                        "failed to ping neighbour: {e}",
+                    );
+                    continue;
+                }
             }
         }
     }
@@ -151,10 +177,22 @@ impl Inner {
         let max_neighbours = self.config.max_neighbours;
         let default_roundtrip = self.config.default_roundtrip;
 
+        let mut overlay_peers_added = self.overlay.entires_added().notified();
+        let mut overlay_peer_count = self.overlay.read_entries().len();
+
         let mut interval = tokio::time::interval(self.config.neighbours_update_interval);
 
         loop {
-            interval.tick().await;
+            if overlay_peer_count < max_neighbours {
+                tracing::info!("not enough neighbours, waiting for more");
+
+                overlay_peers_added.await;
+                overlay_peers_added = self.overlay.entires_added().notified();
+
+                overlay_peer_count = self.overlay.read_entries().len();
+            } else {
+                interval.tick().await;
+            }
 
             let active_neighbours = self.neighbours.get_active_neighbours().await.len();
             let neighbours_to_get = max_neighbours + (max_neighbours - active_neighbours);

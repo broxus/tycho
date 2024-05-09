@@ -6,20 +6,19 @@ use everscale_crypto::ed25519;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use self::config::EndpointConfig;
-use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
-use self::endpoint::Endpoint;
-use crate::types::{
-    Address, DisconnectReason, PeerEvent, PeerId, PeerInfo, Response, Service, ServiceExt,
-    ServiceRequest,
-};
-
 pub use self::config::{NetworkConfig, QuicConfig};
 pub use self::connection::{Connection, RecvStream, SendStream};
 pub use self::connection_manager::{
     ActivePeers, KnownPeerHandle, KnownPeers, KnownPeersError, PeerBannedError, WeakActivePeers,
     WeakKnownPeerHandle,
 };
+use self::connection_manager::{ConnectionManager, ConnectionManagerRequest};
+use self::endpoint::Endpoint;
 pub use self::peer::Peer;
+use crate::types::{
+    Address, DisconnectReason, PeerEvent, PeerId, PeerInfo, Response, Service, ServiceExt,
+    ServiceRequest,
+};
 
 mod config;
 mod connection;
@@ -38,11 +37,17 @@ pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
 #[derive(Default)]
 struct BuilderFields {
     config: Option<NetworkConfig>,
+    remote_addr: Option<Address>,
 }
 
 impl<MandatoryFields> NetworkBuilder<MandatoryFields> {
     pub fn with_config(mut self, config: NetworkConfig) -> Self {
         self.optional_fields.config = Some(config);
+        self
+    }
+
+    pub fn with_remote_addr<T: Into<Address>>(mut self, addr: T) -> Self {
+        self.optional_fields.remote_addr = Some(addr.into());
         self
     }
 }
@@ -72,13 +77,11 @@ impl<T1> NetworkBuilder<(T1, ())> {
 }
 
 impl NetworkBuilder {
-    pub fn build<T: ToSocketAddrs, S>(self, bind_address: T, service: S) -> Result<Network>
+    pub fn build<T: ToSocket, S>(self, bind_address: T, service: S) -> Result<Network>
     where
         S: Send + Sync + Clone + 'static,
         S: Service<ServiceRequest, QueryResponse = Response>,
     {
-        use socket2::{Domain, Protocol, Socket, Type};
-
         let config = self.optional_fields.config.unwrap_or_default();
         let quic_config = config.quic.clone().unwrap_or_default();
         let (service_name, private_key) = self.mandatory_fields;
@@ -92,18 +95,7 @@ impl NetworkBuilder {
             .with_transport_config(quic_config.make_transport_config())
             .build()?;
 
-        let socket = 'socket: {
-            let mut err = anyhow::anyhow!("no addresses to bind to");
-            for addr in bind_address.to_socket_addrs()? {
-                let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
-                if let Err(e) = s.bind(&socket2::SockAddr::from(addr)) {
-                    err = e.into();
-                } else {
-                    break 'socket s;
-                }
-            }
-            return Err(err);
-        };
+        let socket = bind_address.to_socket().map(socket2::Socket::from)?;
 
         if let Some(send_buffer_size) = quic_config.socket_send_buffer_size {
             if let Err(e) = socket.set_send_buffer_size(send_buffer_size) {
@@ -129,6 +121,12 @@ impl NetworkBuilder {
         let weak_active_peers = ActivePeers::downgrade(&active_peers);
         let known_peers = KnownPeers::new();
 
+        let remote_addr = self.optional_fields.remote_addr.unwrap_or_else(|| {
+            let addr = endpoint.local_addr();
+            tracing::debug!(%addr, "using local address as remote address");
+            addr.into()
+        });
+
         let inner = Arc::new_cyclic(move |_weak| {
             let service = service.boxed_clone();
 
@@ -144,6 +142,7 @@ impl NetworkBuilder {
 
             NetworkInner {
                 config,
+                remote_addr,
                 endpoint,
                 active_peers: weak_active_peers,
                 known_peers,
@@ -179,6 +178,10 @@ impl Network {
             mandatory_fields: ((), ()),
             optional_fields: Default::default(),
         }
+    }
+
+    pub fn remote_addr(&self) -> &Address {
+        self.0.remote_addr()
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -232,7 +235,7 @@ impl Network {
     pub fn sign_peer_info(&self, now: u32, ttl: u32) -> PeerInfo {
         let mut res = PeerInfo {
             id: *self.0.peer_id(),
-            address_list: vec![self.local_addr().into()].into_boxed_slice(),
+            address_list: vec![self.remote_addr().clone()].into_boxed_slice(),
             created_at: now,
             expires_at: now.saturating_add(ttl),
             signature: Box::new([0; 64]),
@@ -248,6 +251,7 @@ impl Network {
 
 struct NetworkInner {
     config: Arc<NetworkConfig>,
+    remote_addr: Address,
     endpoint: Arc<Endpoint>,
     active_peers: WeakActivePeers,
     known_peers: KnownPeers,
@@ -256,6 +260,10 @@ struct NetworkInner {
 }
 
 impl NetworkInner {
+    fn remote_addr(&self) -> &Address {
+        &self.remote_addr
+    }
+
     fn local_addr(&self) -> SocketAddr {
         self.endpoint.local_addr()
     }
@@ -317,16 +325,68 @@ impl Drop for NetworkInner {
     }
 }
 
+pub trait ToSocket {
+    fn to_socket(self) -> Result<std::net::UdpSocket>;
+}
+
+impl ToSocket for std::net::UdpSocket {
+    fn to_socket(self) -> Result<std::net::UdpSocket> {
+        Ok(self)
+    }
+}
+
+macro_rules! impl_to_socket_for_addr {
+    ($($ty:ty),*$(,)?) => {$(
+        impl ToSocket for $ty {
+            fn to_socket(self) -> Result<std::net::UdpSocket> {
+                bind_socket_to_addr(self)
+            }
+        }
+    )*};
+}
+
+impl_to_socket_for_addr! {
+    SocketAddr,
+    std::net::SocketAddrV4,
+    std::net::SocketAddrV6,
+    (std::net::IpAddr, u16),
+    (std::net::Ipv4Addr, u16),
+    (std::net::Ipv6Addr, u16),
+    (&str, u16),
+    (String, u16),
+    &str,
+    String,
+    &[SocketAddr],
+    Address,
+}
+
+fn bind_socket_to_addr<T: ToSocketAddrs>(bind_address: T) -> Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let mut err = anyhow::anyhow!("no addresses to bind to");
+    for addr in bind_address.to_socket_addrs()? {
+        let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        if let Err(e) = s.bind(&socket2::SockAddr::from(addr)) {
+            err = e.into();
+        } else {
+            return Ok(s.into());
+        }
+    }
+    Err(err)
+}
+
 #[derive(thiserror::Error, Debug)]
 #[error("network has been shutdown")]
 struct NetworkShutdownError;
 
 #[cfg(test)]
 mod tests {
+    use futures_util::stream::FuturesUnordered;
+    use futures_util::StreamExt;
     use tracing_test::traced_test;
 
     use super::*;
-    use crate::types::{service_query_fn, BoxCloneService, PeerInfo, Request};
+    use crate::types::{service_message_fn, service_query_fn, BoxCloneService, PeerInfo, Request};
     use crate::util::NetworkExt;
 
     fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
@@ -355,7 +415,7 @@ mod tests {
     fn make_peer_info(network: &Network) -> Arc<PeerInfo> {
         Arc::new(PeerInfo {
             id: *network.peer_id(),
-            address_list: vec![network.local_addr().into()].into_boxed_slice(),
+            address_list: vec![network.remote_addr().clone()].into_boxed_slice(),
             created_at: 0,
             expires_at: u32::MAX,
             signature: Box::new([0; 64]),
@@ -421,6 +481,61 @@ mod tests {
             let (res1, res2) = futures_util::future::join(peer1_fut, peer2_fut).await;
             assert_eq!(res1?.body, req.body);
             assert_eq!(res2?.body, req.body);
+        }
+
+        Ok(())
+    }
+
+    #[traced_test]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uni_message_handler() -> Result<()> {
+        std::panic::set_hook(Box::new(|info| {
+            use std::io::Write;
+
+            tracing::error!("{}", info);
+            std::io::stderr().flush().ok();
+            std::io::stdout().flush().ok();
+            std::process::exit(1);
+        }));
+
+        fn noop_service() -> BoxCloneService<ServiceRequest, Response> {
+            let handle = |request: ServiceRequest| async move {
+                tracing::trace!("received: {} bytes", request.body.len());
+            };
+            service_message_fn(handle).boxed_clone()
+        }
+
+        fn make_network() -> Result<Network> {
+            Network::builder()
+                .with_config(NetworkConfig {
+                    enable_0rtt: true,
+                    ..Default::default()
+                })
+                .with_random_private_key()
+                .with_service_name("tycho")
+                .build("127.0.0.1:0", noop_service())
+        }
+
+        let left = make_network()?;
+        let right = make_network()?;
+
+        let _left_to_right = left.known_peers().insert(make_peer_info(&right), false)?;
+        let _right_to_left = right.known_peers().insert(make_peer_info(&left), false)?;
+
+        let req = Request {
+            version: Default::default(),
+            body: vec![0xff; 750 * 1024].into(),
+        };
+
+        for _ in 0..10 {
+            let mut futures = FuturesUnordered::new();
+            for _ in 0..100 {
+                futures.push(left.send(&right.peer_id(), req.clone()));
+            }
+
+            while let Some(res) = futures.next().await {
+                res?;
+            }
         }
 
         Ok(())

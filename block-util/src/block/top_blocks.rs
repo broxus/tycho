@@ -64,7 +64,7 @@ impl ShardHeights {
         self.0.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = BlockIdShort> + ExactSizeIterator + Clone + '_ {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = BlockIdShort> + Clone + '_ {
         self.0
             .iter()
             .map(|(shard, seqno)| BlockIdShort::from((*shard, *seqno)))

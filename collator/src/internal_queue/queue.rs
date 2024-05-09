@@ -1,14 +1,17 @@
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use everscale_types::models::{BlockIdShort, ShardIdent};
+use tokio::sync::{Mutex, RwLock};
+
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::persistent::persistent_state::PersistentState;
 use crate::internal_queue::session::session_state::SessionState;
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::QueueDiff;
-use everscale_types::models::{BlockIdShort, ShardIdent};
-use std::marker::PhantomData;
-use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 
-pub trait Queue<SS, PS>
+#[trait_variant::make(Queue: Send)]
+pub trait LocalQueue<SS, PS>
 where
     SS: StateSnapshot + 'static,
     PS: StateSnapshot + 'static,
@@ -24,6 +27,7 @@ where
         diff_id: &BlockIdShort,
     ) -> Result<Option<Arc<QueueDiff>>, QueueError>;
 }
+
 pub struct QueueImpl<S, P, SS, PS>
 where
     S: SessionState<SS>,
@@ -39,10 +43,10 @@ where
 
 impl<S, P, SS, PS> Queue<SS, PS> for QueueImpl<S, P, SS, PS>
 where
-    S: SessionState<SS>,
-    P: PersistentState<PS>,
-    SS: StateSnapshot + 'static,
-    PS: StateSnapshot + 'static,
+    S: SessionState<SS> + Send,
+    P: PersistentState<PS> + Send + Sync,
+    SS: StateSnapshot + 'static + Send + Sync,
+    PS: StateSnapshot + 'static + Send + Sync,
 {
     fn new(base_shard: ShardIdent) -> Self {
         let session_state = Mutex::new(S::new(base_shard));
@@ -90,12 +94,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use everscale_types::models::ShardIdent;
+
     use super::*;
     use crate::internal_queue::persistent::persistent_state::PersistentStateImpl;
     use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
     use crate::internal_queue::session::session_state::SessionStateImpl;
     use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
-    use everscale_types::models::ShardIdent;
 
     #[tokio::test]
     async fn test_new_queue() {
@@ -106,8 +111,8 @@ mod tests {
             PersistentStateImpl,
             SessionStateSnapshot,
             PersistentStateSnapshot,
-        > = QueueImpl::new(base_shard);
+        > = <QueueImpl<_, _, _, _> as Queue<_, _>>::new(base_shard);
 
-        queue.split_shard(&base_shard).await.unwrap();
+        Queue::split_shard(&queue, &base_shard).await.unwrap();
     }
 }

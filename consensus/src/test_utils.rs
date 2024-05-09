@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
-    PeerInfo, Router,
+    PeerInfo, Router, ToSocket,
 };
 use tycho_util::time::now_sec;
 
@@ -55,7 +55,7 @@ pub fn make_peer_info(key: &SecretKey, address: Address, ttl: Option<u32>) -> Pe
 // TODO receive configured services from general node,
 //  move current setup to tests as it provides acceptable timing
 // This dependencies should be passed from validator module to init mempool
-pub fn from_validator<T: ToSocketAddrs>(
+pub fn from_validator<T: ToSocket>(
     socket_addr: T,
     secret_key: &SecretKey,
     dht_config: DhtConfig,

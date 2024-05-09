@@ -23,7 +23,7 @@ tokio = { workspace = true, features = ["macros", "rt", "signal"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
+trait-variant = { workspace = true }
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
 
@@ -33,17 +33,14 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
-
-#TODO: should be here?
 tycho-consensus = {workspace = true}
-
-
 
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tracing-test = { workspace = true }
 tycho-block-util = { workspace = true, features = ["test"] }
+tycho-collator = { workspace = true, features = ["test"] }
 tycho-core = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }

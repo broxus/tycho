@@ -1,13 +1,15 @@
-use crate::internal_queue::error::QueueError;
-use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
-use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, EnqueuedMessageKey, Lt};
-use crate::internal_queue::types::QueueDiff;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, ShardIdent};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
+
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{BlockIdShort, ShardIdent};
+
+use crate::internal_queue::error::QueueError;
+use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
+use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, EnqueuedMessageKey, Lt};
+use crate::internal_queue::types::QueueDiff;
 
 pub trait QueueIterator {
     fn next(&mut self) -> Option<IterItem>;
@@ -191,11 +193,12 @@ fn find_common_ancestor(shard1: ShardIdent, shard2: ShardIdent) -> Option<ShardI
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
     use crate::internal_queue::shard::Shard;
     use crate::internal_queue::types::ext_types_stubs::{MessageContent, MessageEnvelope};
-    use std::collections::HashMap;
 
     fn mock_snapshot() -> Box<dyn StateSnapshot> {
         let shard_id = ShardIdent::new_full(0);

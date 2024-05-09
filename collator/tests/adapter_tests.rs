@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::cell::Cell;
+use everscale_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
@@ -124,8 +125,7 @@ async fn test_add_and_get_next_block() {
     };
     adapter.accept_block(block).await.unwrap();
 
-    // TOOD: Incorrect!!! Should be waiting for the next block, not the previous one
-    let next_block = adapter.wait_for_block(prev_block_id).await;
+    let next_block = adapter.wait_for_block_next(prev_block_id).await;
     assert!(
         next_block.is_some(),
         "Block should be retrieved after being added"
@@ -135,7 +135,7 @@ async fn test_add_and_get_next_block() {
 #[tokio::test]
 async fn test_add_read_handle_1000_blocks_parallel() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
-    tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel");
+    tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel", "debug");
 
     let storage = prepare_test_storage().await.unwrap();
 
@@ -210,22 +210,26 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 let next_block = adapter.wait_for_block(&block_id).await;
                 assert!(
                     next_block.is_some(),
-                    "Block {} should be retrieved after being added",
-                    i
+                    "Block {i} should be retrieved after being added",
                 );
 
-                let last_mc_block_id = adapter.load_last_applied_mc_block_id().await.unwrap();
-                let state = storage
-                    .shard_state_storage()
-                    .load_state(&last_mc_block_id)
-                    .await
-                    .unwrap();
+                let mcstate_tracker = MinRefMcStateTracker::new();
+                let mut shard_state = ShardStateUnsplit::default();
+                shard_state.shard_ident = block_id.shard;
+                shard_state.seqno = block_id.seqno;
+
+                let state = ShardStateStuff::from_state_and_root(
+                    &block_id,
+                    Box::new(shard_state),
+                    Cell::default(),
+                    &mcstate_tracker,
+                )
+                .unwrap();
 
                 let handle_block = adapter.handle_state(&state).await;
                 assert!(
                     handle_block.is_ok(),
-                    "Block {} should be handled after being added",
-                    i
+                    "Block {i} should be handled after being added",
                 );
             }
         })

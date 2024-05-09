@@ -1,8 +1,10 @@
-use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, EnqueuedMessageKey};
-use crate::internal_queue::types::QueueDiff;
-use everscale_types::models::{BlockIdShort, ShardIdent};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use everscale_types::models::{BlockIdShort, ShardIdent};
+
+use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, EnqueuedMessageKey};
+use crate::internal_queue::types::QueueDiff;
 
 #[derive(Clone)]
 pub struct Shard {

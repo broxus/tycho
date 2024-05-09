@@ -23,15 +23,27 @@ impl ShardStateStuff {
         .map_err(From::from)
     }
 
-    pub fn new(block_id: BlockId, root: Cell, tracker: &MinRefMcStateTracker) -> Result<Self> {
-        let shard_state = root.parse::<ShardStateUnsplit>()?;
-
+    pub fn from_root(
+        block_id: &BlockId,
+        root: Cell,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self> {
+        let shard_state = root.parse::<Box<ShardStateUnsplit>>()?;
         Self::from_state_and_root(block_id, shard_state, root, tracker)
     }
 
+    pub fn from_state(
+        block_id: &BlockId,
+        shard_state: Box<ShardStateUnsplit>,
+        tracker: &MinRefMcStateTracker,
+    ) -> Result<Self> {
+        let root = CellBuilder::build_from(&shard_state)?;
+        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
+    }
+
     pub fn from_state_and_root(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
+        block_id: &BlockId,
+        shard_state: Box<ShardStateUnsplit>,
         root: Cell,
         tracker: &MinRefMcStateTracker,
     ) -> Result<Self> {
@@ -48,7 +60,7 @@ impl ShardStateStuff {
         let handle = tracker.insert(shard_state.min_ref_mc_seqno);
         Ok(Self {
             inner: Arc::new(Inner {
-                block_id,
+                block_id: *block_id,
                 shard_state_extra: shard_state.load_custom()?,
                 shard_state,
                 root,
@@ -57,28 +69,27 @@ impl ShardStateStuff {
         })
     }
 
-    pub fn deserialize_zerostate(id: BlockId, bytes: &[u8]) -> Result<Self> {
-        anyhow::ensure!(id.seqno == 0, "given id has a non-zero seqno");
+    pub fn deserialize_zerostate(zerostate_id: &BlockId, bytes: &[u8]) -> Result<Self> {
+        anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
 
         let file_hash = sha2::Sha256::digest(bytes);
         anyhow::ensure!(
-            id.file_hash.as_slice() == file_hash.as_slice(),
+            zerostate_id.file_hash.as_slice() == file_hash.as_slice(),
             "file_hash mismatch. Expected: {}, got: {}",
             hex::encode(file_hash),
-            id.file_hash,
+            zerostate_id.file_hash,
         );
 
         let root = Boc::decode(bytes)?;
         anyhow::ensure!(
-            &id.root_hash == root.repr_hash(),
-            "root_hash mismatch for {id}. Expected: {expected}, got: {got}",
-            id = id,
-            expected = id.root_hash,
+            &zerostate_id.root_hash == root.repr_hash(),
+            "root_hash mismatch for {zerostate_id}. Expected: {expected}, got: {got}",
+            expected = zerostate_id.root_hash,
             got = root.repr_hash(),
         );
 
-        Self::new(
-            id,
+        Self::from_root(
+            zerostate_id,
             root,
             ZEROSTATE_REFS.get_or_init(MinRefMcStateTracker::new),
         )
@@ -118,7 +129,7 @@ impl ShardStateStuff {
 
 struct Inner {
     block_id: BlockId,
-    shard_state: ShardStateUnsplit,
+    shard_state: Box<ShardStateUnsplit>,
     shard_state_extra: Option<McStateExtra>,
     handle: RefMcStateHandle,
     root: Cell,

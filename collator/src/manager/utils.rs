@@ -4,9 +4,8 @@ use everscale_types::boc::BocRepr;
 use everscale_types::models::ValidatorDescription;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
-use crate::types::{BlockStuffForSync, CollationConfig};
-
 use super::types::BlockCandidateEntry;
+use crate::types::{BlockStuffForSync, CollationConfig};
 
 pub fn build_block_stuff_for_sync(
     block_candidate: &BlockCandidateEntry,

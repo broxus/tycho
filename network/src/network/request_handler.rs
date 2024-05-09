@@ -37,6 +37,26 @@ impl InboundRequestHandler {
     pub async fn start(self) {
         tracing::debug!(peer_id = %self.connection.peer_id(), "request handler started");
 
+        struct ClearOnDrop<'a> {
+            handler: &'a InboundRequestHandler,
+            reason: DisconnectReason,
+        }
+
+        impl Drop for ClearOnDrop<'_> {
+            fn drop(&mut self) {
+                self.handler.active_peers.remove_with_stable_id(
+                    self.handler.connection.peer_id(),
+                    self.handler.connection.stable_id(),
+                    self.reason,
+                );
+            }
+        }
+
+        let mut clear_on_drop = ClearOnDrop {
+            handler: &self,
+            reason: DisconnectReason::LocallyClosed,
+        };
+
         let mut inflight_requests = JoinSet::<()>::new();
 
         let reason: quinn::ConnectionError = loop {
@@ -107,12 +127,7 @@ impl InboundRequestHandler {
                 }
             }
         };
-
-        self.active_peers.remove_with_stable_id(
-            self.connection.peer_id(),
-            self.connection.stable_id(),
-            DisconnectReason::from(reason),
-        );
+        clear_on_drop.reason = reason.into();
 
         inflight_requests.shutdown().await;
         tracing::debug!(peer_id = %self.connection.peer_id(), "request handler stopped");

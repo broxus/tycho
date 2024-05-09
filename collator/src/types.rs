@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::{CellBuilder, HashBytes};
 use everscale_types::models::{
     Block, BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature,
 };
-
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
@@ -89,27 +87,6 @@ impl BlockCandidate {
     }
 }
 
-pub trait ShardStateStuffExt {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-}
-
-impl ShardStateStuffExt for ShardStateStuff {
-    fn from_state(
-        block_id: BlockId,
-        shard_state: ShardStateUnsplit,
-        tracker: &MinRefMcStateTracker,
-    ) -> Result<Self> {
-        let root = CellBuilder::build_from(&shard_state)?;
-        ShardStateStuff::from_state_and_root(block_id, shard_state, root, tracker)
-    }
-}
-
 #[derive(Clone)]
 pub enum OnValidatedBlockEvent {
     ValidByState,
@@ -163,8 +140,8 @@ impl ValidatedBlock {
 }
 
 pub struct BlockStuffForSync {
-    //STUB: will not parse Block because candidate does not contain real block
-    //TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
+    // STUB: will not parse Block because candidate does not contain real block
+    // TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
     pub block_id: BlockId,
     pub block_stuff_aug: BlockStuffAug,
     pub signatures: FastHashMap<HashBytes, Signature>,
@@ -178,21 +155,27 @@ pub(crate) type CollationSessionId = (ShardIdent, u32);
 #[derive(Clone)]
 pub struct CollationSessionInfo {
     /// Sequence number of the collation session
+    workchain: i32,
     seqno: u32,
     collators: ValidatorSubsetInfo,
     current_collator_keypair: Option<Arc<KeyPair>>,
 }
 impl CollationSessionInfo {
     pub fn new(
+        workchain: i32,
         seqno: u32,
         collators: ValidatorSubsetInfo,
         current_collator_keypair: Option<Arc<KeyPair>>,
     ) -> Self {
         Self {
+            workchain,
             seqno,
             collators,
             current_collator_keypair,
         }
+    }
+    pub fn workchain(&self) -> i32 {
+        self.workchain
     }
     pub fn seqno(&self) -> u32 {
         self.seqno

@@ -1,3 +1,5 @@
+#![allow(clippy::exit)]
+
 use tracing_subscriber::EnvFilter;
 
 pub fn init_logger(test_name: &str, filter: &str) {

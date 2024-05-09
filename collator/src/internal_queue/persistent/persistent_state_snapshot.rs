@@ -1,8 +1,10 @@
-use crate::internal_queue::error::QueueError;
-use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
-use everscale_types::models::ShardIdent;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use everscale_types::models::ShardIdent;
+
+use crate::internal_queue::error::QueueError;
+use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
 
 pub struct PersistentStateSnapshot {}
 

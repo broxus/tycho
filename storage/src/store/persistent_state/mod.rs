@@ -31,9 +31,7 @@ impl PersistentStateStorage {
         files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
     ) -> Result<Self> {
-        let storage_dir = files_dir.subdir(BASE_DIR);
-        storage_dir.ensure_exists()?;
-
+        let storage_dir = files_dir.create_subdir(BASE_DIR)?;
         let is_cancelled = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
@@ -88,19 +86,23 @@ impl PersistentStateStorage {
         block_id: &BlockId,
         offset: u64,
         size: u64,
-    ) -> Option<Bytes> {
-        let path = self
+    ) -> Result<Bytes> {
+        // todo: add validation for offset and size
+        // so it won't eat all the memory
+        let mut builder = self
             .mc_states_dir(mc_block_id)
-            .join(block_id.root_hash.to_string());
-
+            .file(block_id.root_hash.to_string());
+        let file_path = builder.path().to_path_buf();
         tokio::task::spawn_blocking(move || {
             // TODO: cache file handles
-            let mut file = std::fs::OpenOptions::new().read(true).open(path).ok()?;
+            let mut file = builder.read(true).open()?;
 
-            if let Err(e) = file.seek(SeekFrom::Start(offset)) {
-                tracing::error!("failed to seek state file offset: {e:?}");
-                return None;
-            }
+            file.seek(SeekFrom::Start(offset)).with_context(|| {
+                format!(
+                    "failed to seek state file offset, path: {}",
+                    file_path.display()
+                )
+            })?;
 
             let mut buf_reader = BufReader::new(file);
 
@@ -111,48 +113,48 @@ impl PersistentStateStorage {
             loop {
                 match buf_reader.read(&mut result[result_cursor..]) {
                     Ok(bytes_read) => {
-                        tracing::info!("Reading state file. Bytes read: {}", bytes_read);
+                        tracing::debug!(bytes_read, "reading state file");
                         if bytes_read == 0 || bytes_read == size as usize {
                             break;
                         }
                         result_cursor += bytes_read;
                     }
                     Err(e) => {
-                        tracing::error!("Failed to read state file. Err: {e:?}");
-                        return None;
+                        return Err(anyhow::Error::new(e).context(format!(
+                            "failed to read state file. Path: {}",
+                            file_path.display()
+                        )))
                     }
                 }
             }
-            tracing::info!(
-                "Finished reading buffer after: {} ms",
+            tracing::debug!(
+                "finished reading buffer after: {} ms",
                 now.elapsed().as_millis()
             );
 
-            Some(result.freeze())
+            Ok(result.freeze())
         })
         .await
-        .ok()
-        .flatten()
+        .unwrap()
     }
 
     pub fn state_exists(&self, mc_block_id: &BlockId, block_id: &BlockId) -> bool {
         // TODO: cache file handles
         self.mc_states_dir(mc_block_id)
-            .join(block_id.root_hash.to_string())
-            .is_file()
+            .file_exists(block_id.root_hash.to_string())
     }
 
     pub fn prepare_persistent_states_dir(&self, mc_block: &BlockId) -> Result<FileDb> {
-        let states_dir = self.storage_dir.subdir(mc_block.seqno.to_string());
+        let states_dir = self.storage_dir.subdir_readonly(mc_block.seqno.to_string());
         if !states_dir.path().is_dir() {
             tracing::info!(mc_block = %mc_block, "creating persistent state directory");
-            states_dir.ensure_exists()?;
+            states_dir.create_if_not_exists()?;
         }
         Ok(states_dir)
     }
 
-    fn mc_states_dir(&self, mc_block_id: &BlockId) -> PathBuf {
-        self.storage_dir.path().join(mc_block_id.seqno.to_string())
+    fn mc_states_dir(&self, mc_block_id: &BlockId) -> FileDb {
+        FileDb::new_readonly(self.storage_dir.path().join(mc_block_id.seqno.to_string()))
     }
 
     pub fn cancel(&self) {

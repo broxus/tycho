@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use rand::distributions::uniform::{UniformInt, UniformSampler};
 use rand::Rng;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::overlay_client::neighbour::Neighbour;
 
@@ -22,8 +22,25 @@ impl Neighbours {
                 max_neighbours,
                 entries: Mutex::new(entries),
                 selection_index: Mutex::new(selection_index),
+                changed: Notify::new(),
             }),
         }
+    }
+
+    pub async fn wait_for_peers(&self, count: usize) {
+        loop {
+            let changed = self.inner.changed.notified();
+
+            if self.inner.entries.lock().await.len() >= count {
+                break;
+            }
+
+            changed.await;
+        }
+    }
+
+    pub fn changed(&self) -> &Notify {
+        &self.inner.changed
     }
 
     pub async fn choose(&self) -> Option<Neighbour> {
@@ -53,9 +70,15 @@ impl Neighbours {
     pub async fn update(&self, new: Vec<Neighbour>) {
         let now = tycho_util::time::now_sec();
 
+        let mut changed = false;
+
         let mut guard = self.inner.entries.lock().await;
         // remove unreliable and expired neighbours
-        guard.retain(|x| x.is_reliable() && x.expires_at_secs() > now);
+        guard.retain(|x| {
+            let retain = x.is_reliable() && x.expires_at_secs() > now;
+            changed |= !retain;
+            retain
+        });
 
         // if all neighbours are reliable and valid then remove the worst
         if guard.len() >= self.inner.max_neighbours {
@@ -65,6 +88,7 @@ impl Neighbours {
             {
                 if let Some(index) = guard.iter().position(|x| x.peer_id() == worst.peer_id()) {
                     guard.remove(index);
+                    changed = true;
                 }
             }
         }
@@ -75,18 +99,23 @@ impl Neighbours {
             }
             if guard.len() < self.inner.max_neighbours {
                 guard.push(n);
+                changed = true;
             }
         }
 
         drop(guard);
         self.update_selection_index().await;
+
+        if changed {
+            self.inner.changed.notify_waiters();
+        }
     }
 
     pub async fn remove_outdated_neighbours(&self) {
         let now = tycho_util::time::now_sec();
 
         let mut guard = self.inner.entries.lock().await;
-        //remove unreliable and expired neighbours
+        // remove unreliable and expired neighbours
         guard.retain(|x| x.expires_at_secs() > now);
         drop(guard);
         self.update_selection_index().await;
@@ -97,6 +126,7 @@ struct Inner {
     max_neighbours: usize,
     entries: Mutex<Vec<Neighbour>>,
     selection_index: Mutex<SelectionIndex>,
+    changed: Notify,
 }
 
 struct SelectionIndex {

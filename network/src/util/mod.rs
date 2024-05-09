@@ -1,9 +1,7 @@
 pub use self::router::{Routable, Router, RouterBuilder};
-pub use self::traits::NetworkExt;
-
 #[cfg(test)]
 pub use self::test::make_peer_info_stub;
-
+pub use self::traits::NetworkExt;
 use crate::types::PeerId;
 
 mod router;

@@ -49,9 +49,9 @@ pub async fn test() {
     let mut rng = thread_rng();
     let slice = initial_peers.as_slice();
     while i < 1000 {
-        //let start = Instant::now();
+        // let start = Instant::now();
         let n_opt = neighbours.choose().await;
-        //let end = Instant::now();
+        // let end = Instant::now();
 
         if let Some(n) = n_opt {
             let index = slice
@@ -90,5 +90,5 @@ pub async fn test() {
         println!("peer {} score {}", i.peer_id(), i.get_stats().score);
     }
 
-    //assert_ne!(peers.len(), 5);
+    // assert_ne!(peers.len(), 5);
 }
