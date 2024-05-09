@@ -102,6 +102,10 @@ impl CollatorStdImpl {
         // compute created / minted / recovered / from_prev_block
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
+        // prepare to read and execute internals and externals
+        let (max_messages_per_set, min_externals_per_set, group_size) =
+            self.get_msgs_execution_params();
+
         // init execution manager
         let mut exec_manager = ExecutionManager::new(
             collation_data.chain_time,
@@ -111,13 +115,10 @@ impl CollatorStdImpl {
             mc_data.mc_state_stuff().state().libraries.clone(),
             mc_data.config().clone(),
             self.config.supported_block_version,
-            self.config.max_collate_threads as u32,
+            group_size as u32,
             prev_shard_data.observable_accounts().clone(),
         );
 
-        // prepare to read and execute internals and externals
-        let (max_messages_per_set, min_externals_per_set, group_size) =
-            self.get_msgs_execution_params();
         let mut all_existing_internals_finished = false;
         let mut all_new_internals_finished = false;
 
@@ -202,8 +203,7 @@ impl CollatorStdImpl {
                 break;
             }
 
-            //TODO: here use exec_manager to execute msgs set, get transactions,
-            //      and update collation_data from them
+            let msgs_len = msgs_set.len() as u32;
             exec_manager.execute_msgs_set(msgs_set);
             let mut msgs_set_offset: u32 = 0;
             let mut msgs_set_full_processed = false;
@@ -211,14 +211,6 @@ impl CollatorStdImpl {
             //STUB: currently emulate msgs processing by groups
             //      check block limits by transactions count
             while !msgs_set_full_processed {
-                let one_tick_processed_msgs: Vec<_> = if msgs_set.len() > group_size {
-                    msgs_set.drain(..group_size).collect()
-                } else {
-                    msgs_set.drain(..).collect()
-                };
-
-                msgs_set_offset += one_tick_processed_msgs.len() as u32;
-
                 let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
                 for (account_id, msg_info, transaction) in group {
                     let internal_msgs = new_transaction(&mut collation_data, &transaction, msg_info)?;
@@ -237,13 +229,13 @@ impl CollatorStdImpl {
                 //TODO: when processing transactions we should check block limits
                 //      currently we simply check only transactions count
                 //      but needs to make good implementation futher
-                block_transactions_count += one_tick_processed_msgs.len();
+                block_transactions_count += new_offset;
                 if block_transactions_count >= 14 {
                     block_limits_reached = true;
                     break;
                 }
 
-                if msgs_set.is_empty() {
+                if msgs_len == msgs_set_offset {
                     msgs_set_full_processed = true;
                 }
             }
