@@ -7,15 +7,15 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use everscale_types::{
-    cell::{CellBuilder, CellSliceRange, HashBytes},
-    models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr},
+    cell::{CellBuilder, HashBytes},
+    models::{ExtInMsgInfo, IntAddr, StdAddr},
 };
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
 
 use crate::tracing_targets;
 
-use super::types::{MempoolAnchor, MempoolAnchorId};
+use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 
 #[cfg(test)]
 #[path = "tests/mempool_adapter_tests.rs"]
@@ -243,7 +243,7 @@ fn _stub_create_random_anchor_with_stub_externals(
     anchor_id: MempoolAnchorId,
 ) -> Arc<MempoolAnchor> {
     let chain_time = anchor_id as u64 * 471 * 6 % 1000000000;
-    let externals_count = chain_time as i32 % 10;
+    let externals_count = chain_time as i32 % 20;
     let mut externals = vec![];
     for i in 0..externals_count {
         let rand_addr = (0..32).map(|_| rand::random::<u8>()).collect::<Vec<u8>>();
@@ -253,16 +253,13 @@ fn _stub_create_random_anchor_with_stub_externals(
         msg_cell_builder.store_u64(chain_time).unwrap();
         msg_cell_builder.store_u32(i as u32).unwrap();
         let msg_cell = msg_cell_builder.build().unwrap();
-        let msg_cell_range = CellSliceRange::full(&*msg_cell);
-        let msg = OwnedMessage {
-            info: MsgInfo::ExtIn(ExtInMsgInfo {
+        let msg = ExternalMessage::new(
+            msg_cell,
+            ExtInMsgInfo {
                 dst: IntAddr::Std(StdAddr::new(0, rand_addr)),
                 ..Default::default()
-            }),
-            body: (msg_cell, msg_cell_range),
-            init: None,
-            layout: None,
-        };
+            },
+        );
         externals.push(Arc::new(msg));
     }
 

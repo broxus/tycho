@@ -2,7 +2,8 @@ use std::{any::Any, fmt::Debug};
 
 use anyhow::{anyhow, Result};
 
-use super::{state_persistent::PersistentStateService, storage::StorageService, MessageQueueImpl};
+use super::queue::MessageQueueImpl;
+use super::{state_persistent::PersistentStateService, storage::StorageService};
 
 #[cfg(test)]
 #[path = "tests/test_cache_persistent.rs"]

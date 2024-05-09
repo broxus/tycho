@@ -15,8 +15,8 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState, PrintSubscriber,
-    StateSubscriber, StateSubscriberContext,
+    BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
+    PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
 
 #[derive(Clone)]
@@ -52,12 +52,12 @@ impl StateSubscriber for StrangeBlockProvider {
 async fn test_collation_process_on_stubs() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
-    let (provider, storage) = prepare_test_storage().await.unwrap();
+    let storage = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
     let block_strider = BlockStrider::builder()
-        .with_provider(provider)
+        .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
             zerostate_id,
             storage.clone(),
@@ -75,7 +75,7 @@ async fn test_collation_process_on_stubs() {
     let node_1_keypair = Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd));
 
     let config = CollationConfig {
-        key_pair: node_1_keypair,
+        key_pair: node_1_keypair.clone(),
         mc_block_min_interval_ms: 10000,
         max_mc_block_delta_from_bc_to_await_own: 2,
         supported_block_version: 50,
@@ -85,7 +85,7 @@ async fn test_collation_process_on_stubs() {
         #[cfg(feature = "test")]
         test_validators_keypairs: vec![
             node_1_keypair,
-            everscale_crypto::ed25519::KeyPair::generate(&mut rnd),
+            everscale_crypto::ed25519::KeyPair::generate(&mut rnd).into(),
         ],
     };
 

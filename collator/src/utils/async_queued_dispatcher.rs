@@ -3,9 +3,8 @@ use std::{future::Future, pin::Pin, usize};
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::tracing_targets;
-
 use super::task_descr::{TaskDesc, TaskResponder};
+use crate::tracing_targets;
 
 pub const STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE: usize = 10;
 

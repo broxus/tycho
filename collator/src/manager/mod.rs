@@ -7,6 +7,9 @@ use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
+#[cfg(feature = "test")]
+use everscale_types::models::ValidatorDescription;
+
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
 use crate::msg_queue::MessageQueueAdapter;

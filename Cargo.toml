@@ -100,7 +100,7 @@ tycho-util = { path = "./util" }
 # NOTE: use crates.io dependency when it is released
 # https://github.com/sagebind/castaway/issues/18
 castaway = { git = "https://github.com/sagebind/castaway.git" }
-everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "tycho" }
+everscale-types = { git = "https://github.com/broxus/everscale-types.git", branch = "feature/msgs-proc-logic" }
 
 [workspace.lints.rust]
 future_incompatible = "warn"

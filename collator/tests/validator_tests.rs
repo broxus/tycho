@@ -22,7 +22,9 @@ use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::state::{ValidationState, ValidationStateStdImpl};
 use tycho_collator::validator::types::ValidationSessionInfo;
 use tycho_collator::validator::validator::{Validator, ValidatorEventListener, ValidatorStdImpl};
-use tycho_core::block_strider::{BlockStrider, PersistentBlockStriderState, PrintSubscriber};
+use tycho_core::block_strider::{
+    BlockStrider, EmptyBlockProvider, PersistentBlockStriderState, PrintSubscriber,
+};
 use tycho_network::{
     DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
 };
@@ -163,12 +165,12 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
     let test_listener = TestValidatorEventListener::new(1, global_validated_blocks);
     let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
 
-    let (provider, storage) = prepare_test_storage().await.unwrap();
+    let storage = prepare_test_storage().await.unwrap();
 
     let zerostate_id = BlockId::default();
 
     let block_strider = BlockStrider::builder()
-        .with_provider(provider)
+        .with_provider(EmptyBlockProvider)
         .with_state(PersistentBlockStriderState::new(
             zerostate_id,
             storage.clone(),

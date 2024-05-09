@@ -82,8 +82,6 @@ impl CollatorStdImpl {
 
         // build master state extra or get a ref to last applied master block
         //TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
-        let (out_msg_queue_info, _min_ref_mc_seqno) =
-            collation_data.out_msg_queue_stuff.get_out_msg_queue_info();
         //collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
         let (mc_state_extra, master_ref) = if self.shard_id.is_masterchain() {
             let (extra, min_ref_mc_seqno) =
@@ -145,9 +143,7 @@ impl CollatorStdImpl {
             gen_utime_ms: info.gen_utime_ms,
             gen_lt: new_block_info.end_lt,
             min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
-            out_msg_queue_info: Lazy::new(&out_msg_queue_info)?,
-            // TODO: Check if total fits into 4 refs
-            externals_processed_upto: collation_data.externals_processed_upto.clone(),
+            processed_upto: Lazy::new(&collation_data.processed_upto)?,
             before_split: new_block_info.before_split,
             accounts: Lazy::new(&shard_accounts)?,
             overload_history: 0,
@@ -165,6 +161,9 @@ impl CollatorStdImpl {
             .total_balance
             .try_add_assign(&value_flow.fees_collected)?;
 
+        new_state
+            .total_validator_fees
+            .checked_add(&value_flow.fees_collected)?;
         new_state
             .total_validator_fees
             .try_sub_assign(&value_flow.recovered)?;

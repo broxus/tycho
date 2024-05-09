@@ -15,16 +15,15 @@ use everscale_types::{
     dict::{AugDict, Dict},
     models::{
         AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-        CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OutMsgQueueInfo,
-        OwnedMessage, PrevBlockRef, ProcessedUpto, ShardAccount, ShardAccounts, ShardDescription,
-        ShardFees, ShardIdent, SimpleLib, ValueFlow,
+        CurrencyCollection, ImportFees, InMsg, LibDescr, McStateExtra, OutMsg, OwnedMessage,
+        PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription, ShardFees,
+        ShardIdent, SimpleLib, ValueFlow,
     },
 };
 
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_core::internal_queue::types::ext_types_stubs::EnqueuedMessage;
 
-use crate::mempool::MempoolAnchorId;
+use crate::msg_queue::types::EnqueuedMessage;
 
 /*
 В текущем коллаторе перед коллацией блока импортируется:
@@ -196,7 +195,7 @@ pub(super) struct PrevData {
     overload_history: u64,
     underload_history: u64,
 
-    externals_processed_upto: BTreeMap<MempoolAnchorId, u64>,
+    processed_upto: ProcessedUptoInfo,
 }
 impl PrevData {
     pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Self, UsageTree)> {
@@ -224,12 +223,7 @@ impl PrevData {
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
         let overload_history = observable_states[0].state().overload_history;
         let underload_history = observable_states[0].state().underload_history;
-        let iter = pure_prev_states[0]
-            .state()
-            .externals_processed_upto
-            .iter()
-            .filter_map(|kv| kv.ok());
-        let externals_processed_upto = BTreeMap::from_iter(iter);
+        let processed_upto = pure_prev_states[0].state().processed_upto.load()?;
 
         let prev_data = Self {
             observable_states,
@@ -246,7 +240,7 @@ impl PrevData {
             overload_history,
             underload_history,
 
-            externals_processed_upto,
+            processed_upto,
         };
 
         Ok((prev_data, usage_tree))
@@ -318,8 +312,8 @@ impl PrevData {
         &self.total_validator_fees
     }
 
-    pub fn externals_processed_upto(&self) -> &BTreeMap<MempoolAnchorId, u64> {
-        &self.externals_processed_upto
+    pub fn processed_upto(&self) -> &ProcessedUptoInfo {
+        &self.processed_upto
     }
 }
 
@@ -341,10 +335,9 @@ pub(super) struct BlockCollationData {
     pub in_msgs: InMsgDescr,
     pub out_msgs: OutMsgDescr,
 
-    // should read from prev_shard_state
-    pub out_msg_queue_stuff: OutMsgQueueInfoStuff,
-    /// Index of the highest external processed from the anchor: (anchor, index)
-    pub externals_processed_upto: Dict<u32, u64>,
+    pub processed_upto: ProcessedUptoInfo,
+    pub externals_reading_started: bool,
+    pub internals_reading_started: bool,
 
     /// Ids of top blocks from shards that be included in the master block
     pub top_shard_blocks_ids: Vec<BlockId>,
@@ -643,24 +636,6 @@ impl ShardAccountStuff {
         libraries.set(&key, &lib_descr)?;
 
         return Ok(());
-    }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct OutMsgQueueInfoStuff {
-    ///  Dict (shard, seq_no): processed up to info
-    pub proc_info: Dict<(u64, u32), ProcessedUpto>,
-}
-
-impl OutMsgQueueInfoStuff {
-    ///TODO: make real implementation
-    pub fn get_out_msg_queue_info(&self) -> (OutMsgQueueInfo, u32) {
-        let mut min_ref_mc_seqno = u32::MAX;
-        //STUB: just clone existing
-        let msg_queue_info = OutMsgQueueInfo {
-            proc_info: self.proc_info.clone(),
-        };
-        (msg_queue_info, min_ref_mc_seqno)
     }
 }
 

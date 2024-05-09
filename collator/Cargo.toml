@@ -28,7 +28,6 @@ everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
 
 # local deps
-tycho-core = { workspace = true }
 #tycho-consensus = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
