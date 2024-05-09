@@ -9,7 +9,6 @@ use rand::SeedableRng;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, watch};
 use tokio::time::error::Elapsed;
-
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 

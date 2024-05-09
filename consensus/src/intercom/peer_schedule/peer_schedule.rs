@@ -6,23 +6,20 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::KeyPair;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
-
 use tycho_network::{PeerId, PrivateOverlay};
 use tycho_util::FastHashSet;
 
 use crate::intercom::dto::PeerState;
 use crate::models::{NodeCount, Round};
 
-/*
-    As validators are elected for wall-clock time range,
-    the round of validator set switch is not known beforehand
-    and will be determined by the time in anchor vertices:
-    it must reach some predefined time range,
-    when the new set is supposed to be online and start to request points,
-    and a (relatively high) predefined number of support rounds must follow
-    for the anchor chain to be committed by majority and for the new nodes to gather data.
-    The switch will occur for validator sets as a whole.
-*/
+// As validators are elected for wall-clock time range,
+// the round of validator set switch is not known beforehand
+// and will be determined by the time in anchor vertices:
+// it must reach some predefined time range,
+// when the new set is supposed to be online and start to request points,
+// and a (relatively high) predefined number of support rounds must follow
+// for the anchor chain to be committed by majority and for the new nodes to gather data.
+// The switch will occur for validator sets as a whole.
 
 #[derive(Clone)]
 pub struct PeerSchedule {

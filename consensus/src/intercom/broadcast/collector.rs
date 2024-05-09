@@ -6,7 +6,6 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::{mpsc, oneshot};
-
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
@@ -126,7 +125,7 @@ struct CollectorTask {
     log_id: Arc<String>,
     downloader: Downloader,
     current_round: DagRound,  // = r+0
-    next_dag_round: DagRound, // = r+1 is always in DAG; contains the keypair to produce point @ r+1
+    next_dag_round: DagRound, /* = r+1 is always in DAG; contains the keypair to produce point @ r+1 */
 
     // @ r+0, will become includes in point @ r+1
     // needed in order to not include same point twice - as an include and as a witness;
@@ -307,7 +306,7 @@ impl CollectorTask {
                         self.includes.push(task)
                     }
                 }
-                _ => _ = self.current_round.add(&point, &self.downloader), // maybe other's dependency
+                _ => _ = self.current_round.add(&point, &self.downloader), /* maybe other's dependency */
             },
             ConsensusEvent::Invalid(dag_point) => {
                 if &dag_point.location().round > self.next_dag_round.round() {

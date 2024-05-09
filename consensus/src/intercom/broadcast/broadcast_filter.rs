@@ -4,17 +4,15 @@ use std::sync::Arc;
 
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
-
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
+use super::dto::ConsensusEvent;
 use crate::dag::Verifier;
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::PeerSchedule;
 use crate::models::{Digest, Location, NodeCount, Point, PointId, Round};
-
-use super::dto::ConsensusEvent;
 
 #[derive(Clone)]
 pub struct BroadcastFilter(Arc<BroadcastFilterInner>);

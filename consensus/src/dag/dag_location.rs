@@ -5,7 +5,6 @@ use std::sync::{Arc, OnceLock};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
-
 use tycho_util::futures::{JoinTask, Shared};
 
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
@@ -22,7 +21,7 @@ pub struct DagLocation {
     // was proven by the next point of a node;
     // even if we marked this point as invalid, consensus may override our decision
     // and we will have to sync
-    /* vertex: Option<Digest>, */
+    // vertex: Option<Digest>,
     /// We can sign or reject just a single (e.g. first validated) point at the current location;
     /// other (equivocated) points may be received as includes, witnesses or a proven vertex;
     /// we have to include signed points @ r+0 & @ r-1 as dependencies in our point @ r+1.

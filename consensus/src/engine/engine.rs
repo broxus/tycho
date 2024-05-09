@@ -5,7 +5,6 @@ use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
-
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
 use crate::dag::{Dag, DagRound, InclusionState, Producer};

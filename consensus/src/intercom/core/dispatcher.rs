@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-
 use tycho_network::{DhtClient, Network, OverlayId, OverlayService, PeerId, PrivateOverlay};
 
 use crate::intercom::core::dto::{MPQuery, MPResponse};

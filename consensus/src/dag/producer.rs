@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
-
 use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;

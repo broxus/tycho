@@ -1,7 +1,6 @@
 use anyhow::anyhow;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-
 use tycho_network::{Response, ServiceRequest, Version};
 
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};

@@ -3,7 +3,6 @@ use std::sync::{Arc, Weak};
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 

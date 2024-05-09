@@ -4,7 +4,6 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
-
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
     PeerInfo, Router, ToSocket,
@@ -113,9 +112,8 @@ mod tests {
     use tokio::sync::mpsc;
     use tokio::task::JoinSet;
 
-    use crate::engine::Engine;
-
     use super::*;
+    use crate::engine::Engine;
 
     async fn make_network(node_count: usize) -> Vec<Engine> {
         let keys = (0..node_count)

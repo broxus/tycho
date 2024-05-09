@@ -14,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
-
 use tycho_consensus::test_utils::drain_anchors;
 use tycho_consensus::Engine;
 use tycho_network::{DhtConfig, NetworkConfig, PeerId, PeerInfo};
@@ -53,7 +52,7 @@ impl Cli {
                     .with_ansi(false)
                     .compact()
                     .with_writer(non_blocking)
-                    .with_filter(EnvFilter::new("trace")), //todo: update with needed crates
+                    .with_filter(EnvFilter::new("trace")), // todo: update with needed crates
             );
             tracing::subscriber::set_global_default(collector)?;
         } else {

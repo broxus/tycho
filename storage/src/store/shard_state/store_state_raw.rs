@@ -592,12 +592,9 @@ mod test {
         }
         tracing::info!("Decompressed the archive");
 
-        let db = Db::open(
-            current_test_path.join("rocksdb"),
-            DbConfig {
-                rocksdb_lru_capacity: ByteSize::mb(256),
-            },
-        )?;
+        let db = Db::open(current_test_path.join("rocksdb"), DbConfig {
+            rocksdb_lru_capacity: ByteSize::mb(256),
+        })?;
         let file_db = FileDb::new(current_test_path.join("file_db"))?;
 
         let cells_storage = CellStorage::new(db.clone(), 100_000_000);

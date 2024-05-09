@@ -4,9 +4,9 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::broadcast::{self};
 use tokio::sync::mpsc;
-
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 

@@ -439,14 +439,12 @@ impl Node {
         let state_storage = self.storage.shard_state_storage();
 
         for state in to_import {
-            let (handle, status) = handle_storage.create_or_load_handle(
-                state.block_id(),
-                BlockMetaData {
+            let (handle, status) =
+                handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
                     is_key_block: true,
                     gen_utime,
                     mc_ref_seqno: 0,
-                },
-            );
+                });
 
             let stored = state_storage
                 .store_state(&handle, &state)

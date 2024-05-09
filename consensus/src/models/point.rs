@@ -6,7 +6,6 @@ use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
-
 use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;

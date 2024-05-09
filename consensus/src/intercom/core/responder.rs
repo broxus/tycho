@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
-
 use tycho_network::{PeerId, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
 

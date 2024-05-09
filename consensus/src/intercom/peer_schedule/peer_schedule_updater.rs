@@ -5,7 +5,6 @@ use parking_lot::Mutex;
 use rand::prelude::IteratorRandom;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::AbortHandle;
-
 use tycho_network::{PeerId, PrivateOverlay, PrivateOverlayEntriesEvent};
 
 use crate::intercom::PeerSchedule;

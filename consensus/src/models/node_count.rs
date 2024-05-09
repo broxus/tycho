@@ -57,9 +57,7 @@ impl NodeCount {
     pub fn reliable_minority(&self) -> usize {
         self.0 as usize + 1
     }
-    /*
-    pub fn unreliable(&self) -> usize {
-        self.0
-    }
-    */
+    // pub fn unreliable(&self) -> usize {
+    // self.0
+    // }
 }

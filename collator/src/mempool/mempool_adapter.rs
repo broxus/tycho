@@ -247,13 +247,10 @@ fn _stub_create_random_anchor_with_stub_externals(
         msg_cell_builder.store_u64(chain_time).unwrap();
         msg_cell_builder.store_u32(i as u32).unwrap();
         let msg_cell = msg_cell_builder.build().unwrap();
-        let msg = ExternalMessage::new(
-            msg_cell,
-            ExtInMsgInfo {
-                dst: IntAddr::Std(StdAddr::new(0, rand_addr)),
-                ..Default::default()
-            },
-        );
+        let msg = ExternalMessage::new(msg_cell, ExtInMsgInfo {
+            dst: IntAddr::Std(StdAddr::new(0, rand_addr)),
+            ..Default::default()
+        });
         externals.push(Arc::new(msg));
     }
 

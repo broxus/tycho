@@ -1,7 +1,6 @@
 use std::sync::atomic::AtomicBool;
 
 use rand::{Rng, SeedableRng};
-
 use tycho_network::PeerId;
 
 use crate::intercom::PeerSchedule;

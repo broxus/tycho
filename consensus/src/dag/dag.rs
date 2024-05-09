@@ -17,7 +17,6 @@ use crate::models::{Point, Round, Ugly, ValidPoint};
 #[derive(Clone)]
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
-    //
     rounds: Arc<Mutex<BTreeMap<Round, DagRound>>>,
 }
 
@@ -203,8 +202,8 @@ impl Dag {
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
     async fn gather_uncommitted(
-        anchor /* @ r+1 */: &Point,
-        anchor_round /* r+1 */: &DagRound,
+        anchor: &Point,          // @ r+1
+        anchor_round: &DagRound, // r+1
     ) -> Vec<Arc<Point>> {
         assert_eq!(
             *anchor_round.round(),

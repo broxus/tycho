@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 use tokio::task::JoinSet;
-
 use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
@@ -11,19 +10,17 @@ use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, Link, Location, NodeCount, Point, PointId, ValidPoint};
 
-/*
-Note on equivocation.
-Detected point equivocation does not invalidate the point, it just
-  prevents us (as a fair actor) from returning our signature to the author.
-Such a point may be included in our next "includes" or "witnesses",
-  but neither its inclusion nor omitting is required: as we don't
-  return our signature, our dependencies cannot be validated against it.
-Equally, we immediately stop communicating with the equivocating node,
-  without invalidating any of its points (no matter historical or future).
-We will not sign the proof for equivocated point
-  as we've banned the author on network layer.
-Anyway, no more than one of equivocated points may become a vertex.
-*/
+// Note on equivocation.
+// Detected point equivocation does not invalidate the point, it just
+// prevents us (as a fair actor) from returning our signature to the author.
+// Such a point may be included in our next "includes" or "witnesses",
+// but neither its inclusion nor omitting is required: as we don't
+// return our signature, our dependencies cannot be validated against it.
+// Equally, we immediately stop communicating with the equivocating node,
+// without invalidating any of its points (no matter historical or future).
+// We will not sign the proof for equivocated point
+// as we've banned the author on network layer.
+// Anyway, no more than one of equivocated points may become a vertex.
 
 pub struct Verifier;
 
@@ -48,8 +45,8 @@ impl Verifier {
 
     /// must be called iff [Self::verify] succeeded
     pub async fn validate(
-        point /* @ r+0 */: Arc<Point>,
-        r_0 /* r+0 */: DagRound,
+        point: Arc<Point>, // @ r+0
+        r_0: DagRound,     // r+0
         downloader: Downloader,
     ) -> DagPoint {
         // TODO upgrade Weak whenever used to let Dag Round drop if some future hangs up for long
@@ -75,7 +72,10 @@ impl Verifier {
         DagPoint::Trusted(ValidPoint::new(point.clone()))
     }
 
-    fn is_self_links_ok(point /* @ r+0 */: &Point, dag_round /* r+0 */: &DagRound) -> bool {
+    fn is_self_links_ok(
+        point: &Point,        // @ r+0
+        dag_round: &DagRound, // r+0
+    ) -> bool {
         // existence of proofs in leader points is a part of point's well-form-ness check
         match &dag_round.anchor_stage() {
             // no one may link to self
@@ -181,8 +181,8 @@ impl Verifier {
     }
 
     fn gather_deps(
-        point /* @ r+0 */: &Point,
-        r_1 /* r-1 */: &DagRound,
+        point: &Point,  // @ r+0
+        r_1: &DagRound, // r-1
         downloader: &Downloader,
         dependencies: &mut JoinSet<DagPoint>,
     ) {
@@ -310,7 +310,10 @@ impl Verifier {
     }
 
     /// blame author and every dependent point's author
-    fn is_list_of_signers_ok(point /* @ r+0 */: &Point, peer_schedule: &PeerSchedule) -> bool {
+    fn is_list_of_signers_ok(
+        point: &Point, // @ r+0
+        peer_schedule: &PeerSchedule,
+    ) -> bool {
         if point.body.location.round == MempoolConfig::GENESIS_ROUND {
             return true; // all maps are empty for a well-formed genesis
         }
@@ -363,7 +366,10 @@ impl Verifier {
     }
 
     /// blame author and every dependent point's author
-    fn is_proof_ok(point /* @ r+0 */: &Point, proven: &Point /* @ r-1 */) -> bool {
+    fn is_proof_ok(
+        point: &Point,  // @ r+0
+        proven: &Point, //  @ r-1
+    ) -> bool {
         if point.body.location.author != proven.body.location.author {
             panic!("Coding error: mismatched authors of proof and its vertex")
         }
