@@ -165,7 +165,9 @@ mod tests {
         }
         let mut engines = vec![];
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        for (key_pair, (dht_client, overlay_service)) in keys.into_iter().zip(from_validators.iter()) {
+        for (key_pair, (dht_client, overlay_service)) in
+            keys.into_iter().zip(from_validators.iter())
+        {
             let engine = Engine::new(
                 key_pair.clone(),
                 &dht_client,
