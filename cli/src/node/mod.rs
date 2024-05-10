@@ -486,6 +486,7 @@ impl Node {
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
             max_collate_threads: 1,
+            test_validators_keypairs: vec![]
         };
 
         let collation_manager = CollationManager::start(

@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::{MempoolAdapterStdImpl, MempoolAdapterStubImpl};
 use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
@@ -98,7 +98,7 @@ async fn test_collation_process_on_stubs() {
         config,
         Arc::new(MessageQueueAdapterStdImpl::default()),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
-        |listener| MempoolAdapterStdImpl::new(listener),
+        |listener| MempoolAdapterStubImpl::new(listener),
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
             config: ValidatorConfig {

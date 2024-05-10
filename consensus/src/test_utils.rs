@@ -35,8 +35,7 @@ pub fn genesis() -> Point {
     .wrap(&genesis_keys)
 }
 
-pub fn make_peer_info(key: &SecretKey, address: Address, ttl: Option<u32>) -> PeerInfo {
-    let keypair = KeyPair::from(key);
+pub fn make_peer_info(keypair: Arc<KeyPair>, address: Address, ttl: Option<u32>) -> PeerInfo {
     let peer_id = PeerId::from(keypair.public_key);
 
     let now = now_sec();
@@ -116,21 +115,22 @@ mod tests {
     use crate::engine::Engine;
 
     async fn make_network(node_count: usize) -> Vec<Engine> {
+        let secret_key = SecretKey::generate(&mut rand::thread_rng());
         let keys = (0..node_count)
-            .map(|_| SecretKey::generate(&mut rand::thread_rng()))
+            .map(|_| Arc::new(KeyPair::from(&secret_key)))
             .collect::<Vec<_>>();
 
         let all_peers = keys
             .iter()
-            .map(|s| PeerId::from(KeyPair::from(s).public_key))
+            .map(|s| PeerId::from(s.public_key))
             .collect::<Vec<_>>();
 
         let from_validators = keys
             .iter()
-            .map(|secret| {
+            .map(|key_pair| {
                 from_validator(
                     (Ipv4Addr::LOCALHOST, 0),
-                    secret,
+                    &secret_key,
                     DhtConfig {
                         local_info_announce_period: Duration::from_secs(1),
                         local_info_announce_period_max_jitter: Duration::from_secs(1),
@@ -146,7 +146,7 @@ mod tests {
         let peer_info = std::iter::zip(&keys, &from_validators)
             .map(|(key, (dht_client, _))| {
                 Arc::new(make_peer_info(
-                    key,
+                    key.clone(),
                     dht_client.network().local_addr().into(),
                     None,
                 ))
@@ -165,12 +165,11 @@ mod tests {
         }
         let mut engines = vec![];
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        for (secret_key, (dht_client, overlay_service)) in keys.iter().zip(from_validators.iter()) {
+        for (key_pair, (dht_client, overlay_service)) in keys.into_iter().zip(from_validators.iter()) {
             let engine = Engine::new(
-                secret_key,
+                key_pair.clone(),
                 &dht_client,
                 &overlay_service,
-                &all_peers,
                 committed_tx.clone(),
             )
             .await;

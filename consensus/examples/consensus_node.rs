@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use everscale_crypto::ed25519;
+use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
@@ -103,6 +104,7 @@ impl CmdRun {
         let global_config = GlobalConfig::from_file(self.global_config)?;
 
         let secret_key = parse_key(&self.key)?;
+        let key_pair = Arc::new(KeyPair::from(&secret_key));
 
         let (dht_client, overlay) = tycho_consensus::test_utils::from_validator(
             self.addr,
@@ -125,7 +127,7 @@ impl CmdRun {
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let engine =
-            Engine::new(&secret_key, &dht_client, &overlay, &all_peers, committed_tx).await;
+            Engine::new(key_pair.clone(), &dht_client, &overlay, committed_tx).await;
         drain_anchors(committed_rx);
 
         tracing::info!(
@@ -182,8 +184,10 @@ struct CmdGenDht {
 
 impl CmdGenDht {
     fn run(self) -> Result<()> {
+        let secret_key = parse_key(&self.key)?;
+        let key_pair = Arc::new(KeyPair::from(&secret_key));
         let entry = tycho_consensus::test_utils::make_peer_info(
-            &parse_key(&self.key)?,
+            key_pair,
             self.addr.into(),
             self.ttl,
         );
