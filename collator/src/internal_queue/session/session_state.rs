@@ -110,17 +110,12 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_new_session_state() {
-        let base_shard = test_shard_ident();
-        let _session_state = SessionStateImpl::new(base_shard);
-    }
-
     #[tokio::test]
     async fn test_split_shard() {
         let base_shard = test_shard_ident();
-        let session_state = SessionStateImpl::new(base_shard);
-        let split_shard_result = session_state.split_shard(&base_shard).await;
+        let session_state =
+            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
+        let split_shard_result = SessionState::split_shard(&session_state, &base_shard).await;
         assert!(
             split_shard_result.is_ok(),
             "Splitting the shard should succeed."
@@ -130,7 +125,8 @@ mod tests {
     #[tokio::test]
     async fn test_apply_diff() {
         let base_shard = test_shard_ident();
-        let session_state = SessionStateImpl::new(base_shard);
+        let session_state =
+            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
         let block_id = BlockIdShort {
             shard: base_shard,
             seqno: 0,
@@ -140,7 +136,7 @@ mod tests {
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });
-        let apply_diff_result = session_state.apply_diff(diff).await;
+        let apply_diff_result = SessionState::apply_diff(&session_state, diff).await;
         assert_eq!(
             session_state
                 .shards_flat
@@ -173,12 +169,13 @@ mod tests {
     #[tokio::test]
     async fn test_remove_diff() {
         let base_shard = test_shard_ident();
-        let session_state = SessionStateImpl::new(base_shard);
+        let session_state =
+            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
         let diff_id = BlockIdShort {
             shard: base_shard,
             seqno: 0,
         };
-        let remove_diff_result = session_state.remove_diff(&diff_id).await;
+        let remove_diff_result = SessionState::remove_diff(&session_state, &diff_id).await;
         assert_eq!(
             session_state
                 .shards_flat
@@ -211,7 +208,8 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot() {
         let base_shard = test_shard_ident();
-        let session_state = SessionStateImpl::new(base_shard);
+        let session_state =
+            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
         let block_id = BlockIdShort {
             shard: base_shard,
             seqno: 0,
@@ -221,9 +219,9 @@ mod tests {
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });
-        let _apply_diff_result = session_state.apply_diff(diff).await;
+        let _apply_diff_result = SessionState::apply_diff(&session_state, diff).await;
 
-        let snapshot = session_state.snapshot().await;
+        let snapshot = SessionState::snapshot(&session_state).await;
         assert_eq!(snapshot.flat_shards.len(), 1);
         assert_eq!(
             snapshot

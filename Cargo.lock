@@ -2592,7 +2592,6 @@ dependencies = [
  "everscale-crypto",
  "everscale-types",
  "futures-util",
- "log",
  "rand",
  "sha2",
  "tempfile",

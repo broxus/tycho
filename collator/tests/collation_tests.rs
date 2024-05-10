@@ -99,6 +99,7 @@ async fn test_collation_process_on_stubs() {
             min_delay: Duration::from_millis(50),
             max_delay: Duration::from_secs(1),
             factor: 2.0,
+            max_times: 999999,
         },
         request_timeout: Duration::from_millis(1000),
         delay_between_requests: Duration::from_millis(50),
@@ -111,7 +112,7 @@ async fn test_collation_process_on_stubs() {
         |listener| MempoolAdapterStdImpl::new(listener),
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
-            config: validator_config
+            config: validator_config,
         },
         CollatorStdImplFactory,
     );

@@ -736,16 +736,14 @@ where
 
                 // notify validator, it will start overlay initialization
 
-
-
                 let session_seqno = new_session_info.seqno();
-
 
                 self.validator
                     .add_session(
                         shard_id,
                         session_seqno,
-                        new_session_info.collators().validators.as_slice())
+                        new_session_info.collators().validators.as_slice(),
+                    )
                     .await?;
             } else {
                 tracing::info!(

@@ -487,7 +487,8 @@ impl Node {
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
             max_collate_threads: 1,
-            // test_validators_keypairs: vec![],
+            #[cfg(feature = "test")]
+            test_validators_keypairs: vec![],
         };
 
         let collation_manager = CollationManager::start(
@@ -507,6 +508,7 @@ impl Node {
                         min_delay: Duration::from_millis(50),
                         max_delay: Duration::from_secs(10),
                         factor: 2.0,
+                        max_times: usize::MAX,
                     },
                     request_timeout: Duration::from_secs(1),
                     delay_between_requests: Duration::from_millis(50),

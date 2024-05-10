@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use anyhow::{bail, Context, Result};
+
+use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature};
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, trace};
-use tycho_network::PrivateOverlay;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
-use crate::validator::client::{ValidatorClient};
 use crate::validator::client::retry::RetryClient;
+use crate::validator::client::ValidatorClient;
 use crate::validator::types::{BlockValidationCandidate, ValidationResult, ValidatorInfo};
 use crate::validator::ValidatorEventListener;
 
@@ -31,6 +30,7 @@ pub trait ValidationState: Send + Sync {
         &self,
         session: Arc<SessionInfo>,
     ) -> impl std::future::Future<Output = Result<()>> + Send;
+
     /// Retrieves an immutable reference to a session by its ID.
     fn get_session(
         &self,
@@ -46,8 +46,8 @@ pub struct SessionInfo {
     max_weight: u64,
     blocks_signatures: FastDashMap<BlockIdShort, (BlockId, SignatureMaps)>,
     cached_signatures: FastDashMap<BlockIdShort, FastHashMap<HashBytes, Signature>>,
-    pub clients: FastHashMap<HashBytes, Arc<RetryClient<ValidatorClient>>>,
-    pub validators: FastHashMap<HashBytes, Arc<ValidatorInfo>>,
+    clients: FastHashMap<HashBytes, Arc<RetryClient<ValidatorClient>>>,
+    validators: FastHashMap<HashBytes, Arc<ValidatorInfo>>,
 }
 
 impl SessionInfo {
@@ -57,10 +57,8 @@ impl SessionInfo {
         validators: FastHashMap<HashBytes, Arc<ValidatorInfo>>,
         clients: FastHashMap<HashBytes, Arc<RetryClient<ValidatorClient>>>,
     ) -> Arc<SessionInfo> {
-        let max_weight = validators
-            .values()
-            .map(|vi| vi.weight)
-            .sum();
+        let max_weight = validators.values().map(|vi| vi.weight).sum();
+
         Arc::new(Self {
             shard_ident,
             seqno,
@@ -68,7 +66,7 @@ impl SessionInfo {
             blocks_signatures: Default::default(),
             cached_signatures: Default::default(),
             validators,
-            clients
+            clients,
         })
     }
 
@@ -80,6 +78,14 @@ impl SessionInfo {
         self.seqno
     }
 
+    pub fn get_validator_client(
+        &self,
+        validator_id: &HashBytes,
+    ) -> Option<Arc<RetryClient<ValidatorClient>>> {
+        self.clients.get(validator_id).cloned()
+    }
+
+    /// Retrieves a validator by its ID.
     pub fn take_cached_signatures(
         &self,
         block_id_short: &BlockIdShort,
@@ -87,6 +93,7 @@ impl SessionInfo {
         self.cached_signatures.remove(block_id_short)
     }
 
+    /// Checks if a block is signed by a validator.
     pub fn is_block_signed_by_validator(
         &self,
         block_id_short: &BlockIdShort,
@@ -100,7 +107,7 @@ impl SessionInfo {
         }
     }
 
-    /// Adds a block to the session, moving cached signatures to block signatures.
+    /// Adds a block to the session.
     pub async fn add_block(&self, block: BlockId) -> Result<()> {
         let block_header = block.as_short_id();
 
@@ -116,6 +123,7 @@ impl SessionInfo {
         Ok(())
     }
 
+    /// Retrieves a block by its short ID.
     pub async fn get_block(&self, block_id_short: &BlockIdShort) -> Option<BlockId> {
         self.blocks_signatures
             .get(block_id_short)
@@ -123,16 +131,14 @@ impl SessionInfo {
     }
 
     /// Determines the validation status of a block.
-    pub async fn get_validation_status(
+    pub async fn validation_status(
         &self,
         block_id_short: &BlockIdShort,
     ) -> Result<ValidationResult> {
-        // Bind the lock result to a variable to extend its lifetime
-        // let block_signatures_guard = self.blocks_signatures;
         let signatures = self.blocks_signatures.get(block_id_short);
 
         if let Some(ref_data) = signatures {
-            Ok(self.validation_status(&ref_data.1).await)
+            Ok(self.calc_validation_status(&ref_data.1))
         } else {
             Ok(ValidationResult::Insufficient(0, 0))
         }
@@ -143,9 +149,7 @@ impl SessionInfo {
         &self,
         block_id_short: &BlockIdShort,
     ) -> Vec<Arc<ValidatorInfo>> {
-        // Retrieve the block signatures (both valid and invalid) if they exist.
         if let Some(ref_data) = self.blocks_signatures.get(block_id_short) {
-            // Create a combined set of validator IDs who have signed (either validly or invalidly).
             let validators_with_signatures: std::collections::HashSet<_> = ref_data
                 .1
                 .valid_signatures
@@ -153,7 +157,6 @@ impl SessionInfo {
                 .chain(ref_data.1.invalid_signatures.keys())
                 .collect();
 
-            // Filter validators who haven't provided a signature.
             self.validators
                 .iter()
                 .filter_map(|(id, info)| {
@@ -162,17 +165,15 @@ impl SessionInfo {
                     } else {
                         None
                     }
-                }).collect()
-
+                })
+                .collect()
         } else {
-            // If there are no signatures for this block, then all validators are considered without signatures.
-            self.validators
-                .values().map(|info| info.clone()).collect()
+            self.validators.values().cloned().collect()
         }
     }
 
     /// Adds cached signatures for a block.
-    pub async fn add_cached_signatures(
+    pub async fn cache_signatures(
         &self,
         block_id_short: &BlockIdShort,
         signatures: Vec<(HashBytes, Signature)>,
@@ -182,24 +183,29 @@ impl SessionInfo {
     }
 
     /// Retrieves valid signatures for a block.
-    pub async fn get_valid_signatures(
+    pub fn get_valid_signatures(
         &self,
         block_id_short: &BlockIdShort,
     ) -> Vec<(HashBytes, Signature)> {
         if let Some(ref_data) = self.blocks_signatures.get(block_id_short) {
-            ref_data.1.valid_signatures.iter().map(|(k, v)| (*k, *v)).collect()
+            ref_data
+                .1
+                .valid_signatures
+                .iter()
+                .map(|(k, v)| (*k, *v))
+                .collect()
         } else {
             Vec::default()
         }
     }
 
-    pub async fn process_signatures_and_update_status(
+    /// Verifies and adds the signatures and updates the validation status.
+    #[tracing::instrument(skip(self, signatures), fields(block_id_short))]
+    pub fn add_signatures(
         &self,
         block_id_short: BlockIdShort,
         signatures: Vec<(HashBytes, Signature)>,
-        listeners: &[Arc<dyn ValidatorEventListener>],
-    ) -> Result<bool> {
-
+    ) -> Result<()> {
         let mut entry = self
             .blocks_signatures
             .entry(block_id_short)
@@ -211,93 +217,98 @@ impl SessionInfo {
                 })
             });
 
-        let event_guard = entry.1.event_dispatched.lock().await;
+        for (validator_id, signature) in signatures {
+            // Skip if signature already exists
+            if entry.1.valid_signatures.contains_key(&validator_id)
+                || entry.1.invalid_signatures.contains_key(&validator_id)
+            {
+                continue;
+            }
+
+            let block_validation_candidate = BlockValidationCandidate::from(entry.0);
+
+            let validator = self.validators.get(&validator_id);
+
+            let validator = match validator {
+                Some(validator) => validator,
+                None => {
+                    tracing::warn!(target: tracing_targets::VALIDATOR, validator_id=%validator_id, "Validator not found");
+                    continue;
+                }
+            };
+
+            match validator
+                .public_key
+                .verify(block_validation_candidate.as_bytes(), &signature.0)
+            {
+                true => entry.1.valid_signatures.insert(validator_id, signature),
+                false => entry.1.invalid_signatures.insert(validator_id, signature),
+            };
+        }
+
+        Ok(())
+    }
+
+    /// Checks the validation status of a block and notifies listeners.
+    #[tracing::instrument(skip(self, listeners), fields(block_id_short))]
+    pub async fn check_validation_and_notify(
+        &self,
+        block_id_short: BlockIdShort,
+        listeners: &[Arc<dyn ValidatorEventListener>],
+    ) -> Result<bool> {
+        let block_signatures = self
+            .blocks_signatures
+            .get(&block_id_short)
+            .ok_or(anyhow!("Block not found"))?;
+
+        let mut event_guard = block_signatures.1.event_dispatched.lock().await;
         if *event_guard {
-            debug!(
-                "Validation event already dispatched for block {:?}",
-                block_id_short
-            );
             return Ok(true);
         }
 
-        // Drop the guard to allow mutable access below
-        drop(event_guard);
-
-        // Process each signature
-        for (validator_id, signature) in signatures {
-            let block_validation_candidate = BlockValidationCandidate::from(entry.0);
-
-            let validator = self
-                .validators
-                .get(&validator_id)
-                .context("Validator not found")?
-                .clone();
-
-            let is_valid = validator
-                .public_key
-                .verify(block_validation_candidate.as_bytes(), &signature.0);
-
-            trace!(
-                target: tracing_targets::VALIDATOR,
-                "Adding signature for block {:?} from validator {:?} valid {}",
-                block_id_short, validator_id, is_valid);
-
-            if is_valid {
-                entry.1.valid_signatures.insert(validator_id, signature);
-            } else {
-                entry.1.invalid_signatures.insert(validator_id, signature);
-            }
-        }
-
-        let validation_status = self.validation_status(&entry.1).await;
-
-        // Check if the validation status qualifies for dispatching the event
+        let validation_status = self.calc_validation_status(&block_signatures.1);
         match validation_status {
-            ValidationResult::Valid => {
-                let mut event_guard = entry.1.event_dispatched.lock().await;
-                *event_guard = true; // Prevent further event dispatching for this block
-                drop(event_guard); // Drop guard as soon as possible
-                let event = OnValidatedBlockEvent::Valid(BlockSignatures {
-                    signatures: entry.1.valid_signatures.clone(),
-                });
-                Self::notify_listeners(entry.0, event, listeners);
-            }
-            ValidationResult::Invalid => {
-                let mut event_guard = entry.1.event_dispatched.lock().await;
-                *event_guard = true; // Prevent further event dispatching for this block
-                drop(event_guard); // Drop guard as soon as possible
-                let event = OnValidatedBlockEvent::Invalid;
-                Self::notify_listeners(entry.0, event, listeners);
-            }
+            ValidationResult::Valid | ValidationResult::Invalid => {
+                *event_guard = true;
+                drop(event_guard);
 
+                tracing::info!(target: tracing_targets::VALIDATOR, block_id_short=%block_id_short, "Block validation finished");
+
+                let event = match validation_status {
+                    ValidationResult::Valid => OnValidatedBlockEvent::Valid(BlockSignatures {
+                        signatures: block_signatures.1.valid_signatures.clone(),
+                    }),
+                    ValidationResult::Invalid => OnValidatedBlockEvent::Invalid,
+                    ValidationResult::Insufficient(..) => unreachable!(),
+                };
+                Self::notify_listeners(block_signatures.0, event, listeners);
+            }
             ValidationResult::Insufficient(total_valid_weight, valid_weight_threshold) => {
-                debug!(total_valid_weight, valid_weight_threshold);
+                tracing::trace!(target: tracing_targets::VALIDATOR,
+                total_valid_weight,
+                valid_weight_threshold,
+                "Insufficient signatures for block");
             }
         }
 
         Ok(validation_status.is_finished())
     }
 
-    async fn validation_status(&self, signature_maps: &SignatureMaps) -> ValidationResult {
-        let total_valid_weight: u64 = signature_maps
-            .valid_signatures
-            .keys()
-            .map(|validator_id| {
-                self.validators
-                    .get(validator_id)
-                    .map_or(0, |vi| vi.weight)
-            })
-            .sum();
+    /// Calculates the validation status of a block.
+    fn calc_validation_status(&self, signature_maps: &SignatureMaps) -> ValidationResult {
+        fn calculate_total_weight<'a>(
+            validator_ids: impl Iterator<Item = &'a HashBytes>,
+            validators: &FastHashMap<HashBytes, Arc<ValidatorInfo>>,
+        ) -> u64 {
+            validator_ids
+                .map(|validator_id| validators.get(validator_id).map_or(0, |vi| vi.weight))
+                .sum()
+        }
 
-        let total_invalid_weight: u64 = signature_maps
-            .invalid_signatures
-            .keys()
-            .map(|validator_id| {
-                self.validators
-                    .get(validator_id)
-                    .map_or(0, |vi| vi.weight)
-            })
-            .sum();
+        let total_valid_weight =
+            calculate_total_weight(signature_maps.valid_signatures.keys(), &self.validators);
+        let total_invalid_weight =
+            calculate_total_weight(signature_maps.invalid_signatures.keys(), &self.validators);
 
         let valid_weight_threshold = self.max_weight * 2 / 3 + 1;
         let invalid_weight_threshold = self.max_weight / 3 + 1;
@@ -311,12 +322,14 @@ impl SessionInfo {
         }
     }
 
+    /// Notifies listeners about block validation.
+    /// This function spawns a new task for each listener.
     fn notify_listeners(
         block: BlockId,
         event: OnValidatedBlockEvent,
         listeners: &[Arc<dyn ValidatorEventListener>],
     ) {
-        trace!(target: tracing_targets::VALIDATOR, "Notifying listeners about block validation");
+        tracing::trace!(target: tracing_targets::VALIDATOR, "Notifying listeners about block validation");
         for listener in listeners {
             let cloned_event = event.clone();
             let listener = listener.clone();
@@ -342,7 +355,11 @@ impl ValidationState for ValidationStateStdImpl {
         }
     }
 
+    /// Adds a new validation session.
+    /// Fails if a session with the same ID already exists.
+    #[tracing::instrument(skip(self, session), fields(session_id = session.seqno(), shard_ident = ?session.shard_ident))]
     async fn try_add_session(&self, session: Arc<SessionInfo>) -> Result<()> {
+        tracing::info!(target: tracing_targets::VALIDATOR, "Saving new session");
         let shard_ident = session.shard_ident;
         let seqno = session.seqno;
 
@@ -359,7 +376,12 @@ impl ValidationState for ValidationStateStdImpl {
         Ok(())
     }
 
-    async fn get_session(&self, shard_ident: ShardIdent, session_id: u32) -> Option<Arc<SessionInfo>> {
+    /// Retrieves an immutable reference to a session by its ID.
+    async fn get_session(
+        &self,
+        shard_ident: ShardIdent,
+        session_id: u32,
+    ) -> Option<Arc<SessionInfo>> {
         self.sessions
             .read()
             .await

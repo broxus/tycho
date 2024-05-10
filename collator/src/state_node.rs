@@ -65,7 +65,6 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
     blocks: Arc<Mutex<HashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>>>,
-    blocks_mapping: Arc<Mutex<HashMap<BlockId, BlockId>>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
 }
@@ -80,7 +79,6 @@ impl StateNodeAdapterStdImpl {
             storage,
             blocks: Default::default(),
             broadcaster,
-            blocks_mapping: Arc::new(Default::default()),
         }
     }
 }

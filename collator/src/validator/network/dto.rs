@@ -1,15 +1,14 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, Signature};
 use tl_proto::{TlRead, TlWrite};
-use tycho_util::FastHashMap;
 
 #[derive(Debug, Clone, TlRead, TlWrite)]
-#[tl(boxed, id = 0x11111111)]
+#[tl(boxed, id = "queries.signaturesQuery", scheme = "proto.tl")]
 pub struct SignaturesQuery {
     pub session_seqno: u32,
     #[tl(with = "tl_block_id_short")]
     pub block_id_short: BlockIdShort,
-    pub signatures: Vec<([u8; 32],  [u8; 64])>,
+    pub signatures: Vec<([u8; 32], [u8; 64])>,
 }
 
 impl SignaturesQuery {
@@ -21,14 +20,18 @@ impl SignaturesQuery {
         Self {
             session_seqno,
             block_id_short,
-            signatures: signatures.into_iter().map(|(hash, signature)| (hash.0, signature.0)).collect()
+            signatures: signatures
+                .into_iter()
+                .map(|(hash, signature)| (hash.0, signature.0))
+                .collect(),
         }
     }
 
     pub fn wrapped_signatures(&self) -> Vec<(HashBytes, Signature)> {
         self.signatures
             .iter()
-            .map(|(hash, signature)| (HashBytes(*hash), Signature(*signature))).collect()
+            .map(|(hash, signature)| (HashBytes(*hash), Signature(*signature)))
+            .collect()
     }
 }
 

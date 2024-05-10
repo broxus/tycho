@@ -1,11 +1,9 @@
 use std::convert::TryFrom;
-use everscale_crypto::ed25519::PublicKey;
 
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
-use tycho_network::PeerId;
-
 
 #[derive(Clone)]
 pub struct ValidatorInfo {
@@ -18,7 +16,8 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
     type Error = anyhow::Error;
 
     fn try_from(value: &ValidatorDescription) -> Result<Self, Self::Error> {
-        let pubkey = PublicKey::from_bytes(value.public_key.0).ok_or(anyhow::anyhow!("Invalid public key"))?;
+        let pubkey = PublicKey::from_bytes(value.public_key.0)
+            .ok_or(anyhow::anyhow!("Invalid public key"))?;
         Ok(Self {
             public_key_hash: HashBytes(pubkey.to_bytes()),
             public_key: pubkey,
@@ -53,7 +52,7 @@ impl BlockValidationCandidate {
 }
 
 #[derive(TlWrite, TlRead)]
-#[tl(boxed, id = 0x13213213)]
+#[tl(boxed, id = "types.overlayNumber", scheme = "proto.tl")]
 pub struct OverlayNumber {
     #[tl(with = "tl_shard_ident")]
     pub shard_ident: ShardIdent,
@@ -77,9 +76,8 @@ impl ValidationResult {
 }
 
 mod tl_shard_ident {
-    use tl_proto::{TlPacket, TlRead, TlResult, TlWrite};
-
     use everscale_types::models::ShardIdent;
+    use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
     pub const fn size_hint(_: &ShardIdent) -> usize {
         12
@@ -93,7 +91,6 @@ mod tl_shard_ident {
     pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<ShardIdent> {
         let workchain = i32::read_from(packet, offset)?;
         let prefix = u64::read_from(packet, offset)?;
-
-        Ok(ShardIdent::new(workchain, prefix).unwrap())
+        ShardIdent::new(workchain, prefix).ok_or(TlError::InvalidData)
     }
 }

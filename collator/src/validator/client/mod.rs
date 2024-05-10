@@ -1,18 +1,14 @@
 pub mod retry;
-
-use std::sync::Arc;
 use std::time::Duration;
-use tycho_network::{Network, PeerId, PrivateOverlay, Request};
-use crate::types::ValidatorNetwork;
-use crate::validator::network::dto::SignaturesQuery;
-use backon::{Retryable, ExponentialBuilder, Backoff};
+
 use anyhow::{anyhow, Result};
-use log::trace;
-use tracing::warn;
+use tycho_network::{Network, PeerId, PrivateOverlay, Request};
+
+use crate::validator::network::dto::SignaturesQuery;
 
 pub struct ValidatorClient {
-    network: Network,
-    private_overlay: PrivateOverlay,
+    pub network: Network,
+    pub private_overlay: PrivateOverlay,
     peer_id: PeerId,
 }
 
@@ -31,20 +27,16 @@ impl ValidatorClient {
         timeout_duration: Duration,
     ) -> Result<SignaturesQuery> {
         let payload = Request::from_tl(payload);
-        match tokio::time::timeout(timeout_duration, self.private_overlay.query(&self.network, &self.peer_id, payload)).await {
-            Ok(Ok(response)) => {
-                response.parse_tl::<SignaturesQuery>().map_err(Into::into)
-            },
-            Ok(Err(e)) => {
-                tracing::warn!("Network error: {}", e);
-                Err(anyhow!("Network error: {}", e))
-            },
-            Err(elapsed) => {
-                tracing::warn!("Timeout during request. Elapsed: {:?}", elapsed);
-                Err(anyhow!("Timeout during request. Elapsed: {:?}", elapsed))
-            },
+        match tokio::time::timeout(
+            timeout_duration,
+            self.private_overlay
+                .query(&self.network, &self.peer_id, payload),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response.parse_tl::<SignaturesQuery>().map_err(Into::into),
+            Ok(Err(e)) => Err(anyhow!("Network error: {}", e)),
+            Err(elapsed) => Err(anyhow!("Timeout during request. Elapsed: {:?}", elapsed)),
         }
     }
 }
-
-
