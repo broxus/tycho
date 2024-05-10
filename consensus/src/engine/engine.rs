@@ -3,8 +3,8 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinSet;
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::task::{JoinError, JoinSet};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
 use crate::dag::{Dag, DagRound, InclusionState, Producer};
@@ -21,9 +21,10 @@ pub struct Engine {
     peer_schedule: Arc<PeerSchedule>,
     dispatcher: Dispatcher,
     downloader: Downloader,
+    broadcaster: Broadcaster,
     collector: Collector,
     broadcast_filter: BroadcastFilter,
-    top_dag_round_watch: watch::Sender<DagRound>,
+    top_dag_round: Arc<RwLock<DagRound>>,
     tasks: JoinSet<()>, // should be JoinSet<!>
     committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
 }
@@ -58,8 +59,9 @@ impl Engine {
                 uploader_tx,
             ),
         );
+        let broadcaster = Broadcaster::new(log_id.clone(), &dispatcher);
 
-        let genesis = Arc::new(crate::test_utils::genesis());
+        let genesis = crate::test_utils::genesis();
         // check only genesis round as it is widely used in point validation.
         // if some nodes use distinct genesis data, their first points will be rejected
         assert_eq!(
@@ -82,10 +84,10 @@ impl Engine {
         let current_dag_round = DagRound::genesis(&genesis, &peer_schedule);
         let dag = Dag::new(current_dag_round.clone());
 
-        let (top_dag_round_tx, top_dag_round_rx) = watch::channel(current_dag_round.clone());
+        let top_dag_round = Arc::new(RwLock::new(current_dag_round.clone()));
 
         let mut tasks = JoinSet::new();
-        let uploader = Uploader::new(log_id.clone(), uploader_rx, top_dag_round_rx);
+        let uploader = Uploader::new(log_id.clone(), uploader_rx, top_dag_round.clone());
         tasks.spawn(async move {
             uploader.run().await;
         });
@@ -119,58 +121,17 @@ impl Engine {
             peer_schedule,
             dispatcher,
             downloader,
+            broadcaster,
             collector,
             broadcast_filter,
-            top_dag_round_watch: top_dag_round_tx,
+            top_dag_round,
             tasks,
             committed,
         }
     }
 
-    async fn bcaster_run(
-        log_id: Arc<String>,
-        produce_own_point: bool,
-        dispatcher: Dispatcher,
-        peer_schedule: Arc<PeerSchedule>,
-        downloader: Downloader,
-        current_dag_round: DagRound,
-        prev_point: Option<PrevPoint>,
-        own_point_state: oneshot::Sender<InclusionState>,
-        bcaster_ready_tx: mpsc::Sender<BroadcasterSignal>,
-        mut collector_signal_rx: mpsc::UnboundedReceiver<CollectorSignal>,
-    ) -> Option<PrevPoint> {
-        if produce_own_point {
-            if let Some(own_point) =
-                Producer::new_point(&current_dag_round, prev_point.as_ref(), vec![]).await
-            {
-                let state = current_dag_round
-                    .insert_exact_sign(&own_point, &peer_schedule, &downloader)
-                    .await
-                    .expect("own produced point must be valid");
-                own_point_state.send(state).ok();
-                let evidence = Broadcaster::new(
-                    log_id.clone(),
-                    &own_point,
-                    &dispatcher,
-                    &peer_schedule,
-                    bcaster_ready_tx,
-                    collector_signal_rx,
-                )
-                .run()
-                .await;
-                return Some(PrevPoint {
-                    digest: own_point.digest.clone(),
-                    evidence: evidence.into_iter().collect(),
-                });
-            }
-        }
-        _ = own_point_state;
-        collector_signal_rx.close();
-        bcaster_ready_tx.send(BroadcasterSignal::Ok).await.ok();
-        None
-    }
     pub async fn run(mut self) -> ! {
-        let mut prev_point: Option<PrevPoint> = None;
+        let mut prev_point: Option<Arc<PrevPoint>> = None;
         let mut produce_own_point = true;
         loop {
             let current_dag_round = self
@@ -179,7 +140,6 @@ impl Engine {
             let next_dag_round = self
                 .dag
                 .top(&current_dag_round.round().next(), &self.peer_schedule);
-            self.top_dag_round_watch.send(next_dag_round.clone()).ok();
 
             tracing::info!("{} @ {:?}", self.log_id, current_dag_round.round());
 
@@ -189,10 +149,11 @@ impl Engine {
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
 
             let bcaster_run = tokio::spawn(Self::bcaster_run(
-                self.log_id.clone(),
                 produce_own_point,
-                self.dispatcher.clone(),
+                self.broadcaster,
                 self.peer_schedule.clone(),
+                self.top_dag_round.clone(),
+                next_dag_round.clone(),
                 self.downloader.clone(),
                 current_dag_round.clone(),
                 prev_point,
@@ -221,26 +182,117 @@ impl Engine {
             ));
 
             match tokio::join!(collector_run, bcaster_run, commit_run, bcast_filter_run) {
-                (Ok(collector_upd), Ok(new_prev_point), Ok(()), Ok(())) => {
+                (Ok(collector_upd), Ok((bcaster, new_prev_point)), Ok(()), Ok(())) => {
+                    self.broadcaster = bcaster;
                     prev_point = new_prev_point;
                     produce_own_point = next_dag_round.round() == collector_upd.next_round();
                     self.collector = collector_upd;
                 }
-                (collector, bcaster, commit, bcast_filter_upd) => {
-                    let msg = [
-                        (collector.err(), "collector"),
-                        (bcaster.err(), "broadcaster"),
-                        (commit.err(), "commit"),
-                        (bcast_filter_upd.err(), "broadcast filter update"),
-                    ]
-                    .into_iter()
-                    .filter_map(|(res, name)| {
-                        res.map(|err| format!("{name} task panicked: {err:?}"))
-                    })
-                    .join("; \n");
-                    panic!("{}", msg)
-                }
+                (collector, bcaster, commit, bcast_filter_upd) => Self::panic_on_join(&[
+                    (collector.err(), "collector"),
+                    (bcaster.err(), "broadcaster"),
+                    (commit.err(), "commit"),
+                    (bcast_filter_upd.err(), "broadcast filter update"),
+                ]),
             }
         }
+    }
+
+    async fn bcaster_run(
+        produce_own_point: bool,
+        mut broadcaster: Broadcaster,
+        peer_schedule: Arc<PeerSchedule>,
+        top_dag_round: Arc<RwLock<DagRound>>,
+        next_dag_round: DagRound,
+        downloader: Downloader,
+        current_dag_round: DagRound,
+        prev_point: Option<Arc<PrevPoint>>,
+        own_point_state: oneshot::Sender<InclusionState>,
+        bcaster_ready_tx: mpsc::Sender<BroadcasterSignal>,
+        mut collector_signal_rx: mpsc::UnboundedReceiver<CollectorSignal>,
+    ) -> (Broadcaster, Option<Arc<PrevPoint>>) {
+        if produce_own_point {
+            let new_point = tokio::spawn(Self::produce(
+                current_dag_round,
+                prev_point,
+                peer_schedule.clone(),
+                downloader,
+                own_point_state,
+            ));
+            // must signal to uploader before start of broadcast
+            let top_dag_round_upd =
+                tokio::spawn(Self::update_top_round(top_dag_round, next_dag_round));
+            let new_point = match tokio::join!(new_point, top_dag_round_upd) {
+                (Ok(new_point), Ok(())) => new_point,
+                (new_point, top_dag_round) => {
+                    Self::panic_on_join(&[
+                        (new_point.err(), "new point producer"),
+                        (top_dag_round.err(), "top dag round update"),
+                    ]);
+                }
+            };
+            if let Some(own_point) = new_point {
+                let evidence = broadcaster
+                    .run(
+                        &own_point,
+                        &peer_schedule,
+                        bcaster_ready_tx,
+                        collector_signal_rx,
+                    )
+                    .await;
+                let prev_point = PrevPoint {
+                    digest: own_point.digest.clone(),
+                    evidence: evidence.into_iter().collect(),
+                };
+                return (broadcaster, Some(Arc::new(prev_point)));
+            }
+        } else {
+            _ = own_point_state;
+            Self::update_top_round(top_dag_round, next_dag_round).await;
+        }
+        collector_signal_rx.close();
+        bcaster_ready_tx.send(BroadcasterSignal::Ok).await.ok();
+        (broadcaster, None)
+    }
+
+    async fn produce(
+        current_dag_round: DagRound,
+        prev_point: Option<Arc<PrevPoint>>,
+        peer_schedule: Arc<PeerSchedule>,
+        downloader: Downloader,
+        own_point_state: oneshot::Sender<InclusionState>,
+    ) -> Option<Arc<Point>> {
+        if let Some(own_point) =
+            Producer::new_point(&current_dag_round, prev_point.as_deref(), vec![]).await
+        {
+            let state = current_dag_round
+                .insert_exact_sign(&own_point, &peer_schedule, &downloader)
+                .await
+                .expect("own produced point must be valid");
+            own_point_state.send(state).ok();
+            Some(own_point)
+        } else {
+            // _ = own_point_state; dropped
+            None
+        }
+    }
+
+    async fn update_top_round(top_dag_round: Arc<RwLock<DagRound>>, top: DagRound) {
+        // must wait while active uploads (from previous round) are enqueued to read;
+        // it would be incorrect to serve uploads from outdated round
+        // since the start of new point broadcast
+        let mut write = top_dag_round.write().await;
+        *write = top;
+    }
+
+    fn panic_on_join(maybe_err: &[(Option<JoinError>, &'static str)]) -> ! {
+        let msg = maybe_err
+            .iter()
+            .filter_map(|(res, name)| {
+                res.as_ref()
+                    .map(|err| format!("{name} task panicked: {err:?}"))
+            })
+            .join("; \n");
+        panic!("{}", msg)
     }
 }

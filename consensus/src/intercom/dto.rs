@@ -1,9 +1,29 @@
-use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::models::{Point, Signature};
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct PointByIdResponse(pub Option<Point>);
+#[derive(Debug)]
+pub struct PointByIdResponse(pub Option<Arc<Point>>);
+impl Serialize for PointByIdResponse {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        self.0.as_deref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for PointByIdResponse {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt = Option::<Point>::deserialize(deserializer)?;
+        Ok(PointByIdResponse(opt.map(|point| Arc::new(point))))
+    }
+}
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum SignatureResponse {

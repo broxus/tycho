@@ -38,5 +38,5 @@ impl MempoolConfig {
 
     /// every failed response is accounted as point is not found;
     /// 1/3+1 failed responses leads to invalidation of the point and all its dependants
-    pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_millis(50);
+    pub const DOWNLOAD_SPAWN_INTERVAL: Duration = Duration::from_millis(50);
 }

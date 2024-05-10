@@ -34,18 +34,7 @@ pub struct DagLocation {
 }
 
 impl DagLocation {
-    pub fn insert_own_point(&mut self, my_point: &DagPoint) {
-        let old = self.versions.insert(
-            my_point.digest().clone(),
-            Shared::new(JoinTask::new(futures_util::future::ready(my_point.clone()))),
-        );
-        assert!(
-            old.is_none(),
-            "Coding error: own point is already inserted into DAG location"
-        );
-        self.state.insert_own_point(my_point);
-    }
-    pub fn add_dependency<I, F>(&mut self, digest: &Digest, init: I) -> Shared<JoinTask<DagPoint>>
+    pub fn get_or_init<I, F>(&mut self, digest: &Digest, init: I) -> Shared<JoinTask<DagPoint>>
     where
         I: FnOnce() -> F,
         F: Future<Output = DagPoint> + Send + 'static,
@@ -62,11 +51,7 @@ impl DagLocation {
             }
         }
     }
-    pub fn add_validate<I, F>(
-        &mut self,
-        digest: &Digest,
-        init: I,
-    ) -> Option<&'_ Shared<JoinTask<DagPoint>>>
+    pub fn init<I, F>(&mut self, digest: &Digest, init: I) -> Option<&'_ Shared<JoinTask<DagPoint>>>
     where
         I: FnOnce() -> F,
         F: Future<Output = DagPoint> + Send + 'static,
@@ -194,7 +179,7 @@ impl Signable {
                     this_call_signed = true;
                     Ok(Signed {
                         at: at.clone(),
-                        with: valid.point.body.sign(key_pair),
+                        with: Signature::new(key_pair, &valid.point.digest),
                     })
                 });
             } else if &valid.point.body.time < time_range.start() {

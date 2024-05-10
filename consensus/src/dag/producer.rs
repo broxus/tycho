@@ -64,22 +64,20 @@ impl Producer {
             .into_iter()
             .map(|point| (point.body.location.author, point.digest.clone()))
             .collect::<BTreeMap<_, _>>();
-        Some(Arc::new(
-            PointBody {
-                location: Location {
-                    round: current_round.round().clone(),
-                    author: local_id.clone(),
-                },
-                time,
-                payload,
-                proof: prev_point.cloned(),
-                includes,
-                witness,
-                anchor_trigger,
-                anchor_proof,
-            }
-            .wrap(&key_pair),
-        ))
+
+        Some(Point::new(key_pair, PointBody {
+            location: Location {
+                round: current_round.round().clone(),
+                author: local_id.clone(),
+            },
+            time,
+            payload,
+            proof: prev_point.cloned(),
+            includes,
+            witness,
+            anchor_trigger,
+            anchor_proof,
+        }))
     }
 
     fn includes(finished_round: &DagRound) -> Vec<Arc<Point>> {

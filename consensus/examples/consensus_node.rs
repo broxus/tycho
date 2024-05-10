@@ -10,7 +10,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use everscale_crypto::ed25519;
-use everscale_crypto::ed25519::KeyPair;
+use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
@@ -119,15 +119,18 @@ impl CmdRun {
             .map(|info| info.id)
             .collect::<Vec<_>>();
 
-        let mut initial_peer_count = 0usize;
+        let mut initial_peer_count = 1_usize;
+        let local_id = PeerId::from(PublicKey::from(&secret_key));
         for peer in global_config.bootstrap_peers {
-            let is_new = dht_client.add_peer(Arc::new(peer))?;
-            initial_peer_count += is_new as usize;
+            if peer.id != local_id {
+                let is_new = dht_client.add_peer(Arc::new(peer))?;
+                initial_peer_count += is_new as usize;
+            }
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let engine = Engine::new(key_pair.clone(), &dht_client, &overlay, committed_tx).await;
-        drain_anchors(committed_rx);
+        tokio::spawn(drain_anchors(committed_rx));
 
         tracing::info!(
             local_id = %dht_client.network().peer_id(),

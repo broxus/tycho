@@ -115,6 +115,11 @@ impl PeerSchedule {
         inner.all_resolved(self.local_id())
     }
 
+    pub fn is_resolved(&self, peer_id: &PeerId) -> bool {
+        let inner = self.inner.lock();
+        inner.is_resolved(peer_id)
+    }
+
     pub fn peers_for(&self, round: &Round) -> Arc<BTreeMap<PeerId, PeerState>> {
         let inner = self.inner.lock();
         inner.peers_for_index_plus_one(inner.index_plus_one(round))
@@ -284,5 +289,14 @@ impl PeerScheduleInner {
             .filter(|(peer_id, state)| *state == &PeerState::Resolved && peer_id != &local_id)
             .map(|(peer_id, _)| *peer_id)
             .collect()
+    }
+
+    fn is_resolved(&self, peer_id: &PeerId) -> bool {
+        // used only in Downloader, such order fits its needs
+        self.peers_resolved[0]
+            .get(peer_id)
+            .or_else(|| self.peers_resolved[2].get(peer_id))
+            .or_else(|| self.peers_resolved[1].get(peer_id))
+            .map_or(false, |state| *state == PeerState::Resolved)
     }
 }

@@ -2662,6 +2662,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
  "tracing-appender",

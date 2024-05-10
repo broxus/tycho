@@ -13,7 +13,7 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{NodeCount, Point, Round, Signature};
+use crate::models::{Digest, NodeCount, Point, Round, Signature};
 
 type BcastResult = anyhow::Result<()>;
 type SigResult = anyhow::Result<SignatureResponse>;
@@ -26,10 +26,49 @@ pub enum BroadcasterSignal {
 
 pub struct Broadcaster {
     log_id: Arc<String>,
-    current_round: Round,
-
-    point_body: Vec<u8>,
     dispatcher: Dispatcher,
+    // do not throw away unfinished broadcasts from previous round
+    bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+}
+
+impl Broadcaster {
+    pub fn new(log_id: Arc<String>, dispatcher: &Dispatcher) -> Self {
+        Self {
+            log_id,
+            dispatcher: dispatcher.clone(),
+            bcasts_outdated: FuturesUnordered::new(),
+        }
+    }
+    pub async fn run(
+        &mut self,
+        point: &Point,
+        peer_schedule: &PeerSchedule,
+        bcaster_signal: mpsc::Sender<BroadcasterSignal>,
+        collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
+    ) -> FastHashMap<PeerId, Signature> {
+        let mut task = BroadcasterTask::new(
+            self.log_id.clone(),
+            point,
+            &self.dispatcher,
+            peer_schedule,
+            bcaster_signal,
+            collector_signal,
+            mem::take(&mut self.bcasts_outdated),
+        );
+        task.run().await;
+        self.bcasts_outdated.extend(task.bcast_futs);
+        self.bcasts_outdated.extend(task.bcasts_outdated);
+        task.signatures
+    }
+}
+
+struct BroadcasterTask {
+    log_id: Arc<String>,
+    dispatcher: Dispatcher,
+    bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+
+    current_round: Round,
+    point_digest: Digest,
     bcaster_signal: mpsc::Sender<BroadcasterSignal>,
     collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
 
@@ -50,16 +89,16 @@ pub struct Broadcaster {
     sig_futs: FuturesUnordered<BoxFuture<'static, (PeerId, SigResult)>>,
 }
 
-impl Broadcaster {
-    pub fn new(
+impl BroadcasterTask {
+    fn new(
         log_id: Arc<String>,
         point: &Point,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
+        bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     ) -> Self {
-        let point_body = bincode::serialize(&point.body).expect("own point serializes to bytes");
         let peer_updates = peer_schedule.updates();
         let signers = peer_schedule
             .peers_for(&point.body.location.round.next())
@@ -77,9 +116,11 @@ impl Broadcaster {
         let sig_request = Dispatcher::signature_request(&point.body.location.round);
         Self {
             log_id,
-            current_round: point.body.location.round,
-            point_body,
             dispatcher: dispatcher.clone(),
+            bcasts_outdated,
+
+            current_round: point.body.location.round,
+            point_digest: point.digest.clone(),
             bcaster_signal,
             collector_signal,
 
@@ -100,7 +141,7 @@ impl Broadcaster {
         }
     }
     /// returns evidence for broadcast point
-    pub async fn run(mut self) -> FastHashMap<PeerId, Signature> {
+    pub async fn run(&mut self) {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -122,9 +163,10 @@ impl Broadcaster {
         }
         loop {
             tokio::select! {
+                Some(_) = self.bcasts_outdated.next() => {} // let them complete
                 Some(collector_signal) = self.collector_signal.recv() => {
                     if self.should_finish(collector_signal).await {
-                        break self.signatures
+                        break;
                     }
                 }
                 Some((peer_id, result)) = self.bcast_futs.next() => {
@@ -226,7 +268,7 @@ impl Broadcaster {
                 match response {
                     SignatureResponse::Signature(signature) => {
                         if self.signers.contains(&peer_id) {
-                            if self.is_signature_ok(&peer_id, &signature) {
+                            if signature.verifies(&peer_id, &self.point_digest) {
                                 self.signatures.insert(peer_id, signature);
                             } else {
                                 // any invalid signature lowers our chances
@@ -281,16 +323,6 @@ impl Broadcaster {
                 self.current_round
             );
         }
-    }
-
-    fn is_signature_ok(&self, peer_id: &PeerId, signature: &Signature) -> bool {
-        let sig_raw: Result<[u8; 64], _> = signature.0.to_vec().try_into();
-        sig_raw
-            .ok()
-            .zip(peer_id.as_public_key())
-            .map_or(false, |(sig_raw, pub_key)| {
-                pub_key.verify_raw(self.point_body.as_slice(), &sig_raw)
-            })
     }
 
     fn match_peer_updates(&mut self, result: Result<(PeerId, PeerState), RecvError>) {

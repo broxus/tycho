@@ -1,9 +1,7 @@
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::task::JoinHandle;
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
     PeerInfo, Router, ToSocket,
@@ -16,10 +14,10 @@ use crate::models::{Link, Location, Point, PointBody, UnixTime};
 const GENESIS_SECRET_KEY_BYTES: [u8; 32] = [0xAE; 32];
 const GENESIS_MILLIS: u64 = 1713225727398;
 
-pub fn genesis() -> Point {
+pub fn genesis() -> Arc<Point> {
     let genesis_keys = KeyPair::from(&SecretKey::from_bytes(GENESIS_SECRET_KEY_BYTES));
 
-    PointBody {
+    Point::new(&genesis_keys, PointBody {
         location: Location {
             round: MempoolConfig::GENESIS_ROUND,
             author: genesis_keys.public_key.into(),
@@ -31,8 +29,7 @@ pub fn genesis() -> Point {
         witness: Default::default(),
         anchor_trigger: Link::ToSelf,
         anchor_proof: Link::ToSelf,
-    }
-    .wrap(&genesis_keys)
+    })
 }
 
 pub fn make_peer_info(keypair: Arc<KeyPair>, address: Address, ttl: Option<u32>) -> PeerInfo {
@@ -87,123 +84,136 @@ pub fn from_validator<T: ToSocket>(
     (dht_service.make_client(&network), overlay_service)
 }
 
-pub fn drain_anchors(
-    mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            _ = committed
-                .recv()
-                .await
-                .expect("committed anchor reader must be alive");
-        }
-    })
+pub async fn drain_anchors(mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>) {
+    loop {
+        _ = committed
+            .recv()
+            .await
+            .expect("committed anchor reader must be alive");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Arc;
-    use std::thread;
     use std::time::Duration;
 
     use parking_lot::deadlock;
     use tokio::sync::mpsc;
-    use tokio::task::JoinSet;
 
     use super::*;
     use crate::engine::Engine;
 
-    async fn make_network(node_count: usize) -> Vec<Engine> {
-        let secret_key = SecretKey::generate(&mut rand::thread_rng());
+    #[global_allocator]
+    static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+    fn make_network(
+        node_count: usize,
+        workers_per_node: usize,
+    ) -> Vec<std::thread::JoinHandle<()>> {
         let keys = (0..node_count)
-            .map(|_| Arc::new(KeyPair::from(&secret_key)))
+            .map(|_| SecretKey::generate(&mut rand::thread_rng()))
             .collect::<Vec<_>>();
 
         let all_peers = keys
             .iter()
-            .map(|s| PeerId::from(s.public_key))
+            .map(|s| PeerId::from(KeyPair::from(s).public_key))
             .collect::<Vec<_>>();
 
-        let from_validators = keys
+        let addresses = keys
             .iter()
-            .map(|key_pair| {
-                from_validator(
-                    (Ipv4Addr::LOCALHOST, 0),
-                    &secret_key,
-                    DhtConfig {
-                        local_info_announce_period: Duration::from_secs(1),
-                        local_info_announce_period_max_jitter: Duration::from_secs(1),
-                        routing_table_refresh_period: Duration::from_secs(1),
-                        routing_table_refresh_period_max_jitter: Duration::from_secs(1),
-                        ..Default::default()
-                    },
-                    NetworkConfig::default(),
-                )
+            .map(|_| {
+                std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+                    .expect("bind udp socket")
+                    .local_addr()
+                    .expect("local address")
+                    .into()
             })
+            .collect::<Vec<Address>>();
+
+        let peer_info = keys
+            .iter()
+            .zip(addresses.iter())
+            .map(|(key, addr)| Arc::new(make_peer_info(key, addr.clone(), None)))
             .collect::<Vec<_>>();
 
-        let peer_info = std::iter::zip(&keys, &from_validators)
-            .map(|(key, (dht_client, _))| {
-                Arc::new(make_peer_info(
-                    key.clone(),
-                    dht_client.network().local_addr().into(),
-                    None,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        for (dht_client, _) in from_validators.iter() {
-            for info in &peer_info {
-                if info.id == dht_client.network().peer_id() {
-                    continue;
-                }
-                dht_client
-                    .add_peer(info.clone())
-                    .expect("add peer to dht client");
-            }
-        }
-        let mut engines = vec![];
-        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        for (key_pair, (dht_client, overlay_service)) in
-            keys.into_iter().zip(from_validators.iter())
+        let mut handles = vec![];
+        for ((secret_key, address), peer_id) in keys
+            .into_iter()
+            .zip(addresses.into_iter())
+            .zip(peer_info.iter().map(|p| p.id))
         {
-            let engine = Engine::new(
-                key_pair.clone(),
-                &dht_client,
-                &overlay_service,
-                committed_tx.clone(),
-            )
-            .await;
-            tracing::info!("created engine {}", dht_client.network().peer_id());
-            engines.push(engine);
-        }
-        drain_anchors(committed_rx);
+            let all_peers = all_peers.clone();
+            let peer_info = peer_info.clone();
+            let handle = std::thread::spawn(move || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(workers_per_node)
+                    .thread_name(format!("tokio-runtime-{peer_id:.4?}"))
+                    .build()
+                    .expect("new tokio runtime")
+                    .block_on(async move {
+                        let (dht_client, overlay_service) = from_validator(
+                            address,
+                            &secret_key,
+                            DhtConfig {
+                                local_info_announce_period: Duration::from_secs(1),
+                                local_info_announce_period_max_jitter: Duration::from_secs(1),
+                                routing_table_refresh_period: Duration::from_secs(1),
+                                routing_table_refresh_period_max_jitter: Duration::from_secs(1),
+                                ..Default::default()
+                            },
+                            NetworkConfig::default(),
+                        );
+                        for info in &peer_info {
+                            if info.id != dht_client.network().peer_id() {
+                                dht_client
+                                    .add_peer(info.clone())
+                                    .expect("add peer to dht client");
+                            }
+                        }
 
-        engines
+                        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+                        tokio::spawn(drain_anchors(committed_rx));
+                        let engine = Engine::new(
+                            &secret_key,
+                            &dht_client,
+                            &overlay_service,
+                            &all_peers,
+                            committed_tx.clone(),
+                        )
+                        .await;
+                        tracing::info!("created engine {}", dht_client.network().peer_id());
+                        engine.run().await;
+                    });
+            });
+            handles.push(handle);
+        }
+        handles
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn engine_works() -> Result<(), ()> {
+    #[test]
+    fn engine_works() -> Result<(), anyhow::Error> {
         // tracing_subscriber::fmt::try_init().ok();
         // tracing::info!("engine_works");
-        tycho_util::test::init_logger("engine_works", "info,tycho_consensus=debug");
+        tycho_util::test::init_logger(
+            "engine_works",
+            "info,tycho_consensus=info,tycho_network=info",
+        );
 
-        check_parking_lot();
+        // check_parking_lot();
         heart_beat();
-        let mut js = JoinSet::new();
-        for engine in make_network(4).await {
-            js.spawn(engine.run());
-        }
-        while let Some(res) = js.join_next().await {
-            res.unwrap();
+        let handles = make_network(21, 2);
+        for handle in handles {
+            handle.join().unwrap();
         }
         Ok(())
     }
 
     pub fn check_parking_lot() {
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(10));
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(10));
             let deadlocks = deadlock::check_deadlock();
             if deadlocks.is_empty() {
                 continue;
@@ -222,8 +232,8 @@ mod tests {
 
     pub fn heart_beat() {
         // Create a background thread which checks for deadlocks every 10s
-        thread::spawn(move || loop {
-            thread::sleep(Duration::from_secs(1));
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(1));
             tracing::info!("heart beat");
         });
     }

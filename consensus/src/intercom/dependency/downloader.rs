@@ -8,7 +8,6 @@ use rand::prelude::{IteratorRandom, SmallRng};
 use rand::SeedableRng;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, watch};
-use tokio::time::error::Elapsed;
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -51,7 +50,7 @@ impl Downloader {
             "point and DAG round mismatch"
         );
         // request point from its signers (any dependant is among them as point is already verified)
-        let mut all_peers = self
+        let all_peers = self
             .peer_schedule
             .peers_for(&point_round.round().next())
             .iter()
@@ -61,17 +60,11 @@ impl Downloader {
             return DagPoint::NotExists(Arc::new(point_id));
         };
         // query author no matter if it is in the next round, but that can't affect 3F+1
-        let completed = if all_peers.contains_key(&point_id.location.author) {
-            0
-        } else if self
-            .peer_schedule
-            .all_resolved()
-            .contains(&point_id.location.author)
+        let completed = match !all_peers.contains_key(&point_id.location.author)
+            && self.peer_schedule.is_resolved(&point_id.location.author)
         {
-            all_peers.insert(point_id.location.author, PeerState::Resolved);
-            -1
-        } else {
-            0
+            true => -1,
+            false => 0,
         };
         if all_peers.is_empty() {
             return DagPoint::NotExists(Arc::new(point_id));
@@ -114,9 +107,7 @@ struct DownloadTask {
     updates: broadcast::Receiver<(PeerId, PeerState)>,
     has_resolved_tx: watch::Sender<bool>,
     has_resolved_rx: watch::Receiver<bool>,
-    in_flight: FuturesUnordered<
-        BoxFuture<'static, (PeerId, Result<anyhow::Result<PointByIdResponse>, Elapsed>)>,
-    >,
+    in_flight: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse>)>>,
     completed: i16,
     attempt: u8,
 }
@@ -127,6 +118,7 @@ impl DownloadTask {
     pub async fn run(mut self) -> DagPoint {
         self.download_mandatory();
         self.download();
+        let mut interval = tokio::time::interval(MempoolConfig::DOWNLOAD_SPAWN_INTERVAL);
         loop {
             tokio::select! {
                 Some((peer_id, resolved)) = self.in_flight.next() =>
@@ -134,6 +126,7 @@ impl DownloadTask {
                         Some(dag_point) => break dag_point,
                         None => continue
                     },
+                _ = interval.tick() => self.download(),
                 update = self.updates.recv() => self.match_peer_updates(update),
             }
         }
@@ -159,9 +152,8 @@ impl DownloadTask {
     fn download(&mut self) {
         self.attempt += 1;
         let count = (MempoolConfig::DOWNLOAD_PEERS as usize)
-            .saturating_pow(self.attempt as u32)
-            .saturating_sub(self.in_flight.len())
-            .max(self.all_peers.len());
+            .saturating_mul(self.attempt as usize)
+            .min(self.all_peers.len());
 
         for peer_id in self
             .all_peers
@@ -180,33 +172,26 @@ impl DownloadTask {
     fn download_one(&mut self, peer_id: &PeerId) {
         let peer_id = peer_id.clone();
         self.in_flight.push(
-            tokio::time::timeout(
-                MempoolConfig::DOWNLOAD_TIMEOUT,
-                self.parent
-                    .dispatcher
-                    .query::<PointByIdResponse>(&peer_id, &self.request),
-            )
-            .map(move |result| (peer_id, result.map(|(_, r)| r)))
-            .boxed(),
+            self.parent
+                .dispatcher
+                .query::<PointByIdResponse>(&peer_id, &self.request)
+                .boxed(),
         );
     }
 
     async fn match_resolved(
         &mut self,
         peer_id: PeerId,
-        resolved: Result<anyhow::Result<PointByIdResponse>, Elapsed>,
+        resolved: anyhow::Result<PointByIdResponse>,
     ) -> Option<DagPoint> {
         match resolved {
-            Err(_timeout) => {
-                tracing::error!("{} : {peer_id:.4?} timed out", self.parent.log_id);
-            }
-            Ok(Err(network_err)) => {
+            Err(network_err) => {
                 tracing::error!(
                     "{} : {peer_id:.4?} network error: {network_err}",
                     self.parent.log_id
                 );
             }
-            Ok(Ok(PointByIdResponse(None))) => {
+            Ok(PointByIdResponse(None)) => {
                 if self.mandatory.remove(&peer_id) {
                     // it's a ban
                     tracing::error!(
@@ -222,7 +207,7 @@ impl DownloadTask {
                     );
                 }
             }
-            Ok(Ok(PointByIdResponse(Some(point)))) => {
+            Ok(PointByIdResponse(Some(point))) => {
                 if point.id() != self.point_id {
                     // it's a ban
                     tracing::error!(
@@ -238,7 +223,6 @@ impl DownloadTask {
                     // DAG could not have moved if this point was needed for commit
                     return Some(DagPoint::NotExists(Arc::new(self.point_id.clone())));
                 };
-                let point = Arc::new(point);
                 match Verifier::verify(&point, &self.parent.peer_schedule) {
                     Ok(()) => {
                         let validated =

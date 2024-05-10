@@ -45,6 +45,10 @@ tycho-util = { workspace = true, features = ["test"] }
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
 tokio = { workspace = true, default-features = false, features = ["rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tikv-jemallocator = { workspace = true, features = [
+    "unprefixed_malloc_on_supported_platforms",
+    "background_threads",
+]}
 
 [lints]
 workspace = true

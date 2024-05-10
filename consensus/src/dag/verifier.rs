@@ -166,7 +166,7 @@ impl Verifier {
     ) {
         let downloader = downloader.clone();
         let shared = round.edit(author, |loc| {
-            loc.add_dependency(digest, move || {
+            loc.get_or_init(digest, move || {
                 let point_id = PointId {
                     location: Location {
                         author: author.clone(),
@@ -385,21 +385,8 @@ impl Verifier {
         if point.body.time < proven.body.time {
             return false; // time must be non-decreasing by the same author
         }
-        let Some(body) = bincode::serialize(&proven.body).ok() else {
-            // should be removed after move to TL
-            panic!("Library error: failed to serialize proven point body")
-        };
         for (peer, sig) in proof.evidence.iter() {
-            let Some(pubkey) = peer.as_public_key() else {
-                // should have been validated prior validator elections
-                panic!("Config error: failed to convert peer id into public key")
-            };
-            let sig: Result<[u8; 64], _> = sig.0.to_vec().try_into();
-            let Some(sig) = sig.ok() else {
-                // unexpected bytes used as a signature, thus invalid
-                return false;
-            };
-            if !pubkey.verify_raw(body.as_slice(), &sig) {
+            if !sig.verifies(peer, &proof.digest) {
                 return false;
             }
         }

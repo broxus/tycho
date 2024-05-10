@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Sub};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -11,7 +12,8 @@ use tycho_network::PeerId;
 use crate::engine::MempoolConfig;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Digest(pub [u8; 32]);
+pub struct Digest([u8; 32]);
+
 impl Display for Digest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let len = f.precision().unwrap_or(32);
@@ -30,8 +32,18 @@ impl Debug for Digest {
     }
 }
 
+impl Digest {
+    fn new(point_body: &PointBody) -> Self {
+        let body = bincode::serialize(&point_body).expect("shouldn't happen");
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_slice());
+        Self(hasher.finalize().into())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
-pub struct Signature(pub Bytes);
+pub struct Signature(Bytes);
+
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let len = f.precision().unwrap_or(64);
@@ -46,6 +58,23 @@ impl Debug for Signature {
         f.write_str("Signature(")?;
         std::fmt::Display::fmt(self, f)?;
         f.write_str(")")
+    }
+}
+
+impl Signature {
+    pub fn new(local_keypair: &KeyPair, digest: &Digest) -> Self {
+        let sig = local_keypair.sign_raw(digest.0.as_slice());
+        Self(Bytes::from(sig.to_vec()))
+    }
+
+    pub fn verifies(&self, signer: &PeerId, digest: &Digest) -> bool {
+        let sig_raw: Result<[u8; 64], _> = self.0.to_vec().try_into();
+        sig_raw
+            .ok()
+            .zip(signer.as_public_key())
+            .map_or(false, |(sig_raw, pub_key)| {
+                pub_key.verify_raw(digest.0.as_slice(), &sig_raw)
+            })
     }
 }
 
@@ -173,44 +202,31 @@ pub struct PointBody {
     pub anchor_proof: Link,
 }
 
-impl PointBody {
-    pub fn wrap(self, local_keypair: &KeyPair) -> Point {
-        assert_eq!(
-            self.location.author,
-            PeerId::from(local_keypair.public_key),
-            "produced point author must match local key pair"
-        );
-        let body = bincode::serialize(&self).expect("shouldn't happen");
-        let sig = local_keypair.sign_raw(body.as_slice());
-        let mut hasher = Sha256::new();
-        hasher.update(body.as_slice());
-        hasher.update(sig.as_slice());
-        let digest = Digest(hasher.finalize().into());
-        Point {
-            body: self,
-            signature: Signature(Bytes::from(sig.to_vec())),
-            digest,
-        }
-    }
-
-    pub fn sign(&self, local_keypair: &KeyPair) -> Signature {
-        let body = bincode::serialize(&self).expect("shouldn't happen");
-        let sig = local_keypair.sign_raw(body.as_slice());
-        Signature(Bytes::from(sig.to_vec()))
-    }
-}
-
 // Todo: Arc<Point{...}> => Point(Arc<...{...}>)
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Point {
     pub body: PointBody,
-    // author's signature for the body
-    pub signature: Signature,
-    // hash of both data and author's signature
+    // hash of the point's body (includes author peer id)
     pub digest: Digest,
+    // author's signature for the digest
+    pub signature: Signature,
 }
 
 impl Point {
+    pub fn new(local_keypair: &KeyPair, point_body: PointBody) -> Arc<Self> {
+        assert_eq!(
+            point_body.location.author,
+            PeerId::from(local_keypair.public_key),
+            "produced point author must match local key pair"
+        );
+        let digest = Digest::new(&point_body);
+        Arc::new(Point {
+            body: point_body,
+            signature: Signature::new(local_keypair, &digest),
+            digest,
+        })
+    }
+
     pub fn id(&self) -> PointId {
         PointId {
             location: self.body.location.clone(),
@@ -235,17 +251,9 @@ impl Point {
     /// blame every dependent point author and the sender of this point,
     /// do not use the author from point's body
     pub fn is_integrity_ok(&self) -> bool {
-        let pubkey = self.body.location.author.as_public_key();
-        let body = bincode::serialize(&self.body).ok();
-        let sig: Result<[u8; 64], _> = self.signature.0.to_vec().try_into();
-        let Some(((pubkey, body), sig)) = pubkey.zip(body).zip(sig.ok()) else {
-            return false;
-        };
-        let mut hasher = Sha256::new();
-        hasher.update(body.as_slice());
-        hasher.update(sig.as_slice());
-        let digest = Digest(hasher.finalize().into());
-        pubkey.verify_raw(body.as_slice(), &sig) && digest == self.digest
+        self.signature
+            .verifies(&self.body.location.author, &self.digest)
+            && self.digest == Digest::new(&self.body)
     }
 
     /// blame author and every dependent point's author

@@ -1,23 +1,23 @@
-use std::ops::Deref;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, RwLock};
+use tycho_util::futures::{JoinTask, Shared};
 
 use crate::dag::DagRound;
 use crate::intercom::dto::PointByIdResponse;
-use crate::models::{DagPoint, Point, PointId, Ugly};
+use crate::models::{DagPoint, PointId, Ugly};
 
 pub struct Uploader {
     log_id: Arc<String>,
     requests: mpsc::UnboundedReceiver<(PointId, oneshot::Sender<PointByIdResponse>)>,
-    top_dag_round: watch::Receiver<DagRound>,
+    top_dag_round: Arc<RwLock<DagRound>>,
 }
 
 impl Uploader {
     pub fn new(
         log_id: Arc<String>,
         requests: mpsc::UnboundedReceiver<(PointId, oneshot::Sender<PointByIdResponse>)>,
-        top_dag_round: watch::Receiver<DagRound>,
+        top_dag_round: Arc<RwLock<DagRound>>,
     ) -> Self {
         Self {
             log_id,
@@ -28,10 +28,14 @@ impl Uploader {
 
     pub async fn run(mut self) -> ! {
         while let Some((point_id, callback)) = self.requests.recv().await {
-            let found = self.find(&point_id).await.map(|p| p.deref().clone());
+            let found = match self.find(&point_id).await {
+                // uploader must hide points that it accounts as not eligible for signature
+                Some(shared) => shared.await.0.into_trusted().map(|trusted| trusted.point),
+                None => None,
+            };
             if let Err(_) = callback.send(PointByIdResponse(found)) {
-                tracing::warn!(
-                    "{} Uploader result channel closed for {:?}, requester's downloader timed out ? ",
+                tracing::debug!(
+                    "{} Uploader result channel closed, requester {:?} cancelled download",
                     self.log_id,
                     point_id.ugly()
                 );
@@ -40,27 +44,19 @@ impl Uploader {
         panic!("Uploader incoming channel closed")
     }
 
-    async fn find(&self, point_id: &PointId) -> Option<Arc<Point>> {
-        let top_dag_round = self.top_dag_round.borrow().clone();
+    // Note: drops strong ref to DagRound as soon as possible - to let it be gone with weak ones
+    async fn find(&self, point_id: &PointId) -> Option<Shared<JoinTask<DagPoint>>> {
+        let top_dag_round = {
+            let read = self.top_dag_round.read().await;
+            read.clone()
+        };
         if &point_id.location.round > top_dag_round.round() {
             return None;
         }
-        let shared = top_dag_round
-            .scan(&point_id.location.round)
-            .map(|dag_round| {
-                dag_round
-                    .view(&point_id.location.author, |loc| {
-                        loc.versions().get(&point_id.digest).cloned()
-                    })
-                    .flatten()
-            })
-            .flatten()?;
-        // keep such matching private to Uploader, it must not be used elsewhere
-        match shared.await {
-            (DagPoint::Trusted(valid), _) => Some(valid.point),
-            (DagPoint::Suspicious(valid), _) => Some(valid.point),
-            (DagPoint::Invalid(invalid), _) => Some(invalid),
-            (DagPoint::NotExists(_), _) => None,
-        }
+        top_dag_round
+            .scan(&point_id.location.round)?
+            .view(&point_id.location.author, |loc| {
+                loc.versions().get(&point_id.digest).cloned()
+            })?
     }
 }

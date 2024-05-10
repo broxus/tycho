@@ -153,7 +153,7 @@ impl DagRound {
 
     pub async fn valid_point_exact(&self, node: &PeerId, digest: &Digest) -> Option<ValidPoint> {
         let point_fut = self.view(node, |loc| loc.versions().get(digest).cloned())??;
-        point_fut.await.0.valid().cloned()
+        point_fut.await.0.into_valid()
     }
 
     pub fn add(
@@ -179,7 +179,7 @@ impl DagRound {
             let state = loc.state().clone();
             let point = point.clone();
             let downloader = downloader.clone();
-            loc.add_validate(digest, || Verifier::validate(point, dag_round, downloader))
+            loc.init(digest, || Verifier::validate(point, dag_round, downloader))
                 .map(|first| first.clone().map(|_| state).boxed())
         })
     }
@@ -230,7 +230,7 @@ impl DagRound {
         }
         self.edit(&dag_point.location().author, |loc| {
             let state = loc.state().clone();
-            loc.add_validate(dag_point.digest(), || {
+            loc.init(dag_point.digest(), || {
                 futures_util::future::ready(dag_point.clone())
             })
             .map(|first| first.clone().map(|_| state).boxed())
