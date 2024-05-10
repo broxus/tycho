@@ -124,8 +124,8 @@ mod tests {
         let base_shard = test_shard_ident();
         let session_state =
             <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
-        let split_shard_result =
-            SessionState::<SessionStateSnapshot>::split_shard(&session_state, &base_shard).await;
+
+        let split_shard_result = SessionState::split_shard(&session_state, &base_shard).await;
         assert!(
             split_shard_result.is_ok(),
             "Splitting the shard should succeed."
@@ -146,8 +146,7 @@ mod tests {
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });
-        let apply_diff_result =
-            SessionState::<SessionStateSnapshot>::apply_diff(&session_state, diff).await;
+        let apply_diff_result = SessionState::apply_diff(&session_state, diff).await;
         assert_eq!(
             session_state
                 .shards_flat
@@ -186,8 +185,7 @@ mod tests {
             shard: base_shard,
             seqno: 0,
         };
-        let remove_diff_result =
-            session_state::SessionState::remove_diff(&session_state, &diff_id).await;
+        let remove_diff_result = SessionState::remove_diff(&session_state, &diff_id).await;
         assert_eq!(
             session_state
                 .shards_flat
@@ -231,10 +229,9 @@ mod tests {
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });
-        let _apply_diff_result =
-            session_state::SessionState::apply_diff(&session_state, diff).await;
+        let _apply_diff_result = SessionState::apply_diff(&session_state, diff).await;
 
-        let snapshot = session_state::SessionState::snapshot(&session_state).await;
+        let snapshot = SessionState::snapshot(&session_state).await;
         assert_eq!(snapshot.flat_shards.len(), 1);
         assert_eq!(
             snapshot

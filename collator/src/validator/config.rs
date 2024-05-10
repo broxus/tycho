@@ -1,4 +1,5 @@
 use std::time::Duration;
+
 use crate::validator::client::retry::BackoffConfig;
 
 #[derive(Clone)]
