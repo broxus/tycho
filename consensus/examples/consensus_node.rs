@@ -129,7 +129,8 @@ impl CmdRun {
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let engine = Engine::new(key_pair.clone(), &dht_client, &overlay, committed_tx).await;
+        let mut engine = Engine::new(key_pair.clone(), &dht_client, &overlay, committed_tx);
+        engine.init_with_genesis(all_peers.as_slice()).await;
         tokio::spawn(drain_anchors(committed_rx));
 
         tracing::info!(
@@ -187,9 +188,9 @@ struct CmdGenDht {
 impl CmdGenDht {
     fn run(self) -> Result<()> {
         let secret_key = parse_key(&self.key)?;
-        let key_pair = Arc::new(KeyPair::from(&secret_key));
+        let key_pair = KeyPair::from(&secret_key);
         let entry =
-            tycho_consensus::test_utils::make_peer_info(key_pair, self.addr.into(), self.ttl);
+            tycho_consensus::test_utils::make_peer_info(&key_pair, self.addr.into(), self.ttl);
         let output = if std::io::stdin().is_terminal() {
             serde_json::to_string_pretty(&entry)
         } else {

@@ -330,6 +330,13 @@ impl std::ops::DerefMut for PrivateOverlayEntriesWriteGuard<'_> {
     }
 }
 
+impl<'a> PrivateOverlayEntriesWriteGuard<'a> {
+    pub fn downgrade(self) -> PrivateOverlayEntriesReadGuard<'a> {
+        let entries = RwLockWriteGuard::downgrade(self.entries);
+        PrivateOverlayEntriesReadGuard { entries }
+    }
+}
+
 pub struct PrivateOverlayEntriesReadGuard<'a> {
     entries: RwLockReadGuard<'a, PrivateOverlayEntries>,
 }

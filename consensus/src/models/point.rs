@@ -82,13 +82,15 @@ impl Signature {
 pub struct Round(pub u32);
 
 impl Round {
-    pub fn prev(&self) -> Round {
+    /// stub that cannot be used even by genesis round
+    pub const BOTTOM: Self = Self(0);
+    pub fn prev(&self) -> Self {
         self.0
             .checked_sub(1)
             .map(Round)
             .expect("DAG round number underflow, fix dag initial configuration")
     }
-    pub fn next(&self) -> Round {
+    pub fn next(&self) -> Self {
         self.0
             .checked_add(1)
             .map(Round)

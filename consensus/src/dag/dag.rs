@@ -21,18 +21,22 @@ pub struct Dag {
 }
 
 impl Dag {
-    pub fn new(dag_round: DagRound) -> Self {
-        let mut rounds = BTreeMap::new();
-        rounds.insert(dag_round.round().clone(), dag_round);
+    pub fn new() -> Self {
         Self {
-            rounds: Arc::new(Mutex::new(rounds)),
+            rounds: Arc::new(Mutex::new(BTreeMap::new())),
         }
+    }
+
+    pub fn init(&self, dag_round: DagRound) {
+        let mut rounds = self.rounds.lock();
+        assert!(rounds.is_empty(), "DAG already initialized");
+        rounds.insert(dag_round.round().clone(), dag_round);
     }
 
     pub fn top(&self, round: &Round, peer_schedule: &PeerSchedule) -> DagRound {
         let mut rounds = self.rounds.lock();
         let mut top = match rounds.last_key_value() {
-            None => unreachable!("DAG cannot be empty"),
+            None => unreachable!("DAG cannot be empty if properly initialized?"),
             Some((_, top)) => top.clone(),
         };
         if (top.round().0 + MempoolConfig::COMMIT_DEPTH as u32) < round.0 {

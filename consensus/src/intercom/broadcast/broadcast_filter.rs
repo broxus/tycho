@@ -27,7 +27,7 @@ impl BroadcastFilter {
             log_id,
             last_by_peer: Default::default(),
             by_round: Default::default(),
-            current_dag_round: Default::default(), // will advance with other peers
+            current_dag_round: AtomicU32::new(Round::BOTTOM.0), // will advance with other peers
             peer_schedule,
             output,
         }))

@@ -37,6 +37,18 @@ impl WeakDagRound {
 }
 
 impl DagRound {
+    /// stub that must remain unlinked into DAG chain and only to be replaced
+    pub fn unusable() -> Self {
+        Self(Arc::new(DagRoundInner {
+            round: Round::BOTTOM,
+            node_count: NodeCount::GENESIS,
+            key_pair: None,
+            anchor_stage: None,
+            locations: FastDashMap::default(),
+            prev: WeakDagRound::BOTTOM,
+        }))
+    }
+
     pub fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
         let peers = peer_schedule.peers_for(&round);
         let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
@@ -195,8 +207,8 @@ impl DagRound {
             panic!("Coding error: malformed point")
         }
         let point = Verifier::validate(point.clone(), self.clone(), downloader.clone()).await;
-        if point.valid().is_none() {
-            panic!("Coding error: not a valid point")
+        if point.trusted().is_none() {
+            panic!("Coding error: not a trusted point")
         }
         let state = self.insert_exact(&point)?.await;
         if let Some(signable) = state.signable() {

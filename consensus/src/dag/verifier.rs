@@ -368,7 +368,7 @@ impl Verifier {
     /// blame author and every dependent point's author
     fn is_proof_ok(
         point: &Point,  // @ r+0
-        proven: &Point, //  @ r-1
+        proven: &Point, // @ r-1
     ) -> bool {
         if point.body.location.author != proven.body.location.author {
             panic!("Coding error: mismatched authors of proof and its vertex")

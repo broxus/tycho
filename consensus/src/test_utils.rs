@@ -32,7 +32,7 @@ pub fn genesis() -> Arc<Point> {
     })
 }
 
-pub fn make_peer_info(keypair: Arc<KeyPair>, address: Address, ttl: Option<u32>) -> PeerInfo {
+pub fn make_peer_info(keypair: &KeyPair, address: Address, ttl: Option<u32>) -> PeerInfo {
     let peer_id = PeerId::from(keypair.public_key);
 
     let now = now_sec();
@@ -114,11 +114,12 @@ mod tests {
     ) -> Vec<std::thread::JoinHandle<()>> {
         let keys = (0..node_count)
             .map(|_| SecretKey::generate(&mut rand::thread_rng()))
+            .map(|secret| (secret, Arc::new(KeyPair::from(&secret))))
             .collect::<Vec<_>>();
 
         let all_peers = keys
             .iter()
-            .map(|s| PeerId::from(KeyPair::from(s).public_key))
+            .map(|(_, kp)| PeerId::from(kp.public_key))
             .collect::<Vec<_>>();
 
         let addresses = keys
@@ -135,11 +136,11 @@ mod tests {
         let peer_info = keys
             .iter()
             .zip(addresses.iter())
-            .map(|(key, addr)| Arc::new(make_peer_info(key, addr.clone(), None)))
+            .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, addr.clone(), None)))
             .collect::<Vec<_>>();
 
         let mut handles = vec![];
-        for ((secret_key, address), peer_id) in keys
+        for (((secret_key, key_pair), address), peer_id) in keys
             .into_iter()
             .zip(addresses.into_iter())
             .zip(peer_info.iter().map(|p| p.id))
@@ -176,14 +177,13 @@ mod tests {
 
                         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
                         tokio::spawn(drain_anchors(committed_rx));
-                        let engine = Engine::new(
-                            &secret_key,
+                        let mut engine = Engine::new(
+                            key_pair,
                             &dht_client,
                             &overlay_service,
-                            &all_peers,
                             committed_tx.clone(),
-                        )
-                        .await;
+                        );
+                        engine.init_with_genesis(all_peers.as_slice()).await;
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         engine.run().await;
                     });

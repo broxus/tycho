@@ -39,19 +39,21 @@ impl Collector {
         downloader: &Downloader,
         from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
         signature_requests: mpsc::UnboundedReceiver<SignatureRequest>,
-        next_includes: impl Iterator<Item = InclusionState>,
-        next_round: Round,
     ) -> Self {
         Self {
             log_id,
             downloader: downloader.clone(),
             from_bcast_filter,
             signature_requests,
-            next_round,
-            next_includes: FuturesUnordered::from_iter(
-                next_includes.map(|a| futures_util::future::ready(a).boxed()),
-            ),
+            next_round: Round::BOTTOM,
+            next_includes: FuturesUnordered::new(),
         }
+    }
+
+    pub fn init(&mut self, next_round: Round, next_includes: impl Iterator<Item = InclusionState>) {
+        self.next_round = next_round;
+        self.next_includes
+            .extend(next_includes.map(|a| futures_util::future::ready(a).boxed()));
     }
 
     pub async fn run(

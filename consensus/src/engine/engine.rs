@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use everscale_crypto::ed25519::{KeyPair, SecretKey};
+use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -19,6 +19,7 @@ pub struct Engine {
     log_id: Arc<String>,
     dag: Dag,
     peer_schedule: Arc<PeerSchedule>,
+    peer_schedule_updater: PeerScheduleUpdater,
     dispatcher: Dispatcher,
     downloader: Downloader,
     broadcaster: Broadcaster,
@@ -30,7 +31,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub async fn new(
+    pub fn new(
         key_pair: Arc<KeyPair>,
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
@@ -51,7 +52,6 @@ impl Engine {
         let dispatcher = Dispatcher::new(
             &dht_client,
             &overlay_service,
-            &[], // TODO: FIX PEERS
             Responder::new(
                 log_id.clone(),
                 broadcast_filter.clone(),
@@ -61,38 +61,21 @@ impl Engine {
         );
         let broadcaster = Broadcaster::new(log_id.clone(), &dispatcher);
 
-        let genesis = crate::test_utils::genesis();
-        // check only genesis round as it is widely used in point validation.
-        // if some nodes use distinct genesis data, their first points will be rejected
-        assert_eq!(
-            genesis.body.location.round,
-            MempoolConfig::GENESIS_ROUND,
-            "genesis point round must match genesis round from config"
-        );
         let peer_schedule_updater =
             PeerScheduleUpdater::new(dispatcher.overlay.clone(), peer_schedule.clone());
-        // finished epoch
-        peer_schedule.set_next_start(genesis.body.location.round);
-        peer_schedule_updater.set_next_peers(&vec![genesis.body.location.author]);
-        peer_schedule.rotate();
-        // current epoch
-        peer_schedule.set_next_start(genesis.body.location.round.next());
-        // start updater only after peers are populated into schedule
-        peer_schedule_updater.set_next_peers(&[]); // TODO: FIX PEERS
-        peer_schedule.rotate();
 
-        let current_dag_round = DagRound::genesis(&genesis, &peer_schedule);
-        let dag = Dag::new(current_dag_round.clone());
-
-        let top_dag_round = Arc::new(RwLock::new(current_dag_round.clone()));
+        let top_dag_round = Arc::new(RwLock::new(DagRound::unusable()));
 
         let mut tasks = JoinSet::new();
         let uploader = Uploader::new(log_id.clone(), uploader_rx, top_dag_round.clone());
         tasks.spawn(async move {
             uploader.run().await;
         });
-        tasks.spawn(async move {
-            peer_schedule_updater.run().await;
+        tasks.spawn({
+            let peer_schedule_updater = peer_schedule_updater.clone();
+            async move {
+                peer_schedule_updater.run().await;
+            }
         });
         tasks.spawn({
             let broadcast_filter = broadcast_filter.clone();
@@ -103,22 +86,13 @@ impl Engine {
 
         let downloader = Downloader::new(log_id.clone(), &dispatcher, &peer_schedule);
 
-        let genesis_state = current_dag_round
-            .insert_exact_sign(&genesis, &peer_schedule, &downloader)
-            .await;
-        let collector = Collector::new(
-            log_id.clone(),
-            &downloader,
-            bcast_rx,
-            sig_responses,
-            genesis_state.into_iter(),
-            current_dag_round.round().next(),
-        );
+        let collector = Collector::new(log_id.clone(), &downloader, bcast_rx, sig_responses);
 
         Self {
             log_id,
-            dag,
+            dag: Dag::new(),
             peer_schedule,
+            peer_schedule_updater,
             dispatcher,
             downloader,
             broadcaster,
@@ -128,6 +102,42 @@ impl Engine {
             tasks,
             committed,
         }
+    }
+
+    pub async fn init_with_genesis(&mut self, next_peers: &[PeerId]) {
+        let genesis = crate::test_utils::genesis();
+        assert!(
+            genesis.body.location.round > *self.top_dag_round.read().await.round(),
+            "genesis point round is too low"
+        );
+        // check only genesis round as it is widely used in point validation.
+        // if some nodes use distinct genesis data, their first points will be rejected
+        assert_eq!(
+            genesis.body.location.round,
+            MempoolConfig::GENESIS_ROUND,
+            "genesis point round must match genesis round from config"
+        );
+        // finished epoch
+        self.peer_schedule
+            .set_next_start(genesis.body.location.round);
+        self.peer_schedule_updater
+            .set_next_peers(&vec![genesis.body.location.author], false);
+        self.peer_schedule.rotate();
+        // current epoch
+        self.peer_schedule
+            .set_next_start(genesis.body.location.round.next());
+        // start updater only after peers are populated into schedule
+        self.peer_schedule_updater.set_next_peers(next_peers, true);
+        self.peer_schedule.rotate();
+
+        let current_dag_round = DagRound::genesis(&genesis, &self.peer_schedule);
+        self.dag.init(current_dag_round.clone());
+
+        let genesis_state = current_dag_round
+            .insert_exact_sign(&genesis, &self.peer_schedule, &self.downloader)
+            .await;
+        self.collector
+            .init(current_dag_round.round().next(), genesis_state.into_iter());
     }
 
     pub async fn run(mut self) -> ! {

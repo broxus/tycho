@@ -19,7 +19,6 @@ impl Dispatcher {
     pub fn new(
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
-        all_peers: &[PeerId],
         responder: Responder,
     ) -> Self {
         let dht_service = dht_client.service();
@@ -27,7 +26,6 @@ impl Dispatcher {
 
         let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
             .with_peer_resolver(peer_resolver)
-            .with_entries(all_peers)
             .build(responder);
 
         overlay_service.add_private_overlay(&private_overlay);

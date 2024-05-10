@@ -128,9 +128,10 @@ impl MempoolAdapterStdImpl {
             tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
 
         tokio::spawn(async move {
-            let engine =
-                tycho_consensus::Engine::new(key_pair, &dht_client, &overlay_service, sender).await;
-
+            let mut engine =
+                tycho_consensus::Engine::new(key_pair, &dht_client, &overlay_service, sender);
+            // TODO replace with some sensible init before run
+            engine.init_with_genesis(&[]).await;
             engine.run().await;
         });
 
