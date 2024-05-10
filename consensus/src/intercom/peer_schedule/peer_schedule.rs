@@ -179,7 +179,7 @@ impl PeerSchedule {
     }
 
     /// use [updater](super::PeerScheduleUpdater::set_next_peers())
-    pub(super) fn set_next_peers(&self, peers: &Vec<PeerId>, overlay: &PrivateOverlay) {
+    pub(super) fn set_next_peers(&self, peers: &[PeerId], overlay: &PrivateOverlay) {
         let local_id = self.local_id();
         let mut inner = self.inner.lock();
         // check resolved peers only after blocking other threads from updating inner;

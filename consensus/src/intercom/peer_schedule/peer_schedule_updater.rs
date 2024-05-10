@@ -31,7 +31,7 @@ impl PeerScheduleUpdater {
         self.listen().await
     }
 
-    pub fn set_next_peers(&self, peers: &Vec<PeerId>) {
+    pub fn set_next_peers(&self, peers: &[PeerId]) {
         self.peer_schedule.set_next_peers(&peers, &self.overlay)
     }
 

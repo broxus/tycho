@@ -3,13 +3,13 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use everscale_types::cell::{CellBuilder, CellSliceRange, HashBytes};
-use everscale_types::models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr};
+use everscale_types::cell::{CellBuilder, HashBytes};
+use everscale_types::models::{ExtInMsgInfo, IntAddr, StdAddr};
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
 
 use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
-use crate::mempool::{MempoolAdapter, MempoolEventListener};
+use crate::mempool::mempool_adapter::{MempoolAdapter, MempoolEventListener};
 use crate::tracing_targets;
 
 #[cfg(test)]
@@ -194,7 +194,6 @@ fn _stub_create_random_anchor_with_stub_externals(
         msg_cell_builder.store_u64(chain_time).unwrap();
         msg_cell_builder.store_u32(i as u32).unwrap();
         let msg_cell = msg_cell_builder.build().unwrap();
-        let msg_cell_range = CellSliceRange::full(&*msg_cell);
         let msg = ExternalMessage::new(msg_cell, ExtInMsgInfo {
             dst: IntAddr::Std(StdAddr::new(0, rand_addr)),
             ..Default::default()

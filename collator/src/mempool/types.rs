@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use everscale_types::models::{ExtInMsgInfo, OwnedMessage};
+use everscale_types::models::ExtInMsgInfo;
 use everscale_types::prelude::Cell;
 
 // TYPES
@@ -21,7 +21,7 @@ impl ExternalMessage {
     }
 }
 
-pub(crate) struct MempoolAnchor {
+pub struct MempoolAnchor {
     id: MempoolAnchorId,
     chain_time: u64,
     externals: Vec<Arc<ExternalMessage>>,

@@ -19,7 +19,7 @@ impl Dispatcher {
     pub fn new(
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
-        all_peers: &Vec<PeerId>,
+        all_peers: &[PeerId],
         responder: Responder,
     ) -> Self {
         let dht_service = dht_client.service();

@@ -30,15 +30,13 @@ pub struct Engine {
 
 impl Engine {
     pub async fn new(
-        secret_key: &SecretKey,
+        key_pair: Arc<KeyPair>,
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
-        peers: &Vec<PeerId>,
         committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
     ) -> Self {
-        let key_pair = KeyPair::from(secret_key);
         let log_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
-        let peer_schedule = Arc::new(PeerSchedule::new(Arc::new(key_pair)));
+        let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
 
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
 
@@ -52,7 +50,7 @@ impl Engine {
         let dispatcher = Dispatcher::new(
             &dht_client,
             &overlay_service,
-            peers,
+            &[], // TODO: FIX PEERS
             Responder::new(
                 log_id.clone(),
                 broadcast_filter.clone(),
@@ -78,7 +76,7 @@ impl Engine {
         // current epoch
         peer_schedule.set_next_start(genesis.body.location.round.next());
         // start updater only after peers are populated into schedule
-        peer_schedule_updater.set_next_peers(peers);
+        peer_schedule_updater.set_next_peers(&[]); // TODO: FIX PEERS
         peer_schedule.rotate();
 
         let current_dag_round = DagRound::genesis(&genesis, &peer_schedule);
