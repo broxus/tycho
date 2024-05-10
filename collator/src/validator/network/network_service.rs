@@ -27,10 +27,6 @@ impl NetworkService {
     }
 }
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, TlRead, TlWrite)]
-#[repr(transparent)]
-pub struct OverlayId(pub [u8; 32]);
-
 impl Service<ServiceRequest> for NetworkService {
     type QueryResponse = Response;
     type OnQueryFuture = Pin<Box<dyn Future<Output = Option<Self::QueryResponse>> + Send>>;
@@ -45,20 +41,18 @@ impl Service<ServiceRequest> for NetworkService {
         async move {
             match query_result {
                 Ok(query) => {
-                    let SignaturesQuery {
-                        session_seqno,
-                        block_id_short,
-                        signatures,
-                    } = query;
+                    let query: SignaturesQuery = query;
+
                     {
                         let session = state
-                            .get_session(block_id_short.shard.workchain(), session_seqno)
+                            .get_session(query.block_id_short.shard, query.session_seqno)
                             .await;
+
                         match handle_signatures_query(
                             session,
-                            session_seqno,
-                            block_id_short,
-                            signatures,
+                            query.session_seqno,
+                            query.block_id_short,
+                            query.wrapped_signatures(),
                             &listeners,
                         )
                         .await

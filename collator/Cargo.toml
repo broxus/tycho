@@ -12,6 +12,7 @@ license.workspace = true
 # crates.io deps
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+backon = { workspace = true }
 bytesize = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }
@@ -32,6 +33,7 @@ tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 tycho-block-util = { workspace = true }
+log = "0.4.21"
 
 
 [dev-dependencies]

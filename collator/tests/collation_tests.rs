@@ -12,6 +12,7 @@ use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::CollationConfig;
+use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
@@ -93,6 +94,15 @@ async fn test_collation_process_on_stubs() {
     tracing::info!("Trying to start CollationManager");
 
     let node_network = tycho_collator::test_utils::create_node_network();
+    let validator_config = ValidatorConfig {
+        backoff_config: BackoffConfig {
+            min_delay: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+            factor: 2.0,
+        },
+        request_timeout: Duration::from_millis(1000),
+        delay_between_requests: Duration::from_millis(50),
+    };
 
     let manager = CollationManager::start(
         config,
@@ -101,10 +111,7 @@ async fn test_collation_process_on_stubs() {
         |listener| MempoolAdapterStdImpl::new(listener),
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
-            config: ValidatorConfig {
-                base_loop_delay: Duration::from_millis(50),
-                max_loop_delay: Duration::from_secs(10),
-            },
+            config: validator_config
         },
         CollatorStdImplFactory,
     );

@@ -219,8 +219,8 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 shard_state.seqno = block_id.seqno;
 
                 let state = ShardStateStuff::from_state_and_root(
-                    block_id,
-                    shard_state,
+                    &block_id,
+                    Box::new(shard_state),
                     Cell::default(),
                     &mcstate_tracker,
                 )
