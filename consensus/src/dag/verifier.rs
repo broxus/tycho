@@ -5,10 +5,12 @@ use tokio::task::JoinSet;
 use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
-use crate::dag::DagRound;
+use crate::dag::{DagRound, WeakDagRound};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Link, Location, NodeCount, Point, PointId, ValidPoint};
+use crate::models::{
+    DagPoint, Digest, Link, Location, NodeCount, Point, PointId, Ugly, ValidPoint,
+};
 
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
@@ -46,9 +48,16 @@ impl Verifier {
     /// must be called iff [Self::verify] succeeded
     pub async fn validate(
         point: Arc<Point>, // @ r+0
-        r_0: DagRound,     // r+0
+        r_0: WeakDagRound, // r+0
         downloader: Downloader,
     ) -> DagPoint {
+        let Some(r_0) = r_0.get() else {
+            tracing::warn!(
+                "cannot validate {:?}, local DAG moved far forward",
+                point.id().ugly()
+            );
+            return DagPoint::NotExists(Arc::new(point.id()));
+        };
         // TODO upgrade Weak whenever used to let Dag Round drop if some future hangs up for long
         if &point.body.location.round != r_0.round() {
             panic!("Coding error: dag round mismatches point round")
@@ -62,14 +71,17 @@ impl Verifier {
         }) {
             return DagPoint::Invalid(point.clone());
         }
-        if let Some(r_1) = r_0.prev().get() {
-            Self::gather_deps(&point, &r_1, &downloader, &mut dependencies);
-            return Self::check_deps(&point, dependencies).await;
-        }
-        // If r-1 exceeds dag depth, the arg point @ r+0 is considered valid by itself.
-        // Any point @ r+0 will be committed, only if it has valid proof @ r+1
-        //   included into valid anchor chain, i.e. validated by consensus.
-        DagPoint::Trusted(ValidPoint::new(point.clone()))
+        let Some(r_1) = r_0.prev().get() else {
+            // If r-1 exceeds dag depth, the arg point @ r+0 is considered valid by itself.
+            // Any point @ r+0 will be committed, only if it has valid proof @ r+1
+            //   included into valid anchor chain, i.e. validated by consensus.
+            return DagPoint::Trusted(ValidPoint::new(point.clone()));
+        };
+        Self::gather_deps(&point, &r_1, &downloader, &mut dependencies);
+        // drop strong links before await
+        _ = r_0;
+        _ = r_1;
+        Self::check_deps(&point, dependencies).await
     }
 
     fn is_self_links_ok(
@@ -128,12 +140,15 @@ impl Verifier {
                 }
                 !found
             });
-            if dag_round.prev().get().map(|r| dag_round = r).is_none() {
-                // if links in point exceed DAG depth, consider them valid by now;
-                // either dependencies have more recent link and point will be invalidated later,
-                // or author was less successful to get fresh data and did not commit for long
-                // (thus keeps more history in its local Dag)
-                break;
+            match dag_round.prev().get() {
+                Some(r) => dag_round = r,
+                None => {
+                    // if links in point exceed DAG depth, consider them valid by now;
+                    // either dependencies have more recent link and point will be invalidated later,
+                    // or author was less successful to get fresh data and did not commit for long
+                    // (thus keeps more history in its local Dag)
+                    break;
+                }
             }
         }
         // valid linked points will be in dag without this addition by recursion,
@@ -174,7 +189,7 @@ impl Verifier {
                     },
                     digest: digest.clone(),
                 };
-                downloader.run(point_id, round.clone(), dependant.clone())
+                downloader.run(point_id, round.as_weak(), dependant.clone())
             })
         });
         dependencies.spawn(shared.map(|(dag_point, _)| dag_point));

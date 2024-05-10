@@ -11,7 +11,7 @@ use tokio::sync::{broadcast, watch};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::dag::{DagRound, Verifier, WeakDagRound};
+use crate::dag::{Verifier, WeakDagRound};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -38,21 +38,24 @@ impl Downloader {
     pub async fn run(
         self,
         point_id: PointId,
-        point_round: DagRound,
+        point_round: WeakDagRound,
         // TODO it would be great to increase the number of dependants in-flight,
         //   but then the DAG needs to store some sort of updatable state machine
         //   instead of opaque Shared<JoinTask<DagPoint>>
         dependant: PeerId,
     ) -> DagPoint {
+        let Some(point_round_temp) = point_round.get() else {
+            return DagPoint::NotExists(Arc::new(point_id));
+        };
         assert_eq!(
             point_id.location.round,
-            *point_round.round(),
+            *point_round_temp.round(),
             "point and DAG round mismatch"
         );
         // request point from its signers (any dependant is among them as point is already verified)
         let all_peers = self
             .peer_schedule
-            .peers_for(&point_round.round().next())
+            .peers_for(&point_round_temp.round().next())
             .iter()
             .map(|(peer_id, state)| (*peer_id, *state))
             .collect::<FastHashMap<PeerId, PeerState>>();
@@ -73,8 +76,9 @@ impl Downloader {
             .chain(iter::once(point_id.location.author))
             .collect();
         let (has_resolved_tx, has_resolved_rx) = watch::channel(false);
+        _ = point_round_temp; // do not leak strong ref across unlimited await
         DownloadTask {
-            weak_dag_round: point_round.as_weak(),
+            weak_dag_round: point_round,
             node_count,
             request: self.dispatcher.point_by_id_request(&point_id),
             point_id,
@@ -193,7 +197,8 @@ impl DownloadTask {
             }
             Ok(PointByIdResponse(None)) => {
                 if self.mandatory.remove(&peer_id) {
-                    // it's a ban
+                    // it's a ban in case permanent storage is used,
+                    // the other way - peer can could have advanced on full DAG_DEPTH already
                     tracing::error!(
                         "{} : {peer_id:.4?} must have returned {:?}",
                         self.parent.log_id,
@@ -215,18 +220,14 @@ impl DownloadTask {
                         self.parent.log_id
                     );
                 }
-                let Some(dag_round) = self.weak_dag_round.get() else {
-                    tracing::warn!(
-                        "{} : {peer_id:.4?} no more retries, local DAG moved far forward",
-                        self.parent.log_id
-                    );
-                    // DAG could not have moved if this point was needed for commit
-                    return Some(DagPoint::NotExists(Arc::new(self.point_id.clone())));
-                };
                 match Verifier::verify(&point, &self.parent.peer_schedule) {
                     Ok(()) => {
-                        let validated =
-                            Verifier::validate(point, dag_round, self.parent.clone()).await;
+                        let validated = Verifier::validate(
+                            point,
+                            self.weak_dag_round.clone(),
+                            self.parent.clone(),
+                        )
+                        .await;
                         if validated.trusted().is_some() {
                             tracing::debug!(
                                 "{} : downloaded dependency {:?}",

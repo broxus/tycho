@@ -13,9 +13,14 @@ use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, NodeCount, Point, PointId, Round, ValidPoint};
 
 #[derive(Clone)]
+/// Allows memory allocated by DAG to be freed
 pub struct WeakDagRound(Weak<DagRoundInner>);
 
 #[derive(Clone)]
+/// do not pass to backwards-recursive async tasks
+/// (where DAG_DEPTH is just a logical limit, but is not explicitly applicable)
+/// to prevent severe memory leaks of a whole DAG round
+/// (in case congested tokio runtime reorders futures), use [WeakDagRound] for that
 pub struct DagRound(Arc<DagRoundInner>);
 
 struct DagRoundInner {
@@ -30,7 +35,7 @@ struct DagRoundInner {
 }
 
 impl WeakDagRound {
-    pub const BOTTOM: Self = WeakDagRound(Weak::new());
+    const BOTTOM: Self = WeakDagRound(Weak::new());
     pub fn get(&self) -> Option<DagRound> {
         self.0.upgrade().map(DagRound)
     }
@@ -185,7 +190,7 @@ impl DagRound {
         if &point.body.location.round != self.round() {
             panic!("Coding error: dag round mismatches point round on add")
         }
-        let dag_round = self.clone();
+        let dag_round = self.as_weak();
         let digest = &point.digest;
         self.edit(&point.body.location.author, |loc| {
             let state = loc.state().clone();
@@ -206,7 +211,7 @@ impl DagRound {
         if !Verifier::verify(point, peer_schedule).is_ok() {
             panic!("Coding error: malformed point")
         }
-        let point = Verifier::validate(point.clone(), self.clone(), downloader.clone()).await;
+        let point = Verifier::validate(point.clone(), self.as_weak(), downloader.clone()).await;
         if point.trusted().is_none() {
             panic!("Coding error: not a trusted point")
         }
