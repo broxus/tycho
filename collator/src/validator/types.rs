@@ -1,75 +1,29 @@
-use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::sync::Arc;
-
 use everscale_crypto::ed25519::PublicKey;
+
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ValidatorDescription};
+use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
-use tracing::error;
+use tycho_network::PeerId;
 
-use crate::types::CollationSessionInfo;
-
-pub(crate) type ValidatorsMap = HashMap<[u8; 32], Arc<ValidatorInfo>>;
-
-pub enum ValidatorInfoError {
-    InvalidPublicKey,
-}
 
 #[derive(Clone)]
 pub struct ValidatorInfo {
-    pub public_key: PublicKey,
+    pub public_key_hash: HashBytes,
     pub weight: u64,
-    pub _adnl_addr: Option<HashBytes>,
+    pub public_key: PublicKey,
 }
 
 impl TryFrom<&ValidatorDescription> for ValidatorInfo {
-    type Error = ValidatorInfoError;
-
-    fn try_from(value: &ValidatorDescription) -> Result<Self, Self::Error> {
-        let pubkey = PublicKey::from_bytes(value.public_key.0)
-            .ok_or(ValidatorInfoError::InvalidPublicKey)?;
-        Ok(Self {
-            public_key: pubkey,
-            weight: value.weight,
-            _adnl_addr: value.adnl_addr.map(|addr| HashBytes(addr.0)),
-        })
-    }
-}
-
-pub struct ValidationSessionInfo {
-    pub workchain: i32,
-    pub seqno: u32,
-    pub validators: ValidatorsMap,
-}
-
-impl TryFrom<Arc<CollationSessionInfo>> for ValidationSessionInfo {
     type Error = anyhow::Error;
 
-    fn try_from(session_info: Arc<CollationSessionInfo>) -> std::result::Result<Self, Self::Error> {
-        let mut validators = HashMap::new();
-        for validator_descr in session_info.collators().validators.iter() {
-            let validator_info: anyhow::Result<ValidatorInfo, ValidatorInfoError> =
-                validator_descr.try_into();
-            match validator_info {
-                Ok(validator_info) => {
-                    validators.insert(
-                        validator_info.public_key.to_bytes(),
-                        Arc::new(validator_info),
-                    );
-                }
-                Err(_) => {
-                    error!("invalid validator public key");
-                }
-            }
-        }
-
-        let validation_session = ValidationSessionInfo {
-            workchain: session_info.workchain(),
-            seqno: session_info.seqno(),
-            validators,
-        };
-        Ok(validation_session)
+    fn try_from(value: &ValidatorDescription) -> Result<Self, Self::Error> {
+        let pubkey = PublicKey::from_bytes(value.public_key.0).ok_or(anyhow::anyhow!("Invalid public key"))?;
+        Ok(Self {
+            public_key_hash: HashBytes(pubkey.to_bytes()),
+            public_key: pubkey,
+            weight: value.weight,
+        })
     }
 }
 
@@ -99,9 +53,10 @@ impl BlockValidationCandidate {
 }
 
 #[derive(TlWrite, TlRead)]
-#[tl(boxed, id = 0x12341111)]
-pub(crate) struct OverlayNumber {
-    pub workchain: i32,
+#[tl(boxed, id = 0x13213213)]
+pub struct OverlayNumber {
+    #[tl(with = "tl_shard_ident")]
+    pub shard_ident: ShardIdent,
     pub session_seqno: u32,
 }
 
@@ -118,5 +73,27 @@ impl ValidationResult {
             ValidationResult::Valid | ValidationResult::Invalid => true,
             ValidationResult::Insufficient(..) => false,
         }
+    }
+}
+
+mod tl_shard_ident {
+    use tl_proto::{TlPacket, TlRead, TlResult, TlWrite};
+
+    use everscale_types::models::ShardIdent;
+
+    pub const fn size_hint(_: &ShardIdent) -> usize {
+        12
+    }
+
+    pub fn write<P: TlPacket>(shard: &ShardIdent, packet: &mut P) {
+        shard.workchain().write_to(packet);
+        shard.prefix().write_to(packet);
+    }
+
+    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<ShardIdent> {
+        let workchain = i32::read_from(packet, offset)?;
+        let prefix = u64::read_from(packet, offset)?;
+
+        Ok(ShardIdent::new(workchain, prefix).unwrap())
     }
 }

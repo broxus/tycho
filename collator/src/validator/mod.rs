@@ -6,3 +6,4 @@ pub mod state;
 pub mod types;
 #[allow(clippy::module_inception)]
 pub mod validator;
+pub mod client;

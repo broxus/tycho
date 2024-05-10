@@ -4,26 +4,31 @@ use tl_proto::{TlRead, TlWrite};
 use tycho_util::FastHashMap;
 
 #[derive(Debug, Clone, TlRead, TlWrite)]
-#[tl(boxed, id = 0x11112222)]
+#[tl(boxed, id = 0x11111111)]
 pub struct SignaturesQuery {
     pub session_seqno: u32,
     #[tl(with = "tl_block_id_short")]
     pub block_id_short: BlockIdShort,
-    pub signatures: Vec<([u8; 32], [u8; 64])>,
+    pub signatures: Vec<([u8; 32],  [u8; 64])>,
 }
 
 impl SignaturesQuery {
-    pub(crate) fn create(
+    pub fn new(
         session_seqno: u32,
-        block_header: BlockIdShort,
-        current_signatures: &FastHashMap<HashBytes, Signature>,
+        block_id_short: BlockIdShort,
+        signatures: Vec<(HashBytes, Signature)>,
     ) -> Self {
-        let signatures = current_signatures.iter().map(|(k, v)| (k.0, v.0)).collect();
         Self {
             session_seqno,
-            block_id_short: block_header,
-            signatures,
+            block_id_short,
+            signatures: signatures.into_iter().map(|(hash, signature)| (hash.0, signature.0)).collect()
         }
+    }
+
+    pub fn wrapped_signatures(&self) -> Vec<(HashBytes, Signature)> {
+        self.signatures
+            .iter()
+            .map(|(hash, signature)| (HashBytes(*hash), Signature(*signature))).collect()
     }
 }
 

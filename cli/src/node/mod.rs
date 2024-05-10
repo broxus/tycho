@@ -16,6 +16,7 @@ use tycho_collator::mempool::MempoolAdapterFactoryStd;
 use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
+use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
@@ -507,8 +508,13 @@ impl Node {
                 },
                 // TODO: Move into node config
                 config: ValidatorConfig {
-                    base_loop_delay: Duration::from_millis(50),
-                    max_loop_delay: Duration::from_secs(10),
+                    backoff_config: BackoffConfig {
+                        min_delay: Duration::from_millis(50),
+                        max_delay: Duration::from_secs(10),
+                        factor: 2.0,
+                    },
+                    request_timeout: Duration::from_secs(1),
+                    delay_between_requests: Duration::from_millis(50),
                 },
             },
             CollatorStdImplFactory,
