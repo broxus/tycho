@@ -28,9 +28,9 @@ impl AnchorStage {
             .iter()
             .nth(leader_index)
             .map(|(peer_id, _)| peer_id)
-        else {
-            panic!("selecting a leader from an empty validator set")
-        };
+            else {
+                panic!("selecting a leader from an empty validator set")
+            };
         if !current_peers.contains_key(leader) {
             return None;
         };

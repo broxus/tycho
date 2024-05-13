@@ -183,6 +183,21 @@ pub enum Link {
     Indirect { to: PointId, path: Through },
 }
 
+impl Link {
+    pub fn is_witness(&self) -> bool {
+        match self {
+            Link::Indirect {..} => true,
+            _ => false
+        }
+    }
+    pub fn witness_to(&self) -> Option<Round> {
+        match self {
+            Link::Indirect {to, .. } => Some(to.location.round),
+            _ => None
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PointBody {
     pub location: Location, // let it be @ r+0

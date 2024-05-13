@@ -6,11 +6,10 @@ use futures_util::FutureExt;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
-use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::{DagLocation, InclusionState, Verifier};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, NodeCount, Point, PointId, Round, ValidPoint};
+use crate::models::{AnchorStage, DagPoint, Digest, NodeCount, Point, PointId, Round, ValidPoint};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed

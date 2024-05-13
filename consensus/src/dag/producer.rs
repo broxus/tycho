@@ -4,9 +4,10 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tycho_network::PeerId;
 
-use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
-use crate::models::{Link, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime};
+use crate::models::{
+    AnchorStage, Link, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime,
+};
 
 pub struct Producer;
 
@@ -28,14 +29,19 @@ impl Producer {
             }
             _ => {}
         };
+
         let includes = Self::includes(&finished_round);
-        let mut anchor_trigger =
-            Self::link_from_includes(&local_id, &current_round, &includes, true);
-        let mut anchor_proof =
-            Self::link_from_includes(&local_id, &current_round, &includes, false);
+        let (mut anchor_trigger, mut anchor_proof) =
+            Self::trigger_and_proof_link_from_includes(&local_id, &current_round, &includes);
+
         let witness = Self::witness(&finished_round);
-        Self::update_link_from_witness(&mut anchor_trigger, finished_round.round(), &witness, true);
-        Self::update_link_from_witness(&mut anchor_proof, finished_round.round(), &witness, false);
+        Self::update_links_from_witness(
+            &mut anchor_trigger,
+            &mut anchor_proof,
+            finished_round.round(),
+            &witness,
+        );
+
         let time = Self::get_time(
             &finished_round,
             &local_id,
@@ -115,76 +121,137 @@ impl Producer {
         }
     }
 
-    fn link_from_includes(
+    fn trigger_and_proof_link_from_includes(
         local_id: &PeerId,
         current_round: &DagRound,
         includes: &[Arc<Point>],
-        is_for_trigger: bool,
-    ) -> Link {
-        let is_leader = match current_round.anchor_stage() {
-            Some(AnchorStage::Trigger { leader, .. }) => is_for_trigger && leader == local_id,
-            Some(AnchorStage::Proof { leader, .. }) => !is_for_trigger && leader == local_id,
-            _ => false,
-        };
+    ) -> (Link, Link) {
+        (
+            Self::trigger_link_from_includes(local_id, current_round, includes),
+            Self::proof_link_from_includes(local_id, current_round, includes),
+        )
+    }
 
-        if is_leader {
-            return Link::ToSelf;
-        }
+    fn trigger_link_from_includes(
+        local_id: &PeerId,
+        current_round: &DagRound,
+        includes: &[Arc<Point>],
+    ) -> Link {
+        match current_round.anchor_stage() {
+            Some(AnchorStage::Trigger { leader, .. }) if leader == local_id => return Link::ToSelf,
+            _ => (),
+        };
 
         let point = includes
             .iter()
-            .max_by_key(|p| {
-                p.last_round(is_for_trigger)
-            })
+            .max_by_key(|p| p.anchor_trigger_round())
             .expect("non-empty list of includes for own point");
 
         let last_round = point.body.location.round;
 
         if last_round == current_round.round().prev() {
-            let is_self_anchor =
-                (is_for_trigger && point.body.anchor_trigger == Link::ToSelf) ||
-                    (!is_for_trigger && point.body.anchor_proof == Link::ToSelf);
-
+            let is_self_anchor = point.body.anchor_trigger == Link::ToSelf;
             if is_self_anchor {
-                return Link::Direct(Through::Includes( point.body.location.author.clone()));
+                return Link::Direct(Through::Includes(point.body.location.author.clone()));
             }
         }
 
-        let to = point.last_round_id(is_for_trigger);
-
         Link::Indirect {
-            to,
+            to: point.anchor_trigger_id(),
             path: Through::Includes(point.body.location.author.clone()),
         }
     }
 
-    fn update_link_from_witness(
-        link: &mut Link,
+    fn proof_link_from_includes(
+        local_id: &PeerId,
+        current_round: &DagRound,
+        includes: &[Arc<Point>],
+    ) -> Link {
+        match current_round.anchor_stage() {
+            Some(AnchorStage::Proof { leader, .. }) if leader == local_id => return Link::ToSelf,
+            _ => (),
+        };
+
+        let point = includes
+            .iter()
+            .max_by_key(|p| p.anchor_proof_round())
+            .expect("non-empty list of includes for own point");
+
+        let last_round = point.body.location.round;
+
+        if last_round == current_round.round().prev() {
+            let is_self_anchor = point.body.anchor_proof == Link::ToSelf;
+            if is_self_anchor {
+                return Link::Direct(Through::Includes(point.body.location.author.clone()));
+            }
+        }
+
+        Link::Indirect {
+            to: point.anchor_proof_id(),
+            path: Through::Includes(point.body.location.author.clone()),
+        }
+    }
+
+    fn update_links_from_witness(
+        anchor_trigger_link: &mut Link,
+        anchor_proof_link: &mut Link,
         finished_round: &Round,
         witness: &[Arc<Point>],
-        is_for_trigger: bool,
     ) {
-        let link_round = match link {
-            Link::ToSelf | Link::Direct(_) => return,
-            Link::Indirect { to, .. } => to.location.round,
-        };
+        if anchor_trigger_link.is_witness() {
+            Self::update_trigger_from_witness(anchor_trigger_link, finished_round, witness)
+        }
+
+        if anchor_proof_link.is_witness() {
+            Self::update_proof_from_witness(anchor_trigger_link, finished_round, witness)
+        }
+    }
+
+    fn update_trigger_from_witness(
+        trigger: &mut Link,
+        finished_round: &Round,
+        witness: &[Arc<Point>],
+    ) {
+        if !trigger.is_witness() {
+            return;
+        }
+
+        let Some(round) = trigger.witness_to();
 
         if let Some(point) = witness
             .iter()
-            .filter(|p| p.last_round(is_for_trigger) > link_round) // Condition check
-            .max_by_key(|p| p.last_round(is_for_trigger))
+            .filter(|p| p.anchor_trigger_round() > round) // Condition check
+            .max_by_key(|p| p.anchor_trigger_round())
         {
             let last_round = point.body.location.round;
-
-            let is_trigger_match = is_for_trigger && point.body.anchor_trigger == Link::ToSelf;
-            let is_proof_match = !is_for_trigger && point.body.anchor_proof == Link::ToSelf;
-
-            if last_round == finished_round.prev() && (is_trigger_match || is_proof_match) {
-                *link = Link::Direct(Through::Witness(point.body.location.author));
+            if last_round == finished_round.prev() && (point.body.anchor_trigger == Link::ToSelf) {
+                *trigger = Link::Direct(Through::Witness(point.body.location.author));
             } else {
-                let to = point.last_round_id(is_for_trigger);
-                *link = Link::Indirect {
-                    to,
+                *trigger = Link::Indirect {
+                    to: point.anchor_trigger_id(),
+                    path: Through::Witness(point.body.location.author),
+                };
+            }
+        }
+    }
+
+    fn update_proof_from_witness(proof: &mut Link, finished_round: &Round, witness: &[Arc<Point>]) {
+        if !proof.is_witness() {
+            return;
+        }
+        let Some(round) = proof.witness_to();
+
+        if let Some(point) = witness
+            .iter()
+            .filter(|p| p.anchor_proof_round() > round) // Condition check
+            .max_by_key(|p| p.anchor_proof_round())
+        {
+            let last_round = point.body.location.round;
+            if last_round == finished_round.prev() && (point.body.anchor_proof == Link::ToSelf) {
+                *proof = Link::Direct(Through::Witness(point.body.location.author));
+            } else {
+                *proof = Link::Indirect {
+                    to: point.anchor_proof_id(),
                     path: Through::Witness(point.body.location.author),
                 };
             }
