@@ -1,46 +1,20 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
-
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::models::*;
+use everscale_types::models::{BlockIdShort, ShardIdent};
 
-use self::types::QueueDiff;
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
-use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
-use crate::internal_queue::queue::QueueImpl;
-use crate::internal_queue::session::session_state::SessionStateImpl;
-use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
+use crate::internal_queue::queue::{Queue, QueueImpl};
+use crate::internal_queue::session::session_state::SessionStateStdImpl;
+use crate::internal_queue::types::QueueDiff;
 use crate::tracing_targets;
 use crate::utils::shard::SplitMergeAction;
 
-pub mod config;
-pub mod types;
-
-mod diff_mgmt;
-mod iterator;
-mod loader;
-mod queue;
-
-pub mod cache_persistent;
-mod cache_persistent_fs;
-
-pub mod state_persistent;
-mod state_persistent_fs;
-
-pub mod storage;
-mod storage_rocksdb;
-
-// TYPES
-
-type MsgQueueStdImpl =
-    QueueImpl<SessionStateImpl, PersistentStateStdImpl>;
-
-// ADAPTER
-
+pub struct MessageQueueAdapterStdImpl {
+    queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl>,
+}
 #[async_trait]
 pub trait MessageQueueAdapter: Send + Sync + 'static {
     /// Perform split and merge in the current queue state in accordance with the new shards set
@@ -54,16 +28,9 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<()>>;
 }
 
-pub struct MessageQueueAdapterStdImpl {
-    msg_queue: MsgQueueStdImpl,
-}
-
-impl Default for MessageQueueAdapterStdImpl {
-    fn default() -> Self {
-        let base_shard = ShardIdent::new_full(0);
-        Self {
-            msg_queue: MsgQueueStdImpl::new(base_shard),
-        }
+impl MessageQueueAdapterStdImpl {
+    pub fn new(queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl>) -> Self {
+        Self { queue }
     }
 }
 
@@ -73,7 +40,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         for sma in split_merge_actions {
             match sma {
                 SplitMergeAction::Split(shard_id) => {
-                    self.msg_queue.split_shard(&shard_id).await?;
+                    self.queue.split_shard(&shard_id).await?;
                     let (shard_l_id, shard_r_id) = shard_id
                         .split()
                         .expect("all split/merge actions should be valid there");

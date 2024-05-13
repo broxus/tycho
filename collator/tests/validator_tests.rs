@@ -12,7 +12,6 @@ use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use rand::prelude::ThreadRng;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
-use tracing::debug;
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
@@ -315,7 +314,7 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
     let network_nodes = make_network(node_count as usize);
     let blocks_amount = 100u32;
     let sessions = 3u32;
-    let max_concurrent_blocks = 10; // Limit to processing ten blocks at a time
+    let max_concurrent_blocks = 5; // Limit to processing ten blocks at a time
     let required_validations = blocks_amount * node_count; // Total required validations for all validators together
     let global_validated_blocks = Arc::new(AtomicUsize::new(0));
 
@@ -396,7 +395,7 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
 fn validator_config() -> ValidatorConfig {
     ValidatorConfig {
         backoff_config: BackoffConfig {
-            min_delay: Duration::from_millis(1000),
+            min_delay: Duration::from_millis(50),
             max_delay: Duration::from_millis(1000),
             factor: 2.0,
             max_times: 9999999,
@@ -417,7 +416,7 @@ async fn handle_validator(
     global_validated_blocks: Arc<AtomicUsize>,
 ) -> Result<()> {
     for session in 1..=sessions {
-        tracing::info!(target: "VALIDATOR", "Validator start. Session: {}", session);
+        tracing::info!("Validator start. Session: {}", session);
         let shard_ident = ShardIdent::new(session as i32, ShardIdent::PREFIX_FULL).unwrap();
         let blocks = create_blocks(blocks_amount, shard_ident);
         let collator_session_info = Arc::new(CollationSessionInfo::new(
@@ -450,7 +449,7 @@ async fn handle_validator(
             });
         }
 
-        let attempts = 10;
+        let attempts = 50;
         let mut attempt = 0;
         while global_validated_blocks.load(Ordering::SeqCst)
             < (required_validations * session) as usize

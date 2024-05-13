@@ -38,10 +38,10 @@ pub struct BlockCandidateContainer {
     /// True when the candidate became valid due to the applied validation result.
     /// Updates by `set_validation_result()`
     is_valid: bool,
-    /// * NotReady - is not ready to send to sync (no master block or it is not validated)
-    /// * Ready - is ready to send to sync (containing master block validated and all including shard blocks too)
-    /// * Sending - block candidate extracted for sending to sync
-    /// * Sent - block cadidate is already sent to sync
+    /// * `NotReady` - is not ready to send to sync (no master block or it is not validated)
+    /// * `Ready` - is ready to send to sync (containing master block validated and all including shard blocks too)
+    /// * `Sending` - block candidate extracted for sending to sync
+    /// * `Sent` - block cadidate is already sent to sync
     pub send_sync_status: SendSyncStatus,
     /// Hash ids of 1 or 2 (in case of merge) previous blocks in the shard or master chain
     prev_blocks_keys: Vec<BlockCacheKey>,

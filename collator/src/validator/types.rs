@@ -59,18 +59,19 @@ pub struct OverlayNumber {
     pub session_seqno: u32,
 }
 
-#[derive(Eq, PartialEq, Debug)]
-pub enum ValidationResult {
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub enum ValidationStatus {
     Valid,
     Invalid,
     Insufficient(u64, u64),
+    BlockNotExist,
 }
 
-impl ValidationResult {
+impl ValidationStatus {
     pub fn is_finished(&self) -> bool {
         match self {
-            ValidationResult::Valid | ValidationResult::Invalid => true,
-            ValidationResult::Insufficient(..) => false,
+            Self::Valid | Self::Invalid => true,
+            Self::Insufficient(..) | Self::BlockNotExist => false,
         }
     }
 }

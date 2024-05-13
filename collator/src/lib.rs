@@ -2,7 +2,6 @@ pub mod collator;
 pub mod internal_queue;
 pub mod manager;
 pub mod mempool;
-pub mod msg_queue;
 pub mod state_node;
 pub mod types;
 pub mod validator;

@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use tycho_network::{Network, PeerId, PrivateOverlay, Request};
 
+use crate::tracing_targets;
 use crate::validator::network::dto::SignaturesQuery;
 
 pub struct ValidatorClient {
@@ -26,6 +27,7 @@ impl ValidatorClient {
         payload: SignaturesQuery,
         timeout_duration: Duration,
     ) -> Result<SignaturesQuery> {
+        tracing::debug!(target: tracing_targets::VALIDATOR, "Requesting signatures from validator1111");
         let payload = Request::from_tl(payload);
         match tokio::time::timeout(
             timeout_duration,

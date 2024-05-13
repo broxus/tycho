@@ -2,7 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use everscale_types::models::BlockIdShort;
 use futures_util::future::{self, FutureExt, Ready};
+use tokio::sync::broadcast::Sender;
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::validator::network::dto::SignaturesQuery;
@@ -14,14 +16,20 @@ use crate::validator::ValidatorEventListener;
 pub struct NetworkService {
     listeners: Vec<Arc<dyn ValidatorEventListener>>,
     state: Arc<ValidationStateStdImpl>,
+    block_validated_broadcaster: Sender<BlockIdShort>,
 }
 
 impl NetworkService {
     pub fn new(
         listeners: Vec<Arc<dyn ValidatorEventListener>>,
         state: Arc<ValidationStateStdImpl>,
+        block_validated_broadcaster: Sender<BlockIdShort>,
     ) -> Self {
-        Self { listeners, state }
+        Self {
+            listeners,
+            state,
+            block_validated_broadcaster,
+        }
     }
 }
 
@@ -36,6 +44,7 @@ impl Service<ServiceRequest> for NetworkService {
 
         let state = self.state.clone();
         let listeners = self.listeners.clone();
+        let broadcaster = self.block_validated_broadcaster.clone();
         async move {
             match query_result {
                 Ok(query) => {
@@ -52,6 +61,7 @@ impl Service<ServiceRequest> for NetworkService {
                             query.block_id_short,
                             query.wrapped_signatures(),
                             &listeners,
+                            broadcaster,
                         )
                         .await
                         {
