@@ -9,7 +9,9 @@ use sha2::Digest;
 
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
-use crate::collator::types::{BlockCollationData, McData, PrevData, ShardDescriptionExt};
+use crate::collator::types::{
+    AsyncMessage, BlockCollationData, McData, PrevData, ShardDescriptionExt,
+};
 use crate::internal_queue::iterator::QueueIterator;
 use crate::tracing_targets;
 use crate::types::BlockCollationResult;
@@ -129,16 +131,19 @@ impl CollatorStdImpl {
 
         // temporary buffer to store first received new internals
         // because we should not take them until existing internals not processed
-        let mut new_int_msgs_tmp_buffer: Vec<(MsgInfo, Cell)> = vec![];
+        let mut new_int_msgs_tmp_buffer: Vec<AsyncMessage> = vec![];
 
         loop {
             // build messages set
-            let mut msgs_set: Vec<(MsgInfo, Cell)> = vec![];
+            let mut msgs_set: Vec<AsyncMessage> = vec![];
 
             // 1. First try to read min externals amount
             let mut ext_msgs = if self.has_pending_externals {
                 self.read_next_externals(min_externals_per_set, &mut collation_data)
                     .await?
+                    .into_iter()
+                    .map(|(msg_info, cell)| AsyncMessage::Ext(msg_info, cell))
+                    .collect()
             } else {
                 vec![]
             };
@@ -173,7 +178,10 @@ impl CollatorStdImpl {
             if remaining_capacity > 0 && self.has_pending_externals {
                 ext_msgs = self
                     .read_next_externals(remaining_capacity, &mut collation_data)
-                    .await?;
+                    .await?
+                    .into_iter()
+                    .map(|(msg_info, cell)| AsyncMessage::Ext(msg_info, cell))
+                    .collect();
                 msgs_set.append(&mut ext_msgs);
             }
 
@@ -207,8 +215,7 @@ impl CollatorStdImpl {
             exec_manager.execute_msgs_set(msgs_set);
             let mut msgs_set_offset: u32 = 0;
             let mut msgs_set_full_processed = false;
-            //STUB: currently emulate msgs processing by groups
-            //      check block limits by transactions count
+            // execute msgs processing by groups
             while !msgs_set_full_processed {
                 let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
                 for (account_id, msg_info, transaction) in group {

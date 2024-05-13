@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{CellBuilder, CellContext, CellFamily, CellSlice, Load, Store};
 use everscale_types::error::Error;
 use everscale_types::merkle::MerkleUpdate;
-use everscale_types::models::{HashUpdate, Lazy, StateInit, TickTock, Transaction};
+use everscale_types::models::{HashUpdate, Lazy, MsgInfo, StateInit, TickTock, Transaction};
 use everscale_types::{
     cell::{Cell, HashBytes, UsageTree, UsageTreeMode},
     dict::{AugDict, Dict},
@@ -681,11 +681,17 @@ impl ShardDescriptionExt for ShardDescription {
 
 /// Async message
 pub(super) enum AsyncMessage {
-    /// 0 - message; 1 - message.id_hash()
-    Ext(OwnedMessage, HashBytes),
-    /// 0 - message in execution queue; 1 - TRUE when from the same shard
-    Int(EnqueuedMessage, bool),
-    /// TickTock message
+    /// 0 - msg info, 1 - msg cell
+    Recover(MsgInfo, Cell),
+    /// 0 - msg info, 1 - msg cell
+    Mint(MsgInfo, Cell),
+    /// 0 - msg info, 1 - msg cell
+    Ext(MsgInfo, Cell),
+    /// 0 - msg info, 1 - msg cell, 2 - is from current shard
+    Int(MsgInfo, Cell, bool),
+    /// 0 - msg info, 1 - msg cell
+    New(MsgInfo, Cell),
+    /// 0 - tick tock msg
     TickTock(TickTock),
 }
 

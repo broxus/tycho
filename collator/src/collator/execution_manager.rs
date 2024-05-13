@@ -26,6 +26,8 @@ use tycho_util::FastHashMap;
 
 use crate::collator::types::{AccountId, ShardAccountStuff};
 
+use super::types::AsyncMessage;
+
 static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 
 /// Execution manager
@@ -89,9 +91,10 @@ impl ExecutionManager {
     }
 
     /// execute messages set
-    pub fn execute_msgs_set(&mut self, msgs: Vec<(MsgInfo, Cell)>) {
+    pub fn execute_msgs_set(&mut self, msgs: Vec<AsyncMessage>) {
         tracing::trace!("adding set of messages");
-        let _ = std::mem::replace(&mut self.messages_set, msgs);
+        todo!()
+        //let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 
     /// tick
