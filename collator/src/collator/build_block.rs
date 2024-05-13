@@ -45,7 +45,7 @@ impl CollatorStdImpl {
                     )?;
                 }
             }
-            if self.shard_id.is_masterchain() {
+            if collation_data.block_id_short.shard.is_masterchain() {
                 updated_shard_account.update_public_libraries(&mut exec_manager.libraries)?;
             }
             let acc_block = AccountBlock {
@@ -168,7 +168,7 @@ impl CollatorStdImpl {
             .total_validator_fees
             .try_sub_assign(&value_flow.recovered)?;
 
-        if self.shard_id.is_masterchain() {
+        if collation_data.block_id_short.shard.is_masterchain() {
             new_state.libraries = exec_manager.libraries;
         }
 

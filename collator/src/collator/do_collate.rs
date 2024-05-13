@@ -121,6 +121,12 @@ impl CollatorStdImpl {
             prev_shard_data.observable_accounts().clone(),
         );
 
+        // execute tick transaction and special transactions (mint, recover)
+        if collation_data.block_id_short.shard.is_masterchain() {
+            //self.create_ticktock_transactions(false, mc_data, prev_data, collator_data, &mut exec_manager).await?;
+            //self.create_special_transactions(mc_data, prev_data, collator_data, &mut exec_manager).await?;
+        }
+
         let mut all_existing_internals_finished = false;
         let mut all_new_internals_finished = false;
 
@@ -260,6 +266,11 @@ impl CollatorStdImpl {
                 // block is full - exit loop
                 break;
             }
+        }
+
+        // execute tock transaction
+        if collation_data.block_id_short.shard.is_masterchain() {
+            //self.create_ticktock_transactions(true, mc_data, prev_data, collator_data, &mut exec_manager).await?;
         }
 
         // build block candidate and new state
