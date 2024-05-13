@@ -605,7 +605,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#e82acd56660db2b595f081fce956a376122a10cb"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#1577b7e873197ecece297742b512094586057065"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -625,7 +625,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#e82acd56660db2b595f081fce956a376122a10cb"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#1577b7e873197ecece297742b512094586057065"
 dependencies = [
  "proc-macro2",
  "quote",

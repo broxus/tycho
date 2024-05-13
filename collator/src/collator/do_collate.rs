@@ -1,5 +1,5 @@
-use std::{collections::HashMap, ops::Deref};
 use std::sync::atomic::Ordering;
+use std::{collections::HashMap, ops::Deref};
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
@@ -207,13 +207,17 @@ impl CollatorStdImpl {
             exec_manager.execute_msgs_set(msgs_set);
             let mut msgs_set_offset: u32 = 0;
             let mut msgs_set_full_processed = false;
-            let mut result = HashMap::new();
             //STUB: currently emulate msgs processing by groups
             //      check block limits by transactions count
             while !msgs_set_full_processed {
                 let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
                 for (account_id, msg_info, transaction) in group {
-                    let internal_msgs = new_transaction(&mut collation_data, &transaction, msg_info)?;
+                    let internal_msgs = new_transaction(
+                        &mut collation_data,
+                        &self.shard_id,
+                        &transaction,
+                        msg_info,
+                    )?;
                     collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
                     // if !check_limits(tick_res) {
                     //     break;
@@ -221,8 +225,6 @@ impl CollatorStdImpl {
                     // TODO: check our for internal
                     // our  = shard ident contain msg src
                     //
-                    let transactions: &mut Vec<_> = result.entry(account_id).or_default();
-                    transactions.push(transaction);
                 }
                 msgs_set_offset = new_offset;
 
@@ -567,9 +569,10 @@ impl CollatorStdImpl {
 /// add in and out messages from to block, and to new message queue
 fn new_transaction(
     colator_data: &mut BlockCollationData,
+    shard_id: &ShardIdent,
     transaction: &Transaction,
     in_msg: MsgInfo,
-) -> Result<Vec<OutMsg>> {
+) -> Result<Vec<(MsgInfo, Cell)>> {
     tracing::trace!("new transaction, message {:?}\n{:?}", in_msg, transaction,);
     colator_data.execute_count += 1;
     // let gas_used = transaction.gas_used().unwrap_or(0);
@@ -583,16 +586,28 @@ fn new_transaction(
     if let Some(ref in_msg_cell) = transaction.in_msg {
         let in_msg = match in_msg {
             // TODO: fix routing
-            MsgInfo::Int(IntMsgInfo { fwd_fee, .. }) => InMsg::Immediate(InMsgFinal {
-                in_msg_envelope: Lazy::new(&MsgEnvelope {
-                    cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
-                    next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
-                    fwd_fee_remaining: Default::default(),               // TODO: fix calculation
-                    message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
-                })?,
-                transaction: Lazy::new(&transaction.clone())?,
-                fwd_fee,
-            }),
+            MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
+                let dst_prefix = dst.prefix();
+                let dst_workchain = dst.workchain();
+                let next_addr = IntermediateAddr::FULL_DEST_SAME_WORKCHAIN;
+                let cur_addr = if contains_prefix(shard_id, dst_workchain, dst_prefix) {
+                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
+                } else {
+                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
+                };
+                InMsg::Immediate(InMsgFinal {
+                    in_msg_envelope: Lazy::new(&MsgEnvelope {
+                        cur_addr,
+                        next_addr,
+                        fwd_fee_remaining: fwd_fee,
+                        message: Lazy::new(&OwnedMessage::load_from(
+                            &mut in_msg_cell.as_slice()?,
+                        )?)?,
+                    })?,
+                    transaction: Lazy::new(&transaction.clone())?,
+                    fwd_fee,
+                })
+            }
             MsgInfo::ExtIn(_) => InMsg::External(InMsgExternal {
                 in_msg: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
                 transaction: Lazy::new(&transaction.clone())?,
@@ -611,17 +626,26 @@ fn new_transaction(
     for out_msg in transaction.iter_out_msgs() {
         let message = out_msg?;
         let msg_cell = CellBuilder::build_from(&message)?;
-        let out_msg = match message.info {
-            MsgInfo::Int(_) => {
+        let message_info = message.info;
+        let out_msg = match message_info.clone() {
+            MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
                 colator_data.enqueue_count += 1;
                 colator_data.out_msg_count += 1;
+                let dst_prefix = dst.prefix();
+                let dst_workchain = dst.workchain();
+                let next_addr = IntermediateAddr::FULL_DEST_SAME_WORKCHAIN;
+                let cur_addr = if contains_prefix(shard_id, dst_workchain, dst_prefix) {
+                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
+                } else {
+                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
+                };
                 // TODO: fix routing
                 // Add to message block here for counting time later it may be replaced
                 OutMsg::New(OutMsgNew {
                     out_msg_envelope: Lazy::new(&MsgEnvelope {
-                        cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
-                        next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN, // TODO: fix calculation
-                        fwd_fee_remaining: Default::default(), // TODO: fix calculation
+                        cur_addr,
+                        next_addr,
+                        fwd_fee_remaining: fwd_fee,
                         message: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
                     })?,
                     transaction: Lazy::new(&transaction.clone())?,
@@ -642,7 +666,18 @@ fn new_transaction(
             out_msg.compute_exported_value()?,
             out_msg.clone(),
         )?;
-        result.push(out_msg);
+        result.push((message_info, msg_cell));
     }
     Ok(result)
+}
+
+pub fn contains_prefix(shard_id: &ShardIdent, workchain_id: i32, prefix_without_tag: u64) -> bool {
+    if shard_id.workchain() == workchain_id {
+        if shard_id.prefix() == 0x8000_0000_0000_0000u64 {
+            return true;
+        }
+        let shift = 64 - shard_id.prefix_len();
+        return (shard_id.prefix() >> shift) == (prefix_without_tag >> shift);
+    }
+    false
 }
