@@ -12,7 +12,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::MempoolAdapterFactoryStd;
 use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
@@ -486,14 +486,19 @@ impl Node {
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
             max_collate_threads: 1,
-            // test_validators_keypairs: vec![],
+            #[cfg(test)]
+            test_validators_keypairs: vec![],
         };
 
         let collation_manager = CollationManager::start(
             collation_config,
             Arc::new(MessageQueueAdapterStdImpl::default()),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
-            MempoolAdapterStdImpl::new,
+            MempoolAdapterFactoryStd::new(
+                self.keypair.clone(),
+                self.dht_client.clone(),
+                self.overlay_service.clone(),
+            ),
             ValidatorStdImplFactory {
                 network: ValidatorNetwork {
                     overlay_service: self.overlay_service.clone(),

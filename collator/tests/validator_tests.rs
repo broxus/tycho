@@ -300,7 +300,7 @@ fn create_blocks(amount: u32) -> Vec<BlockId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_validator_accept_block_by_network() -> Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
-    tycho_util::test::init_logger("test_validator_accept_block_by_network");
+    tycho_util::test::init_logger("test_validator_accept_block_by_network", "debug");
 
     let mut tmp_dirs = Vec::new();
 

@@ -83,7 +83,7 @@ fn make_network(node_count: usize) -> Vec<Node> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn private_overlays_accessible() -> Result<()> {
-    tycho_util::test::init_logger("private_overlays_accessible");
+    tycho_util::test::init_logger("private_overlays_accessible", "debug");
 
     let nodes = make_network(20);
 

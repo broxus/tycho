@@ -17,7 +17,7 @@ mod common;
 
 #[tokio::test]
 async fn overlay_server_with_empty_storage() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_with_empty_storage");
+    tycho_util::test::init_logger("overlay_server_with_empty_storage", "debug");
 
     #[derive(Debug, Default)]
     struct PeerState {
@@ -141,7 +141,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
 #[tokio::test]
 async fn overlay_server_blocks() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_blocks");
+    tycho_util::test::init_logger("overlay_server_blocks", "debug");
 
     #[derive(Debug, Default)]
     struct PeerState {

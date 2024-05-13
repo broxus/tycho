@@ -1,13 +1,10 @@
 use std::sync::Arc;
 
-use anyhow::Result;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::cell::{CellBuilder, HashBytes};
-use everscale_types::models::{
-    Block, BlockId, OwnedMessage, ShardIdent, ShardStateUnsplit, Signature,
-};
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{Block, BlockId, OwnedMessage, ShardIdent, Signature};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
 use tycho_util::FastHashMap;
 
@@ -21,7 +18,7 @@ pub struct CollationConfig {
 
     pub max_collate_threads: u16,
 
-    #[cfg(feature = "test")]
+    #[cfg(any(test, feature = "test"))]
     pub test_validators_keypairs: Vec<Arc<KeyPair>>,
 }
 

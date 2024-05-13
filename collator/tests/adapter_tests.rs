@@ -135,7 +135,7 @@ async fn test_add_and_get_next_block() {
 #[tokio::test]
 async fn test_add_read_handle_1000_blocks_parallel() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
-    tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel");
+    tycho_util::test::init_logger("test_add_read_handle_100000_blocks_parallel", "debug");
 
     let storage = prepare_test_storage().await.unwrap();
 
@@ -219,8 +219,8 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 shard_state.seqno = block_id.seqno;
 
                 let state = ShardStateStuff::from_state_and_root(
-                    block_id,
-                    shard_state,
+                    &block_id,
+                    Box::new(shard_state),
                     Cell::default(),
                     &mcstate_tracker,
                 )

@@ -223,7 +223,7 @@ where
             Arc::new(state_node_adapter_factory.create(arc_dispatcher.clone()));
 
         // create mempool adapter
-        let mpool_adapter = Arc::new(mpool_adapter_factory.create(arc_dispatcher.clone()));
+        let mpool_adapter = mpool_adapter_factory.create(arc_dispatcher.clone());
 
         // create validator and start its tasks queue
         let validator = validator_factory.create(ValidatorContext {

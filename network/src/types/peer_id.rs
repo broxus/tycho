@@ -54,7 +54,9 @@ impl std::fmt::Display for PeerId {
 
 impl std::fmt::Debug for PeerId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PeerId({self})")
+        f.write_str("PeerId(")?;
+        std::fmt::Display::fmt(self, f)?;
+        f.write_str(")")
     }
 }
 

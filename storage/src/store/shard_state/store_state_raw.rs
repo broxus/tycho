@@ -571,7 +571,7 @@ mod test {
     #[tokio::test]
     #[ignore]
     async fn insert_and_delete_of_several_shards() -> Result<()> {
-        tycho_util::test::init_logger("insert_and_delete_of_several_shards");
+        tycho_util::test::init_logger("insert_and_delete_of_several_shards", "debug");
         let project_root = project_root()?.join(".scratch");
         let integration_test_path = project_root.join("integration_tests");
         let current_test_path = integration_test_path.join("insert_and_delete_of_several_shards");
