@@ -317,6 +317,7 @@ pub(super) struct BlockCollationData {
     pub enqueue_count: u32,
     pub out_msg_count: u32,
     pub msg_queue_depth_sum: u32,
+    pub dequeue_count: u32,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt
@@ -671,6 +672,7 @@ impl ShardDescriptionExt for ShardDescription {
 }
 
 /// Async message
+#[derive(Clone, Debug)]
 pub(super) enum AsyncMessage {
     /// 0 - msg info, 1 - msg cell
     Recover(MsgInfo, Cell),
@@ -681,7 +683,7 @@ pub(super) enum AsyncMessage {
     /// 0 - msg info, 1 - msg cell, 2 - is from current shard
     Int(MsgInfo, Cell, bool),
     /// 0 - msg info, 1 - msg cell
-    New(MsgInfo, Cell),
+    NewInt(MsgInfo, Cell),
     /// 0 - tick tock msg
     TickTock(TickTock),
 }
