@@ -103,7 +103,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::engine::Engine;
+    use crate::engine::{Engine, InputBufferStub};
 
     #[global_allocator]
     static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -182,6 +182,7 @@ mod tests {
                             &dht_client,
                             &overlay_service,
                             committed_tx.clone(),
+                            InputBufferStub::new(100, 3),
                         );
                         engine.init_with_genesis(all_peers.as_slice()).await;
                         tracing::info!("created engine {}", dht_client.network().peer_id());

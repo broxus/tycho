@@ -5,5 +5,5 @@ pub(crate) mod intercom;
 pub(crate) mod models;
 pub mod test_utils;
 
-pub use engine::Engine;
+pub use engine::*;
 pub use models::Point;

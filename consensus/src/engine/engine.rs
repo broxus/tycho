@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedSender;
@@ -8,6 +9,7 @@ use tokio::task::{JoinError, JoinSet};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
 use crate::dag::{Dag, DagRound, InclusionState, Producer};
+use crate::engine::input_buffer::InputBuffer;
 use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
@@ -28,6 +30,7 @@ pub struct Engine {
     top_dag_round: Arc<RwLock<DagRound>>,
     tasks: JoinSet<()>, // should be JoinSet<!>
     committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+    input_buffer: Box<dyn InputBuffer + Send>,
 }
 
 impl Engine {
@@ -36,6 +39,7 @@ impl Engine {
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+        input_buffer: impl InputBuffer + Send + 'static,
     ) -> Self {
         let log_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
         let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
@@ -101,6 +105,7 @@ impl Engine {
             top_dag_round,
             tasks,
             committed,
+            input_buffer: Box::new(input_buffer),
         }
     }
 
@@ -151,7 +156,21 @@ impl Engine {
                 .dag
                 .top(&current_dag_round.round().next(), &self.peer_schedule);
 
-            tracing::info!("{} @ {:?}", self.log_id, current_dag_round.round());
+            let produce_with_payload = if produce_own_point {
+                Some(self.input_buffer.as_mut().fetch(prev_point.is_some()).await)
+            } else {
+                None
+            };
+
+            tracing::info!(
+                "{} @ {:?} {}",
+                self.log_id,
+                current_dag_round.round(),
+                produce_with_payload
+                    .as_ref()
+                    .map(|payload| payload.iter().map(|bytes| bytes.len()).sum::<usize>() / 1024)
+                    .map_or("no point".to_string(), |kb| format!("payload {kb} KiB"))
+            );
 
             let (bcaster_ready_tx, bcaster_ready_rx) = mpsc::channel(1);
             // let this channel unbounded - there won't be many items, but every of them is essential
@@ -159,7 +178,7 @@ impl Engine {
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
 
             let bcaster_run = tokio::spawn(Self::bcaster_run(
-                produce_own_point,
+                produce_with_payload,
                 self.broadcaster,
                 self.peer_schedule.clone(),
                 self.top_dag_round.clone(),
@@ -209,7 +228,7 @@ impl Engine {
     }
 
     async fn bcaster_run(
-        produce_own_point: bool,
+        produce_with_payload: Option<Vec<Bytes>>,
         mut broadcaster: Broadcaster,
         peer_schedule: Arc<PeerSchedule>,
         top_dag_round: Arc<RwLock<DagRound>>,
@@ -221,13 +240,14 @@ impl Engine {
         bcaster_ready_tx: mpsc::Sender<BroadcasterSignal>,
         mut collector_signal_rx: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> (Broadcaster, Option<Arc<PrevPoint>>) {
-        if produce_own_point {
+        if let Some(payload) = produce_with_payload {
             let new_point = tokio::spawn(Self::produce(
                 current_dag_round,
                 prev_point,
                 peer_schedule.clone(),
                 downloader,
                 own_point_state,
+                payload,
             ));
             // must signal to uploader before start of broadcast
             let top_dag_round_upd =
@@ -271,9 +291,10 @@ impl Engine {
         peer_schedule: Arc<PeerSchedule>,
         downloader: Downloader,
         own_point_state: oneshot::Sender<InclusionState>,
+        payload: Vec<Bytes>,
     ) -> Option<Arc<Point>> {
         if let Some(own_point) =
-            Producer::new_point(&current_dag_round, prev_point.as_deref(), vec![]).await
+            Producer::new_point(&current_dag_round, prev_point.as_deref(), payload).await
         {
             let state = current_dag_round
                 .insert_exact_sign(&own_point, &peer_schedule, &downloader)
