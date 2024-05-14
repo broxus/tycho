@@ -74,6 +74,8 @@ integration_test: prepare_integration_tests
 
 gen_network n: build_debug
     #!/usr/bin/env bash
+    set -eE
+
     TEMP_DIR="./.temp"
     TYCHO_BIN="./target/debug/tycho"
 
@@ -126,17 +128,56 @@ node n: build_debug
         --config "$TEMP_DIR/config{{n}}.json" \
         --global-config "$TEMP_DIR/global-config.json" \
         --import-zerostate "$TEMP_DIR/zerostate.boc" \
-        --logger-config ./logger.json \
+        --logger-config ./logger.json
 
-init_node_config: build_debug
+init_node_config *flags: build_debug
     #!/usr/bin/env bash
-    TYCHO_BIN="./target/debug/tycho"
-    $TYCHO_BIN node run --init-config "./config.json"
+    set -eE
 
-init_zerostate_config: build_debug
-    #!/usr/bin/env bash
+    CONFIG_PATH="./config.json"
+    LOG_PATH="./logger.json"
+
     TYCHO_BIN="./target/debug/tycho"
-    $TYCHO_BIN tool gen-zerostate --init-config "./zerostate.json"
+    $TYCHO_BIN node run --init-config "$CONFIG_PATH" {{flags}}
+
+    CONFIG=$(jq '.public_ip = "127.0.0.1"' "$CONFIG_PATH")
+    echo "$CONFIG" > "$CONFIG_PATH"
+
+    if ! [ -f "$LOG_PATH" ]; then
+        cat << EOF > "$LOG_PATH"
+        {
+          "tycho": "info",
+          "tycho_core": "debug",
+          "tycho_network": "info",
+          "collation_manager": "debug",
+          "mempool_adapter": "debug",
+          "state_node_adapter": "debug",
+          "mq_adapter": "debug",
+          "collator": "debug",
+          "validator": "debug",
+          "async_queued_dispatcher": "debug"
+        }
+    EOF
+    fi
+
+init_zerostate_config *flags: build_debug
+    #!/usr/bin/env bash
+    set -eE
+
+    KEYS_PATH="./keys.json"
+    CONFIG_PATH="./zerostate.json"
+
+    TYCHO_BIN="./target/debug/tycho"
+
+    $TYCHO_BIN tool gen-zerostate --init-config "$CONFIG_PATH" {{flags}}
+
+    if ! [ -f "$KEYS_PATH" ]; then
+        $TYCHO_BIN tool gen-key > "$KEYS_PATH"
+    fi
+
+    PUBLIC_KEY=$(jq '.public' "$KEYS_PATH")
+    CONFIG=$(jq ".config_public_key = $PUBLIC_KEY | .minter_public_key = $PUBLIC_KEY" "$CONFIG_PATH")
+    echo "$CONFIG" > "$CONFIG_PATH"
 
 build_debug:
     cargo build --bin tycho

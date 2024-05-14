@@ -28,6 +28,21 @@ To format code:
 just fmt
 ```
 
+## Local Network
+
+```bash
+# Generate zerostate config stub (with optional --force flag):
+just init_zerostate_config
+# Generate node config sub (with optional --force flag):
+just init_node_config
+# Generate a local network of 3 nodes:
+just gen_network 3
+
+# Start nodes in separate terminals or spawn them with `&`:
+just node 1
+just node 2
+just node 3
+```
 
 ## Prebuilt RocksDB
 
@@ -53,7 +68,8 @@ cd /path/to
 git clone https://github.com/facebook/rocksdb.git
 cd rocksdb
 git checkout v8.10.0
-make -j 10 static_lib
-export ROCKSDB_LIB_DIR=/path/to/rocksdb
+mkdir -p build && cd ./build
+cmake -DWITH_LZ4=ON -DWITH_ZSTD=ON -DWITH_JEMALLOC=ON -DCMAKE_BUILD_TYPE=Release ..
+make -j16 rocksdb
+export ROCKSDB_LIB_DIR=/path/to/rocksdb/build
 ```
-
