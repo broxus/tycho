@@ -177,7 +177,7 @@ pub enum Through {
     Includes(PeerId),
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
 pub enum PointType {
     Trigger,
     Proof,
@@ -375,8 +375,8 @@ impl Point {
         self.get_linked_to_round(link_fn(&self))
     }
 
-    pub fn point_link<'a>(point: &'a Point, point_type: &'a PointType) -> &'a Link {
-        let get_link = identity(move |point: &Point, point_type: &PointType| -> &Link {
+    pub fn point_link<'a>(point: &'a Point, point_type: PointType) -> &'a Link {
+        let get_link = identity(move |point: &Point, point_type: PointType| -> &Link {
             match point_type {
                 PointType::Trigger => &point.body.anchor_trigger,
                 PointType::Proof => &point.body.anchor_proof,

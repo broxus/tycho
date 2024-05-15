@@ -137,7 +137,7 @@ impl Producer {
         use Link::*;
 
         if let Some(anchor_stage) = current_round.anchor_stage() {
-            match (anchor_stage, &point_type) {
+            match (anchor_stage, point_type) {
                 (Trigger { leader, .. }, PointType::Trigger)
                 | (Proof { leader, .. }, PointType::Proof)
                     if leader == local_id =>
@@ -150,7 +150,7 @@ impl Producer {
 
         let point = includes
             .iter()
-            .max_by_key(|point| point.anchor_round(|p| Point::point_link(&p, &point_type)));
+            .max_by_key(|point| point.anchor_round(|p| Point::point_link(&p, point_type)));
 
         if let Some(point) = point {
             if point.body.location.round == current_round.round().prev() {
@@ -164,7 +164,7 @@ impl Producer {
                 }
             }
 
-            let to = point.anchor_id(|p| Point::point_link(&p, &point_type));
+            let to = point.anchor_id(|p| Point::point_link(&p, point_type));
             Indirect {
                 to,
                 path: Through::Includes(point.body.location.author.clone()),
@@ -187,20 +187,20 @@ impl Producer {
 
         let max_point = witness
             .iter()
-            .filter(|point| point.anchor_round(|p| Point::point_link(&p, &point_type)) > link_round)
-            .max_by_key(|point| point.anchor_round(|p| Point::point_link(&p, &point_type)));
+            .filter(|point| point.anchor_round(|p| Point::point_link(&p, point_type)) > link_round)
+            .max_by_key(|point| point.anchor_round(|p| Point::point_link(&p, point_type)));
 
         if let Some(point) = max_point {
 
             let is_previous_round = point.body.location.round == finished_round.prev();
 
-            match (is_previous_round, &point_type, &point.body.anchor_trigger, &point.body.anchor_proof) {
+            match (is_previous_round, point_type, &point.body.anchor_trigger, &point.body.anchor_proof) {
                 (true, PointType::Trigger, Link::ToSelf, _)
                 | (true, PointType::Proof, _, Link::ToSelf) => {
                     *link = Link::Direct(Through::Witness(point.body.location.author.clone()));
                 }
                 _ => {
-                    let to = point.anchor_id(|p| Point::point_link(&p, &point_type));
+                    let to = point.anchor_id(|p| Point::point_link(&p, point_type));
                     *link = Link::Indirect {
                         to,
                         path: Through::Witness(point.body.location.author.clone()),
