@@ -332,15 +332,8 @@ impl Point {
 
     // TODO maybe implement field accessors parameterized by combination of enums
 
-    //-----------
 
-    // pub fn anchor_round(&self, tpe: PointType) -> Round {
-    //     match tpe {
-    //         PointType::Proof => self.get_linked_to_round(&self.body.anchor_proof),
-    //         PointType::Trigger => self.get_linked_to_round(&self.body.anchor_trigger),
-    //     }
-    // }
-
+    // OLD FUNCTIONS SECTIONS. NOT USED IN PRODUCER
     pub fn anchor_trigger_round(&self) -> Round {
         self.get_linked_to_round(&self.body.anchor_trigger)
     }
@@ -350,9 +343,6 @@ impl Point {
     }
 
 
-
-    //-----------
-
     pub fn anchor_trigger_id(&self) -> PointId {
         self.get_linked_to(&self.body.anchor_trigger)
     }
@@ -361,16 +351,26 @@ impl Point {
         self.get_linked_to(&self.body.anchor_proof)
     }
 
+    pub fn anchor_trigger_through(&self) -> PointId {
+        self.get_linked_through(&self.body.anchor_trigger)
+    }
+
+    pub fn anchor_proof_through(&self) -> PointId {
+        self.get_linked_through(&self.body.anchor_proof)
+    }
+
+    // END SECTION
+
     pub fn anchor_id<'a, F>(&'a self, link_fn: F) -> PointId
-        where
-            F: Fn(&'a Point) -> &'a Link,
+    where
+        F: Fn(&'a Point) -> &'a Link,
     {
         self.get_linked_to(link_fn(&self))
     }
 
     pub fn anchor_round<'a, F>(&'a self, link_fn: F) -> Round
-        where
-            F: Fn(&'a Point) -> &'a Link,
+    where
+        F: Fn(&'a Point) -> &'a Link,
     {
         self.get_linked_to_round(link_fn(&self))
     }
@@ -387,16 +387,6 @@ impl Point {
     }
 
 
-    //-----------
-
-    pub fn anchor_trigger_through(&self) -> PointId {
-        self.get_linked_through(&self.body.anchor_trigger)
-    }
-
-    pub fn anchor_proof_through(&self) -> PointId {
-        self.get_linked_through(&self.body.anchor_proof)
-    }
-
     fn get_linked_to_round(&self, link: &Link) -> Round {
         match link {
             Link::ToSelf => self.body.location.round.clone(),
@@ -409,8 +399,12 @@ impl Point {
     fn get_linked_to(&self, link: &Link) -> PointId {
         match link {
             Link::ToSelf => self.id(),
-            Link::Direct(Through::Includes(peer)) => self.get_linked(peer, true),
-            Link::Direct(Through::Witness(peer)) => self.get_linked(peer, false),
+            Link::Direct(Through::Includes(peer)) => self.get_linked(peer, |point| {
+                (&point.body.includes, point.body.location.round.prev())
+            }),
+            Link::Direct(Through::Witness(peer)) => self.get_linked(peer, |point| {
+                (&point.body.witness, point.body.location.round.prev().prev())
+            }),
             Link::Indirect { to, .. } => to.clone(),
         }
     }
@@ -420,27 +414,30 @@ impl Point {
             Link::Indirect {
                 path: Through::Includes(peer),
                 ..
-            } => self.get_linked(peer, true),
+            } => self.get_linked(peer, |point| {
+                (&point.body.includes, point.body.location.round.prev())
+            }),
             Link::Indirect {
                 path: Through::Witness(peer),
                 ..
-            } => self.get_linked(peer, false),
+            } => self.get_linked(peer, |point| {
+                (&point.body.witness, point.body.location.round.prev().prev())
+            }),
             _ => self.get_linked_to(link),
         }
     }
 
-    fn get_linked(&self, peer: &PeerId, through_includes: bool) -> PointId {
-        let (through, round) = if through_includes {
-            (&self.body.includes, self.body.location.round.prev())
-        } else {
-            (&self.body.witness, self.body.location.round.prev().prev())
-        };
+    fn get_linked<'a, F>(&'a self, peer: &'a PeerId, use_links: F) -> PointId
+    where
+        F: Fn(&'a Point) -> (&'a BTreeMap<PeerId, Digest>, Round),
+    {
+        let (links, round) = use_links(&self);
         PointId {
             location: Location {
                 round,
                 author: peer.clone(),
             },
-            digest: through
+            digest: links
                 .get(peer)
                 .expect("Coding error: usage of ill-formed point")
                 .clone(),
