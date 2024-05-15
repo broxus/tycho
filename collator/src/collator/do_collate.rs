@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 use std::{collections::HashMap, ops::Deref};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
@@ -224,7 +224,7 @@ impl CollatorStdImpl {
             // execute msgs processing by groups
             while !msgs_set_full_processed {
                 let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
-                for (account_id, msg_info, transaction) in group {
+                for (_account_id, msg_info, transaction) in group {
                     let internal_msgs = new_transaction(
                         &mut collation_data,
                         &self.shard_id,
@@ -232,12 +232,6 @@ impl CollatorStdImpl {
                         msg_info,
                     )?;
                     collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
-                    // if !check_limits(tick_res) {
-                    //     break;
-                    // }
-                    // TODO: check our for internal
-                    // our  = shard ident contain msg src
-                    //
                 }
                 msgs_set_offset = new_offset;
 
@@ -584,62 +578,105 @@ impl CollatorStdImpl {
     }
 }
 
-/// add in and out messages from to block, and to new message queue
+/// add in and out messages from to block
 fn new_transaction(
     colator_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
     transaction: &Transaction,
-    in_msg: MsgInfo,
+    in_msg: AsyncMessage,
 ) -> Result<Vec<(MsgInfo, Cell)>> {
     tracing::trace!("new transaction, message {:?}\n{:?}", in_msg, transaction,);
     colator_data.execute_count += 1;
-    // let gas_used = transaction.gas_used().unwrap_or(0);
-    // colator_data
-    //     .block_limit_status
-    //     .add_gas_used(gas_used as u32);
-    // colator_data
-    //     .block_limit_status
-    //     .add_transaction(transaction.lt == colator_data.start_lt + 1);
+    let (in_msg, in_msg_cell) = match in_msg {
+        AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), in_msg_cell, current_shard) => {
+            let next_addr = IntermediateAddr::FULL_DEST_SAME_WORKCHAIN;
+            // NOTE: `cur_addr` is not used in current routing between shards logic, it's just here to make the code more readable
+            let cur_addr = if current_shard {
+                IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
+            } else {
+                IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
+            };
+            let msg_envelope = MsgEnvelope {
+                cur_addr,
+                next_addr,
+                fwd_fee_remaining: fwd_fee,
+                message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
+            };
 
-    if let Some(ref in_msg_cell) = transaction.in_msg {
-        let in_msg = match in_msg {
-            // TODO: fix routing
-            MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
-                let dst_prefix = dst.prefix();
-                let dst_workchain = dst.workchain();
-                let next_addr = IntermediateAddr::FULL_DEST_SAME_WORKCHAIN;
-                let cur_addr = if contains_prefix(shard_id, dst_workchain, dst_prefix) {
-                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
-                } else {
-                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
-                };
-                InMsg::Immediate(InMsgFinal {
-                    in_msg_envelope: Lazy::new(&MsgEnvelope {
-                        cur_addr,
-                        next_addr,
-                        fwd_fee_remaining: fwd_fee,
-                        message: Lazy::new(&OwnedMessage::load_from(
-                            &mut in_msg_cell.as_slice()?,
-                        )?)?,
-                    })?,
-                    transaction: Lazy::new(&transaction.clone())?,
-                    fwd_fee,
-                })
+            let in_msg = InMsg::Final(InMsgFinal {
+                in_msg_envelope: Lazy::new(&msg_envelope)?,
+                transaction: Lazy::new(&transaction.clone())?,
+                fwd_fee,
+            });
+
+            if current_shard {
+                let out_msg = OutMsg::DequeueImmediate(OutMsgDequeueImmediate {
+                    out_msg_envelope: Lazy::new(&msg_envelope)?,
+                    reimport: Lazy::new(&in_msg)?,
+                });
+
+                colator_data.out_msgs.set(
+                    in_msg_cell.repr_hash(),
+                    out_msg.compute_exported_value()?,
+                    out_msg.clone(),
+                )?;
+                colator_data.dequeue_count += 1;
+                // TODO: del out msg from queue
             }
-            MsgInfo::ExtIn(_) => InMsg::External(InMsgExternal {
+
+            (in_msg, in_msg_cell)
+        }
+        AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), in_msg_cell) => {
+            let next_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
+            let cur_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
+            let msg_envelope = MsgEnvelope {
+                cur_addr,
+                next_addr,
+                fwd_fee_remaining: fwd_fee,
+                message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
+            };
+            let in_msg = InMsg::Immediate(InMsgFinal {
+                in_msg_envelope: Lazy::new(&msg_envelope)?,
+                transaction: Lazy::new(transaction)?,
+                fwd_fee,
+            });
+
+            let previous_transaction = match colator_data
+                .out_msgs
+                .get(in_msg_cell.repr_hash())?
+                .context("New Message was not found in out msgs")?
+            {
+                (_, OutMsg::New(previous_out_msg)) => previous_out_msg.transaction,
+                _ => {
+                    bail!("Out msgs doesn't contain out message with state New");
+                }
+            };
+
+            let out_msg = OutMsg::Immediate(OutMsgImmediate {
+                out_msg_envelope: Lazy::new(&msg_envelope)?,
+                transaction: previous_transaction,
+                reimport: Lazy::new(&in_msg)?,
+            });
+
+            colator_data.out_msgs.replace(
+                in_msg_cell.repr_hash(),
+                out_msg.compute_exported_value()?,
+                out_msg.clone(),
+            )?;
+            (in_msg, in_msg_cell)
+        }
+        AsyncMessage::Ext(MsgInfo::ExtIn(_), in_msg_cell) => (
+            InMsg::External(InMsgExternal {
                 in_msg: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
                 transaction: Lazy::new(&transaction.clone())?,
             }),
-            MsgInfo::ExtOut(_) => {
-                bail!("External outbound message cannot be input")
-            }
-        };
-        colator_data.in_msgs.set(
-            in_msg_cell.repr_hash().clone(),
-            in_msg.compute_fees()?,
-            in_msg,
-        )?;
-    }
+            in_msg_cell,
+        ),
+        _ => unreachable!(),
+    };
+    colator_data
+        .in_msgs
+        .set(in_msg_cell.repr_hash(), in_msg.compute_fees()?, in_msg)?;
     let mut result = vec![];
     for out_msg in transaction.iter_out_msgs() {
         let message = out_msg?;
@@ -651,14 +688,13 @@ fn new_transaction(
                 colator_data.out_msg_count += 1;
                 let dst_prefix = dst.prefix();
                 let dst_workchain = dst.workchain();
-                let next_addr = IntermediateAddr::FULL_DEST_SAME_WORKCHAIN;
-                let cur_addr = if contains_prefix(shard_id, dst_workchain, dst_prefix) {
+                let cur_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
+                // NOTE: `next_addr` is not used in current routing between shards logic, it's just here to make the code more readable
+                let next_addr = if contains_prefix(shard_id, dst_workchain, dst_prefix) {
                     IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
                 } else {
                     IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
                 };
-                // TODO: fix routing
-                // Add to message block here for counting time later it may be replaced
                 OutMsg::New(OutMsgNew {
                     out_msg_envelope: Lazy::new(&MsgEnvelope {
                         cur_addr,
@@ -680,7 +716,7 @@ fn new_transaction(
         };
 
         colator_data.out_msgs.set(
-            msg_cell.repr_hash().clone(),
+            msg_cell.repr_hash(),
             out_msg.compute_exported_value()?,
             out_msg.clone(),
         )?;

@@ -34,7 +34,7 @@ static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 pub(super) struct ExecutionManager {
     /// libraries
     pub libraries: Dict<HashBytes, LibDescr>,
-    /// gen_utime
+    /// generated unix time
     gen_utime: u32,
     // block's start logical time
     start_lt: u64,
@@ -51,7 +51,7 @@ pub(super) struct ExecutionManager {
     /// block version
     block_version: u32,
     /// messages set
-    messages_set: Vec<(MsgInfo, Cell)>,
+    messages_set: Vec<AsyncMessage>,
     /// group limit
     group_limit: u32,
     /// shard accounts
@@ -93,15 +93,14 @@ impl ExecutionManager {
     /// execute messages set
     pub fn execute_msgs_set(&mut self, msgs: Vec<AsyncMessage>) {
         tracing::trace!("adding set of messages");
-        todo!()
-        //let _ = std::mem::replace(&mut self.messages_set, msgs);
+        let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 
     /// tick
     pub async fn tick(
         &mut self,
         offset: u32,
-    ) -> Result<(u32, Vec<(AccountId, MsgInfo, Box<Transaction>)>)> {
+    ) -> Result<(u32, Vec<(AccountId, AsyncMessage, Box<Transaction>)>)> {
         tracing::trace!("execute manager messages set tick with {offset}");
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
@@ -156,37 +155,33 @@ impl ExecutionManager {
     pub async fn execute_message(
         &self,
         account_id: AccountId,
-        new_msg: (MsgInfo, Cell),
+        new_msg: AsyncMessage,
         mut shard_account: ShardAccountStuff,
-    ) -> Result<(Result<Box<Transaction>>, MsgInfo, ShardAccountStuff)> {
-        let (msg, new_msg_cell) = new_msg;
+    ) -> Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)> {
         tracing::trace!("execute message for account {account_id}");
-
-        let state_libs = self.libraries.clone();
-        let block_unixtime = self.gen_utime;
-        let block_lt = self.start_lt;
-        let seed_block = self.seed_block.clone();
-        let block_version = self.block_version;
-        let config = PreloadedBlockchainConfig::with_config(self.config.clone(), 0)?; // TODO: fix global id
+        let (config, params) = self.get_execute_params(shard_account.lt.clone())?;
         let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
-            let params = ExecuteParams {
-                state_libs,
-                block_unixtime,
-                block_lt,
-                last_tr_lt: shard_account.lt.clone(),
-                seed_block,
-                block_version,
-                ..ExecuteParams::default()
-            };
             let mut account_root = shard_account.account_root.clone();
-            let mut transaction_res =
-                execute_ordinary_message(&new_msg_cell, &mut account_root, params, &config);
-            // TODO replace with batch set
-            if let Ok(transaction) = transaction_res.as_mut() {
-                shard_account.add_transaction(transaction, account_root)?;
-            }
-            Ok((transaction_res, msg, shard_account))
-                as Result<(Result<Box<Transaction>>, MsgInfo, ShardAccountStuff)>
+            let transaction = match &new_msg {
+                AsyncMessage::Recover(_, new_msg_cell)
+                | AsyncMessage::Mint(_, new_msg_cell)
+                | AsyncMessage::Ext(_, new_msg_cell)
+                | AsyncMessage::Int(_, new_msg_cell, _)
+                | AsyncMessage::NewInt(_, new_msg_cell) => {
+                    let mut transaction_res =
+                        execute_ordinary_message(new_msg_cell, &mut account_root, params, &config);
+                    // TODO replace with batch set
+                    if let Ok(transaction) = transaction_res.as_mut() {
+                        shard_account.add_transaction(transaction, account_root)?;
+                    }
+                    transaction_res
+                }
+                AsyncMessage::TickTock(ticktock_) => {
+                    execute_ticktock_message(*ticktock_, &mut account_root, params, &config)
+                }
+            };
+            Ok((transaction, new_msg, shard_account))
+                as Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)>
         })
         .await??;
 
@@ -207,11 +202,63 @@ impl ExecutionManager {
         let old_state = account_stuff.state_update.load()?.old;
         account_stuff.state_update = Lazy::new(&HashUpdate {
             old: old_state,
-            new: account_stuff.account_root.repr_hash().clone(),
+            new: *account_stuff.account_root.repr_hash(),
         })?;
 
         self.changed_accounts.insert(account_id, account_stuff);
         Ok(())
+    }
+
+    /// execute ticktock transaction
+    pub async fn execute_ticktock_transaction(
+        &self,
+        ticktock: TickTock,
+        mut account_root: Cell,
+        last_tr_lt: Arc<AtomicU64>,
+    ) -> Result<Box<Transaction>> {
+        tracing::trace!("execute ticktock transaction");
+        let (config, params) = self.get_execute_params(last_tr_lt)?;
+        tokio::task::spawn_blocking(move || {
+            execute_ticktock_message(ticktock, &mut account_root, params, &config)
+        })
+        .await?
+    }
+
+    /// execute special transaction
+    pub async fn execute_special_transaction(
+        &self,
+        msg_cell: Cell,
+        mut account_root: Cell,
+        last_tr_lt: Arc<AtomicU64>,
+    ) -> Result<Box<Transaction>> {
+        tracing::trace!("execute ticktock transaction");
+        let (config, params) = self.get_execute_params(last_tr_lt)?;
+        tokio::task::spawn_blocking(move || {
+            execute_ordinary_message(&msg_cell, &mut account_root, params, &config)
+        })
+        .await?
+    }
+
+    fn get_execute_params(
+        &self,
+        last_tr_lt: Arc<AtomicU64>,
+    ) -> Result<(PreloadedBlockchainConfig, ExecuteParams)> {
+        let state_libs = self.libraries.clone();
+        let block_unixtime = self.gen_utime;
+        let block_lt = self.start_lt;
+        let seed_block = self.seed_block;
+        let block_version = self.block_version;
+        let config = PreloadedBlockchainConfig::with_config(self.config.clone(), 0)?; // TODO: fix global id
+        let params = ExecuteParams {
+            state_libs,
+            block_unixtime,
+            block_lt,
+            last_tr_lt,
+            seed_block,
+            block_version,
+            ..ExecuteParams::default()
+        };
+        Ok((config, params))
     }
 }
 
@@ -243,10 +290,10 @@ fn execute_ticktock_message(
 
 /// calculate group
 pub fn calculate_group(
-    messages_set: &[(MsgInfo, Cell)],
+    messages_set: &[AsyncMessage],
     group_limit: u32,
     offset: u32,
-) -> (u32, HashMap<AccountId, (MsgInfo, Cell)>) {
+) -> (u32, HashMap<AccountId, AsyncMessage>) {
     let mut new_offset = offset;
     let mut holes_group: HashMap<AccountId, u32> = HashMap::new();
     let mut max_account_count = 0;
@@ -254,12 +301,12 @@ pub fn calculate_group(
     let mut holes_count: i32 = 0;
     let mut group = HashMap::new();
     for (i, msg) in messages_set.iter().enumerate() {
-        let account_id = match msg.0 {
-            MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }) => {
-                dst.as_std().map(|a| a.address.clone()).unwrap_or_default()
+        let account_id = match msg {
+            AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
+                dst.as_std().map(|a| a.address).unwrap_or_default()
             }
-            MsgInfo::Int(IntMsgInfo { ref dst, .. }) => {
-                dst.as_std().map(|a| a.address.clone()).unwrap_or_default()
+            AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
+                dst.as_std().map(|a| a.address).unwrap_or_default()
             }
             _ => {
                 unreachable!()
@@ -272,49 +319,51 @@ pub fn calculate_group(
                 max_account_count = *count;
                 holes_max_count = (group_limit * max_account_count) as i32 - offset as i32;
             }
-        } else {
-            if group.len() < group_limit as usize {
-                match holes_group.get_mut(&account_id) {
-                    None => {
-                        if holes_max_count > 0 {
-                            holes_group.insert(account_id, 1);
-                            holes_max_count -= 1;
-                            holes_count += 1;
+        } else if group.len() < group_limit as usize {
+            match holes_group.get_mut(&account_id) {
+                None => {
+                    if holes_max_count > 0 {
+                        holes_group.insert(account_id, 1);
+                        holes_max_count -= 1;
+                        holes_count += 1;
+                    } else {
+                        // if group have this account we skip it
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            group.entry(account_id)
+                        {
+                            e.insert(msg.clone());
                         } else {
-                            // if group have this account we skip it
-                            if group.get(&account_id).is_none() {
-                                group.insert(account_id, msg.clone());
-                            } else {
-                                // if the offset was not set previously, and the account is skipped then
-                                // it means that we need to move by current group length
-                                if new_offset == offset {
-                                    new_offset += group.len() as u32;
-                                }
-                            }
-                        }
-                    }
-                    Some(count) => {
-                        if *count != max_account_count && holes_max_count > 0 {
-                            *count += 1;
-                            holes_max_count -= 1;
-                            holes_count += 1;
-                        } else {
-                            // group has this account, but it was not taken on previous runs
-                            if group.get(&account_id).is_none() {
-                                group.insert(account_id, msg.clone());
-                            } else {
-                                // if the offset was not set previously, and the account is skipped then
-                                // it means that we need to move by current group length
-                                if new_offset == offset {
-                                    new_offset += group.len() as u32;
-                                }
+                            // if the offset was not set previously, and the account is skipped then
+                            // it means that we need to move by current group length
+                            if new_offset == offset {
+                                new_offset += group.len() as u32;
                             }
                         }
                     }
                 }
-            } else {
-                break;
+                Some(count) => {
+                    if *count != max_account_count && holes_max_count > 0 {
+                        *count += 1;
+                        holes_max_count -= 1;
+                        holes_count += 1;
+                    } else {
+                        // group has this account, but it was not taken on previous runs
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            group.entry(account_id)
+                        {
+                            e.insert(msg.clone());
+                        } else {
+                            // if the offset was not set previously, and the account is skipped then
+                            // it means that we need to move by current group length
+                            if new_offset == offset {
+                                new_offset += group.len() as u32;
+                            }
+                        }
+                    }
+                }
             }
+        } else {
+            break;
         }
     }
     // if new offset was not set then it means that we took all group elements and all holes on our way
