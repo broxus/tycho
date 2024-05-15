@@ -16,8 +16,6 @@ use everscale_types::models::{
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
-use crate::msg_queue::types::EnqueuedMessage;
-
 // В текущем коллаторе перед коллацией блока импортируется:
 // - предыдущий мастер стейт
 // - предыдущие стейты шарды (их может быть 2, если мерж)

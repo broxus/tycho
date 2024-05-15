@@ -320,7 +320,7 @@ impl CollatorStdImpl {
         // 5. update validator_info
         // TODO: check `create_mc_state_extra()` for a reference implementation
         // STUB: currently we do not use validator_info and just do nothing there
-        let validator_info = prev_state_extra.validator_info.clone();
+        let validator_info = prev_state_extra.validator_info;
 
         // 6. update prev_blocks (add prev block's id to the dictionary)
         let prev_is_key_block = collation_data.block_id_short.seqno == 1 // prev block is a keyblock if it is a zerostate

@@ -12,6 +12,7 @@ license.workspace = true
 # crates.io deps
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+backon = { workspace = true }
 bytesize = { workspace = true }
 futures-util = { workspace = true }
 parking_lot = { workspace = true }

@@ -1,20 +1,21 @@
 use std::sync::Arc;
 
-use everscale_types::models::BlockIdShort;
-use tracing::trace;
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{BlockIdShort, Signature};
+use tokio::sync::broadcast::Sender;
 use tycho_network::Response;
 
-use crate::tracing_targets;
 use crate::validator::network::dto::SignaturesQuery;
-use crate::validator::state::SessionInfo;
-use crate::validator::{process_candidate_signature_response, ValidatorEventListener};
+use crate::validator::state::{NotificationStatus, SessionInfo};
+use crate::validator::{process_new_signatures, ValidatorEventListener};
 
 pub async fn handle_signatures_query(
     session: Option<Arc<SessionInfo>>,
     session_seqno: u32,
     block_id_short: BlockIdShort,
-    signatures: Vec<([u8; 32], [u8; 64])>,
+    signatures: Vec<(HashBytes, Signature)>,
     listeners: &[Arc<dyn ValidatorEventListener>],
+    validation_finish_broadcaster: Sender<BlockIdShort>,
 ) -> Result<Option<Response>, anyhow::Error>
 where
 {
@@ -25,28 +26,19 @@ where
             signatures: vec![],
         },
         Some(session) => {
-            trace!(target: tracing_targets::VALIDATOR, "Processing signatures query for block {:?} with {} signatures", block_id_short, signatures.len());
-            process_candidate_signature_response(
-                session.clone(),
-                block_id_short,
-                signatures,
-                listeners,
-            )
-            .await?;
+            let process_new_signatures_result =
+                process_new_signatures(session.clone(), block_id_short, signatures, listeners)
+                    .await?;
 
-            trace!(target: tracing_targets::VALIDATOR, "Getting valid signatures for block {:?}", block_id_short);
-            let signatures = session
-                .get_valid_signatures(&block_id_short)
-                .await
-                .into_iter()
-                .map(|(k, v)| (k.0, v.0))
-                .collect::<Vec<_>>();
-
-            SignaturesQuery {
-                session_seqno,
-                block_id_short,
-                signatures,
+            if process_new_signatures_result.0.is_finished()
+                && process_new_signatures_result.1 == NotificationStatus::Notified
+            {
+                validation_finish_broadcaster.send(block_id_short)?;
             }
+
+            let signatures = session.get_valid_signatures(&block_id_short).await;
+
+            SignaturesQuery::new(session_seqno, block_id_short, signatures)
         }
     };
     Ok(Some(Response::from_tl(response)))

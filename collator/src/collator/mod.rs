@@ -8,9 +8,9 @@ use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use self::types::{McData, PrevData, WorkingState};
+use crate::collator::queue_adapter::MessageQueueAdapter;
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
-use crate::msg_queue::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
     BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
@@ -23,6 +23,7 @@ use crate::{method_to_async_task_closure, tracing_targets};
 mod build_block;
 mod do_collate;
 mod execution_manager;
+pub mod queue_adapter;
 mod types;
 
 // FACTORY

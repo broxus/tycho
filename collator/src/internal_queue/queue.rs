@@ -1,24 +1,52 @@
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::{Mutex, RwLock};
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::persistent::persistent_state::PersistentState;
-use crate::internal_queue::session::session_state::SessionState;
+use crate::internal_queue::persistent::persistent_state::{
+    PersistentState, PersistentStateConfig, PersistentStateFactory, PersistentStateImplFactory,
+    PersistentStateStdImpl,
+};
+use crate::internal_queue::session::session_state::{
+    SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
+};
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::QueueDiff;
 
-#[trait_variant::make(Queue: Send)]
-pub trait LocalQueue<SS, PS>
+// FACTORY
+
+pub struct QueueConfig {
+    pub persistent_state_config: PersistentStateConfig,
+}
+
+pub trait QueueFactory {
+    type Queue: Queue;
+
+    fn create(&self) -> Self::Queue;
+}
+
+impl<F, R> QueueFactory for F
 where
-    SS: StateSnapshot + 'static,
-    PS: StateSnapshot + 'static,
+    F: Fn() -> R,
+    R: Queue,
 {
-    fn new(base_shard: ShardIdent) -> Self
-    where
-        Self: Sized;
+    type Queue = R;
+
+    fn create(&self) -> Self::Queue {
+        self()
+    }
+}
+
+pub struct QueueFactoryStdImpl {
+    pub session_state_factory: SessionStateImplFactory,
+    pub persistent_state_factory: PersistentStateImplFactory,
+}
+
+// TRAIT
+
+#[trait_variant::make(Queue: Send)]
+pub trait LocalQueue {
     async fn snapshot(&self) -> Vec<Box<dyn StateSnapshot>>;
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
@@ -28,37 +56,35 @@ where
     ) -> Result<Option<Arc<QueueDiff>>, QueueError>;
 }
 
-pub struct QueueImpl<S, P, SS, PS>
+// IMPLEMENTATION
+
+impl QueueFactory for QueueFactoryStdImpl {
+    type Queue = QueueImpl<SessionStateStdImpl, PersistentStateStdImpl>;
+
+    fn create(&self) -> Self::Queue {
+        let session_state = self.session_state_factory.create();
+        let persistent_state = self.persistent_state_factory.create();
+        QueueImpl {
+            session_state: Mutex::new(session_state),
+            persistent_state: RwLock::new(persistent_state),
+        }
+    }
+}
+
+pub struct QueueImpl<S, P>
 where
-    S: SessionState<SS>,
-    P: PersistentState<PS>,
-    SS: StateSnapshot,
-    PS: StateSnapshot,
+    S: SessionState,
+    P: PersistentState,
 {
     session_state: Mutex<S>,
     persistent_state: RwLock<P>,
-    _marker: PhantomData<SS>,
-    _marker2: PhantomData<PS>,
 }
 
-impl<S, P, SS, PS> Queue<SS, PS> for QueueImpl<S, P, SS, PS>
+impl<S, P> Queue for QueueImpl<S, P>
 where
-    S: SessionState<SS> + Send,
-    P: PersistentState<PS> + Send + Sync,
-    SS: StateSnapshot + 'static + Send + Sync,
-    PS: StateSnapshot + 'static + Send + Sync,
+    S: SessionState + Send,
+    P: PersistentState + Send + Sync,
 {
-    fn new(base_shard: ShardIdent) -> Self {
-        let session_state = Mutex::new(S::new(base_shard));
-        let persistent_state = RwLock::new(P::new());
-        Self {
-            session_state,
-            persistent_state,
-            _marker: PhantomData,
-            _marker2: PhantomData,
-        }
-    }
-
     async fn snapshot(&self) -> Vec<Box<dyn StateSnapshot>> {
         let session_state_lock = self.session_state.lock().await;
         let persistent_state_lock = self.persistent_state.read().await;
@@ -97,22 +123,32 @@ mod tests {
     use everscale_types::models::ShardIdent;
 
     use super::*;
-    use crate::internal_queue::persistent::persistent_state::PersistentStateImpl;
-    use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
-    use crate::internal_queue::session::session_state::SessionStateImpl;
-    use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
+    use crate::internal_queue::persistent::persistent_state::{
+        PersistentStateImplFactory, PersistentStateStdImpl,
+    };
 
     #[tokio::test]
     async fn test_new_queue() {
         let base_shard = ShardIdent::new_full(0);
+        let config = QueueConfig {
+            persistent_state_config: PersistentStateConfig {
+                database_url: "db_url".to_string(),
+            },
+        };
 
-        let queue: QueueImpl<
-            SessionStateImpl,
-            PersistentStateImpl,
-            SessionStateSnapshot,
-            PersistentStateSnapshot,
-        > = <QueueImpl<_, _, _, _> as Queue<_, _>>::new(base_shard);
+        let session_state_factory = SessionStateImplFactory::new(vec![ShardIdent::new_full(0)]);
+        let persistent_state_factory =
+            PersistentStateImplFactory::new(config.persistent_state_config);
+
+        let queue_factory = QueueFactoryStdImpl {
+            session_state_factory,
+            persistent_state_factory,
+        };
+
+        let queue = queue_factory.create();
 
         Queue::split_shard(&queue, &base_shard).await.unwrap();
+
+        assert_eq!(queue.session_state.lock().await.shards_count().await, 3);
     }
 }

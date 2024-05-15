@@ -27,6 +27,7 @@ ahash = "0.8"
 anyhow = "1.0.79"
 arc-swap = "1.6.0"
 async-trait = "0.1"
+backon = "0.4.4"
 base64 = "0.22.0"
 bincode = "1.3"
 bumpalo = "3.14.0"
@@ -35,7 +36,7 @@ bytesize = { version = "1.3.0", features = ["serde"] }
 castaway = "0.2"
 clap = { version = "4.5.3", features = ["derive"] }
 crc = "3.0.1"
-dashmap = "5.4"
+dashmap = "5.5.3"
 ed25519 = "2.0"
 everscale-crypto = { version = "0.2", features = ["tl-proto", "serde"] }
 everscale-types = { version = "0.1.0-rc.6", features = ["tycho"] }
@@ -87,7 +88,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
 trait-variant = "0.1.2"
 triomphe = "0.1.11"
-weedb = "0.1.1"
+weedb = "0.2.2"
 x509-parser = "0.15"
 
 # local deps

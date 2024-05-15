@@ -11,7 +11,7 @@ or
 - `podman`
 - `podman-compose`
 
-###  Usage
+### Usage
 
 ```bash
 cargo install --path ./simulator

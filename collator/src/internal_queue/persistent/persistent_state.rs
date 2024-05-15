@@ -6,28 +6,74 @@ use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStat
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::ext_types_stubs::EnqueuedMessage;
 
-#[trait_variant::make(PersistentState: Send)]
-pub trait LocalPersistentState<S>
+// CONFIG
+
+pub struct PersistentStateConfig {
+    pub database_url: String,
+}
+
+// FACTORY
+
+impl<F, R> PersistentStateFactory for F
 where
-    S: StateSnapshot,
+    F: Fn() -> R,
+    R: PersistentState,
 {
-    fn new() -> Self;
+    type PersistentState = R;
+
+    fn create(&self) -> Self::PersistentState {
+        self()
+    }
+}
+
+pub struct PersistentStateImplFactory {
+    pub config: PersistentStateConfig,
+}
+
+impl PersistentStateImplFactory {
+    pub fn new(config: PersistentStateConfig) -> Self {
+        Self { config }
+    }
+}
+
+impl PersistentStateFactory for PersistentStateImplFactory {
+    type PersistentState = PersistentStateStdImpl;
+
+    fn create(&self) -> Self::PersistentState {
+        PersistentStateStdImpl::new(self.config.database_url.clone())
+    }
+}
+
+pub trait PersistentStateFactory {
+    type PersistentState: LocalPersistentState;
+
+    fn create(&self) -> Self::PersistentState;
+}
+
+// TRAIT
+
+#[trait_variant::make(PersistentState: Send)]
+pub trait LocalPersistentState {
     async fn add_messages(
         &self,
         block_id_short: BlockIdShort,
         messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()>;
-    async fn snapshot(&self) -> Box<S>;
+    async fn snapshot(&self) -> Box<dyn StateSnapshot>;
     async fn gc();
 }
 
-pub struct PersistentStateImpl {}
+// IMPLEMENTATION
 
-impl PersistentState<PersistentStateSnapshot> for PersistentStateImpl {
-    fn new() -> Self {
+pub struct PersistentStateStdImpl {}
+
+impl PersistentStateStdImpl {
+    pub fn new(_database_url: String) -> Self {
         Self {}
     }
+}
 
+impl PersistentState for PersistentStateStdImpl {
     async fn add_messages(
         &self,
         _block_id_short: BlockIdShort,
@@ -36,9 +82,11 @@ impl PersistentState<PersistentStateSnapshot> for PersistentStateImpl {
         Ok(())
     }
 
-    async fn snapshot(&self) -> Box<PersistentStateSnapshot> {
+    async fn snapshot(&self) -> Box<dyn StateSnapshot> {
         Box::new(PersistentStateSnapshot {})
     }
 
-    async fn gc() {}
+    async fn gc() {
+        // Garbage collection logic
+    }
 }

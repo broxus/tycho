@@ -2,9 +2,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use everscale_types::models::BlockIdShort;
 use futures_util::future::{self, FutureExt, Ready};
-use tracing::error;
-use tycho_network::__internal::tl_proto::{TlRead, TlWrite};
+use tokio::sync::broadcast::Sender;
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::validator::network::dto::SignaturesQuery;
@@ -16,20 +16,22 @@ use crate::validator::ValidatorEventListener;
 pub struct NetworkService {
     listeners: Vec<Arc<dyn ValidatorEventListener>>,
     state: Arc<ValidationStateStdImpl>,
+    block_validated_broadcaster: Sender<BlockIdShort>,
 }
 
 impl NetworkService {
     pub fn new(
         listeners: Vec<Arc<dyn ValidatorEventListener>>,
         state: Arc<ValidationStateStdImpl>,
+        block_validated_broadcaster: Sender<BlockIdShort>,
     ) -> Self {
-        Self { listeners, state }
+        Self {
+            listeners,
+            state,
+            block_validated_broadcaster,
+        }
     }
 }
-
-#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, TlRead, TlWrite)]
-#[repr(transparent)]
-pub struct OverlayId(pub [u8; 32]);
 
 impl Service<ServiceRequest> for NetworkService {
     type QueryResponse = Response;
@@ -42,24 +44,24 @@ impl Service<ServiceRequest> for NetworkService {
 
         let state = self.state.clone();
         let listeners = self.listeners.clone();
+        let broadcaster = self.block_validated_broadcaster.clone();
         async move {
             match query_result {
                 Ok(query) => {
-                    let SignaturesQuery {
-                        session_seqno,
-                        block_id_short,
-                        signatures,
-                    } = query;
+                    let query: SignaturesQuery = query;
+
                     {
                         let session = state
-                            .get_session(block_id_short.shard.workchain(), session_seqno)
+                            .get_session(query.block_id_short.shard, query.session_seqno)
                             .await;
+
                         match handle_signatures_query(
                             session,
-                            session_seqno,
-                            block_id_short,
-                            signatures,
+                            query.session_seqno,
+                            query.block_id_short,
+                            query.wrapped_signatures(),
                             &listeners,
+                            broadcaster,
                         )
                         .await
                         {
@@ -71,7 +73,7 @@ impl Service<ServiceRequest> for NetworkService {
                     }
                 }
                 Err(e) => {
-                    error!("Error parsing query: {:?}", e);
+                    tracing::error!("Error parsing query: {:?}", e);
                     None
                 }
             }

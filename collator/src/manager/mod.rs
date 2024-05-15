@@ -13,9 +13,9 @@ use self::types::{
     McBlockSubgraphToSend, SendSyncStatus,
 };
 use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
+use crate::collator::queue_adapter::MessageQueueAdapter;
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
-use crate::msg_queue::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
@@ -735,8 +735,15 @@ where
                 }
 
                 // notify validator, it will start overlay initialization
+
+                let session_seqno = new_session_info.seqno();
+
                 self.validator
-                    .add_session(Arc::new(new_session_info.clone().try_into()?))
+                    .add_session(
+                        shard_id,
+                        session_seqno,
+                        new_session_info.collators().validators.as_slice(),
+                    )
                     .await?;
             } else {
                 tracing::info!(
