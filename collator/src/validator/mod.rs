@@ -1,5 +1,6 @@
 pub(crate) use validator::*;
 
+pub mod client;
 pub mod config;
 pub mod network;
 pub mod state;

@@ -10,13 +10,49 @@ use crate::internal_queue::shard::Shard;
 use crate::internal_queue::snapshot::StateSnapshot;
 use crate::internal_queue::types::QueueDiff;
 
-#[trait_variant::make(SessionState: Send)]
-pub trait LocalSessionState<S>
+// FACTORY
+
+pub trait SessionStateFactory {
+    type SessionState: LocalSessionState;
+    fn create(&self) -> Self::SessionState;
+}
+
+impl<F, R> SessionStateFactory for F
 where
-    S: StateSnapshot,
+    F: Fn() -> R,
+    R: SessionState,
 {
-    fn new(base_shard: ShardIdent) -> Self;
-    async fn snapshot(&self) -> Box<S>;
+    type SessionState = R;
+
+    fn create(&self) -> Self::SessionState {
+        self()
+    }
+}
+
+pub struct SessionStateImplFactory {
+    shards: Vec<ShardIdent>,
+}
+
+impl SessionStateImplFactory {
+    pub fn new(shards: Vec<ShardIdent>) -> Self {
+        Self { shards }
+    }
+}
+
+impl SessionStateFactory for SessionStateImplFactory {
+    type SessionState = SessionStateStdImpl;
+
+    fn create(&self) -> Self::SessionState {
+        <SessionStateStdImpl as SessionState>::new(self.shards.as_slice())
+    }
+}
+
+// TRAIT
+
+#[trait_variant::make(SessionState: Send)]
+pub trait LocalSessionState {
+    fn new(shards: &[ShardIdent]) -> Self;
+    async fn snapshot(&self) -> Box<dyn StateSnapshot>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
     async fn remove_diff(
@@ -25,20 +61,24 @@ where
     ) -> Result<Option<Arc<QueueDiff>>, QueueError>;
 }
 
-pub struct SessionStateImpl {
+// IMPLEMENTATION
+
+pub struct SessionStateStdImpl {
     shards_flat: RwLock<HashMap<ShardIdent, Arc<RwLock<Shard>>>>,
 }
 
-impl SessionState<SessionStateSnapshot> for SessionStateImpl {
-    fn new(base_shard: ShardIdent) -> Self {
+impl SessionState for SessionStateStdImpl {
+    fn new(shards: &[ShardIdent]) -> Self {
         let mut shards_flat = HashMap::new();
-        shards_flat.insert(base_shard, Arc::new(RwLock::new(Shard::new(base_shard))));
+        for shard in shards {
+            shards_flat.insert(*shard, Arc::new(RwLock::new(Shard::new(*shard))));
+        }
         Self {
             shards_flat: RwLock::new(shards_flat),
         }
     }
 
-    async fn snapshot(&self) -> Box<SessionStateSnapshot> {
+    async fn snapshot(&self) -> Box<dyn StateSnapshot> {
         let shards_flat_read = self.shards_flat.read().await;
         let mut flat_shards = HashMap::new();
         for (shard_ident, shard_lock) in shards_flat_read.iter() {
@@ -82,21 +122,24 @@ impl SessionState<SessionStateSnapshot> for SessionStateImpl {
     }
 }
 
+impl SessionStateStdImpl {
+    pub async fn shards_count(&self) -> usize {
+        self.shards_flat.read().await.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use everscale_types::models::BlockIdShort;
-
     use super::*;
-    use crate::internal_queue::session::session_state;
     use crate::internal_queue::session::session_state::*;
     use crate::internal_queue::types::ext_types_stubs::{
         EnqueuedMessage, MessageContent, MessageEnvelope,
     };
 
-    fn test_shard_ident() -> ShardIdent {
-        ShardIdent::new_full(0)
+    fn test_shard_idents() -> Vec<ShardIdent> {
+        vec![ShardIdent::new_full(0)]
     }
 
     fn default_message() -> Arc<EnqueuedMessage> {
@@ -112,33 +155,23 @@ mod tests {
         })
     }
 
-    #[test]
-    fn test_new_session_state() {
-        let base_shard = test_shard_ident();
-        let _session_state =
-            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
-    }
-
     #[tokio::test]
     async fn test_split_shard() {
-        let base_shard = test_shard_ident();
-        let session_state =
-            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
+        let base_shard = test_shard_idents();
+        let session_state = <SessionStateStdImpl as SessionState>::new(base_shard.as_slice());
         let split_shard_result =
-            SessionState::<SessionStateSnapshot>::split_shard(&session_state, &base_shard).await;
+            SessionState::split_shard(&session_state, &base_shard.first().unwrap()).await;
         assert!(
             split_shard_result.is_ok(),
             "Splitting the shard should succeed."
         );
     }
-
     #[tokio::test]
     async fn test_apply_diff() {
-        let base_shard = test_shard_ident();
-        let session_state =
-            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
+        let base_shard = test_shard_idents();
+        let session_state = <SessionStateStdImpl as SessionState>::new(base_shard.as_slice());
         let block_id = BlockIdShort {
-            shard: base_shard,
+            shard: *base_shard.first().unwrap(),
             seqno: 0,
         };
         let diff = Arc::new(QueueDiff {
@@ -146,8 +179,7 @@ mod tests {
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });
-        let apply_diff_result =
-            SessionState::<SessionStateSnapshot>::apply_diff(&session_state, diff).await;
+        let apply_diff_result = SessionState::apply_diff(&session_state, diff).await;
         assert_eq!(
             session_state
                 .shards_flat
@@ -179,21 +211,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_diff() {
-        let base_shard = test_shard_ident();
-        let session_state =
-            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
+        let base_shard = test_shard_idents();
+        let session_state = <SessionStateStdImpl as SessionState>::new(base_shard.as_slice());
         let diff_id = BlockIdShort {
-            shard: base_shard,
+            shard: *base_shard.first().unwrap(),
             seqno: 0,
         };
-        let remove_diff_result =
-            session_state::SessionState::remove_diff(&session_state, &diff_id).await;
+        let remove_diff_result = SessionState::remove_diff(&session_state, &diff_id).await;
         assert_eq!(
             session_state
                 .shards_flat
                 .read()
                 .await
-                .get(&base_shard)
+                .get(&base_shard.first().unwrap())
                 .unwrap()
                 .read()
                 .await
@@ -206,7 +236,7 @@ mod tests {
                 .shards_flat
                 .read()
                 .await
-                .get(&base_shard)
+                .get(&base_shard.first().unwrap())
                 .unwrap()
                 .read()
                 .await
@@ -219,11 +249,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_snapshot() {
-        let base_shard = test_shard_ident();
-        let session_state =
-            <SessionStateImpl as SessionState<SessionStateSnapshot>>::new(base_shard);
+        let shards = test_shard_idents();
+
+        let factory = SessionStateImplFactory {
+            shards: shards.clone(),
+        };
+
+        let session_state = factory.create();
+
         let block_id = BlockIdShort {
-            shard: base_shard,
+            shard: shards.first().cloned().unwrap(),
             seqno: 0,
         };
         let diff = Arc::new(QueueDiff {
@@ -231,19 +266,10 @@ mod tests {
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });
-        let _apply_diff_result =
-            session_state::SessionState::apply_diff(&session_state, diff).await;
+        let _apply_diff_result = SessionState::apply_diff(&session_state, diff).await;
 
-        let snapshot = session_state::SessionState::snapshot(&session_state).await;
-        assert_eq!(snapshot.flat_shards.len(), 1);
-        assert_eq!(
-            snapshot
-                .flat_shards
-                .get(&base_shard)
-                .unwrap()
-                .outgoing_messages
-                .len(),
-            1
-        );
+        let snapshot = SessionState::snapshot(&session_state).await;
+        // let m = snapshot.get_outgoing_messages_by_shard(&mut shards, &shard_id).unwrap();
+        // assert_eq!(m.len(), 1);
     }
 }

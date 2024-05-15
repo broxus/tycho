@@ -2,16 +2,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::{BlockId, GlobalCapability};
+use everscale_types::models::{BlockId, GlobalCapability, ShardIdent};
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
+use tycho_collator::collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::collator::CollatorStdImplFactory;
+use tycho_collator::internal_queue::persistent::persistent_state::{
+    PersistentStateConfig, PersistentStateImplFactory,
+};
+use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
+use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStubImpl;
-use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
+use tycho_collator::mempool::{MempoolAdapterStdImpl, MempoolAdapterStubImpl};
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::CollationConfig;
+use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
@@ -93,18 +99,43 @@ async fn test_collation_process_on_stubs() {
     tracing::info!("Trying to start CollationManager");
 
     let node_network = tycho_collator::test_utils::create_node_network();
+    let validator_config = ValidatorConfig {
+        backoff_config: BackoffConfig {
+            min_delay: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+            factor: 2.0,
+            max_times: 999999,
+        },
+        request_timeout: Duration::from_millis(1000),
+        delay_between_requests: Duration::from_millis(50),
+    };
+
+    let queue_config = QueueConfig {
+        persistent_state_config: PersistentStateConfig {
+            database_url: "db_url".to_string(),
+        },
+    };
+
+    let shards = vec![ShardIdent::default()];
+    let session_state_factory = SessionStateImplFactory::new(shards);
+    let persistent_state_factory =
+        PersistentStateImplFactory::new(queue_config.persistent_state_config);
+
+    let queue_factory = QueueFactoryStdImpl {
+        session_state_factory,
+        persistent_state_factory,
+    };
+    let queue = queue_factory.create();
+    let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
     let manager = CollationManager::start(
         config,
-        Arc::new(MessageQueueAdapterStdImpl::default()),
+        Arc::new(message_queue_adapter),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
         |listener| MempoolAdapterStubImpl::new(listener),
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
-            config: ValidatorConfig {
-                base_loop_delay: Duration::from_millis(50),
-                max_loop_delay: Duration::from_secs(10),
-            },
+            config: validator_config,
         },
         CollatorStdImplFactory,
     );
