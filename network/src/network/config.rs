@@ -98,6 +98,8 @@ pub struct QuicConfig {
     pub socket_send_buffer_size: Option<usize>,
     /// Default: auto.
     pub socket_recv_buffer_size: Option<usize>,
+    /// Default: true.
+    pub use_pmtu: bool,
 }
 
 impl Default for QuicConfig {
@@ -110,6 +112,7 @@ impl Default for QuicConfig {
             send_window: None,
             socket_send_buffer_size: None,
             socket_recv_buffer_size: None,
+            use_pmtu: true,
         }
     }
 }
@@ -132,6 +135,10 @@ impl QuicConfig {
         }
         if let Some(send_window) = self.send_window {
             config.receive_window(make_varint(send_window));
+        }
+        if self.use_pmtu {
+            let mtu = quinn::MtuDiscoveryConfig::default();
+            config.mtu_discovery_config(Some(mtu));
         }
 
         config
