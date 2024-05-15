@@ -761,11 +761,9 @@ fn new_transaction(
                     reimport: Lazy::new(&in_msg)?,
                 });
 
-                colator_data.out_msgs.set(
-                    in_msg_cell.repr_hash(),
-                    out_msg.compute_exported_value()?,
-                    out_msg.clone(),
-                )?;
+                colator_data
+                    .out_msgs
+                    .insert(*in_msg_cell.repr_hash(), out_msg.clone());
                 colator_data.dequeue_count += 1;
                 // TODO: del out msg from queue
             }
@@ -789,10 +787,10 @@ fn new_transaction(
 
             let previous_transaction = match colator_data
                 .out_msgs
-                .get(in_msg_cell.repr_hash())?
+                .get(in_msg_cell.repr_hash())
                 .context("New Message was not found in out msgs")?
             {
-                (_, OutMsg::New(previous_out_msg)) => previous_out_msg.transaction,
+                OutMsg::New(previous_out_msg) => previous_out_msg.transaction.clone(),
                 _ => {
                     bail!("Out msgs doesn't contain out message with state New");
                 }
@@ -804,11 +802,9 @@ fn new_transaction(
                 reimport: Lazy::new(&in_msg)?,
             });
 
-            colator_data.out_msgs.replace(
-                in_msg_cell.repr_hash(),
-                out_msg.compute_exported_value()?,
-                out_msg.clone(),
-            )?;
+            colator_data
+                .out_msgs
+                .insert(*in_msg_cell.repr_hash(), out_msg.clone());
             (in_msg, in_msg_cell)
         }
         AsyncMessage::Ext(MsgInfo::ExtIn(_), in_msg_cell) => (
@@ -822,7 +818,7 @@ fn new_transaction(
     };
     colator_data
         .in_msgs
-        .set(in_msg_cell.repr_hash(), in_msg.compute_fees()?, in_msg)?;
+        .insert(*in_msg_cell.repr_hash(), in_msg);
     let mut result = vec![];
     for out_msg in transaction.iter_out_msgs() {
         let message = out_msg?;
@@ -861,11 +857,9 @@ fn new_transaction(
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be output"),
         };
 
-        colator_data.out_msgs.set(
-            msg_cell.repr_hash(),
-            out_msg.compute_exported_value()?,
-            out_msg.clone(),
-        )?;
+        colator_data
+            .out_msgs
+            .insert(*msg_cell.repr_hash(), out_msg.clone());
         result.push((message_info, msg_cell));
     }
     Ok(result)
