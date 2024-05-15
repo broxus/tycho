@@ -8,6 +8,7 @@ use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as Sha2Digest, Sha256};
 use tycho_network::PeerId;
+use tycho_util::misc::identity;
 
 use crate::engine::MempoolConfig;
 
@@ -177,6 +178,12 @@ pub enum Through {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub enum PointType {
+    Trigger,
+    Proof,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum Link {
     ToSelf,
     Direct(Through),
@@ -325,6 +332,15 @@ impl Point {
 
     // TODO maybe implement field accessors parameterized by combination of enums
 
+    //-----------
+
+    // pub fn anchor_round(&self, tpe: PointType) -> Round {
+    //     match tpe {
+    //         PointType::Proof => self.get_linked_to_round(&self.body.anchor_proof),
+    //         PointType::Trigger => self.get_linked_to_round(&self.body.anchor_trigger),
+    //     }
+    // }
+
     pub fn anchor_trigger_round(&self) -> Round {
         self.get_linked_to_round(&self.body.anchor_trigger)
     }
@@ -333,6 +349,10 @@ impl Point {
         self.get_linked_to_round(&self.body.anchor_proof)
     }
 
+
+
+    //-----------
+
     pub fn anchor_trigger_id(&self) -> PointId {
         self.get_linked_to(&self.body.anchor_trigger)
     }
@@ -340,6 +360,34 @@ impl Point {
     pub fn anchor_proof_id(&self) -> PointId {
         self.get_linked_to(&self.body.anchor_proof)
     }
+
+    pub fn anchor_id<'a, F>(&'a self, link_fn: F) -> PointId
+        where
+            F: Fn(&'a Point) -> &'a Link,
+    {
+        self.get_linked_to(link_fn(&self))
+    }
+
+    pub fn anchor_round<'a, F>(&'a self, link_fn: F) -> Round
+        where
+            F: Fn(&'a Point) -> &'a Link,
+    {
+        self.get_linked_to_round(link_fn(&self))
+    }
+
+    pub fn point_link<'a>(point: &'a Point, point_type: &'a PointType) -> &'a Link {
+        let get_link = identity(move |point: &Point, point_type: &PointType| -> &Link {
+            match point_type {
+                PointType::Trigger => &point.body.anchor_trigger,
+                PointType::Proof => &point.body.anchor_proof,
+            }
+        });
+
+        get_link(point, point_type)
+    }
+
+
+    //-----------
 
     pub fn anchor_trigger_through(&self) -> PointId {
         self.get_linked_through(&self.body.anchor_trigger)
