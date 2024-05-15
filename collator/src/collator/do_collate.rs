@@ -123,8 +123,15 @@ impl CollatorStdImpl {
 
         // execute tick transaction and special transactions (mint, recover)
         if collation_data.block_id_short.shard.is_masterchain() {
-            //self.create_ticktock_transactions(false, mc_data, prev_data, collator_data, &mut exec_manager).await?;
-            //self.create_special_transactions(mc_data, prev_data, collator_data, &mut exec_manager).await?;
+            self.create_ticktock_transactions(
+                false,
+                mc_data,
+                &mut collation_data,
+                &mut exec_manager,
+            )
+            .await?;
+            self.create_special_transactions(mc_data, &mut collation_data, &mut exec_manager)
+                .await?;
         }
 
         let mut all_existing_internals_finished = false;
@@ -575,6 +582,145 @@ impl CollatorStdImpl {
         }
 
         Ok(to_mint)
+    }
+
+    /// Create special transactions for the collator
+    async fn create_special_transactions(
+        &self,
+        mc_data: &McData,
+        collator_data: &mut BlockCollationData,
+        exec_manager: &mut ExecutionManager,
+    ) -> Result<()> {
+        tracing::trace!("{}: create_special_transactions", self.collator_descr);
+
+        let account_id = mc_data.config().get_fee_collector_address()?;
+        self.create_special_transaction(
+            account_id,
+            collator_data.value_flow.recovered.clone(),
+            AsyncMessage::Recover,
+            collator_data,
+            exec_manager,
+        )
+        .await?;
+        // self.check_stop_flag()?;
+
+        let account_id = mc_data.config().get_minter_address()?;
+        self.create_special_transaction(
+            account_id,
+            collator_data.value_flow.minted.clone(),
+            AsyncMessage::Mint,
+            collator_data,
+            exec_manager,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    async fn create_special_transaction(
+        &self,
+        account: HashBytes,
+        amount: CurrencyCollection,
+        f: impl FnOnce(MsgInfo, Cell) -> AsyncMessage,
+        collation_data: &mut BlockCollationData,
+        exec_manager: &mut ExecutionManager,
+    ) -> Result<()> {
+        tracing::trace!(
+            "{}: create_special_transaction: recover {} to account {}",
+            self.collator_descr,
+            amount.tokens,
+            account
+        );
+        if amount.tokens.is_zero() {
+            return Ok(());
+        }
+        let info = MsgInfo::Int(IntMsgInfo {
+            ihr_disabled: false,
+            bounce: true,
+            bounced: false,
+            src: IntAddr::from((-1, [0; 32].into())),
+            dst: IntAddr::from((-1, account)),
+            value: amount,
+            ihr_fee: Default::default(),
+            fwd_fee: Default::default(),
+            created_lt: collation_data.start_lt,
+            created_at: collation_data.chain_time,
+        });
+        let msg = BaseMessage {
+            info: info.clone(),
+            init: None,
+            body: CellSlice::default(),
+            layout: None,
+        };
+        let cell = CellBuilder::build_from(msg)?;
+        let async_message = f(info, cell);
+        let transaction = exec_manager
+            .execute_special_transaction(account, async_message.clone())
+            .await?;
+        new_transaction(collation_data, &self.shard_id, &transaction, async_message)?;
+        collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+        Ok(())
+    }
+
+    async fn create_ticktock_transactions(
+        &self,
+        tock: bool,
+        mc_data: &McData,
+        collation_data: &mut BlockCollationData,
+        exec_manager: &mut ExecutionManager,
+    ) -> Result<()> {
+        tracing::trace!("{}: create_ticktock_transactions", self.collator_descr);
+        let config_address = mc_data.config().address;
+        let fundamental_dict = mc_data.config().get_fundamental_addresses()?;
+        for account in fundamental_dict.keys() {
+            self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
+                .await?;
+            // self.check_stop_flag()?;
+        }
+        self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_ticktock_transaction(
+        &self,
+        account: HashBytes,
+        tock: bool,
+        collation_data: &mut BlockCollationData,
+        exec_manager: &mut ExecutionManager,
+    ) -> Result<()> {
+        tracing::trace!(
+            "{}: create_ticktock_transaction({}) acc: {}",
+            self.collator_descr,
+            if tock { "tock" } else { "tick" },
+            account
+        );
+
+        let max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+        let shard_account = exec_manager.get_shard_account_stuff(account, max_lt)?;
+        let tick_tock = shard_account
+            .shard_account
+            .load_account()?
+            .map(|account| {
+                if let AccountState::Active(StateInit { ref special, .. }) = account.state {
+                    special.unwrap_or_default()
+                } else {
+                    Default::default()
+                }
+            })
+            .unwrap_or_default();
+
+        if (tick_tock.tock && tock) || (tick_tock.tick && !tock) {
+            let tt = if tock { TickTock::Tock } else { TickTock::Tick };
+            let async_message = AsyncMessage::TickTock(tt);
+            let transaction = exec_manager
+                .execute_special_transaction(account, async_message.clone())
+                .await?;
+            new_transaction(collation_data, &self.shard_id, &transaction, async_message)?;
+            collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+        }
+
+        Ok(())
     }
 }
 
