@@ -4,18 +4,19 @@ use std::thread::available_parallelism;
 
 use anyhow::{Context, Result};
 use bytesize::ByteSize;
+use serde::{Deserialize, Serialize};
+pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Stats as RocksdbStats, Table};
 use weedb::{Caches, WeeDb};
-
-pub use weedb::Stats as RocksdbStats;
-pub use weedb::{rocksdb, BoundedCfHandle, ColumnFamily, Table};
-
-pub use self::config::DbOptions;
 
 pub mod refcount;
 pub mod tables;
 
-mod config;
 mod migrations;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbConfig {
+    pub rocksdb_lru_capacity: ByteSize,
+}
 
 pub struct Db {
     pub archives: Table<tables::Archives>,
@@ -24,6 +25,7 @@ pub struct Db {
     pub package_entries: Table<tables::PackageEntries>,
     pub shard_states: Table<tables::ShardStates>,
     pub cells: Table<tables::Cells>,
+    pub temp_cells: Table<tables::TempCells>,
     pub node_states: Table<tables::NodeStates>,
     pub prev1: Table<tables::Prev1>,
     pub prev2: Table<tables::Prev2>,
@@ -35,10 +37,9 @@ pub struct Db {
 }
 
 impl Db {
-    pub fn open(path: PathBuf, options: DbOptions) -> Result<Arc<Self>> {
+    pub fn open(path: PathBuf, options: DbConfig) -> Result<Arc<Self>> {
         tracing::info!(
             rocksdb_lru_capacity = %options.rocksdb_lru_capacity,
-            cells_cache_size = %options.cells_cache_size,
             "opening DB"
         );
 
@@ -99,6 +100,7 @@ impl Db {
             .with_table::<tables::KeyBlocks>()
             .with_table::<tables::ShardStates>()
             .with_table::<tables::Cells>()
+            .with_table::<tables::TempCells>()
             .with_table::<tables::NodeStates>()
             .with_table::<tables::Prev1>()
             .with_table::<tables::Prev2>()
@@ -117,6 +119,7 @@ impl Db {
             package_entries: inner.instantiate_table(),
             shard_states: inner.instantiate_table(),
             cells: inner.instantiate_table(),
+            temp_cells: inner.instantiate_table(),
             node_states: inner.instantiate_table(),
             prev1: inner.instantiate_table(),
             prev2: inner.instantiate_table(),
@@ -151,15 +154,22 @@ impl Db {
             (self.archives.cf(), "archives"),
             (self.shard_states.cf(), "shard states"),
             (self.cells.cf(), "cells"),
+            (self.temp_cells.cf(), "temp cells"),
         ];
+
+        let mut compaction_options = rocksdb::CompactOptions::default();
+        compaction_options.set_exclusive_manual_compaction(true);
+        compaction_options
+            .set_bottommost_level_compaction(rocksdb::BottommostLevelCompaction::ForceOptimized);
 
         for (cf, title) in tables {
             tracing::info!("{title} compaction started");
 
             let instant = Instant::now();
-
             let bound = Option::<[u8; 0]>::None;
-            self.raw().compact_range_cf(&cf, bound, bound);
+
+            self.raw()
+                .compact_range_cf_opt(&cf, bound, bound, &compaction_options);
 
             tracing::info!(
                 elapsed = %humantime::format_duration(instant.elapsed()),
@@ -224,6 +234,7 @@ impl Db {
                 package_entries => tables::PackageEntries,
                 shard_states => tables::ShardStates,
                 cells => tables::Cells,
+                temp_cells => tables::TempCells,
                 node_states => tables::NodeStates,
                 prev1 => tables::Prev1,
                 prev2 => tables::Prev2,

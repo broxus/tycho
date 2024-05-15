@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
@@ -50,7 +50,8 @@ impl StateSubscriber for StrangeBlockProvider {
 /// run: `RUST_BACKTRACE=1 cargo test -p tycho-collator --features test --test collation_tests -- --nocapture`
 #[tokio::test]
 async fn test_collation_process_on_stubs() {
-    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
+    tycho_util::test::init_logger("test_collation_process_on_stubs", "debug");
 
     let storage = prepare_test_storage().await.unwrap();
 
@@ -85,7 +86,7 @@ async fn test_collation_process_on_stubs() {
         #[cfg(feature = "test")]
         test_validators_keypairs: vec![
             node_1_keypair,
-            everscale_crypto::ed25519::KeyPair::generate(&mut rnd).into(),
+            // Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd)),
         ],
     };
 
@@ -95,9 +96,9 @@ async fn test_collation_process_on_stubs() {
 
     let manager = CollationManager::start(
         config,
-        Arc::new(MessageQueueAdapterStdImpl::new()),
+        Arc::new(MessageQueueAdapterStdImpl::default()),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
-        |listener| MempoolAdapterStdImpl::new(listener),
+        |listener| MempoolAdapterStubImpl::new(listener),
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
             config: ValidatorConfig {

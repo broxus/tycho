@@ -8,24 +8,47 @@ rust-version.workspace = true
 repository.workspace = true
 license.workspace = true
 
+[[example]]
+name = "consensus-node"
+path = "examples/consensus_node.rs"
+
 [dependencies]
-# crates.io deps
+ahash = { workspace = true }
 anyhow = { workspace = true }
 bincode = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
+dashmap = { workspace = true }
+everscale-crypto = { workspace = true }
 futures-util = { workspace = true }
+itertools = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true, features = ["small_rng"] }
+rand_pcg = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
+tokio = { workspace = true, default-features = false }
 tracing = { workspace = true }
 weedb = { workspace = true }
+
+# examples' dependencies
+clap = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tracing-appender = { workspace = true }
 
 # local deps
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-util = { workspace = true }
+tycho-util = { workspace = true, features = ["test"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
-tracing-test = { workspace = true }
+parking_lot = { workspace = true, features = ["deadlock_detection"] }
+tokio = { workspace = true, default-features = false, features = ["rt-multi-thread", "macros"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tikv-jemallocator = { workspace = true, features = [
+    "unprefixed_malloc_on_supported_platforms",
+    "background_threads",
+]}
 
 [lints]
 workspace = true

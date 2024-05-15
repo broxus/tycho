@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
-
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tokio::sync::{broadcast, Mutex};
-
-use tycho_block_util::block::BlockStuffAug;
-use tycho_block_util::{block::BlockStuff, state::ShardStateStuff};
+use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, Storage};
 
 use crate::tracing_targets;
@@ -58,6 +56,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()>;
     /// Waits for the specified block to be received and returns it
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
+    /// Waits for the specified block by prev_id to be received and returns it
+    async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
 }
@@ -125,45 +125,96 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {:?}", block.block_id);
         let mut blocks = self.blocks.lock().await;
-        let block_id = match block.block_id.shard.is_masterchain() {
-            true => {
-                let prev_block_id = *block
-                    .prev_blocks_ids
-                    .last()
-                    .ok_or(anyhow!("no prev block"))?;
+        let block_id = block.block_id;
+        blocks
+            .entry(block.block_id.shard)
+            .or_insert_with(BTreeMap::new)
+            .insert(block.block_id.seqno, block);
 
-                self.blocks_mapping
-                    .lock()
-                    .await
-                    .insert(block.block_id, prev_block_id);
-
-                blocks
-                    .entry(block.block_id.shard)
-                    .or_insert_with(BTreeMap::new)
-                    .insert(prev_block_id.seqno, block);
-
-                prev_block_id
-            }
-            false => {
-                let block_id = block.block_id;
-                blocks
-                    .entry(block.block_id.shard)
-                    .or_insert_with(BTreeMap::new)
-                    .insert(block.block_id.seqno, block);
-                block_id
-            }
-        };
         let broadcast_result = self.broadcaster.send(block_id).ok();
         tracing::trace!(target: tracing_targets::STATE_NODE_ADAPTER, "Block broadcast_result: {:?}", broadcast_result);
         Ok(())
     }
 
     async fn wait_for_block(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>> {
+        let block_id = BlockIdToWait::Full(block_id);
+        self.wait_for_block_ext(block_id).await
+    }
+
+    async fn wait_for_block_next(&self, prev_block_id: &BlockId) -> Option<Result<BlockStuffAug>> {
+        let next_block_id_short =
+            BlockIdShort::from((prev_block_id.shard, prev_block_id.seqno + 1));
+        let block_id = BlockIdToWait::Short(&next_block_id_short);
+        self.wait_for_block_ext(block_id).await
+    }
+
+    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {:?}", state.block_id());
+        let block_id = *state.block_id();
+
+        let mut to_split = Vec::new();
+
+        let shard = block_id.shard;
+        let seqno = block_id.seqno;
+
+        {
+            let blocks_guard = self.blocks.lock().await;
+            if let Some(shard_blocks) = blocks_guard.get(&shard) {
+                let block = shard_blocks.get(&seqno);
+
+                if shard.is_masterchain() {
+                    let prev_mc_block = shard_blocks
+                        .range(..=seqno)
+                        .rev()
+                        .find_map(|(&key, value)| if key < seqno { Some(value) } else { None });
+
+                    if let Some(prev_mc_block) = prev_mc_block {
+                        for id in &prev_mc_block.top_shard_blocks_ids {
+                            to_split.push((id.shard, id.seqno + 1));
+                        }
+                        to_split.push((shard, prev_mc_block.block_id.seqno + 1));
+                    }
+                }
+
+                match block {
+                    None => {
+                        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
+                        self.listener.on_block_accepted_external(state).await?;
+                    }
+                    Some(block) => {
+                        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
+                        self.listener.on_block_accepted(&block.block_id).await?;
+                    }
+                }
+            } else {
+                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external. Shard ID not found in blocks buffer: {:?}", block_id);
+                self.listener.on_block_accepted_external(state).await?;
+            }
+        }
+
+        {
+            let mut blocks_guard = self.blocks.lock().await;
+            for (shard, seqno) in &to_split {
+                if let Some(shard_blocks) = blocks_guard.get_mut(shard) {
+                    *shard_blocks = shard_blocks.split_off(seqno);
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl StateNodeAdapterStdImpl {
+    async fn wait_for_block_ext(
+        &self,
+        block_id: BlockIdToWait<'_>,
+    ) -> Option<Result<BlockStuffAug>> {
         let mut receiver = self.broadcaster.subscribe();
         loop {
             let blocks = self.blocks.lock().await;
-            if let Some(shard_blocks) = blocks.get(&block_id.shard) {
-                if let Some(block) = shard_blocks.get(&block_id.seqno) {
+            if let Some(shard_blocks) = blocks.get(&block_id.shard()) {
+                if let Some(block) = shard_blocks.get(&block_id.seqno()) {
                     return Some(Ok(block.block_stuff_aug.clone()));
                 }
             }
@@ -171,7 +222,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
             loop {
                 match receiver.recv().await {
-                    Ok(received_block_id) if received_block_id == *block_id => {
+                    Ok(received_block_id) if block_id == received_block_id => {
                         break;
                     }
                     Ok(_) => continue,
@@ -187,69 +238,34 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             }
         }
     }
+}
 
-    async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {:?}", state.block_id());
-        let block_id = *state.block_id();
+enum BlockIdToWait<'a> {
+    Short(&'a BlockIdShort),
+    Full(&'a BlockId),
+}
 
-        let mut to_split = Vec::new();
-        let mut to_remove = Vec::new();
-
-        let mut block_mapping_guard = self.blocks_mapping.lock().await;
-        let block_id = match block_mapping_guard.remove(&block_id) {
-            None => block_id,
-            Some(some) => some.clone(),
-        };
-
-        let shard = block_id.shard;
-        let seqno = block_id.seqno;
-
-        let mut blocks_guard = self.blocks.lock().await;
-
-        let result_future = if let Some(shard_blocks) = blocks_guard.get(&shard) {
-            if let Some(block_data) = shard_blocks.get(&seqno) {
-                if shard.is_masterchain() {
-                    let prev_seqno = block_data
-                        .prev_blocks_ids
-                        .last()
-                        .ok_or(anyhow!("no prev block"))?
-                        .seqno;
-                    for id in &block_data.top_shard_blocks_ids {
-                        to_split.push((id.shard, id.seqno));
-                        to_remove.push((id.shard, id.seqno));
-                    }
-                    to_split.push((shard, prev_seqno));
-                    to_remove.push((shard, prev_seqno));
-                } else {
-                    to_remove.push((shard, seqno));
-                }
-                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {:?}", block_id);
-                self.listener.on_block_accepted(&block_id)
-            } else {
-                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted external: {:?}", block_id);
-                self.listener.on_block_accepted_external(state)
-            }
-        } else {
-            tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted external: {:?}", block_id);
-            self.listener.on_block_accepted_external(state)
-        };
-
-        for (shard, seqno) in &to_split {
-            if let Some(shard_blocks) = blocks_guard.get_mut(shard) {
-                shard_blocks.split_off(seqno);
-            }
+impl BlockIdToWait<'_> {
+    fn shard(&self) -> ShardIdent {
+        match self {
+            Self::Short(id) => id.shard,
+            Self::Full(id) => id.shard,
         }
+    }
 
-        for (shard, seqno) in &to_remove {
-            if let Some(shard_blocks) = blocks_guard.get_mut(shard) {
-                shard_blocks.remove(seqno);
-            }
+    fn seqno(&self) -> u32 {
+        match self {
+            Self::Short(id) => id.seqno,
+            Self::Full(id) => id.seqno,
         }
+    }
+}
 
-        drop(blocks_guard);
-
-        result_future.await?;
-
-        Ok(())
+impl PartialEq<BlockId> for BlockIdToWait<'_> {
+    fn eq(&self, other: &BlockId) -> bool {
+        match *self {
+            BlockIdToWait::Short(short) => &other.as_short_id() == short,
+            BlockIdToWait::Full(full) => full == other,
+        }
     }
 }

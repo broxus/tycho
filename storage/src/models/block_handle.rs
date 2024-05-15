@@ -2,9 +2,9 @@ use std::sync::{Arc, Weak};
 
 use everscale_types::models::*;
 use tokio::sync::RwLock;
+use tycho_util::FastDashMap;
 
 use super::BlockMeta;
-use tycho_util::FastDashMap;
 
 #[derive(Clone)]
 #[repr(transparent)]

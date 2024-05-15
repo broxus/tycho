@@ -10,16 +10,15 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use self::types::{McData, PrevData, WorkingState};
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
-use crate::method_to_async_task_closure;
 use crate::msg_queue::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
-use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
 };
+use crate::{method_to_async_task_closure, tracing_targets};
 
 mod build_block;
 mod do_collate;
@@ -407,7 +406,7 @@ impl CollatorStdImpl {
         prev_states: Vec<ShardStateStuff>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<WorkingState> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
         let mc_data = McData::build(mc_state)?;
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
@@ -427,7 +426,7 @@ impl CollatorStdImpl {
         _mc_data: &McData,
         _prev_states: &[ShardStateStuff],
     ) -> Result<()> {
-        //TODO: make real implementation
+        // TODO: make real implementation
         // refer to the old node impl:
         //  Collator::unpack_last_state()
         Ok(())
@@ -437,7 +436,7 @@ impl CollatorStdImpl {
     /// 2. Await next anchor via mempool adapter
     /// 3. Store anchor in cache and return it
     async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>> {
-        //TODO: make real implementation
+        // TODO: make real implementation
 
         //TODO: use get_next_anchor() only once
         let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
@@ -486,8 +485,8 @@ impl CollatorStdImpl {
 
     /// (TODO) TRUE - when internal messages queue has internals
     fn has_internals(&self) -> Result<bool> {
-        //TODO: make real implementation
-        //STUB: always return false emulating that all internals were processed in prev block
+        // TODO: make real implementation
+        // STUB: always return false emulating that all internals were processed in prev block
         Ok(false)
     }
 
@@ -521,7 +520,7 @@ impl CollatorStdImpl {
             self.collator_descr(),
         );
 
-        //TODO: fix the work with internals
+        // TODO: fix the work with internals
 
         // check internals
         let has_internals = self.has_internals()?;

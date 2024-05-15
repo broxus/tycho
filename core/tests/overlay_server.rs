@@ -9,6 +9,7 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStatePart};
 use tycho_network::PeerId;
+use tycho_storage::Storage;
 
 use crate::common::archive::*;
 
@@ -16,7 +17,7 @@ mod common;
 
 #[tokio::test]
 async fn overlay_server_with_empty_storage() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_with_empty_storage");
+    tycho_util::test::init_logger("overlay_server_with_empty_storage", "debug");
 
     #[derive(Debug, Default)]
     struct PeerState {
@@ -24,7 +25,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         known_by: usize,
     }
 
-    let (storage, tmp_dir) = common::storage::init_empty_storage().await?;
+    let (storage, _tmp_dir) = Storage::new_temp()?;
 
     const NODE_COUNT: usize = 10;
     let nodes = common::node::make_network(storage, NODE_COUNT);
@@ -134,15 +135,13 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     let result = client.get_archive_slice(0, 0, 100).await;
     assert!(result.is_err());
 
-    tmp_dir.close()?;
-
     tracing::info!("done!");
     Ok(())
 }
 
 #[tokio::test]
 async fn overlay_server_blocks() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_blocks");
+    tycho_util::test::init_logger("overlay_server_blocks", "debug");
 
     #[derive(Debug, Default)]
     struct PeerState {

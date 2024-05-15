@@ -6,18 +6,20 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use everscale_types::cell::*;
 use everscale_types::models::BlockId;
+use tycho_block_util::state::*;
+use tycho_util::progress_bar::*;
+use tycho_util::FastHashMap;
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
 use super::shard_state_reader::*;
 use crate::db::*;
-use crate::util::*;
+use crate::store::shard_state::StoredValue;
 
-use tycho_block_util::state::*;
-use tycho_util::progress_bar::*;
-use tycho_util::FastHashMap;
+pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
-pub struct ShardStateReplaceTransaction<'a> {
+pub struct StoreStateRaw<'a> {
+    block_id: BlockId,
     db: &'a Db,
     cell_storage: &'a Arc<CellStorage>,
     min_ref_mc_state: &'a MinRefMcStateTracker,
@@ -27,17 +29,19 @@ pub struct ShardStateReplaceTransaction<'a> {
     file_ctx: FilesContext,
 }
 
-impl<'a> ShardStateReplaceTransaction<'a> {
-    pub fn new(
+impl<'a> StoreStateRaw<'a> {
+    pub(crate) fn new(
+        block_id: &BlockId,
         db: &'a Db,
         downloads_dir: &FileDb,
         cell_storage: &'a Arc<CellStorage>,
         min_ref_mc_state: &'a MinRefMcStateTracker,
-        block_id: &BlockId,
     ) -> Result<Self> {
-        let file_ctx = FilesContext::new(downloads_dir, block_id)?;
+        let file_ctx =
+            FilesContext::new(downloads_dir, block_id).context("failed to create files context")?;
 
         Ok(Self {
+            block_id: *block_id,
             db,
             file_ctx,
             cell_storage,
@@ -52,14 +56,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         &self.header
     }
 
-    pub fn process_packet(
-        &mut self,
-        packet: Vec<u8>,
-        progress_bar: &mut ProgressBar,
-    ) -> Result<bool> {
+    pub fn process_part(&mut self, part: Vec<u8>, progress_bar: &mut ProgressBar) -> Result<bool> {
         let cells_file = self.file_ctx.cells_file()?;
 
-        self.reader.set_next_packet(packet);
+        self.reader.set_next_packet(part);
 
         let header = loop {
             if let Some(header) = &self.header {
@@ -115,11 +115,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         Ok(true)
     }
 
-    pub fn finalize(
-        mut self,
-        block_id: BlockId,
-        progress_bar: &mut ProgressBar,
-    ) -> Result<ShardStateStuff> {
+    pub fn finalize(mut self, progress_bar: &mut ProgressBar) -> Result<ShardStateStuff> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
@@ -143,6 +139,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
 
         let mut tail = [0; 4];
         let mut ctx = FinalizationContext::new(self.db);
+        ctx.clear_temp_cells(self.db)?;
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -189,7 +186,7 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                     unsafe { hashes_file.read_exact_at(index as usize * HashesEntry::LEN, buffer) }
                 }
 
-                ShardStateReplaceTransaction::finalize_cell(&mut ctx, cell_index as u32, cell)?;
+                StoreStateRaw::finalize_cell(&mut ctx, cell_index as u32, cell)?;
 
                 // SAFETY: `entries_buffer` is guaranteed to be in separate memory area
                 unsafe {
@@ -220,7 +217,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         let root_hash = ctx.entries_buffer.repr_hash();
         ctx.final_check(root_hash)?;
 
-        let shard_state_key = block_id.as_short_id().to_vec();
+        self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
+        ctx.clear_temp_cells(self.db)?;
+
+        let shard_state_key = self.block_id.as_short_id().to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
 
         progress_bar.complete();
@@ -231,8 +231,8 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                 let cell_id = HashBytes::from_slice(&root[..32]);
 
                 let cell = self.cell_storage.load_cell(cell_id)?;
-                Ok(ShardStateStuff::new(
-                    block_id,
+                Ok(ShardStateStuff::from_root(
+                    &self.block_id,
                     Cell::from(cell as Arc<_>),
                     self.min_ref_mc_state,
                 )?)
@@ -256,12 +256,12 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         // Prepare mask and counters
         let mut children_mask = LevelMask::new(0);
         let mut tree_bits_count = cell.bit_len as u64;
-        let mut tree_cell_count = 1;
+        let mut tree_cell_count = 1u64;
 
         for (_, child) in children.iter() {
             children_mask |= child.level_mask();
-            tree_bits_count += child.tree_bits_count();
-            tree_cell_count += child.tree_cell_count();
+            tree_bits_count = tree_bits_count.saturating_add(child.tree_bits_count());
+            tree_cell_count = tree_cell_count.saturating_add(child.tree_cell_count());
         }
 
         let mut is_merkle_cell = false;
@@ -296,27 +296,32 @@ impl<'a> ShardStateReplaceTransaction<'a> {
             level_mask.level() + 1
         };
 
-        let mut max_depths = [0u16; 4];
         let mut temp_descriptor = cell.descriptor;
-        for i in 0..hash_count {
+
+        let mut hash_idx = 0;
+        for level in 0..4 {
+            if level != 0 && (is_pruned_cell || !level_mask.contains(level)) {
+                continue;
+            }
             let mut hasher = Sha256::new();
 
             let level_mask = if is_pruned_cell {
                 level_mask
             } else {
-                LevelMask::from_level(i)
+                LevelMask::from_level(level)
             };
 
             temp_descriptor.d1 &= !(CellDescriptor::LEVEL_MASK | CellDescriptor::STORE_HASHES_MASK);
             temp_descriptor.d1 |= u8::from(level_mask) << 5;
             hasher.update([temp_descriptor.d1, temp_descriptor.d2]);
 
-            if i == 0 {
+            if level == 0 {
                 hasher.update(cell.data);
             } else {
-                hasher.update(current_entry.get_hash_slice(i - 1));
+                hasher.update(current_entry.get_hash_slice(hash_idx - 1));
             }
 
+            let mut depth = 0;
             for (index, child) in children.iter() {
                 let child_depth = if child.cell_type().is_pruned_branch() {
                     let child_data = ctx
@@ -324,17 +329,21 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                         .get(index)
                         .ok_or(ReplaceTransactionError::InvalidCell)
                         .context("Pruned branch data not found")?;
-                    child.pruned_branch_depth(i, child_data)
+                    child.pruned_branch_depth(hash_idx + is_merkle_cell as u8, child_data)
                 } else {
-                    child.depth(if is_merkle_cell { i + 1 } else { i })
+                    child.depth(hash_idx + is_merkle_cell as u8)
                 };
                 hasher.update(child_depth.to_be_bytes());
 
-                let depth = &mut max_depths[i as usize];
-                *depth = std::cmp::max(*depth, child_depth + 1);
-
-                current_entry.set_depth(i, *depth);
+                depth = child_depth
+                    .checked_add(1)
+                    .map(|next_depth| next_depth.max(depth))
+                    .filter(|&depth| depth <= MAX_DEPTH)
+                    .ok_or(ReplaceTransactionError::InvalidCell)
+                    .context("Max tree depth exceeded")?;
             }
+
+            current_entry.set_depth(hash_idx, depth);
 
             for (index, child) in children.iter() {
                 let child_hash = if child.cell_type().is_pruned_branch() {
@@ -344,16 +353,19 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                         .ok_or(ReplaceTransactionError::InvalidCell)
                         .context("Pruned branch data not found")?;
                     child
-                        .pruned_branch_hash(i, child_data)
+                        .pruned_branch_hash(hash_idx + is_merkle_cell as u8, child_data)
                         .context("Invalid pruned branch")?
                 } else {
-                    child.hash(if is_merkle_cell { i + 1 } else { i })
+                    child.hash(hash_idx + is_merkle_cell as u8)
                 };
                 hasher.update(child_hash);
             }
 
-            current_entry.set_hash(i, hasher.finalize().as_slice());
+            current_entry.set_hash(hash_idx, hasher.finalize().as_slice());
+            hash_idx += 1;
         }
+
+        anyhow::ensure!(hash_count == hash_idx, "invalid hash count");
 
         // Update pruned branches
         if is_pruned_cell {
@@ -364,22 +376,10 @@ impl<'a> ShardStateReplaceTransaction<'a> {
         let output_buffer = &mut ctx.output_buffer;
         output_buffer.clear();
 
-        output_buffer.extend_from_slice(&[
-            1,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            cell.descriptor.d1,
-            cell.descriptor.d2,
-        ]);
+        output_buffer.extend_from_slice(&[cell.descriptor.d1, cell.descriptor.d2]);
         output_buffer.extend_from_slice(&cell.bit_len.to_le_bytes());
         output_buffer.extend_from_slice(cell.data);
 
-        let hash_count = cell.descriptor.hash_count();
         for i in 0..hash_count {
             output_buffer.extend_from_slice(current_entry.get_hash_slice(i));
             output_buffer.extend_from_slice(current_entry.get_depth_slice(i));
@@ -394,31 +394,31 @@ impl<'a> ShardStateReplaceTransaction<'a> {
                     .ok_or(ReplaceTransactionError::InvalidCell)
                     .context("Pruned branch data not found")?;
                 child
-                    .pruned_branch_hash(MAX_LEVEL, child_data)
+                    .pruned_branch_hash(LevelMask::MAX_LEVEL, child_data)
                     .context("Invalid pruned branch")?
             } else {
-                child.hash(MAX_LEVEL)
+                child.hash(LevelMask::MAX_LEVEL)
             };
 
             *ctx.cell_usages.entry(*child_hash).or_default() += 1;
             output_buffer.extend_from_slice(child_hash);
         }
 
-        // // Write counters
-        // output_buffer.extend_from_slice(current_entry.get_tree_counters());
+        // Write counters
+        output_buffer.extend_from_slice(current_entry.get_tree_counters());
 
         // Save serialized data
         let repr_hash = if is_pruned_cell {
             current_entry
                 .as_reader()
-                .pruned_branch_hash(3, cell.data)
+                .pruned_branch_hash(LevelMask::MAX_LEVEL, cell.data)
                 .context("Invalid pruned branch")?
         } else {
-            current_entry.as_reader().hash(MAX_LEVEL)
+            current_entry.as_reader().hash(LevelMask::MAX_LEVEL)
         };
 
         ctx.write_batch
-            .merge_cf(&ctx.cells_cf, repr_hash, output_buffer.as_slice());
+            .put_cf(&ctx.temp_cells_cf, repr_hash, output_buffer.as_slice());
         ctx.cell_usages.insert(*repr_hash, -1);
 
         // Done
@@ -431,7 +431,7 @@ struct FinalizationContext<'a> {
     cell_usages: FastHashMap<[u8; 32], i32>,
     entries_buffer: EntriesBuffer,
     output_buffer: Vec<u8>,
-    cells_cf: BoundedCfHandle<'a>,
+    temp_cells_cf: BoundedCfHandle<'a>,
     write_batch: rocksdb::WriteBatch,
 }
 
@@ -442,26 +442,25 @@ impl<'a> FinalizationContext<'a> {
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
             entries_buffer: EntriesBuffer::new(),
             output_buffer: Vec::with_capacity(1 << 10),
-            cells_cf: db.cells.cf(),
+            temp_cells_cf: db.temp_cells.cf(),
             write_batch: rocksdb::WriteBatch::default(),
         }
     }
 
-    fn finalize_cell_usages(&mut self) {
-        self.cell_usages.retain(|key, &mut rc| {
-            if rc > 0 {
-                self.write_batch.merge_cf(
-                    &self.cells_cf,
-                    key,
-                    refcount::encode_positive_refcount(rc as u32),
-                );
-            }
+    fn clear_temp_cells(&self, db: &Db) -> std::result::Result<(), rocksdb::Error> {
+        let from = &[0x00; 32];
+        let to = &[0xff; 32];
+        db.raw().delete_range_cf(&self.temp_cells_cf, from, to)
+    }
 
-            rc < 0
-        });
+    fn finalize_cell_usages(&mut self) {
+        self.cell_usages.retain(|_, &mut rc| rc < 0);
     }
 
     fn final_check(&self, root_hash: &[u8; 32]) -> Result<()> {
+        tracing::info!(root_hash = %HashBytes::wrap(root_hash), "Final check");
+        tracing::info!(len=?self.cell_usages.len(), "Cell usages");
+
         anyhow::ensure!(
             self.cell_usages.len() == 1 && self.cell_usages.contains_key(root_hash),
             "Invalid shard state cell"
@@ -557,4 +556,144 @@ enum FilesContextError {
     AlreadyFinalized,
 }
 
-const MAX_LEVEL: u8 = 3;
+#[cfg(test)]
+mod test {
+
+    use std::io::{BufReader, Read};
+
+    use bytesize::ByteSize;
+    use everscale_types::models::ShardIdent;
+    use tycho_util::project_root;
+    use weedb::rocksdb::{IteratorMode, WriteBatch};
+
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn insert_and_delete_of_several_shards() -> Result<()> {
+        tycho_util::test::init_logger("insert_and_delete_of_several_shards", "debug");
+        let project_root = project_root()?.join(".scratch");
+        let integration_test_path = project_root.join("integration_tests");
+        let current_test_path = integration_test_path.join("insert_and_delete_of_several_shards");
+        std::fs::remove_dir_all(&current_test_path).ok();
+        std::fs::create_dir_all(&current_test_path)?;
+        // decompressing the archive
+        let archive_path = integration_test_path.join("states.tar.zst");
+        let res = std::process::Command::new("tar")
+            .arg("-I")
+            .arg("zstd")
+            .arg("-xf")
+            .arg(&archive_path)
+            .arg("-C")
+            .arg(&current_test_path)
+            .status()?;
+        if !res.success() {
+            return Err(anyhow::anyhow!("Failed to decompress the archive"));
+        }
+        tracing::info!("Decompressed the archive");
+
+        let db = Db::open(current_test_path.join("rocksdb"), DbConfig {
+            rocksdb_lru_capacity: ByteSize::mb(256),
+        })?;
+        let file_db = FileDb::new(current_test_path.join("file_db"))?;
+
+        let cells_storage = CellStorage::new(db.clone(), 100_000_000);
+
+        let tracker = MinRefMcStateTracker::new();
+        let download_dir = file_db.create_subdir("downloads")?;
+
+        for file in std::fs::read_dir(current_test_path.join("states"))? {
+            let file = file?;
+            let filename = file.file_name().to_string_lossy().to_string();
+
+            let block_id = parse_filename(filename.as_ref());
+
+            let mut store_state =
+                StoreStateRaw::new(&block_id, &db, &download_dir, &cells_storage, &tracker)
+                    .context("Failed to create ShardStateReplaceTransaction")?;
+
+            let file = File::open(file.path())?;
+            let mut file = BufReader::new(file);
+            let chunk_size = 10_000_000; // size of each chunk in bytes
+            let mut buffer = vec![0u8; chunk_size];
+            let mut pg = ProgressBar::builder("downloading state")
+                .exact_unit("cells")
+                .build();
+
+            loop {
+                let bytes_read = file.read(&mut buffer)?;
+                if bytes_read == 0 {
+                    break; // End of file
+                }
+
+                let packet = buffer[..bytes_read].to_vec();
+                store_state.process_part(packet, &mut pg)?;
+            }
+
+            let mut pg = ProgressBar::builder("processing state")
+                .with_mapper(|x| bytesize::to_string(x, false))
+                .build();
+            store_state.finalize(&mut pg)?;
+        }
+        tracing::info!("Finished processing all states");
+        tracing::info!("Starting gc");
+        states_gc(&cells_storage, &db).await?;
+
+        drop(db);
+        drop(cells_storage);
+        rocksdb::DB::destroy(
+            &rocksdb::Options::default(),
+            current_test_path.join("rocksdb"),
+        )?;
+
+        Ok(())
+    }
+
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &Db) -> Result<()> {
+        let states_iterator = db.shard_states.iterator(IteratorMode::Start);
+        let bump = bumpalo::Bump::new();
+
+        let total_states = db.shard_states.iterator(IteratorMode::Start).count();
+
+        for (deleted, state) in states_iterator.enumerate() {
+            let (_, value) = state?;
+
+            // check that state actually exists
+            let cell = cell_storage.load_cell(HashBytes::from_slice(value.as_ref()))?;
+
+            let mut batch = WriteBatch::default();
+            cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
+
+            // execute batch
+            db.raw().write_opt(batch, db.cells.write_config())?;
+            tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
+        }
+
+        // two compactions in row. First one run merge operators, second one will remove all tombstones
+        db.trigger_compaction().await;
+        db.trigger_compaction().await;
+
+        let cells_left = db.cells.iterator(IteratorMode::Start).count();
+        tracing::info!("States GC finished. Cells left: {cells_left}");
+        assert_eq!(cells_left, 0, "Gc is broken. Press F to pay respect");
+
+        Ok(())
+    }
+
+    fn parse_filename(name: &str) -> BlockId {
+        // Split the remaining string by commas into components
+        let parts: Vec<&str> = name.split(',').collect();
+
+        // Parse each part
+        let workchain: i32 = parts[0].parse().unwrap();
+        let prefix = u64::from_str_radix(parts[1], 16).unwrap();
+        let seqno: u32 = parts[2].parse().unwrap();
+
+        BlockId {
+            shard: ShardIdent::new(workchain, prefix).unwrap(),
+            seqno,
+            root_hash: Default::default(),
+            file_hash: Default::default(),
+        }
+    }
+}

@@ -22,7 +22,7 @@ impl CollatorStdImpl {
         next_chain_time: u64,
         top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
     ) -> Result<()> {
-        //TODO: make real implementation
+        // TODO: make real implementation
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 
@@ -59,7 +59,7 @@ impl CollatorStdImpl {
         );
 
         // prepare block collation data
-        //STUB: consider split/merge in future for taking prev_block_id
+        // STUB: consider split/merge in future for taking prev_block_id
         let prev_block_id = prev_shard_data.blocks_ids()[0];
         let mut collation_data = BlockCollationData::default();
         collation_data.block_id_short = BlockIdShort {
@@ -86,7 +86,7 @@ impl CollatorStdImpl {
             }
             collation_data.set_shards(shards);
 
-            //TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
+            // TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
         }
 
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
@@ -520,7 +520,7 @@ impl CollatorStdImpl {
         } else {
             collation_data.value_flow.created.tokens =
                 mc_data.config().get_block_creation_reward(false)?;
-            //TODO: should check if it is good to cast `prefix_len` from u16 to u8
+            // TODO: should check if it is good to cast `prefix_len` from u16 to u8
             collation_data.value_flow.created.tokens >>=
                 collation_data.block_id_short.shard.prefix_len() as u8;
         }
@@ -534,7 +534,7 @@ impl CollatorStdImpl {
     }
 
     fn compute_minted_amount(&self, mc_data: &McData) -> Result<CurrencyCollection> {
-        //TODO: just copied from old node, needs to review
+        // TODO: just copied from old node, needs to review
         tracing::trace!("Collator ({}): compute_minted_amount", self.collator_descr);
 
         let mut to_mint = CurrencyCollection::default();

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_types)]
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::Path;

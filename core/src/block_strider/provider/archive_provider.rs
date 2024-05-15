@@ -8,7 +8,6 @@ use everscale_types::models::{Block, BlockId, BlockIdShort, BlockProof};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use sha2::Digest;
-
 use tycho_block_util::archive::{ArchiveEntryId, ArchiveReader};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 

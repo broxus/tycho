@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use futures_util::future::{self, FutureExt, Ready};
 use tracing::error;
-
 use tycho_network::__internal::tl_proto::{TlRead, TlWrite};
 use tycho_network::{Response, Service, ServiceRequest};
 
@@ -52,7 +51,9 @@ impl Service<ServiceRequest> for NetworkService {
                         signatures,
                     } = query;
                     {
-                        let session = state.get_session(session_seqno).await;
+                        let session = state
+                            .get_session(block_id_short.shard.workchain(), session_seqno)
+                            .await;
                         match handle_signatures_query(
                             session,
                             session_seqno,

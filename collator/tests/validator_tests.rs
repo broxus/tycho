@@ -12,7 +12,6 @@ use rand::prelude::ThreadRng;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
 use tracing::debug;
-
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
@@ -263,7 +262,8 @@ async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
         short_hash: 0,
     };
     let keypair = Arc::new(KeyPair::generate(&mut ThreadRng::default()));
-    let collator_session_info = Arc::new(CollationSessionInfo::new(0, validators, Some(keypair)));
+    let collator_session_info =
+        Arc::new(CollationSessionInfo::new(-1, 0, validators, Some(keypair)));
 
     let validation_session =
         Arc::new(ValidationSessionInfo::try_from(collator_session_info.clone()).unwrap());
@@ -300,7 +300,7 @@ fn create_blocks(amount: u32) -> Vec<BlockId> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_validator_accept_block_by_network() -> Result<()> {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
-    tycho_util::test::init_logger("test_validator_accept_block_by_network");
+    tycho_util::test::init_logger("test_validator_accept_block_by_network", "debug");
 
     let mut tmp_dirs = Vec::new();
 
@@ -402,6 +402,7 @@ async fn handle_validator(
     for session in 1..=sessions {
         let blocks = create_blocks(blocks_amount);
         let collator_session_info = Arc::new(CollationSessionInfo::new(
+            -1,
             session,
             validators_subset_info.clone(),
             Some(validator.get_keypair()), // Assuming you have access to node's keypair here

@@ -7,14 +7,8 @@ use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashSet};
 
-use self::entries_merger::PublicOverlayEntriesMerger;
-use crate::dht::DhtService;
-use crate::network::Network;
-use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry};
-use crate::types::{PeerId, Response, Service, ServiceRequest};
-use crate::util::Routable;
-
 pub use self::config::OverlayConfig;
+use self::entries_merger::PublicOverlayEntriesMerger;
 pub use self::overlay_id::OverlayId;
 pub use self::private_overlay::{
     PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
@@ -23,6 +17,11 @@ pub use self::private_overlay::{
 pub use self::public_overlay::{
     PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
 };
+use crate::dht::DhtService;
+use crate::network::Network;
+use crate::proto::overlay::{rpc, PublicEntriesResponse, PublicEntry};
+use crate::types::{PeerId, Response, Service, ServiceRequest};
+use crate::util::Routable;
 
 mod background_tasks;
 mod config;
@@ -317,7 +316,7 @@ impl OverlayServiceInner {
         };
 
         // Add proposed entries to the overlay
-        overlay.add_untrusted_entries(&req.entries, now_sec());
+        overlay.add_untrusted_entries(&self.local_id, &req.entries, now_sec());
 
         // Collect proposed entries to exclude from the response
         let requested_ids = req

@@ -1,9 +1,13 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::models::*;
 
+use self::types::QueueDiff;
 use crate::internal_queue::iterator::QueueIterator;
 use crate::internal_queue::persistent::persistent_state::PersistentStateImpl;
 use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
@@ -12,8 +16,6 @@ use crate::internal_queue::session::session_state::SessionStateImpl;
 use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
 use crate::tracing_targets;
 use crate::utils::shard::SplitMergeAction;
-
-use self::types::QueueDiff;
 
 pub mod config;
 pub mod types;
@@ -56,8 +58,8 @@ pub struct MessageQueueAdapterStdImpl {
     msg_queue: MsgQueueStdImpl,
 }
 
-impl MessageQueueAdapterStdImpl {
-    pub fn new() -> Self {
+impl Default for MessageQueueAdapterStdImpl {
+    fn default() -> Self {
         let base_shard = ShardIdent::new_full(0);
         Self {
             msg_queue: MsgQueueStdImpl::new(base_shard),
@@ -101,8 +103,8 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     }
 
     async fn commit_diff(&self, _diff_id: &BlockIdShort) -> Result<Option<()>> {
-        //TODO: make real implementation
-        //STUB: just return oks
+        // TODO: make real implementation
+        // STUB: just return oks
         Ok(Some(()))
     }
 }

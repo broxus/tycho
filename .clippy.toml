@@ -1,2 +1,14 @@
 allow-print-in-tests = true
 allow-dbg-in-tests = true
+
+# https://rust-lang.github.io/rust-clippy/master/index.html#disallowed_methods
+disallowed-methods = [
+    { path = "std::fs::File::create", reason = "use tycho_storage::FileDb instead" },
+    { path = "std::fs::File::create_new", reason = "use tycho_storage::FileDb instead" },
+    { path = "std::fs::File::open", reason = "use tycho_storage::FileDb instead" },
+    { path = "std::fs::File::options", reason = "use tycho_storage::FileDb instead" },
+]
+
+disallowed-types = [
+    { path = "std::fs::OpenOptions", reason = "use tycho_storage::FileDb instead" },
+]

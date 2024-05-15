@@ -201,8 +201,9 @@ pub(crate) fn parse_peer_identity(identity: Box<dyn std::any::Any>) -> Result<Pe
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use super::*;
 
     #[test]
     fn parse_cert() {

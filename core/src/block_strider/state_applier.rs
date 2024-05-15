@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use everscale_types::cell::Cell;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
@@ -147,15 +146,11 @@ where
 
         let info = block.load_info()?;
         let res = block_storage
-            .store_block_data(
-                block,
-                archive_data,
-                BlockMetaData {
-                    is_key_block: info.key_block,
-                    gen_utime: info.gen_utime,
-                    mc_ref_seqno: mc_block_id.seqno,
-                },
-            )
+            .store_block_data(block, archive_data, BlockMetaData {
+                is_key_block: info.key_block,
+                gen_utime: info.gen_utime,
+                mc_ref_seqno: mc_block_id.seqno,
+            })
             .await?;
 
         Ok(res.handle)
@@ -177,7 +172,7 @@ where
             .await
             .context("Failed to join blocking task")?
             .context("Failed to apply state update")?;
-        let new_state = ShardStateStuff::new(*block.id(), new_state, mc_state_tracker)
+        let new_state = ShardStateStuff::from_root(block.id(), new_state, mc_state_tracker)
             .context("Failed to create new state")?;
 
         let state_storage = self.inner.storage.shard_state_storage();
@@ -214,123 +209,4 @@ struct Inner<S> {
     mc_state_tracker: MinRefMcStateTracker,
     storage: Storage,
     state_subscriber: S,
-}
-
-#[cfg(test)]
-pub mod test {
-    use std::str::FromStr;
-
-    use everscale_types::cell::HashBytes;
-    use everscale_types::models::*;
-    use tracing_test::traced_test;
-    use tycho_storage::{BlockMetaData, Db, DbOptions, Storage};
-
-    use super::*;
-    use crate::block_strider::subscriber::test::PrintSubscriber;
-    use crate::block_strider::{ArchiveBlockProvider, BlockStrider, PersistentBlockStriderState};
-
-    #[traced_test]
-    #[tokio::test]
-    async fn test_state_apply() -> anyhow::Result<()> {
-        let (provider, storage) = prepare_state_apply().await?;
-
-        let last_mc = *provider.mc_block_ids.last_key_value().unwrap().1;
-        let blocks = provider.blocks.keys().copied().collect::<Vec<_>>();
-
-        let block_strider = BlockStrider::builder()
-            .with_provider(provider)
-            .with_state(PersistentBlockStriderState::new(last_mc, storage.clone()))
-            .with_state_subscriber(Default::default(), storage.clone(), PrintSubscriber)
-            .build();
-
-        block_strider.run().await?;
-
-        assert_eq!(
-            storage.node_state().load_last_mc_block_id().unwrap(),
-            last_mc
-        );
-        storage
-            .shard_state_storage()
-            .load_state(&last_mc)
-            .await
-            .unwrap();
-
-        for block in &blocks {
-            let handle = storage.block_handle_storage().load_handle(block).unwrap();
-            assert!(handle.meta().is_applied());
-            storage
-                .shard_state_storage()
-                .load_state(block)
-                .await
-                .unwrap();
-        }
-
-        Ok(())
-    }
-
-    pub async fn prepare_state_apply() -> Result<(ArchiveBlockProvider, Storage)> {
-        let data = include_bytes!("../../tests/data/00001");
-        let provider = ArchiveBlockProvider::new(data).unwrap();
-        let temp = tempfile::tempdir().unwrap();
-        let db = Db::open(temp.path().to_path_buf(), DbOptions::default()).unwrap();
-        let storage = Storage::new(db, temp.path().join("file"), 1_000_000).unwrap();
-
-        let master = include_bytes!("../../tests/data/everscale_zerostate.boc");
-        let shard = include_bytes!("../../tests/data/everscale_shard_zerostate.boc");
-
-        let master_id = BlockId {
-            root_hash: HashBytes::from_str(
-                "58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845",
-            )
-            .unwrap(),
-            file_hash: HashBytes::from_str(
-                "d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4",
-            )
-            .unwrap(),
-            shard: ShardIdent::MASTERCHAIN,
-            seqno: 0,
-        };
-        let master = ShardStateStuff::deserialize_zerostate(master_id, master).unwrap();
-
-        // Parse block id
-        let block_id = BlockId::from_str("-1:8000000000000000:0:58ffca1a178daff705de54216e5433c9bd2e7d850070d334d38997847ab9e845:d270b87b2952b5ba7daa70aaf0a8c361befcf4d8d2db92f9640d5443070838e4")?;
-
-        // Write zerostate to db
-        let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-            &block_id,
-            BlockMetaData::zero_state(master.state().gen_utime),
-        );
-
-        storage
-            .shard_state_storage()
-            .store_state(&handle, &master)
-            .await?;
-
-        let shard_id = BlockId {
-            root_hash: HashBytes::from_str(
-                "95f042d1bf5b99840cad3aaa698f5d7be13d9819364faf9dd43df5b5d3c2950e",
-            )
-            .unwrap(),
-            file_hash: HashBytes::from_str(
-                "97af4602a57fc884f68bb4659bab8875dc1f5e45a9fd4fbafd0c9bc10aa5067c",
-            )
-            .unwrap(),
-            shard: ShardIdent::BASECHAIN,
-            seqno: 0,
-        };
-
-        //store workchain zerostate
-        let shard = ShardStateStuff::deserialize_zerostate(shard_id, shard).unwrap();
-        let (handle, _) = storage.block_handle_storage().create_or_load_handle(
-            &shard_id,
-            BlockMetaData::zero_state(shard.state().gen_utime),
-        );
-        storage
-            .shard_state_storage()
-            .store_state(&handle, &shard)
-            .await?;
-
-        storage.node_state().store_last_mc_block_id(&master_id);
-        Ok((provider, storage))
-    }
 }

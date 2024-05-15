@@ -105,7 +105,7 @@ impl TasksStream {
                     let overlay_id = *overlay_id;
                     async move {
                         if let Err(e) = fut.await {
-                            tracing::error!(task, %overlay_id, "task failed: {e:?}");
+                            tracing::error!(task, %overlay_id, "task failed: {e}");
                         }
                         overlay_id
                     }

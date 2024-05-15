@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use everscale_types::{
-    cell::Cell,
-    models::{ExtInMsgInfo, MsgInfo},
-};
+use everscale_types::models::{ExtInMsgInfo, MsgInfo};
+use everscale_types::prelude::Cell;
 
 // TYPES
 

@@ -6,7 +6,6 @@ use anyhow::Result;
 use everscale_types::cell::Load;
 use everscale_types::models::{Block, BlockId, BlockIdShort, BlockProof};
 use sha2::Digest;
-
 use tycho_block_util::archive::{ArchiveEntryId, ArchiveReader, WithArchiveData};
 
 pub struct Archive {

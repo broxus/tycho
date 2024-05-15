@@ -1,9 +1,11 @@
-use std::{any::Any, fmt::Debug};
+use std::any::Any;
+use std::fmt::Debug;
 
 use anyhow::{anyhow, Result};
 
 use super::queue::MessageQueueImpl;
-use super::{state_persistent::PersistentStateService, storage::StorageService};
+use super::state_persistent::PersistentStateService;
+use super::storage::StorageService;
 
 #[cfg(test)]
 #[path = "tests/test_cache_persistent.rs"]
@@ -19,11 +21,9 @@ pub trait PersistentCacheConfig: Debug {
     fn as_any(&self) -> &dyn Any;
 }
 
-/*
-This part of the code contains logic of working with persistent cache.
-
-We use partials just to separate the codebase on smaller and easier maintainable parts.
- */
+// This part of the code contains logic of working with persistent cache.
+//
+// We use partials just to separate the codebase on smaller and easier maintainable parts.
 impl<CH, ST, DB> MessageQueueImpl<CH, ST, DB>
 where
     CH: PersistentCacheService,

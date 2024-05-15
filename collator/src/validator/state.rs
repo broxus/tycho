@@ -6,14 +6,15 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Signature};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, trace};
+use tycho_network::PrivateOverlay;
+use tycho_util::{FastDashMap, FastHashMap};
 
+use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
 use crate::validator::types::{
     BlockValidationCandidate, ValidationResult, ValidationSessionInfo, ValidatorInfo,
 };
 use crate::validator::ValidatorEventListener;
-use tycho_network::PrivateOverlay;
-use tycho_util::{FastDashMap, FastHashMap};
 
 struct SignatureMaps {
     valid_signatures: FastHashMap<HashBytes, Signature>,
@@ -34,12 +35,14 @@ pub trait ValidationState: Send + Sync {
     /// Retrieves an immutable reference to a session by its ID.
     fn get_session(
         &self,
+        workchain: i32,
         session_id: u32,
     ) -> impl std::future::Future<Output = Option<Arc<SessionInfo>>> + Send;
 }
 
 /// Holds information about a validation session.
 pub struct SessionInfo {
+    workchain: i32,
     seqno: u32,
     max_weight: u64,
     blocks_signatures: FastDashMap<BlockIdShort, (BlockId, SignatureMaps)>,
@@ -50,6 +53,7 @@ pub struct SessionInfo {
 
 impl SessionInfo {
     pub fn new(
+        workchain: i32,
         seqno: u32,
         validation_session_info: Arc<ValidationSessionInfo>,
         private_overlay: PrivateOverlay,
@@ -60,6 +64,7 @@ impl SessionInfo {
             .map(|vi| vi.weight)
             .sum();
         Arc::new(Self {
+            workchain,
             seqno,
             max_weight,
             blocks_signatures: Default::default(),
@@ -67,6 +72,10 @@ impl SessionInfo {
             validation_session_info,
             private_overlay,
         })
+    }
+
+    pub fn workchain(&self) -> i32 {
+        self.workchain
     }
 
     pub fn get_seqno(&self) -> u32 {
@@ -110,14 +119,11 @@ impl SessionInfo {
         self.blocks_signatures
             .entry(block_header)
             .or_insert_with(|| {
-                (
-                    block,
-                    SignatureMaps {
-                        valid_signatures: FastHashMap::default(),
-                        invalid_signatures: FastHashMap::default(),
-                        event_dispatched: Mutex::new(false),
-                    },
-                )
+                (block, SignatureMaps {
+                    valid_signatures: FastHashMap::default(),
+                    invalid_signatures: FastHashMap::default(),
+                    event_dispatched: Mutex::new(false),
+                })
             });
         Ok(())
     }
@@ -133,7 +139,6 @@ impl SessionInfo {
         &self,
         block_id_short: &BlockIdShort,
     ) -> anyhow::Result<ValidationResult> {
-        trace!("Getting validation status for block {:?}", block_id_short);
         // Bind the lock result to a variable to extend its lifetime
         // let block_signatures_guard = self.blocks_signatures;
         let signatures = self.blocks_signatures.get(block_id_short);
@@ -207,44 +212,14 @@ impl SessionInfo {
         }
     }
 
-    /// Adds a signature for a block.
-    pub async fn add_signature(
-        &self,
-        block_id: &BlockId,
-        validator_id: HashBytes,
-        signature: Signature,
-        is_valid: bool,
-    ) {
-        let block_header = block_id.as_short_id();
-        // let mut write_guard = self.blocks_signatures.write().await; // Hold onto the lock
-        let mut entry = self
-            .blocks_signatures
-            .entry(block_header) // Use the guard to access the map
-            .or_insert_with(|| {
-                (
-                    *block_id,
-                    SignatureMaps {
-                        valid_signatures: FastHashMap::default(),
-                        invalid_signatures: FastHashMap::default(),
-                        event_dispatched: Mutex::new(false),
-                    },
-                )
-            });
-
-        if is_valid {
-            entry.1.valid_signatures.insert(validator_id, signature);
-        } else {
-            entry.1.invalid_signatures.insert(validator_id, signature);
-        }
-    }
-
     pub async fn process_signatures_and_update_status(
         &self,
         block_id_short: BlockIdShort,
         signatures: Vec<([u8; 32], [u8; 64])>,
         listeners: &[Arc<dyn ValidatorEventListener>],
-    ) -> anyhow::Result<()> {
-        trace!(
+    ) -> anyhow::Result<bool> {
+        debug!(
+            target: tracing_targets::VALIDATOR,
             "Processing signatures for block in state {:?}",
             block_id_short
         );
@@ -252,14 +227,11 @@ impl SessionInfo {
             .blocks_signatures
             .entry(block_id_short)
             .or_insert_with(|| {
-                (
-                    BlockId::default(), // Default should be replaced with actual block retrieval logic if necessary
-                    SignatureMaps {
-                        valid_signatures: FastHashMap::default(),
-                        invalid_signatures: FastHashMap::default(),
-                        event_dispatched: Mutex::new(false),
-                    },
-                )
+                (BlockId::default(), SignatureMaps {
+                    valid_signatures: FastHashMap::default(),
+                    invalid_signatures: FastHashMap::default(),
+                    event_dispatched: Mutex::new(false),
+                })
             });
 
         let event_guard = entry.1.event_dispatched.lock().await;
@@ -268,7 +240,7 @@ impl SessionInfo {
                 "Validation event already dispatched for block {:?}",
                 block_id_short
             );
-            return Ok(());
+            return Ok(true);
         }
 
         // Drop the guard to allow mutable access below
@@ -280,13 +252,21 @@ impl SessionInfo {
             let signature = Signature(sig_bytes);
             let block_validation_candidate = BlockValidationCandidate::from(entry.0);
 
-            let is_valid = self
+            let validator = self
                 .get_validation_session_info()
                 .validators
                 .get(&validator_id)
                 .context("Validator not found")?
+                .clone();
+
+            let is_valid = validator
                 .public_key
                 .verify(block_validation_candidate.as_bytes(), &signature.0);
+
+            trace!(
+                target: tracing_targets::VALIDATOR,
+                "Adding signature for block {:?} from validator {:?} valid {}",
+                block_id_short, validator_id, is_valid);
 
             if is_valid {
                 entry.1.valid_signatures.insert(validator_id, signature);
@@ -296,6 +276,7 @@ impl SessionInfo {
         }
 
         let validation_status = self.validation_status(&entry.1).await;
+
         // Check if the validation status qualifies for dispatching the event
         match validation_status {
             ValidationResult::Valid => {
@@ -315,10 +296,12 @@ impl SessionInfo {
                 Self::notify_listeners(entry.0, event, listeners);
             }
 
-            ValidationResult::Insufficient(_, _) => {}
+            ValidationResult::Insufficient(total_valid_weight, valid_weight_threshold) => {
+                debug!(total_valid_weight, valid_weight_threshold);
+            }
         }
 
-        Ok(())
+        Ok(validation_status.is_finished())
     }
 
     async fn validation_status(&self, signature_maps: &SignatureMaps) -> ValidationResult {
@@ -361,6 +344,7 @@ impl SessionInfo {
         event: OnValidatedBlockEvent,
         listeners: &[Arc<dyn ValidatorEventListener>],
     ) {
+        trace!(target: tracing_targets::VALIDATOR, "Notifying listeners about block validation");
         for listener in listeners {
             let cloned_event = event.clone();
             let listener = listener.clone();
@@ -376,7 +360,7 @@ impl SessionInfo {
 
 /// Standard implementation of `ValidationState`.
 pub struct ValidationStateStdImpl {
-    sessions: RwLock<HashMap<u32, Arc<SessionInfo>>>,
+    sessions: RwLock<HashMap<(i32, u32), Arc<SessionInfo>>>,
 }
 
 impl ValidationState for ValidationStateStdImpl {
@@ -387,18 +371,27 @@ impl ValidationState for ValidationStateStdImpl {
     }
 
     async fn try_add_session(&self, session: Arc<SessionInfo>) -> anyhow::Result<()> {
+        let workchain = session.workchain;
         let seqno = session.seqno;
 
-        let session = self.sessions.write().await.insert(seqno, session);
+        let session = self
+            .sessions
+            .write()
+            .await
+            .insert((workchain, seqno), session);
 
         if session.is_some() {
-            bail!("Session already exists with seqno: {seqno}");
+            bail!("Session already exists with seqno: ({workchain}, {seqno})");
         }
 
         Ok(())
     }
 
-    async fn get_session(&self, session_id: u32) -> Option<Arc<SessionInfo>> {
-        self.sessions.read().await.get(&session_id).cloned()
+    async fn get_session(&self, workchain: i32, session_id: u32) -> Option<Arc<SessionInfo>> {
+        self.sessions
+            .read()
+            .await
+            .get(&(workchain, session_id))
+            .cloned()
     }
 }

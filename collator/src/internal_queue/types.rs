@@ -1,8 +1,9 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use everscale_types::models::{BlockIdShort, ShardIdent};
 
 use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, EnqueuedMessageKey};
-use std::collections::HashMap;
-use std::sync::Arc;
 
 pub struct QueueDiff {
     pub id: BlockIdShort,

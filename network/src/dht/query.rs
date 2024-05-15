@@ -375,13 +375,10 @@ impl Query {
             return (node, None);
         };
 
-        let req = network.query(
-            &node.id,
-            Request {
-                version: Default::default(),
-                body: request_body.clone(),
-            },
-        );
+        let req = network.query(&node.id, Request {
+            version: Default::default(),
+            body: request_body.clone(),
+        });
 
         let res = match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
             Ok(res) => {
@@ -443,13 +440,10 @@ impl StoreValue<()> {
             return (node, None);
         };
 
-        let req = network.send(
-            &node.id,
-            Request {
-                version: Default::default(),
-                body: request_body.clone(),
-            },
-        );
+        let req = network.send(&node.id, Request {
+            version: Default::default(),
+            body: request_body.clone(),
+        });
 
         let res = match tokio::time::timeout(REQUEST_TIMEOUT, req).await {
             Ok(res) => Some(res),

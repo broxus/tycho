@@ -76,7 +76,7 @@ fn make_network(node_count: usize) -> Vec<Node> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_overlays_accessible() -> Result<()> {
-    tycho_util::test::init_logger("public_overlays_accessible");
+    tycho_util::test::init_logger("public_overlays_accessible", "debug");
 
     #[derive(Debug, Default)]
     struct PeerState {

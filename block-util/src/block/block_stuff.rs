@@ -39,7 +39,7 @@ impl BlockStuff {
 
         let cell = CellBuilder::build_from(&block).unwrap();
         let root_hash = *cell.repr_hash();
-        let file_hash = sha2::Sha256::digest(Boc::encode(&cell)).into();
+        let file_hash = Boc::file_hash(Boc::encode(&cell));
 
         let block_id = BlockId {
             shard: block_info.shard,

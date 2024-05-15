@@ -51,7 +51,7 @@ impl Cli {
                     .with_ansi(false)
                     .compact()
                     .with_writer(non_blocking)
-                    .with_filter(EnvFilter::new("trace")), //todo: update with needed crates
+                    .with_filter(EnvFilter::new("trace")), // todo: update with needed crates
             );
             tracing::subscriber::set_global_default(collector)?;
         } else {

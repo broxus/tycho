@@ -19,8 +19,10 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+
+tycho-util = { workspace = true }
 
 [lints]
 workspace = true

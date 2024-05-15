@@ -4,7 +4,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use arc_swap::ArcSwapAny;
 use tokio::sync::Notify;
-
 use tycho_block_util::state::*;
 
 use crate::models::{BlockHandle, BriefBlockMeta};
