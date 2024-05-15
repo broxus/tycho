@@ -111,21 +111,7 @@ impl ExecutionManager {
         // TODO check externals is not exist accounts needed ?
         for (account_id, msg) in group {
             let max_lt = self.max_lt.load(Ordering::Acquire);
-            let shard_account = if let Some(a) = self.changed_accounts.get(&account_id) {
-                a.clone()
-            } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
-                ShardAccountStuff::new(account_id, shard_account.clone(), max_lt)?
-            } else {
-                let shard_account = EMPTY_SHARD_ACCOUNT
-                    .get_or_init(|| ShardAccount {
-                        account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
-                        last_trans_hash: Default::default(),
-                        last_trans_lt: 0,
-                    })
-                    .clone();
-                ShardAccountStuff::new(account_id, shard_account, max_lt)?
-            };
-
+            let shard_account = self.get_shard_account_stuff(account_id, max_lt)?;
             futures.push(self.execute_message(account_id, msg, shard_account));
         }
         let now = std::time::Instant::now();
@@ -149,6 +135,28 @@ impl ExecutionManager {
         total_trans_duration.fetch_add(duration, Ordering::Relaxed);
 
         Ok((new_offset, result))
+    }
+
+    pub fn get_shard_account_stuff(
+        &self,
+        account_id: AccountId,
+        max_lt: u64,
+    ) -> Result<ShardAccountStuff> {
+        let shard_account = if let Some(a) = self.changed_accounts.get(&account_id) {
+            a.clone()
+        } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
+            ShardAccountStuff::new(account_id, shard_account.clone(), max_lt)?
+        } else {
+            let shard_account = EMPTY_SHARD_ACCOUNT
+                .get_or_init(|| ShardAccount {
+                    account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
+                    last_trans_hash: Default::default(),
+                    last_trans_lt: 0,
+                })
+                .clone();
+            ShardAccountStuff::new(account_id, shard_account, max_lt)?
+        };
+        Ok(shard_account)
     }
 
     /// execute message
@@ -209,34 +217,19 @@ impl ExecutionManager {
         Ok(())
     }
 
-    /// execute ticktock transaction
-    pub async fn execute_ticktock_transaction(
-        &self,
-        ticktock: TickTock,
-        mut account_root: Cell,
-        last_tr_lt: Arc<AtomicU64>,
-    ) -> Result<Box<Transaction>> {
-        tracing::trace!("execute ticktock transaction");
-        let (config, params) = self.get_execute_params(last_tr_lt)?;
-        tokio::task::spawn_blocking(move || {
-            execute_ticktock_message(ticktock, &mut account_root, params, &config)
-        })
-        .await?
-    }
-
     /// execute special transaction
     pub async fn execute_special_transaction(
-        &self,
-        msg_cell: Cell,
-        mut account_root: Cell,
-        last_tr_lt: Arc<AtomicU64>,
+        &mut self,
+        account_id: AccountId,
+        msg: AsyncMessage,
     ) -> Result<Box<Transaction>> {
-        tracing::trace!("execute ticktock transaction");
-        let (config, params) = self.get_execute_params(last_tr_lt)?;
-        tokio::task::spawn_blocking(move || {
-            execute_ordinary_message(&msg_cell, &mut account_root, params, &config)
-        })
-        .await?
+        tracing::trace!("execute special transaction");
+        let max_lt = self.max_lt.load(Ordering::Acquire);
+        let shard_account = self.get_shard_account_stuff(account_id, max_lt)?;
+        let (transaction, _, shard_account) =
+            self.execute_message(account_id, msg, shard_account).await?;
+        self.update_shard_account(account_id, shard_account)?;
+        transaction
     }
 
     fn get_execute_params(
