@@ -818,7 +818,7 @@ fn new_transaction(
     };
     colator_data
         .in_msgs
-        .set(in_msg_cell.repr_hash(), in_msg.compute_fees()?, in_msg)?;
+        .insert(*in_msg_cell.repr_hash(), in_msg);
     let mut result = vec![];
     for out_msg in transaction.iter_out_msgs() {
         let message = out_msg?;

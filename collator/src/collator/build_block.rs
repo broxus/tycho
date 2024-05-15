@@ -64,8 +64,15 @@ impl CollatorStdImpl {
         // calc value flow
         // TODO: init collation_data.value_flow
         let mut value_flow = collation_data.value_flow.clone();
+
+        let mut in_msgs = InMsgDescr::new();
+        // TODO: use more effective algorithm than iter and set
+        for (msg_id, msg) in collation_data.in_msgs.iter() {
+            in_msgs.set(msg_id, msg.compute_fees()?, msg)?;
+        }
+
         // TODO: init collation_data.in_msgs
-        value_flow.imported = collation_data.in_msgs.root_extra().value_imported.clone();
+        value_flow.imported = in_msgs.root_extra().value_imported.clone();
         // TODO: init collation_data.out_msgs
         let mut out_msgs = OutMsgDescr::new();
         // TODO: use more effective algorithm than iter and set
@@ -76,7 +83,7 @@ impl CollatorStdImpl {
         value_flow.fees_collected = account_blocks.root_extra().clone();
         value_flow
             .fees_collected
-            .try_add_assign_tokens(collation_data.in_msgs.root_extra().fees_collected)?;
+            .try_add_assign_tokens(in_msgs.root_extra().fees_collected)?;
         value_flow
             .fees_collected
             .try_add_assign(&value_flow.fees_imported)?;
@@ -194,7 +201,7 @@ impl CollatorStdImpl {
 
         // calc block extra
         let mut new_block_extra = BlockExtra {
-            in_msg_description: Lazy::new(&collation_data.in_msgs)?,
+            in_msg_description: Lazy::new(&in_msgs)?,
             out_msg_description: Lazy::new(&out_msgs)?,
             account_blocks: Lazy::new(&account_blocks)?,
             rand_seed: collation_data.rand_seed,
