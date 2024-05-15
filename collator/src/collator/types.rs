@@ -323,7 +323,7 @@ pub(super) struct BlockCollationData {
     pub max_lt: u64,
 
     pub in_msgs: InMsgDescr,
-    pub out_msgs: OutMsgDescr,
+    pub out_msgs: BTreeMap<HashBytes, OutMsg>,
 
     pub processed_upto: ProcessedUptoInfo,
     pub externals_reading_started: bool,
