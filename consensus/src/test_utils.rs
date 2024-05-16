@@ -29,6 +29,7 @@ pub fn genesis() -> Arc<Point> {
         witness: Default::default(),
         anchor_trigger: Link::ToSelf,
         anchor_proof: Link::ToSelf,
+        anchor_time: UnixTime::from_millis(GENESIS_MILLIS),
     })
 }
 
