@@ -123,14 +123,9 @@ impl CollatorStdImpl {
 
         // execute tick transaction and special transactions (mint, recover)
         if collation_data.block_id_short.shard.is_masterchain() {
-            self.create_ticktock_transactions(
-                false,
-                mc_data,
-                &mut collation_data,
-                &mut exec_manager,
-            )
-            .await?;
-            self.create_special_transactions(mc_data, &mut collation_data, &mut exec_manager)
+            self.create_ticktock_transactions(false, &mut collation_data, &mut exec_manager)
+                .await?;
+            self.create_special_transactions(&mut collation_data, &mut exec_manager)
                 .await?;
         }
 
@@ -271,7 +266,8 @@ impl CollatorStdImpl {
 
         // execute tock transaction
         if collation_data.block_id_short.shard.is_masterchain() {
-            //self.create_ticktock_transactions(true, mc_data, prev_data, collator_data, &mut exec_manager).await?;
+            self.create_ticktock_transactions(true, &mut collation_data, &mut exec_manager)
+                .await?;
         }
 
         // build block candidate and new state
@@ -587,13 +583,16 @@ impl CollatorStdImpl {
     /// Create special transactions for the collator
     async fn create_special_transactions(
         &self,
-        mc_data: &McData,
         collator_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         tracing::trace!("{}: create_special_transactions", self.collator_descr);
 
-        let account_id = mc_data.config().get_fee_collector_address()?;
+        let account_id = self
+            .working_state()
+            .mc_data
+            .config()
+            .get_fee_collector_address()?;
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),
@@ -604,7 +603,7 @@ impl CollatorStdImpl {
         .await?;
         // self.check_stop_flag()?;
 
-        let account_id = mc_data.config().get_minter_address()?;
+        let account_id = self.working_state().mc_data.config().get_minter_address()?;
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.minted.clone(),
@@ -665,13 +664,16 @@ impl CollatorStdImpl {
     async fn create_ticktock_transactions(
         &self,
         tock: bool,
-        mc_data: &McData,
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         tracing::trace!("{}: create_ticktock_transactions", self.collator_descr);
-        let config_address = mc_data.config().address;
-        let fundamental_dict = mc_data.config().get_fundamental_addresses()?;
+        let config_address = self.working_state().mc_data.config().address;
+        let fundamental_dict = self
+            .working_state()
+            .mc_data
+            .config()
+            .get_fundamental_addresses()?;
         for account in fundamental_dict.keys() {
             self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
                 .await?;
