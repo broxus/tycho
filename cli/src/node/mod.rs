@@ -18,7 +18,8 @@ use tycho_collator::internal_queue::persistent::persistent_state::{
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterFactoryStd;
+use tycho_collator::mempool::{MempoolAdapterFactoryStd, MempoolAdapterStubImpl};
+use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
 use tycho_collator::validator::client::retry::BackoffConfig;
@@ -445,12 +446,14 @@ impl Node {
         let state_storage = self.storage.shard_state_storage();
 
         for state in to_import {
-            let (handle, status) =
-                handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
+            let (handle, status) = handle_storage.create_or_load_handle(
+                state.block_id(),
+                BlockMetaData {
                     is_key_block: true,
                     gen_utime,
                     mc_ref_seqno: 0,
-                });
+                },
+            );
 
             let stored = state_storage
                 .store_state(&handle, &state)
@@ -518,11 +521,7 @@ impl Node {
             collation_config,
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
-            MempoolAdapterFactoryStd::new(
-                self.keypair.clone(),
-                self.dht_client.clone(),
-                self.overlay_service.clone(),
-            ),
+            MempoolAdapterStubImpl::new,
             ValidatorStdImplFactory {
                 network: ValidatorNetwork {
                     overlay_service: self.overlay_service.clone(),

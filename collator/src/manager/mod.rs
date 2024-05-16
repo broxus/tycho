@@ -158,7 +158,7 @@ where
 
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
-            process_block_candidate,
+            process_collated_block_candidate,
             collation_result
         ))
         .await
@@ -824,7 +824,7 @@ where
     /// 4. If master block then update last master block chain time
     /// 5. Notify mempool about new master block (it may perform gc or nodes rotation)
     /// 6. Execute master block processing routines like for the block from bc
-    pub async fn process_block_candidate(
+    pub async fn process_collated_block_candidate(
         &mut self,
         collation_result: BlockCollationResult,
     ) -> Result<()> {
@@ -878,20 +878,12 @@ where
                 candidate_id.as_short_id(),
                 candidate_chain_time,
             );
-            if let Some(next_mc_block_chain_time) = self
-                .update_last_collated_chain_time_and_check_mc_block_interval(
-                    candidate_id.shard,
-                    candidate_chain_time,
-                )
-            {
-                self.enqueue_mc_block_collation(next_mc_block_chain_time, Some(candidate_id))
-                    .await?;
-            } else {
-                // if do not need to collate master block then can continue to collate shard blocks
-                // otherwise next shard block will be scheduled after master block collation
-                self.enqueue_try_collate_next_shard_block(&candidate_id.shard)
-                    .await?;
-            }
+            self.check_collate_mc_block(
+                candidate_id.shard,
+                candidate_chain_time,
+                Some(candidate_id),
+            )
+            .await?;
         } else {
             // store last master block chain time
             tracing::debug!(
@@ -940,10 +932,7 @@ where
             .await
     }
 
-    /// 1. Store last collated chain time from anchor and check if master block interval elapsed in each shard
-    /// 2. If true, schedule master block collation
-    /// 3. If no, schedule next shard block collation attempt
-    pub async fn process_empty_skipped_anchor(
+    async fn process_empty_skipped_anchor(
         &mut self,
         shard_id: ShardIdent,
         anchor: Arc<MempoolAnchor>,
@@ -954,13 +943,23 @@ where
             anchor.chain_time(),
             anchor.id(),
         );
-        if let Some(next_mc_block_chain_time) = self
-            .update_last_collated_chain_time_and_check_mc_block_interval(
-                shard_id,
-                anchor.chain_time(),
-            )
+        self.check_collate_mc_block(shard_id, anchor.chain_time(), None)
+            .await
+    }
+
+    /// 1. Store last collated chain time from anchor and check if master block interval elapsed in each shard
+    /// 2. If true, schedule master block collation
+    /// 3. If no, schedule next shard block collation attempt
+    async fn check_collate_mc_block(
+        &mut self,
+        shard_id: ShardIdent,
+        chain_time: u64,
+        trigger_shard_block_id: Option<BlockId>,
+    ) -> Result<()> {
+        if let Some(next_mc_block_chain_time) =
+            self.update_last_collated_chain_time_and_check_mc_block_interval(shard_id, chain_time)
         {
-            self.enqueue_mc_block_collation(next_mc_block_chain_time, None)
+            self.enqueue_mc_block_collation(next_mc_block_chain_time, trigger_shard_block_id)
                 .await?;
         } else {
             // if do not need to collate master block then run next attempt to collate shard block
