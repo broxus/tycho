@@ -31,6 +31,8 @@ impl AnchorStage {
         else {
             panic!("selecting a leader from an empty validator set")
         };
+        // the leader cannot produce three points in a row, so we have an undefined leader,
+        // rather than an intentional leaderless support round - all represented by `None`
         if !current_peers.contains_key(leader) {
             return None;
         };

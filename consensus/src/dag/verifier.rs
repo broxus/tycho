@@ -9,7 +9,7 @@ use crate::dag::{DagRound, WeakDagRound};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    DagPoint, Digest, Link, Location, NodeCount, Point, PointId, Ugly, ValidPoint,
+    DagPoint, Digest, Link, LinkField, Location, NodeCount, Point, PointId, Ugly, ValidPoint,
 };
 
 // Note on equivocation.
@@ -115,20 +115,20 @@ impl Verifier {
         dependencies: &mut JoinSet<DagPoint>,
     ) -> bool {
         let mut links = vec![
-            (point.anchor_proof_id(), false),
-            (point.anchor_trigger_id(), true),
+            (point.anchor_id(LinkField::Proof), LinkField::Proof),
+            (point.anchor_id(LinkField::Trigger), LinkField::Trigger),
         ];
         let mut linked_with_round = Vec::with_capacity(2);
         let mut dag_round = dag_round.clone();
         while !links.is_empty() {
-            links.retain(|(linked, is_trigger)| {
+            links.retain(|(linked, link_field)| {
                 let found = &linked.location.round == dag_round.round();
                 if found {
-                    match (&dag_round.anchor_stage(), is_trigger) {
+                    match (&dag_round.anchor_stage(), link_field) {
                         // AnchorStage::Candidate(_) requires nothing special
-                        (Some(AnchorStage::Proof { leader, .. }), false)
+                        (Some(AnchorStage::Proof { leader, .. }), LinkField::Proof)
                             if leader == linked.location.author => {}
-                        (Some(AnchorStage::Trigger { leader, .. }), true)
+                        (Some(AnchorStage::Trigger { leader, .. }), LinkField::Trigger)
                             if leader == linked.location.author => {}
                         _ => return false, // link not to round's leader
                     }
@@ -233,10 +233,10 @@ impl Verifier {
         // Invalid dependency is the author's fault.
         let mut is_suspicious = false;
         // last is meant to be the last among all dependencies
-        let anchor_trigger_id = point.anchor_trigger_id();
-        let anchor_proof_id = point.anchor_proof_id();
-        let anchor_trigger_through = point.anchor_trigger_through();
-        let anchor_proof_through = point.anchor_proof_through();
+        let anchor_trigger_id = point.anchor_id(LinkField::Trigger);
+        let anchor_proof_id = point.anchor_id(LinkField::Proof);
+        let anchor_trigger_link_id = point.anchor_link_id(LinkField::Trigger);
+        let anchor_proof_link_id = point.anchor_link_id(LinkField::Proof);
         while let Some(res) = dependencies.join_next().await {
             match res {
                 Ok(DagPoint::Trusted(valid) | DagPoint::Suspicious(valid)) => {
@@ -252,19 +252,21 @@ impl Verifier {
                             None => return DagPoint::Invalid(point.clone()),
                         }
                     } // else: valid dependency
-                    if valid.point.anchor_trigger_round() > anchor_trigger_id.location.round
-                        || valid.point.anchor_proof_round() > anchor_proof_id.location.round
+                    if valid.point.anchor_round(LinkField::Trigger)
+                        > anchor_trigger_id.location.round
+                        || valid.point.anchor_round(LinkField::Proof)
+                            > anchor_proof_id.location.round
                     {
                         // did not actualize the chain
                         return DagPoint::Invalid(point.clone());
                     }
                     let valid_point_id = valid.point.id();
                     if ({
-                        valid_point_id == anchor_trigger_through
-                            && valid.point.anchor_trigger_id() != anchor_trigger_id
+                        valid_point_id == anchor_trigger_link_id
+                            && valid.point.anchor_id(LinkField::Trigger) != anchor_trigger_id
                     }) || ({
-                        valid_point_id == anchor_proof_through
-                            && valid.point.anchor_proof_id() != anchor_proof_id
+                        valid_point_id == anchor_proof_link_id
+                            && valid.point.anchor_id(LinkField::Proof) != anchor_proof_id
                     }) {
                         // path does not lead to destination
                         return DagPoint::Invalid(point.clone());

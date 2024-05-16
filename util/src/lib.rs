@@ -34,12 +34,6 @@ mod util {
     pub(crate) mod wake_list;
 }
 
-pub mod misc {
-
-    pub use identity::identity;
-    mod identity;
-}
-
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;
 pub type FastDashSet<K> = dashmap::DashSet<K, ahash::RandomState>;
 pub type FastHashMap<K, V> = HashMap<K, V, ahash::RandomState>;

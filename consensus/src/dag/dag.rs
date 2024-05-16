@@ -12,7 +12,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{Point, Round, Ugly, ValidPoint};
+use crate::models::{LinkField, Point, Round, Ugly, ValidPoint};
 
 #[derive(Clone)]
 pub struct Dag {
@@ -125,7 +125,7 @@ impl Dag {
     ) -> Vec<(ValidPoint, DagRound)> {
         assert_eq!(
             last_trigger.point.prev_id(),
-            Some(last_trigger.point.anchor_proof_id()),
+            Some(last_trigger.point.anchor_id(LinkField::Proof)),
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         let mut anchor_stack = Vec::new();
@@ -181,7 +181,7 @@ impl Dag {
                     anchor_stack.push((anchor.clone(), anchor_round.clone()));
 
                     let Some(next_proof) = proof_round
-                        .valid_point(&anchor.point.anchor_proof_id())
+                        .valid_point(&anchor.point.anchor_id(LinkField::Proof))
                         .await
                     else {
                         break;
