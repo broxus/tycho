@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
 use everscale_types::models::*;
+use weedb::{ColumnFamily, Table};
 
 use crate::db::*;
 use crate::models::*;
@@ -8,11 +7,11 @@ use crate::util::*;
 
 /// Stores relations between blocks
 pub struct BlockConnectionStorage {
-    db: Arc<Db>,
+    db: BaseDb,
 }
 
 impl BlockConnectionStorage {
-    pub fn new(db: Arc<Db>) -> Self {
+    pub fn new(db: BaseDb) -> Self {
         Self { db }
     }
 
@@ -63,7 +62,7 @@ impl BlockConnectionStorage {
                 id.to_vec(),
             );
 
-            self.db.raw().write(write_batch).unwrap();
+            self.db.rocksdb().write(write_batch).unwrap();
         } else {
             self.db
                 .block_handles

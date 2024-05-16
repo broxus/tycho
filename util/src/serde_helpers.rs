@@ -202,6 +202,12 @@ impl<S> StrVisitor<S> {
     }
 }
 
+impl<S> Default for StrVisitor<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'de, S: FromStr> Visitor<'de> for StrVisitor<S>
 where
     <S as FromStr>::Err: std::fmt::Display,

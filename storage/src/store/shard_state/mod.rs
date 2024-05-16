@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;
+use weedb::rocksdb;
 
 use self::cell_storage::*;
 use self::store_state_raw::StoreStateRaw;
@@ -23,7 +24,7 @@ mod store_state_raw;
 const DOWNLOADS_DIR: &str = "downloads";
 
 pub struct ShardStateStorage {
-    db: Arc<Db>,
+    db: BaseDb,
     downloads_dir: FileDb,
 
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -38,7 +39,7 @@ pub struct ShardStateStorage {
 
 impl ShardStateStorage {
     pub fn new(
-        db: Arc<Db>,
+        db: BaseDb,
         files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_storage: Arc<BlockStorage>,
@@ -98,7 +99,7 @@ impl ShardStateStorage {
 
         let _gc_lock = self.gc_lock.lock().await;
 
-        let raw_db = self.db.raw().clone();
+        let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();
         let block_handle_storage = self.block_handle_storage.clone();
@@ -168,8 +169,6 @@ impl ShardStateStorage {
     }
 
     pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<TopBlocks> {
-        let _compaction_guard = self.db.delay_compaction().await;
-
         // Compute recent block ids for the specified masterchain seqno
         let top_blocks = self
             .compute_recent_blocks(mc_seqno)
@@ -182,7 +181,7 @@ impl ShardStateStorage {
         );
         let instant = Instant::now();
 
-        let raw = self.db.raw();
+        let raw = self.db.rocksdb();
 
         // Manually get required column factory and r/w options
         let snapshot = raw.snapshot();

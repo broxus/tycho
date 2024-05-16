@@ -3049,9 +3049,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.2.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c45cc21a50d70895ffc05d8516f43c99b052e24db18482d6622b43cbb307ecf2"
+checksum = "cccfb44112e5a07a3b19799d0d0436e5bd40f4401cad73ffaa4b2199cdffc75f"
 dependencies = [
  "librocksdb-sys",
  "metrics",

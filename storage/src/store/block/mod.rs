@@ -17,6 +17,7 @@ use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
 use tycho_util::FastHashMap;
+use weedb::rocksdb;
 
 use crate::db::*;
 use crate::models::*;
@@ -24,7 +25,7 @@ use crate::util::*;
 use crate::{BlockConnection, BlockConnectionStorage, BlockHandleStorage, HandleCreationStatus};
 
 pub struct BlockStorage {
-    db: Arc<Db>,
+    db: BaseDb,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
@@ -34,7 +35,7 @@ pub struct BlockStorage {
 
 impl BlockStorage {
     pub fn new(
-        db: Arc<Db>,
+        db: BaseDb,
         block_handle_storage: Arc<BlockHandleStorage>,
         block_connection_storage: Arc<BlockConnectionStorage>,
     ) -> Result<Self> {
@@ -338,7 +339,7 @@ impl BlockStorage {
             );
         }
         // 5. Execute transaction
-        self.db.raw().write(batch)?;
+        self.db.rocksdb().write(batch)?;
 
         // Block will be removed after blocks gc
 
@@ -400,7 +401,7 @@ impl BlockStorage {
             );
         }
 
-        self.db.raw().write(batch)?;
+        self.db.rocksdb().write(batch)?;
 
         Ok(())
     }
@@ -490,8 +491,6 @@ impl BlockStorage {
         max_blocks_per_batch: Option<usize>,
         gc_type: BlocksGcKind,
     ) -> Result<()> {
-        let _compaction_guard = self.db.delay_compaction().await;
-
         // Find target block
         let target_block = match gc_type {
             BlocksGcKind::BeforePreviousKeyBlock => self
@@ -549,8 +548,6 @@ impl BlockStorage {
     }
 
     pub async fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
-        let _compaction_guard = self.db.delay_compaction().await;
-
         let mut archive_ids = self.archive_ids.write();
 
         let retained_ids = match archive_ids.iter().rev().find(|&id| *id < until_id).cloned() {
@@ -591,7 +588,7 @@ impl BlockStorage {
         let archives_cf = self.db.archives.cf();
         let write_options = self.db.archives.write_config();
 
-        self.db.raw().delete_range_cf_opt(
+        self.db.rocksdb().delete_range_cf_opt(
             &archives_cf,
             [0; 4],
             until_id.to_be_bytes(),
@@ -793,13 +790,13 @@ pub struct StoreBlockResult {
 }
 
 fn remove_blocks(
-    db: Arc<Db>,
+    db: BaseDb,
     max_blocks_per_batch: Option<usize>,
     top_blocks: &TopBlocks,
 ) -> Result<BlockGcStats> {
     let mut stats = BlockGcStats::default();
 
-    let raw = db.raw().as_ref();
+    let raw = db.rocksdb().as_ref();
     let package_entries_cf = db.package_entries.cf();
     let block_handles_cf = db.block_handles.cf();
     let key_blocks_cf = db.key_blocks.cf();

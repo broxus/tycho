@@ -9,17 +9,17 @@ use everscale_types::cell::{CellDescriptor, HashBytes};
 use smallvec::SmallVec;
 use tycho_util::FastHashMap;
 
-use crate::db::{Db, FileDb, TempFile};
+use crate::db::{BaseDb, FileDb, TempFile};
 
 pub struct CellWriter<'a> {
-    db: &'a Db,
+    db: &'a BaseDb,
     states_dir: &'a FileDb,
     block_root_hash: &'a HashBytes,
 }
 
 impl<'a> CellWriter<'a> {
     #[allow(unused)]
-    pub fn new(db: &'a Db, states_dir: &'a FileDb, block_root_hash: &'a HashBytes) -> Self {
+    pub fn new(db: &'a BaseDb, states_dir: &'a FileDb, block_root_hash: &'a HashBytes) -> Self {
         Self {
             db,
             states_dir,
@@ -161,7 +161,7 @@ impl<'a> CellWriter<'a> {
             .truncate(true)
             .open_as_temp()?;
 
-        let raw = self.db.raw().as_ref();
+        let raw = self.db.rocksdb().as_ref();
         let read_options = self.db.cells.read_config();
         let cf = self.db.cells.cf();
 

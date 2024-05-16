@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use weedb::rocksdb;
 
 pub use self::config::*;
 pub use self::db::*;
@@ -31,32 +32,83 @@ impl Storage {
     pub fn new(config: StorageConfig) -> Result<Self> {
         let root = FileDb::new(&config.root_dir)?;
 
-        let files_db = root.create_subdir(FILES_SUBDIR)?;
-        let kv_db = Db::open(config.root_dir.join(DB_SUBDIR), config.db_config)
-            .context("failed to open a rocksdb")?;
+        let file_db = root.create_subdir(FILES_SUBDIR)?;
 
-        let block_handle_storage = Arc::new(BlockHandleStorage::new(kv_db.clone()));
-        let block_connection_storage = Arc::new(BlockConnectionStorage::new(kv_db.clone()));
+        let caches = weedb::Caches::with_capacity(config.rocksdb_lru_capacity.as_u64() as _);
+
+        let threads = std::thread::available_parallelism()?.get();
+        let fdlimit = match fdlimit::raise_fd_limit() {
+            // New fd limit
+            Ok(fdlimit::Outcome::LimitRaised { to, .. }) => to,
+            // Current soft limit
+            _ => {
+                rlimit::getrlimit(rlimit::Resource::NOFILE)
+                    .unwrap_or((256, 0))
+                    .0
+            }
+        };
+
+        let base_db = BaseDb::builder_prepared(config.root_dir.join(DB_SUBDIR), caches)
+            .with_metrics_enabled(config.rocksdb_enable_metrics)
+            .with_options(|opts, _| {
+                opts.set_paranoid_checks(false);
+
+                // bigger base level size - less compactions
+                // parallel compactions finishes faster - less write stalls
+
+                opts.set_max_subcompactions(threads as u32 / 2);
+
+                // io
+                opts.set_max_open_files(fdlimit as i32);
+
+                // logging
+                opts.set_log_level(rocksdb::LogLevel::Info);
+                opts.set_keep_log_file_num(2);
+                opts.set_recycle_log_file_num(2);
+
+                // cf
+                opts.create_if_missing(true);
+                opts.create_missing_column_families(true);
+
+                // cpu
+                opts.set_max_background_jobs(std::cmp::max((threads as i32) / 2, 2));
+                opts.increase_parallelism(threads as i32);
+
+                opts.set_allow_concurrent_memtable_write(false);
+                opts.set_enable_write_thread_adaptive_yield(true);
+
+                // debug
+                // NOTE: could slower everything a bit in some cloud environments.
+                //       See: https://github.com/facebook/rocksdb/issues/3889
+                //
+                // opts.enable_statistics();
+                // opts.set_stats_dump_period_sec(600);
+            })
+            .build()?;
+
+        let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
+        let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
         let runtime_storage = Arc::new(RuntimeStorage::new(block_handle_storage.clone()));
         let block_storage = Arc::new(BlockStorage::new(
-            kv_db.clone(),
+            base_db.clone(),
             block_handle_storage.clone(),
             block_connection_storage.clone(),
         )?);
         let shard_state_storage = ShardStateStorage::new(
-            kv_db.clone(),
-            &files_db,
+            base_db.clone(),
+            &file_db,
             block_handle_storage.clone(),
             block_storage.clone(),
             config.cells_cache_size.as_u64(),
         )?;
         let persistent_state_storage =
-            PersistentStateStorage::new(kv_db.clone(), &files_db, block_handle_storage.clone())?;
-        let node_state_storage = NodeStateStorage::new(kv_db);
+            PersistentStateStorage::new(base_db.clone(), &file_db, block_handle_storage.clone())?;
+        let node_state_storage = NodeStateStorage::new(base_db.clone());
 
         Ok(Self {
             inner: Arc::new(Inner {
                 root,
+                base_db,
                 block_handle_storage,
                 block_storage,
                 shard_state_storage,
@@ -81,6 +133,10 @@ impl Storage {
 
     pub fn root(&self) -> &FileDb {
         &self.inner.root
+    }
+
+    pub fn base_db(&self) -> &BaseDb {
+        &self.inner.base_db
     }
 
     pub fn runtime_storage(&self) -> &RuntimeStorage {
@@ -114,6 +170,8 @@ impl Storage {
 
 struct Inner {
     root: FileDb,
+    base_db: BaseDb,
+
     runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,

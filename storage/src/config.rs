@@ -3,8 +3,6 @@ use std::path::{Path, PathBuf};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
-use crate::db::DbConfig;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct StorageConfig {
@@ -13,13 +11,20 @@ pub struct StorageConfig {
     /// Default: `./db`.
     pub root_dir: PathBuf,
 
+    /// Whether to enable RocksDB metrics.
+    ///
+    /// Default: `false`.
+    pub rocksdb_enable_metrics: bool,
+
+    /// RocksDB LRU cache capacity.
+    ///
+    /// Default: calculated based on the available memory.
+    pub rocksdb_lru_capacity: ByteSize,
+
     /// Runtime cells cache size.
     ///
     /// Default: calculated based on the available memory.
     pub cells_cache_size: ByteSize,
-
-    /// RocksDB configuration.
-    pub db_config: DbConfig,
 }
 
 impl StorageConfig {
@@ -27,10 +32,9 @@ impl StorageConfig {
     pub fn new_potato(path: &Path) -> Self {
         Self {
             root_dir: path.to_owned(),
+            rocksdb_lru_capacity: ByteSize::kb(1024),
             cells_cache_size: ByteSize::kb(1024),
-            db_config: DbConfig {
-                rocksdb_lru_capacity: ByteSize::kb(1024),
-            },
+            rocksdb_enable_metrics: false,
         }
     }
 }
@@ -77,9 +81,8 @@ impl Default for StorageConfig {
         Self {
             root_dir: PathBuf::from("./db"),
             cells_cache_size,
-            db_config: DbConfig {
-                rocksdb_lru_capacity,
-            },
+            rocksdb_lru_capacity,
+            rocksdb_enable_metrics: false,
         }
     }
 }

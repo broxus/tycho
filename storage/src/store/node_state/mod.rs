@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use everscale_types::models::*;
 use parking_lot::Mutex;
 
@@ -7,13 +5,13 @@ use crate::db::*;
 use crate::util::*;
 
 pub struct NodeStateStorage {
-    db: Arc<Db>,
+    db: BaseDb,
     last_mc_block_id: BlockIdCache,
     init_mc_block_id: BlockIdCache,
 }
 
 impl NodeStateStorage {
-    pub fn new(db: Arc<Db>) -> Self {
+    pub fn new(db: BaseDb) -> Self {
         Self {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
@@ -39,7 +37,7 @@ impl NodeStateStorage {
 
     #[inline(always)]
     fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
-        let node_states = &self.db.node_states;
+        let node_states = &self.db.state;
         node_states
             .insert(key, write_block_id_le(block_id))
             .unwrap();
@@ -52,7 +50,7 @@ impl NodeStateStorage {
             return Some(*cached);
         }
 
-        let value = read_block_id_le(&self.db.node_states.get(key).unwrap()?);
+        let value = read_block_id_le(&self.db.state.get(key).unwrap()?);
         *cache.lock() = Some(value);
         Some(value)
     }
