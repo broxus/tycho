@@ -114,7 +114,7 @@ impl CollatorStdImpl {
             collation_data.start_lt,
             collation_data.max_lt,
             collation_data.rand_seed,
-            mc_data.mc_state_stuff().state().libraries.clone(),
+            mc_data.libraries().clone(),
             mc_data.config().clone(),
             self.config.supported_block_version,
             group_size as u32,
@@ -597,7 +597,7 @@ impl CollatorStdImpl {
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.recovered.clone(),
-            AsyncMessage::Recover,
+            |_, msg_cell| AsyncMessage::Recover(msg_cell),
             collator_data,
             exec_manager,
         )
@@ -608,7 +608,7 @@ impl CollatorStdImpl {
         self.create_special_transaction(
             account_id,
             collator_data.value_flow.minted.clone(),
-            AsyncMessage::Mint,
+            |_, msg_cell| AsyncMessage::Mint(msg_cell),
             collator_data,
             exec_manager,
         )

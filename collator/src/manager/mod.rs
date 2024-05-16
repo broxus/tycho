@@ -831,21 +831,21 @@ where
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Start processing block candidate (id: {}, chain_time: {})...",
-            collation_result.candidate.block_id().as_short_id(),
-            collation_result.candidate.chain_time(),
+            collation_result.candidate.block_id.as_short_id(),
+            collation_result.candidate.chain_time,
         );
 
         // find session related to this block by shard
         let session_info = self
             .active_collation_sessions
-            .get(collation_result.candidate.shard_id())
+            .get(&collation_result.candidate.block_id.shard)
             .ok_or(anyhow!(
                 "There is no active collation session for the shard that block belongs to"
             ))?
             .clone();
 
-        let candidate_chain_time = collation_result.candidate.chain_time();
-        let candidate_id = *collation_result.candidate.block_id();
+        let candidate_chain_time = collation_result.candidate.chain_time;
+        let candidate_id = collation_result.candidate.block_id;
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -1156,7 +1156,7 @@ where
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
-        let candidate_id = *candidate.block_id();
+        let candidate_id = candidate.block_id;
         let block_container = BlockCandidateContainer::new(candidate);
         if candidate_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
@@ -1507,7 +1507,7 @@ where
                         tracing::warn!(
                             target: tracing_targets::COLLATION_MANAGER,
                             "Block ({}) sync: was not accepted. err: {:?}",
-                            block_to_send.entry.candidate.block_id().as_short_id(),
+                            block_to_send.entry.candidate.block_id.as_short_id(),
                             err,
                         );
                         should_restore_blocks_in_cache = true;
@@ -1516,7 +1516,7 @@ where
                         tracing::debug!(
                             target: tracing_targets::COLLATION_MANAGER,
                             "Block ({}) sync: was successfully sent to sync",
-                            block_to_send.entry.candidate.block_id().as_short_id(),
+                            block_to_send.entry.candidate.block_id.as_short_id(),
                         );
                         block_to_send.send_sync_status = SendSyncStatus::Sent;
                         sent_blocks.push(block_to_send);
@@ -1530,13 +1530,13 @@ where
             for sent_block in sent_blocks.iter() {
                 // TODO: handle if diff does not exist
                 if let Err(err) = mq_adapter
-                    .commit_diff(&sent_block.entry.candidate.block_id().as_short_id())
+                    .commit_diff(&sent_block.entry.candidate.block_id.as_short_id())
                     .await
                 {
                     tracing::warn!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block ({}) sync: error committing message queue diff: {:?}",
-                        sent_block.entry.candidate.block_id().as_short_id(),
+                        sent_block.entry.candidate.block_id.as_short_id(),
                         err,
                     );
                     should_restore_blocks_in_cache = true;
@@ -1545,7 +1545,7 @@ where
                     tracing::debug!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block ({}) sync: message queue diff was committed",
-                        sent_block.entry.candidate.block_id().as_short_id(),
+                        sent_block.entry.candidate.block_id.as_short_id(),
                     );
                 }
             }

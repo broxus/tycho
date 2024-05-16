@@ -5,8 +5,8 @@ use tokio::sync::oneshot;
 pub struct TaskDesc<F: ?Sized, R> {
     id: u64,
     descr: String,
-    closure: Box<F>,                      // closure for execution
-    creation_time: std::time::SystemTime, // time of task creation
+    closure: Box<F>,                       // closure for execution
+    _creation_time: std::time::SystemTime, // time of task creation
     responder: Option<oneshot::Sender<R>>,
 }
 
@@ -21,7 +21,7 @@ impl<F: ?Sized, R> TaskDesc<F, R> {
             id,
             descr: descr.into(),
             closure,
-            creation_time: std::time::SystemTime::now(),
+            _creation_time: std::time::SystemTime::now(),
             responder: None,
         }
     }
@@ -35,7 +35,7 @@ impl<F: ?Sized, R> TaskDesc<F, R> {
             id,
             descr: descr.into(),
             closure,
-            creation_time: std::time::SystemTime::now(),
+            _creation_time: std::time::SystemTime::now(),
             responder: Some(sender),
         };
         (task, receiver)
@@ -81,9 +81,11 @@ impl<R> TaskResponder<R> for Option<oneshot::Sender<R>> {
     }
 }
 
+#[allow(unused)]
 pub struct TaskResponseReceiver<R> {
     inner_receiver: oneshot::Receiver<anyhow::Result<R>>,
 }
+#[allow(unused)]
 impl<R> TaskResponseReceiver<R>
 where
     R: Send + 'static,
@@ -130,6 +132,7 @@ where
     }
 }
 
+#[allow(unused)]
 pub struct TaskResponseReceiverWithConvert<R, T>
 where
     T: TryFrom<R>,
@@ -137,6 +140,7 @@ where
     _marker_t: std::marker::PhantomData<T>,
     inner_receiver: oneshot::Receiver<anyhow::Result<R>>,
 }
+#[allow(unused)]
 impl<R, T> TaskResponseReceiverWithConvert<R, T>
 where
     R: Send + 'static,

@@ -55,8 +55,8 @@ pub struct BlockCandidateContainer {
 
 impl BlockCandidateContainer {
     pub fn new(candidate: BlockCandidate) -> Self {
-        let block_id = *candidate.block_id();
-        let key = candidate.block_id().as_short_id();
+        let block_id = candidate.block_id;
+        let key = candidate.block_id.as_short_id();
         let entry = BlockCandidateEntry {
             key,
             candidate,
@@ -68,13 +68,13 @@ impl BlockCandidateContainer {
             block_id,
             prev_blocks_keys: entry
                 .candidate
-                .prev_blocks_ids()
+                .prev_blocks_ids
                 .iter()
                 .map(|id| id.as_short_id())
                 .collect(),
             top_shard_blocks_keys: entry
                 .candidate
-                .top_shard_blocks_ids()
+                .top_shard_blocks_ids
                 .iter()
                 .map(|id| id.as_short_id())
                 .collect(),
@@ -174,7 +174,7 @@ impl BlockCandidateContainer {
             .entry
             .as_ref()
             .ok_or_else(|| anyhow!("`entry` was extracted"))?;
-        Ok(entry.candidate.block())
+        Ok(&entry.candidate.block)
     }
 }
 

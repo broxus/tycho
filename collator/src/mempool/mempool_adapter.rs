@@ -18,10 +18,6 @@ use crate::mempool::types::ExternalMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
 
-#[cfg(test)]
-#[path = "tests/mempool_adapter_tests.rs"]
-pub(super) mod tests;
-
 // FACTORY
 
 pub trait MempoolAdapterFactory {

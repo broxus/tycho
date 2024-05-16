@@ -171,8 +171,8 @@ impl ExecutionManager {
         let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
             let mut account_root = shard_account.account_root.clone();
             let transaction = match &new_msg {
-                AsyncMessage::Recover(_, new_msg_cell)
-                | AsyncMessage::Mint(_, new_msg_cell)
+                AsyncMessage::Recover(new_msg_cell)
+                | AsyncMessage::Mint(new_msg_cell)
                 | AsyncMessage::Ext(_, new_msg_cell)
                 | AsyncMessage::Int(_, new_msg_cell, _)
                 | AsyncMessage::NewInt(_, new_msg_cell) => {

@@ -15,7 +15,7 @@ enum CalcSplitMergeStep<'a> {
         Option<Vec<&'a ShardIdent>>,
         Option<SplitMergeAction>,
     ),
-    DoAction(ShardIdent, Vec<&'a ShardIdent>, SplitMergeAction),
+    DoAction(Vec<&'a ShardIdent>, SplitMergeAction),
 }
 
 /// Calculate the list of split/merge actions that are needed
@@ -68,13 +68,12 @@ pub fn calc_split_merge_actions(
                         result_actions.push(action.clone());
                     }
                     planned_actions.push_back(CalcSplitMergeStep::DoAction(
-                        from_shard_id,
                         child_to_shards,
                         SplitMergeAction::Split(from_shard_id),
                     ));
                 }
             }
-            CalcSplitMergeStep::DoAction(_, child_to_shards, action) => match action {
+            CalcSplitMergeStep::DoAction(child_to_shards, action) => match action {
                 SplitMergeAction::Split(from_shard_id) => {
                     let (l_shard, r_shard) = from_shard_id.split().ok_or_else(|| {
                         anyhow!(

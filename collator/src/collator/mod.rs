@@ -9,7 +9,7 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use self::types::{McData, PrevData, WorkingState};
 use crate::collator::queue_adapter::MessageQueueAdapter;
-use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
+use crate::internal_queue::iterator::QueueIterator;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
@@ -283,15 +283,14 @@ impl CollatorStdImpl {
         let (mc_state, prev_states) = Self::load_init_states(
             self.state_node_adapter.clone(),
             self.shard_id,
-            prev_blocks_ids.clone(),
+            prev_blocks_ids,
             mc_state,
         )
         .await?;
 
         // build, validate and set working state
         tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): building working state...", self.collator_descr());
-        let working_state =
-            Self::build_and_validate_working_state(mc_state, prev_states, prev_blocks_ids.clone())?;
+        let working_state = Self::build_and_validate_working_state(mc_state, prev_states)?;
         self.set_working_state(working_state);
 
         // master block collations will be called by the collation manager directly
@@ -405,7 +404,6 @@ impl CollatorStdImpl {
     fn build_and_validate_working_state(
         mc_state: ShardStateStuff,
         prev_states: Vec<ShardStateStuff>,
-        prev_blocks_ids: Vec<BlockId>,
     ) -> Result<WorkingState> {
         // TODO: make real implementation
 
@@ -608,12 +606,15 @@ impl CollatorStdImpl {
     }
 }
 
+#[allow(unused)]
 struct QueueIteratorStubImpl;
+#[allow(unused)]
 impl QueueIteratorStubImpl {
     pub fn create_stub() -> Self {
         Self
     }
 }
+#[allow(unused)]
 impl QueueIterator for QueueIteratorStubImpl {
     fn add_message(
         &mut self,

@@ -9,10 +9,9 @@ use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, Usage
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-    CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo,
-    OutMsg, OwnedMessage, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts,
-    ShardDescription, ShardFees, ShardIdent, SimpleLib, StateInit, TickTock, Transaction,
-    ValueFlow,
+    CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OutMsg,
+    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription, ShardFees,
+    ShardIdent, SimpleLib, StateInit, TickTock, Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
@@ -98,7 +97,8 @@ pub(super) struct WorkingState {
 pub(super) struct McData {
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
-    prev_key_block: Option<BlockId>,
+    // TODO: remove if we do not need this
+    _prev_key_block: Option<BlockId>,
     mc_state_stuff: ShardStateStuff,
 }
 impl McData {
@@ -127,7 +127,7 @@ impl McData {
 
         Ok(Self {
             mc_state_extra: mc_state_extra.clone(),
-            prev_key_block,
+            _prev_key_block: prev_key_block,
             prev_key_block_seqno,
             mc_state_stuff,
         })
@@ -178,11 +178,13 @@ pub(super) struct PrevData {
     pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
 
-    gen_utime: u32,
+    // TODO: remove if we do not need this
+    _gen_utime: u32,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
-    overload_history: u64,
-    underload_history: u64,
+    // TODO: remove if we do not need this
+    _overload_history: u64,
+    _underload_history: u64,
 
     processed_upto: ProcessedUptoInfo,
 }
@@ -223,24 +225,16 @@ impl PrevData {
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root.clone(),
 
-            gen_utime,
+            _gen_utime: gen_utime,
             gen_lt,
             total_validator_fees,
-            overload_history,
-            underload_history,
+            _overload_history: overload_history,
+            _underload_history: underload_history,
 
             processed_upto,
         };
 
         Ok((prev_data, usage_tree))
-    }
-
-    pub fn update_state(&mut self, new_blocks_ids: Vec<BlockId>) -> Result<()> {
-        // TODO: make real implementation
-        // STUB: currently have stub signature and implementation
-        self.blocks_ids = new_blocks_ids;
-
-        Ok(())
     }
 
     pub fn observable_states(&self) -> &Vec<ShardStateStuff> {
@@ -285,10 +279,6 @@ impl PrevData {
         Ok(prev_ref)
     }
 
-    pub fn pure_states(&self) -> &Vec<ShardStateStuff> {
-        &self.pure_states
-    }
-
     pub fn pure_state_root(&self) -> &Cell {
         &self.pure_state_root
     }
@@ -314,7 +304,8 @@ pub(super) struct BlockCollationData {
     pub execute_count: u32,
     pub enqueue_count: u32,
     pub out_msg_count: u32,
-    pub msg_queue_depth_sum: u32,
+    // TODO: remove if we do not need this
+    pub _msg_queue_depth_sum: u32,
     pub dequeue_count: u32,
 
     pub start_lt: u64,
@@ -327,7 +318,8 @@ pub(super) struct BlockCollationData {
 
     pub processed_upto: ProcessedUptoInfo,
     pub externals_reading_started: bool,
-    pub internals_reading_started: bool,
+    // TODO: remove if we do not need this
+    pub _internals_reading_started: bool,
 
     /// Ids of top blocks from shards that be included in the master block
     pub top_shard_blocks_ids: Vec<BlockId>,
@@ -387,8 +379,6 @@ impl BlockCollationData {
 
 pub(super) type AccountId = HashBytes;
 
-pub(super) type InMsgDescr = AugDict<HashBytes, ImportFees, InMsg>;
-pub(super) type OutMsgDescr = AugDict<HashBytes, CurrencyCollection, OutMsg>;
 pub(super) type Transactions = AugDict<u64, CurrencyCollection, Lazy<Transaction>>;
 
 pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, AccountBlock>;
@@ -481,7 +471,7 @@ impl ShardAccountStuff {
             })
             .unwrap_or_default();
 
-        let mut lt: Arc<AtomicU64> = Arc::new(max_lt.into());
+        let lt: Arc<AtomicU64> = Arc::new(max_lt.into());
         lt.fetch_max(last_trans_lt + 1, Ordering::Release);
         Ok(Self {
             account_addr,
@@ -673,9 +663,9 @@ impl ShardDescriptionExt for ShardDescription {
 #[derive(Clone, Debug)]
 pub(super) enum AsyncMessage {
     /// 0 - msg info, 1 - msg cell
-    Recover(MsgInfo, Cell),
+    Recover(Cell),
     /// 0 - msg info, 1 - msg cell
-    Mint(MsgInfo, Cell),
+    Mint(Cell),
     /// 0 - msg info, 1 - msg cell
     Ext(MsgInfo, Cell),
     /// 0 - msg info, 1 - msg cell, 2 - is from current shard

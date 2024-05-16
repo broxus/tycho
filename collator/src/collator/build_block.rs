@@ -9,7 +9,7 @@ use tycho_block_util::state::ShardStateStuff;
 
 use super::execution_manager::ExecutionManager;
 use super::CollatorStdImpl;
-use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
+use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData};
 use crate::types::BlockCandidate;
 
 impl CollatorStdImpl {
@@ -259,16 +259,16 @@ impl CollatorStdImpl {
         // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
 
-        let block_candidate = BlockCandidate::new(
-            new_block_id,
-            new_block,
-            prev_shard_data.blocks_ids().clone(),
-            collation_data.top_shard_blocks_ids.clone(),
-            new_block_boc,
+        let block_candidate = BlockCandidate {
+            block_id: new_block_id,
+            block: new_block,
+            prev_blocks_ids: prev_shard_data.blocks_ids().clone(),
+            top_shard_blocks_ids: collation_data.top_shard_blocks_ids.clone(),
+            data: new_block_boc,
             collated_data,
-            HashBytes::ZERO,
-            new_block_info.gen_utime as u64,
-        );
+            collated_file_hash: HashBytes::ZERO,
+            chain_time: new_block_info.gen_utime as u64,
+        };
 
         let new_state_stuff = ShardStateStuff::from_state_and_root(
             &new_block_id,
@@ -406,8 +406,8 @@ impl CollatorStdImpl {
     fn update_shard_config(
         &self,
         collation_data: &mut BlockCollationData,
-        wc_set: &Dict<i32, WorkchainDescription>,
-        update_cc: bool,
+        _wc_set: &Dict<i32, WorkchainDescription>,
+        _update_cc: bool,
     ) -> Result<u32> {
         // TODO: here should be the split/merge logic, refer to old node impl
 
@@ -422,8 +422,8 @@ impl CollatorStdImpl {
 
     fn update_block_creator_stats(
         &self,
-        collation_data: &BlockCollationData,
-        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
+        _collation_data: &BlockCollationData,
+        _block_create_stats: &mut Dict<HashBytes, CreatorStats>,
     ) -> Result<()> {
         // TODO: implement if we really need it
         // STUB: do not update anything

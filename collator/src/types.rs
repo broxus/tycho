@@ -29,59 +29,14 @@ pub struct BlockCollationResult {
 
 #[derive(Clone)]
 pub struct BlockCandidate {
-    block_id: BlockId,
-    block: Block,
-    prev_blocks_ids: Vec<BlockId>,
-    top_shard_blocks_ids: Vec<BlockId>,
-    data: Vec<u8>,
-    collated_data: Vec<u8>,
-    collated_file_hash: HashBytes,
-    chain_time: u64,
-}
-
-impl BlockCandidate {
-    pub fn new(
-        block_id: BlockId,
-        block: Block,
-        prev_blocks_ids: Vec<BlockId>,
-        top_shard_blocks_ids: Vec<BlockId>,
-        data: Vec<u8>,
-        collated_data: Vec<u8>,
-        collated_file_hash: HashBytes,
-        chain_time: u64,
-    ) -> Self {
-        Self {
-            block_id,
-            block,
-            prev_blocks_ids,
-            top_shard_blocks_ids,
-            data,
-            collated_data,
-            collated_file_hash,
-            chain_time,
-        }
-    }
-    pub fn block_id(&self) -> &BlockId {
-        &self.block_id
-    }
-    pub fn block(&self) -> &Block {
-        &self.block
-    }
-    pub fn shard_id(&self) -> &ShardIdent {
-        &self.block_id.shard
-    }
-    pub fn chain_time(&self) -> u64 {
-        self.chain_time
-    }
-    pub fn prev_blocks_ids(&self) -> &[BlockId] {
-        &self.prev_blocks_ids
-    }
-    pub fn top_shard_blocks_ids(&self) -> &[BlockId] {
-        &self.top_shard_blocks_ids
-    }
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
+    pub block_id: BlockId,
+    pub block: Block,
+    pub prev_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks_ids: Vec<BlockId>,
+    pub data: Vec<u8>,
+    pub collated_data: Vec<u8>,
+    pub collated_file_hash: HashBytes,
+    pub chain_time: u64,
 }
 
 #[derive(Clone)]
@@ -183,20 +138,6 @@ impl CollationSessionInfo {
 
     pub fn current_collator_keypair(&self) -> Option<&Arc<KeyPair>> {
         self.current_collator_keypair.as_ref()
-    }
-}
-
-pub(crate) struct MessageContainer {
-    id_hash: HashBytes,
-    pub message: Arc<OwnedMessage>,
-}
-impl MessageContainer {
-    pub fn from_message(message: Arc<OwnedMessage>) -> Self {
-        let id_hash = *message.body.0.repr_hash();
-        Self { id_hash, message }
-    }
-    pub fn id_hash(&self) -> &HashBytes {
-        &self.id_hash
     }
 }
 
