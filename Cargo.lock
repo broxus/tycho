@@ -703,7 +703,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#1577b7e873197ecece297742b512094586057065"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#6028044f724ca8ed1ac01f518111c67a4396e55b"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -723,7 +723,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#1577b7e873197ecece297742b512094586057065"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#6028044f724ca8ed1ac01f518111c67a4396e55b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3079,9 +3079,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c45cc21a50d70895ffc05d8516f43c99b052e24db18482d6622b43cbb307ecf2"
+checksum = "012f0e0b665939639f40b0bd2d7443ea014c617b4ce784c1636eca9992a40289"
 dependencies = [
  "librocksdb-sys",
  "metrics",

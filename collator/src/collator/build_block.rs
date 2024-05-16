@@ -344,18 +344,18 @@ impl CollatorStdImpl {
             root_hash: prev_state.block_id().root_hash,
             file_hash: prev_state.block_id().file_hash,
         };
-        // TODO: use AugDict::set when it be implemented
-        // prev_blocks.set(
-        //     &prev_state.block_id().seqno,
-        //     &KeyBlockRef {
-        //         is_key_block,
-        //         block_ref: prev_blk_ref.clone(),
-        //     },
-        //     &KeyMaxLt {
-        //         has_key_block: is_key_block,
-        //         max_end_lt: prev_state.state().gen_lt,
-        //     },
-        // )?;
+
+        prev_blocks.set(
+            &prev_state.block_id().seqno,
+            &KeyMaxLt {
+                has_key_block: is_key_block,
+                max_end_lt: prev_state.state().gen_lt,
+            },
+            &KeyBlockRef {
+                is_key_block,
+                block_ref: prev_blk_ref.clone(),
+            },
+        )?;
 
         // 7. update last_key_block
         let last_key_block = if prev_state_extra.after_key_block {
