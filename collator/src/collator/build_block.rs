@@ -348,11 +348,11 @@ impl CollatorStdImpl {
         prev_blocks.set(
             &prev_state.block_id().seqno,
             &KeyMaxLt {
-                has_key_block: is_key_block,
+                has_key_block: prev_is_key_block,
                 max_end_lt: prev_state.state().gen_lt,
             },
             &KeyBlockRef {
-                is_key_block,
+                is_key_block: prev_is_key_block,
                 block_ref: prev_blk_ref.clone(),
             },
         )?;
