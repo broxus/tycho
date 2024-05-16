@@ -19,7 +19,6 @@ use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFact
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::{MempoolAdapterFactoryStd, MempoolAdapterStubImpl};
-use tycho_collator::msg_queue::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
 use tycho_collator::validator::client::retry::BackoffConfig;
