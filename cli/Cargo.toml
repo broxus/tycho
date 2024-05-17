@@ -49,6 +49,7 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["test"] }
 
 [build-dependencies]
 anyhow = { workspace = true }

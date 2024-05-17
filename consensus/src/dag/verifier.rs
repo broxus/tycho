@@ -9,7 +9,7 @@ use crate::dag::{DagRound, WeakDagRound};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{
-    DagPoint, Digest, Link, Location, NodeCount, Point, PointId, Ugly, ValidPoint,
+    DagPoint, Digest, Link, LinkField, Location, NodeCount, Point, PointId, Ugly, ValidPoint,
 };
 
 // Note on equivocation.
@@ -59,7 +59,7 @@ impl Verifier {
             return DagPoint::NotExists(Arc::new(point.id()));
         };
         // TODO upgrade Weak whenever used to let Dag Round drop if some future hangs up for long
-        if &point.body.location.round != r_0.round() {
+        if point.body.location.round != r_0.round() {
             panic!("Coding error: dag round mismatches point round")
         }
 
@@ -115,25 +115,25 @@ impl Verifier {
         dependencies: &mut JoinSet<DagPoint>,
     ) -> bool {
         let mut links = vec![
-            (point.anchor_proof_id(), false),
-            (point.anchor_trigger_id(), true),
+            (point.anchor_id(LinkField::Proof), LinkField::Proof),
+            (point.anchor_id(LinkField::Trigger), LinkField::Trigger),
         ];
         let mut linked_with_round = Vec::with_capacity(2);
         let mut dag_round = dag_round.clone();
         while !links.is_empty() {
-            links.retain(|(linked, is_trigger)| {
-                let found = &linked.location.round == dag_round.round();
+            links.retain(|(linked, link_field)| {
+                let found = linked.location.round == dag_round.round();
                 if found {
-                    match (&dag_round.anchor_stage(), is_trigger) {
+                    match (&dag_round.anchor_stage(), link_field) {
                         // AnchorStage::Candidate(_) requires nothing special
-                        (Some(AnchorStage::Proof { leader, .. }), false)
+                        (Some(AnchorStage::Proof { leader, .. }), LinkField::Proof)
                             if leader == linked.location.author => {}
-                        (Some(AnchorStage::Trigger { leader, .. }), true)
+                        (Some(AnchorStage::Trigger { leader, .. }), LinkField::Trigger)
                             if leader == linked.location.author => {}
                         _ => return false, // link not to round's leader
                     }
                     linked_with_round.push((
-                        linked.location.author.clone(),
+                        linked.location.author,
                         linked.digest.clone(),
                         dag_round.clone(),
                     ));
@@ -155,7 +155,7 @@ impl Verifier {
         // while we need to get invalid ones to blame current point
         for (author, digest, dag_round) in linked_with_round {
             // skip self links
-            if dag_round.round() < &point.body.location.round {
+            if dag_round.round() < point.body.location.round {
                 // TODO will add the same point from direct dependencies twice,
                 // we can do better but nothing terrible
                 Self::add_dependency(
@@ -184,12 +184,12 @@ impl Verifier {
             loc.get_or_init(digest, move || {
                 let point_id = PointId {
                     location: Location {
-                        author: author.clone(),
-                        round: round.round().clone(),
+                        author: *author,
+                        round: round.round(),
                     },
                     digest: digest.clone(),
                 };
-                downloader.run(point_id, round.as_weak(), dependant.clone())
+                downloader.run(point_id, round.to_weak(), dependant.clone())
             })
         });
         dependencies.spawn(shared.map(|(dag_point, _)| dag_point));
@@ -221,7 +221,7 @@ impl Verifier {
 
     async fn check_deps(point: &Arc<Point>, mut dependencies: JoinSet<DagPoint>) -> DagPoint {
         // point is well-formed if we got here, so point.proof matches point.includes
-        let proven_vertex = point.body.proof.as_ref().map(|p| &p.digest).clone();
+        let proven_vertex = point.body.proof.as_ref().map(|p| &p.digest);
         let prev_loc = Location {
             round: point.body.location.round.prev(),
             author: point.body.location.author,
@@ -233,10 +233,10 @@ impl Verifier {
         // Invalid dependency is the author's fault.
         let mut is_suspicious = false;
         // last is meant to be the last among all dependencies
-        let anchor_trigger_id = point.anchor_trigger_id();
-        let anchor_proof_id = point.anchor_proof_id();
-        let anchor_trigger_through = point.anchor_trigger_through();
-        let anchor_proof_through = point.anchor_proof_through();
+        let anchor_trigger_id = point.anchor_id(LinkField::Trigger);
+        let anchor_proof_id = point.anchor_id(LinkField::Proof);
+        let anchor_trigger_link_id = point.anchor_link_id(LinkField::Trigger);
+        let anchor_proof_link_id = point.anchor_link_id(LinkField::Proof);
         while let Some(res) = dependencies.join_next().await {
             match res {
                 Ok(DagPoint::Trusted(valid) | DagPoint::Suspicious(valid)) => {
@@ -252,19 +252,21 @@ impl Verifier {
                             None => return DagPoint::Invalid(point.clone()),
                         }
                     } // else: valid dependency
-                    if valid.point.anchor_trigger_round() > anchor_trigger_id.location.round
-                        || valid.point.anchor_proof_round() > anchor_proof_id.location.round
+                    if valid.point.anchor_round(LinkField::Trigger)
+                        > anchor_trigger_id.location.round
+                        || valid.point.anchor_round(LinkField::Proof)
+                            > anchor_proof_id.location.round
                     {
                         // did not actualize the chain
                         return DagPoint::Invalid(point.clone());
                     }
                     let valid_point_id = valid.point.id();
                     if ({
-                        valid_point_id == anchor_trigger_through
-                            && valid.point.anchor_trigger_id() != anchor_trigger_id
+                        valid_point_id == anchor_trigger_link_id
+                            && valid.point.anchor_id(LinkField::Trigger) != anchor_trigger_id
                     }) || ({
-                        valid_point_id == anchor_proof_through
-                            && valid.point.anchor_proof_id() != anchor_proof_id
+                        valid_point_id == anchor_proof_link_id
+                            && valid.point.anchor_id(LinkField::Proof) != anchor_proof_id
                     }) {
                         // path does not lead to destination
                         return DagPoint::Invalid(point.clone());
@@ -339,7 +341,7 @@ impl Verifier {
         ] = peer_schedule.peers_for_array([
                 point.body.location.round.prev().prev(),
                 point.body.location.round.prev(),
-                point.body.location.round.clone(),
+                point.body.location.round,
             ]);
         for (peer_id, _) in point.body.witness.iter() {
             if !witness_peers.contains_key(peer_id) {

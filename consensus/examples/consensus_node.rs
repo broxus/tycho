@@ -16,7 +16,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 use tycho_consensus::test_utils::drain_anchors;
-use tycho_consensus::Engine;
+use tycho_consensus::{Engine, InputBufferStub};
 use tycho_network::{DhtConfig, NetworkConfig, PeerId, PeerInfo};
 use tycho_util::time::now_sec;
 
@@ -129,7 +129,13 @@ impl CmdRun {
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(key_pair.clone(), &dht_client, &overlay, committed_tx);
+        let mut engine = Engine::new(
+            key_pair.clone(),
+            &dht_client,
+            &overlay,
+            committed_tx,
+            InputBufferStub::new(100, 5),
+        );
         engine.init_with_genesis(all_peers.as_slice()).await;
         tokio::spawn(drain_anchors(committed_rx));
 

@@ -40,8 +40,8 @@ impl Dispatcher {
         (&MPQuery::PointById(id.clone())).into()
     }
 
-    pub fn signature_request(round: &Round) -> tycho_network::Request {
-        (&MPQuery::Signature(round.clone())).into()
+    pub fn signature_request(round: Round) -> tycho_network::Request {
+        (&MPQuery::Signature(round)).into()
     }
 
     pub fn query<T>(
@@ -52,7 +52,7 @@ impl Dispatcher {
     where
         T: TryFrom<MPResponse, Error = anyhow::Error>,
     {
-        let peer_id = peer_id.clone();
+        let peer_id = *peer_id;
         let request = request.clone();
         let overlay = self.overlay.clone();
         let network = self.network.clone();
@@ -80,7 +80,7 @@ impl Dispatcher {
         peer_id: &PeerId,
         request: &tycho_network::Request,
     ) -> BoxFuture<'static, (PeerId, Result<()>)> {
-        let peer_id = peer_id.clone();
+        let peer_id = *peer_id;
         let request = request.clone();
         let overlay = self.overlay.clone();
         let network = self.network.clone();

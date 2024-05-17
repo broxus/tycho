@@ -36,6 +36,12 @@ impl MempoolConfig {
     /// or a verifiable point is found (ill-formed or incorrectly signed points are not eligible)
     pub const DOWNLOAD_PEERS: u8 = 3;
 
+    /// hard limit on cached external messages ring buffer
+    pub const PAYLOAD_BUFFER_BYTES: usize = 50 * 1024 * 1024;
+
+    /// hard limit on point payload (excessive will be postponed)
+    pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
+
     /// every failed response is accounted as point is not found;
     /// 1/3+1 failed responses leads to invalidation of the point and all its dependants
     pub const DOWNLOAD_SPAWN_INTERVAL: Duration = Duration::from_millis(50);

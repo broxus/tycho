@@ -55,13 +55,13 @@ impl DagRound {
     }
 
     pub fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
-        let peers = peer_schedule.peers_for(&round);
+        let peers = peer_schedule.peers_for(round);
         let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
         Self(Arc::new(DagRoundInner {
             round,
             node_count: NodeCount::try_from(peers.len())
                 .expect(&format!("peer schedule updated for {round:?}")),
-            key_pair: peer_schedule.local_keys(&round),
+            key_pair: peer_schedule.local_keys(round),
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
             prev,
@@ -70,16 +70,16 @@ impl DagRound {
 
     pub fn next(&self, peer_schedule: &PeerSchedule) -> Self {
         let next_round = self.round().next();
-        let peers = peer_schedule.peers_for(&next_round);
+        let peers = peer_schedule.peers_for(next_round);
         let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
         Self(Arc::new(DagRoundInner {
             round: next_round,
             node_count: NodeCount::try_from(peers.len())
                 .expect(&format!("peer schedule updated for {next_round:?}")),
-            key_pair: peer_schedule.local_keys(&next_round),
+            key_pair: peer_schedule.local_keys(next_round),
             anchor_stage: AnchorStage::of(next_round, peer_schedule),
             locations,
-            prev: self.as_weak(),
+            prev: self.to_weak(),
         }))
     }
 
@@ -96,12 +96,12 @@ impl DagRound {
         }))
     }
 
-    pub fn round(&self) -> &'_ Round {
-        &self.0.round
+    pub fn round(&self) -> Round {
+        self.0.round
     }
 
-    pub fn node_count(&self) -> &'_ NodeCount {
-        &self.0.node_count
+    pub fn node_count(&self) -> NodeCount {
+        self.0.node_count
     }
 
     pub fn key_pair(&self) -> Option<&'_ KeyPair> {
@@ -141,14 +141,14 @@ impl DagRound {
         &self.0.prev
     }
 
-    pub fn as_weak(&self) -> WeakDagRound {
+    pub fn to_weak(&self) -> WeakDagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
     pub async fn vertex_by_proof(&self, proof: &ValidPoint) -> Option<ValidPoint> {
         match proof.point.body.proof {
             Some(ref proven) => {
-                let dag_round = self.scan(&proof.point.body.location.round.prev())?;
+                let dag_round = self.scan(proof.point.body.location.round.prev())?;
                 dag_round
                     .valid_point_exact(&proof.point.body.location.author, &proven.digest)
                     .await
@@ -158,7 +158,7 @@ impl DagRound {
     }
 
     pub async fn valid_point(&self, point_id: &PointId) -> Option<ValidPoint> {
-        match self.scan(&point_id.location.round) {
+        match self.scan(point_id.location.round) {
             Some(linked) => {
                 linked
                     .valid_point_exact(&point_id.location.author, &point_id.digest)
@@ -178,7 +178,7 @@ impl DagRound {
         point: &Arc<Point>,
         downloader: &Downloader,
     ) -> Option<BoxFuture<'static, InclusionState>> {
-        self.scan(&point.body.location.round)
+        self.scan(point.body.location.round)
             .and_then(|linked| linked.add_exact(&point, downloader))
     }
 
@@ -187,10 +187,10 @@ impl DagRound {
         point: &Arc<Point>,
         downloader: &Downloader,
     ) -> Option<BoxFuture<'static, InclusionState>> {
-        if &point.body.location.round != self.round() {
+        if point.body.location.round != self.round() {
             panic!("Coding error: dag round mismatches point round on add")
         }
-        let dag_round = self.as_weak();
+        let dag_round = self.to_weak();
         let digest = &point.digest;
         self.edit(&point.body.location.author, |loc| {
             let state = loc.state().clone();
@@ -211,7 +211,7 @@ impl DagRound {
         if !Verifier::verify(point, peer_schedule).is_ok() {
             panic!("Coding error: malformed point")
         }
-        let point = Verifier::validate(point.clone(), self.as_weak(), downloader.clone()).await;
+        let point = Verifier::validate(point.clone(), self.to_weak(), downloader.clone()).await;
         if point.trusted().is_none() {
             panic!("Coding error: not a trusted point")
         }
@@ -219,7 +219,7 @@ impl DagRound {
         if let Some(signable) = state.signable() {
             signable.sign(
                 self.round(),
-                peer_schedule.local_keys(&self.round().next()).as_deref(),
+                peer_schedule.local_keys(self.round().next()).as_deref(),
                 MempoolConfig::sign_time_range(),
             );
         }
@@ -236,13 +236,13 @@ impl DagRound {
         if dag_point.valid().is_some() {
             panic!("Coding error: failed to insert valid point as invalid")
         }
-        self.scan(&dag_point.location().round)
+        self.scan(dag_point.location().round)
             .map(|linked| linked.insert_exact(dag_point))
             .flatten()
     }
 
     fn insert_exact(&self, dag_point: &DagPoint) -> Option<BoxFuture<'static, InclusionState>> {
-        if &dag_point.location().round != self.round() {
+        if dag_point.location().round != self.round() {
             panic!("Coding error: dag round mismatches point round on insert")
         }
         self.edit(&dag_point.location().author, |loc| {
@@ -254,7 +254,7 @@ impl DagRound {
         })
     }
 
-    pub fn scan(&self, round: &Round) -> Option<Self> {
+    pub fn scan(&self, round: Round) -> Option<Self> {
         assert!(
             round <= self.round(),
             "Coding error: cannot scan DAG rounds chain for a future round"

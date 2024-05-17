@@ -12,7 +12,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{Point, Round, Ugly, ValidPoint};
+use crate::models::{LinkField, Point, Round, Ugly, ValidPoint};
 
 #[derive(Clone)]
 pub struct Dag {
@@ -30,10 +30,10 @@ impl Dag {
     pub fn init(&self, dag_round: DagRound) {
         let mut rounds = self.rounds.lock();
         assert!(rounds.is_empty(), "DAG already initialized");
-        rounds.insert(dag_round.round().clone(), dag_round);
+        rounds.insert(dag_round.round(), dag_round);
     }
 
-    pub fn top(&self, round: &Round, peer_schedule: &PeerSchedule) -> DagRound {
+    pub fn top(&self, round: Round, peer_schedule: &PeerSchedule) -> DagRound {
         let mut rounds = self.rounds.lock();
         let mut top = match rounds.last_key_value() {
             None => unreachable!("DAG cannot be empty if properly initialized?"),
@@ -85,8 +85,8 @@ impl Dag {
         }
     }
 
-    async fn latest_trigger(next_round: &DagRound) -> Option<ValidPoint> {
-        let mut next_dag_round = next_round.clone();
+    async fn latest_trigger(next_dag_round: &DagRound) -> Option<ValidPoint> {
+        let mut next_dag_round = next_dag_round.clone();
         let mut latest_trigger = None;
         while let Some(current_dag_round) = next_dag_round.prev().get() {
             if let Some(AnchorStage::Trigger {
@@ -125,7 +125,7 @@ impl Dag {
     ) -> Vec<(ValidPoint, DagRound)> {
         assert_eq!(
             last_trigger.point.prev_id(),
-            Some(last_trigger.point.anchor_proof_id()),
+            Some(last_trigger.point.anchor_id(LinkField::Proof)),
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         let mut anchor_stack = Vec::new();
@@ -133,64 +133,63 @@ impl Dag {
             panic!("anchor proof round not in DAG")
         };
         loop {
-            let Some(proof_round) = future_round.scan(&proof.point.body.location.round) else {
+            let Some(proof_round) = future_round.scan(proof.point.body.location.round) else {
                 panic!("anchor proof round not in DAG while a point from it was received")
             };
-            if proof_round.round() == &MempoolConfig::GENESIS_ROUND {
+            if proof_round.round() == MempoolConfig::GENESIS_ROUND {
                 break;
             }
-            match proof_round.anchor_stage() {
-                Some(AnchorStage::Proof {
-                    ref leader,
-                    ref is_used,
-                }) => {
-                    assert_eq!(
-                        proof.point.body.location.round,
-                        *proof_round.round(),
-                        "anchor proof round does not match"
-                    );
-                    assert_eq!(
-                        proof.point.body.location.author, leader,
-                        "anchor proof author does not match prescribed by round"
-                    );
-                    let Some(anchor_round) = proof_round.prev().get() else {
-                        break;
-                    };
-                    if is_used.load(Ordering::Relaxed) {
-                        break;
-                    };
-                    let mut proofs = FuturesUnordered::new();
-                    proof_round.view(leader, |loc| {
-                        for (_, version) in loc.versions() {
-                            proofs.push(version.clone())
-                        }
-                    });
-                    let mut anchor = None;
-                    'v: while let Some((proof, _)) = proofs.next().await {
-                        if let Some(valid) = proof.into_valid() {
-                            let Some(valid) = proof_round.vertex_by_proof(&valid).await else {
-                                panic!("anchor proof is not linked to anchor, validation broken")
-                            };
-                            _ = anchor.insert(valid);
-                            is_used.store(true, Ordering::Relaxed);
-                            break 'v;
-                        }
-                    }
-                    let anchor = anchor
-                        .expect("any anchor proof points to anchor point, validation is broken");
-                    anchor_stack.push((anchor.clone(), anchor_round.clone()));
-
-                    let Some(next_proof) = proof_round
-                        .valid_point(&anchor.point.anchor_proof_id())
-                        .await
-                    else {
-                        break;
-                    };
-                    proof = next_proof;
-                    future_round = anchor_round;
+            let Some(AnchorStage::Proof {
+                ref leader,
+                ref is_used,
+            }) = proof_round.anchor_stage()
+            else {
+                panic!("anchor proof round is not expected, validation is broken")
+            };
+            assert_eq!(
+                proof.point.body.location.round,
+                proof_round.round(),
+                "anchor proof round does not match"
+            );
+            assert_eq!(
+                proof.point.body.location.author, leader,
+                "anchor proof author does not match prescribed by round"
+            );
+            let Some(anchor_round) = proof_round.prev().get() else {
+                break;
+            };
+            if is_used.load(Ordering::Relaxed) {
+                break;
+            };
+            let mut proofs = FuturesUnordered::new();
+            proof_round.view(leader, |loc| {
+                for (_, version) in loc.versions() {
+                    proofs.push(version.clone())
                 }
-                _ => panic!("anchor proof round is not expected, validation is broken"),
+            });
+            let mut anchor = None;
+            'v: while let Some((proof, _)) = proofs.next().await {
+                if let Some(valid) = proof.into_valid() {
+                    let Some(valid) = proof_round.vertex_by_proof(&valid).await else {
+                        panic!("anchor proof is not linked to anchor, validation broken")
+                    };
+                    _ = anchor.insert(valid);
+                    is_used.store(true, Ordering::Relaxed);
+                    break 'v;
+                }
             }
+            let anchor =
+                anchor.expect("any anchor proof points to anchor point, validation is broken");
+            anchor_stack.push((anchor.clone(), anchor_round.clone()));
+
+            let Some(next_proof) = proof_round
+                .valid_point(&anchor.point.anchor_id(LinkField::Proof))
+                .await
+            else {
+                break;
+            };
+            proof = next_proof;
+            future_round = anchor_round;
         }
         anchor_stack
     }
@@ -210,7 +209,7 @@ impl Dag {
         anchor_round: &DagRound, // r+1
     ) -> Vec<Arc<Point>> {
         assert_eq!(
-            *anchor_round.round(),
+            anchor_round.round(),
             anchor.body.location.round,
             "passed anchor round does not match anchor point's round"
         );

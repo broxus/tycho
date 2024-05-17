@@ -1,18 +1,19 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::boc::Boc;
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ExtInMsgInfo;
 use everscale_types::prelude::Load;
 use parking_lot::RwLock;
+use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_consensus::Point;
+use tycho_consensus::{InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService};
+use tycho_util::FastHashSet;
 
 use crate::mempool::types::ExternalMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
@@ -127,9 +128,16 @@ impl MempoolAdapterStdImpl {
         let (sender, receiver) =
             tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
 
+        // TODO receive from outside
+        let (_externals_tx, externals_rx) = mpsc::unbounded_channel();
+        let mut engine = tycho_consensus::Engine::new(
+            key_pair,
+            &dht_client,
+            &overlay_service,
+            sender,
+            InputBufferImpl::new(externals_rx),
+        );
         tokio::spawn(async move {
-            let mut engine =
-                tycho_consensus::Engine::new(key_pair, &dht_client, &overlay_service, sender);
             // TODO replace with some sensible init before run
             engine.init_with_genesis(&[]).await;
             engine.run().await;
@@ -156,7 +164,8 @@ pub async fn parse_points(
     mut rx: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
 ) {
     while let Some((anchor, points)) = rx.recv().await {
-        let mut external_messages = HashMap::<HashBytes, ExternalMessage>::new();
+        let mut repr_hashes = FastHashSet::default();
+        let mut messages = Vec::new();
 
         for point in points {
             'message: for message in &point.body.payload {
@@ -184,15 +193,11 @@ pub async fn parse_points(
                     }
                 };
 
-                let external_message = ExternalMessage::new(cell.clone(), ext_in_message);
-                external_messages.insert(*cell.repr_hash(), external_message);
+                if repr_hashes.insert(*cell.repr_hash()) {
+                    messages.push(Arc::new(ExternalMessage::new(cell.clone(), ext_in_message)));
+                }
             }
         }
-
-        let messages = external_messages
-            .into_iter()
-            .map(|m| Arc::new(m.1))
-            .collect::<Vec<_>>();
 
         let anchor = Arc::new(MempoolAnchor::new(
             anchor.body.location.round.0,

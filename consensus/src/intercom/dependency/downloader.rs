@@ -49,13 +49,13 @@ impl Downloader {
         };
         assert_eq!(
             point_id.location.round,
-            *point_round_temp.round(),
+            point_round_temp.round(),
             "point and DAG round mismatch"
         );
         // request point from its signers (any dependant is among them as point is already verified)
         let all_peers = self
             .peer_schedule
-            .peers_for(&point_round_temp.round().next())
+            .peers_for(point_round_temp.round().next())
             .iter()
             .map(|(peer_id, state)| (*peer_id, *state))
             .collect::<FastHashMap<PeerId, PeerState>>();
@@ -174,11 +174,10 @@ impl DownloadTask {
     }
 
     fn download_one(&mut self, peer_id: &PeerId) {
-        let peer_id = peer_id.clone();
         self.in_flight.push(
             self.parent
                 .dispatcher
-                .query::<PointByIdResponse>(&peer_id, &self.request)
+                .query::<PointByIdResponse>(peer_id, &self.request)
                 .boxed(),
         );
     }
