@@ -4,6 +4,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::types::ProofFunds;
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, UsageTreeMode};
 use everscale_types::dict::{AugDict, Dict};
@@ -383,11 +384,11 @@ impl BlockCollationData {
     pub fn store_shard_fees(
         &mut self,
         shard_id: ShardIdent,
-        shard_description: Box<ShardDescription>,
+        proof_funds: ProofFunds,
     ) -> Result<()> {
         let shard_fee_created = ShardFeeCreated {
-            fees: shard_description.fees_collected.clone(),
-            create: shard_description.funds_created.clone(),
+            fees: proof_funds.fees_collected.clone(),
+            create: proof_funds.funds_created.clone(),
         };
         self.shard_fees.set(
             ShardIdentFull::from(shard_id),

@@ -19,7 +19,7 @@ use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, Mempo
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-    CollationSessionInfo, OnValidatedBlockEvent,
+    CollationSessionInfo, OnValidatedBlockEvent, ProofFunds,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
@@ -1046,24 +1046,74 @@ where
         &self,
         _next_mc_block_chain_time: u64,
         _trigger_shard_block_id: Option<BlockId>,
-    ) -> Result<Vec<(BlockId, BlockInfo, ValueFlow)>> {
+    ) -> Result<Vec<(BlockId, BlockInfo, ValueFlow, ProofFunds)>> {
         // TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
+        // 1. Find current master block
+        let (_, mut mc_block_container) = self
+            .blocks_cache
+            .master
+            .last_key_value()
+            .ok_or_else(|| anyhow!("Master block  not found in cache!",))?;
+        if !mc_block_container.is_valid() {
+            return Ok(vec![]);
+        }
+
+        // 3. By the top shard blocks info find shard blocks of current master block
+        // 4. Recursively find prev shard blocks until the end or top shard blocks of prev master reached
+        let mut prev_shard_blocks_keys = mc_block_container
+            .top_shard_blocks_keys()
+            .iter()
+            .cloned()
+            .collect::<VecDeque<_>>();
+        let mut result = HashMap::new();
+        while let Some(prev_shard_block_key) = prev_shard_blocks_keys.pop_front() {
+            let shard_cache = self
+                .blocks_cache
+                .shards
+                .get(&prev_shard_block_key.shard)
+                .ok_or_else(|| {
+                    anyhow!("Shard block ({}) not found in cache!", prev_shard_block_key)
+                })?;
+            if let Some(shard_block_container) = shard_cache.get(&prev_shard_block_key.seqno) {
+                // if shard block included in current master block subgraph
+                if matches!(shard_block_container.containing_mc_block, Some(containing_mc_block_key) if &containing_mc_block_key == mc_block_container.key())
+                {
+                    // 5. If master block and all shard blocks valid the extract them from entries and return
+                    if !shard_block_container.is_valid() {
+                        return Ok(vec![]);
+                    }
+
+                    let block = shard_block_container.get_block()?;
+                    let value_flow = block.load_value_flow()?;
+                    let fees_collected = value_flow.fees_collected.clone();
+                    let funds_created = value_flow.created.clone();
+
+                    let (_, _, proof) = result
+                        .entry(*shard_block_container.block_id())
+                        .or_insert((block.load_info()?, value_flow, ProofFunds::default()));
+                    proof.fees_collected.checked_add(&fees_collected)?;
+                    proof.funds_created.checked_add(&funds_created)?;
+
+                    shard_block_container
+                        .prev_blocks_keys()
+                        .iter()
+                        .cloned()
+                        .for_each(|sub_prev| prev_shard_blocks_keys.push_back(sub_prev));
+                }
+            }
+        }
 
         // STUB: when we work with only one shard we can just get the last shard block
         //      because collator manager will try run master block collation before
         //      before processing any next candidate from the shard collator
         //      because of dispatcher tasks queue
-        let mut res = vec![];
-        for (_, v) in self
-            .blocks_cache
-            .shards
-            .iter()
-            .filter_map(|(_, shard_cache)| shard_cache.last_key_value())
-        {
-            let block = v.get_block()?;
-            res.push((*v.block_id(), block.load_info()?, block.load_value_flow()?));
-        }
-        Ok(res)
+
+        Ok(result
+            .into_iter()
+            .map(|(block_id, (block_info, value_flow, proof_funds))| {
+                (block_id, block_info, value_flow, proof_funds)
+            })
+            .collect())
     }
 
     /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation
@@ -1097,7 +1147,7 @@ where
 
         let _tracing_top_shard_blocks_descr = top_shard_blocks_info
             .iter()
-            .map(|(id, _, _)| id.as_short_id().to_string())
+            .map(|(id, _, _, _)| id.as_short_id().to_string())
             .collect::<Vec<_>>();
 
         mc_collator

@@ -13,7 +13,7 @@ use crate::internal_queue::iterator::QueueIterator;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
-    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
+    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo, ProofFunds,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
@@ -94,7 +94,7 @@ pub trait Collator: Send + Sync + 'static {
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
+        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow, ProofFunds)>,
     ) -> Result<()>;
 }
 
@@ -143,7 +143,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
+        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow, ProofFunds)>,
     ) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             do_collate,

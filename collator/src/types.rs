@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{Block, BlockId, OwnedMessage, ShardIdent, Signature};
+use everscale_types::models::{
+    Block, BlockId, CurrencyCollection, OwnedMessage, ShardIdent, Signature,
+};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
@@ -174,4 +176,10 @@ pub struct NodeNetwork {
     pub overlay_service: OverlayService,
     pub peer_resolver: PeerResolver,
     pub dht_client: DhtClient,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProofFunds {
+    pub fees_collected: CurrencyCollection,
+    pub funds_created: CurrencyCollection,
 }
