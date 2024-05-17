@@ -30,7 +30,7 @@ pub struct Engine {
     top_dag_round: Arc<RwLock<DagRound>>,
     tasks: JoinSet<()>, // should be JoinSet<!>
     committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
-    input_buffer: Box<dyn InputBuffer + Send>,
+    input_buffer: Box<dyn InputBuffer>,
 }
 
 impl Engine {
@@ -39,7 +39,7 @@ impl Engine {
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
-        input_buffer: impl InputBuffer + Send + 'static,
+        input_buffer: impl InputBuffer,
     ) -> Self {
         let log_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
         let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
