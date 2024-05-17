@@ -14,8 +14,10 @@ mod models;
 mod store;
 
 mod util {
-    pub use stored_value::*;
+    pub use self::slot_subscriptions::*;
+    pub use self::stored_value::*;
 
+    mod slot_subscriptions;
     mod stored_value;
 }
 

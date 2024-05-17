@@ -16,7 +16,6 @@ use tycho_block_util::archive::{
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
-use tycho_util::FastDashMap;
 use weedb::rocksdb;
 
 use crate::db::*;
@@ -29,7 +28,7 @@ pub struct BlockStorage {
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
     archive_ids: RwLock<BTreeSet<u32>>,
-    block_subscriptions: FastDashMap<BlockId, Subscriptions>,
+    block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
 }
 
@@ -99,8 +98,6 @@ impl BlockStorage {
     pub async fn wait_for_block(&self, block_id: &BlockId) -> Result<BlockStuffAug> {
         let block_handle_storage = &self.block_handle_storage;
 
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
         // Take an exclusive lock to prevent any block data from being stored
         let guard = self.store_block_data.write().await;
 
@@ -114,20 +111,12 @@ impl BlockStorage {
         }
 
         // Add subscription for the block and drop the lock
-        let idx = self.add_block_subscription(block_id, tx);
+        let rx = self.block_subscriptions.subscribe(block_id);
+
+        // NOTE: Guard must be dropped before awaiting
         drop(guard);
 
-        // Create a guard to remove the subscription when it's dropped
-        let guard = SubscriptionGuard {
-            subscriptions: &self.block_subscriptions,
-            block_id,
-            index: Some(idx),
-        };
-
-        // Wait for the block data to be loaded
-        let block = rx.await?;
-        guard.disarm();
-
+        let block = rx.await;
         Ok(BlockStuffAug::loaded(block))
     }
 
@@ -172,9 +161,7 @@ impl BlockStorage {
         }
 
         // TODO: only notify subscribers if `updated`?
-        if let Some((_, subscriptions)) = self.block_subscriptions.remove(block_id) {
-            subscriptions.notify(block);
-        }
+        self.block_subscriptions.notify(block_id, block);
 
         Ok(StoreBlockResult {
             handle,
@@ -652,19 +639,6 @@ impl BlockStorage {
         Ok(())
     }
 
-    /// Inserts a new subscription and returns its index.
-    fn add_block_subscription(&self, block_id: &BlockId, tx: BlockTx) -> usize {
-        use dashmap::mapref::entry::Entry;
-
-        match self.block_subscriptions.entry(*block_id) {
-            Entry::Occupied(mut entry) => entry.get_mut().insert(tx),
-            Entry::Vacant(entry) => {
-                entry.insert(Subscriptions::new(tx));
-                0
-            }
-        }
-    }
-
     fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
     where
         I: Borrow<BlockId> + Hash,
@@ -903,77 +877,6 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 pub const ARCHIVE_SLICE_SIZE: u32 = 20_000;
-
-struct Subscriptions {
-    active: usize,
-    slots: Vec<Option<BlockTx>>,
-}
-
-impl Subscriptions {
-    fn new(tx: BlockTx) -> Self {
-        Self {
-            active: 1,
-            slots: vec![Some(tx)],
-        }
-    }
-
-    fn notify(self, block: &BlockStuff) {
-        for tx in self.slots.into_iter().flatten() {
-            tx.send(block.clone()).ok();
-        }
-    }
-
-    fn insert(&mut self, tx: BlockTx) -> usize {
-        self.active += 1;
-
-        // Reuse existing slot
-        for (i, item) in self.slots.iter_mut().enumerate() {
-            if item.is_some() {
-                continue;
-            }
-            *item = Some(tx);
-            return i;
-        }
-
-        // Add new slot
-        let idx = self.slots.len();
-        self.slots.push(Some(tx));
-        idx
-    }
-
-    fn remove(&mut self, index: usize) {
-        // NOTE: Slot count never decreases
-        self.active -= 1;
-        self.slots[index] = None;
-    }
-}
-
-struct SubscriptionGuard<'a> {
-    subscriptions: &'a FastDashMap<BlockId, Subscriptions>,
-    block_id: &'a BlockId,
-    index: Option<usize>,
-}
-
-impl SubscriptionGuard<'_> {
-    fn disarm(mut self) {
-        self.index = None;
-    }
-}
-
-impl<'a> Drop for SubscriptionGuard<'a> {
-    fn drop(&mut self) {
-        let Some(index) = self.index else {
-            return;
-        };
-
-        self.subscriptions.remove_if_mut(self.block_id, |_, slots| {
-            slots.remove(index);
-            slots.active == 0
-        });
-    }
-}
-
-type BlockTx = tokio::sync::oneshot::Sender<BlockStuff>;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
