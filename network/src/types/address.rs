@@ -266,27 +266,46 @@ impl FromStr for Address {
 /// - Its labels are 63 or fewer characters.
 /// - Its labels do not start or end with '-' or '.'.
 fn validate_hostname(hostname: &[u8]) -> Option<&str> {
-    fn is_valid_char(byte: u8) -> bool {
-        matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'.')
-    }
-
-    // TODO: Use one iteration instead of two.
-    if hostname.iter().any(|byte| !is_valid_char(*byte)) {
+    if hostname.is_empty() || hostname.len() > 253 {
         return None;
     }
 
-    let is_invalid = hostname.is_empty()
-        || hostname.len() > 253
-        || hostname.split(|&c| c == b'.').any(|label| {
-            label.is_empty() || label.len() > 63 || label.starts_with(b"-") || label.ends_with(b"-")
-        });
+    let mut label_length = 0;
+    let mut previous_char = b'.'; // assume the previous character is a dot
 
-    if is_invalid {
-        None
-    } else {
-        // SAFETY: `hostname` is guaranteed to contain only valid UTF-8 characters.
-        Some(unsafe { std::str::from_utf8_unchecked(hostname) })
+    for &byte in hostname {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' => {
+                label_length += 1;
+            }
+            b'-' => {
+                if label_length == 0 {
+                    return None; // invalid label
+                }
+                label_length += 1;
+            }
+            b'.' => {
+                if label_length == 0 || previous_char == b'-' {
+                    return None; // invalid label
+                }
+                label_length = 0; // reset label length after each dot
+            }
+            _ => return None,
+        }
+
+        if label_length > 63 {
+            return None; // invalid label
+        }
+
+        previous_char = byte;
     }
+
+    if label_length == 0 || previous_char == b'-' {
+        return None;
+    }
+
+    // SAFETY: `hostname` is guaranteed to contain only valid UTF-8 characters.
+    Some(unsafe { std::str::from_utf8_unchecked(hostname) })
 }
 
 const ADDRESS_V4_TL_ID: u32 = tl_proto::id!("transport.address.ipv4", scheme = "proto.tl");
@@ -361,6 +380,47 @@ mod tests {
                 tl_proto::deserialize::<Address>(&tl_proto::serialize(addr)),
                 Err(tl_proto::TlError::InvalidData)
             ));
+        }
+    }
+
+    #[test]
+    fn valid_hostnames() {
+        for hostname in &[
+            "VaLiD-HoStNaMe",
+            "50-name",
+            "235235",
+            "example.com",
+            "VaLid.HoStNaMe",
+            "123.456",
+        ] {
+            assert!(
+                validate_hostname(hostname.as_bytes()).is_some(),
+                "{} is not valid",
+                hostname
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_hostnames() {
+        for hostname in &[
+            "-invalid-name",
+            "also-invalid-",
+            "asdf@fasd",
+            "@asdfl",
+            "asd f@",
+            ".invalid",
+            "invalid.name.",
+            "foo.label-is-way-to-longgggggggggggggggggggggggggggggggggggggggggggg.org",
+            "invalid.-starting.char",
+            "invalid.ending-.char",
+            "empty..label",
+        ] {
+            assert!(
+                validate_hostname(hostname.as_bytes()).is_none(),
+                "{} should not be valid",
+                hostname
+            );
         }
     }
 }
