@@ -79,8 +79,8 @@ impl Producer {
 
         Some(Point::new(key_pair, PointBody {
             location: Location {
-                round: current_round.round().clone(),
-                author: local_id.clone(),
+                round: current_round.round(),
+                author: local_id,
             },
             time,
             payload,
@@ -153,18 +153,18 @@ impl Producer {
         if point.body.location.round == current_round.round().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
-            Link::Direct(Through::Includes(point.body.location.author.clone()))
+            Link::Direct(Through::Includes(point.body.location.author))
         } else {
             Link::Indirect {
                 to: point.anchor_id(link_field),
-                path: Through::Includes(point.body.location.author.clone()),
+                path: Through::Includes(point.body.location.author),
             }
         }
     }
 
     fn update_link_from_witness(
         link: &mut Link,
-        current_round: &Round,
+        current_round: Round,
         witness: &[Arc<Point>],
         link_field: LinkField,
     ) {
@@ -184,11 +184,11 @@ impl Producer {
         if point.body.location.round == current_round.prev().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(point.body.location.author.clone()));
+            *link = Link::Direct(Through::Witness(point.body.location.author));
         } else {
             *link = Link::Indirect {
                 to: point.anchor_id(link_field),
-                path: Through::Witness(point.body.location.author.clone()),
+                path: Through::Witness(point.body.location.author),
             };
         }
     }
@@ -198,16 +198,16 @@ impl Producer {
         local_id: &PeerId,
         anchor_proof: &Link,
         prev_point: Option<&PrevPoint>,
-        includes: &Vec<Arc<Point>>,
-        witness: &Vec<Arc<Point>>,
+        includes: &[Arc<Point>],
+        witness: &[Arc<Point>],
     ) -> UnixTime {
         let mut time = UnixTime::now();
         if let Some(prev_point) = prev_point {
             if let Some(valid) = finished_round
-                .valid_point_exact(&local_id, &prev_point.digest)
+                .valid_point_exact(local_id, &prev_point.digest)
                 .await
             {
-                time = valid.point.body.time.clone().max(time);
+                time = valid.point.body.time.max(time);
             }
         }
         match anchor_proof {
@@ -221,14 +221,14 @@ impl Producer {
                     .iter()
                     .find(|point| point.body.location.author == peer_id)
                 {
-                    time = point.body.time.clone().max(time);
+                    time = point.body.time.max(time);
                 }
             }
             Link::Indirect { to, .. } => {
                 // it's sufficient to check prev point - it can't have newer anchor proof
                 if prev_point.is_none() {
                     if let Some(valid) = finished_round.valid_point(&to).await {
-                        time = valid.point.body.time.clone().max(time);
+                        time = valid.point.body.time.max(time);
                     } else {
                         panic!("last anchor proof must stay in DAG until its payload is committed")
                     }

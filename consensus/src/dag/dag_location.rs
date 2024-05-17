@@ -109,7 +109,7 @@ impl InclusionState {
             None => assert!(false, "Coding error: own point is not trusted"),
             Some(valid) => {
                 _ = signed.set(Ok(Signed {
-                    at: valid.point.body.location.round.clone(),
+                    at: valid.point.body.location.round,
                     with: valid.point.signature.clone(),
                 }))
             }
@@ -132,9 +132,9 @@ impl InclusionState {
     pub fn signed(&self) -> Option<&'_ Result<Signed, ()>> {
         self.0.get()?.signed.get()
     }
-    pub fn signed_point(&self, at: &Round) -> Option<&'_ ValidPoint> {
+    pub fn signed_point(&self, at: Round) -> Option<&'_ ValidPoint> {
         let signable = self.0.get()?;
-        if &signable.signed.get()?.as_ref().ok()?.at == at {
+        if signable.signed.get()?.as_ref().ok()?.at == at {
             signable.first_completed.valid()
         } else {
             None
@@ -168,7 +168,7 @@ pub struct Signed {
 impl Signable {
     pub fn sign(
         &self,
-        at: &Round,
+        at: Round,
         key_pair: Option<&KeyPair>, // same round for own point and next round for other's
         time_range: RangeInclusive<UnixTime>,
     ) -> bool {
@@ -178,7 +178,7 @@ impl Signable {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {
-                        at: at.clone(),
+                        at,
                         with: Signature::new(key_pair, &valid.point.digest),
                     })
                 });

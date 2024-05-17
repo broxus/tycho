@@ -339,10 +339,10 @@ impl Point {
 
     pub fn anchor_round(&self, link_field: LinkField) -> Round {
         match self.anchor_link(link_field) {
-            Link::ToSelf => self.body.location.round.clone(),
+            Link::ToSelf => self.body.location.round,
             Link::Direct(Through::Includes(_)) => self.body.location.round.prev(),
             Link::Direct(Through::Witness(_)) => self.body.location.round.prev().prev(),
-            Link::Indirect { to, .. } => to.location.round.clone(),
+            Link::Indirect { to, .. } => to.location.round,
         }
     }
 
@@ -378,7 +378,7 @@ impl Point {
         PointId {
             location: Location {
                 round,
-                author: peer.clone(),
+                author: *peer,
             },
             digest: map
                 .get(peer)

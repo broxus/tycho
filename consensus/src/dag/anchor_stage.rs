@@ -41,11 +41,11 @@ impl AnchorStage {
             // 1 is an anchor candidate (surprisingly, nothing special about this point)
             0 | 1 => None,
             2 => Some(AnchorStage::Proof {
-                leader: leader.clone(),
+                leader: *leader,
                 is_used: AtomicBool::new(false),
             }),
             3 => Some(AnchorStage::Trigger {
-                leader: leader.clone(),
+                leader: *leader,
                 is_used: AtomicBool::new(false),
             }),
             _ => unreachable!(),

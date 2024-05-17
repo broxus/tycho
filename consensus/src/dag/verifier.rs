@@ -59,7 +59,7 @@ impl Verifier {
             return DagPoint::NotExists(Arc::new(point.id()));
         };
         // TODO upgrade Weak whenever used to let Dag Round drop if some future hangs up for long
-        if &point.body.location.round != r_0.round() {
+        if point.body.location.round != r_0.round() {
             panic!("Coding error: dag round mismatches point round")
         }
 
@@ -122,7 +122,7 @@ impl Verifier {
         let mut dag_round = dag_round.clone();
         while !links.is_empty() {
             links.retain(|(linked, link_field)| {
-                let found = &linked.location.round == dag_round.round();
+                let found = linked.location.round == dag_round.round();
                 if found {
                     match (&dag_round.anchor_stage(), link_field) {
                         // AnchorStage::Candidate(_) requires nothing special
@@ -133,7 +133,7 @@ impl Verifier {
                         _ => return false, // link not to round's leader
                     }
                     linked_with_round.push((
-                        linked.location.author.clone(),
+                        linked.location.author,
                         linked.digest.clone(),
                         dag_round.clone(),
                     ));
@@ -155,7 +155,7 @@ impl Verifier {
         // while we need to get invalid ones to blame current point
         for (author, digest, dag_round) in linked_with_round {
             // skip self links
-            if dag_round.round() < &point.body.location.round {
+            if dag_round.round() < point.body.location.round {
                 // TODO will add the same point from direct dependencies twice,
                 // we can do better but nothing terrible
                 Self::add_dependency(
@@ -184,12 +184,12 @@ impl Verifier {
             loc.get_or_init(digest, move || {
                 let point_id = PointId {
                     location: Location {
-                        author: author.clone(),
-                        round: round.round().clone(),
+                        author: *author,
+                        round: round.round(),
                     },
                     digest: digest.clone(),
                 };
-                downloader.run(point_id, round.as_weak(), dependant.clone())
+                downloader.run(point_id, round.to_weak(), dependant.clone())
             })
         });
         dependencies.spawn(shared.map(|(dag_point, _)| dag_point));
@@ -221,7 +221,7 @@ impl Verifier {
 
     async fn check_deps(point: &Arc<Point>, mut dependencies: JoinSet<DagPoint>) -> DagPoint {
         // point is well-formed if we got here, so point.proof matches point.includes
-        let proven_vertex = point.body.proof.as_ref().map(|p| &p.digest).clone();
+        let proven_vertex = point.body.proof.as_ref().map(|p| &p.digest);
         let prev_loc = Location {
             round: point.body.location.round.prev(),
             author: point.body.location.author,
@@ -341,7 +341,7 @@ impl Verifier {
         ] = peer_schedule.peers_for_array([
                 point.body.location.round.prev().prev(),
                 point.body.location.round.prev(),
-                point.body.location.round.clone(),
+                point.body.location.round,
             ]);
         for (peer_id, _) in point.body.witness.iter() {
             if !witness_peers.contains_key(peer_id) {

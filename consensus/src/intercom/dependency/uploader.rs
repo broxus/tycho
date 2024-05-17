@@ -50,11 +50,11 @@ impl Uploader {
             let read = self.top_dag_round.read().await;
             read.clone()
         };
-        if &point_id.location.round > top_dag_round.round() {
+        if point_id.location.round > top_dag_round.round() {
             return None;
         }
         top_dag_round
-            .scan(&point_id.location.round)?
+            .scan(point_id.location.round)?
             .view(&point_id.location.author, |loc| {
                 loc.versions().get(&point_id.digest).cloned()
             })?

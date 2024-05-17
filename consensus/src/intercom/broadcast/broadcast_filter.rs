@@ -37,7 +37,7 @@ impl BroadcastFilter {
         self.0.add(point);
     }
 
-    pub fn advance_round(&self, new_round: &Round) {
+    pub fn advance_round(&self, new_round: Round) {
         self.0.advance_round(new_round)
     }
 
@@ -133,7 +133,7 @@ impl BroadcastFilterInner {
         }
         match self.by_round.entry(round).or_try_insert_with(|| {
             // how many nodes should send broadcasts
-            NodeCount::try_from(self.peer_schedule.peers_for(&round).len())
+            NodeCount::try_from(self.peer_schedule.peers_for(round).len())
                 .map(|node_count| (node_count, Default::default()))
         }) {
             Err(_) => {
@@ -154,11 +154,11 @@ impl BroadcastFilterInner {
                 };
             }
         }
-        self.advance_round(&round);
+        self.advance_round(round);
     }
 
     // drop everything up to the new round (inclusive), channelling cached points
-    fn advance_round(&self, new_round: &Round) {
+    fn advance_round(&self, new_round: Round) {
         for round in (self.current_dag_round.load(Ordering::Acquire)..=new_round.0).map(Round) {
             self.output.send(ConsensusEvent::Forward(round)).ok();
             // allow filter to channel messages only after Forward was sent
@@ -183,7 +183,7 @@ impl BroadcastFilterInner {
         // TODO there must be some config value - when node needs to sync;
         //   values too far in the future are some garbage, must ban authors
         self.by_round.retain(|round, _| {
-            new_round < round && round.0 <= new_round.0 + MempoolConfig::COMMIT_DEPTH as u32
+            new_round < *round && round.0 <= new_round.0 + MempoolConfig::COMMIT_DEPTH as u32
         });
     }
 }

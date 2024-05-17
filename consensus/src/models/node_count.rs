@@ -1,4 +1,4 @@
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct NodeCount(u8);
 
 impl std::fmt::Debug for NodeCount {

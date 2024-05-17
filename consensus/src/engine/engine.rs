@@ -112,7 +112,7 @@ impl Engine {
     pub async fn init_with_genesis(&mut self, next_peers: &[PeerId]) {
         let genesis = crate::test_utils::genesis();
         assert!(
-            genesis.body.location.round > *self.top_dag_round.read().await.round(),
+            genesis.body.location.round > self.top_dag_round.read().await.round(),
             "genesis point round is too low"
         );
         // check only genesis round as it is widely used in point validation.
@@ -154,7 +154,7 @@ impl Engine {
                 .top(self.collector.next_round(), &self.peer_schedule);
             let next_dag_round = self
                 .dag
-                .top(&current_dag_round.round().next(), &self.peer_schedule);
+                .top(current_dag_round.round().next(), &self.peer_schedule);
 
             let produce_with_payload = if produce_own_point {
                 Some(self.input_buffer.as_mut().fetch(prev_point.is_some()).await)
@@ -199,8 +199,8 @@ impl Engine {
 
             let bcast_filter_run = {
                 let bcast_filter = self.broadcast_filter.clone();
-                let round = current_dag_round.round().clone();
-                tokio::spawn(async move { bcast_filter.advance_round(&round) })
+                let round = current_dag_round.round();
+                tokio::spawn(async move { bcast_filter.advance_round(round) })
             };
 
             let collector_run = tokio::spawn(self.collector.run(
