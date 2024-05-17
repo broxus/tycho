@@ -66,8 +66,8 @@ where
 
 #[async_trait]
 pub trait CollatorEventListener: Send + Sync {
-    /// Process empty anchor that was skipped without shard block collation
-    async fn on_skipped_empty_anchor(
+    /// Process anchor that was skipped without block collation
+    async fn on_skipped_anchor(
         &self,
         shard_id: ShardIdent,
         anchor: Arc<MempoolAnchor>,
@@ -84,14 +84,13 @@ pub trait CollatorEventListener: Send + Sync {
 pub trait Collator: Send + Sync + 'static {
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
-    /// Enqueue update of McData in working state and run attempt to collate shard block
-    async fn equeue_update_mc_data_and_resume_shard_collation(
-        &self,
-        mc_state: ShardStateStuff,
-    ) -> Result<()>;
+    /// Enqueue update of McData in working state and run attempt to collate next shard block
+    async fn equeue_update_mc_data_and_try_collate(&self, mc_state: ShardStateStuff) -> Result<()>;
     /// Enqueue next attemt to collate block
+    /// (with check if there are internals or externals for collation).
+    /// Check implementation for master and shards for details
     async fn equeue_try_collate(&self) -> Result<()>;
-    /// Enqueue new block collation
+    /// Enqueue new block collation (without check of internals and externals)
     async fn equeue_do_collate(
         &self,
         next_chain_time: u64,
@@ -128,19 +127,16 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         todo!()
     }
 
-    async fn equeue_update_mc_data_and_resume_shard_collation(
-        &self,
-        mc_state: ShardStateStuff,
-    ) -> Result<()> {
+    async fn equeue_update_mc_data_and_try_collate(&self, mc_state: ShardStateStuff) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
-            update_mc_data_and_resume_collation,
+            update_mc_data_and_try_collate,
             mc_state
         ))
         .await
     }
 
     async fn equeue_try_collate(&self) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(try_collate_next_shard_block,))
+        self.enqueue_task(method_to_async_task_closure!(try_collate,))
             .await
     }
 
@@ -152,7 +148,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         self.enqueue_task(method_to_async_task_closure!(
             do_collate,
             next_chain_time,
-            top_shard_blocks_info
+            Some(top_shard_blocks_info)
         ))
         .await
     }
@@ -293,15 +289,13 @@ impl CollatorStdImpl {
         let working_state = Self::build_and_validate_working_state(mc_state, prev_states)?;
         self.set_working_state(working_state);
 
-        // master block collations will be called by the collation manager directly
+        // TODO: collate right now instead of queuing
 
-        // enqueue collation attempt of next shard block
-        if !self.shard_id.is_masterchain() {
-            self.dispatcher
-                .enqueue_task(method_to_async_task_closure!(try_collate_next_shard_block,))
-                .await?;
-            tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): collation attempt enqueued", self.collator_descr());
-        }
+        // enqueue collation attempt of next block
+        self.dispatcher
+            .enqueue_task(method_to_async_task_closure!(try_collate,))
+            .await?;
+        tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): collation attempt enqueued", self.collator_descr());
 
         tracing::info!(target: tracing_targets::COLLATOR, "Collator init ({}): finished", self.collator_descr());
 
@@ -437,7 +431,7 @@ impl CollatorStdImpl {
     async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>> {
         // TODO: make real implementation
 
-        //TODO: use get_next_anchor() only once
+        // TODO: use get_next_anchor() only once
         let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
             self.mpool_adapter.get_next_anchor(prev_anchor_id).await?
         } else {
@@ -496,26 +490,81 @@ impl CollatorStdImpl {
         Ok(QueueIteratorStubImpl::create_stub())
     }
 
-    async fn update_mc_data_and_resume_collation(
-        &mut self,
-        mc_state: ShardStateStuff,
-    ) -> Result<()> {
+    async fn update_mc_data_and_try_collate(&mut self, mc_state: ShardStateStuff) -> Result<()> {
         self.update_mc_data(mc_state)?;
 
-        self.dispatcher
-            .enqueue_task(method_to_async_task_closure!(try_collate_next_shard_block,))
-            .await
+        self.try_collate_next_shard_block_impl().await
     }
 
-    fn try_collate_next_shard_block(&mut self) -> BoxFuture<'_, Result<()>> {
+    fn try_collate(&mut self) -> BoxFuture<'_, Result<()>> {
         // NOTE: Prevents recursive future creation
-        Box::pin(async move { self.try_collate_next_shard_block_impl().await })
+        Box::pin(async move { self.try_collate_impl().await })
     }
 
+    async fn try_collate_impl(&mut self) -> Result<()> {
+        if self.shard_id.is_masterchain() {
+            self.try_collate_next_master_block_impl().await
+        } else {
+            self.try_collate_next_shard_block_impl().await
+        }
+    }
+
+    /// Run collation if there are internals,
+    /// otherwise import next anchor and notify it to manager
+    /// that will route next collation steps
+    async fn try_collate_next_master_block_impl(&mut self) -> Result<()> {
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            "Collator ({}): check if can collate next block",
+            self.collator_descr(),
+        );
+
+        // TODO: fix the work with internals
+
+        // check internals
+        let has_internals = self.has_internals()?;
+        if has_internals {
+            // collate if has internals
+            tracing::debug!(
+                target: tracing_targets::COLLATOR,
+                "Collator ({}): there are unprocessed internals from previous block, will collate next block",
+                self.collator_descr(),
+            );
+            let next_chain_time = self.working_state().prev_shard_data.gen_chain_time() as u64;
+            self.do_collate(next_chain_time, None).await?;
+        } else {
+            // otherwise import next anchor and return it notify to manager
+            tracing::debug!(
+                target: tracing_targets::COLLATOR,
+                "Collator ({}): there are no internals, will import next anchor",
+                self.collator_descr(),
+            );
+            let next_anchor = self.import_next_anchor().await?;
+            if next_anchor.has_externals() {
+                tracing::debug!(
+                    target: tracing_targets::COLLATOR,
+                    "Collator ({}): just imported anchor has externals",
+                    self.collator_descr(),
+                );
+            }
+            // this may start master block collation or cause next anchor import
+            self.listener
+                .on_skipped_anchor(self.shard_id, next_anchor)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Run collation if there are internals or externals,
+    /// otherwise import next anchor.
+    /// If it has externals then run collation,
+    /// otherwise return empty anchor to manager
+    /// that will route next collation steps
     async fn try_collate_next_shard_block_impl(&mut self) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): checking if can collate next block",
+            "Collator ({}): check if can collate next block",
             self.collator_descr(),
         );
 
@@ -532,17 +581,14 @@ impl CollatorStdImpl {
         }
 
         // check pending externals
-        let mut has_externals = true;
-        if !has_internals {
-            has_externals = self.has_pending_externals;
-            if has_externals {
-                tracing::debug!(
-                    target: tracing_targets::COLLATOR,
-                    "Collator ({}): there are pending externals from previously imported anchors, will collate next block",
-                    self.collator_descr(),
-                );
-            }
-        };
+        let mut has_externals = self.has_pending_externals;
+        if has_externals {
+            tracing::debug!(
+                target: tracing_targets::COLLATOR,
+                "Collator ({}): there are pending externals from previously imported anchors, will collate next block",
+                self.collator_descr(),
+            );
+        }
 
         //TODO: import next anchor every time when there is no pending externals to update chain time
 
@@ -567,37 +613,23 @@ impl CollatorStdImpl {
             None
         };
 
-        // queue collation if has internals or externals
+        // collate block if has internals or externals
         if has_internals || has_externals {
             let next_chain_time = self.get_last_imported_anchor_chain_time();
-            self.dispatcher
-                .enqueue_task(method_to_async_task_closure!(
-                    do_collate,
-                    next_chain_time,
-                    vec![]
-                ))
-                .await?;
-            tracing::debug!(
-                target: tracing_targets::COLLATOR,
-                "Collator ({}): block collation task enqueued",
-                self.collator_descr(),
-            );
+            self.do_collate(next_chain_time, None).await?;
         } else {
+            // otherwise we have definitely imported the next anchor
+            let anchor = next_anchor.expect("should be Some here");
             // notify manager when next anchor was imported but id does not contain externals
-            if let Some(anchor) = next_anchor {
-                // this will initiate master block collation or next shard block collation attempt
+            if !anchor.has_externals() {
+                // this may start master block collation or next shard block collation attempt
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
                     "Collator ({}): just imported anchor has no externals, will notify collation manager",
                     self.collator_descr(),
                 );
                 self.listener
-                    .on_skipped_empty_anchor(self.shard_id, anchor)
-                    .await?;
-            } else {
-                // otherwise enqueue next shard block collation attempt right now
-                self.dispatcher
-                    .enqueue_task(method_to_async_task_closure!(try_collate_next_shard_block,))
+                    .on_skipped_anchor(self.shard_id, anchor)
                     .await?;
             }
         }

@@ -143,7 +143,7 @@ where
     CF: CollatorFactory,
     V: Validator,
 {
-    async fn on_skipped_empty_anchor(
+    async fn on_skipped_anchor(
         &self,
         shard_id: ShardIdent,
         anchor: Arc<MempoolAnchor>,
@@ -652,7 +652,7 @@ where
             );
 
             collator
-                .equeue_update_mc_data_and_resume_shard_collation(mc_state.clone())
+                .equeue_update_mc_data_and_try_collate(mc_state.clone())
                 .await?;
         }
 
@@ -956,61 +956,70 @@ where
         chain_time: u64,
         trigger_shard_block_id: Option<BlockId>,
     ) -> Result<()> {
-        if let Some(next_mc_block_chain_time) =
-            self.update_last_collated_chain_time_and_check_mc_block_interval(shard_id, chain_time)
-        {
-            self.enqueue_mc_block_collation(next_mc_block_chain_time, trigger_shard_block_id)
-                .await?;
+        // if current shard chain time elapsed master block interval
+        // then stop shard collation
+        let (mc_block_interval_elapsed, next_mc_block_chain_time_opt) =
+            self.update_last_collated_chain_time_and_check_mc_block_interval(shard_id, chain_time);
+        if mc_block_interval_elapsed {
+            // and if chain time elapsed master block interval in every shard
+            // then run master block collation
+            if let Some(next_mc_block_chain_time) = next_mc_block_chain_time_opt {
+                self.enqueue_mc_block_collation(next_mc_block_chain_time, trigger_shard_block_id)
+                    .await?;
+            }
         } else {
-            // if do not need to collate master block then run next attempt to collate shard block
-            // otherwise next shard block will be scheduled after master block collation
-            self.enqueue_try_collate_next_shard_block(&shard_id).await?;
+            // if master block interval not elapsed
+            // then continue shard collation by running `try_collate` that will
+            // - in masterchain: just import next anchor
+            // - in workchain: run next attempt to collate shard block
+            self.enqueue_try_collate(&shard_id).await?;
         }
         Ok(())
     }
 
-    /// 1. (TODO) Store last collated chain time from anchor
-    /// 2. (TODO) Check if master block interval expired in each shard
-    /// 3. Return chain time for master block collation if interval expired
+    /// 1. (TODO) Store last collated chain time by shards
+    /// 2. Check if master block interval elapsed in current shard
+    /// 3. (TODO) And if it elapsed in every shard, then return chain time for master block collation
     fn update_last_collated_chain_time_and_check_mc_block_interval(
         &mut self,
         _shard_id: ShardIdent,
         chain_time: u64,
-    ) -> Option<u64> {
+    ) -> (bool, Option<u64>) {
         // TODO: make real implementation
 
         // TODO: idea is to store for each shard each chain time and related shard block
         //      that expired master block interval. So we will have a list of such chain times.
-        //      Then we can collate master block if interval expired in all shards.
-        //      We should take the max chain time among first that expired the masterblock interval in each shard
+        //      Then we can collate master block if interval elapsed in all shards.
+        //      We should take the max chain time among first that elapsed the masterblock interval in each shard
         //      then we take shard blocks which chain time less then determined max
 
         // STUB: when we work with only one shard we can check for master block interval easier
-        let elapsed = chain_time - self.last_mc_block_chain_time();
-        let check = elapsed > self.config.mc_block_min_interval_ms;
+        let chain_time_elapsed = chain_time - self.last_mc_block_chain_time();
+        let mc_block_interval_elapsed = chain_time_elapsed > self.config.mc_block_min_interval_ms;
 
-        if check {
+        if mc_block_interval_elapsed {
             // additionally check `next_mc_block_chain_time`
             // probably the master block collation was already enqueued
-            let elapsed = chain_time - self.next_mc_block_chain_time();
-            let check = elapsed > self.config.mc_block_min_interval_ms;
-            if check {
+            let chain_time_elapsed = chain_time - self.next_mc_block_chain_time();
+            let mc_block_interval_elapsed =
+                chain_time_elapsed > self.config.mc_block_min_interval_ms;
+            if mc_block_interval_elapsed {
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Master block interval is {}ms, chain time elapsed {}ms from last one - will collate next",
-                    self.config.mc_block_min_interval_ms, elapsed,
+                    self.config.mc_block_min_interval_ms, chain_time_elapsed,
                 );
-                return Some(chain_time);
+                return (mc_block_interval_elapsed, Some(chain_time));
             } else {
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Elapsed chain time {}ms has not expired master block interval {}ms - do not need to collate next master block",
-                    elapsed, self.config.mc_block_min_interval_ms,
+                    chain_time_elapsed, self.config.mc_block_min_interval_ms,
                 );
             }
         }
 
-        None
+        (mc_block_interval_elapsed, None)
     }
 
     /// Find top shard blocks in cacche for the next master block collation
@@ -1086,8 +1095,8 @@ where
         Ok(())
     }
 
-    async fn enqueue_try_collate_next_shard_block(&self, shard_id: &ShardIdent) -> Result<()> {
-        // get shardchain collator if exists
+    async fn enqueue_try_collate(&self, shard_id: &ShardIdent) -> Result<()> {
+        // get collator if exists
         let Some(collator) = self.active_collators.get(shard_id) else {
             tracing::warn!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -1101,7 +1110,7 @@ where
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Equeued next attempt to collate shard block for {}",
+            "Equeued next attempt to collate block for shard {}",
             shard_id,
         );
 

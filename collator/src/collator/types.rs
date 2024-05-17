@@ -178,8 +178,7 @@ pub(super) struct PrevData {
     pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
 
-    // TODO: remove if we do not need this
-    _gen_utime: u32,
+    gen_chain_time: u32,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
     // TODO: remove if we do not need this
@@ -225,7 +224,7 @@ impl PrevData {
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root.clone(),
 
-            _gen_utime: gen_utime,
+            gen_chain_time: gen_utime,
             gen_lt,
             total_validator_fees,
             _overload_history: overload_history,
@@ -281,6 +280,10 @@ impl PrevData {
 
     pub fn pure_state_root(&self) -> &Cell {
         &self.pure_state_root
+    }
+
+    pub fn gen_chain_time(&self) -> u32 {
+        self.gen_chain_time
     }
 
     pub fn gen_lt(&self) -> u64 {

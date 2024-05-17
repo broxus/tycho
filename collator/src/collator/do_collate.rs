@@ -20,23 +20,25 @@ impl CollatorStdImpl {
     pub(super) async fn do_collate(
         &mut self,
         next_chain_time: u64,
-        top_shard_blocks_info: Vec<(BlockId, BlockInfo, ValueFlow)>,
+        top_shard_blocks_info: Option<Vec<(BlockId, BlockInfo, ValueFlow)>>,
     ) -> Result<()> {
         // TODO: make real implementation
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 
-        let _tracing_top_shard_blocks_descr = if top_shard_blocks_info.is_empty() {
-            "".to_string()
-        } else {
-            format!(
-                ", top_shard_blocks: {:?}",
-                top_shard_blocks_info
-                    .iter()
-                    .map(|(id, _, _)| id.as_short_id().to_string())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )
+        let _tracing_top_shard_blocks_descr = match top_shard_blocks_info {
+            None => "".to_string(),
+            Some(ref top_shard_blocks_info) if top_shard_blocks_info.is_empty() => "".to_string(),
+            Some(ref top_shard_blocks_info) => {
+                format!(
+                    ", top_shard_blocks: {:?}",
+                    top_shard_blocks_info
+                        .iter()
+                        .map(|(id, _, _)| id.as_short_id().to_string())
+                        .collect::<Vec<_>>()
+                        .as_slice(),
+                )
+            }
         };
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -70,22 +72,35 @@ impl CollatorStdImpl {
 
         // init ShardHashes descriptions for master
         if collation_data.block_id_short.shard.is_masterchain() {
-            let mut shards = HashMap::new();
-            for (top_block_id, top_block_info, top_block_value_flow) in top_shard_blocks_info {
-                let mut shard_descr = ShardDescription::from_block_info(
-                    top_block_id,
-                    &top_block_info,
-                    &top_block_value_flow,
-                );
-                shard_descr.reg_mc_seqno = collation_data.block_id_short.seqno;
+            if let Some(top_shard_blocks_info) = top_shard_blocks_info {
+                let mut shards = HashMap::new();
+                for (top_block_id, top_block_info, top_block_value_flow) in top_shard_blocks_info {
+                    let mut shard_descr = ShardDescription::from_block_info(
+                        top_block_id,
+                        &top_block_info,
+                        &top_block_value_flow,
+                    );
+                    shard_descr.reg_mc_seqno = collation_data.block_id_short.seqno;
 
-                collation_data.update_shards_max_end_lt(shard_descr.end_lt);
+                    collation_data.update_shards_max_end_lt(shard_descr.end_lt);
 
-                shards.insert(top_block_id.shard, Box::new(shard_descr));
-                collation_data.top_shard_blocks_ids.push(top_block_id);
+                    shards.insert(top_block_id.shard, Box::new(shard_descr));
+                    collation_data.top_shard_blocks_ids.push(top_block_id);
+                }
+                collation_data.set_shards(shards);
+            } else {
+                // when top_shard_blocks_info is None we just take ShardHashes from prev state
+                let shards = prev_shard_data.observable_states()[0]
+                    .shards()?
+                    .iter()
+                    .filter_map(|entry| {
+                        entry
+                            .ok()
+                            .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
+                    })
+                    .collect::<HashMap<_, _>>();
+                collation_data.set_shards(shards);
             }
-            collation_data.set_shards(shards);
-
             // TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
         }
 
