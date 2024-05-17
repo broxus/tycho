@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::network::config::EndpointConfig;
 use crate::network::connection::{parse_peer_identity, Connection};
-use crate::types::{Address, Direction, PeerId};
+use crate::types::{Direction, PeerId};
 
 pub(crate) struct Endpoint {
     inner: quinn::Endpoint,
@@ -75,7 +75,7 @@ impl Endpoint {
     /// Connect to a remote endpoint expecting it to have the provided peer id.
     pub fn connect_with_expected_id(
         &self,
-        address: Address,
+        address: &SocketAddr,
         peer_id: &PeerId,
     ) -> Result<Connecting> {
         let config = self.config.make_client_config_for_peer_id(peer_id)?;
@@ -86,12 +86,10 @@ impl Endpoint {
     fn connect_with_client_config(
         &self,
         config: quinn::ClientConfig,
-        address: Address,
+        address: &SocketAddr,
     ) -> Result<Connecting> {
-        let address = address.resolve()?;
-
         self.inner
-            .connect_with(config, address, &self.config.service_name)
+            .connect_with(config, *address, &self.config.service_name)
             .map_err(Into::into)
             .map(Connecting::new_outbound)
     }

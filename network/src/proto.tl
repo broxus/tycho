@@ -13,6 +13,7 @@ transport.peerId key:int256 = transport.PeerId;
 
 transport.address.ipv4 ip:int port:int = transport.Address;
 transport.address.ipv6 ip:int128 port:int = transport.Address;
+transport.address.dns hostname:bytes post:int = transport.Address;
 
 // DHT
 ////////////////////////////////////////////////////////////////////////////////
