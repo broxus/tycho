@@ -10,8 +10,9 @@ use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
     CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OutMsg,
-    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription, ShardFees,
-    ShardIdent, SimpleLib, StateInit, TickTock, Transaction, ValueFlow,
+    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
+    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, StateInit, TickTock,
+    Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
@@ -377,6 +378,23 @@ impl BlockCollationData {
     pub fn min_ref_mc_seqno(&self) -> Result<u32> {
         self.min_ref_mc_seqno
             .ok_or_else(|| anyhow!("`min_ref_mc_seqno` is not initialized yet"))
+    }
+
+    pub fn store_shard_fees(
+        &mut self,
+        shard_id: ShardIdent,
+        shard_description: Box<ShardDescription>,
+    ) -> Result<()> {
+        let shard_fee_created = ShardFeeCreated {
+            fees: shard_description.fees_collected.clone(),
+            create: shard_description.funds_created.clone(),
+        };
+        self.shard_fees.set(
+            ShardIdentFull::from(shard_id),
+            shard_fee_created.clone(),
+            shard_fee_created,
+        )?;
+        Ok(())
     }
 }
 

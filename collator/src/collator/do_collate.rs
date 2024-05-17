@@ -1,4 +1,5 @@
 use std::sync::atomic::Ordering;
+use std::sync::{atomic, Arc};
 use std::{collections::HashMap, ops::Deref};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -6,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use sha2::Digest;
+use tycho_block_util::state::ShardStateStuff;
 
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
@@ -72,7 +74,7 @@ impl CollatorStdImpl {
 
         // init ShardHashes descriptions for master
         if collation_data.block_id_short.shard.is_masterchain() {
-            if let Some(top_shard_blocks_info) = top_shard_blocks_info {
+            let shards = if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 let mut shards = HashMap::new();
                 for (top_block_id, top_block_info, top_block_value_flow) in top_shard_blocks_info {
                     let mut shard_descr = ShardDescription::from_block_info(
@@ -87,10 +89,10 @@ impl CollatorStdImpl {
                     shards.insert(top_block_id.shard, Box::new(shard_descr));
                     collation_data.top_shard_blocks_ids.push(top_block_id);
                 }
-                collation_data.set_shards(shards);
+                shards
             } else {
                 // when top_shard_blocks_info is None we just take ShardHashes from prev state
-                let shards = prev_shard_data.observable_states()[0]
+                prev_shard_data.observable_states()[0]
                     .shards()?
                     .iter()
                     .filter_map(|entry| {
@@ -98,10 +100,14 @@ impl CollatorStdImpl {
                             .ok()
                             .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
                     })
-                    .collect::<HashMap<_, _>>();
-                collation_data.set_shards(shards);
-            }
-            // TODO: setup ShardFees and update `collation_data.value_flow.fees_*`
+                    .collect::<HashMap<_, _>>()
+            };
+
+            self.import_new_shard_top_blocks_for_masterchain(
+                mc_data.config(),
+                &mut collation_data,
+                shards,
+            )?;
         }
 
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
@@ -744,6 +750,86 @@ impl CollatorStdImpl {
             collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
         }
 
+        Ok(())
+    }
+
+    fn import_new_shard_top_blocks_for_masterchain(
+        &self,
+        config: &BlockchainConfig,
+        collation_data: &mut BlockCollationData,
+        shards: HashMap<ShardIdent, Box<ShardDescription>>,
+    ) -> Result<()> {
+        tracing::trace!(
+            "{}: import_new_shard_top_blocks_for_masterchain",
+            self.collator_descr
+        );
+        let mut tb_act = 0;
+        let gen_utime = collation_data.chain_time;
+        for (shard_id, mut shard_descr) in shards {
+            if shard_descr.gen_utime >= gen_utime {
+                tracing::debug!(
+                    "{}: ShardTopBlockDescr for {} skipped: it claims to be generated at {} \
+                    while it is still {}",
+                    self.collator_descr,
+                    shard_id,
+                    shard_descr.gen_utime,
+                    gen_utime
+                );
+                continue;
+            }
+            if config
+                .get_global_version()?
+                .capabilities
+                .contains(GlobalCapability::CapWorkchains)
+            {
+                // TODO: Fill shard_descr proof_chain
+                // shard_descr.proof_chain = Some(sh_bd.top_block_descr().chain().clone());
+            }
+            // TODO: Check may update shard block info
+            // TODO: Implement merge algorithm in future
+
+            shard_descr.reg_mc_seqno = collation_data.block_id_short.seqno;
+            let end_lt = shard_descr.end_lt;
+            self.update_shard_block_info(
+                collation_data.shards_mut()?,
+                shard_id,
+                shard_descr.clone(),
+            )?;
+
+            collation_data.store_shard_fees(shard_id, shard_descr)?;
+            // TODO: collation_data.register_shard_block_creators
+            collation_data.update_shards_max_end_lt(end_lt);
+            tracing::debug!(
+                "{}: updated top shard block information with {}",
+                self.collator_descr,
+                shard_id
+            );
+            tb_act += 1;
+        }
+
+        if tb_act > 0 {
+            // TODO: collation_data.set_shard_conf_adjusted();
+        }
+
+        let shard_fees = collation_data.shard_fees.root_extra().clone();
+
+        collation_data
+            .value_flow
+            .fees_collected
+            .checked_add(&shard_fees.fees)?;
+        collation_data.value_flow.fees_imported = shard_fees.fees;
+
+        Ok(())
+    }
+
+    pub fn update_shard_block_info(
+        &self,
+        shardes: &mut HashMap<ShardIdent, Box<ShardDescription>>,
+        shard_id: ShardIdent,
+        shard_description: Box<ShardDescription>,
+    ) -> Result<()> {
+        // TODO: check may update shard block info and add algorithm merge/split
+        shardes.insert(shard_id, shard_description);
         Ok(())
     }
 }
