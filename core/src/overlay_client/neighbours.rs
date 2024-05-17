@@ -132,7 +132,7 @@ struct Inner {
 struct SelectionIndex {
     /// Neighbour indices with cumulative weight.
     indices_with_weights: Vec<(Neighbour, u32)>,
-    /// Optional uniform distribution [0; total_weight).
+    /// Optional uniform distribution `[0; total_weight)`.
     distribution: Option<UniformInt<u32>>,
 }
 

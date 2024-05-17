@@ -11,12 +11,12 @@ pub struct StorageConfig {
     /// Default: `./db`.
     pub root_dir: PathBuf,
 
-    /// Whether to enable RocksDB metrics.
+    /// Whether to enable `RocksDB` metrics.
     ///
     /// Default: `false`.
     pub rocksdb_enable_metrics: bool,
 
-    /// RocksDB LRU cache capacity.
+    /// `RocksDB` LRU cache capacity.
     ///
     /// Default: calculated based on the available memory.
     pub rocksdb_lru_capacity: ByteSize,

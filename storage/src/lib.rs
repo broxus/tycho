@@ -93,7 +93,7 @@ impl Storage {
             base_db.clone(),
             block_handle_storage.clone(),
             block_connection_storage.clone(),
-        )?);
+        ));
         let shard_state_storage = ShardStateStorage::new(
             base_db.clone(),
             &file_db,
@@ -104,6 +104,8 @@ impl Storage {
         let persistent_state_storage =
             PersistentStateStorage::new(base_db.clone(), &file_db, block_handle_storage.clone())?;
         let node_state_storage = NodeStateStorage::new(base_db.clone());
+
+        // TODO: preload archive ids
 
         Ok(Self {
             inner: Arc::new(Inner {

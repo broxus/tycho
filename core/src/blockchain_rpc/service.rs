@@ -62,7 +62,7 @@ impl Service<ServiceRequest> for BlockchainRpcService {
         fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        let (constructor, body) = match self.inner.try_handle_prefix(&req) {
+        let (constructor, body) = match try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
                 tracing::debug!("failed to deserialize query: {e}");
@@ -170,19 +170,6 @@ impl Inner {
         &self.storage
     }
 
-    fn try_handle_prefix<'a>(
-        &self,
-        req: &'a ServiceRequest,
-    ) -> Result<(u32, &'a [u8]), tl_proto::TlError> {
-        let body = req.as_ref();
-        if body.len() < 4 {
-            return Err(tl_proto::TlError::UnexpectedEof);
-        }
-
-        let constructor = std::convert::identity(body).get_u32_le();
-        Ok((constructor, body))
-    }
-
     fn handle_get_next_key_block_ids(
         &self,
         req: &rpc::GetNextKeyBlockIds,
@@ -211,15 +198,7 @@ impl Inner {
                 );
             }
 
-            let mut ids = Vec::with_capacity(limit);
-            while let Some(id) = iterator.next() {
-                ids.push(id);
-                if ids.len() >= limit {
-                    break;
-                }
-            }
-
-            Ok::<_, anyhow::Error>(ids)
+            Ok::<_, anyhow::Error>(iterator.take(limit).collect::<Vec<_>>())
         };
 
         match get_next_key_block_ids() {
@@ -410,4 +389,14 @@ impl Inner {
             }
         }
     }
+}
+
+fn try_handle_prefix(req: &ServiceRequest) -> Result<(u32, &[u8]), tl_proto::TlError> {
+    let body = req.as_ref();
+    if body.len() < 4 {
+        return Err(tl_proto::TlError::UnexpectedEof);
+    }
+
+    let constructor = std::convert::identity(body).get_u32_le();
+    Ok((constructor, body))
 }
