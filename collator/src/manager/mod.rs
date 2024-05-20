@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, BlockInfo, ShardIdent, ValueFlow};
+use everscale_types::models::{BlockId, ShardIdent};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
@@ -1048,23 +1048,15 @@ where
         _trigger_shard_block_id: Option<BlockId>,
     ) -> Result<Vec<TopBlockDescription>> {
         // TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
-        // 1. Find current master block
-        let (_, mut mc_block_container) = self
-            .blocks_cache
-            .master
-            .last_key_value()
-            .ok_or_else(|| anyhow!("Master block  not found in cache!",))?;
-        if !mc_block_container.is_valid() {
-            return Ok(vec![]);
-        }
 
-        // 3. By the top shard blocks info find shard blocks of current master block
-        // 4. Recursively find prev shard blocks until the end or top shard blocks of prev master reached
-        let mut prev_shard_blocks_keys = mc_block_container
-            .top_shard_blocks_keys()
+        let mut prev_shard_blocks_keys = self
+            .blocks_cache
+            .shards
             .iter()
+            .filter_map(|(_, shard_cache)| shard_cache.last_key_value().map(|(_, v)| v.key()))
             .cloned()
-            .collect::<VecDeque<_>>();
+            .collect::<VecDeque<BlockCacheKey>>();
+
         let mut result = HashMap::new();
         while let Some(prev_shard_block_key) = prev_shard_blocks_keys.pop_front() {
             let shard_cache = self
@@ -1075,9 +1067,8 @@ where
                     anyhow!("Shard block ({}) not found in cache!", prev_shard_block_key)
                 })?;
             if let Some(shard_block_container) = shard_cache.get(&prev_shard_block_key.seqno) {
-                // if shard block included in current master block subgraph
-                if matches!(shard_block_container.containing_mc_block, Some(containing_mc_block_key) if &containing_mc_block_key == mc_block_container.key())
-                {
+                // if shard block is not included in any master block
+                if shard_block_container.containing_mc_block.is_none() {
                     // 5. If master block and all shard blocks valid the extract them from entries and return
                     if !shard_block_container.is_valid() {
                         return Ok(vec![]);
