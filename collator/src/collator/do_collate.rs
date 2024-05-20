@@ -1,6 +1,7 @@
+use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic, Arc};
-use std::{collections::HashMap, ops::Deref};
 
 use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::models::*;
@@ -14,7 +15,6 @@ use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
     AsyncMessage, BlockCollationData, McData, PrevData, ShardDescriptionExt,
 };
-use crate::internal_queue::iterator::QueueIterator;
 use crate::tracing_targets;
 use crate::types::{BlockCollationResult, ProofFunds, ShardIdentExt, TopBlockDescription};
 
@@ -144,16 +144,16 @@ impl CollatorStdImpl {
         let mut block_limits_reached = false;
         let mut block_transactions_count = 0;
 
-        let mut int_msgs_iter = self.init_internal_mq_iterator().await?;
-
-        // temporary buffer to store first received new internals
-        // because we should not take them until existing internals not processed
-        let mut new_int_msgs_tmp_buffer: Vec<AsyncMessage> = vec![];
+        let mut internal_messages_iterator = self
+            .init_internal_mq_iterator(&collation_data, &mc_data)
+            .await?;
 
         // indicate that there are still unprocessed internals whe collation loop finished
         let mut has_pending_internals = false;
 
         loop {
+            let mut internal_messages_in_set = vec![];
+
             // build messages set
             let mut msgs_set: Vec<AsyncMessage> = vec![];
 
@@ -171,19 +171,21 @@ impl CollatorStdImpl {
             // 2. Then iterate through existing internals and try to fill the set
             let mut remaining_capacity = max_messages_per_set - ext_msgs.len();
             while remaining_capacity > 0 && !all_existing_internals_finished {
-                match int_msgs_iter.next() {
-                    Some(int_msg) if !int_msg.is_new => {
-                        //TODO: add existing internal message to set
-                        // msgs_set.push((..., ...));
-                        remaining_capacity -= 1;
-                    }
+                match internal_messages_iterator.next(false) {
                     Some(int_msg) => {
-                        //TODO: store new internal in the buffer
-                        // because we should not take it until existing internals not processed
-                        // new_int_msgs_tmp_buffer.push((..., ...));
-                        all_existing_internals_finished = true;
-                        //TODO: we should pass `return_new: bool` into `QueueIterator::next()` and
-                        //      do not return new internal if `return_new == false`
+                        let message_with_source = int_msg.message_with_source;
+                        let int_msg_info = MsgInfo::Int(message_with_source.message.info.clone());
+                        let cell = message_with_source.message.cell.clone();
+                        let is_current_shard = message_with_source.shard_id == self.shard_id;
+
+                        internal_messages_in_set.push((
+                            message_with_source.shard_id,
+                            message_with_source.message.key(),
+                        ));
+                        let async_message = AsyncMessage::Int(int_msg_info, cell, is_current_shard);
+
+                        msgs_set.push(async_message);
+                        remaining_capacity -= 1;
                     }
                     None => {
                         all_existing_internals_finished = true;
@@ -208,15 +210,21 @@ impl CollatorStdImpl {
             // 4. When all externals and existing internals finished (the collected set is empty here)
             //    fill next messages sets with new internals
             if msgs_set.is_empty() {
-                if !new_int_msgs_tmp_buffer.is_empty() {
-                    remaining_capacity -= new_int_msgs_tmp_buffer.len();
-                    msgs_set.append(&mut new_int_msgs_tmp_buffer);
-                }
                 while remaining_capacity > 0 && !all_new_internals_finished {
-                    match int_msgs_iter.next() {
+                    match internal_messages_iterator.next(true) {
                         Some(int_msg) => {
-                            //TODO: add internal message to set
-                            // msgs_set.push((..., ...));
+                            let message_with_source = int_msg.message_with_source;
+                            let int_msg_info =
+                                MsgInfo::Int(message_with_source.message.info.clone());
+                            let cell = message_with_source.message.cell.clone();
+                            internal_messages_in_set.push((
+                                message_with_source.shard_id,
+                                message_with_source.message.key(),
+                            ));
+
+                            let async_message = AsyncMessage::NewInt(int_msg_info, cell);
+
+                            msgs_set.push(async_message);
                             remaining_capacity -= 1;
                         }
                         None => {
@@ -233,23 +241,30 @@ impl CollatorStdImpl {
 
             let msgs_len = msgs_set.len() as u32;
             exec_manager.execute_msgs_set(msgs_set);
-            let mut msgs_set_offset: u32 = 0;
+            let mut msgs_set_offset = collation_data.processed_upto.processed_offset;
             let mut msgs_set_full_processed = false;
+
             // execute msgs processing by groups
             while !msgs_set_full_processed {
                 let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
                 for (_account_id, msg_info, transaction) in group {
-                    let internal_msgs = new_transaction(
+                    let new_internal_messages = new_transaction(
                         &mut collation_data,
                         &self.shard_id,
                         &transaction,
                         msg_info,
                     )?;
+
+                    self.mq_adapter.add_messages_to_iterator(
+                        &mut internal_messages_iterator,
+                        new_internal_messages,
+                    )?;
+
                     collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
                 }
                 msgs_set_offset = new_offset;
 
-                //TODO: when processing transactions we should check block limits
+                // TODO: when processing transactions we should check block limits
                 //      currently we simply check only transactions count
                 //      but needs to make good implementation futher
                 block_transactions_count += new_offset;
@@ -263,6 +278,11 @@ impl CollatorStdImpl {
                 }
             }
 
+            self.mq_adapter.commit_processed_messages(
+                &mut internal_messages_iterator,
+                internal_messages_in_set,
+            )?;
+
             // store how many msgs from the set were processed (offset)
             Self::update_processed_upto_execution_offset(
                 &mut collation_data,
@@ -271,7 +291,7 @@ impl CollatorStdImpl {
             );
 
             // TODO: update `has_pending_internals` to indicate if there are still unprocessed internals in the queue
-            //has_pending_internals = ...;
+            // has_pending_internals = ...;
 
             if block_limits_reached {
                 // block is full - exit loop
@@ -289,6 +309,9 @@ impl CollatorStdImpl {
         let (candidate, new_state_stuff) = self
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
+
+        let diff = internal_messages_iterator.take_diff(candidate.block_id.as_short_id());
+        self.mq_adapter.apply_diff(Arc::new(diff)).await?;
 
         // return collation result
         let collation_result = BlockCollationResult {
@@ -316,7 +339,7 @@ impl CollatorStdImpl {
     ///                           when there are a lot of internals and externals
     /// * `group_size` - max num of accounts to be processed in one tick
     fn get_msgs_execution_params(&self) -> (usize, usize, usize) {
-        //TODO: should get this from BlockchainConfig
+        // TODO: should get this from BlockchainConfig
         (10, 4, 3)
     }
 
@@ -327,7 +350,7 @@ impl CollatorStdImpl {
         count: usize,
         collation_data: &mut BlockCollationData,
     ) -> Result<Vec<(MsgInfo, Cell)>> {
-        //TODO: was written in a hurry, should be reviewed and optimized
+        // TODO: was written in a hurry, should be reviewed and optimized
 
         // when we already read externals in this collation then continue from read_to
         let read_from_opt = if collation_data.externals_reading_started {
@@ -405,7 +428,7 @@ impl CollatorStdImpl {
         if unread_msgs_left_in_last_read_anchor {
             self.has_pending_externals = true;
         } else {
-            //TODO: should make other implementation without iterating through all anchors in cache
+            // TODO: should make other implementation without iterating through all anchors in cache
             self.has_pending_externals = self.anchors_cache.iter().any(|(id, anchor)| {
                 if let Some(ref last_read_anchor) = last_read_anchor_opt {
                     id != last_read_anchor && anchor.has_externals()
@@ -430,7 +453,7 @@ impl CollatorStdImpl {
             let ext_proc_upto = collation_data.processed_upto.externals.as_mut().unwrap();
             ext_proc_upto.processed_to = ext_proc_upto.read_to;
 
-            //TODO: set internals read window full pocessed
+            // TODO: set internals read window full pocessed
 
             collation_data.processed_upto.processed_offset = 0;
         } else {

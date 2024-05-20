@@ -1,10 +1,7 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::sync::Arc;
 
-use crate::types::ProofFunds;
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, UsageTreeMode};
 use everscale_types::dict::{AugDict, Dict};
@@ -16,6 +13,8 @@ use everscale_types::models::{
     Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+
+use crate::types::ProofFunds;
 
 // В текущем коллаторе перед коллацией блока импортируется:
 // - предыдущий мастер стейт
@@ -603,7 +602,7 @@ impl ShardAccountStuff {
             libraries.set(&key, &lib_descr)?;
         }
 
-        return Ok(());
+        Ok(())
     }
 
     pub fn add_public_library(
@@ -618,7 +617,7 @@ impl ShardAccountStuff {
             self.account_addr
         );
 
-        if key != library.repr_hash().clone() {
+        if key != *library.repr_hash() {
             bail!("Can't add library {} because it mismatch given key", key);
         }
 
@@ -649,7 +648,7 @@ impl ShardAccountStuff {
 
         libraries.set(&key, &lib_descr)?;
 
-        return Ok(());
+        Ok(())
     }
 }
 

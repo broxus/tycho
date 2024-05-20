@@ -3,7 +3,8 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{
-    Block, BlockId, BlockInfo, CurrencyCollection, IntAddr, OwnedMessage, ShardIdent, Signature, ValueFlow,
+    Block, BlockId, BlockInfo, CurrencyCollection, IntAddr, OwnedMessage, ShardIdent, Signature,
+    ValueFlow,
 };
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
