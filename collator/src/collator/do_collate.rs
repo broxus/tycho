@@ -757,6 +757,7 @@ impl CollatorStdImpl {
             block_info,
             value_flow,
             proof_funds,
+            creators,
         } in top_shard_blocks_info
         {
             let mut shard_descr = Box::new(ShardDescription::from_block_info(
@@ -802,7 +803,7 @@ impl CollatorStdImpl {
             )?;
 
             collation_data.store_shard_fees(shard_id, proof_funds)?;
-            // TODO: collation_data.register_shard_block_creators
+            collation_data.register_shard_block_creators(creators)?;
             tracing::debug!(
                 "{}: updated top shard block information with {}",
                 self.collator_descr,

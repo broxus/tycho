@@ -190,4 +190,5 @@ pub struct TopBlockDescription {
     pub block_info: BlockInfo,
     pub value_flow: ValueFlow,
     pub proof_funds: ProofFunds,
+    pub creators: Vec<HashBytes>,
 }

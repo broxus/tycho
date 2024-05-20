@@ -1071,14 +1071,21 @@ where
                 if shard_block_container.containing_mc_block.is_none() {
                     let block = shard_block_container.get_block()?;
                     let value_flow = block.load_value_flow()?;
+                    let block_extra = block.load_extra()?;
+                    let creator = block_extra.created_by;
                     let fees_collected = value_flow.fees_collected.clone();
                     let funds_created = value_flow.created.clone();
 
-                    let (_, _, proof) = result
-                        .entry(*shard_block_container.block_id())
-                        .or_insert((block.load_info()?, value_flow, ProofFunds::default()));
+                    let (_, _, proof, creators) =
+                        result.entry(*shard_block_container.block_id()).or_insert((
+                            block.load_info()?,
+                            value_flow,
+                            ProofFunds::default(),
+                            vec![],
+                        ));
                     proof.fees_collected.checked_add(&fees_collected)?;
                     proof.funds_created.checked_add(&funds_created)?;
+                    creators.push(creator);
 
                     shard_block_container
                         .prev_blocks_keys()
@@ -1092,11 +1099,12 @@ where
         Ok(result
             .into_iter()
             .map(
-                |(block_id, (block_info, value_flow, proof_funds))| TopBlockDescription {
+                |(block_id, (block_info, value_flow, proof_funds, creators))| TopBlockDescription {
                     block_id,
                     block_info,
                     value_flow,
                     proof_funds,
+                    creators,
                 },
             )
             .collect())

@@ -343,6 +343,8 @@ pub(super) struct BlockCollationData {
     min_ref_mc_seqno: Option<u32>,
 
     pub rand_seed: HashBytes,
+
+    block_create_count: HashMap<HashBytes, u64>,
 }
 
 impl BlockCollationData {
@@ -395,6 +397,16 @@ impl BlockCollationData {
             shard_fee_created.clone(),
             shard_fee_created,
         )?;
+        Ok(())
+    }
+
+    pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
+        for creator in creators {
+            self.block_create_count
+                .entry(creator)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
         Ok(())
     }
 }
