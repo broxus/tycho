@@ -19,6 +19,9 @@ impl ExternalMessage {
             message_info,
         }
     }
+    pub fn info(&self) -> &ExtInMsgInfo {
+        &self.message_info
+    }
 }
 
 impl From<&ExternalMessage> for (MsgInfo, Cell) {

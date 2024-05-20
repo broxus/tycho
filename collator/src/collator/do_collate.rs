@@ -14,7 +14,7 @@ use crate::collator::types::{
 };
 use crate::internal_queue::iterator::QueueIterator;
 use crate::tracing_targets;
-use crate::types::BlockCollationResult;
+use crate::types::{BlockCollationResult, ShardIdentExt};
 
 impl CollatorStdImpl {
     pub(super) async fn do_collate(
@@ -71,7 +71,7 @@ impl CollatorStdImpl {
         collation_data.rand_seed = rand_seed;
 
         // init ShardHashes descriptions for master
-        if collation_data.block_id_short.shard.is_masterchain() {
+        if self.shard_id.is_masterchain() {
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 let mut shards = HashMap::new();
                 for (top_block_id, top_block_info, top_block_value_flow) in top_shard_blocks_info {
@@ -137,7 +137,7 @@ impl CollatorStdImpl {
         );
 
         // execute tick transaction and special transactions (mint, recover)
-        if collation_data.block_id_short.shard.is_masterchain() {
+        if self.shard_id.is_masterchain() {
             self.create_ticktock_transactions(false, &mut collation_data, &mut exec_manager)
                 .await?;
             self.create_special_transactions(&mut collation_data, &mut exec_manager)
@@ -286,7 +286,7 @@ impl CollatorStdImpl {
         }
 
         // execute tock transaction
-        if collation_data.block_id_short.shard.is_masterchain() {
+        if self.shard_id.is_masterchain() {
             self.create_ticktock_transactions(true, &mut collation_data, &mut exec_manager)
                 .await?;
         }
@@ -380,14 +380,16 @@ impl CollatorStdImpl {
                 read_next_anchor_from_msg_idx = 0;
                 msgs_read_from_last_anchor = 0;
                 while let Some(ext_msg) = iter.next() {
-                    ext_messages.push(ext_msg.deref().into());
-                    msgs_read_from_last_anchor += 1;
-                    total_msgs_read += 1;
+                    if self.shard_id.contains_address(&ext_msg.info().dst) {
+                        ext_messages.push(ext_msg.deref().into());
+                        msgs_read_from_last_anchor += 1;
+                        total_msgs_read += 1;
 
-                    // stop reading if target msgs count reached
-                    if total_msgs_read == count {
-                        unread_msgs_left_in_last_read_anchor = iter.count() > 0;
-                        break 'read_anchors;
+                        // stop reading if target msgs count reached
+                        if total_msgs_read == count {
+                            unread_msgs_left_in_last_read_anchor = iter.count() > 0;
+                            break 'read_anchors;
+                        }
                     }
                 }
             }
@@ -490,7 +492,7 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         tracing::trace!("Collator ({}): update_value_flow()", self.collator_descr);
 
-        if collation_data.block_id_short.shard.is_masterchain() {
+        if self.shard_id.is_masterchain() {
             collation_data.value_flow.created.tokens =
                 mc_data.config().get_block_creation_reward(true)?;
 

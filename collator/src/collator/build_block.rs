@@ -95,7 +95,7 @@ impl CollatorStdImpl {
         // build master state extra or get a ref to last applied master block
         //TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
         //collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
-        let (mc_state_extra, master_ref) = if self.shard_id.is_masterchain() {
+        let (mc_state_extra, master_ref) = if collation_data.block_id_short.shard.is_masterchain() {
             let (extra, min_ref_mc_seqno) =
                 self.create_mc_state_extra(collation_data, new_config_opt)?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
