@@ -32,13 +32,13 @@ pub fn genesis() -> Arc<Point> {
     })
 }
 
-pub fn make_peer_info(keypair: &KeyPair, address: Address, ttl: Option<u32>) -> PeerInfo {
+pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option<u32>) -> PeerInfo {
     let peer_id = PeerId::from(keypair.public_key);
 
     let now = now_sec();
     let mut peer_info = PeerInfo {
         id: peer_id,
-        address_list: vec![address.clone()].into_boxed_slice(),
+        address_list: address_list.into_boxed_slice(),
         created_at: now,
         expires_at: ttl.unwrap_or(u32::MAX),
         signature: Box::new([0; 64]),
@@ -136,7 +136,9 @@ mod tests {
         let peer_info = keys
             .iter()
             .zip(addresses.iter())
-            .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, addr.clone(), None)))
+            .map(|((_, key_pair), addr)| {
+                Arc::new(make_peer_info(key_pair, vec![addr.clone()], None))
+            })
             .collect::<Vec<_>>();
 
         let mut handles = vec![];

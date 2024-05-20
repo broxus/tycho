@@ -17,7 +17,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 use tycho_consensus::test_utils::drain_anchors;
 use tycho_consensus::{Engine, InputBufferStub};
-use tycho_network::{DhtConfig, NetworkConfig, PeerId, PeerInfo};
+use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId, PeerInfo};
 use tycho_util::time::now_sec;
 
 #[tokio::main]
@@ -179,8 +179,9 @@ impl CmdGenKey {
 /// generate a dht node info
 #[derive(Parser)]
 struct CmdGenDht {
-    /// local node address
-    addr: SocketAddr,
+    /// a list of node addresses
+    #[clap(required = true)]
+    addr: Vec<Address>,
 
     /// node secret key
     #[clap(long)]
@@ -195,8 +196,7 @@ impl CmdGenDht {
     fn run(self) -> Result<()> {
         let secret_key = parse_key(&self.key)?;
         let key_pair = KeyPair::from(&secret_key);
-        let entry =
-            tycho_consensus::test_utils::make_peer_info(&key_pair, self.addr.into(), self.ttl);
+        let entry = tycho_consensus::test_utils::make_peer_info(&key_pair, self.addr, self.ttl);
         let output = if std::io::stdin().is_terminal() {
             serde_json::to_string_pretty(&entry)
         } else {

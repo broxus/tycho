@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -218,11 +218,11 @@ fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_public_ip(ip: Option<Ipv4Addr>) -> Result<Ipv4Addr> {
+async fn resolve_public_ip(ip: Option<IpAddr>) -> Result<IpAddr> {
     match ip {
         Some(address) => Ok(address),
         None => match public_ip::addr_v4().await {
-            Some(address) => Ok(address),
+            Some(address) => Ok(IpAddr::V4(address)),
             None => anyhow::bail!("failed to resolve public IP address"),
         },
     }

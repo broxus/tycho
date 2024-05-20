@@ -322,21 +322,3 @@ impl<'de, const M: usize> Visitor<'de> for BytesVisitor<M> {
         array_from_iterator(SeqIter::new(seq), &self)
     }
 }
-
-struct HexVisitor;
-
-impl<'de> Visitor<'de> for HexVisitor {
-    type Value = Vec<u8>;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("hex-encoded byte array")
-    }
-
-    fn visit_str<E: Error>(self, value: &str) -> Result<Self::Value, E> {
-        hex::decode(value).map_err(|_e| E::invalid_type(serde::de::Unexpected::Str(value), &self))
-    }
-
-    fn visit_bytes<E: Error>(self, value: &[u8]) -> Result<Self::Value, E> {
-        Ok(value.to_vec())
-    }
-}
