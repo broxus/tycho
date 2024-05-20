@@ -751,7 +751,6 @@ impl CollatorStdImpl {
             "{}: import_new_shard_top_blocks_for_masterchain",
             self.collator_descr
         );
-        let mut tb_act = 0;
         let gen_utime = collation_data.chain_time;
         for TopBlockDescription {
             block_id,
@@ -789,7 +788,8 @@ impl CollatorStdImpl {
                 .capabilities
                 .contains(GlobalCapability::CapWorkchains)
             {
-                // TODO: Fill shard_descr proof_chain
+                // NOTE: shard_descr proof_chain is used for transactions between workchains in TON
+                // we skip it for now and will rework mechanism in the future
                 // shard_descr.proof_chain = Some(sh_bd.top_block_descr().chain().clone());
             }
             // TODO: Check may update shard block info
@@ -808,11 +808,6 @@ impl CollatorStdImpl {
                 self.collator_descr,
                 shard_id
             );
-            tb_act += 1;
-        }
-
-        if tb_act > 0 {
-            // TODO: collation_data.set_shard_conf_adjusted();
         }
 
         let shard_fees = collation_data.shard_fees.root_extra().clone();
@@ -832,7 +827,6 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         shard_description: Box<ShardDescription>,
     ) -> Result<()> {
-        // TODO: check may update shard block info and add algorithm merge/split
         shardes.insert(shard_id, shard_description);
         Ok(())
     }

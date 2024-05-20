@@ -1069,11 +1069,6 @@ where
             if let Some(shard_block_container) = shard_cache.get(&prev_shard_block_key.seqno) {
                 // if shard block is not included in any master block
                 if shard_block_container.containing_mc_block.is_none() {
-                    // 5. If master block and all shard blocks valid the extract them from entries and return
-                    if !shard_block_container.is_valid() {
-                        return Ok(vec![]);
-                    }
-
                     let block = shard_block_container.get_block()?;
                     let value_flow = block.load_value_flow()?;
                     let fees_collected = value_flow.fees_collected.clone();
@@ -1093,11 +1088,6 @@ where
                 }
             }
         }
-
-        // STUB: when we work with only one shard we can just get the last shard block
-        //      because collator manager will try run master block collation before
-        //      before processing any next candidate from the shard collator
-        //      because of dispatcher tasks queue
 
         Ok(result
             .into_iter()
