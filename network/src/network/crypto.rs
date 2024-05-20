@@ -1,13 +1,13 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug};
 use std::sync::Arc;
 
 use anyhow::Result;
 use pkcs8::EncodePrivateKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, Error, OtherError, SignatureScheme};
 use rustls::client::danger::HandshakeSignatureValid;
-use rustls::pki_types::CertificateDer;
-use webpki::Cert;
-use webpki::types::DnsName;
+use rustls::crypto::{verify_tls13_signature, WebPkiSupportedAlgorithms};
+use rustls::pki_types::{CertificateDer, SignatureVerificationAlgorithm};
+use webpki::ring::ED25519;
 
 use crate::types::PeerId;
 
@@ -20,16 +20,20 @@ pub(crate) fn generate_cert(
     // TODO: use zeroize for `rustls::PrivateKey` contents?
 
     let key_der = rustls::pki_types::PrivatePkcs8KeyDer::from(keypair.to_pkcs8_der()?.as_bytes());
-    let key_pair = rcgen::KeyPair::from_der_and_sign_algo(key_der.secret_pkcs8_der(), ALGO)?;
+    let key_pair = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&key_der, ALGO)?;
 
-    let mut cert_params = rcgen::CertificateParams::new([subject_name.to_owned()]);
-    cert_params.key_pair = Some(key_pair);
+    let mut cert_params = rcgen::CertificateParams::new([subject_name.to_owned()])?;
     cert_params.distinguished_name = rcgen::DistinguishedName::new();
-    cert_params.alg = ALGO;
 
-    let cert = rcgen::Certificate::from_params(cert_params)?.serialize_der()?;
+    let cert = cert_params.self_signed(&key_pair)?.der();
 
-    Ok((rustls::pki_types::CertificateDer::<'static>::from(cert.as_slice()), key_der))
+    //cert_params.key_pair = Some(key_pair);
+    //cert_params.alg = ALGO;
+
+
+    //let cert = rcgen::Certificate:: (cert_params)?.serialize_der()?;
+
+    Ok((rustls::pki_types::CertificateDer::<'static>::from(cert.as_ref()), key_der))
 }
 
 pub(crate) fn peer_id_from_certificate(
@@ -43,9 +47,9 @@ pub(crate) fn peer_id_from_certificate(
     let spki = cert.public_key();
     let public_key =
         ed25519::pkcs8::PublicKeyBytes::from_public_key_der(spki.raw).map_err(|e| {
-            rustls::Error::InvalidCertificate(rustls::CertificateError::Other(Arc::new(
+            rustls::Error::InvalidCertificate(rustls::CertificateError::Other(OtherError(Arc::new(
                 InvalidCertificatePublicKey(e),
-            )))
+            ))))
         })?;
 
     Ok(PeerId(public_key.to_bytes()))
@@ -69,7 +73,7 @@ impl CertVerifierWithPeerId {
 impl rustls::client::danger::ServerCertVerifier for CertVerifierWithPeerId {
     fn verify_server_cert(
         &self,
-        end_entity: &rustls::pki_types::CertificateDer<'static>,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
         intermediates: &[rustls::pki_types::CertificateDer<'_>],
         server_name: & rustls::pki_types::ServerName<'_>,
         ocsp_response: &[u8],
@@ -96,11 +100,14 @@ impl rustls::client::danger::ServerCertVerifier for CertVerifierWithPeerId {
     }
 
     fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> std::result::Result<HandshakeSignatureValid, Error> {
-        todo!()
+        verify_tls13_signature(message, cert, dss, &WebPkiSupportedAlgorithms {
+            all: &[ED25519],
+            mapping: &[(SignatureScheme::ED25519, &[ED25519])],
+        })
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![]
+        vec![SignatureScheme::ED25519]
     }
 }
 
@@ -128,8 +135,8 @@ impl rustls::server::danger::ClientCertVerifier for CertVerifier {
 
     fn verify_client_cert(
         &self,
-        end_entity: &rustls::pki_types::CertificateDer<'static>,
-        intermediates: &[rustls::pki_types::CertificateDer<'static>],
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
         // Parse the certificate
@@ -143,14 +150,15 @@ impl rustls::server::danger::ClientCertVerifier for CertVerifier {
             .verify_for_usage(
                 SIGNATURE_ALGORITHMS,
                 std::slice::from_ref(&prepared.root),
-                &prepared.intermediates.iter().map(|x| CertificateDer::from(x)).collect::<Vec<_>>(),
+                &prepared.intermediates.iter().map(|x| CertificateDer::from(*x)).collect::<Vec<_>>(),
                 now,
                 webpki::KeyUsage::client_auth(),
-                &[],
+                None,
+                None
             )
             .map_err(map_pki_error)?;
 
-        let Ok(subject_name) = webpki::types::DnsName::try_from(self.service_name.as_ref()) else {
+        let Ok(subject_name) = webpki::types::DnsName::try_from(self.service_name.as_str()) else {
             return Err(rustls::Error::UnsupportedNameType);
         };
 
@@ -171,7 +179,10 @@ impl rustls::server::danger::ClientCertVerifier for CertVerifier {
     }
 
     fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> std::result::Result<HandshakeSignatureValid, Error> {
-        todo!()
+        verify_tls13_signature(message, cert, dss, &WebPkiSupportedAlgorithms {
+            all: &[ED25519],
+            mapping: &[(SignatureScheme::ED25519, &[ED25519])],
+        })
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -185,7 +196,7 @@ impl rustls::client::danger::ServerCertVerifier for CertVerifier {
         &self,
         end_entity: &rustls::pki_types::CertificateDer<'_>,
         intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        server_name: &rustls::pki_types::ServerName,
+        server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
@@ -194,7 +205,7 @@ impl rustls::client::danger::ServerCertVerifier for CertVerifier {
             if let  rustls::pki_types::ServerName::DnsName(name) = server_name {
                 if let (Ok(name), Ok(target)) = (
                     rustls::pki_types::DnsName::try_from(name.as_ref()),
-                    rustls::pki_types::DnsName::try_from(self.service_name.as_ref()),
+                    rustls::pki_types::DnsName::try_from(self.service_name.as_str()),
                 ) {
                     if name.as_ref() == target.as_ref() {
                         break 'name name;
@@ -215,7 +226,7 @@ impl rustls::client::danger::ServerCertVerifier for CertVerifier {
             .verify_for_usage(
                 SIGNATURE_ALGORITHMS,
                 std::slice::from_ref(&prepared.root),
-                &prepared.intermediates.iter().map(|x| CertificateDer::from(x)).collect::<Vec<_>>(),
+                &prepared.intermediates.iter().map(|x| CertificateDer::from(*x)).collect::<Vec<_>>(),
                 now,
                 webpki::KeyUsage::server_auth(),
                 None,
@@ -232,11 +243,14 @@ impl rustls::client::danger::ServerCertVerifier for CertVerifier {
     }
 
     fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> std::result::Result<HandshakeSignatureValid, Error> {
-        todo!()
+        unimplemented!()
     }
 
     fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> std::result::Result<HandshakeSignatureValid, Error> {
-        todo!()
+        verify_tls13_signature(message, cert, dss, &WebPkiSupportedAlgorithms {
+            all: &[ED25519],
+            mapping: &[(SignatureScheme::ED25519, &[ED25519])],
+        })
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
@@ -253,8 +267,8 @@ struct PreparedCert<'a> {
 // This prepares arguments for webpki, including a trust anchor which is the end entity of the certificate
 // (which embodies a self-signed certificate by definition)
 fn prepare_for_self_signed<'a>(
-    end_entity: &'a rustls::pki_types::CertificateDer,
-    intermediates: &'a [rustls::pki_types::CertificateDer],
+    end_entity: &'a rustls::pki_types::CertificateDer<'_>,
+    intermediates: &'a [rustls::pki_types::CertificateDer<'_>],
 ) -> Result<PreparedCert<'a>, rustls::Error> {
     // EE cert must appear first.
     let parsed = webpki::EndEntityCert::try_from(end_entity).map_err(|x| map_pki_error(x))?;
@@ -302,4 +316,4 @@ struct InvalidCertificatePublicKey(pkcs8::spki::Error);
 #[error("certificate peer id mismatch")]
 struct CertificatePeerIdMismatch;
 
-static SIGNATURE_ALGORITHMS: &[&rustls::SignatureAlgorithm] = &[&rustls::SignatureAlgorithm::ED25519];
+static SIGNATURE_ALGORITHMS: &[&dyn SignatureVerificationAlgorithm] = &[ED25519];

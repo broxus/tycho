@@ -120,7 +120,7 @@ impl<'a> Future for Accept<'a> {
         self.project()
             .inner
             .poll(cx)
-            .map(|c| c.map(Connecting::new_inbound))
+            .map(|c| c.map(|x | Connecting::new_inbound(x.accept().unwrap())))
     }
 }
 

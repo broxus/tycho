@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use quinn::crypto::HmacKey;
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::{ SupportedCipherSuite};
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
@@ -187,8 +189,9 @@ impl EndpointConfig {
             )?;
 
         client_config.enable_early_data = self.enable_early_data;
+        let quinn_config = QuicClientConfig::try_from(client_config)?;
 
-        let mut client = quinn::ClientConfig::new(Arc::new(client_config));
+        let mut client = quinn::ClientConfig::new (Arc::new(quinn_config));
         client.transport_config(self.transport_config.clone());
         Ok(client)
     }
@@ -314,13 +317,14 @@ fn make_server_config(
         // TODO: Should we enable this?
         // server_crypto.send_half_rtt_data = true;
     }
+    let server_config = QuicServerConfig::try_from(server_crypto)?;
 
-    let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_config));
     server.transport = transport_config;
     Ok(server)
 }
 
-fn compute_reset_key(private_key: &[u8; 32]) -> Arc<dyn rustls::crypto::hmac::Key> {
+fn compute_reset_key(private_key: &[u8; 32]) -> Arc<ring::hmac::Key> {
     const STATELESS_RESET_SALT: &[u8] = b"tycho-stateless-reset";
 
     let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, STATELESS_RESET_SALT);

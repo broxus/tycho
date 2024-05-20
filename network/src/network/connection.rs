@@ -130,8 +130,8 @@ impl tokio::io::AsyncWrite for SendStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        Pin::new(&mut self.0).poll_write(cx, buf)
+    ) -> Poll<core::result::Result<usize, std::io::Error>> {
+        Pin::new(&mut self.0).poll_write(cx, buf).map_err(std::io::Error::from)
     }
 
     #[inline]
