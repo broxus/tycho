@@ -422,11 +422,30 @@ impl CollatorStdImpl {
 
     fn update_block_creator_stats(
         &self,
-        _collation_data: &BlockCollationData,
-        _block_create_stats: &mut Dict<HashBytes, CreatorStats>,
+        collation_data: &BlockCollationData,
+        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
     ) -> Result<()> {
-        // TODO: implement if we really need it
-        // STUB: do not update anything
+        for (creator, count) in &collation_data.block_create_count {
+            let shard_scaled = count << 32;
+            block_create_stats.set(
+                creator,
+                CreatorStats {
+                    mc_blocks: BlockCounters {
+                        updated_at: collation_data.chain_time,
+                        total: 0,
+                        cnt2048: 0,
+                        cnt65536: 0,
+                    },
+                    shard_blocks: BlockCounters {
+                        updated_at: collation_data.chain_time,
+                        total: *count,
+                        cnt2048: shard_scaled,
+                        cnt65536: shard_scaled,
+                    },
+                },
+            )?;
+        }
+
         Ok(())
     }
 

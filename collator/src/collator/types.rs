@@ -4,14 +4,16 @@ use std::{
     sync::Arc,
 };
 
+use crate::types::ProofFunds;
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, UsageTreeMode};
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
     CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OutMsg,
-    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription, ShardFees,
-    ShardIdent, SimpleLib, StateInit, TickTock, Transaction, ValueFlow,
+    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
+    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, StateInit, TickTock,
+    Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
@@ -341,6 +343,8 @@ pub(super) struct BlockCollationData {
     min_ref_mc_seqno: Option<u32>,
 
     pub rand_seed: HashBytes,
+
+    pub block_create_count: HashMap<HashBytes, u64>,
 }
 
 impl BlockCollationData {
@@ -377,6 +381,33 @@ impl BlockCollationData {
     pub fn min_ref_mc_seqno(&self) -> Result<u32> {
         self.min_ref_mc_seqno
             .ok_or_else(|| anyhow!("`min_ref_mc_seqno` is not initialized yet"))
+    }
+
+    pub fn store_shard_fees(
+        &mut self,
+        shard_id: ShardIdent,
+        proof_funds: ProofFunds,
+    ) -> Result<()> {
+        let shard_fee_created = ShardFeeCreated {
+            fees: proof_funds.fees_collected.clone(),
+            create: proof_funds.funds_created.clone(),
+        };
+        self.shard_fees.set(
+            ShardIdentFull::from(shard_id),
+            shard_fee_created.clone(),
+            shard_fee_created,
+        )?;
+        Ok(())
+    }
+
+    pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
+        for creator in creators {
+            self.block_create_count
+                .entry(creator)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+        Ok(())
     }
 }
 
