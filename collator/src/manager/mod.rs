@@ -19,7 +19,7 @@ use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, Mempo
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-    CollationSessionInfo, OnValidatedBlockEvent, ProofFunds,
+    CollationSessionInfo, OnValidatedBlockEvent, ProofFunds, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
@@ -1046,7 +1046,7 @@ where
         &self,
         _next_mc_block_chain_time: u64,
         _trigger_shard_block_id: Option<BlockId>,
-    ) -> Result<Vec<(BlockId, BlockInfo, ValueFlow, ProofFunds)>> {
+    ) -> Result<Vec<TopBlockDescription>> {
         // TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
         // 1. Find current master block
         let (_, mut mc_block_container) = self
@@ -1110,9 +1110,14 @@ where
 
         Ok(result
             .into_iter()
-            .map(|(block_id, (block_info, value_flow, proof_funds))| {
-                (block_id, block_info, value_flow, proof_funds)
-            })
+            .map(
+                |(block_id, (block_info, value_flow, proof_funds))| TopBlockDescription {
+                    block_id,
+                    block_info,
+                    value_flow,
+                    proof_funds,
+                },
+            )
             .collect())
     }
 
@@ -1147,7 +1152,7 @@ where
 
         let _tracing_top_shard_blocks_descr = top_shard_blocks_info
             .iter()
-            .map(|(id, _, _, _)| id.as_short_id().to_string())
+            .map(|TopBlockDescription { block_id, .. }| block_id.as_short_id().to_string())
             .collect::<Vec<_>>();
 
         mc_collator

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{
-    Block, BlockId, CurrencyCollection, OwnedMessage, ShardIdent, Signature,
+    Block, BlockId, BlockInfo, CurrencyCollection, OwnedMessage, ShardIdent, Signature, ValueFlow,
 };
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
@@ -182,4 +182,12 @@ pub struct NodeNetwork {
 pub struct ProofFunds {
     pub fees_collected: CurrencyCollection,
     pub funds_created: CurrencyCollection,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopBlockDescription {
+    pub block_id: BlockId,
+    pub block_info: BlockInfo,
+    pub value_flow: ValueFlow,
+    pub proof_funds: ProofFunds,
 }
