@@ -23,7 +23,7 @@ pub(crate) async fn handshake(connection: &Connection) -> Result<()> {
         Direction::Inbound => {
             let mut send_stream = connection.open_uni().await?;
             send_version(&mut send_stream, Version::V1).await?;
-            send_stream.finish().await?;
+            send_stream.finish()?;
         }
         Direction::Outbound => {
             let mut recv_stream = connection.accept_uni().await?;

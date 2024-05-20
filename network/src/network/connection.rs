@@ -191,7 +191,7 @@ pub(crate) fn extract_peer_id(connection: &quinn::Connection) -> Result<PeerId> 
 
 pub(crate) fn parse_peer_identity(identity: Box<dyn std::any::Any>) -> Result<PeerId> {
     let certificate = identity
-        .downcast::<Vec<rustls::Certificate>>()
+        .downcast::<Vec<rustls::pki_types::CertificateDer>>()
         .ok()
         .and_then(|certificates| certificates.into_iter().next())
         .context("No certificate found in the connection")?;

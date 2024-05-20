@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::{self};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -28,7 +29,7 @@ pub struct Broadcaster {
     log_id: Arc<String>,
     dispatcher: Dispatcher,
     // do not throw away unfinished broadcasts from previous round
-    bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+    bcasts_outdated: JoinSet<(PeerId, BcastResult)>,
 }
 
 impl Broadcaster {
@@ -36,7 +37,7 @@ impl Broadcaster {
         Self {
             log_id,
             dispatcher: dispatcher.clone(),
-            bcasts_outdated: FuturesUnordered::new(),
+            bcasts_outdated: JoinSet::new(),
         }
     }
     pub async fn run(
@@ -53,11 +54,12 @@ impl Broadcaster {
             peer_schedule,
             bcaster_signal,
             collector_signal,
-            mem::take(&mut self.bcasts_outdated),
+            //mem::take(&mut self.bcasts_outdated),
         );
         task.run().await;
-        self.bcasts_outdated.extend(task.bcast_futs);
-        self.bcasts_outdated.extend(task.bcasts_outdated);
+        task.bcast_futs.detach_all();
+        //self.bcasts_outdated.extend(task.bcast_futs);
+        //self.bcasts_outdated.extend(task.bcasts_outdated);
         task.signatures
     }
 }
@@ -65,7 +67,7 @@ impl Broadcaster {
 struct BroadcasterTask {
     log_id: Arc<String>,
     dispatcher: Dispatcher,
-    bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+    //bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
 
     current_round: Round,
     point_digest: Digest,
@@ -83,7 +85,10 @@ struct BroadcasterTask {
 
     bcast_request: tycho_network::Request,
     bcast_peers: FastHashSet<PeerId>,
-    bcast_futs: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+
+    bcast_futs: JoinSet<(PeerId, BcastResult)>,
+
+
     sig_request: tycho_network::Request,
     sig_peers: FastHashSet<PeerId>,
     sig_futs: FuturesUnordered<BoxFuture<'static, (PeerId, SigResult)>>,
@@ -97,7 +102,7 @@ impl BroadcasterTask {
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
-        bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+        //bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     ) -> Self {
         let peer_updates = peer_schedule.updates();
         let signers = peer_schedule
@@ -117,7 +122,7 @@ impl BroadcasterTask {
         Self {
             log_id,
             dispatcher: dispatcher.clone(),
-            bcasts_outdated,
+            //bcasts_outdated,
 
             current_round: point.body.location.round,
             point_digest: point.digest.clone(),
@@ -133,7 +138,7 @@ impl BroadcasterTask {
 
             bcast_request,
             bcast_peers: collectors,
-            bcast_futs: FuturesUnordered::new(),
+            bcast_futs: JoinSet::new(),
 
             sig_request,
             sig_peers: Default::default(),
@@ -163,13 +168,13 @@ impl BroadcasterTask {
         }
         loop {
             tokio::select! {
-                Some(_) = self.bcasts_outdated.next() => {} // let them complete
+                //Some(_) = self.bcasts_outdated.next() => {} // let them complete
                 Some(collector_signal) = self.collector_signal.recv() => {
                     if self.should_finish(collector_signal).await {
                         break;
                     }
                 }
-                Some((peer_id, result)) = self.bcast_futs.next() => {
+                Some(Ok((peer_id, result))) = self.bcast_futs.join_next() => {
                     self.match_broadcast_result(peer_id, result)
                 },
                 Some((peer_id, result)) = self.sig_futs.next() =>  {
@@ -292,7 +297,7 @@ impl BroadcasterTask {
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.bcast_futs
-                .push(self.dispatcher.send(peer_id, &self.bcast_request));
+                .spawn(self.dispatcher.send(&peer_id, &self.bcast_request));
             tracing::debug!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast",
                 self.log_id,

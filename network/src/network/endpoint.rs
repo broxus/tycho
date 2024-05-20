@@ -11,7 +11,7 @@ use crate::network::config::EndpointConfig;
 use crate::network::connection::{parse_peer_identity, Connection};
 use crate::types::{Direction, PeerId};
 
-pub(crate) struct Endpoint {
+pub(crate) struct Endpoint  {
     inner: quinn::Endpoint,
     local_addr: RwLock<SocketAddr>,
     config: EndpointConfig,

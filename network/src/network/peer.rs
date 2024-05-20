@@ -30,7 +30,7 @@ impl Peer {
         let mut recv_stream = FramedRead::new(recv_stream, make_codec(&self.config));
 
         send_request(&mut send_stream, request).await?;
-        send_stream.get_mut().finish().await?;
+        send_stream.get_mut().finish()?;
 
         recv_response(&mut recv_stream).await
     }
@@ -40,7 +40,7 @@ impl Peer {
         let mut send_stream = FramedWrite::new(send_stream, make_codec(&self.config));
 
         send_request(&mut send_stream, request).await?;
-        send_stream.get_mut().finish().await?;
+        send_stream.get_mut().finish()?;
 
         Ok(())
     }

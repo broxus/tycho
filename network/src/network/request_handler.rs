@@ -214,7 +214,7 @@ impl BiStreamRequestHandler {
                 if let Some(res) = res {
                     send_response(&mut self.send_stream, res).await?;
                 }
-                self.send_stream.get_mut().finish().await?;
+                self.send_stream.get_mut().finish()?;
                 Ok(())
             },
             _ = stopped => anyhow::bail!("send_stream closed by remote"),
