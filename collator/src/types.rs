@@ -3,7 +3,7 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{
-    Block, BlockId, BlockInfo, CurrencyCollection, OwnedMessage, ShardIdent, Signature, ValueFlow,
+    Block, BlockId, BlockInfo, CurrencyCollection, IntAddr, OwnedMessage, ShardIdent, Signature, ValueFlow,
 };
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
@@ -151,6 +151,27 @@ pub(crate) trait MessageExt {
 impl MessageExt for OwnedMessage {
     fn id_hash(&self) -> &HashBytes {
         self.body.0.repr_hash()
+    }
+}
+
+pub(crate) trait IntAdrExt {
+    fn get_address(&self) -> HashBytes;
+}
+impl IntAdrExt for IntAddr {
+    fn get_address(&self) -> HashBytes {
+        match self {
+            Self::Std(std_addr) => std_addr.address,
+            Self::Var(var_addr) => HashBytes::from_slice(var_addr.address.as_slice()),
+        }
+    }
+}
+
+pub(crate) trait ShardIdentExt {
+    fn contains_address(&self, addr: &IntAddr) -> bool;
+}
+impl ShardIdentExt for ShardIdent {
+    fn contains_address(&self, addr: &IntAddr) -> bool {
+        self.workchain() == addr.workchain() && self.contains_account(&addr.get_address())
     }
 }
 
