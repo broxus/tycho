@@ -87,7 +87,7 @@ where
     /// id of last master block collated by ourselves
     last_collated_mc_block_id: Option<BlockId>,
     /// chain time of last collated master block or received from bc
-    last_mc_block_chain_time: u64,
+    last_collated_mc_block_chain_time: u64,
     /// chain time for next master block to be collated
     next_mc_block_chain_time: u64,
 }
@@ -149,7 +149,7 @@ where
         anchor: Arc<MempoolAnchor>,
     ) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
-            process_empty_skipped_anchor,
+            process_skipped_anchor,
             shard_id,
             anchor
         ))
@@ -250,7 +250,7 @@ where
 
             last_processed_mc_block_id: None,
             last_collated_mc_block_id: None,
-            last_mc_block_chain_time: 0,
+            last_collated_mc_block_chain_time: 0,
             next_mc_block_chain_time: 0,
         };
         AsyncQueuedDispatcher::run(processor, receiver);
@@ -285,16 +285,19 @@ where
         }
     }
 
-    /// Return last master block chain time
-    fn last_mc_block_chain_time(&self) -> u64 {
-        self.last_mc_block_chain_time
+    /// Return last collated master block chain time
+    fn last_collated_mc_block_chain_time(&self) -> u64 {
+        self.last_collated_mc_block_chain_time
     }
-    fn set_last_mc_block_chain_time(&mut self, chain_time: u64) {
-        self.last_mc_block_chain_time = chain_time;
+    fn set_last_collated_mc_block_chain_time(&mut self, chain_time: u64) {
+        self.last_collated_mc_block_chain_time = chain_time;
     }
-
-    fn next_mc_block_chain_time(&self) -> u64 {
-        self.next_mc_block_chain_time
+    /// Return last collated master block id
+    fn last_collated_mc_block_id(&self) -> Option<&BlockId> {
+        self.last_collated_mc_block_id.as_ref()
+    }
+    fn set_last_collated_mc_block_id(&mut self, block_id: BlockId) {
+        self.last_collated_mc_block_id = Some(block_id);
     }
 
     fn last_processed_mc_block_id(&self) -> Option<&BlockId> {
@@ -302,13 +305,6 @@ where
     }
     fn set_last_processed_mc_block_id(&mut self, block_id: BlockId) {
         self.last_processed_mc_block_id = Some(block_id);
-    }
-
-    fn last_collated_mc_block_id(&self) -> Option<&BlockId> {
-        self.last_collated_mc_block_id.as_ref()
-    }
-    fn set_last_collated_mc_block_id(&mut self, block_id: BlockId) {
-        self.last_collated_mc_block_id = Some(block_id);
     }
 
     /// (TODO) Check sync status between mempool and blockchain state
@@ -628,16 +624,10 @@ where
 
         let cc_config = mc_state_extra.config.get_catchain_config()?;
 
-        // update master state in the collators of the existing sessions
+        // update master state in existing collators and resume collation
         for (shard_id, session_info) in sessions_to_keep {
             self.active_collation_sessions
                 .insert(shard_id, session_info);
-
-            // skip collator of masterchain because it's working state already updated
-            // after master block collation
-            if shard_id.is_masterchain() {
-                continue;
-            }
 
             // if there is no active collator then current node does not collate this shard
             // so we do not need to do anything
@@ -645,15 +635,23 @@ where
                 continue;
             };
 
-            tracing::info!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Updating McData in active collator for shard {} and resuming collation in it...",
-                shard_id,
-            );
-
-            collator
-                .equeue_update_mc_data_and_try_collate(mc_state.clone())
-                .await?;
+            if shard_id.is_masterchain() {
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Resuming collation attempts in master chain {}",
+                    shard_id,
+                );
+                collator.equeue_try_collate().await?;
+            } else {
+                tracing::info!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Updating McData in active collator for shard {} and resuming collation in it...",
+                    shard_id,
+                );
+                collator
+                    .equeue_update_mc_data_and_try_collate(mc_state.clone())
+                    .await?;
+            }
         }
 
         // we may have sessions to finish, collators to stop, and sessions to start
@@ -870,51 +868,65 @@ where
             .validate(candidate_id, session_info.seqno())
             .await?;
 
-        // chek if master block min interval elapsed and it needs to collate new master block
-        if !candidate_id.shard.is_masterchain() {
+        // when candidate is master
+        if candidate_id.shard.is_masterchain() {
+            // store last collated master block id and chain time
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Candidate (id: {}, chain_time: {}) is a master block",
+                candidate_id.as_short_id(),
+                candidate_chain_time,
+            );
+            self.set_last_collated_mc_block_chain_time(candidate_chain_time);
+            self.set_last_collated_mc_block_id(candidate_id);
+
+            // collate next master block right now if there are pending internals
+            if collation_result.has_pending_internals {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Candidate (id: {}, chain_time: {}): there are pending internals in master queue",
+                    candidate_id.as_short_id(),
+                    candidate_chain_time,
+                );
+                self.enqueue_mc_block_collation(candidate_chain_time, None)
+                    .await?;
+            } else {
+                // otherwise execute master block processing routines
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Candidate (id: {}, chain_time: {}): will notify mempool and equeue collation sessions refresh",
+                    candidate_id.as_short_id(),
+                    candidate_chain_time,
+                );
+
+                Self::notify_mempool_about_mc_block(
+                    self.mpool_adapter.clone(),
+                    new_mc_state.clone(),
+                )
+                .await?;
+
+                self.dispatcher
+                    .enqueue_task(method_to_async_task_closure!(
+                        refresh_collation_sessions,
+                        new_mc_state
+                    ))
+                    .await?;
+            }
+        } else {
+            // when candidate is shard
+            // chek if master block interval elapsed and it needs to collate new master block
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will check if master block interval elapsed by chain time from candidate (id: {}, chain_time: {})",
                 candidate_id.as_short_id(),
                 candidate_chain_time,
             );
-            self.check_collate_mc_block(
+            self.collate_mc_block_by_interval_or_continue_shard_collation(
                 candidate_id.shard,
                 candidate_chain_time,
                 Some(candidate_id),
             )
             .await?;
-        } else {
-            // store last master block chain time
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Candidate (id: {}, chain_time: {}) is a master block, will update `last_mc_block_chain_time`",
-                candidate_id.as_short_id(),
-                candidate_chain_time,
-            );
-            self.set_last_mc_block_chain_time(candidate_chain_time);
-        }
-
-        // execute master block processing routines
-        if candidate_id.shard.is_masterchain() {
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Candidate (id: {}, chain_time: {}) is a master block, will notify mempool and equeue collation sessions refresh",
-                candidate_id.as_short_id(),
-                candidate_chain_time,
-            );
-
-            self.set_last_collated_mc_block_id(candidate_id);
-
-            Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), new_mc_state.clone())
-                .await?;
-
-            self.dispatcher
-                .enqueue_task(method_to_async_task_closure!(
-                    refresh_collation_sessions,
-                    new_mc_state
-                ))
-                .await?;
         }
 
         Ok(())
@@ -932,7 +944,7 @@ where
             .await
     }
 
-    async fn process_empty_skipped_anchor(
+    async fn process_skipped_anchor(
         &mut self,
         shard_id: ShardIdent,
         anchor: Arc<MempoolAnchor>,
@@ -943,14 +955,18 @@ where
             anchor.chain_time(),
             anchor.id(),
         );
-        self.check_collate_mc_block(shard_id, anchor.chain_time(), None)
-            .await
+        self.collate_mc_block_by_interval_or_continue_shard_collation(
+            shard_id,
+            anchor.chain_time(),
+            None,
+        )
+        .await
     }
 
-    /// 1. Store last collated chain time from anchor and check if master block interval elapsed in each shard
+    /// 1. Check if should collate master
     /// 2. If true, schedule master block collation
-    /// 3. If no, schedule next shard block collation attempt
-    async fn check_collate_mc_block(
+    /// 3. If no, schedule next collation attempt in current shard
+    async fn collate_mc_block_by_interval_or_continue_shard_collation(
         &mut self,
         shard_id: ShardIdent,
         chain_time: u64,
@@ -979,7 +995,10 @@ where
 
     /// 1. (TODO) Store last collated chain time by shards
     /// 2. Check if master block interval elapsed in current shard
-    /// 3. (TODO) And if it elapsed in every shard, then return chain time for master block collation
+    /// 3. (TODO) And if it elapsed in every shard, then return chain time for the next master block collation
+    ///
+    /// Returns: (`master_block_interval_elapsed`, `next_mc_block_chain_time`)
+    /// * `next_mc_block_chain_time.is_some()` when master block interval elapsed in every shard
     fn update_last_collated_chain_time_and_check_mc_block_interval(
         &mut self,
         _shard_id: ShardIdent,
@@ -994,13 +1013,13 @@ where
         //      then we take shard blocks which chain time less then determined max
 
         // STUB: when we work with only one shard we can check for master block interval easier
-        let chain_time_elapsed = chain_time - self.last_mc_block_chain_time();
+        let chain_time_elapsed = chain_time - self.last_collated_mc_block_chain_time();
         let mc_block_interval_elapsed = chain_time_elapsed > self.config.mc_block_min_interval_ms;
 
         if mc_block_interval_elapsed {
             // additionally check `next_mc_block_chain_time`
             // probably the master block collation was already enqueued
-            let chain_time_elapsed = chain_time - self.next_mc_block_chain_time();
+            let chain_time_elapsed = chain_time - self.next_mc_block_chain_time;
             let mc_block_interval_elapsed =
                 chain_time_elapsed > self.config.mc_block_min_interval_ms;
             if mc_block_interval_elapsed {

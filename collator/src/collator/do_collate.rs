@@ -156,6 +156,9 @@ impl CollatorStdImpl {
         // because we should not take them until existing internals not processed
         let mut new_int_msgs_tmp_buffer: Vec<AsyncMessage> = vec![];
 
+        // indicate that there are still unprocessed internals whe collation loop finished
+        let mut has_pending_internals = false;
+
         loop {
             // build messages set
             let mut msgs_set: Vec<AsyncMessage> = vec![];
@@ -273,6 +276,9 @@ impl CollatorStdImpl {
                 msgs_set_offset,
             );
 
+            // TODO: update `has_pending_internals` to indicate if there are still unprocessed internals in the queue
+            //has_pending_internals = ...;
+
             if block_limits_reached {
                 // block is full - exit loop
                 break;
@@ -294,6 +300,7 @@ impl CollatorStdImpl {
         let collation_result = BlockCollationResult {
             candidate,
             new_state_stuff: new_state_stuff.clone(),
+            has_pending_internals,
         };
         self.listener.on_block_candidate(collation_result).await?;
         tracing::info!(
