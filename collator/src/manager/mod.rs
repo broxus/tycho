@@ -1076,16 +1076,24 @@ where
                     let fees_collected = value_flow.fees_collected.clone();
                     let funds_created = value_flow.created.clone();
 
-                    let (_, _, proof, creators) =
-                        result.entry(*shard_block_container.block_id()).or_insert((
-                            block.load_info()?,
+                    let top_block = result.entry(shard_block_container.key().shard).or_insert(
+                        TopBlockDescription {
+                            block_id: *shard_block_container.block_id(),
+                            block_info: block.load_info()?,
                             value_flow,
-                            ProofFunds::default(),
-                            vec![],
-                        ));
-                    proof.fees_collected.checked_add(&fees_collected)?;
-                    proof.funds_created.checked_add(&funds_created)?;
-                    creators.push(creator);
+                            proof_funds: ProofFunds::default(),
+                            creators: vec![],
+                        },
+                    );
+                    top_block
+                        .proof_funds
+                        .fees_collected
+                        .checked_add(&fees_collected)?;
+                    top_block
+                        .proof_funds
+                        .funds_created
+                        .checked_add(&funds_created)?;
+                    top_block.creators.push(creator);
 
                     shard_block_container
                         .prev_blocks_keys()
@@ -1096,18 +1104,12 @@ where
             }
         }
 
-        Ok(result
-            .into_iter()
-            .map(
-                |(block_id, (block_info, value_flow, proof_funds, creators))| TopBlockDescription {
-                    block_id,
-                    block_info,
-                    value_flow,
-                    proof_funds,
-                    creators,
-                },
-            )
-            .collect())
+        // STUB: when we work with only one shard we can just get the last shard block
+        //      because collator manager will try run master block collation before
+        //      before processing any next candidate from the shard collator
+        //      because of dispatcher tasks queue
+
+        Ok(result.into_values().collect())
     }
 
     /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation

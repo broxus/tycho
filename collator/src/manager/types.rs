@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::models::{
-    Block, BlockId, BlockIdShort, CurrencyCollection, ShardIdent, Signature,
-};
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
 use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
 
