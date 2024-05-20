@@ -9,6 +9,7 @@ pub use self::shard_state::*;
 mod block;
 mod block_connection;
 mod block_handle;
+mod jrpc;
 mod node_state;
 mod persistent_state;
 mod runtime;
