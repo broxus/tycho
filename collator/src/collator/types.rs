@@ -344,7 +344,7 @@ pub(super) struct BlockCollationData {
 
     pub rand_seed: HashBytes,
 
-    block_create_count: HashMap<HashBytes, u64>,
+    pub block_create_count: HashMap<HashBytes, u64>,
 }
 
 impl BlockCollationData {
