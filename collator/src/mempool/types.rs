@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use everscale_types::models::{ExtInMsgInfo, MsgInfo};
+use everscale_types::models::{ExtInMsgInfo, MsgInfo, ShardIdent};
 use everscale_types::prelude::Cell;
+
+use crate::types::ShardIdentExt;
 
 // TYPES
 
@@ -60,8 +62,10 @@ impl MempoolAnchor {
         self.externals.len()
     }
 
-    pub fn has_externals(&self) -> bool {
-        !self.externals.is_empty()
+    pub fn check_has_externals_for(&self, shard_id: &ShardIdent) -> bool {
+        self.externals
+            .iter()
+            .any(|ext| shard_id.contains_address(&ext.info().dst))
     }
 
     pub fn externals_iterator(

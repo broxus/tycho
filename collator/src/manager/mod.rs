@@ -952,7 +952,8 @@ where
     ) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Will check if master block interval elapsed by chain time {} from empty anchor {}",
+            "Will check if master block interval elapsed in {} by chain time {} from empty anchor {}",
+            shard_id,
             anchor.chain_time(),
             anchor.id(),
         );

@@ -432,7 +432,9 @@ impl CollatorStdImpl {
     /// 1. Get last imported anchor from cache or last processed from `externals_processed_upto`
     /// 2. Await next anchor via mempool adapter
     /// 3. Store anchor in cache and return it
-    async fn import_next_anchor(&mut self) -> Result<Arc<MempoolAnchor>> {
+    ///
+    /// Returns: (`next_anchor`, `has_externals`)
+    async fn import_next_anchor(&mut self) -> Result<(Arc<MempoolAnchor>, bool)> {
         // TODO: make real implementation
 
         // TODO: use get_next_anchor() only once
@@ -469,11 +471,12 @@ impl CollatorStdImpl {
         self.anchors_cache
             .insert(next_anchor.id(), next_anchor.clone());
 
-        if next_anchor.has_externals() {
+        let has_externals = next_anchor.check_has_externals_for(&self.shard_id);
+        if has_externals {
             self.has_pending_externals = true;
         }
 
-        Ok(next_anchor)
+        Ok((next_anchor, has_externals))
     }
 
     fn get_last_imported_anchor_chain_time(&self) -> u64 {
@@ -546,7 +549,7 @@ impl CollatorStdImpl {
     async fn try_collate_next_master_block_impl(&mut self) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): check if can collate next block",
+            "Collator ({}): check if can collate next master block",
             self.collator_descr(),
         );
 
@@ -570,8 +573,8 @@ impl CollatorStdImpl {
                 "Collator ({}): there are no internals, will import next anchor",
                 self.collator_descr(),
             );
-            let next_anchor = self.import_next_anchor().await?;
-            if next_anchor.has_externals() {
+            let (next_anchor, has_externals) = self.import_next_anchor().await?;
+            if has_externals {
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
                     "Collator ({}): just imported anchor has externals",
@@ -595,7 +598,7 @@ impl CollatorStdImpl {
     async fn try_collate_next_shard_block_impl(&mut self) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}): check if can collate next block",
+            "Collator ({}): check if can collate next shard block",
             self.collator_descr(),
         );
 
@@ -624,14 +627,14 @@ impl CollatorStdImpl {
         // TODO: import next anchor every time when there is no pending externals to update chain time
 
         // import next anchor if no internals and no pending externals for collation
-        let next_anchor = if !has_internals && !has_externals {
+        let next_anchor_info_opt = if !has_internals && !has_externals {
             tracing::debug!(
                 target: tracing_targets::COLLATOR,
                 "Collator ({}): there are no internals or pending externals, will import next anchor",
                 self.collator_descr(),
             );
-            let next_anchor = self.import_next_anchor().await?;
-            has_externals = next_anchor.has_externals();
+            let (next_anchor, next_anchor_has_externals) = self.import_next_anchor().await?;
+            has_externals = next_anchor_has_externals;
             if has_externals {
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
@@ -639,7 +642,7 @@ impl CollatorStdImpl {
                     self.collator_descr(),
                 );
             }
-            Some(next_anchor)
+            Some((next_anchor, next_anchor_has_externals))
         } else {
             None
         };
@@ -650,9 +653,10 @@ impl CollatorStdImpl {
             self.do_collate(next_chain_time, None).await?;
         } else {
             // otherwise we have definitely imported the next anchor
-            let anchor = next_anchor.expect("should be Some here");
+            let (next_anchor, next_anchor_has_externals) =
+                next_anchor_info_opt.expect("should be Some here");
             // notify manager when next anchor was imported but id does not contain externals
-            if !anchor.has_externals() {
+            if !next_anchor_has_externals {
                 // this may start master block collation or next shard block collation attempt
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
@@ -660,7 +664,7 @@ impl CollatorStdImpl {
                     self.collator_descr(),
                 );
                 self.listener
-                    .on_skipped_anchor(self.shard_id, anchor)
+                    .on_skipped_anchor(self.shard_id, next_anchor)
                     .await?;
             }
         }

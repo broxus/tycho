@@ -170,15 +170,7 @@ impl CollatorStdImpl {
 
         new_state
             .total_validator_fees
-            .checked_add(&value_flow.fees_collected)?;
-
-        new_state
-            .total_balance
             .try_add_assign(&value_flow.fees_collected)?;
-
-        new_state
-            .total_validator_fees
-            .checked_add(&value_flow.fees_collected)?;
         new_state
             .total_validator_fees
             .try_sub_assign(&value_flow.recovered)?;

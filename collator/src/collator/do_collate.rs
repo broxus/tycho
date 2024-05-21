@@ -109,6 +109,13 @@ impl CollatorStdImpl {
         collation_data.max_lt = collation_data.start_lt + 1;
 
         collation_data.processed_upto = prev_shard_data.processed_upto().clone();
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            "Collator ({}{}): processed_upto = {:?}",
+            self.collator_descr(),
+            _tracing_top_shard_blocks_descr,
+            collation_data.processed_upto,
+        );
 
         // compute created / minted / recovered / from_prev_block
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
@@ -247,6 +254,7 @@ impl CollatorStdImpl {
             // execute msgs processing by groups
             while !msgs_set_full_processed {
                 let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
+                let processed_msgs_count = group.len();
                 for (_account_id, msg_info, transaction) in group {
                     let new_internal_messages = new_transaction(
                         &mut collation_data,
@@ -267,7 +275,7 @@ impl CollatorStdImpl {
                 // TODO: when processing transactions we should check block limits
                 //      currently we simply check only transactions count
                 //      but needs to make good implementation futher
-                block_transactions_count += new_offset;
+                block_transactions_count += processed_msgs_count;
                 if block_transactions_count >= 14 {
                     block_limits_reached = true;
                     break;
@@ -431,9 +439,9 @@ impl CollatorStdImpl {
             // TODO: should make other implementation without iterating through all anchors in cache
             self.has_pending_externals = self.anchors_cache.iter().any(|(id, anchor)| {
                 if let Some(ref last_read_anchor) = last_read_anchor_opt {
-                    id != last_read_anchor && anchor.has_externals()
+                    id != last_read_anchor && anchor.check_has_externals_for(&self.shard_id)
                 } else {
-                    anchor.has_externals()
+                    anchor.check_has_externals_for(&self.shard_id)
                 }
             });
         }
