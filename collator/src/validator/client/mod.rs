@@ -27,7 +27,7 @@ impl ValidatorClient {
         payload: SignaturesQuery,
         timeout_duration: Duration,
     ) -> Result<SignaturesQuery> {
-        tracing::debug!(target: tracing_targets::VALIDATOR, "Requesting signatures from validator1111");
+        tracing::debug!(target: tracing_targets::VALIDATOR, "Requesting signatures from validator");
         let payload = Request::from_tl(payload);
         match tokio::time::timeout(
             timeout_duration,

@@ -10,7 +10,6 @@ use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, 
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, Lt, QueueDiff};
 pub trait QueueIterator: Send {
     fn next(&mut self, with_new: bool) -> Option<IterItem>;
-    // fn commit(&mut self);
     fn take_diff(&mut self, block_id_short: BlockIdShort) -> QueueDiff;
     fn commit_processed_messages(
         &mut self,
@@ -166,7 +165,8 @@ impl QueueIterator for QueueIteratorImpl {
             diff.messages.push(message.clone());
         }
 
-        self.current_position = self.commited_current_position.clone();
+        self.current_position
+            .clone_from(&self.commited_current_position);
         self.commited_current_position.clear();
         self.new_messages.clear();
 

@@ -50,6 +50,7 @@ pub trait LocalQueue {
     async fn snapshot(&self) -> Vec<Box<dyn StateSnapshot>>;
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
+    async fn add_shard(&self, shard_id: &ShardIdent);
     async fn commit_diff(
         &self,
         diff_id: &BlockIdShort,
@@ -96,6 +97,10 @@ where
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
         self.session_state.lock().await.split_shard(shard_id).await
+    }
+
+    async fn add_shard(&self, shard_id: &ShardIdent) {
+        self.session_state.lock().await.add_shard(shard_id).await;
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {

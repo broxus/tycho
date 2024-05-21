@@ -44,7 +44,7 @@ impl<T> RetryClient<T> {
                     Ok(response)
                 }
                 Err(e) => {
-                    tracing::warn!(target: tracing_targets::VALIDATOR, "Retry request with error: {:?}", e);
+                    tracing::warn!(target: tracing_targets::VALIDATOR, "Retry request with error: {:?}", e.to_string());
                     Err(e)
                 }
             }

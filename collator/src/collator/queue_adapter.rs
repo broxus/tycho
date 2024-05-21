@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use everscale_types::cell::Cell;
 use everscale_types::models::{BlockIdShort, MsgInfo, ShardIdent};
+use tracing::instrument;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
@@ -57,6 +58,7 @@ impl MessageQueueAdapterStdImpl {
 
 #[async_trait]
 impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
+    #[instrument(skip(self))]
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
         for sma in split_merge_actions {
             match sma {
@@ -76,6 +78,9 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
                 SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
                     // do nothing because current queue impl does not need to perform merges
                 }
+                SplitMergeAction::Add(new_shard) => {
+                    self.queue.add_shard(&new_shard).await;
+                }
             }
         }
         tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updated shards in message queue");
@@ -90,8 +95,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     ) -> Result<Box<dyn QueueIterator>> {
         let snapshots = self.queue.snapshot().await;
 
-        let iterator =
-            QueueIteratorImpl::new(shards_from, shards_to, snapshots, for_shard_id.clone())?;
+        let iterator = QueueIteratorImpl::new(shards_from, shards_to, snapshots, for_shard_id)?;
         Ok(Box::new(iterator))
     }
 
