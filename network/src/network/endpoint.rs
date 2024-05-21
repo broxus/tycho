@@ -11,7 +11,7 @@ use crate::network::config::EndpointConfig;
 use crate::network::connection::{parse_peer_identity, Connection};
 use crate::types::{Direction, PeerId};
 
-pub(crate) struct Endpoint  {
+pub(crate) struct Endpoint {
     inner: quinn::Endpoint,
     local_addr: RwLock<SocketAddr>,
     config: EndpointConfig,
@@ -117,10 +117,18 @@ impl<'a> Future for Accept<'a> {
     type Output = Option<Connecting>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.project()
-            .inner
-            .poll(cx)
-            .map(|c| c.map(|x | Connecting::new_inbound(x.accept().unwrap())))
+        self.project().inner.poll(cx).map(|c| {
+            c.and_then(|c| {
+                let remote_addr = c.remote_address();
+                match c.accept() {
+                    Ok(c) => Some(Connecting::new_inbound(c)),
+                    Err(e) => {
+                        tracing::warn!(%remote_addr, "failed to accept an incoming connection: {e:?}");
+                        None
+                    }
+                }
+            })
+        })
     }
 }
 
