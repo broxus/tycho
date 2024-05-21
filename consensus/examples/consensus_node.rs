@@ -81,6 +81,8 @@ struct CmdRun {
     /// local node address
     addr: SocketAddr,
 
+    remote_addr: Address,
+
     /// node secret key
     #[clap(long)]
     key: String,
@@ -109,6 +111,7 @@ impl CmdRun {
         let (dht_client, overlay) = tycho_consensus::test_utils::from_validator(
             self.addr,
             &secret_key,
+            Some(self.remote_addr),
             node_config.dht,
             node_config.network,
         );
