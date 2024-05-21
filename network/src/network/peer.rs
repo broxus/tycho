@@ -41,6 +41,7 @@ impl Peer {
 
         send_request(&mut send_stream, request).await?;
         send_stream.get_mut().finish()?;
+        _ = send_stream.get_mut().stopped().await;
 
         Ok(())
     }
