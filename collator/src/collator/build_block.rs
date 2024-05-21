@@ -416,24 +416,72 @@ impl CollatorStdImpl {
         collation_data: &BlockCollationData,
         block_create_stats: &mut Dict<HashBytes, CreatorStats>,
     ) -> Result<()> {
+        let mut mc_updated = false;
         for (creator, count) in &collation_data.block_create_count {
             let shard_scaled = count << 32;
-            block_create_stats.set(creator, CreatorStats {
+            let total_mc = if self.config.key_pair.public_key.to_bytes() == *creator {
+                mc_updated = true;
+                1
+            } else {
+                0
+            };
+
+            block_create_stats.set(
+                creator,
+                CreatorStats {
+                    mc_blocks: BlockCounters {
+                        updated_at: collation_data.chain_time,
+                        total: total_mc,
+                        cnt2048: total_mc,
+                        cnt65536: total_mc,
+                    },
+                    shard_blocks: BlockCounters {
+                        updated_at: collation_data.chain_time,
+                        total: *count,
+                        cnt2048: shard_scaled,
+                        cnt65536: shard_scaled,
+                    },
+                },
+            )?;
+        }
+        if !mc_updated {
+            block_create_stats.set(
+                self.config.key_pair.public_key.to_bytes(),
+                CreatorStats {
+                    mc_blocks: BlockCounters {
+                        updated_at: collation_data.chain_time,
+                        total: 1,
+                        cnt2048: 1,
+                        cnt65536: 1,
+                    },
+                    shard_blocks: BlockCounters {
+                        updated_at: collation_data.chain_time,
+                        total: 0,
+                        cnt2048: 0,
+                        cnt65536: 0,
+                    },
+                },
+            )?;
+        }
+
+        let default_shard_blocks_count = collation_data.block_create_count.values().sum();
+        block_create_stats.set(
+            HashBytes::default(),
+            CreatorStats {
                 mc_blocks: BlockCounters {
                     updated_at: collation_data.chain_time,
-                    total: 0,
-                    cnt2048: 0,
-                    cnt65536: 0,
+                    total: 1,
+                    cnt2048: 1,
+                    cnt65536: 1,
                 },
                 shard_blocks: BlockCounters {
                     updated_at: collation_data.chain_time,
-                    total: *count,
-                    cnt2048: shard_scaled,
-                    cnt65536: shard_scaled,
+                    total: default_shard_blocks_count,
+                    cnt2048: default_shard_blocks_count << 32,
+                    cnt65536: default_shard_blocks_count << 32,
                 },
-            })?;
-        }
-
+            },
+        )?;
         Ok(())
     }
 
