@@ -54,12 +54,12 @@ impl Broadcaster {
             peer_schedule,
             bcaster_signal,
             collector_signal,
-            //mem::take(&mut self.bcasts_outdated),
+            // mem::take(&mut self.bcasts_outdated),
         );
         task.run().await;
         task.bcast_futs.detach_all();
-        //self.bcasts_outdated.extend(task.bcast_futs);
-        //self.bcasts_outdated.extend(task.bcasts_outdated);
+        // self.bcasts_outdated.extend(task.bcast_futs);
+        // self.bcasts_outdated.extend(task.bcasts_outdated);
         task.signatures
     }
 }
@@ -67,8 +67,7 @@ impl Broadcaster {
 struct BroadcasterTask {
     log_id: Arc<String>,
     dispatcher: Dispatcher,
-    //bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
-
+    // bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     current_round: Round,
     point_digest: Digest,
     bcaster_signal: mpsc::Sender<BroadcasterSignal>,
@@ -88,7 +87,6 @@ struct BroadcasterTask {
 
     bcast_futs: JoinSet<(PeerId, BcastResult)>,
 
-
     sig_request: tycho_network::Request,
     sig_peers: FastHashSet<PeerId>,
     sig_futs: FuturesUnordered<BoxFuture<'static, (PeerId, SigResult)>>,
@@ -102,7 +100,7 @@ impl BroadcasterTask {
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
-        //bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+        // bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     ) -> Self {
         let peer_updates = peer_schedule.updates();
         let signers = peer_schedule
@@ -122,8 +120,7 @@ impl BroadcasterTask {
         Self {
             log_id,
             dispatcher: dispatcher.clone(),
-            //bcasts_outdated,
-
+            // bcasts_outdated,
             current_round: point.body.location.round,
             point_digest: point.digest.clone(),
             bcaster_signal,
