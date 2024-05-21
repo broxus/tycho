@@ -383,7 +383,6 @@ struct NetworkShutdownError;
 mod tests {
     use futures_util::stream::FuturesUnordered;
     use futures_util::StreamExt;
-    use tracing_test::traced_test;
 
     use super::*;
     use crate::types::{service_message_fn, service_query_fn, BoxCloneService, PeerInfo, Request};
@@ -424,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_manager_works() -> Result<()> {
-        tycho_util::test::init_logger("connection_manager_works", "trace");
+        tycho_util::test::init_logger("connection_manager_works", "debug");
 
         let peer1 = make_network("tycho")?;
         let peer2 = make_network("tycho")?;
@@ -460,10 +459,9 @@ mod tests {
         Ok(())
     }
 
-    #[traced_test]
     #[tokio::test]
     async fn simultaneous_queries() -> Result<()> {
-        tracing_subscriber::fmt::try_init().ok();
+        tycho_util::test::init_logger("simultaneous_queries", "debug");
 
         for _ in 0..10 {
             let peer1 = make_network("tycho")?;
@@ -487,17 +485,9 @@ mod tests {
         Ok(())
     }
 
-    #[traced_test]
     #[tokio::test(flavor = "multi_thread")]
     async fn uni_message_handler() -> Result<()> {
-        std::panic::set_hook(Box::new(|info| {
-            use std::io::Write;
-
-            tracing::error!("{}", info);
-            std::io::stderr().flush().ok();
-            std::io::stdout().flush().ok();
-            std::process::exit(1);
-        }));
+        tycho_util::test::init_logger("uni_message_handler", "debug");
 
         fn noop_service() -> BoxCloneService<ServiceRequest, Response> {
             let handle = |request: ServiceRequest| async move {
