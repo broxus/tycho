@@ -103,6 +103,9 @@ impl SessionState for SessionStateStdImpl {
 
     async fn add_shard(&self, shard_id: &ShardIdent) {
         let mut lock = self.shards_flat.write().await;
+        if lock.contains_key(shard_id) {
+            return;
+        }
         lock.insert(*shard_id, Arc::new(RwLock::new(Shard::new(*shard_id))));
     }
 

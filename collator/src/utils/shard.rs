@@ -44,7 +44,22 @@ pub fn calc_split_merge_actions(
     for new_shard_id in to_new_shards.iter() {
         // if shard has a root level then add new shard to queue
         if new_shard_id.is_full() {
-            result_actions.push(SplitMergeAction::Add(**new_shard_id));
+            let new_shard_id = *new_shard_id;
+            let mut found = false;
+            let mut has_children = false;
+
+            for &sh in &from_current_shards {
+                if sh == new_shard_id {
+                    found = true;
+                }
+                if new_shard_id.is_ancestor_of(sh) {
+                    has_children = true;
+                    break;
+                }
+            }
+            if !found || has_children {
+                result_actions.push(SplitMergeAction::Add(*new_shard_id));
+            }
         }
     }
 
