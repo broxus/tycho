@@ -74,8 +74,14 @@ pub trait ValidatorEventListener: Send + Sync {
 
 #[trait_variant::make(Validator: Send)]
 pub trait ValidatorInternal: Sync + 'static {
-    /// Enqueue block candidate validation task
+    /// Run block validation
     async fn validate(&self, candidate: BlockId, session_seqno: u32) -> Result<()>;
+    /// Run block validation detached
+    async fn spawn_validate(
+        self: Arc<Self>,
+        candidate: BlockId,
+        session_seqno: u32,
+    ) -> JoinHandle<Result<()>>;
     /// Stop block candidate validation task
     async fn stop_validation(&self, block_id: &BlockId) -> Result<()>;
     /// Add new validation session
@@ -225,6 +231,19 @@ impl Validator for ValidatorStdImpl {
         Ok(())
     }
 
+    async fn spawn_validate(
+        self: Arc<Self>,
+        candidate: BlockId,
+        session_seqno: u32,
+    ) -> JoinHandle<Result<()>> {
+        let validator = Arc::clone(&self);
+        let future = tokio::spawn(async move {
+            Validator::validate(&*validator, candidate, session_seqno).await
+        });
+
+        future
+    }
+
     #[tracing::instrument(skip(self), fields(block_id = %block_id))]
     async fn stop_validation(&self, block_id: &BlockId) -> Result<()> {
         self.block_validated_broadcaster
@@ -355,7 +374,7 @@ pub async fn process_new_signatures(
 
         Ok((validation_status, NotificationStatus::NotNotified))
     } else {
-        tracing::debug!(target: tracing_targets::VALIDATOR, "Caching signatures for block");
+        tracing::trace!(target: tracing_targets::VALIDATOR, "Caching signatures for block");
         if block_id_short.seqno > 0 {
             let previous_block =
                 BlockIdShort::from((block_id_short.shard, block_id_short.seqno - 1));
@@ -514,6 +533,7 @@ async fn spawn_validation_tasks(
                 }
 
                 // Wait before next request
+                // TODO Exponential backoff
                 tokio::time::sleep(delay_between_requests).await;
             }
 

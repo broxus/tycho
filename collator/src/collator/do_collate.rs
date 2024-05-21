@@ -253,12 +253,6 @@ impl CollatorStdImpl {
             let mut msgs_set_offset = collation_data.processed_upto.processed_offset;
             let mut msgs_set_full_processed = false;
 
-            if STUB_SKIP_EXECUTION {
-                if msgs_set_offset > 0 {
-                    msgs_set = msgs_set.split_off(msgs_set_offset as usize);
-                }
-            }
-
             // execute msgs processing by groups
             while !msgs_set_full_processed {
                 // STUB: skip real execution

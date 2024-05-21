@@ -5,6 +5,7 @@ use everscale_types::models::ShardIdent;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SplitMergeAction {
+    Add(ShardIdent),
     Split(ShardIdent),
     Merge(ShardIdent, ShardIdent),
 }
@@ -25,6 +26,7 @@ pub fn calc_split_merge_actions(
     to_new_shards: Vec<&ShardIdent>,
 ) -> Result<Vec<SplitMergeAction>> {
     // TODO: not the best code, possibly needs refactoring
+
     let full_shard_id = ShardIdent::new_full(0);
     let mut planned_actions = VecDeque::new();
     if from_current_shards.is_empty() {
@@ -38,6 +40,13 @@ pub fn calc_split_merge_actions(
     }
 
     let mut result_actions = vec![];
+
+    for new_shard_id in to_new_shards.iter() {
+        // if shard has a root level then add new shard to queue
+        if new_shard_id.is_full() {
+            result_actions.push(SplitMergeAction::Add(**new_shard_id));
+        }
+    }
 
     let mut rest_to_shards = to_new_shards;
     while let Some(next_planned_action) = planned_actions.pop_front() {
@@ -96,6 +105,7 @@ pub fn calc_split_merge_actions(
                 SplitMergeAction::Merge(_from_shard_id_1, _from_shard_id_2) => {
                     // do nothing
                 }
+                SplitMergeAction::Add(_) => {}
             },
         }
     }

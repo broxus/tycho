@@ -67,6 +67,7 @@ impl Service<ServiceRequest> for NetworkService {
                         {
                             Ok(response_option) => response_option,
                             Err(e) => {
+                                tracing::error!("Error handling signatures query: {:?}", e);
                                 panic!("Error handling signatures query: {:?}", e);
                             }
                         }

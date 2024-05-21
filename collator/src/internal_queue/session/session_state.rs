@@ -55,6 +55,7 @@ pub trait LocalSessionState {
     async fn snapshot(&self) -> Box<dyn StateSnapshot>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
+    async fn add_shard(&self, shard_id: &ShardIdent);
     async fn remove_diff(
         &self,
         diff_id: &BlockIdShort,
@@ -98,6 +99,11 @@ impl SessionState for SessionStateStdImpl {
             lock.insert(split.1, Arc::new(RwLock::new(Shard::new(split.1))));
         };
         Ok(())
+    }
+
+    async fn add_shard(&self, shard_id: &ShardIdent) {
+        let mut lock = self.shards_flat.write().await;
+        lock.insert(*shard_id, Arc::new(RwLock::new(Shard::new(*shard_id))));
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {

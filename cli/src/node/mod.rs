@@ -502,7 +502,7 @@ impl Node {
             },
         };
 
-        let shards = vec![ShardIdent::default()];
+        let shards = vec![];
         let session_state_factory = SessionStateImplFactory::new(shards);
         let persistent_state_factory =
             PersistentStateImplFactory::new(queue_config.persistent_state_config);

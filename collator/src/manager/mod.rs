@@ -25,7 +25,7 @@ use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
 };
 use crate::utils::schedule_async_action;
-use crate::utils::shard::calc_split_merge_actions;
+use crate::utils::shard::{calc_split_merge_actions, SplitMergeAction};
 use crate::validator::{Validator, ValidatorContext, ValidatorEventListener, ValidatorFactory};
 use crate::{method_to_async_task_closure, tracing_targets};
 
@@ -72,7 +72,7 @@ where
     mq_adapter: Arc<dyn MessageQueueAdapter>,
 
     collator_factory: CF,
-    validator: V,
+    validator: Arc<V>,
 
     active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
     collation_sessions_to_finish: HashMap<CollationSessionId, Arc<CollationSessionInfo>>,
@@ -231,6 +231,8 @@ where
             state_node_adapter: state_node_adapter.clone(),
             keypair: config.key_pair.clone(),
         });
+
+        let validator = Arc::new(validator);
 
         let processor = Self {
             config: Arc::new(config),
@@ -554,13 +556,14 @@ where
 
         // update shards in msgs queue
         let current_shards_ids = self.active_collation_sessions.keys().collect();
-        let new_shards_ids = new_shards_info.keys().collect();
+        let new_shards_ids: Vec<&ShardIdent> = new_shards_info.keys().collect();
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Detecting split/merge actions to move from current shards {:?} to new shards {:?}...",
             current_shards_ids,
             new_shards_ids
         );
+
         let split_merge_actions = calc_split_merge_actions(current_shards_ids, new_shards_ids)?;
         if !split_merge_actions.is_empty() {
             tracing::info!(
@@ -864,6 +867,10 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
+
+        // let _handle = self.validator.clone()
+        //     .spawn_validate(candidate_id, session_info.seqno())
+        //     .await;
 
         self.validator
             .validate(candidate_id, session_info.seqno())
