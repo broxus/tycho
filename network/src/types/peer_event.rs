@@ -18,6 +18,7 @@ pub enum DisconnectReason {
     Reset,
     TimedOut,
     LocallyClosed,
+    CidsExhausted,
 }
 
 impl From<quinn::ConnectionError> for DisconnectReason {
@@ -37,6 +38,7 @@ impl From<&quinn::ConnectionError> for DisconnectReason {
             quinn::ConnectionError::Reset => Self::Reset,
             quinn::ConnectionError::TimedOut => Self::TimedOut,
             quinn::ConnectionError::LocallyClosed => Self::LocallyClosed,
+            quinn::ConnectionError::CidsExhausted => Self::CidsExhausted,
         }
     }
 }

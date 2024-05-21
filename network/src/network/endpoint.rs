@@ -117,10 +117,18 @@ impl<'a> Future for Accept<'a> {
     type Output = Option<Connecting>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        self.project()
-            .inner
-            .poll(cx)
-            .map(|c| c.map(Connecting::new_inbound))
+        self.project().inner.poll(cx).map(|c| {
+            c.and_then(|c| {
+                let remote_addr = c.remote_address();
+                match c.accept() {
+                    Ok(c) => Some(Connecting::new_inbound(c)),
+                    Err(e) => {
+                        tracing::warn!(%remote_addr, "failed to accept an incoming connection: {e:?}");
+                        None
+                    }
+                }
+            })
+        })
     }
 }
 

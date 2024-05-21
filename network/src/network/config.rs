@@ -2,11 +2,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use rustls::crypto::CryptoProvider;
+use rustls::SupportedCipherSuite;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
+use webpki::types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
 use crate::network::crypto::{
     generate_cert, peer_id_from_certificate, CertVerifier, CertVerifierWithPeerId,
+    SUPPORTED_SIG_ALGS,
 };
 use crate::types::PeerId;
 
@@ -136,12 +141,13 @@ impl QuicConfig {
 pub(crate) struct EndpointConfig {
     pub peer_id: PeerId,
     pub service_name: String,
-    pub client_cert: rustls::Certificate,
-    pub pkcs8_der: rustls::PrivateKey,
+    pub client_cert: CertificateDer<'static>,
+    pub pkcs8_der: PrivatePkcs8KeyDer<'static>,
     pub quinn_server_config: quinn::ServerConfig,
     pub transport_config: Arc<quinn::TransportConfig>,
     pub quinn_endpoint_config: quinn::EndpointConfig,
     pub enable_early_data: bool,
+    pub crypto_provider: Arc<CryptoProvider>,
 }
 
 impl EndpointConfig {
@@ -153,20 +159,24 @@ impl EndpointConfig {
     }
 
     pub fn make_client_config_for_peer_id(&self, peer_id: &PeerId) -> Result<quinn::ClientConfig> {
-        let mut client_config = rustls::ClientConfig::builder()
-            .with_cipher_suites(DEFAULT_CIPHER_SUITES)
-            .with_kx_groups(DEFAULT_KX_GROUPS)
-            .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
-            .unwrap()
-            .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(
-                self.service_name.clone(),
-                peer_id,
-            )))
-            .with_client_auth_cert(vec![self.client_cert.clone()], self.pkcs8_der.clone())?;
+        let mut client_config =
+            rustls::ClientConfig::builder_with_provider(self.crypto_provider.clone())
+                .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
+                .unwrap()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(CertVerifierWithPeerId::new(
+                    self.service_name.clone(),
+                    peer_id,
+                )))
+                .with_client_auth_cert(
+                    vec![self.client_cert.clone()],
+                    PrivateKeyDer::Pkcs8(self.pkcs8_der.clone_key()),
+                )?;
 
         client_config.enable_early_data = self.enable_early_data;
+        let quinn_config = QuicClientConfig::try_from(client_config)?;
 
-        let mut client = quinn::ClientConfig::new(Arc::new(client_config));
+        let mut client = quinn::ClientConfig::new(Arc::new(quinn_config));
         client.transport_config(self.transport_config.clone());
         Ok(client)
     }
@@ -230,19 +240,27 @@ impl EndpointConfigBuilder {
         let transport_config = Arc::new(self.optional_fields.transport_config.unwrap_or_default());
 
         let reset_key = compute_reset_key(&keypair.secret_key);
-        let quinn_endpoint_config = quinn::EndpointConfig::new(Arc::new(reset_key));
+        let quinn_endpoint_config = quinn::EndpointConfig::new(reset_key);
 
         let (cert, pkcs8_der) =
             generate_cert(&keypair, &service_name).context("Failed to generate a certificate")?;
 
         let cert_verifier = Arc::new(CertVerifier::from(service_name.clone()));
 
+        let crypto_provider = Arc::new(CryptoProvider {
+            cipher_suites: DEFAULT_CIPHER_SUITES.to_vec(),
+            kx_groups: DEFAULT_KX_GROUPS.to_vec(),
+            signature_verification_algorithms: SUPPORTED_SIG_ALGS,
+            ..rustls::crypto::ring::default_provider()
+        });
+
         let quinn_server_config = make_server_config(
             &service_name,
-            pkcs8_der.clone(),
+            &pkcs8_der,
             cert.clone(),
             cert_verifier,
             transport_config.clone(),
+            crypto_provider.clone(),
             self.optional_fields.enable_0rtt,
         )?;
 
@@ -257,27 +275,28 @@ impl EndpointConfigBuilder {
             transport_config,
             quinn_endpoint_config,
             enable_early_data: self.optional_fields.enable_0rtt,
+            crypto_provider,
         })
     }
 }
 
 fn make_server_config(
     service_name: &str,
-    pkcs8_der: rustls::PrivateKey,
-    cert: rustls::Certificate,
+    pkcs8_der: &rustls::pki_types::PrivatePkcs8KeyDer<'_>,
+    cert: rustls::pki_types::CertificateDer<'static>,
     cert_verifier: Arc<CertVerifier>,
     transport_config: Arc<quinn::TransportConfig>,
+    crypto_provider: Arc<CryptoProvider>,
     enable_0rtt: bool,
 ) -> Result<quinn::ServerConfig> {
     let mut server_cert_resolver = rustls::server::ResolvesServerCertUsingSni::new();
 
-    let key = rustls::sign::any_eddsa_type(&pkcs8_der).context("Invalid private key")?;
+    let key =
+        rustls::crypto::ring::sign::any_eddsa_type(pkcs8_der).context("Invalid private key")?;
     let certified_key = rustls::sign::CertifiedKey::new(vec![cert], key);
     server_cert_resolver.add(service_name, certified_key)?;
 
-    let mut server_crypto = rustls::ServerConfig::builder()
-        .with_cipher_suites(DEFAULT_CIPHER_SUITES)
-        .with_kx_groups(DEFAULT_KX_GROUPS)
+    let mut server_crypto = rustls::ServerConfig::builder_with_provider(crypto_provider.clone())
         .with_protocol_versions(DEFAULT_PROTOCOL_VERSIONS)
         .unwrap()
         .with_client_cert_verifier(cert_verifier)
@@ -289,13 +308,14 @@ fn make_server_config(
         // TODO: Should we enable this?
         // server_crypto.send_half_rtt_data = true;
     }
+    let server_config = QuicServerConfig::try_from(server_crypto)?;
 
-    let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_crypto));
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(server_config));
     server.transport = transport_config;
     Ok(server)
 }
 
-fn compute_reset_key(private_key: &[u8; 32]) -> ring::hmac::Key {
+fn compute_reset_key(private_key: &[u8; 32]) -> Arc<ring::hmac::Key> {
     const STATELESS_RESET_SALT: &[u8] = b"tycho-stateless-reset";
 
     let salt = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA256, STATELESS_RESET_SALT);
@@ -305,13 +325,17 @@ fn compute_reset_key(private_key: &[u8; 32]) -> ring::hmac::Key {
     let mut reset_key = [0; 32];
     okm.fill(&mut reset_key).unwrap();
 
-    ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key)
+    Arc::new(ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &reset_key))
 }
 
-static DEFAULT_CIPHER_SUITES: &[rustls::SupportedCipherSuite] = &[
-    rustls::cipher_suite::TLS13_AES_256_GCM_SHA384,
-    rustls::cipher_suite::TLS13_AES_128_GCM_SHA256,
-    rustls::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+static DEFAULT_CIPHER_SUITES: &[SupportedCipherSuite] = &[
+    // TLS1.3 suites
+    rustls::crypto::ring::cipher_suite::TLS13_AES_256_GCM_SHA384,
+    rustls::crypto::ring::cipher_suite::TLS13_AES_128_GCM_SHA256,
+    rustls::crypto::ring::cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
 ];
-static DEFAULT_KX_GROUPS: &[&rustls::SupportedKxGroup] = &[&rustls::kx_group::X25519];
+
+static DEFAULT_KX_GROUPS: &[&dyn rustls::crypto::SupportedKxGroup] =
+    &[rustls::crypto::ring::kx_group::X25519];
+
 static DEFAULT_PROTOCOL_VERSIONS: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS13];

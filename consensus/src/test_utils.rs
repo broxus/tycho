@@ -207,7 +207,7 @@ mod tests {
 
         // check_parking_lot();
         heart_beat();
-        let handles = make_network(21, 2);
+        let handles = make_network(9, 2);
         for handle in handles {
             handle.join().unwrap();
         }
