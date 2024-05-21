@@ -796,7 +796,10 @@ impl CellImpl for StorageCell {
     }
 
     fn stats(&self) -> CellTreeStats {
-        todo!()
+        // TODO: make real implementation
+
+        // STUB: just return default value
+        Default::default()
     }
 }
 
