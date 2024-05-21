@@ -1,20 +1,13 @@
-use std::sync::atomic::Ordering;
-use std::sync::OnceLock;
-use std::{
-    collections::HashMap,
-    sync::{atomic::AtomicU64, Arc},
-};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
-use everscale_types::cell::Cell;
+use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::dict::Dict;
 use everscale_types::models::{
-    ExtInMsgInfo, HashUpdate, IntMsgInfo, Lazy, MsgInfo, OptionalAccount, ShardAccount,
-    ShardAccounts, TickTock, Transaction,
-};
-use everscale_types::{
-    cell::HashBytes,
-    dict::Dict,
-    models::{BlockchainConfig, LibDescr},
+    BlockchainConfig, ExtInMsgInfo, HashUpdate, IntMsgInfo, Lazy, LibDescr, MsgInfo,
+    OptionalAccount, ShardAccount, ShardAccounts, TickTock, Transaction,
 };
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -24,9 +17,8 @@ use ton_executor::{
 };
 use tycho_util::FastHashMap;
 
-use crate::collator::types::{AccountId, ShardAccountStuff};
-
 use super::types::AsyncMessage;
+use crate::collator::types::{AccountId, ShardAccountStuff};
 
 static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 

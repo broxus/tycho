@@ -16,4 +16,12 @@ impl StateSnapshot for PersistentStateSnapshot {
     ) -> Result<Vec<Arc<MessageWithSource>>, QueueError> {
         Ok(vec![])
     }
+
+    fn next(
+        &self,
+        _shard_range: &HashMap<ShardIdent, ShardRange>,
+        _for_shard: &ShardIdent,
+    ) -> Option<Arc<MessageWithSource>> {
+        todo!()
+    }
 }

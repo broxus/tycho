@@ -3,12 +3,11 @@ use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, ShardIdent};
 
-use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, EnqueuedMessageKey};
-use crate::internal_queue::types::QueueDiff;
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 
 #[derive(Clone)]
 pub struct Shard {
-    pub(crate) outgoing_messages: BTreeMap<EnqueuedMessageKey, Arc<EnqueuedMessage>>,
+    pub(crate) outgoing_messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     pub(crate) diffs: BTreeMap<BlockIdShort, Arc<QueueDiff>>,
 }
 

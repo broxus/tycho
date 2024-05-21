@@ -1,5 +1,4 @@
 use anyhow::{bail, Result};
-
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -25,10 +24,10 @@ impl CollatorStdImpl {
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
 
-        let mut new_config_opt: Option<BlockchainConfig> = None;
+        let new_config_opt: Option<BlockchainConfig> = None;
 
         for (account_id, updated_shard_account) in exec_manager.changed_accounts.drain() {
-            //TODO: get updated blockchain config if it stored in account
+            // TODO: get updated blockchain config if it stored in account
             let account = updated_shard_account.shard_account.load_account()?;
             match account {
                 None => {
@@ -93,8 +92,8 @@ impl CollatorStdImpl {
         value_flow.to_next_block = shard_accounts.root_extra().balance.clone();
 
         // build master state extra or get a ref to last applied master block
-        //TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
-        //collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
+        // TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
+        // collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
         let (mc_state_extra, master_ref) = if collation_data.block_id_short.shard.is_masterchain() {
             let (extra, min_ref_mc_seqno) =
                 self.create_mc_state_extra(collation_data, new_config_opt)?;
@@ -427,23 +426,20 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         for (creator, count) in &collation_data.block_create_count {
             let shard_scaled = count << 32;
-            block_create_stats.set(
-                creator,
-                CreatorStats {
-                    mc_blocks: BlockCounters {
-                        updated_at: collation_data.chain_time,
-                        total: 0,
-                        cnt2048: 0,
-                        cnt65536: 0,
-                    },
-                    shard_blocks: BlockCounters {
-                        updated_at: collation_data.chain_time,
-                        total: *count,
-                        cnt2048: shard_scaled,
-                        cnt65536: shard_scaled,
-                    },
+            block_create_stats.set(creator, CreatorStats {
+                mc_blocks: BlockCounters {
+                    updated_at: collation_data.chain_time,
+                    total: 0,
+                    cnt2048: 0,
+                    cnt65536: 0,
                 },
-            )?;
+                shard_blocks: BlockCounters {
+                    updated_at: collation_data.chain_time,
+                    total: *count,
+                    cnt2048: shard_scaled,
+                    cnt65536: shard_scaled,
+                },
+            })?;
         }
 
         Ok(())

@@ -1,10 +1,7 @@
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::sync::Arc;
 
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
-use tracing::error;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::shard::Shard;
@@ -33,32 +30,25 @@ impl StateSnapshot for SessionStateSnapshot {
                 .flat_shards
                 .get(shard_range.0)
                 .ok_or(QueueError::ShardNotFound(*shard_range.0))?;
-            for (_, message) in shard.outgoing_messages.iter().filter(|message| {
-                let account_hash = HashBytes::from_str(&message.1.env.to_contract);
-                match account_hash {
-                    Ok(hash) => {
-                        if !shard_id.contains_account(&hash) {
-                            return false;
-                        }
-                    }
-                    Err(e) => {
-                        error!("failed to convert account to hashbytes {e:?}");
-                        return false;
-                    }
+
+            for (_, message) in shard.outgoing_messages.iter() {
+                let account_hash = message.destination()?;
+
+                if !shard_id.contains_account(&account_hash) {
+                    continue;
                 }
 
                 if let Some(from_lt) = shard_range.1.from_lt {
-                    if message.1.created_lt < from_lt {
-                        return false;
+                    if message.info.created_lt < from_lt {
+                        continue;
                     }
                 }
                 if let Some(to_lt) = shard_range.1.to_lt {
-                    if message.1.created_lt > to_lt {
-                        return false;
+                    if message.info.created_lt > to_lt {
+                        continue;
                     }
                 }
-                true
-            }) {
+
                 let message_with_source = MessageWithSource {
                     shard_id: *shard_range.0,
                     message: message.clone(),
@@ -67,6 +57,14 @@ impl StateSnapshot for SessionStateSnapshot {
             }
         }
         Ok(messages)
+    }
+
+    fn next(
+        &self,
+        _shard_range: &HashMap<ShardIdent, ShardRange>,
+        _for_shard: &ShardIdent,
+    ) -> Option<Arc<MessageWithSource>> {
+        todo!()
     }
 }
 

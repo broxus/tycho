@@ -4,7 +4,7 @@ use everscale_types::models::BlockIdShort;
 
 use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
 use crate::internal_queue::snapshot::StateSnapshot;
-use crate::internal_queue::types::ext_types_stubs::EnqueuedMessage;
+use crate::internal_queue::types::EnqueuedMessage;
 
 // CONFIG
 

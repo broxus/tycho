@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use async_trait::async_trait;
 use everscale_types::models::*;
 use futures_util::future::{BoxFuture, Future};
@@ -9,7 +9,10 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use self::types::{McData, PrevData, WorkingState};
 use crate::collator::queue_adapter::MessageQueueAdapter;
+use crate::collator::types::BlockCollationData;
 use crate::internal_queue::iterator::QueueIterator;
+use crate::internal_queue::snapshot::IterRange;
+use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
@@ -485,10 +488,37 @@ impl CollatorStdImpl {
     }
 
     /// Create and return internal message queue iterator
-    async fn init_internal_mq_iterator(&self) -> Result<impl QueueIterator> {
-        //TODO: should use McData and PrevData from working state
-        //      to calculate params for getting snapshot from message queue
-        Ok(QueueIteratorStubImpl::create_stub())
+    async fn init_internal_mq_iterator(
+        &self,
+        collation_data: &BlockCollationData,
+        mc_data: &&McData,
+    ) -> Result<Box<dyn QueueIterator>> {
+        let mut ranges_from = vec![];
+        for entry in collation_data.processed_upto.internals.iter() {
+            let (shard_id_full, processed_upto_info) = entry?;
+            ranges_from.push(IterRange {
+                shard_id: shard_id_full.try_into()?,
+                lt: processed_upto_info.processed_to_msg.0,
+            });
+        }
+        let mut ranges_to = vec![];
+
+        for shard in mc_data.mc_state_extra().shards.iter() {
+            let (shard_id, shard_description) = shard.unwrap();
+
+            let iter_range_to = IterRange {
+                shard_id,
+                lt: shard_description.end_lt,
+            };
+
+            ranges_to.push(iter_range_to);
+        }
+
+        let internal_messages_iterator = self
+            .mq_adapter
+            .create_iterator(self.shard_id, ranges_from, ranges_to)
+            .await?;
+        Ok(internal_messages_iterator)
     }
 
     async fn update_mc_data_and_try_collate(&mut self, mc_state: ShardStateStuff) -> Result<()> {
@@ -591,7 +621,7 @@ impl CollatorStdImpl {
             );
         }
 
-        //TODO: import next anchor every time when there is no pending externals to update chain time
+        // TODO: import next anchor every time when there is no pending externals to update chain time
 
         // import next anchor if no internals and no pending externals for collation
         let next_anchor = if !has_internals && !has_externals {
@@ -651,19 +681,29 @@ impl QueueIteratorStubImpl {
 impl QueueIterator for QueueIteratorStubImpl {
     fn add_message(
         &mut self,
-        message: Arc<crate::internal_queue::types::ext_types_stubs::EnqueuedMessage>,
+        message: Arc<crate::internal_queue::types::EnqueuedMessage>,
     ) -> anyhow::Result<()> {
         Ok(())
     }
-    fn commit(&mut self) {}
-    fn get_diff(&self, block_id_short: BlockIdShort) -> crate::internal_queue::types::QueueDiff {
+    // fn commit(&mut self) {}
+    fn take_diff(
+        &mut self,
+        block_id_short: BlockIdShort,
+    ) -> crate::internal_queue::types::QueueDiff {
         crate::internal_queue::types::QueueDiff {
             id: block_id_short,
             messages: vec![],
             processed_upto: HashMap::new(),
         }
     }
-    fn next(&mut self) -> Option<crate::internal_queue::iterator::IterItem> {
+    fn next(&mut self, with_new: bool) -> Option<crate::internal_queue::iterator::IterItem> {
         None
+    }
+
+    fn commit_processed_messages(
+        &mut self,
+        messages: Vec<(ShardIdent, InternalMessageKey)>,
+    ) -> Result<()> {
+        todo!()
     }
 }

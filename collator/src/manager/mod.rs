@@ -864,6 +864,7 @@ where
             candidate_id.as_short_id(),
             candidate_chain_time,
         );
+
         self.validator
             .validate(candidate_id, session_info.seqno())
             .await?;
