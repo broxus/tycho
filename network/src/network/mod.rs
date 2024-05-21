@@ -422,39 +422,40 @@ mod tests {
         })
     }
 
-    #[traced_test]
     #[tokio::test]
     async fn connection_manager_works() -> Result<()> {
+        tycho_util::test::init_logger("connection_manager_works", "trace");
+
         let peer1 = make_network("tycho")?;
         let peer2 = make_network("tycho")?;
         let peer3 = make_network("not-tycho")?;
 
-        assert!(peer1
+        peer1
             .connect(peer2.local_addr(), peer2.peer_id())
             .await
-            .is_ok());
-        assert!(peer2
+            .unwrap();
+        peer2
             .connect(peer1.local_addr(), peer1.peer_id())
             .await
-            .is_ok());
+            .unwrap();
 
-        assert!(peer1
+        peer1
             .connect(peer3.local_addr(), peer3.peer_id())
             .await
-            .is_err());
-        assert!(peer2
+            .unwrap_err();
+        peer2
             .connect(peer3.local_addr(), peer3.peer_id())
             .await
-            .is_err());
+            .unwrap_err();
 
-        assert!(peer3
+        peer3
             .connect(peer1.local_addr(), peer1.peer_id())
             .await
-            .is_err());
-        assert!(peer3
+            .unwrap_err();
+        peer3
             .connect(peer2.local_addr(), peer2.peer_id())
             .await
-            .is_err());
+            .unwrap_err();
 
         Ok(())
     }
