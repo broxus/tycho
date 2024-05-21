@@ -137,8 +137,10 @@ impl CollatorStdImpl {
             prev_shard_data.observable_accounts().clone(),
         );
 
+        const STUB_SKIP_EXECUTION: bool = true;
+
         // execute tick transaction and special transactions (mint, recover)
-        if self.shard_id.is_masterchain() {
+        if self.shard_id.is_masterchain() && !STUB_SKIP_EXECUTION {
             self.create_ticktock_transactions(false, &mut collation_data, &mut exec_manager)
                 .await?;
             self.create_special_transactions(&mut collation_data, &mut exec_manager)
@@ -247,30 +249,48 @@ impl CollatorStdImpl {
             }
 
             let msgs_len = msgs_set.len() as u32;
-            exec_manager.execute_msgs_set(msgs_set);
+            exec_manager.execute_msgs_set(msgs_set.clone()); // STUB: clone to use msgs_set in stub logic
             let mut msgs_set_offset = collation_data.processed_upto.processed_offset;
             let mut msgs_set_full_processed = false;
 
             // execute msgs processing by groups
             while !msgs_set_full_processed {
-                let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
-                let processed_msgs_count = group.len();
-                for (_account_id, msg_info, transaction) in group {
-                    let new_internal_messages = new_transaction(
-                        &mut collation_data,
-                        &self.shard_id,
-                        &transaction,
-                        msg_info,
-                    )?;
-
-                    self.mq_adapter.add_messages_to_iterator(
-                        &mut internal_messages_iterator,
-                        new_internal_messages,
-                    )?;
-
+                // STUB: skip real execution
+                let processed_msgs_count = if STUB_SKIP_EXECUTION {
+                    if msgs_set_offset > 0 {
+                        msgs_set = msgs_set.split_off(msgs_set_offset as usize);
+                    }
+                    let left_msgs = if msgs_set.len() > group_size {
+                        msgs_set.split_off(group_size - 1)
+                    } else {
+                        vec![]
+                    };
+                    let processed_msgs_count = msgs_set.len();
                     collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
-                }
-                msgs_set_offset = new_offset;
+                    msgs_set_offset += processed_msgs_count as u32;
+                    msgs_set = left_msgs;
+                    processed_msgs_count
+                } else {
+                    let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
+                    let processed_msgs_count = group.len();
+                    for (_account_id, msg_info, transaction) in group {
+                        let new_internal_messages = new_transaction(
+                            &mut collation_data,
+                            &self.shard_id,
+                            &transaction,
+                            msg_info,
+                        )?;
+
+                        self.mq_adapter.add_messages_to_iterator(
+                            &mut internal_messages_iterator,
+                            new_internal_messages,
+                        )?;
+
+                        collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+                    }
+                    msgs_set_offset = new_offset;
+                    processed_msgs_count
+                };
 
                 // TODO: when processing transactions we should check block limits
                 //      currently we simply check only transactions count
@@ -308,7 +328,7 @@ impl CollatorStdImpl {
         }
 
         // execute tock transaction
-        if self.shard_id.is_masterchain() {
+        if self.shard_id.is_masterchain() && !STUB_SKIP_EXECUTION {
             self.create_ticktock_transactions(true, &mut collation_data, &mut exec_manager)
                 .await?;
         }
