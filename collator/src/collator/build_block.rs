@@ -196,11 +196,10 @@ impl CollatorStdImpl {
             out_msg_description: Lazy::new(&out_msgs)?,
             account_blocks: Lazy::new(&account_blocks)?,
             rand_seed: collation_data.rand_seed,
+            created_by: collation_data.created_by,
             ..Default::default()
         };
 
-        // TODO: fill created_by
-        // extra.created_by = self.created_by.clone();
         if let Some(mc_state_extra) = mc_state_extra {
             let new_mc_block_extra = McBlockExtra {
                 shards: mc_state_extra.shards.clone(),
@@ -372,7 +371,7 @@ impl CollatorStdImpl {
                 .block_create_stats
                 .clone()
                 .unwrap_or_default();
-            self.update_block_creator_stats(collation_data, &mut stats)?;
+            Self::update_block_creator_stats(collation_data, &mut stats)?;
             Some(stats)
         } else {
             None
@@ -411,32 +410,6 @@ impl CollatorStdImpl {
         Ok(min_ref_mc_seqno)
     }
 
-    fn update_block_creator_stats(
-        &self,
-        collation_data: &BlockCollationData,
-        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
-    ) -> Result<()> {
-        for (creator, count) in &collation_data.block_create_count {
-            let shard_scaled = count << 32;
-            block_create_stats.set(creator, CreatorStats {
-                mc_blocks: BlockCounters {
-                    updated_at: collation_data.chain_time,
-                    total: 0,
-                    cnt2048: 0,
-                    cnt65536: 0,
-                },
-                shard_blocks: BlockCounters {
-                    updated_at: collation_data.chain_time,
-                    total: *count,
-                    cnt2048: shard_scaled,
-                    cnt65536: shard_scaled,
-                },
-            })?;
-        }
-
-        Ok(())
-    }
-
     fn create_merkle_update(
         collator_descr: &str,
         prev_shard_data: &PrevData,
@@ -459,5 +432,69 @@ impl CollatorStdImpl {
         );
 
         Ok(state_update)
+    }
+    fn update_block_creator_stats(
+        collation_data: &BlockCollationData,
+        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
+    ) -> Result<()> {
+        let mut mc_updated = false;
+        for (creator, count) in &collation_data.block_create_count {
+            let shard_scaled = count << 32;
+            let total_mc = if collation_data.created_by == *creator {
+                mc_updated = true;
+                1
+            } else {
+                0
+            };
+
+            block_create_stats.set(creator, CreatorStats {
+                mc_blocks: BlockCounters {
+                    updated_at: collation_data.chain_time,
+                    total: total_mc,
+                    cnt2048: total_mc,
+                    cnt65536: total_mc,
+                },
+                shard_blocks: BlockCounters {
+                    updated_at: collation_data.chain_time,
+                    total: *count,
+                    cnt2048: shard_scaled,
+                    cnt65536: shard_scaled,
+                },
+            })?;
+        }
+        if !mc_updated {
+            block_create_stats.set(collation_data.created_by, CreatorStats {
+                mc_blocks: BlockCounters {
+                    updated_at: collation_data.chain_time,
+                    total: 1,
+                    cnt2048: 1,
+                    cnt65536: 1,
+                },
+                shard_blocks: BlockCounters {
+                    updated_at: collation_data.chain_time,
+                    total: 0,
+                    cnt2048: 0,
+                    cnt65536: 0,
+                },
+            })?;
+        }
+
+        let default_shard_blocks_count = collation_data.block_create_count.values().sum();
+        block_create_stats.set(HashBytes::default(), CreatorStats {
+            mc_blocks: BlockCounters {
+                updated_at: collation_data.chain_time,
+                total: 1,
+                cnt2048: 1,
+                cnt65536: 1,
+            },
+            shard_blocks: BlockCounters {
+                updated_at: collation_data.chain_time,
+                total: default_shard_blocks_count,
+                cnt2048: default_shard_blocks_count << 32,
+                cnt65536: default_shard_blocks_count << 32,
+            },
+        })?;
+        // TODO: prune CreatorStats https://github.com/ton-blockchain/ton/blob/master/validator/impl/collator.cpp#L4191
+        Ok(())
     }
 }
