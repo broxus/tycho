@@ -9,6 +9,7 @@ use tycho_block_util::state::ShardStateStuff;
 use super::execution_manager::ExecutionManager;
 use super::CollatorStdImpl;
 use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData};
+use crate::tracing_targets;
 use crate::types::BlockCandidate;
 
 impl CollatorStdImpl {
@@ -17,6 +18,12 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         mut exec_manager: ExecutionManager,
     ) -> Result<(BlockCandidate, ShardStateStuff)> {
+        tracing::debug!(
+            target: tracing_targets::COLLATOR,
+            "Collator ({}): start finalize_block",
+            self.collator_descr(),
+        );
+
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 

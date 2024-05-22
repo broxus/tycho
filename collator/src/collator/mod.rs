@@ -1,13 +1,13 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use anyhow::{Error, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::models::*;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
-use self::types::{McData, PrevData, WorkingState};
+use self::types::{CachedMempoolAnchor, McData, PrevData, WorkingState};
 use crate::collator::queue_adapter::MessageQueueAdapter;
 use crate::collator::types::BlockCollationData;
 use crate::internal_queue::iterator::QueueIterator;
@@ -174,12 +174,14 @@ pub struct CollatorStdImpl {
 
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
-    anchors_cache: BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>,
+    anchors_cache: BTreeMap<MempoolAnchorId, CachedMempoolAnchor>,
 
     last_imported_anchor_id: Option<MempoolAnchorId>,
     last_imported_anchor_chain_time: Option<u64>,
 
-    /// TRUE - when exist imported anchors in cache and not all their externals were read.
+    /// TRUE - when exist imported anchors in cache,
+    /// when they have externals for current shard of collator,
+    /// and not all these externals were read.
     ///
     /// Updated in the `import_next_anchor()` and `read_next_externals()`
     has_pending_externals: bool,
@@ -466,15 +468,18 @@ impl CollatorStdImpl {
             next_anchor.externals_count(),
         );
 
-        self.last_imported_anchor_id = Some(next_anchor.id());
-        self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
-        self.anchors_cache
-            .insert(next_anchor.id(), next_anchor.clone());
-
         let has_externals = next_anchor.check_has_externals_for(&self.shard_id);
         if has_externals {
             self.has_pending_externals = true;
         }
+
+        self.last_imported_anchor_id = Some(next_anchor.id());
+        self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
+        self.anchors_cache
+            .insert(next_anchor.id(), CachedMempoolAnchor {
+                anchor: next_anchor.clone(),
+                has_externals,
+            });
 
         Ok((next_anchor, has_externals))
     }
@@ -577,7 +582,7 @@ impl CollatorStdImpl {
             if has_externals {
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
-                    "Collator ({}): just imported anchor has externals",
+                    "Collator ({}): just imported anchor has externals fo current shard",
                     self.collator_descr(),
                 );
             }

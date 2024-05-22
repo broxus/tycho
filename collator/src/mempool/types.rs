@@ -9,6 +9,7 @@ use crate::types::ShardIdentExt;
 
 pub type MempoolAnchorId = u32;
 
+#[derive(Debug)]
 pub struct ExternalMessage {
     message_cell: Cell,
     message_info: ExtInMsgInfo,
@@ -35,6 +36,7 @@ impl From<&ExternalMessage> for (MsgInfo, Cell) {
     }
 }
 
+#[derive(Debug)]
 pub struct MempoolAnchor {
     id: MempoolAnchorId,
     chain_time: u64,

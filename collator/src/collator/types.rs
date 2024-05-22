@@ -14,6 +14,7 @@ use everscale_types::models::{
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
+use crate::mempool::MempoolAnchor;
 use crate::types::ProofFunds;
 
 // В текущем коллаторе перед коллацией блока импортируется:
@@ -413,6 +414,12 @@ impl BlockCollationData {
     }
 }
 
+pub(super) struct CachedMempoolAnchor {
+    pub anchor: Arc<MempoolAnchor>,
+    /// Has externals for current shard of collator
+    pub has_externals: bool,
+}
+
 pub(super) type AccountId = HashBytes;
 
 pub(super) type Transactions = AugDict<u64, CurrencyCollection, Lazy<Transaction>>;
@@ -711,8 +718,6 @@ pub(super) enum AsyncMessage {
     /// 0 - tick tock msg
     TickTock(TickTock),
 }
-
-pub mod ext_types_stubs {}
 
 pub trait ShardStateProvider {
     fn get_account_state(&self, account_id: &AccountId) -> Option<ShardAccount>;
