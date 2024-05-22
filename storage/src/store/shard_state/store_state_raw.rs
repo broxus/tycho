@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use everscale_types::cell::*;
 use everscale_types::models::BlockId;
 use tycho_block_util::state::*;
@@ -19,7 +20,7 @@ use crate::store::shard_state::StoredValue;
 
 pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
-pub struct StoreStateRaw<'a> {
+pub struct StoreStateRaw {
     block_id: BlockId,
     db: &'a BaseDb,
     cell_storage: &'a Arc<CellStorage>,
@@ -28,28 +29,34 @@ pub struct StoreStateRaw<'a> {
     header: Option<BocHeader>,
     cells_read: u64,
     file_ctx: FilesContext,
+
+    cells_progress: ProgressBar,
 }
 
-impl<'a> StoreStateRaw<'a> {
+impl StoreStateRaw {
     pub(crate) fn new(
         block_id: &BlockId,
         db: &'a BaseDb,
         downloads_dir: &FileDb,
-        cell_storage: &'a Arc<CellStorage>,
-        min_ref_mc_state: &'a MinRefMcStateTracker,
+        cell_storage: &Arc<CellStorage>,
+        min_ref_mc_state: &MinRefMcStateTracker,
     ) -> Result<Self> {
         let file_ctx =
             FilesContext::new(downloads_dir, block_id).context("failed to create files context")?;
+        let pg = ProgressBar::builder("downloading state")
+            .exact_unit("cells")
+            .build();
 
         Ok(Self {
             block_id: *block_id,
-            db,
+            db: db.clone(),
             file_ctx,
-            cell_storage,
-            min_ref_mc_state,
+            cell_storage: cell_storage.clone(),
+            min_ref_mc_state: min_ref_mc_state.clone(),
             reader: ShardStatePacketReader::new(),
             header: None,
             cells_read: 0,
+            cells_progress: pg,
         })
     }
 
@@ -57,7 +64,8 @@ impl<'a> StoreStateRaw<'a> {
         &self.header
     }
 
-    pub fn process_part(&mut self, part: Vec<u8>, progress_bar: &mut ProgressBar) -> Result<bool> {
+    pub fn process_part(&mut self, part: Bytes) -> Result<bool> {
+        let progress_bar = &mut self.cells_progress;
         let cells_file = self.file_ctx.cells_file()?;
 
         self.reader.set_next_packet(part);
@@ -116,10 +124,14 @@ impl<'a> StoreStateRaw<'a> {
         Ok(true)
     }
 
-    pub fn finalize(mut self, progress_bar: &mut ProgressBar) -> Result<ShardStateStuff> {
+    pub fn finalize(mut self) -> Result<ShardStateStuff> {
         // 2^7 bits + 1 bytes
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
+
+        let mut progress_bar = ProgressBar::builder("processing state")
+            .with_mapper(|x| bytesize::to_string(x, false))
+            .build();
 
         let header = match &self.header {
             Some(header) => header,
@@ -139,8 +151,8 @@ impl<'a> StoreStateRaw<'a> {
         let write_options = self.db.cells.new_write_config();
 
         let mut tail = [0; 4];
-        let mut ctx = FinalizationContext::new(self.db);
-        ctx.clear_temp_cells(self.db)?;
+        let mut ctx = FinalizationContext::new(&self.db);
+        ctx.clear_temp_cells(&self.db)?;
 
         // Allocate on heap to prevent big future size
         let mut chunk_buffer = Vec::with_capacity(1 << 20);
@@ -219,7 +231,7 @@ impl<'a> StoreStateRaw<'a> {
         ctx.final_check(root_hash)?;
 
         self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
-        ctx.clear_temp_cells(self.db)?;
+        ctx.clear_temp_cells(&self.db)?;
 
         let shard_state_key = self.block_id.as_short_id().to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
@@ -235,7 +247,7 @@ impl<'a> StoreStateRaw<'a> {
                 Ok(ShardStateStuff::from_root(
                     &self.block_id,
                     Cell::from(cell as Arc<_>),
-                    self.min_ref_mc_state,
+                    &self.min_ref_mc_state,
                 )?)
             }
             None => Err(ReplaceTransactionError::NotFound.into()),
@@ -622,9 +634,6 @@ mod test {
             let mut file = BufReader::new(file);
             let chunk_size = 10_000_000; // size of each chunk in bytes
             let mut buffer = vec![0u8; chunk_size];
-            let mut pg = ProgressBar::builder("downloading state")
-                .exact_unit("cells")
-                .build();
 
             loop {
                 let bytes_read = file.read(&mut buffer)?;
@@ -632,14 +641,11 @@ mod test {
                     break; // End of file
                 }
 
-                let packet = buffer[..bytes_read].to_vec();
-                store_state.process_part(packet, &mut pg)?;
+                let packet = Bytes::copy_from_slice(&buffer[..bytes_read]);
+                store_state.process_part(packet)?;
             }
 
-            let mut pg = ProgressBar::builder("processing state")
-                .with_mapper(|x| bytesize::to_string(x, false))
-                .build();
-            store_state.finalize(&mut pg)?;
+            store_state.finalize()?;
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");

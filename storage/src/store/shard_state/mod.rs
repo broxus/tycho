@@ -19,7 +19,7 @@ use crate::{BlockHandleStorage, BlockStorage};
 mod cell_storage;
 mod entries_buffer;
 mod shard_state_reader;
-mod store_state_raw;
+pub mod store_state_raw;
 
 const DOWNLOADS_DIR: &str = "downloads";
 
@@ -151,7 +151,7 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    pub fn begin_store_state_raw(&'_ self, block_id: &BlockId) -> Result<StoreStateRaw<'_>> {
+    pub fn begin_store_state_raw(&'_ self, block_id: &BlockId) -> Result<StoreStateRaw> {
         StoreStateRaw::new(
             block_id,
             &self.db,
