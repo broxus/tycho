@@ -145,8 +145,8 @@ impl BlockchainRpcClient {
         &self,
         mc_block: &BlockId,
         block: &BlockId,
+        limit: u64,
         offset: u64,
-        max_size: u64,
     ) -> Result<QueryResponse<PersistentStatePart>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
@@ -154,7 +154,7 @@ impl BlockchainRpcClient {
                 block_id: *block,
                 mc_block_id: *mc_block,
                 offset,
-                max_size,
+                max_size: limit,
             })
             .await?;
         Ok(data)
