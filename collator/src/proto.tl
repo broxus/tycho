@@ -5,11 +5,22 @@
 * @param block_id_short The short identifier for a block
 * @param signatures     A vector of hash-signature pairs
 */
-queries.signaturesQuery
+queries.signaturesQueryRes
     session_seqno:int
     block_id_short:types.blockIdShort
     signatures:(vector types.hashSignaturePair)
-    = queries.SignaturesQuery;
+    = queries.SignaturesQueryRes;
+
+/**
+* @param session_seqno  The sequence number of the session
+* @param block_id_short The short identifier for a block
+* @param signatures     A vector of hash-signature pairs
+*/
+queries.signaturesQueryReq
+    session_seqno:int
+    block_id_short:types.blockIdShort
+    signature:bytes
+    = queries.SignaturesQueryReq;
 
 /**
 * @param workchain Workchain identifier of the shard

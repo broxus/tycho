@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use backon::{BackoffBuilder, ExponentialBuilder};
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription};
@@ -17,13 +18,13 @@ use crate::types::{OnValidatedBlockEvent, ValidatorNetwork};
 use crate::validator::client::retry::RetryClient;
 use crate::validator::client::ValidatorClient;
 use crate::validator::config::ValidatorConfig;
-use crate::validator::network::dto::SignaturesQuery;
+use crate::validator::network::dto::SignaturesQueryRequest;
 use crate::validator::network::network_service::NetworkService;
 use crate::validator::state::{
     NotificationStatus, SessionInfo, ValidationState, ValidationStateStdImpl,
 };
 use crate::validator::types::{
-    BlockValidationCandidate, OverlayNumber, ValidationStatus, ValidatorInfo,
+    BlockValidationCandidate, OverlayNumber, StopValidationCommand, ValidationStatus, ValidatorInfo,
 };
 
 // FACTORY
@@ -74,16 +75,16 @@ pub trait ValidatorEventListener: Send + Sync {
 
 #[trait_variant::make(Validator: Send)]
 pub trait ValidatorInternal: Sync + 'static {
-    /// Run block validation
-    async fn validate(&self, candidate: BlockId, session_seqno: u32) -> Result<()>;
-    /// Run block validation detached
+    /// Run block candidate validation task
     async fn spawn_validate(
         self: Arc<Self>,
         candidate: BlockId,
         session_seqno: u32,
     ) -> JoinHandle<Result<()>>;
+    /// Validate
+    async fn validate(&self, candidate: BlockId, session_seqno: u32) -> Result<()>;
     /// Stop block candidate validation task
-    async fn stop_validation(&self, block_id: &BlockId) -> Result<()>;
+    async fn stop_validation(&self, command: StopValidationCommand) -> Result<()>;
     /// Add new validation session
     async fn add_session(
         &self,
@@ -122,8 +123,8 @@ pub struct ValidatorStdImpl {
     keypair: Arc<KeyPair>,
     config: ValidatorConfig,
     block_validated_broadcaster: (
-        broadcast::Sender<BlockIdShort>,
-        broadcast::Receiver<BlockIdShort>,
+        broadcast::Sender<StopValidationCommand>,
+        broadcast::Receiver<StopValidationCommand>,
     ),
 }
 
@@ -155,6 +156,17 @@ impl ValidatorStdImpl {
 }
 
 impl Validator for ValidatorStdImpl {
+    async fn spawn_validate(
+        self: Arc<Self>,
+        candidate: BlockId,
+        session_seqno: u32,
+    ) -> JoinHandle<Result<()>> {
+        let validator = Arc::clone(&self);
+        tokio::spawn(
+            async move { Validator::validate(&*validator, candidate, session_seqno).await },
+        )
+    }
+
     #[tracing::instrument(skip(self), fields(block_id, session_seqno))]
     async fn validate(&self, block_id: BlockId, session_seqno: u32) -> Result<()> {
         tracing::info!(target: tracing_targets::VALIDATOR, "Validating block");
@@ -205,7 +217,6 @@ impl Validator for ValidatorStdImpl {
 
         let validators_without_signature = session
             .validators_without_signatures(&block_short_id)
-            .await
             .iter()
             .filter(|validator| validator.public_key_hash.0 != self.keypair.public_key.to_bytes())
             .cloned()
@@ -214,11 +225,12 @@ impl Validator for ValidatorStdImpl {
         let handlers = spawn_validation_tasks(
             validators_without_signature,
             session,
-            &self.listeners,
+            self.listeners.clone(),
             cancellation_token,
-            &self.config,
+            Arc::new(self.config.clone()),
             block_short_id,
             self.block_validated_broadcaster.0.clone(),
+            our_signature,
         )
         .await;
 
@@ -231,24 +243,9 @@ impl Validator for ValidatorStdImpl {
         Ok(())
     }
 
-    async fn spawn_validate(
-        self: Arc<Self>,
-        candidate: BlockId,
-        session_seqno: u32,
-    ) -> JoinHandle<Result<()>> {
-        let validator = Arc::clone(&self);
-        let future = tokio::spawn(async move {
-            Validator::validate(&*validator, candidate, session_seqno).await
-        });
-
-        future
-    }
-
-    #[tracing::instrument(skip(self), fields(block_id = %block_id))]
-    async fn stop_validation(&self, block_id: &BlockId) -> Result<()> {
-        self.block_validated_broadcaster
-            .0
-            .send(block_id.as_short_id())?;
+    #[tracing::instrument(skip(self), fields(command))]
+    async fn stop_validation(&self, command: StopValidationCommand) -> Result<()> {
+        self.block_validated_broadcaster.0.send(command)?;
         Ok(())
     }
 
@@ -323,8 +320,10 @@ impl Validator for ValidatorStdImpl {
                     private_overlay.clone(),
                     peer_id,
                 );
-                let retry_client =
-                    RetryClient::new(Arc::new(validator_client), config.backoff_config.clone());
+                let retry_client = RetryClient::new(
+                    Arc::new(validator_client),
+                    config.error_backoff_config.clone(),
+                );
 
                 validator_clients.insert(*validator_pubkey, Arc::new(retry_client));
             }
@@ -357,31 +356,29 @@ pub async fn process_new_signatures(
     signatures: Vec<(HashBytes, Signature)>,
     listeners: &[Arc<dyn ValidatorEventListener>],
 ) -> Result<(ValidationStatus, NotificationStatus)> {
-    if session.get_block(&block_id_short).await.is_some() {
+    if session.get_block(&block_id_short).is_some() {
         session
             .add_signatures(block_id_short, signatures.clone())
-            .await
-            .unwrap();
+            .await?;
 
-        let validation_status = session.check_validation_status(&block_id_short).await?;
+        let validation_status = session.check_validation_status(&block_id_short)?;
 
         if validation_status.is_finished() {
-            let notification_status = session
-                .notify_listeners_if_not(block_id_short, &validation_status, listeners)
-                .await?;
+            let notification_status =
+                session.notify_listeners_if_not(block_id_short, &validation_status, listeners)?;
             return Ok((validation_status, notification_status));
         }
 
         Ok((validation_status, NotificationStatus::NotNotified))
     } else {
-        tracing::trace!(target: tracing_targets::VALIDATOR, "Caching signatures for block");
+        tracing::debug!(target: tracing_targets::VALIDATOR, "Caching signatures for block");
         if block_id_short.seqno > 0 {
             let previous_block =
                 BlockIdShort::from((block_id_short.shard, block_id_short.seqno - 1));
-            let previous_block = session.get_block(&previous_block).await;
+            let previous_block = session.get_block(&previous_block);
 
             if previous_block.is_some() {
-                session.cache_signatures(&block_id_short, signatures).await;
+                session.cache_signatures(&block_id_short, signatures);
             }
         }
         Ok((
@@ -425,13 +422,15 @@ async fn check_and_notify_validated_by_state(
         .is_some()
     {
         for listener in listeners.iter() {
-            let cloned_listener = listener.clone();
-            let cloned_block_id = *block_id;
-            tokio::spawn(async move {
-                cloned_listener
-                    .on_block_validated(cloned_block_id, OnValidatedBlockEvent::ValidByState)
-                    .await
-                    .expect("Failed to notify listener");
+            tokio::spawn({
+                let listener = listener.clone();
+                let block_id = *block_id;
+                async move {
+                    listener
+                        .on_block_validated(block_id, OnValidatedBlockEvent::ValidByState)
+                        .await
+                        .expect("Failed to notify listener");
+                }
             });
         }
         return Ok(true);
@@ -439,15 +438,17 @@ async fn check_and_notify_validated_by_state(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip(validators, session, listeners, cancellation_token, config), fields(block_id = %block_short_id))]
 async fn spawn_validation_tasks(
     validators: Vec<Arc<ValidatorInfo>>,
     session: Arc<SessionInfo>,
-    listeners: &[Arc<dyn ValidatorEventListener>],
+    listeners: Vec<Arc<dyn ValidatorEventListener>>,
     cancellation_token: CancellationToken,
-    config: &ValidatorConfig,
+    config: Arc<ValidatorConfig>,
     block_short_id: BlockIdShort,
-    on_block_validated_event_sender: broadcast::Sender<BlockIdShort>,
+    on_block_validated_event_sender: broadcast::Sender<StopValidationCommand>,
+    self_signature: Signature,
 ) -> Vec<JoinHandle<Result<()>>> {
     tracing::info!(target: tracing_targets::VALIDATOR, "Spawning validation tasks");
 
@@ -459,9 +460,6 @@ async fn spawn_validation_tasks(
             .unwrap_or_else(|| panic!("Validator client not found for validator: {:?}", validator.public_key_hash));
 
         let cancellation_token_clone = cancellation_token.clone();
-        let request_timeout = config.request_timeout;
-        let delay_between_requests = config.delay_between_requests;
-        let listeners_clone = listeners.to_vec();
 
         // Spawn a task to listen for block validation events
         tokio::spawn(async move {
@@ -469,11 +467,23 @@ async fn spawn_validation_tasks(
                 tokio::select! {
                     result = subscriber.recv() => {
                         match result{
-                            Ok(result) => {
-                                if result == block_short_id {
-                                    tracing::trace!(target: tracing_targets::VALIDATOR, "Received block validation event");
-                                    cancellation_token_clone.cancel();
-                                    return;
+                            Ok(comand) => {
+
+                                match comand {
+                                    StopValidationCommand::ByBlock(block_id) => {
+                                        if block_id == block_short_id {
+                                            tracing::trace!(target: tracing_targets::VALIDATOR, "Received block validation stop event ByBlock");
+                                            cancellation_token_clone.cancel();
+                                            return;
+                                        }
+                                    }
+                                    StopValidationCommand::ByTopShardBlock(top_shard_block) => {
+                                        if top_shard_block.shard == block_short_id.shard && top_shard_block.seqno >= block_short_id.seqno {
+                                            tracing::trace!(target: tracing_targets::VALIDATOR, "Received block validation stop event ByTopShardBlock");
+                                            cancellation_token_clone.cancel();
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -491,62 +501,69 @@ async fn spawn_validation_tasks(
 
         // Spawn a task to request and process signatures
         let cancellation_token_clone = cancellation_token.clone();
-        tokio::spawn(async move {
-            while !cancellation_token_clone.is_cancelled() {
-                tracing::trace!(target: tracing_targets::VALIDATOR, "Requesting signatures");
+        tokio::spawn(
+            {
+                let listeners = listeners.clone();
+                let config = config.clone();
+                let request_timeout = config.request_timeout;
+                async move {
+                    let mut backoff = ExponentialBuilder::default()
+                        .with_min_delay(config.request_signatures_backoff_config.min_delay)
+                        .with_max_delay(config.request_signatures_backoff_config.max_delay)
+                        .with_factor(config.request_signatures_backoff_config.factor)
+                        .with_max_times(config.request_signatures_backoff_config.max_times)
+                        .build();
 
-                // Check if the block is already signed by the validator
-                if session_clone.is_block_signed_by_validator(&block_short_id, validator.public_key_hash).await {
-                    break;
-                }
 
-                // Create query payload
-                let query_payload = create_query_payload_for_validator(&session_clone, block_short_id).await;
+                    while !cancellation_token_clone.is_cancelled() {
+                        tracing::trace!(target: tracing_targets::VALIDATOR, "Requesting signatures");
 
-                // Request signatures with retry
-                let result = tokio::select! {
-                    result = validator_client.execute_with_retry(move |client: Arc<ValidatorClient>| {
-                        let query_payload_clone = query_payload.clone();
-                        async move {
-                            client.request_signatures(query_payload_clone, request_timeout).await
+                        // Check if the block is already signed by the validator
+                        if session_clone.is_block_signed_by_validator(&block_short_id, validator.public_key_hash).await {
+                            break;
                         }
-                    }) => result,
-                    _ = cancellation_token_clone.cancelled() => {
-                        tracing::trace!(target: tracing_targets::VALIDATOR, "Validation task cancelled");
-                        break;
-                    },
-                }?;
 
-                // Process new signatures
-                let process_new_signatures_result = process_new_signatures(
-                    session_clone.clone(),
-                    block_short_id,
-                    result.wrapped_signatures(),
-                    &listeners_clone,
-                ).await?;
+                        // Create query payload
+                        let query_payload = SignaturesQueryRequest::new(session_clone.seqno(), block_short_id, self_signature);
 
-                // Check if validation is finished
-                if process_new_signatures_result.0.is_finished() {
-                    tracing::trace!(target: tracing_targets::VALIDATOR, "Send message to stop validation tasks");
-                    cancellation_token_clone.cancel();
-                    break;
+                        // Request signatures with retry
+                        let result = tokio::select! {
+                        result = validator_client.execute_with_retry(move |client: Arc<ValidatorClient>| {
+                            let query_payload_clone = query_payload.clone();
+                            async move {
+                                client.request_signatures(query_payload_clone, request_timeout).await
+                            }
+                        }) => result,
+                        _ = cancellation_token_clone.cancelled() => {
+                            tracing::trace!(target: tracing_targets::VALIDATOR, "Validation task cancelled");
+                            break;
+                        },
+                    }?;
+
+                        // Process new signatures
+                        let process_new_signatures_result = process_new_signatures(
+                            session_clone.clone(),
+                            block_short_id,
+                            result.wrapped_signatures(),
+                            &listeners,
+                        ).await?;
+
+                        // Check if validation is finished
+                        if process_new_signatures_result.0.is_finished() {
+                            tracing::trace!(target: tracing_targets::VALIDATOR, "Send message to stop validation tasks");
+                            cancellation_token_clone.cancel();
+                            break;
+                        }
+
+                        let delay = backoff.next().unwrap_or_else(|| config.request_signatures_backoff_config.max_delay);
+                        tracing::trace!(target: tracing_targets::VALIDATOR, "Backing off for {:?}", delay);
+                        tokio::time::sleep(delay).await;
+                    }
+
+                    Ok(())
                 }
+            })
 
-                // Wait before next request
-                // TODO Exponential backoff
-                tokio::time::sleep(delay_between_requests).await;
-            }
-
-            Ok(())
-        })
-    }).collect()
-}
-
-async fn create_query_payload_for_validator(
-    session: &Arc<SessionInfo>,
-    block_short_id: BlockIdShort,
-) -> SignaturesQuery {
-    let seq_no = session.seqno();
-    let valid_signatures = session.get_valid_signatures(&block_short_id).await;
-    SignaturesQuery::new(seq_no, block_short_id, valid_signatures)
+    }
+        ).collect()
 }

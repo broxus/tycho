@@ -1,17 +1,19 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, Signature};
 use tl_proto::{TlRead, TlWrite};
+use tycho_network::util::tl;
 
 #[derive(Debug, Clone, TlRead, TlWrite)]
-#[tl(boxed, id = "queries.signaturesQuery", scheme = "proto.tl")]
-pub struct SignaturesQuery {
+#[tl(boxed, id = "queries.signaturesQueryRes", scheme = "proto.tl")]
+pub struct SignaturesQueryResponse {
     pub session_seqno: u32,
     #[tl(with = "tl_block_id_short")]
     pub block_id_short: BlockIdShort,
+    #[tl(with = "tl::VecWithMaxLen::<150>")]
     pub signatures: Vec<([u8; 32], [u8; 64])>,
 }
 
-impl SignaturesQuery {
+impl SignaturesQueryResponse {
     pub fn new(
         session_seqno: u32,
         block_id_short: BlockIdShort,
@@ -32,6 +34,25 @@ impl SignaturesQuery {
             .iter()
             .map(|(hash, signature)| (HashBytes(*hash), Signature(*signature)))
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, TlRead, TlWrite)]
+#[tl(boxed, id = "queries.signaturesQueryReq", scheme = "proto.tl")]
+pub struct SignaturesQueryRequest {
+    pub session_seqno: u32,
+    #[tl(with = "tl_block_id_short")]
+    pub block_id_short: BlockIdShort,
+    pub signature: [u8; 64],
+}
+
+impl SignaturesQueryRequest {
+    pub fn new(session_seqno: u32, block_id_short: BlockIdShort, signature: Signature) -> Self {
+        Self {
+            session_seqno,
+            block_id_short,
+            signature: signature.0,
+        }
     }
 }
 

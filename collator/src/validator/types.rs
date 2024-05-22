@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 
 use everscale_crypto::ed25519::PublicKey;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone)]
@@ -51,6 +51,12 @@ impl BlockValidationCandidate {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum StopValidationCommand {
+    ByTopShardBlock(BlockIdShort),
+    ByBlock(BlockIdShort),
+}
+
 #[derive(TlWrite, TlRead)]
 #[tl(boxed, id = "types.overlayNumber", scheme = "proto.tl")]
 pub struct OverlayNumber {
@@ -59,10 +65,9 @@ pub struct OverlayNumber {
     pub session_seqno: u32,
 }
 
-#[derive(Eq, PartialEq, Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ValidationStatus {
     Valid,
-    Invalid,
     Insufficient(u64, u64),
     BlockNotExist,
 }
@@ -70,7 +75,7 @@ pub enum ValidationStatus {
 impl ValidationStatus {
     pub fn is_finished(&self) -> bool {
         match self {
-            Self::Valid | Self::Invalid => true,
+            Self::Valid => true,
             Self::Insufficient(..) | Self::BlockNotExist => false,
         }
     }

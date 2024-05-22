@@ -394,11 +394,17 @@ async fn test_validator_accept_block_by_network() -> Result<()> {
 
 fn validator_config() -> ValidatorConfig {
     ValidatorConfig {
-        backoff_config: BackoffConfig {
+        error_backoff_config: BackoffConfig {
             min_delay: Duration::from_millis(50),
             max_delay: Duration::from_millis(1000),
             factor: 2.0,
-            max_times: 9999999,
+            max_times: 999999999,
+        },
+        request_signatures_backoff_config: BackoffConfig {
+            min_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(150),
+            factor: 2.0,
+            max_times: 999999999,
         },
         request_timeout: Duration::from_millis(1000),
         delay_between_requests: Duration::from_millis(50),
