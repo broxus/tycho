@@ -4,7 +4,7 @@ use anyhow::Context;
 use bytes::{Buf, Bytes};
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
-use tycho_network::{Response, Service, ServiceRequest};
+use tycho_network::{InboundRequestMeta, Response, Service, ServiceRequest};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 
@@ -15,7 +15,11 @@ use crate::proto::overlay;
 pub trait BroadcastListener: Send + Sync + 'static {
     type HandleMessageFut<'a>: Future<Output = ()> + Send + 'a;
 
-    fn handle_message<'a>(&'a self, message: Bytes) -> Self::HandleMessageFut<'a>;
+    fn handle_message<'a>(
+        &'a self,
+        meta: Arc<InboundRequestMeta>,
+        message: Bytes,
+    ) -> Self::HandleMessageFut<'a>;
 }
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -25,7 +29,11 @@ impl BroadcastListener for NoopBroadcastListener {
     type HandleMessageFut<'a> = futures_util::future::Ready<()>;
 
     #[inline]
-    fn handle_message<'a>(&'a self, _: Bytes) -> Self::HandleMessageFut<'a> {
+    fn handle_message<'a>(
+        &'a self,
+        _: Arc<InboundRequestMeta>,
+        _: Bytes,
+    ) -> Self::HandleMessageFut<'a> {
         futures_util::future::ready(())
     }
 }
@@ -254,7 +262,10 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             MessageBroadcastRef::TL_ID => {
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
-                    inner.broadcast_listener.handle_message(req.body).await
+                    inner
+                        .broadcast_listener
+                        .handle_message(req.metadata, req.body)
+                        .await
                 })
             }
             constructor => {
