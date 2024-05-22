@@ -410,7 +410,7 @@ impl CollatorStdImpl {
 
         // STUB: just do nothing for now: no split/merge, no session rotation
         let mut min_ref_mc_seqno = u32::max_value();
-        for (_shard_id, shard_descr) in collation_data.shards_mut()? {
+        for shard_descr in collation_data.shards_mut()?.values_mut() {
             min_ref_mc_seqno = std::cmp::min(min_ref_mc_seqno, shard_descr.min_ref_mc_seqno);
         }
 

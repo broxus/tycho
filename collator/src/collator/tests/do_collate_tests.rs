@@ -40,6 +40,7 @@ fn test_read_next_externals() {
     let mut collation_data = BlockCollationData::default();
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+        "run 1",
         &shard_id,
         &mut anchors_cache,
         3,
@@ -62,6 +63,7 @@ fn test_read_next_externals() {
     });
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+        "run 2",
         &shard_id,
         &mut anchors_cache,
         3,
@@ -78,6 +80,7 @@ fn test_read_next_externals() {
     assert_eq!(*kv.0, 1);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+        "run 3",
         &shard_id,
         &mut anchors_cache,
         10,
@@ -94,6 +97,7 @@ fn test_read_next_externals() {
     assert_eq!(*kv.0, 2);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+        "run 4",
         &shard_id,
         &mut anchors_cache,
         20,
@@ -110,6 +114,7 @@ fn test_read_next_externals() {
     assert_eq!(*kv.0, 4);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+        "run 5",
         &shard_id,
         &mut anchors_cache,
         3,
@@ -127,6 +132,7 @@ fn test_read_next_externals() {
 
     // all anchors removed from cache, should not fail on empty cache
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
+        "run 6",
         &shard_id,
         &mut anchors_cache,
         3,
