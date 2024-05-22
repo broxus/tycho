@@ -123,6 +123,12 @@ impl<T2> BlockchainRpcServiceBuilder<((), T2)> {
     }
 }
 
+impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2)> {
+    pub fn with_config(self, config: BlockchainRpcServiceConfig) -> Self {
+        Self { config, ..self }
+    }
+}
+
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct BlockchainRpcService<B = NoopBroadcastListener> {
@@ -130,9 +136,9 @@ pub struct BlockchainRpcService<B = NoopBroadcastListener> {
 }
 
 impl BlockchainRpcService<()> {
-    pub fn builder(config: BlockchainRpcServiceConfig) -> BlockchainRpcServiceBuilder<((), ())> {
+    pub fn builder() -> BlockchainRpcServiceBuilder<((), ())> {
         BlockchainRpcServiceBuilder {
-            config,
+            config: Default::default(),
             mandatory_fields: ((), ()),
         }
     }

@@ -15,6 +15,7 @@ members = [
     "consensus",
     "core",
     "network",
+    "rpc",
     "simulator",
     "storage",
     "util",
@@ -96,6 +97,8 @@ tycho-collator = { path = "./collator" }
 tycho-consensus = { path = "./consensus" }
 tycho-core = { path = "./core" }
 tycho-network = { path = "./network" }
+tycho-rpc = { path = "./rpc" }
+tycho-simulator = { path = "./simulator" }
 tycho-storage = { path = "./storage" }
 tycho-util = { path = "./util" }
 

@@ -138,7 +138,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
             let public_overlay = PublicOverlay::builder(OVERLAY_ID)
                 .with_peer_resolver(base.peer_resolver.clone())
                 .build(
-                    BlockchainRpcService::builder(Default::default())
+                    BlockchainRpcService::builder()
                         .with_storage(storage)
                         .with_broadcast_listener(broadcast_counter)
                         .build(),

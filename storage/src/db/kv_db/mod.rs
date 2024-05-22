@@ -67,12 +67,12 @@ weedb::tables! {
     }
 }
 
-// === Jrpc DB ===
+// === RPC DB ===
 
-pub type JrpcDb = WeeDb<JrpcTables>;
+pub type RpcDb = WeeDb<RpcTables>;
 
-impl WithMigrations for JrpcDb {
-    const NAME: &'static str = "jrpc";
+impl WithMigrations for RpcDb {
+    const NAME: &'static str = "rpc";
     const VERSION: Semver = [0, 0, 1];
 
     fn register_migrations(_migrations: &mut Migrations<Self>) -> Result<(), MigrationError> {
@@ -82,7 +82,7 @@ impl WithMigrations for JrpcDb {
 }
 
 weedb::tables! {
-    pub struct JrpcTables<Caches> {
+    pub struct RpcTables<Caches> {
         pub state: tables::State,
         pub transactions: tables::Transactions,
         pub transactions_by_hash: tables::TransactionsByHash,

@@ -103,7 +103,7 @@ impl Node {
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
             .with_peer_resolver(peer_resolver)
             .build(
-                BlockchainRpcService::builder(Default::default())
+                BlockchainRpcService::builder()
                     .with_storage(storage)
                     .without_broadcast_listener()
                     .build(),

@@ -15,13 +15,13 @@ use weedb::{rocksdb, OwnedSnapshot};
 use crate::db::*;
 
 pub struct JrpcStorage {
-    db: JrpcDb,
+    db: RpcDb,
     min_tx_lt: AtomicU64,
     snapshot: ArcSwapOption<OwnedSnapshot>,
 }
 
 impl JrpcStorage {
-    pub fn new(db: JrpcDb) -> Self {
+    pub fn new(db: RpcDb) -> Self {
         Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
@@ -236,7 +236,7 @@ impl JrpcStorage {
         }
 
         impl<'a> GcState<'a> {
-            fn new(db: &'a JrpcDb) -> Self {
+            fn new(db: &'a RpcDb) -> Self {
                 Self {
                     raw: db.rocksdb(),
                     writeopt: db.transactions.write_config(),
@@ -559,7 +559,7 @@ impl JrpcStorage {
     }
 
     fn update_code_hash(
-        db: &JrpcDb,
+        db: &RpcDb,
         workchain: i8,
         account: &HashBytes,
         accounts: &ShardAccounts,

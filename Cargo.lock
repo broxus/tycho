@@ -2801,6 +2801,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-rpc"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tycho-block-util",
+ "tycho-core",
+ "tycho-storage",
+ "tycho-util",
+]
+
+[[package]]
 name = "tycho-simulator"
 version = "0.0.1"
 dependencies = [
