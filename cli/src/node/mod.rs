@@ -310,8 +310,12 @@ impl Node {
         );
 
         // Setup blockchain rpc
+        // TODO: Add broadcast listener
         let blockchain_rpc_service =
-            BlockchainRpcService::new(storage.clone(), node_config.blockchain_rpc_service);
+            BlockchainRpcService::builder(node_config.blockchain_rpc_service)
+                .with_storage(storage.clone())
+                .without_broadcast_listener()
+                .build();
 
         let public_overlay =
             PublicOverlay::builder(global_config.zerostate.compute_public_overlay_id())

@@ -1,20 +1,23 @@
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwapOption;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use metrics::atomics::AtomicU64;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
-use weedb::rocksdb;
+use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
 
 pub struct JrpcStorage {
     db: JrpcDb,
     min_tx_lt: AtomicU64,
+    snapshot: ArcSwapOption<OwnedSnapshot>,
 }
 
 impl JrpcStorage {
@@ -22,7 +25,17 @@ impl JrpcStorage {
         Self {
             db,
             min_tx_lt: AtomicU64::new(u64::MAX),
+            snapshot: Default::default(),
         }
+    }
+
+    pub fn load_snapshot(&self) -> Option<Arc<OwnedSnapshot>> {
+        self.snapshot.load_full()
+    }
+
+    pub fn update_snapshot(&self) {
+        let snapshot = Arc::new(self.db.owned_snapshot());
+        self.snapshot.store(Some(snapshot));
     }
 
     #[tracing::instrument(level = "info", name = "sync_min_tx_lt", skip_all)]

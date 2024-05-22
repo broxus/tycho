@@ -1178,7 +1178,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c2a198fb6b0eada2a8df47933734e6d35d350665a33a3593d7164fa52c75c19"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.5",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -3049,9 +3049,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cccfb44112e5a07a3b19799d0d0436e5bd40f4401cad73ffaa4b2199cdffc75f"
+checksum = "68d95dd19031e90753c8b3d2bf76e9bc715cc1be6af6a49f99cd484f8386b937"
 dependencies = [
  "librocksdb-sys",
  "metrics",
