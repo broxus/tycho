@@ -3,8 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
-use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStatePart};
