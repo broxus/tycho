@@ -35,7 +35,8 @@ impl MempoolAdapterExtFilesStubImpl {
         //      that produces the repeating set of anchors
         let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
 
-        let mut externals = fs::read_dir("externals")
+        let externals_dir = PathBuf::from("externals");
+        let mut externals = fs::read_dir(externals_dir)
             .expect("externals dir not found")
             .map(|res| res.map(|e| e.path()))
             .collect::<Result<Vec<_>, io::Error>>()
@@ -203,6 +204,7 @@ pub fn create_anchor_with_externals_from_file(
     let mut buf = vec![];
     file.read_to_end(&mut buf).unwrap();
     let file_name = external_path.file_name().unwrap().to_str().unwrap();
+    tracing::info!("read external from file: {}", file_name);
     let timestamp: u64 = file_name.parse().unwrap();
     let mut buffer = vec![];
     BASE64_STANDARD.decode_vec(buf, &mut buffer).unwrap();
