@@ -65,6 +65,7 @@ impl ExecutionManager {
         group_limit: u32,
         shard_accounts: ShardAccounts,
     ) -> Self {
+        tracing::error!("shard_accounts = {shard_accounts:?}");
         Self {
             libraries,
             gen_utime,
@@ -110,7 +111,14 @@ impl ExecutionManager {
 
         let mut executed_messages = vec![];
         while let Some(executed_message) = futures.next().await {
-            executed_messages.push(executed_message?);
+            let (transaction, msg, ex) = executed_message?;
+            if let AsyncMessage::Ext(_, _) = &msg {
+                if let Err(ref e) = transaction {
+                    tracing::error!("failed to execute external transaction: {e:?}");
+                    continue;
+                }
+            }
+            executed_messages.push((transaction, msg, ex));
         }
 
         drop(futures);
