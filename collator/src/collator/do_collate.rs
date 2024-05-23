@@ -142,7 +142,7 @@ impl CollatorStdImpl {
             prev_shard_data.observable_accounts().clone(),
         );
 
-        const STUB_SKIP_EXECUTION: bool = true;
+        const STUB_SKIP_EXECUTION: bool = false;
 
         // execute tick transaction and special transactions (mint, recover)
         if self.shard_id.is_masterchain() && !STUB_SKIP_EXECUTION {
@@ -1206,6 +1206,22 @@ fn new_transaction(
                 .insert(*in_msg_cell.repr_hash(), out_msg.clone());
             (in_msg, in_msg_cell)
         }
+        AsyncMessage::Mint(in_msg_cell) | AsyncMessage::Recover(in_msg_cell) => {
+            let next_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
+            let cur_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
+            let msg_envelope = MsgEnvelope {
+                cur_addr,
+                next_addr,
+                fwd_fee_remaining: Default::default(),
+                message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
+            };
+            let in_msg = InMsg::Immediate(InMsgFinal {
+                in_msg_envelope: Lazy::new(&msg_envelope)?,
+                transaction: Lazy::new(transaction)?,
+                fwd_fee: Default::default(),
+            });
+            (in_msg, in_msg_cell)
+        }
         AsyncMessage::Ext(MsgInfo::ExtIn(_), in_msg_cell) => (
             InMsg::External(InMsgExternal {
                 in_msg: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
@@ -1213,7 +1229,13 @@ fn new_transaction(
             }),
             in_msg_cell,
         ),
-        _ => unreachable!(),
+        AsyncMessage::TickTock(_) => {
+            return Ok(vec![]);
+        }
+        s => {
+            tracing::error!("wrong async message - {s:?}");
+            unreachable!()
+        }
     };
     colator_data
         .in_msgs
