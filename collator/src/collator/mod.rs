@@ -8,15 +8,14 @@ use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
 use self::types::{CachedMempoolAnchor, McData, PrevData, WorkingState};
-use crate::collator::queue_adapter::MessageQueueAdapter;
-use crate::collator::types::BlockCollationData;
-use crate::internal_queue::iterator::QueueIterator;
+use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::snapshot::IterRange;
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
+use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
-    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo, ProofFunds,
+    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
     TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
@@ -27,7 +26,6 @@ use crate::{method_to_async_task_closure, tracing_targets};
 mod build_block;
 mod do_collate;
 mod execution_manager;
-pub mod queue_adapter;
 mod types;
 
 // FACTORY
@@ -343,6 +341,19 @@ impl CollatorStdImpl {
         Ok(())
     }
 
+    fn update_working_state_pending_internals(
+        &mut self,
+        has_pending_externals: Option<bool>,
+    ) -> Result<()> {
+        let working_state_mut = self.working_state.as_mut().expect(
+            "should `init` collator before calling `update_working_state_pending_internals`",
+        );
+
+        working_state_mut.has_pending_internals = has_pending_externals;
+
+        Ok(())
+    }
+
     /// Update McData in working state
     fn update_mc_data(&mut self, mc_state: ShardStateStuff) -> Result<()> {
         let mc_state_block_id = mc_state.block_id().as_short_id();
@@ -415,6 +426,7 @@ impl CollatorStdImpl {
             mc_data,
             prev_shard_data,
             usage_tree,
+            has_pending_internals: None,
         };
 
         Ok(working_state)
@@ -488,21 +500,23 @@ impl CollatorStdImpl {
         self.last_imported_anchor_chain_time.unwrap()
     }
 
-    /// (TODO) TRUE - when internal messages queue has internals
-    fn has_internals(&self) -> Result<bool> {
-        // TODO: make real implementation
-        // STUB: always return false emulating that all internals were processed in prev block
-        Ok(false)
+    async fn load_has_internals(&mut self) -> Result<()> {
+        let mut iterator = self.init_internal_mq_iterator().await?;
+        let has_internals = iterator.peek().is_some();
+        self.update_working_state_pending_internals(Some(has_internals))?;
+        Ok(())
+    }
+
+    fn has_internals(&self) -> Option<bool> {
+        self.working_state().has_pending_internals
     }
 
     /// Create and return internal message queue iterator
-    async fn init_internal_mq_iterator(
-        &self,
-        collation_data: &BlockCollationData,
-        mc_data: &&McData,
-    ) -> Result<Box<dyn QueueIterator>> {
+    async fn init_internal_mq_iterator(&self) -> Result<Box<dyn QueueIterator>> {
+        let processed_upto = self.working_state().prev_shard_data.processed_upto();
+        let mc_data = &self.working_state().mc_data;
         let mut ranges_from = vec![];
-        for entry in collation_data.processed_upto.internals.iter() {
+        for entry in processed_upto.internals.iter() {
             let (shard_id_full, processed_upto_info) = entry?;
             ranges_from.push(IterRange {
                 shard_id: shard_id_full.try_into()?,
@@ -531,7 +545,7 @@ impl CollatorStdImpl {
 
     async fn update_mc_data_and_try_collate(&mut self, mc_state: ShardStateStuff) -> Result<()> {
         self.update_mc_data(mc_state)?;
-
+        self.update_working_state_pending_internals(None)?;
         self.try_collate_next_shard_block_impl().await
     }
 
@@ -558,10 +572,14 @@ impl CollatorStdImpl {
             self.collator_descr(),
         );
 
-        // TODO: fix the work with internals
+        if self.has_internals().is_none() {
+            self.load_has_internals().await?;
+        }
 
         // check internals
-        let has_internals = self.has_internals()?;
+        let has_internals = self
+            .has_internals()
+            .ok_or(anyhow::anyhow!("has_pending internals doesn't init"))?;
         if has_internals {
             // collate if has internals
             tracing::debug!(
@@ -607,10 +625,15 @@ impl CollatorStdImpl {
             self.collator_descr(),
         );
 
-        // TODO: fix the work with internals
+        if self.has_internals().is_none() {
+            self.load_has_internals().await?;
+        }
 
         // check internals
-        let has_internals = self.has_internals()?;
+        let has_internals = self
+            .has_internals()
+            .ok_or(anyhow::anyhow!("has_pending internals doesn't init"))?;
+
         if has_internals {
             tracing::debug!(
                 target: tracing_targets::COLLATOR,
@@ -709,10 +732,11 @@ impl QueueIterator for QueueIteratorStubImpl {
         None
     }
 
-    fn commit_processed_messages(
-        &mut self,
-        messages: Vec<(ShardIdent, InternalMessageKey)>,
-    ) -> Result<()> {
+    fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
+        todo!()
+    }
+
+    fn peek(&mut self) -> Option<IterItem> {
         todo!()
     }
 }

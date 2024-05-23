@@ -203,13 +203,13 @@ impl SessionInfo {
     }
 
     /// Verifies and adds the signatures and updates the validation status.
-    #[tracing::instrument(skip(self, signatures), fields(block_id_short))]
+    #[tracing::instrument(skip(self, signatures), fields(%block_id_short))]
     pub async fn add_signatures(
         &self,
         block_id_short: BlockIdShort,
         signatures: Vec<(HashBytes, Signature)>,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::VALIDATOR, block_id_short=%block_id_short, "Adding signatures");
+        tracing::trace!(target: tracing_targets::VALIDATOR, "Adding signatures");
 
         let mut to_verify = Vec::new();
 
@@ -259,14 +259,19 @@ impl SessionInfo {
                         entry.1.valid_signatures.insert(validator_id, signature);
                     });
             } else {
-                tracing::warn!(target: tracing_targets::VALIDATOR, validator_id=%validator_id, "Invalid signature");
+                let root_hash = HashBytes(block_validation_candidate.root_hash);
+                let file_hash = HashBytes(block_validation_candidate.file_hash);
+                tracing::warn!(target: tracing_targets::VALIDATOR, validator_id=%validator_id,
+                    root_hash=?root_hash,
+                    file_hash=?file_hash,
+                    "Invalid signature");
             }
         }
 
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), fields(block_id_short))]
+    #[tracing::instrument(skip(self), fields(%block_id_short))]
     pub fn check_validation_status(
         &self,
         block_id_short: &BlockIdShort,
@@ -283,7 +288,7 @@ impl SessionInfo {
         Ok(validation_status)
     }
 
-    #[tracing::instrument(skip(self, listeners), fields(block_id_short))]
+    #[tracing::instrument(skip(self, listeners), fields(%block_id_short))]
     pub fn notify_listeners_if_not(
         &self,
         block_id_short: BlockIdShort,
@@ -315,6 +320,8 @@ impl SessionInfo {
             }),
             ValidationStatus::Insufficient(..) | ValidationStatus::BlockNotExist => unreachable!(),
         };
+
+        tracing::info!(target: tracing_targets::VALIDATOR, "Notifying listeners about success block validation");
 
         Self::notify_listeners(block_signatures.0, event, listeners);
 

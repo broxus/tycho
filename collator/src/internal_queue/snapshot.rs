@@ -7,7 +7,7 @@ use everscale_types::models::ShardIdent;
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::types::{EnqueuedMessage, Lt};
 
-#[derive(Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct MessageWithSource {
     pub shard_id: ShardIdent,
     pub message: Arc<EnqueuedMessage>,
@@ -37,6 +37,7 @@ impl Ord for MessageWithSource {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct IterRange {
     pub shard_id: ShardIdent,
     pub lt: Lt,

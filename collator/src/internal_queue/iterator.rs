@@ -9,17 +9,23 @@ use crate::internal_queue::error::QueueError;
 use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, Lt, QueueDiff};
 pub trait QueueIterator: Send {
+    /// Get next message
     fn next(&mut self, with_new: bool) -> Option<IterItem>;
+    /// Peek next message
+    fn peek(&mut self) -> Option<IterItem>;
+    /// Take diff from iterator
+    /// Move current position to commited position
+    /// Create new transaction
     fn take_diff(&mut self, block_id_short: BlockIdShort) -> QueueDiff;
-    fn commit_processed_messages(
-        &mut self,
-        messages: Vec<(ShardIdent, InternalMessageKey)>,
-    ) -> Result<()>;
+    /// Commit processed messages
+    /// It's getting last message position for each shard and save
+    fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
+    /// Add new message to iterator
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
 }
 
 pub struct QueueIteratorImpl {
-    for_block: ShardIdent,
+    for_shard: ShardIdent,
     current_position: HashMap<ShardIdent, InternalMessageKey>,
     commited_current_position: HashMap<ShardIdent, InternalMessageKey>,
     messages: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
@@ -31,7 +37,7 @@ impl QueueIteratorImpl {
         shards_from: Vec<IterRange>,
         shards_to: Vec<IterRange>,
         snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
-        for_block: ShardIdent,
+        for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
         let shards_with_ranges: &mut HashMap<ShardIdent, ShardRange> = &mut HashMap::new();
         for from in &shards_from {
@@ -44,14 +50,15 @@ impl QueueIteratorImpl {
 
         for snapshot in snapshots {
             let snapshot_messages =
-                snapshot.get_outgoing_messages_by_shard(shards_with_ranges, &for_block)?;
+                snapshot.get_outgoing_messages_by_shard(shards_with_ranges, &for_shard)?;
+
             for snapshot_message in snapshot_messages {
                 messages.push(Reverse(snapshot_message));
             }
         }
 
         Ok(Self {
-            for_block,
+            for_shard,
             messages,
             current_position: Default::default(),
             new_messages: Default::default(),
@@ -142,16 +149,30 @@ impl QueueIterator for QueueIteratorImpl {
 
             let is_new = self.new_messages.contains_key(&message_key);
 
-            if with_new || !is_new {
+            return if with_new || !is_new {
                 let message_with_source = self.messages.pop()?.0;
                 self.new_messages.remove(&message_key);
-                return Some(IterItem {
+                Some(IterItem {
                     message_with_source,
                     is_new,
-                });
+                })
             } else {
-                return None;
-            }
+                None
+            };
+        }
+        None
+    }
+
+    fn peek(&mut self) -> Option<IterItem> {
+        if let Some(message_with_source) = self.messages.peek() {
+            let message_key = message_with_source.0.message.key();
+
+            let is_new = self.new_messages.contains_key(&message_key);
+
+            return Some(IterItem {
+                message_with_source: message_with_source.0.clone(),
+                is_new,
+            });
         }
         None
     }
@@ -173,10 +194,7 @@ impl QueueIterator for QueueIteratorImpl {
         diff
     }
 
-    fn commit_processed_messages(
-        &mut self,
-        messages: Vec<(ShardIdent, InternalMessageKey)>,
-    ) -> Result<()> {
+    fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
         if !self.commited_current_position.is_empty() {
             bail!("Already commited. Please take diff before commit again")
         }
@@ -204,8 +222,8 @@ impl QueueIterator for QueueIteratorImpl {
             }
         };
 
-        if self.for_block.contains_account(&message_destination) {
-            let message_with_source = MessageWithSource::new(self.for_block, message.clone());
+        if self.for_shard.contains_account(&message_destination) {
+            let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
             self.messages.push(Reverse(Arc::new(message_with_source)));
         };
         Ok(())

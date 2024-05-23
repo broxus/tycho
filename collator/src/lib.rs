@@ -9,5 +9,6 @@ pub mod validator;
 #[cfg(any(test, feature = "test"))]
 pub mod test_utils;
 
+pub mod queue_adapter;
 mod tracing_targets;
-mod utils;
+pub mod utils;

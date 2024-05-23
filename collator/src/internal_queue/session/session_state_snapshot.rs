@@ -2,11 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::models::ShardIdent;
-use everscale_types::prelude::HashBytes;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::shard::Shard;
 use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
+use everscale_types::prelude::HashBytes;
 use crate::internal_queue::types::EnqueuedMessage;
 
 pub struct SessionStateSnapshot {
@@ -34,9 +34,11 @@ impl StateSnapshot for SessionStateSnapshot {
                 .ok_or(QueueError::ShardNotFound(*shard_range.0))?;
 
             for (_, message) in shard.outgoing_messages.iter() {
-                let account_hash = message.destination()?;
+                let (workchain, account_hash) = message.destination()?;
 
-                if !shard_id.contains_account(&account_hash) {
+                if !shard_id.contains_account(&account_hash)
+                    || shard_id.workchain() != workchain as i32
+                {
                     continue;
                 }
 

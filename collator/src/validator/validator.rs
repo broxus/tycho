@@ -167,7 +167,7 @@ impl Validator for ValidatorStdImpl {
         )
     }
 
-    #[tracing::instrument(skip(self), fields(block_id, session_seqno), target = "VALIDATOR")]
+    #[tracing::instrument(skip(self), fields(%block_id, %session_seqno))]
     async fn validate(&self, block_id: BlockId, session_seqno: u32) -> Result<()> {
         tracing::info!(target: tracing_targets::VALIDATOR, "Validating block");
         let session = self
@@ -243,13 +243,13 @@ impl Validator for ValidatorStdImpl {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self), fields(command))]
+    #[tracing::instrument(skip(self), fields(?command))]
     async fn stop_validation(&self, command: StopValidationCommand) -> Result<()> {
         self.block_validated_broadcaster.0.send(command)?;
         Ok(())
     }
 
-    #[tracing::instrument(skip(self, validators_descriptions), fields(session_seqno = session_seqno, shard_ident = %shard_ident))]
+    #[tracing::instrument(skip(self, validators_descriptions), fields(%session_seqno, ?shard_ident))]
     async fn add_session(
         &self,
         shard_ident: ShardIdent,
@@ -334,7 +334,7 @@ impl Validator for ValidatorStdImpl {
 
         self.validation_state.try_add_session(session_info).await?;
 
-        tracing::info!(target: tracing_targets::VALIDATOR, session_seqno, %shard_ident, "Validation session added");
+        tracing::info!(target: tracing_targets::VALIDATOR, "Validation session added");
         Ok(())
     }
 
@@ -349,7 +349,7 @@ fn sign_block(key_pair: &KeyPair, block: &BlockId) -> anyhow::Result<Signature> 
     Ok(signature)
 }
 
-#[tracing::instrument(skip(session, block_id_short, signatures, listeners), fields(block_id = %block_id_short))]
+#[tracing::instrument(skip(session, block_id_short, signatures, listeners), fields(%block_id_short))]
 pub async fn process_new_signatures(
     session: Arc<SessionInfo>,
     block_id_short: BlockIdShort,
@@ -439,7 +439,7 @@ async fn check_and_notify_validated_by_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip(validators, session, listeners, cancellation_token, config), fields(block_id = %block_short_id))]
+#[tracing::instrument(skip(validators, session, listeners, cancellation_token, config), fields(%block_short_id))]
 async fn spawn_validation_tasks(
     validators: Vec<Arc<ValidatorInfo>>,
     session: Arc<SessionInfo>,

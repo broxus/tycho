@@ -13,9 +13,9 @@ use self::types::{
     McBlockSubgraphToSend, SendSyncStatus,
 };
 use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
-use crate::collator::queue_adapter::MessageQueueAdapter;
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
+use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
@@ -25,7 +25,7 @@ use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
 };
 use crate::utils::schedule_async_action;
-use crate::utils::shard::{calc_split_merge_actions, SplitMergeAction};
+use crate::utils::shard::calc_split_merge_actions;
 use crate::validator::{Validator, ValidatorContext, ValidatorEventListener, ValidatorFactory};
 use crate::{method_to_async_task_closure, tracing_targets};
 
