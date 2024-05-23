@@ -983,12 +983,14 @@ impl CollatorStdImpl {
             .config()
             .get_fundamental_addresses()?;
         for account in fundamental_dict.keys() {
-            self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
-                .await?;
+            // TODO: uncomment when ticktock is implemented
+            // self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
+            //     .await?;
             // self.check_stop_flag()?;
         }
-        self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
-            .await?;
+        // TODO: uncomment when ticktock is implemented
+        // self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
+        //     .await?;
         Ok(())
     }
 
