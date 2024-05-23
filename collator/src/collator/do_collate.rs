@@ -1229,6 +1229,9 @@ fn new_transaction(
             }),
             in_msg_cell,
         ),
+        AsyncMessage::TickTock(_) => {
+            return Ok(vec![]);
+        }
         s => {
             tracing::error!("wrong async message - {s:?}");
             unreachable!()

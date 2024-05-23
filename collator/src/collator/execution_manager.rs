@@ -293,7 +293,11 @@ pub fn calculate_group(
             AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
                 dst.as_std().map(|a| a.address).unwrap_or_default()
             }
-            _ => {
+            AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
+                dst.as_std().map(|a| a.address).unwrap_or_default()
+            }
+            s => {
+                tracing::error!("wrong async message - {s:?}");
                 unreachable!()
             }
         };
