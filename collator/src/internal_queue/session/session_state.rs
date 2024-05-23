@@ -141,11 +141,12 @@ impl SessionStateStdImpl {
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
-    use crate::internal_queue::session::session_state::*;
-    use crate::internal_queue::types::ext_types_stubs::{
-        EnqueuedMessage, MessageContent, MessageEnvelope,
+    use everscale_types::models::{BlockIdShort, ShardIdent};
+
+    use crate::internal_queue::session::session_state::{
+        SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
     };
+    use crate::internal_queue::types::{EnqueuedMessage, QueueDiff};
 
     fn test_shard_idents() -> Vec<ShardIdent> {
         vec![ShardIdent::new_full(0)]
@@ -153,14 +154,9 @@ mod tests {
 
     fn default_message() -> Arc<EnqueuedMessage> {
         Arc::new(EnqueuedMessage {
-            created_lt: 0,
-            enqueued_lt: 0,
-            hash: "somehash".to_string(),
-            env: MessageEnvelope {
-                message: MessageContent {},
-                from_contract: "0".to_string(),
-                to_contract: "1".to_string(),
-            },
+            info: Default::default(),
+            cell: Default::default(),
+            hash: Default::default(),
         })
     }
 

@@ -100,11 +100,17 @@ async fn test_collation_process_on_stubs() {
 
     let node_network = tycho_collator::test_utils::create_node_network();
     let validator_config = ValidatorConfig {
-        backoff_config: BackoffConfig {
+        request_signatures_backoff_config: BackoffConfig {
+            min_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(150),
+            factor: 2.0,
+            max_times: 999999999,
+        },
+        error_backoff_config: BackoffConfig {
             min_delay: Duration::from_millis(50),
             max_delay: Duration::from_secs(1),
             factor: 2.0,
-            max_times: 999999,
+            max_times: 999999999,
         },
         request_timeout: Duration::from_millis(1000),
         delay_between_requests: Duration::from_millis(50),

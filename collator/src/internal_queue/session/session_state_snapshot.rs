@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::models::ShardIdent;
+use everscale_types::prelude::HashBytes;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::shard::Shard;
 use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
+use crate::internal_queue::types::EnqueuedMessage;
 
 pub struct SessionStateSnapshot {
     pub flat_shards: HashMap<ShardIdent, Shard>,
@@ -68,68 +70,46 @@ impl StateSnapshot for SessionStateSnapshot {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::internal_queue::types::ext_types_stubs::{
-        EnqueuedMessage, MessageContent, MessageEnvelope,
+#[test]
+fn test_get_outgoing_messages_by_shard() {
+    let shard_id = ShardIdent::new_full(0);
+    let mut shard = Shard::new(shard_id);
+
+    let message1 = EnqueuedMessage {
+        info: Default::default(),
+        cell: Default::default(),
+        hash: Default::default(),
     };
 
-    #[test]
-    fn test_get_outgoing_messages_by_shard() {
-        let shard_id = ShardIdent::new_full(0);
-        let mut shard = Shard::new(shard_id);
+    let message2 = EnqueuedMessage {
+        info: Default::default(),
+        cell: Default::default(),
+        hash: HashBytes([1; 32]),
+    };
 
-        let message1 = EnqueuedMessage {
-            created_lt: 10,
-            enqueued_lt: 0,
-            hash: "somehash".to_string(),
-            env: MessageEnvelope {
-                message: MessageContent {},
-                from_contract: "0:46768a917036eb8dc0bf51465f6355cd64eeb3449ba31ae00a18226f65bb675a"
-                    .to_string(),
-                to_contract: "0:46768a917036eb8dc0bf51465f6355cd64eeb3449ba31ae00a18226f65bb675a"
-                    .to_string(),
-            },
-        };
+    shard
+        .outgoing_messages
+        .insert(message1.key(), Arc::new(message1));
+    shard
+        .outgoing_messages
+        .insert(message2.key(), Arc::new(message2));
 
-        let message2 = EnqueuedMessage {
-            created_lt: 20,
-            enqueued_lt: 0,
-            hash: "somehash2".to_string(),
-            env: MessageEnvelope {
-                message: MessageContent {},
-                from_contract: "0:46768a917036eb8dc0bf51465f6355cd64eeb3449ba31ae00a18226f65bb675a"
-                    .to_string(),
-                to_contract: "0:46768a917036eb8dc0bf51465f6355cd64eeb3449ba31ae00a18226f65bb675a"
-                    .to_string(),
-            },
-        };
+    let mut flat_shards = HashMap::new();
+    flat_shards.insert(shard_id, shard);
 
-        shard
-            .outgoing_messages
-            .insert(message1.key(), Arc::new(message1));
-        shard
-            .outgoing_messages
-            .insert(message2.key(), Arc::new(message2));
+    let session_state_snapshot = SessionStateSnapshot::new(flat_shards);
 
-        let mut flat_shards = HashMap::new();
-        flat_shards.insert(shard_id, shard);
+    let mut shards = HashMap::new();
+    let range = ShardRange {
+        shard_id,
+        from_lt: Some(11),
+        to_lt: Some(20),
+    };
+    shards.insert(shard_id, range);
 
-        let session_state_snapshot = SessionStateSnapshot::new(flat_shards);
+    let result = session_state_snapshot.get_outgoing_messages_by_shard(&mut shards, &shard_id);
 
-        let mut shards = HashMap::new();
-        let range = ShardRange {
-            shard_id,
-            from_lt: Some(11),
-            to_lt: Some(20),
-        };
-        shards.insert(shard_id, range);
-
-        let result = session_state_snapshot.get_outgoing_messages_by_shard(&mut shards, &shard_id);
-
-        assert!(result.is_ok());
-        let messages = result.unwrap();
-        assert_eq!(messages.len(), 1);
-    }
+    assert!(result.is_ok());
+    let messages = result.unwrap();
+    assert_eq!(messages.len(), 1);
 }

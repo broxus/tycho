@@ -527,7 +527,7 @@ impl Node {
                 },
                 // TODO: Move into node config
                 config: ValidatorConfig {
-                    backoff_config: BackoffConfig {
+                    error_backoff_config: BackoffConfig {
                         min_delay: Duration::from_millis(50),
                         max_delay: Duration::from_secs(10),
                         factor: 2.0,
@@ -535,6 +535,12 @@ impl Node {
                     },
                     request_timeout: Duration::from_secs(1),
                     delay_between_requests: Duration::from_millis(50),
+                    request_signatures_backoff_config: BackoffConfig {
+                        min_delay: Duration::from_millis(50),
+                        max_delay: Duration::from_secs(1),
+                        factor: 2.0,
+                        max_times: usize::MAX,
+                    },
                 },
             },
             CollatorStdImplFactory,
