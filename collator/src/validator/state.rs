@@ -209,7 +209,7 @@ impl SessionInfo {
         block_id_short: BlockIdShort,
         signatures: Vec<(HashBytes, Signature)>,
     ) -> Result<()> {
-        tracing::info!(target: tracing_targets::VALIDATOR, block_id_short=%block_id_short, "Adding signatures");
+        tracing::trace!(target: tracing_targets::VALIDATOR, block_id_short=%block_id_short, "Adding signatures");
 
         let mut to_verify = Vec::new();
 

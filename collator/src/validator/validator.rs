@@ -167,7 +167,7 @@ impl Validator for ValidatorStdImpl {
         )
     }
 
-    #[tracing::instrument(skip(self), fields(block_id, session_seqno))]
+    #[tracing::instrument(skip(self), fields(block_id, session_seqno), target = "VALIDATOR")]
     async fn validate(&self, block_id: BlockId, session_seqno: u32) -> Result<()> {
         tracing::info!(target: tracing_targets::VALIDATOR, "Validating block");
         let session = self

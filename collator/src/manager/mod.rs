@@ -872,13 +872,11 @@ where
             candidate_chain_time,
         );
 
-        // let _handle = self.validator.clone()
-        //     .spawn_validate(candidate_id, session_info.seqno())
-        //     .await;
-
-        self.validator
-            .validate(candidate_id, session_info.seqno())
-            .await?;
+        let _handle = self
+            .validator
+            .clone()
+            .spawn_validate(candidate_id, session_info.seqno())
+            .await;
 
         // when candidate is master
         if candidate_id.shard.is_masterchain() {
