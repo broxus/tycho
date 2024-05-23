@@ -295,13 +295,34 @@ impl ZerostateConfig {
     fn build_masterchain_state(&self, now: u32) -> Result<ShardStateUnsplit> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
-        for account in self.accounts.values() {
-            if let Some(account) = account.as_ref() {
+        {
+            let mut accounts = ShardAccounts::new();
+            for (account, account_state) in self.accounts.iter() {
+                let account_state_cell = Lazy::new(account_state)?;
+                let Some(account_state) = account_state.as_ref() else {
+                    continue;
+                };
+
+                accounts.set(
+                    account,
+                    DepthBalanceInfo {
+                        balance: account_state.balance.clone(),
+                        split_depth: 0,
+                    },
+                    ShardAccount {
+                        account: account_state_cell,
+                        last_trans_hash: HashBytes::ZERO,
+                        last_trans_lt: 0,
+                    },
+                )?;
+
                 state.total_balance = state
                     .total_balance
-                    .checked_add(&account.balance)
+                    .checked_add(&account_state.balance)
                     .wrap_err("failed ot compute total balance")?;
             }
+            assert_eq!(state.total_balance, accounts.root_extra().balance);
+            state.accounts = Lazy::new(&accounts)?;
         }
 
         let workchains = self.params.get::<ConfigParam12>()?.unwrap();
