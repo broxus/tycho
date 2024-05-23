@@ -332,18 +332,18 @@ impl CollatorStdImpl {
                 block_transactions_count += executed_msgs_count;
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
-                    "Collator ({}{}): processed {} messages from set, total {}/{}, offset = {}",
+                    "Collator ({}{}): processed {}/{} messages from set, total {}, offset = {}",
                     self.collator_descr(),
                     _tracing_top_shard_blocks_descr,
                     executed_msgs_count,
-                    block_transactions_count,
                     msgs_len,
+                    block_transactions_count,
                     msgs_set_offset,
                 );
                 if block_transactions_count >= 14 {
                     tracing::debug!(
                         target: tracing_targets::COLLATOR,
-                        "Collator ({}{}): STUB: block limit in reached: {}/14",
+                        "Collator ({}{}): STUB: block limit reached: {}/14",
                         self.collator_descr(),
                         _tracing_top_shard_blocks_descr,
                         block_transactions_count,

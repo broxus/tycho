@@ -665,7 +665,7 @@ impl CollatorStdImpl {
                 // this may start master block collation or next shard block collation attempt
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
-                    "Collator ({}): just imported anchor has no externals, will notify collation manager",
+                    "Collator ({}): just imported anchor has no externals for current shard, will notify collation manager",
                     self.collator_descr(),
                 );
                 self.listener
