@@ -120,6 +120,7 @@ impl Storage {
                 block_connection_storage,
                 node_state_storage,
                 runtime_storage,
+                rpc_state: None,
             }),
         })
     }
@@ -170,6 +171,10 @@ impl Storage {
     pub fn node_state(&self) -> &NodeStateStorage {
         &self.inner.node_state_storage
     }
+
+    pub fn rpc_storage(&self) -> &Option<RpcStorage> {
+        &self.inner.rpc_state
+    }
 }
 
 struct Inner {
@@ -183,4 +188,6 @@ struct Inner {
     shard_state_storage: ShardStateStorage,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
+
+    rpc_state: Option<RpcStorage>,
 }

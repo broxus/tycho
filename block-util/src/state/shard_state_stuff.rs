@@ -127,6 +127,13 @@ impl ShardStateStuff {
     }
 }
 
+impl AsRef<ShardStateUnsplit> for ShardStateStuff {
+    #[inline]
+    fn as_ref(&self) -> &ShardStateUnsplit {
+        &self.inner.shard_state
+    }
+}
+
 struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,

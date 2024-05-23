@@ -748,7 +748,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#ab9e9e857d267d4bf30415639b7dc068f544455b"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#0156a3a8bb50425b45e9629b0546e655f8a00262"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -768,7 +768,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#ab9e9e857d267d4bf30415639b7dc068f544455b"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#0156a3a8bb50425b45e9629b0546e655f8a00262"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2805,8 +2805,12 @@ name = "tycho-rpc"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "everscale-types",
+ "futures-util",
+ "parking_lot",
  "serde",
  "serde_json",
+ "tracing",
  "tycho-block-util",
  "tycho-core",
  "tycho-storage",

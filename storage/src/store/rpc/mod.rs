@@ -14,13 +14,13 @@ use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
 
-pub struct JrpcStorage {
+pub struct RpcStorage {
     db: RpcDb,
     min_tx_lt: AtomicU64,
     snapshot: ArcSwapOption<OwnedSnapshot>,
 }
 
-impl JrpcStorage {
+impl RpcStorage {
     pub fn new(db: RpcDb) -> Self {
         Self {
             db,
@@ -429,14 +429,13 @@ impl JrpcStorage {
         .unwrap()
     }
 
-    #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block_id))]
+    #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
     pub async fn update(
         &self,
-        block_id: &BlockId,
         block: BlockStuff,
-        state: Option<ShardStateStuff>,
+        accounts: Option<ShardAccountsDict>,
     ) -> Result<()> {
-        let Ok(workchain) = i8::try_from(block_id.shard.workchain()) else {
+        let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
 
@@ -447,7 +446,6 @@ impl JrpcStorage {
 
             let extra = block.block().load_extra()?;
             let account_blocks = extra.account_blocks.load()?;
-            let accounts = state.map(|s| s.state().load_accounts()).transpose()?;
 
             let mut write_batch = rocksdb::WriteBatch::default();
             let tx_cf = &db.transactions.cf();
@@ -562,7 +560,7 @@ impl JrpcStorage {
         db: &RpcDb,
         workchain: i8,
         account: &HashBytes,
-        accounts: &ShardAccounts,
+        accounts: &ShardAccountsDict,
         remove: bool,
         write_batch: &mut rocksdb::WriteBatch,
     ) -> Result<()> {
