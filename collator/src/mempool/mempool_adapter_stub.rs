@@ -183,7 +183,11 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
 pub fn _stub_create_random_anchor_with_stub_externals(
     anchor_id: MempoolAnchorId,
 ) -> Arc<MempoolAnchor> {
-    let chain_time = anchor_id as u64 * 471 * 6 % 1000000000;
+    let chain_time = if anchor_id == 0 {
+        2600
+    } else {
+        anchor_id as u64 * 646 % 1000000000
+    };
     let externals_count = chain_time as i32 % 10;
     let mut externals = vec![];
     for i in 0..externals_count {
