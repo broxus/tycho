@@ -100,26 +100,25 @@ impl CollatorStdImpl {
 
         // init ShardHashes descriptions for master
         if self.shard_id.is_masterchain() {
+            let shards = prev_shard_data.observable_states()[0]
+                .shards()?
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .ok()
+                        .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
+                })
+                .collect::<HashMap<_, _>>();
+
+            collation_data.set_shards(shards);
+
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 self.import_new_shard_top_blocks_for_masterchain(
                     mc_data.config(),
                     &mut collation_data,
                     top_shard_blocks_info,
                 )?;
-            } else {
-                // when top_shard_blocks_info is None we just take ShardHashes from prev state
-                let shards = prev_shard_data.observable_states()[0]
-                    .shards()?
-                    .iter()
-                    .filter_map(|entry| {
-                        entry
-                            .ok()
-                            .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
-                    })
-                    .collect::<HashMap<_, _>>();
-
-                collation_data.set_shards(shards);
-            };
+            }
         }
 
         // compute created / minted / recovered / from_prev_block
@@ -1046,7 +1045,7 @@ impl CollatorStdImpl {
             "Collator ({}): import_new_shard_top_blocks_for_masterchain",
             self.collator_descr(),
         );
-        collation_data.set_shards(Default::default());
+
         let gen_utime = collation_data.chain_time;
         for TopBlockDescription {
             block_id,
