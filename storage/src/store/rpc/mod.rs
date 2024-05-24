@@ -39,10 +39,6 @@ impl RpcStorage {
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
     ) -> Result<CodeHashesIter<'_>> {
-        let Some(snapshot) = self.snapshot.load_full() else {
-            anyhow::bail!("not ready");
-        };
-
         let mut key = [0u8; tables::CodeHashes::KEY_LEN];
         key[0..32].copy_from_slice(code_hash.as_ref());
         if let Some(continuation) = continuation {
@@ -55,10 +51,12 @@ impl RpcStorage {
         upper_bound.extend_from_slice(&[0xff; 33]);
 
         let mut readopts = self.db.code_hashes.new_read_config();
-        readopts.set_snapshot(&snapshot);
         // TODO: somehow make the range inclusive since
         // upper_bound is not included in the range
         readopts.set_iterate_upper_bound(upper_bound);
+        if let Some(snapshot) = &*self.snapshot.load() {
+            readopts.set_snapshot(snapshot);
+        }
 
         let rocksdb = self.db.rocksdb();
         let code_hashes_cf = self.db.code_hashes.cf();
@@ -72,8 +70,56 @@ impl RpcStorage {
         Ok(CodeHashesIter { inner: iter })
     }
 
+    pub fn get_transactions(
+        &self,
+        account: &StdAddr,
+        last_lt: Option<u64>,
+    ) -> Result<TransactionsIterBuilder<'_>> {
+        let mut key = [0u8; tables::Transactions::KEY_LEN];
+        key[0] = account.workchain as u8;
+        key[1..33].copy_from_slice(account.address.as_ref());
+        key[33..].copy_from_slice(&last_lt.unwrap_or(u64::MAX).to_be_bytes());
+
+        let mut lower_bound = Vec::with_capacity(tables::Transactions::KEY_LEN);
+        lower_bound.extend_from_slice(&key[..33]);
+        lower_bound.extend_from_slice(&[0; 8]);
+
+        let mut readopts = self.db.transactions.new_read_config();
+        readopts.set_iterate_lower_bound(lower_bound);
+        if let Some(snapshot) = &*self.snapshot.load() {
+            readopts.set_snapshot(snapshot);
+        }
+
+        let rocksdb = self.db.rocksdb();
+        let transactions_cf = self.db.transactions.cf();
+        let mut iter = rocksdb.raw_iterator_cf_opt(&transactions_cf, readopts);
+        iter.seek_for_prev(key);
+
+        Ok(TransactionsIterBuilder { inner: iter })
+    }
+
+    pub fn get_transaction(
+        &self,
+        hash: &HashBytes,
+    ) -> Result<Option<rocksdb::DBPinnableSlice<'_>>> {
+        let Some(key) = self.db.transactions_by_hash.get(hash)? else {
+            return Ok(None);
+        };
+        self.db.transactions.get(key).map_err(Into::into)
+    }
+
+    pub fn get_dst_transaction(
+        &self,
+        in_msg_hash: &HashBytes,
+    ) -> Result<Option<rocksdb::DBPinnableSlice<'_>>> {
+        let Some(key) = self.db.transactions_by_in_msg.get(in_msg_hash)? else {
+            return Ok(None);
+        };
+        self.db.transactions.get(key).map_err(Into::into)
+    }
+
     #[tracing::instrument(level = "info", name = "sync_min_tx_lt", skip_all)]
-    pub async fn sync_min_tx_lt(&self) -> Result<()> {
+    pub async fn sync_min_tx_lt(&self) -> Result<(), rocksdb::Error> {
         let min_lt = match self.db.state.get(TX_MIN_LT)? {
             Some(value) if value.is_empty() => None,
             Some(value) => Some(u64::from_le_bytes(value.as_ref().try_into().unwrap())),
@@ -101,7 +147,7 @@ impl RpcStorage {
                         elapsed = %humantime::format_duration(started_at.elapsed()),
                         "finished searching for the minimum transaction LT"
                     );
-                    Ok::<_, anyhow::Error>(min_lt)
+                    Ok::<_, rocksdb::Error>(min_lt)
                 })
                 .await
                 .unwrap()?
@@ -766,6 +812,38 @@ impl Iterator for CodeHashesIter<'_> {
             address: HashBytes(value[33..65].try_into().unwrap()),
         });
         self.inner.next();
+        result
+    }
+}
+
+pub struct TransactionsIterBuilder<'a> {
+    inner: rocksdb::DBRawIterator<'a>,
+}
+
+impl<'a> TransactionsIterBuilder<'a> {
+    pub fn map<F>(self, map: F) -> TransactionsIter<'a, F> {
+        TransactionsIter {
+            inner: self.inner,
+            map,
+        }
+    }
+}
+
+pub struct TransactionsIter<'a, F> {
+    inner: rocksdb::DBRawIterator<'a>,
+    map: F,
+}
+
+impl<F, R> Iterator for TransactionsIter<'_, F>
+where
+    for<'a> F: FnMut(&'a [u8]) -> R,
+{
+    type Item = R;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.inner.value()?;
+        let result = Some((self.map)(value));
+        self.inner.prev();
         result
     }
 }

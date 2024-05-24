@@ -11,7 +11,7 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{CodeHashesIter, Storage};
+use tycho_storage::{CodeHashesIter, Storage, TransactionsIterBuilder};
 use tycho_util::FastHashMap;
 
 use crate::config::RpcConfig;
@@ -90,7 +90,10 @@ impl RpcState {
             .await;
     }
 
-    pub fn get_account_state(&self, address: &StdAddr) -> Result<LoadedAccountState> {
+    pub fn get_account_state(
+        &self,
+        address: &StdAddr,
+    ) -> Result<LoadedAccountState, RpcStateError> {
         self.inner.get_account_state(address)
     }
 
@@ -98,11 +101,50 @@ impl RpcState {
         &self,
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
-    ) -> Result<CodeHashesIter<'_>> {
+    ) -> Result<CodeHashesIter<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
-            anyhow::bail!("not supported");
+            return Err(RpcStateError::NotSupported);
         };
-        storage.get_accounts_by_code_hash(code_hash, continuation)
+        storage
+            .get_accounts_by_code_hash(code_hash, continuation)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_transactions(
+        &self,
+        account: &StdAddr,
+        last_lt: Option<u64>,
+    ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_transactions(account, last_lt)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_transaction(
+        &self,
+        hash: &HashBytes,
+    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_transaction(hash)
+            .map_err(RpcStateError::Internal)
+    }
+
+    pub fn get_dst_transaction(
+        &self,
+        in_msg_hash: &HashBytes,
+    ) -> Result<Option<impl AsRef<[u8]> + '_>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        storage
+            .get_dst_transaction(in_msg_hash)
+            .map_err(RpcStateError::Internal)
     }
 }
 
@@ -131,7 +173,7 @@ struct Inner {
 }
 
 impl Inner {
-    fn get_account_state(&self, address: &StdAddr) -> Result<LoadedAccountState> {
+    fn get_account_state(&self, address: &StdAddr) -> Result<LoadedAccountState, RpcStateError> {
         let is_masterchain = address.is_masterchain();
 
         if is_masterchain {
@@ -272,22 +314,30 @@ struct CachedAccounts {
 }
 
 impl CachedAccounts {
-    fn get(&self, account: &HashBytes) -> Result<LoadedAccountState> {
-        let Some((_, state)) = self.accounts.get(account)? else {
-            return Ok(LoadedAccountState::NotFound {
+    fn get(&self, account: &HashBytes) -> Result<LoadedAccountState, RpcStateError> {
+        match self.accounts.get(account) {
+            Ok(Some((_, state))) => Ok(LoadedAccountState::Found {
+                state,
+                mc_ref_handle: self.mc_ref_hanlde.clone(),
+                gen_utime: self.gen_utime,
+            }),
+            Ok(None) => Ok(LoadedAccountState::NotFound {
                 timings: GenTimings {
                     gen_lt: 0,
                     gen_utime: self.gen_utime,
                 },
-            });
-        };
-
-        Ok(LoadedAccountState::Found {
-            state,
-            mc_ref_handle: self.mc_ref_hanlde.clone(),
-            gen_utime: self.gen_utime,
-        })
+            }),
+            Err(e) => Err(RpcStateError::Internal(e.into())),
+        }
     }
 }
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum RpcStateError {
+    #[error("not supported")]
+    NotSupported,
+    #[error("internal: {0}")]
+    Internal(#[source] anyhow::Error),
+}

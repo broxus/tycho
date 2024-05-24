@@ -2810,6 +2810,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "thiserror",
  "tracing",
  "tycho-block-util",
  "tycho-core",
