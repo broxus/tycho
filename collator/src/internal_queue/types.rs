@@ -8,6 +8,7 @@ use everscale_types::models::{BlockIdShort, IntAddr, IntMsgInfo, ShardIdent};
 
 pub type Lt = u64;
 
+#[derive(Debug, Clone)]
 pub struct QueueDiff {
     pub id: BlockIdShort,
     pub messages: Vec<Arc<EnqueuedMessage>>,
@@ -24,6 +25,7 @@ impl QueueDiff {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct EnqueuedMessage {
     pub info: IntMsgInfo,
     pub cell: Cell,
@@ -38,9 +40,9 @@ impl From<(IntMsgInfo, Cell)> for EnqueuedMessage {
 }
 
 impl EnqueuedMessage {
-    pub fn destination(&self) -> Result<HashBytes> {
+    pub fn destination(&self) -> Result<(i8, HashBytes)> {
         match &self.info.dst {
-            IntAddr::Std(dst) => Ok(dst.address),
+            IntAddr::Std(dst) => Ok((dst.workchain, dst.address)),
             IntAddr::Var(_) => {
                 bail!("Var destination address is not supported")
             }
@@ -68,7 +70,7 @@ impl Ord for EnqueuedMessage {
     }
 }
 
-#[derive(Ord, Eq, PartialEq, PartialOrd, Hash, Clone)]
+#[derive(Debug, Ord, Eq, PartialEq, PartialOrd, Hash, Clone)]
 pub struct InternalMessageKey {
     pub lt: Lt,
     pub hash: HashBytes,

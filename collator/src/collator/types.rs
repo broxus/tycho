@@ -94,6 +94,7 @@ pub(super) struct WorkingState {
     pub mc_data: McData,
     pub prev_shard_data: PrevData,
     pub usage_tree: UsageTree,
+    pub has_pending_internals: Option<bool>,
 }
 
 pub(super) struct McData {

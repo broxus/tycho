@@ -54,8 +54,13 @@ pub trait LocalSessionState {
     fn new(shards: &[ShardIdent]) -> Self;
     async fn snapshot(&self) -> Box<dyn StateSnapshot>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
+    async fn merge_shards(
+        &self,
+        shard_1_id: &ShardIdent,
+        shard_2_id: &ShardIdent,
+    ) -> Result<(), QueueError>;
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
-    async fn add_shard(&self, shard_id: &ShardIdent);
+    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn remove_diff(
         &self,
         diff_id: &BlockIdShort,
@@ -91,22 +96,80 @@ impl SessionState for SessionStateStdImpl {
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
         let mut lock = self.shards_flat.write().await;
-        lock.get(shard_id)
+        let shard = lock
+            .get(shard_id)
             .ok_or(QueueError::ShardNotFound(*shard_id))?;
+
+        let shard_messages_len = shard.read().await.outgoing_messages.len();
+
+        if shard_messages_len > 0 {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Cannot split shard with messages"
+            )));
+        }
+
         let split = shard_id.split();
-        if let Some(split) = split {
-            lock.insert(split.0, Arc::new(RwLock::new(Shard::new(split.0))));
-            lock.insert(split.1, Arc::new(RwLock::new(Shard::new(split.1))));
-        };
+
+        let split = split.ok_or(QueueError::Other(anyhow::anyhow!("Failed to split shard")))?;
+
+        // check if the split is not already in the shards
+        if lock.contains_key(&split.0) || lock.contains_key(&split.1) {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Splitted shards already exists in the shards"
+            )));
+        }
+
+        lock.insert(split.0, Arc::new(RwLock::new(Shard::new(split.0))));
+        lock.insert(split.1, Arc::new(RwLock::new(Shard::new(split.1))));
+
         Ok(())
     }
 
-    async fn add_shard(&self, shard_id: &ShardIdent) {
+    async fn merge_shards(
+        &self,
+        shard_1_id: &ShardIdent,
+        shard_2_id: &ShardIdent,
+    ) -> Result<(), QueueError> {
         let mut lock = self.shards_flat.write().await;
-        if lock.contains_key(shard_id) {
-            return;
+        let shard_1 = lock
+            .get(shard_1_id)
+            .ok_or(QueueError::ShardNotFound(*shard_1_id))?;
+        let shard_2 = lock
+            .get(shard_2_id)
+            .ok_or(QueueError::ShardNotFound(*shard_2_id))?;
+        let shard_1_messages_len = shard_1.read().await.outgoing_messages.len();
+        let shard_2_messages_len = shard_2.read().await.outgoing_messages.len();
+        if shard_1_messages_len > 0 || shard_2_messages_len > 0 {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Cannot merge shards with messages"
+            )));
         }
-        lock.insert(*shard_id, Arc::new(RwLock::new(Shard::new(*shard_id))));
+
+        let merged_shard_1 = shard_1_id
+            .merge()
+            .ok_or(QueueError::Other(anyhow::anyhow!("Failed to merge shard")))?;
+        let merged_shard_2 = shard_2_id
+            .merge()
+            .ok_or(QueueError::Other(anyhow::anyhow!("Failed to merge shard")))?;
+
+        if merged_shard_1 != merged_shard_2 {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Merge shards are not equal"
+            )));
+        }
+
+        if lock.contains_key(&merged_shard_1) {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Merged shard already exists in the shards"
+            )));
+        }
+
+        lock.insert(
+            merged_shard_1,
+            Arc::new(RwLock::new(Shard::new(merged_shard_1))),
+        );
+
+        Ok(())
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {
@@ -115,6 +178,15 @@ impl SessionState for SessionStateStdImpl {
             .get(&diff.id.shard)
             .ok_or(QueueError::ShardNotFound(diff.id.shard))?;
         shard.write().await.add_diff(diff);
+        Ok(())
+    }
+
+    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
+        let mut lock = self.shards_flat.write().await;
+        if lock.contains_key(shard_id) {
+            return Err(QueueError::ShardAlreadyExists(*shard_id));
+        }
+        lock.insert(*shard_id, Arc::new(RwLock::new(Shard::new(*shard_id))));
         Ok(())
     }
 

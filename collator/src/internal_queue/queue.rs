@@ -49,8 +49,13 @@ pub struct QueueFactoryStdImpl {
 pub trait LocalQueue {
     async fn snapshot(&self) -> Vec<Box<dyn StateSnapshot>>;
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
+    async fn merge_shards(
+        &self,
+        shard_1_id: &ShardIdent,
+        shard_2_id: &ShardIdent,
+    ) -> Result<(), QueueError>;
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
-    async fn add_shard(&self, shard_id: &ShardIdent);
+    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn commit_diff(
         &self,
         diff_id: &BlockIdShort,
@@ -99,12 +104,24 @@ where
         self.session_state.lock().await.split_shard(shard_id).await
     }
 
-    async fn add_shard(&self, shard_id: &ShardIdent) {
-        self.session_state.lock().await.add_shard(shard_id).await;
+    async fn merge_shards(
+        &self,
+        shard_1_id: &ShardIdent,
+        shard_2_id: &ShardIdent,
+    ) -> Result<(), QueueError> {
+        self.session_state
+            .lock()
+            .await
+            .merge_shards(shard_1_id, shard_2_id)
+            .await
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {
         self.session_state.lock().await.apply_diff(diff).await
+    }
+
+    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
+        self.session_state.lock().await.add_shard(shard_id).await
     }
 
     async fn commit_diff(

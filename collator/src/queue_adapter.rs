@@ -43,7 +43,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     ) -> Result<()>;
     /// Commit processed messages in the iterator
     /// Save last message position for each shard
-    fn commit_processed_messages(
+    fn commit_messages_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(ShardIdent, InternalMessageKey)>,
@@ -58,8 +58,9 @@ impl MessageQueueAdapterStdImpl {
 
 #[async_trait]
 impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(?split_merge_actions))]
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
+        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updated shards in message queue");
         for sma in split_merge_actions {
             match sma {
                 SplitMergeAction::Split(shard_id) => {
@@ -75,24 +76,28 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
                         shard_r_id,
                     );
                 }
-                SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
-                    // do nothing because current queue impl does not need to perform merges
+                SplitMergeAction::Merge(shard_id_1, shard_id_2) => {
+                    self.queue.merge_shards(&shard_id_1, &shard_id_2).await?;
                 }
                 SplitMergeAction::Add(new_shard) => {
-                    self.queue.add_shard(&new_shard).await;
+                    self.queue.add_shard(&new_shard).await?;
                 }
             }
         }
-        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updated shards in message queue");
         Ok(())
     }
 
+    #[instrument(skip(self), fields(%for_shard_id, ?shards_from, ?shards_to))]
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
         shards_from: Vec<IterRange>,
         shards_to: Vec<IterRange>,
     ) -> Result<Box<dyn QueueIterator>> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            "Creating iterator"
+        );
         let snapshots = self.queue.snapshot().await;
 
         let iterator = QueueIteratorImpl::new(shards_from, shards_to, snapshots, for_shard_id)?;
@@ -100,11 +105,23 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            id = ?diff.id,
+            new_messages_len = diff.messages.len(),
+            processed_upto_len = ?diff.processed_upto,
+            "Applying diff to the queue"
+        );
         self.queue.apply_diff(diff).await?;
         Ok(())
     }
 
+    #[instrument(skip(self), fields(%diff_id))]
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            "Committing diff to the queue"
+        );
         let diff = self.queue.commit_diff(diff_id).await?;
         Ok(diff)
     }
@@ -114,6 +131,11 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(MsgInfo, Cell)>,
     ) -> Result<()> {
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            messages_len = messages.len(),
+            "Adding messages to the iterator"
+        );
         for (msg_info, cell) in messages {
             let int_msg_info = match msg_info {
                 MsgInfo::Int(int_msg_info) => int_msg_info,
@@ -125,11 +147,16 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(())
     }
 
-    fn commit_processed_messages(
+    fn commit_messages_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(ShardIdent, InternalMessageKey)>,
     ) -> Result<()> {
-        iterator.commit_processed_messages(messages)
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+            messages_len = messages.len(),
+            "Committing messages to the iterator"
+        );
+        iterator.commit(messages)
     }
 }

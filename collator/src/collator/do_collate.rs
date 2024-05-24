@@ -16,9 +16,9 @@ use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
     AsyncMessage, BlockCollationData, McData, PrevData, ShardDescriptionExt,
 };
-use crate::mempool::{MempoolAnchor, MempoolAnchorId};
+use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
-use crate::types::{BlockCollationResult, ProofFunds, ShardIdentExt, TopBlockDescription};
+use crate::types::{BlockCollationResult, ShardIdentExt, TopBlockDescription};
 
 #[cfg(test)]
 #[path = "tests/do_collate_tests.rs"]
@@ -157,9 +157,7 @@ impl CollatorStdImpl {
         let mut block_limits_reached = false;
         let mut block_transactions_count = 0;
 
-        let mut internal_messages_iterator = self
-            .init_internal_mq_iterator(&collation_data, &mc_data)
-            .await?;
+        let mut internal_messages_iterator = self.init_internal_mq_iterator().await?;
 
         // indicate that there are still unprocessed internals whe collation loop finished
         let mut has_pending_internals = false;
@@ -198,13 +196,15 @@ impl CollatorStdImpl {
                         let cell = message_with_source.message.cell.clone();
                         let is_current_shard = message_with_source.shard_id == self.shard_id;
 
+                        let async_message = AsyncMessage::Int(int_msg_info, cell, is_current_shard);
+
+                        msgs_set.push(async_message);
+
                         internal_messages_in_set.push((
                             message_with_source.shard_id,
                             message_with_source.message.key(),
                         ));
-                        let async_message = AsyncMessage::Int(int_msg_info, cell, is_current_shard);
 
-                        msgs_set.push(async_message);
                         remaining_capacity -= 1;
                     }
                     None => {
@@ -251,14 +251,16 @@ impl CollatorStdImpl {
                             let int_msg_info =
                                 MsgInfo::Int(message_with_source.message.info.clone());
                             let cell = message_with_source.message.cell.clone();
+
+                            let async_message = AsyncMessage::NewInt(int_msg_info, cell);
+
+                            msgs_set.push(async_message);
+
                             internal_messages_in_set.push((
                                 message_with_source.shard_id,
                                 message_with_source.message.key(),
                             ));
 
-                            let async_message = AsyncMessage::NewInt(int_msg_info, cell);
-
-                            msgs_set.push(async_message);
                             remaining_capacity -= 1;
                         }
                         None => {
@@ -266,15 +268,15 @@ impl CollatorStdImpl {
                         }
                     }
                 }
-
-                tracing::debug!(
-                    target: tracing_targets::COLLATOR,
-                    "Collator ({}{}): read {} new internals",
-                    self.collator_descr(),
-                    _tracing_top_shard_blocks_descr,
-                    internal_messages_in_set.len(),
-                );
             }
+
+            tracing::debug!(
+                target: tracing_targets::COLLATOR,
+                "Collator ({}{}): read {} new internals",
+                self.collator_descr(),
+                _tracing_top_shard_blocks_descr,
+                internal_messages_in_set.len(),
+            );
 
             if msgs_set.is_empty() {
                 // no any messages to process - exit loop
@@ -357,10 +359,13 @@ impl CollatorStdImpl {
                 }
             }
 
-            self.mq_adapter.commit_processed_messages(
-                &mut internal_messages_iterator,
-                internal_messages_in_set,
-            )?;
+            // commit messages to iterator only if set was fully processed
+            if msgs_set_full_processed {
+                self.mq_adapter.commit_messages_to_iterator(
+                    &mut internal_messages_iterator,
+                    internal_messages_in_set,
+                )?;
+            }
 
             // store how many msgs from the set were processed (offset)
             Self::update_processed_upto_execution_offset(
@@ -377,8 +382,7 @@ impl CollatorStdImpl {
                 collation_data.processed_upto,
             );
 
-            // TODO: update `has_pending_internals` to indicate if there are still unprocessed internals in the queue
-            // has_pending_internals = ...;
+            has_pending_internals = internal_messages_iterator.peek().is_some();
 
             if block_limits_reached {
                 // block is full - exit loop
@@ -419,6 +423,7 @@ impl CollatorStdImpl {
 
         // update PrevData in working state
         self.update_working_state(new_state_stuff)?;
+        self.update_working_state_pending_internals(Some(has_pending_internals))?;
 
         Ok(())
     }
