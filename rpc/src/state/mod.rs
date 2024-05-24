@@ -11,7 +11,7 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::Storage;
+use tycho_storage::{CodeHashesIter, Storage};
 use tycho_util::FastHashMap;
 
 use crate::config::RpcConfig;
@@ -92,6 +92,17 @@ impl RpcState {
 
     pub fn get_account_state(&self, address: &StdAddr) -> Result<LoadedAccountState> {
         self.inner.get_account_state(address)
+    }
+
+    pub fn get_accounts_by_code_hash(
+        &self,
+        code_hash: &HashBytes,
+        continuation: Option<&StdAddr>,
+    ) -> Result<CodeHashesIter<'_>> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            anyhow::bail!("not supported");
+        };
+        storage.get_accounts_by_code_hash(code_hash, continuation)
     }
 }
 

@@ -29,13 +29,47 @@ impl RpcStorage {
         }
     }
 
-    pub fn load_snapshot(&self) -> Option<Arc<OwnedSnapshot>> {
-        self.snapshot.load_full()
-    }
-
     pub fn update_snapshot(&self) {
         let snapshot = Arc::new(self.db.owned_snapshot());
         self.snapshot.store(Some(snapshot));
+    }
+
+    pub fn get_accounts_by_code_hash(
+        &self,
+        code_hash: &HashBytes,
+        continuation: Option<&StdAddr>,
+    ) -> Result<CodeHashesIter<'_>> {
+        let Some(snapshot) = self.snapshot.load_full() else {
+            anyhow::bail!("not ready");
+        };
+
+        let mut key = [0u8; tables::CodeHashes::KEY_LEN];
+        key[0..32].copy_from_slice(code_hash.as_ref());
+        if let Some(continuation) = continuation {
+            key[32] = continuation.workchain as u8;
+            key[33..65].copy_from_slice(continuation.address.as_ref());
+        }
+
+        let mut upper_bound = Vec::with_capacity(tables::CodeHashes::KEY_LEN);
+        upper_bound.extend_from_slice(&key[..32]);
+        upper_bound.extend_from_slice(&[0xff; 33]);
+
+        let mut readopts = self.db.code_hashes.new_read_config();
+        readopts.set_snapshot(&snapshot);
+        // TODO: somehow make the range inclusive since
+        // upper_bound is not included in the range
+        readopts.set_iterate_upper_bound(upper_bound);
+
+        let rocksdb = self.db.rocksdb();
+        let code_hashes_cf = self.db.code_hashes.cf();
+        let mut iter = rocksdb.raw_iterator_cf_opt(&code_hashes_cf, readopts);
+
+        iter.seek(key);
+        if continuation.is_some() {
+            iter.next();
+        }
+
+        Ok(CodeHashesIter { inner: iter })
     }
 
     #[tracing::instrument(level = "info", name = "sync_min_tx_lt", skip_all)]
@@ -712,6 +746,27 @@ impl RpcStorage {
         })
         .await
         .unwrap()
+    }
+}
+
+pub struct CodeHashesIter<'a> {
+    inner: rocksdb::DBRawIterator<'a>,
+}
+
+impl Iterator for CodeHashesIter<'_> {
+    type Item = StdAddr;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.inner.key()?;
+        debug_assert!(value.len() == tables::CodeHashes::KEY_LEN);
+
+        let result = Some(StdAddr {
+            anycast: None,
+            workchain: value[32] as i8,
+            address: HashBytes(value[33..65].try_into().unwrap()),
+        });
+        self.inner.next();
+        result
     }
 }
 
