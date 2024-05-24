@@ -2,6 +2,7 @@ use axum::response::Response;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use serde::Deserialize;
+use tycho_util::serde_helpers;
 
 use self::extractor::Jrpc;
 use crate::declare_jrpc_method;
@@ -37,15 +38,14 @@ pub struct SendMessageRequest {
 #[derive(Debug, Deserialize)]
 pub struct GetContractStateRequest {
     pub address: StdAddr,
-    // TODO: serialize as optional string
+    #[serde(with = "serde_helpers::option_string")]
     pub last_transaction_lt: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct GetTransactionsListRequest {
     pub account: StdAddr,
-    // TODO: serialize as optional string
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "serde_helpers::option_string")]
     pub last_transaction_lt: Option<u64>,
     pub limit: u8,
 }

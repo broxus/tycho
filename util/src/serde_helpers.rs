@@ -211,6 +211,40 @@ pub mod string {
     }
 }
 
+pub mod option_string {
+    use super::*;
+
+    pub fn serialize<S, T>(value: &Option<T>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+        T: std::fmt::Display,
+    {
+        #[derive(Serialize)]
+        #[serde(transparent)]
+        #[repr(transparent)]
+        struct Helper<'a, T: std::fmt::Display>(#[serde(with = "string")] &'a T);
+
+        value.as_ref().map(Helper).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: FromStr,
+        T::Err: std::fmt::Display,
+    {
+        #[derive(Deserialize)]
+        #[serde(transparent)]
+        #[repr(transparent)]
+        struct Helper<T>(#[serde(with = "string")] T)
+        where
+            T: FromStr,
+            T::Err: std::fmt::Display;
+
+        Helper::deserialize(deserializer).map(|Helper(v)| Some(v))
+    }
+}
+
 #[derive(Deserialize)]
 #[repr(transparent)]
 pub struct BorrowedStr<'a>(#[serde(borrow)] pub Cow<'a, str>);
