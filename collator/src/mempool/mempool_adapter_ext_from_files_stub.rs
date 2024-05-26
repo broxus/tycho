@@ -43,6 +43,15 @@ impl MempoolAdapterExtFilesStubImpl {
             .expect("failed to read externals dir");
 
         externals.sort();
+        let mut timestamp: u64 = externals
+            .first()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap_or_default();
 
         tokio::spawn({
             let listener = listener.clone();
@@ -55,24 +64,27 @@ impl MempoolAdapterExtFilesStubImpl {
                     tokio::time::sleep(tokio::time::Duration::from_millis(rnd_round_interval * 6))
                         .await;
                     anchor_id += 1;
-                    if let Some(external) = externals_iter.next() {
-                        let anchor = create_anchor_with_externals_from_file(anchor_id, external);
-                        {
-                            let mut anchor_cache_rw = stub_anchors_cache
-                                .write()
-                                .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))
-                                .unwrap();
-                            tracing::debug!(
-                                target: tracing_targets::MEMPOOL_ADAPTER,
-                                "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
-                                anchor.id(),
-                                anchor.chain_time(),
-                                anchor.externals_count(),
-                            );
-                            anchor_cache_rw.insert(anchor_id, anchor.clone());
-                        }
-                        listener.on_new_anchor(anchor).await.unwrap();
+                    let anchor = create_anchor_with_externals_from_file(
+                        anchor_id,
+                        &mut externals_iter,
+                        timestamp,
+                    );
+                    {
+                        let mut anchor_cache_rw = stub_anchors_cache
+                            .write()
+                            .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))
+                            .unwrap();
+                        tracing::debug!(
+                            target: tracing_targets::MEMPOOL_ADAPTER,
+                            "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
+                            anchor.id(),
+                            anchor.chain_time(),
+                            anchor.externals_count(),
+                        );
+                        anchor_cache_rw.insert(anchor_id, anchor.clone());
                     }
+                    listener.on_new_anchor(anchor).await.unwrap();
+                    timestamp += 2136; // 2136 ms
                 }
             }
         });
@@ -197,22 +209,30 @@ impl MempoolAdapter for MempoolAdapterExtFilesStubImpl {
 
 pub fn create_anchor_with_externals_from_file(
     anchor_id: MempoolAnchorId,
-    external_path: PathBuf,
+    external_paths: &mut dyn Iterator<Item = PathBuf>,
+    timestamp: u64,
 ) -> Arc<MempoolAnchor> {
     let mut externals = vec![];
-    let mut file = File::open(&external_path).unwrap();
-    let mut buf = vec![];
-    file.read_to_end(&mut buf).unwrap();
-    let file_name = external_path.file_name().unwrap().to_str().unwrap();
-    tracing::info!("read external from file: {}", file_name);
-    let timestamp: u64 = file_name.parse().unwrap();
-    let mut buffer = vec![];
-    BASE64_STANDARD.decode_vec(buf, &mut buffer).unwrap();
-    let code = Boc::decode(buffer).expect("failed to decode external boc");
-    let message = OwnedMessage::load_from(&mut code.as_slice().unwrap()).unwrap();
-    if let MsgInfo::ExtIn(ext_in) = message.info {
-        let msg = ExternalMessage::new(code, ext_in);
-        externals.push(Arc::new(msg));
+    while let Some(external_path) = external_paths.next() {
+        let mut file = File::open(&external_path).unwrap();
+        let mut file_content = vec![];
+        file.read_to_end(&mut file_content).unwrap();
+        let file_name = external_path.file_name().unwrap().to_str().unwrap();
+        let file_timestamp: u64 = file_name.parse().unwrap();
+        if file_timestamp > timestamp {
+            break;
+        }
+        tracing::info!("read external from file: {}", file_name);
+        let mut base64_content = vec![];
+        BASE64_STANDARD
+            .decode_vec(file_content, &mut base64_content)
+            .unwrap();
+        let code = Boc::decode(base64_content).expect("failed to decode external boc");
+        let message = OwnedMessage::load_from(&mut code.as_slice().unwrap()).unwrap();
+        if let MsgInfo::ExtIn(ext_in) = message.info {
+            let msg = ExternalMessage::new(code, ext_in);
+            externals.push(Arc::new(msg));
+        }
     }
 
     Arc::new(MempoolAnchor::new(anchor_id, timestamp, externals))

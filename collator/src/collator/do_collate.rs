@@ -980,20 +980,14 @@ impl CollatorStdImpl {
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         tracing::trace!("{}: create_ticktock_transactions", self.collator_descr);
-        let config_address = self.working_state().mc_data.config().address;
-        let fundamental_dict = self
-            .working_state()
-            .mc_data
-            .config()
-            .get_fundamental_addresses()?;
-        for account in fundamental_dict.keys() {
-            // TODO: uncomment when ticktock is implemented
+        let config = self.working_state().mc_data.config();
+        for account in config.get_fundamental_addresses()?.keys() {
+            // TODO: uncomment when config ticktock is fixed
             // self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
             //     .await?;
-            // self.check_stop_flag()?;
         }
-        // TODO: uncomment when ticktock is implemented
-        // self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
+        // TODO: uncomment when config ticktock is fixed
+        // self.create_ticktock_transaction(config.address, tock, collation_data, exec_manager)
         //     .await?;
         Ok(())
     }
