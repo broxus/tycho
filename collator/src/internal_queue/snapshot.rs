@@ -43,6 +43,7 @@ pub struct IterRange {
     pub lt: Lt,
 }
 
+#[derive(Debug)]
 pub struct ShardRange {
     pub shard_id: ShardIdent,
     pub from_lt: Option<Lt>,

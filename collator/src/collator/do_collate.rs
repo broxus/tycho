@@ -191,6 +191,13 @@ impl CollatorStdImpl {
             while remaining_capacity > 0 && !all_existing_internals_finished {
                 match internal_messages_iterator.next(false) {
                     Some(int_msg) => {
+                        tracing::trace!(
+                            target: tracing_targets::COLLATOR,
+                            "Collator ({}). Shard {:?}: read existing internal message from iterator: {:?}",
+                            self.collator_descr(),
+                            self.shard_id,
+                            int_msg.message_with_source,
+                        );
                         let message_with_source = int_msg.message_with_source;
                         let int_msg_info = MsgInfo::Int(message_with_source.message.info.clone());
                         let cell = message_with_source.message.cell.clone();
@@ -248,6 +255,15 @@ impl CollatorStdImpl {
                     match internal_messages_iterator.next(true) {
                         Some(int_msg) => {
                             let message_with_source = int_msg.message_with_source;
+
+                            tracing::trace!(
+                                target: tracing_targets::COLLATOR,
+                                "Collator ({}). Shard {:?}: read new internal message from iterator: {:?}",
+                                self.collator_descr(),
+                                self.shard_id,
+                                message_with_source,
+                            );
+
                             let int_msg_info =
                                 MsgInfo::Int(message_with_source.message.info.clone());
                             let cell = message_with_source.message.cell.clone();
@@ -272,10 +288,8 @@ impl CollatorStdImpl {
 
             tracing::debug!(
                 target: tracing_targets::COLLATOR,
-                "Collator ({}{}): read {} new internals",
-                self.collator_descr(),
-                _tracing_top_shard_blocks_descr,
-                internal_messages_in_set.len(),
+                "Set size {}",
+                msgs_set.len(),
             );
 
             if msgs_set.is_empty() {
@@ -317,10 +331,26 @@ impl CollatorStdImpl {
                             msg_info,
                         )?;
 
-                        self.mq_adapter.add_messages_to_iterator(
-                            &mut internal_messages_iterator,
-                            new_internal_messages,
-                        )?;
+                        if !new_internal_messages.is_empty() {
+                            tracing::trace!(
+                                target: tracing_targets::COLLATOR,
+                                "Collator ({}{}): created new internal messages: {:?}",
+                                self.collator_descr(),
+                                _tracing_top_shard_blocks_descr,
+                                new_internal_messages,
+                            );
+                            self.mq_adapter.add_messages_to_iterator(
+                                &mut internal_messages_iterator,
+                                new_internal_messages,
+                            )?;
+                        } else {
+                            tracing::trace!(
+                                target: tracing_targets::COLLATOR,
+                                "Collator ({}{}): no new internal messages created",
+                                self.collator_descr(),
+                                _tracing_top_shard_blocks_descr,
+                            );
+                        }
 
                         collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
                     }
@@ -396,13 +426,38 @@ impl CollatorStdImpl {
                 .await?;
         }
 
+        let diff = internal_messages_iterator.take_diff();
+
+        // update internal messages processed_upto info in collation_data
+        for (shard_ident, message_key) in diff.processed_upto.iter() {
+            let processed_upto = InternalsProcessedUpto {
+                processed_to_msg: (message_key.lt, message_key.hash.clone()),
+                read_to_msg: (message_key.lt, message_key.hash.clone()),
+            };
+
+            let shard_ident_full: ShardIdentFull = (*shard_ident).into();
+            collation_data
+                .processed_upto
+                .internals
+                .add(shard_ident_full, processed_upto.clone())?;
+            tracing::trace!(
+                target: tracing_targets::COLLATOR,
+                "Collator ({}{}): updated processed_upto for shard {:?} = {:?}",
+                self.collator_descr(),
+                _tracing_top_shard_blocks_descr,
+                shard_ident,
+                processed_upto,
+            );
+        }
+
         // build block candidate and new state
         let (candidate, new_state_stuff) = self
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
 
-        let diff = internal_messages_iterator.take_diff(candidate.block_id.as_short_id());
-        self.mq_adapter.apply_diff(Arc::new(diff)).await?;
+        self.mq_adapter
+            .apply_diff(Arc::new(diff), candidate.block_id.as_short_id())
+            .await?;
 
         // STUB: sleep 2 secs to slow down collation process for analysis
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -721,8 +776,9 @@ impl CollatorStdImpl {
     ) {
         if msgs_set_full_processed {
             // externals read window full processed
-            let ext_proc_upto = collation_data.processed_upto.externals.as_mut().unwrap();
-            ext_proc_upto.processed_to = ext_proc_upto.read_to;
+            if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+                externals.processed_to = externals.read_to;
+            }
 
             // TODO: set internals read window full pocessed
 

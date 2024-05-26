@@ -17,8 +17,7 @@ use tycho_collator::internal_queue::persistent::persistent_state::{
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterExtFilesStubImpl;
-use tycho_collator::mempool::MempoolAdapterStubImpl;
+use tycho_collator::mempool::{MempoolAdapterExtFilesStubImpl, MempoolAdapterStubImpl};
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};

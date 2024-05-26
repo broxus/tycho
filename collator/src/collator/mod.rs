@@ -536,6 +536,20 @@ impl CollatorStdImpl {
             ranges_to.push(iter_range_to);
         }
 
+        /// TODO Should to use real start
+        let mc_start_range = 0;
+        let mc_end_range = self.working_state().mc_data.mc_state_stuff().state().gen_lt;
+
+        ranges_from.push(IterRange {
+            shard_id: ShardIdent::new_full(-1),
+            lt: mc_start_range,
+        });
+
+        ranges_to.push(IterRange {
+            shard_id: ShardIdent::new_full(-1),
+            lt: mc_end_range,
+        });
+
         let internal_messages_iterator = self
             .mq_adapter
             .create_iterator(self.shard_id, ranges_from, ranges_to)
@@ -718,12 +732,8 @@ impl QueueIterator for QueueIteratorStubImpl {
         Ok(())
     }
     // fn commit(&mut self) {}
-    fn take_diff(
-        &mut self,
-        block_id_short: BlockIdShort,
-    ) -> crate::internal_queue::types::QueueDiff {
+    fn take_diff(&mut self) -> crate::internal_queue::types::QueueDiff {
         crate::internal_queue::types::QueueDiff {
-            id: block_id_short,
             messages: vec![],
             processed_upto: HashMap::new(),
         }

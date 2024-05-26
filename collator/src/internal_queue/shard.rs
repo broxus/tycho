@@ -19,8 +19,8 @@ impl Shard {
         }
     }
 
-    pub fn add_diff(&mut self, diff: Arc<QueueDiff>) {
-        self.diffs.insert(diff.id, diff.clone());
+    pub fn add_diff(&mut self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) {
+        self.diffs.insert(block_id_short, diff.clone());
 
         for message in &diff.messages {
             self.outgoing_messages

@@ -31,7 +31,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
         shards_to: Vec<IterRange>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()>;
+    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>>;
@@ -104,15 +104,15 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(Box::new(iterator))
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()> {
+    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            id = ?diff.id,
+            id = ?block_id_short,
             new_messages_len = diff.messages.len(),
             processed_upto_len = ?diff.processed_upto,
             "Applying diff to the queue"
         );
-        self.queue.apply_diff(diff).await?;
+        self.queue.apply_diff(diff, block_id_short).await?;
         Ok(())
     }
 

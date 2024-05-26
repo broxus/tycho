@@ -59,7 +59,11 @@ pub trait LocalSessionState {
         shard_1_id: &ShardIdent,
         shard_2_id: &ShardIdent,
     ) -> Result<(), QueueError>;
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
+    async fn apply_diff(
+        &self,
+        diff: Arc<QueueDiff>,
+        block_id_short: BlockIdShort,
+    ) -> Result<(), QueueError>;
     async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn remove_diff(
         &self,
@@ -172,12 +176,16 @@ impl SessionState for SessionStateStdImpl {
         Ok(())
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {
+    async fn apply_diff(
+        &self,
+        diff: Arc<QueueDiff>,
+        block_id_short: BlockIdShort,
+    ) -> Result<(), QueueError> {
         let locker = self.shards_flat.write().await;
         let shard = locker
-            .get(&diff.id.shard)
-            .ok_or(QueueError::ShardNotFound(diff.id.shard))?;
-        shard.write().await.add_diff(diff);
+            .get(&block_id_short.shard)
+            .ok_or(QueueError::ShardNotFound(block_id_short.shard))?;
+        shard.write().await.add_diff(diff, block_id_short);
         Ok(())
     }
 

@@ -251,6 +251,8 @@ impl SessionInfo {
             })
             .await?;
 
+            /// TODO temporary stub. Always consider signature as valid
+            let valid_signature = true;
             if valid_signature {
                 tracing::trace!(target: tracing_targets::VALIDATOR, validator_id=%validator_id, "Valid signature");
                 self.blocks_signatures
