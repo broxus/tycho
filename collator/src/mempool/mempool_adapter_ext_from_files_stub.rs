@@ -1,20 +1,22 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::{fs, io};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use everscale_types::boc::Boc;
-use everscale_types::cell::{CellBuilder, HashBytes, Load};
-use everscale_types::models::{ExtInMsgInfo, IntAddr, MsgInfo, OwnedMessage, StdAddr};
+use everscale_types::cell::Load;
+use everscale_types::models::{MsgInfo, OwnedMessage};
+use parking_lot::RwLock;
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
 
+use super::mempool_adapter_stub::{stub_get_anchor_by_id, stub_get_next_anchor};
 use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::mempool::mempool_adapter::{MempoolAdapter, MempoolEventListener};
 use crate::tracing_targets;
@@ -31,8 +33,6 @@ impl MempoolAdapterExtFilesStubImpl {
     pub fn new(listener: Arc<dyn MempoolEventListener>) -> Self {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
-        // TODO: make real implementation, currently runs stub task
-        //      that produces the repeating set of anchors
         let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
 
         let externals_dir = PathBuf::from("test/externals/set01");
@@ -58,10 +58,7 @@ impl MempoolAdapterExtFilesStubImpl {
                     if let Some(external) = externals_iter.next() {
                         let anchor = create_anchor_with_externals_from_file(anchor_id, external);
                         {
-                            let mut anchor_cache_rw = stub_anchors_cache
-                                .write()
-                                .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))
-                                .unwrap();
+                            let mut anchor_cache_rw = stub_anchors_cache.write();
                             tracing::debug!(
                                 target: tracing_targets::MEMPOOL_ADAPTER,
                                 "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
@@ -103,93 +100,15 @@ impl MempoolAdapter for MempoolAdapterExtFilesStubImpl {
         &self,
         anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>> {
-        // TODO: make real implementation, currently only return anchor from local cache
-        let res = {
-            let anchors_cache_r = self
-                ._stub_anchors_cache
-                .read()
-                .map_err(|e| anyhow!("Poison error on read lock: {:?}", e))?;
-            anchors_cache_r.get(&anchor_id).cloned()
-        };
-        if res.is_some() {
-            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Requested anchor (id: {}) found in local cache", anchor_id);
-        } else {
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                "Requested anchor (id: {}) was not found in local cache",
-                anchor_id
-            );
-            tracing::trace!(target: tracing_targets::MEMPOOL_ADAPTER, "STUB: Requesting anchor (id: {}) in mempool...", anchor_id);
-            let response_duration = tokio::time::Duration::from_millis(107);
-            tokio::time::sleep(response_duration).await;
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                "STUB: Requested anchor (id: {}) was not found in mempool (responded in {} ms)",
-                anchor_id,
-                response_duration.as_millis(),
-            );
-        }
-        Ok(res)
+        stub_get_anchor_by_id(self._stub_anchors_cache.clone(), anchor_id).await
     }
 
     async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
-        // TODO: make real implementation, currently only return anchor from local cache
-
-        let mut stub_first_attempt = true;
-        let mut request_timer = std::time::Instant::now();
-        loop {
-            {
-                let anchors_cache_r = self
-                    ._stub_anchors_cache
-                    .read()
-                    .map_err(|e| anyhow!("Poison error on read lock: {:?}", e))?;
-
-                let mut range = anchors_cache_r.range((
-                    std::ops::Bound::Excluded(prev_anchor_id),
-                    std::ops::Bound::Unbounded,
-                ));
-
-                if let Some((next_id, next)) = range.next() {
-                    if stub_first_attempt {
-                        tracing::info!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "Found in cache next anchor (id: {}) after specified previous (id: {})",
-                            next_id,
-                            prev_anchor_id,
-                        );
-                    } else {
-                        tracing::info!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "STUB: Returned next anchor (id: {}) after previous (id: {}) from mempool (responded in {} ms)",
-                            next_id,
-                            prev_anchor_id,
-                            request_timer.elapsed().as_millis(),
-                        );
-                    }
-                    return Ok(next.clone());
-                } else if stub_first_attempt {
-                    tracing::info!(
-                        target: tracing_targets::MEMPOOL_ADAPTER,
-                        "There is no next anchor in cache after previous (id: {}). STUB: Requested it from mempool. Waiting...",
-                        prev_anchor_id
-                    );
-                }
-            }
-
-            // stub waiting some time until new emulated anchors be added to cache
-            if stub_first_attempt {
-                request_timer = std::time::Instant::now();
-            }
-            stub_first_attempt = false;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1020)).await;
-        }
+        stub_get_next_anchor(self._stub_anchors_cache.clone(), prev_anchor_id).await
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
-        let mut anchors_cache_rw = self
-            ._stub_anchors_cache
-            .write()
-            .map_err(|e| anyhow!("Poison error on write lock: {:?}", e))?;
+        let mut anchors_cache_rw = self._stub_anchors_cache.write();
         anchors_cache_rw.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
         Ok(())
     }

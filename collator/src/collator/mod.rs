@@ -455,19 +455,19 @@ impl CollatorStdImpl {
         let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
             self.mpool_adapter.get_next_anchor(prev_anchor_id).await?
         } else {
-            let prev_shard_data = &self.working_state().prev_shard_data;
-            let processed_upto = prev_shard_data.processed_upto();
-            match self
-                .mpool_adapter
-                .get_anchor_by_id(
-                    processed_upto
-                        .externals
-                        .as_ref()
-                        .map_or(0, |upto| upto.processed_to.0),
-                )
-                .await?
-            {
-                Some(anchor) => anchor,
+            let anchor_id_opt = self
+                .working_state()
+                .prev_shard_data
+                .processed_upto()
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to.0);
+            match anchor_id_opt {
+                Some(anchor_id) => self
+                    .mpool_adapter
+                    .get_anchor_by_id(anchor_id)
+                    .await?
+                    .unwrap(),
                 None => self.mpool_adapter.get_next_anchor(0).await?,
             }
         };

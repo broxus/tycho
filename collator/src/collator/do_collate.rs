@@ -311,11 +311,30 @@ impl CollatorStdImpl {
                     let executed_msgs_count = group.len();
                     for (_account_id, msg_info, transaction) in group {
                         let new_internal_messages = new_transaction(
+                            &self.collator_descr.clone(),
                             &mut collation_data,
                             &self.shard_id,
                             &transaction,
                             msg_info,
                         )?;
+
+                        tracing::trace!(
+                            target: tracing_targets::COLLATOR,
+                            "Collator ({}{}): produced internals to {:?}",
+                            self.collator_descr(),
+                            _tracing_top_shard_blocks_descr,
+                            new_internal_messages
+                            .iter()
+                            .filter_map(|(msg_info, _)| {
+                                if let MsgInfo::Int(int_msg_info) = msg_info {
+                                    Some(int_msg_info.dst.to_string())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .as_slice(),
+                        );
 
                         self.mq_adapter.add_messages_to_iterator(
                             &mut internal_messages_iterator,
@@ -404,8 +423,8 @@ impl CollatorStdImpl {
         let diff = internal_messages_iterator.take_diff(candidate.block_id.as_short_id());
         self.mq_adapter.apply_diff(Arc::new(diff)).await?;
 
-        // STUB: sleep 2 secs to slow down collation process for analysis
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // STUB: sleep to slow down collation process for analysis
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
         // return collation result
         let collation_result = BlockCollationResult {
@@ -968,7 +987,13 @@ impl CollatorStdImpl {
         let transaction = exec_manager
             .execute_special_transaction(account, async_message.clone())
             .await?;
-        new_transaction(collation_data, &self.shard_id, &transaction, async_message)?;
+        new_transaction(
+            &self.collator_descr.clone(),
+            collation_data,
+            &self.shard_id,
+            &transaction,
+            async_message,
+        )?;
         collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
         Ok(())
     }
@@ -1032,7 +1057,13 @@ impl CollatorStdImpl {
             let transaction = exec_manager
                 .execute_special_transaction(account, async_message.clone())
                 .await?;
-            new_transaction(collation_data, &self.shard_id, &transaction, async_message)?;
+            new_transaction(
+                &self.collator_descr.clone(),
+                collation_data,
+                &self.shard_id,
+                &transaction,
+                async_message,
+            )?;
             collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
         }
 
@@ -1131,12 +1162,19 @@ impl CollatorStdImpl {
 
 /// add in and out messages from to block
 fn new_transaction(
+    collator_descr: &str,
     colator_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
     transaction: &Transaction,
     in_msg: AsyncMessage,
 ) -> Result<Vec<(MsgInfo, Cell)>> {
-    tracing::trace!("new transaction, message {:?}\n{:?}", in_msg, transaction,);
+    tracing::trace!(
+        target: tracing_targets::COLLATOR,
+        "Collator ({}): new transaction from message {:?}\n{:?}",
+        collator_descr,
+        in_msg,
+        transaction,
+    );
     colator_data.execute_count += 1;
     let (in_msg, in_msg_cell) = match in_msg {
         AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), in_msg_cell, current_shard) => {
