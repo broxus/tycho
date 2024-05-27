@@ -10,8 +10,6 @@ use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, McData, PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
-use crate::internal_queue::queue::LocalQueue;
-use crate::internal_queue::snapshot::IterRange;
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;

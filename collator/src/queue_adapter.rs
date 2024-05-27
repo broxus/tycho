@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -12,7 +11,6 @@ use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
 use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::session::session_state::SessionStateStdImpl;
-use crate::internal_queue::snapshot::IterRange;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::tracing_targets;
 use crate::utils::shard::SplitMergeAction;

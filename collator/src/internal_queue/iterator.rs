@@ -2,8 +2,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
-use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
+use anyhow::Result;
+use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;

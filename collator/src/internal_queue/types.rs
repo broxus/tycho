@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{BlockIdShort, IntAddr, IntMsgInfo, ShardIdent};
+use everscale_types::models::{IntAddr, IntMsgInfo, ShardIdent};
 
 pub type Lt = u64;
 
