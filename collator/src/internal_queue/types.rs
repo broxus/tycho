@@ -10,15 +10,13 @@ pub type Lt = u64;
 
 #[derive(Debug, Clone)]
 pub struct QueueDiff {
-    pub id: BlockIdShort,
     pub messages: Vec<Arc<EnqueuedMessage>>,
     pub processed_upto: HashMap<ShardIdent, InternalMessageKey>,
 }
 
 impl QueueDiff {
-    pub fn new(id: BlockIdShort) -> Self {
+    pub fn new() -> Self {
         QueueDiff {
-            id,
             messages: Default::default(),
             processed_upto: Default::default(),
         }

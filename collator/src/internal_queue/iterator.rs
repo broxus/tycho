@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
@@ -16,7 +17,7 @@ pub trait QueueIterator: Send {
     /// Take diff from iterator
     /// Move current position to commited position
     /// Create new transaction
-    fn take_diff(&mut self, block_id_short: BlockIdShort) -> QueueDiff;
+    fn take_diff(&mut self) -> QueueDiff;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
@@ -34,15 +35,27 @@ pub struct QueueIteratorImpl {
 
 impl QueueIteratorImpl {
     pub fn new(
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
         snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
         for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
         let shards_with_ranges: &mut HashMap<ShardIdent, ShardRange> = &mut HashMap::new();
-        for from in &shards_from {
+        for from in shards_from {
             for to in &shards_to {
-                Self::traverse_and_collect_ranges(shards_with_ranges, from, to);
+                let iter_range_from = IterRange {
+                    shard_id: from.0,
+                    lt: from.1,
+                };
+                let iter_range_to = IterRange {
+                    shard_id: *to.0,
+                    lt: *to.1,
+                };
+                Self::traverse_and_collect_ranges(
+                    shards_with_ranges,
+                    &iter_range_from,
+                    &iter_range_to,
+                );
             }
         }
 
@@ -145,13 +158,24 @@ impl QueueIteratorImpl {
 impl QueueIterator for QueueIteratorImpl {
     fn next(&mut self, with_new: bool) -> Option<IterItem> {
         if let Some(message_with_source) = self.messages.peek() {
-            let message_key = message_with_source.0.message.key();
+            let message = message_with_source.0.message.clone();
+            let message_key = message.key();
 
             let is_new = self.new_messages.contains_key(&message_key);
 
             return if with_new || !is_new {
                 let message_with_source = self.messages.pop()?.0;
-                self.new_messages.remove(&message_key);
+
+                if is_new {
+                    // remove if read message for current shard and it's new
+                    tracing::trace!(
+                        target: crate::tracing_targets::MQ,
+                        "Removing message from new messages because it's read: {:?}",
+                        message_with_source);
+                    self.new_messages.remove(&message_key);
+                }
+
+                // self.new_messages.remove(&message_key);
                 Some(IterItem {
                     message_with_source,
                     is_new,
@@ -177,8 +201,13 @@ impl QueueIterator for QueueIteratorImpl {
         None
     }
 
-    fn take_diff(&mut self, block_id_short: BlockIdShort) -> QueueDiff {
-        let mut diff = QueueDiff::new(block_id_short);
+    fn take_diff(&mut self) -> QueueDiff {
+        tracing::debug!(
+            target: crate::tracing_targets::MQ,
+            "Taking diff from iterator. New messages count: {}",
+            self.new_messages.len());
+
+        let mut diff = QueueDiff::new();
         for (shard_id, lt) in self.commited_current_position.iter() {
             diff.processed_upto.insert(*shard_id, lt.clone());
         }
@@ -195,9 +224,10 @@ impl QueueIterator for QueueIteratorImpl {
     }
 
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
-        if !self.commited_current_position.is_empty() {
-            bail!("Already commited. Please take diff before commit again")
-        }
+        tracing::debug!(
+            target: crate::tracing_targets::MQ,
+            "Committing messages to the iterator. Messages count: {}",
+            messages.len());
 
         for message in messages {
             // insert only if key greater then current
@@ -215,15 +245,16 @@ impl QueueIterator for QueueIteratorImpl {
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
         self.new_messages.insert(message.key(), message.clone());
 
-        let message_destination = match &message.info.dst {
-            IntAddr::Std(addr) => addr.address,
-            IntAddr::Var(_) => {
-                bail!("VarAddr is not supported")
-            }
-        };
+        let (dest_workchain, dest_account) = message.destination()?;
 
-        if self.for_shard.contains_account(&message_destination) {
+        if self.for_shard.contains_account(&dest_account)
+            && self.for_shard.workchain() == dest_workchain as i32
+        {
             let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
+            tracing::trace!(
+                target: crate::tracing_targets::MQ,
+                "Adding messages directly because it's for current shard: {:?}",
+                message_with_source);
             self.messages.push(Reverse(Arc::new(message_with_source)));
         };
         Ok(())

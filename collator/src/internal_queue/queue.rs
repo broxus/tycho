@@ -54,7 +54,11 @@ pub trait LocalQueue {
         shard_1_id: &ShardIdent,
         shard_2_id: &ShardIdent,
     ) -> Result<(), QueueError>;
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
+    async fn apply_diff(
+        &self,
+        diff: Arc<QueueDiff>,
+        block_id_short: BlockIdShort,
+    ) -> Result<(), QueueError>;
     async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn commit_diff(
         &self,
@@ -116,8 +120,16 @@ where
             .await
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {
-        self.session_state.lock().await.apply_diff(diff).await
+    async fn apply_diff(
+        &self,
+        diff: Arc<QueueDiff>,
+        block_id_short: BlockIdShort,
+    ) -> Result<(), QueueError> {
+        self.session_state
+            .lock()
+            .await
+            .apply_diff(diff, block_id_short)
+            .await
     }
 
     async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
@@ -133,7 +145,7 @@ where
         let diff = session_state_lock.remove_diff(diff_id).await?;
         if let Some(diff) = &diff {
             persistent_state_lock
-                .add_messages(diff.id, diff.messages.clone())
+                .add_messages(*diff_id, diff.messages.clone())
                 .await?;
         }
         Ok(diff)

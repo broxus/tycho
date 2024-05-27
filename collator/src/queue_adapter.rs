@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -5,6 +6,7 @@ use async_trait::async_trait;
 use everscale_types::cell::Cell;
 use everscale_types::models::{BlockIdShort, MsgInfo, ShardIdent};
 use tracing::instrument;
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
@@ -27,11 +29,11 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()>;
+    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>>;
@@ -91,8 +93,8 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>> {
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
@@ -104,15 +106,15 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(Box::new(iterator))
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<()> {
+    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            id = ?diff.id,
+            id = ?block_id_short,
             new_messages_len = diff.messages.len(),
             processed_upto_len = ?diff.processed_upto,
             "Applying diff to the queue"
         );
-        self.queue.apply_diff(diff).await?;
+        self.queue.apply_diff(diff, block_id_short).await?;
         Ok(())
     }
 
