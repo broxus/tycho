@@ -19,6 +19,7 @@ use tycho_util::FastHashMap;
 
 use super::types::AsyncMessage;
 use crate::collator::types::{AccountId, ShardAccountStuff};
+use crate::tracing_targets;
 
 static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 
@@ -65,7 +66,7 @@ impl ExecutionManager {
         group_limit: u32,
         shard_accounts: ShardAccounts,
     ) -> Self {
-        tracing::error!("shard_accounts = {shard_accounts:?}");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "shard_accounts = {shard_accounts:?}");
         Self {
             libraries,
             gen_utime,
@@ -85,7 +86,7 @@ impl ExecutionManager {
 
     /// execute messages set
     pub fn execute_msgs_set(&mut self, msgs: Vec<AsyncMessage>) {
-        tracing::trace!("adding set of messages");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 
@@ -94,7 +95,7 @@ impl ExecutionManager {
         &mut self,
         offset: u32,
     ) -> Result<(u32, Vec<(AccountId, AsyncMessage, Box<Transaction>)>)> {
-        tracing::trace!("execute manager messages set tick with {offset}");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute manager messages set tick with {offset}");
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
 
@@ -114,7 +115,7 @@ impl ExecutionManager {
             let (transaction, msg, ex) = executed_message?;
             if let AsyncMessage::Ext(_, _) = &msg {
                 if let Err(ref e) = transaction {
-                    tracing::error!("failed to execute external transaction: {e:?}");
+                    tracing::error!(target: tracing_targets::EXEC_MANAGER, "failed to execute external transaction: {e:?}");
                     continue;
                 }
             }
@@ -130,7 +131,7 @@ impl ExecutionManager {
         }
 
         let duration = now.elapsed().as_micros() as u64;
-        tracing::trace!("tick executed {duration}μ;",);
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "tick executed {duration}μ;",);
 
         total_trans_duration.fetch_add(duration, Ordering::Relaxed);
 
@@ -166,7 +167,19 @@ impl ExecutionManager {
         new_msg: AsyncMessage,
         mut shard_account: ShardAccountStuff,
     ) -> Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)> {
-        tracing::trace!("execute message for account {account_id}");
+        tracing::trace!(
+            target: tracing_targets::EXEC_MANAGER,
+            "executing {} message for account {}",
+            match &new_msg {
+                AsyncMessage::Recover(_) => "Recover",
+                AsyncMessage::Mint(_) => "Mint",
+                AsyncMessage::Ext(_, _) => "Ext",
+                AsyncMessage::Int(_, _, _) => "Int",
+                AsyncMessage::NewInt(_, _) => "NewInt",
+                AsyncMessage::TickTock(_) => "TickTock",
+            },
+            account_id,
+        );
         let (config, params) = self.get_execute_params(shard_account.lt.clone())?;
         let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
             let mut account_root = shard_account.account_root.clone();
@@ -206,7 +219,7 @@ impl ExecutionManager {
         account_id: AccountId,
         mut account_stuff: ShardAccountStuff,
     ) -> Result<()> {
-        tracing::trace!("update shard account for account {account_id}");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "update shard account for account {account_id}");
         let old_state = account_stuff.state_update.load()?.old;
         account_stuff.state_update = Lazy::new(&HashUpdate {
             old: old_state,
@@ -223,7 +236,7 @@ impl ExecutionManager {
         account_id: AccountId,
         msg: AsyncMessage,
     ) -> Result<Box<Transaction>> {
-        tracing::trace!("execute special transaction");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
         let max_lt = self.max_lt.load(Ordering::Acquire);
         let shard_account = self.get_shard_account_stuff(account_id, max_lt)?;
         let (transaction, _, shard_account) =

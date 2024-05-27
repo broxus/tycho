@@ -482,7 +482,7 @@ impl CollatorStdImpl {
         self.listener.on_block_candidate(collation_result).await?;
         tracing::info!(
             target: tracing_targets::COLLATOR,
-            "Collator ({}{}): STUB: created and sent empty block candidate...",
+            "Collator ({}{}): created and sent block candidate...",
             self.collator_descr(),
             _tracing_top_shard_blocks_descr,
         );

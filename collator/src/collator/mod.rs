@@ -345,6 +345,7 @@ impl CollatorStdImpl {
         &mut self,
         has_pending_externals: Option<bool>,
     ) -> Result<()> {
+        // TODO: just create `working_state_mut()` func
         let working_state_mut = self.working_state.as_mut().expect(
             "should `init` collator before calling `update_working_state_pending_internals`",
         );
@@ -612,7 +613,7 @@ impl CollatorStdImpl {
             if has_externals {
                 tracing::debug!(
                     target: tracing_targets::COLLATOR,
-                    "Collator ({}): just imported anchor has externals fo current shard",
+                    "Collator ({}): just imported anchor has externals for master",
                     self.collator_descr(),
                 );
             }

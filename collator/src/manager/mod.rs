@@ -1034,7 +1034,7 @@ where
         if mc_block_interval_elapsed {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
-                "Master block interval is {}ms, chain time {}ms elapsed interval in current shard {}",
+                "Master block interval is {}ms, elapsed chain time {}ms exceeded the interval in current shard {}",
                 self.config.mc_block_min_interval_ms, chain_time_elapsed, shard_id,
             );
             // if master block interval elapsed in every shard
@@ -1070,7 +1070,7 @@ where
                     .expect("Here `first_elapsed_chain_times` vec should not be empty");
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
-                    "Master block interval is {}ms, chain time {}ms elapsed interval in every shard - will collate next master block",
+                    "Master block interval {}ms elapsed in every shard - will collate next master block with chain time {}ms",
                     self.config.mc_block_min_interval_ms, max_first_chain_time_that_elapsed,
                 );
                 return (
