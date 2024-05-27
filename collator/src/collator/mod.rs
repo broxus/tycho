@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use everscale_types::models::*;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, McData, PrevData, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
+use crate::internal_queue::queue::LocalQueue;
 use crate::internal_queue::snapshot::IterRange;
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
@@ -513,42 +515,40 @@ impl CollatorStdImpl {
 
     /// Create and return internal message queue iterator
     async fn init_internal_mq_iterator(&self) -> Result<Box<dyn QueueIterator>> {
-        let processed_upto = self.working_state().prev_shard_data.processed_upto();
         let mc_data = &self.working_state().mc_data;
-        let mut ranges_from = vec![];
+        let processed_upto = self.working_state().prev_shard_data.processed_upto();
+        let mut ranges_from = FastHashMap::default();
+
         for entry in processed_upto.internals.iter() {
             let (shard_id_full, processed_upto_info) = entry?;
-            ranges_from.push(IterRange {
-                shard_id: shard_id_full.try_into()?,
-                lt: processed_upto_info.processed_to_msg.0,
-            });
+            ranges_from.insert(
+                ShardIdent::try_from(shard_id_full)?,
+                processed_upto_info.processed_to_msg.0,
+            );
         }
-        let mut ranges_to = vec![];
+
+        if !ranges_from.contains_key(&ShardIdent::new_full(-1)) {
+            ranges_from.insert(ShardIdent::new_full(-1), 0);
+        }
+
+        for mc_shard_hash in mc_data.mc_state_extra().shards.iter() {
+            let (shard_id, _) = mc_shard_hash?;
+            if !ranges_from.contains_key(&shard_id) {
+                ranges_from.insert(shard_id, 0);
+            }
+        }
+
+        let mut ranges_to = FastHashMap::default();
 
         for shard in mc_data.mc_state_extra().shards.iter() {
-            let (shard_id, shard_description) = shard.unwrap();
-
-            let iter_range_to = IterRange {
-                shard_id,
-                lt: shard_description.end_lt,
-            };
-
-            ranges_to.push(iter_range_to);
+            let (shard_id, shard_description) = shard?;
+            ranges_to.insert(shard_id, shard_description.end_lt);
         }
 
-        /// TODO Should to use real start
-        let mc_start_range = 0;
-        let mc_end_range = self.working_state().mc_data.mc_state_stuff().state().gen_lt;
-
-        ranges_from.push(IterRange {
-            shard_id: ShardIdent::new_full(-1),
-            lt: mc_start_range,
-        });
-
-        ranges_to.push(IterRange {
-            shard_id: ShardIdent::new_full(-1),
-            lt: mc_end_range,
-        });
+        ranges_to.insert(
+            ShardIdent::new_full(-1),
+            self.working_state().mc_data.mc_state_stuff().state().gen_lt,
+        );
 
         let internal_messages_iterator = self
             .mq_adapter

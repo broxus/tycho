@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -5,6 +6,7 @@ use async_trait::async_trait;
 use everscale_types::cell::Cell;
 use everscale_types::models::{BlockIdShort, MsgInfo, ShardIdent};
 use tracing::instrument;
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
 use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
@@ -27,8 +29,8 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
     async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
@@ -91,8 +93,8 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>> {
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,

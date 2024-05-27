@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
@@ -34,15 +35,27 @@ pub struct QueueIteratorImpl {
 
 impl QueueIteratorImpl {
     pub fn new(
-        shards_from: Vec<IterRange>,
-        shards_to: Vec<IterRange>,
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
         snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
         for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
         let shards_with_ranges: &mut HashMap<ShardIdent, ShardRange> = &mut HashMap::new();
-        for from in &shards_from {
+        for from in shards_from {
             for to in &shards_to {
-                Self::traverse_and_collect_ranges(shards_with_ranges, from, to);
+                let iter_range_from = IterRange {
+                    shard_id: from.0,
+                    lt: from.1,
+                };
+                let iter_range_to = IterRange {
+                    shard_id: *to.0,
+                    lt: *to.1,
+                };
+                Self::traverse_and_collect_ranges(
+                    shards_with_ranges,
+                    &iter_range_from,
+                    &iter_range_to,
+                );
             }
         }
 
