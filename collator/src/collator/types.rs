@@ -430,7 +430,7 @@ pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, Accou
 #[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
-    pub shard_account: ShardAccount,
+    pub shard_account: ShardAccount, // TODO: refactor account root and shard account into one
     pub orig_libs: Dict<HashBytes, SimpleLib>,
     pub account_root: Cell,
     pub last_trans_hash: HashBytes,
