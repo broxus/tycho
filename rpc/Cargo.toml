@@ -11,15 +11,18 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
-mime = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["cors", "timeout"] }
 tracing = { workspace = true }
 
 # local deps
@@ -27,6 +30,10 @@ tycho-block-util = { workspace = true }
 tycho-core = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
+
+[features]
+default = []
+compression = ["tower-http/compression-gzip"]
 
 [lints]
 workspace = true

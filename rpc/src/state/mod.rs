@@ -15,6 +15,7 @@ use tycho_storage::{CodeHashesIter, Storage, TransactionsIterBuilder};
 use tycho_util::FastHashMap;
 
 use crate::config::RpcConfig;
+use crate::endpoint::RpcEndpoint;
 use crate::models::GenTimings;
 
 pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient)> {
@@ -81,6 +82,16 @@ impl RpcState {
             config: RpcConfig::default(),
             mandatory_fields: (),
         }
+    }
+
+    pub fn make_endpoint(&self) -> RpcEndpoint {
+        RpcEndpoint {
+            state: self.clone(),
+        }
+    }
+
+    pub fn config(&self) -> &RpcConfig {
+        &self.inner.config
     }
 
     pub async fn broadcast_external_message(&self, message: &[u8]) {

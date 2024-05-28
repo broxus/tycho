@@ -137,10 +137,42 @@ where
     }
 }
 
+pub struct JrpcOkResponse<T> {
+    pub id: i64,
+    pub result: T,
+}
+
+impl<T> JrpcOkResponse<T> {
+    pub fn new(id: i64, result: T) -> Self {
+        Self { id, result }
+    }
+}
+
+impl<T: serde::Serialize> Serialize for JrpcOkResponse<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut ser = serializer.serialize_struct("JrpcResponse", 3)?;
+        ser.serialize_field(JSONRPC_FIELD, JSONRPC_VERSION)?;
+        ser.serialize_field("id", &self.id)?;
+        ser.serialize_field("result", &self.result)?;
+        ser.end()
+    }
+}
+
+impl<T: serde::Serialize> IntoResponse for JrpcOkResponse<T> {
+    fn into_response(self) -> Response {
+        (StatusCode::OK, axum::Json(self)).into_response()
+    }
+}
+
 pub struct JrpcErrorResponse {
-    id: Option<i64>,
-    code: i32,
-    message: Cow<'static, str>,
+    pub id: Option<i64>,
+    pub code: i32,
+    pub message: Cow<'static, str>,
 }
 
 impl Serialize for JrpcErrorResponse {

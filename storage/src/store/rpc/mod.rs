@@ -821,7 +821,10 @@ pub struct TransactionsIterBuilder<'a> {
 }
 
 impl<'a> TransactionsIterBuilder<'a> {
-    pub fn map<F>(self, map: F) -> TransactionsIter<'a, F> {
+    pub fn map<F, R>(self, map: F) -> TransactionsIter<'a, F>
+    where
+        for<'s> F: FnMut(&'s [u8]) -> R,
+    {
         TransactionsIter {
             inner: self.inner,
             map,
