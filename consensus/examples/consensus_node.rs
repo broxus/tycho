@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 use tycho_consensus::test_utils::drain_anchors;
-use tycho_consensus::Engine;
-use tycho_network::{DhtConfig, NetworkConfig, PeerId, PeerInfo};
+use tycho_consensus::{Engine, InputBufferStub};
+use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId, PeerInfo};
 use tycho_util::time::now_sec;
 
 #[tokio::main]
@@ -81,6 +81,8 @@ struct CmdRun {
     /// local node address
     addr: SocketAddr,
 
+    remote_addr: Address,
+
     /// node secret key
     #[clap(long)]
     key: String,
@@ -109,6 +111,7 @@ impl CmdRun {
         let (dht_client, overlay) = tycho_consensus::test_utils::from_validator(
             self.addr,
             &secret_key,
+            Some(self.remote_addr),
             node_config.dht,
             node_config.network,
         );
@@ -129,7 +132,13 @@ impl CmdRun {
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let mut engine = Engine::new(key_pair.clone(), &dht_client, &overlay, committed_tx);
+        let mut engine = Engine::new(
+            key_pair.clone(),
+            &dht_client,
+            &overlay,
+            committed_tx,
+            InputBufferStub::new(100, 5),
+        );
         engine.init_with_genesis(all_peers.as_slice()).await;
         tokio::spawn(drain_anchors(committed_rx));
 
@@ -173,8 +182,9 @@ impl CmdGenKey {
 /// generate a dht node info
 #[derive(Parser)]
 struct CmdGenDht {
-    /// local node address
-    addr: SocketAddr,
+    /// a list of node addresses
+    #[clap(required = true)]
+    addr: Vec<Address>,
 
     /// node secret key
     #[clap(long)]
@@ -189,8 +199,7 @@ impl CmdGenDht {
     fn run(self) -> Result<()> {
         let secret_key = parse_key(&self.key)?;
         let key_pair = KeyPair::from(&secret_key);
-        let entry =
-            tycho_consensus::test_utils::make_peer_info(&key_pair, self.addr.into(), self.ttl);
+        let entry = tycho_consensus::test_utils::make_peer_info(&key_pair, self.addr, self.ttl);
         let output = if std::io::stdin().is_terminal() {
             serde_json::to_string_pretty(&entry)
         } else {

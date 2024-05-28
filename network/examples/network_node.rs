@@ -147,8 +147,9 @@ impl CmdGenKey {
 /// generate a dht node info
 #[derive(Parser)]
 struct CmdGenDht {
-    /// local node address
-    addr: SocketAddr,
+    /// a list of node addresses
+    #[clap(required = true)]
+    addr: Vec<Address>,
 
     /// node secret key
     #[clap(long)]
@@ -161,7 +162,7 @@ struct CmdGenDht {
 
 impl CmdGenDht {
     fn run(self) -> Result<()> {
-        let entry = Node::make_peer_info(parse_key(&self.key)?, self.addr.into(), self.ttl);
+        let entry = Node::make_peer_info(parse_key(&self.key)?, self.addr, self.ttl);
         let output = if std::io::stdin().is_terminal() {
             serde_json::to_string_pretty(&entry)
         } else {
@@ -235,14 +236,18 @@ impl Node {
         Ok(Self { network, dht })
     }
 
-    fn make_peer_info(key: ed25519::SecretKey, address: Address, ttl: Option<u32>) -> PeerInfo {
+    fn make_peer_info(
+        key: ed25519::SecretKey,
+        address_list: Vec<Address>,
+        ttl: Option<u32>,
+    ) -> PeerInfo {
         let keypair = ed25519::KeyPair::from(&key);
         let peer_id = PeerId::from(keypair.public_key);
 
         let now = now_sec();
         let mut node_info = PeerInfo {
             id: peer_id,
-            address_list: vec![address].into_boxed_slice(),
+            address_list: address_list.into_boxed_slice(),
             created_at: now,
             expires_at: ttl.unwrap_or(u32::MAX),
             signature: Box::new([0; 64]),

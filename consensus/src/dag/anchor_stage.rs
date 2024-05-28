@@ -31,6 +31,8 @@ impl AnchorStage {
         else {
             panic!("selecting a leader from an empty validator set")
         };
+        // the leader cannot produce three points in a row, so we have an undefined leader,
+        // rather than an intentional leaderless support round - all represented by `None`
         if !current_peers.contains_key(leader) {
             return None;
         };
@@ -39,11 +41,11 @@ impl AnchorStage {
             // 1 is an anchor candidate (surprisingly, nothing special about this point)
             0 | 1 => None,
             2 => Some(AnchorStage::Proof {
-                leader: leader.clone(),
+                leader: *leader,
                 is_used: AtomicBool::new(false),
             }),
             3 => Some(AnchorStage::Trigger {
-                leader: leader.clone(),
+                leader: *leader,
                 is_used: AtomicBool::new(false),
             }),
             _ => unreachable!(),

@@ -58,7 +58,7 @@ impl PeerSchedule {
     // To sign a point or to query for points, we need to know the intersection of:
     // * which nodes are in the validator set during the round of interest
     // * which nodes are able to connect at the moment
-    pub async fn wait_for_peers(&self, round: &Round, node_count: NodeCount) {
+    pub async fn wait_for_peers(&self, round: Round, node_count: NodeCount) {
         let mut rx = self.updates();
         let peers = (*self.peers_for(round)).clone();
         let local_id = self.local_id();
@@ -102,7 +102,7 @@ impl PeerSchedule {
     ///
     /// Consensus progress is not guaranteed without witness (because of evidence requirement),
     /// but we don't care if the consensus of an ending epoch stalls at its last round.
-    pub fn local_keys(&self, round: &Round) -> Option<Arc<KeyPair>> {
+    pub fn local_keys(&self, round: Round) -> Option<Arc<KeyPair>> {
         if self.peers_for(round).contains_key(&self.local_id()) {
             Some(self.local_keys.clone())
         } else {
@@ -112,7 +112,7 @@ impl PeerSchedule {
 
     pub fn all_resolved(&self) -> FastHashSet<PeerId> {
         let inner = self.inner.lock();
-        inner.all_resolved(self.local_id())
+        inner.all_resolved(&self.local_id())
     }
 
     pub fn is_resolved(&self, peer_id: &PeerId) -> bool {
@@ -120,7 +120,7 @@ impl PeerSchedule {
         inner.is_resolved(peer_id)
     }
 
-    pub fn peers_for(&self, round: &Round) -> Arc<BTreeMap<PeerId, PeerState>> {
+    pub fn peers_for(&self, round: Round) -> Arc<BTreeMap<PeerId, PeerState>> {
         let inner = self.inner.lock();
         inner.peers_for_index_plus_one(inner.index_plus_one(round))
     }
@@ -130,7 +130,7 @@ impl PeerSchedule {
         rounds: [Round; N],
     ) -> [Arc<BTreeMap<PeerId, PeerState>>; N] {
         let inner = self.inner.lock();
-        array::from_fn(|i| inner.peers_for_index_plus_one(inner.index_plus_one(&rounds[i])))
+        array::from_fn(|i| inner.peers_for_index_plus_one(inner.index_plus_one(rounds[i])))
     }
 
     /// does not return empty maps
@@ -139,8 +139,8 @@ impl PeerSchedule {
             return vec![];
         }
         let inner = self.inner.lock();
-        let mut first = inner.index_plus_one(&rounds.start);
-        let last = inner.index_plus_one(&rounds.end.prev());
+        let mut first = inner.index_plus_one(rounds.start);
+        let last = inner.index_plus_one(rounds.end.prev());
         if 0 == first && first < last {
             first += 1; // exclude inner.empty
         }
@@ -193,13 +193,13 @@ impl PeerSchedule {
             .read_entries()
             .iter()
             .filter(|a| a.resolver_handle.is_resolved())
-            .map(|a| a.peer_id.clone())
+            .map(|a| a.peer_id)
             .collect::<FastHashSet<_>>();
         let peers = peers
             .iter()
             .map(|peer_id| {
                 (
-                    peer_id.clone(),
+                    *peer_id,
                     if resolved.contains(&peer_id) && peer_id != local_id {
                         PeerState::Resolved
                     } else {
@@ -229,13 +229,13 @@ impl PeerSchedule {
                     continue;
                 };
                 if *b != new_state {
-                    *b = new_state.clone();
+                    *b = new_state;
                     is_applied = true;
                 }
             }
         }
         if is_applied {
-            _ = self.updates.send((peer_id.clone(), new_state));
+            _ = self.updates.send((*peer_id, new_state));
         }
         is_applied
     }
@@ -261,12 +261,12 @@ impl PeerScheduleInner {
         }
     }
 
-    fn index_plus_one(&self, round: &Round) -> u8 {
-        if self.next_epoch_start.as_ref().map_or(false, |r| r <= round) {
+    fn index_plus_one(&self, round: Round) -> u8 {
+        if self.next_epoch_start.map_or(false, |r| r <= round) {
             3
-        } else if &self.cur_epoch_start <= round {
+        } else if self.cur_epoch_start <= round {
             2
-        } else if &self.prev_epoch_start <= round {
+        } else if self.prev_epoch_start <= round {
             1
         } else {
             0
@@ -281,12 +281,12 @@ impl PeerScheduleInner {
         }
     }
 
-    fn all_resolved(&self, local_id: PeerId) -> FastHashSet<PeerId> {
+    fn all_resolved(&self, local_id: &PeerId) -> FastHashSet<PeerId> {
         self.peers_resolved[0]
             .iter()
             .chain(self.peers_resolved[1].iter())
             .chain(self.peers_resolved[2].iter())
-            .filter(|(peer_id, state)| *state == &PeerState::Resolved && peer_id != &local_id)
+            .filter(|(peer_id, state)| *state == &PeerState::Resolved && peer_id != local_id)
             .map(|(peer_id, _)| *peer_id)
             .collect()
     }

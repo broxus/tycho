@@ -88,7 +88,7 @@ impl ResponderInner {
             MPQuery::Signature(round) => {
                 let (tx, rx) = oneshot::channel();
                 self.signature_requests
-                    .send((round, req.metadata.peer_id.clone(), tx))
+                    .send((round, req.metadata.peer_id, tx))
                     .ok();
                 match rx.await {
                     Ok(response) => MPResponse::Signature(response),

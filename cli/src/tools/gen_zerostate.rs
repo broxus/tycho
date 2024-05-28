@@ -190,11 +190,16 @@ impl ZerostateConfig {
 
         {
             let mut fundamental_addresses = self.params.get::<ConfigParam31>()?.unwrap_or_default();
-            fundamental_addresses.set(config_address, ())?;
+
+            // NOTE: Config address is handled separately and must not be in the list
+            fundamental_addresses.remove(config_address)?;
+
+            // Ensure that the elector and minter are in the list
             fundamental_addresses.set(elector_address, ())?;
             if let Some(minter_address) = minter_address {
                 fundamental_addresses.set(minter_address, ())?;
             }
+
             self.params.set::<ConfigParam31>(&fundamental_addresses)?;
         }
 
@@ -292,21 +297,32 @@ impl ZerostateConfig {
         Ok(())
     }
 
-    fn build_masterchain_state(&self, now: u32) -> Result<ShardStateUnsplit> {
+    fn build_masterchain_state(self, now: u32) -> Result<ShardStateUnsplit> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
         {
             let mut accounts = ShardAccounts::new();
-            for (account, account_state) in self.accounts.iter() {
-                let account_state_cell = Lazy::new(account_state)?;
-                let Some(account_state) = account_state.as_ref() else {
-                    continue;
+            for (account, mut account_state) in self.accounts {
+                let balance = match account_state.as_mut() {
+                    Some(state) => {
+                        // Always ensure that the account storage stat is up-to-date
+                        state.storage_stat.used = compute_storage_used(state)?;
+                        state.balance.clone()
+                    }
+                    None => continue,
                 };
+
+                let account_state_cell = Lazy::new(&account_state)?;
+
+                state.total_balance = state
+                    .total_balance
+                    .checked_add(&balance)
+                    .wrap_err("failed ot compute total balance")?;
 
                 accounts.set(
                     account,
                     DepthBalanceInfo {
-                        balance: account_state.balance.clone(),
+                        balance,
                         split_depth: 0,
                     },
                     ShardAccount {
@@ -315,11 +331,6 @@ impl ZerostateConfig {
                         last_trans_lt: 0,
                     },
                 )?;
-
-                state.total_balance = state
-                    .total_balance
-                    .checked_add(&account_state.balance)
-                    .wrap_err("failed ot compute total balance")?;
             }
             assert_eq!(state.total_balance, accounts.root_extra().balance);
             state.accounts = Lazy::new(&accounts)?;
@@ -624,11 +635,7 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     })?;
 
     // Param 31
-    params.set_fundamental_addresses(&[
-        HashBytes([0x00; 32]),
-        HashBytes([0x33; 32]),
-        HashBytes([0x55; 32]),
-    ])?;
+    params.set_fundamental_addresses(&[HashBytes([0x00; 32]), HashBytes([0x33; 32])])?;
 
     Ok(params)
 }

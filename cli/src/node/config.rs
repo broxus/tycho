@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 
 use anyhow::Result;
@@ -32,12 +32,12 @@ pub struct NodeConfig {
     /// Public IP address of the node.
     ///
     /// Default: resolved automatically.
-    pub public_ip: Option<Ipv4Addr>,
+    pub public_ip: Option<IpAddr>,
 
     /// Ip address to listen on.
     ///
     /// Default: 0.0.0.0
-    pub local_ip: Ipv4Addr,
+    pub local_ip: IpAddr,
 
     /// Default: 30000.
     pub port: u16,
@@ -63,7 +63,7 @@ impl Default for NodeConfig {
     fn default() -> Self {
         Self {
             public_ip: None,
-            local_ip: Ipv4Addr::UNSPECIFIED,
+            local_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 30000,
             network: NetworkConfig::default(),
             dht: DhtConfig::default(),

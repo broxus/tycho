@@ -83,11 +83,11 @@ impl Collector {
 
         assert_eq!(
             current_dag_round.round(),
-            &self.next_round,
+            self.next_round,
             "collector expected to be run at {:?}",
-            &self.next_round
+            self.next_round
         );
-        self.next_round = next_dag_round.round().clone();
+        self.next_round = next_dag_round.round();
         let includes_ready = FastHashSet::with_capacity_and_hasher(
             current_dag_round.node_count().full(),
             Default::default(),
@@ -116,8 +116,8 @@ impl Collector {
         self
     }
 
-    pub fn next_round(&self) -> &'_ Round {
-        &self.next_round
+    pub fn next_round(&self) -> Round {
+        self.next_round
     }
 }
 
@@ -193,7 +193,7 @@ impl CollectorTask {
                 },
                 request = signature_requests.recv() => match request {
                     Some((round, author, callback)) => {
-                        _ = callback.send(self.signature_response(&round, &author));
+                        _ = callback.send(self.signature_response(round, &author));
                     }
                     None => panic!("channel with signature requests closed")
                 },
@@ -251,7 +251,7 @@ impl CollectorTask {
         self.next_includes
             .push(futures_util::future::ready(state).boxed());
         self.is_includes_ready = true;
-        match point_round.cmp(self.next_dag_round.round()) {
+        match point_round.cmp(&self.next_dag_round.round()) {
             Ordering::Less => {
                 panic!("Coding error: next includes futures contain current or previous round")
             }
@@ -279,16 +279,16 @@ impl CollectorTask {
         );
         match consensus_event {
             ConsensusEvent::Forward(consensus_round) => {
-                match consensus_round.cmp(self.next_dag_round.round()) {
+                match consensus_round.cmp(&self.next_dag_round.round()) {
                     // we're too late, consensus moved forward
-                    std::cmp::Ordering::Greater => return Err(consensus_round.clone()),
+                    std::cmp::Ordering::Greater => return Err(*consensus_round),
                     // we still have a chance to finish current round
                     std::cmp::Ordering::Equal => {}
                     // we are among the fastest nodes of consensus
                     std::cmp::Ordering::Less => {}
                 }
             }
-            ConsensusEvent::Verified(point) => match &point.body.location.round {
+            ConsensusEvent::Verified(point) => match point.body.location.round {
                 x if x > self.next_dag_round.round() => {
                     panic!(
                         "{} @ {:?} Coding error: broadcast filter advanced \
@@ -311,7 +311,7 @@ impl CollectorTask {
                 _ => _ = self.current_round.add(&point, &self.downloader), /* maybe other's dependency */
             },
             ConsensusEvent::Invalid(dag_point) => {
-                if &dag_point.location().round > self.next_dag_round.round() {
+                if dag_point.location().round > self.next_dag_round.round() {
                     panic!(
                         "{} @ {:?} Coding error: broadcast filter advanced \
                             while collector left behind; event: {:?}",
@@ -343,7 +343,7 @@ impl CollectorTask {
         if let Some(Ok(_)) = state.signed() {
             if let Some(dag_point) = state
                 .point()
-                .filter(|dp| dp.location().round == *self.current_round.round())
+                .filter(|dp| dp.location().round == self.current_round.round())
             {
                 self.includes_ready.insert(dag_point.location().author);
                 tracing::debug!(
@@ -367,7 +367,7 @@ impl CollectorTask {
         );
     }
 
-    fn signature_response(&mut self, round: &Round, author: &PeerId) -> SignatureResponse {
+    fn signature_response(&mut self, round: Round, author: &PeerId) -> SignatureResponse {
         if round > self.current_round.round() {
             return SignatureResponse::TryLater; // hold fast nodes from moving forward
         };
@@ -385,7 +385,7 @@ impl CollectorTask {
                 // points @ current local dag round are includes for next round point
                 Some(key_pair) if round == self.current_round.round() => Some(key_pair),
                 // points @ previous local dag round are witness for next round point
-                Some(_) if round == &self.current_round.round().prev() => {
+                Some(_) if round == self.current_round.round().prev() => {
                     self.current_round.key_pair()
                 }
                 // point is too old, cannot include;
@@ -393,12 +393,12 @@ impl CollectorTask {
                 _ => None,
             };
             if signable.sign(
-                &self.current_round.round(),
+                self.current_round.round(),
                 key_pair,
                 MempoolConfig::sign_time_range(),
             ) {
                 if round == self.current_round.round() {
-                    self.includes_ready.insert(author.clone());
+                    self.includes_ready.insert(*author);
                 }
             }
         }

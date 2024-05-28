@@ -6,7 +6,9 @@ use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
-use crate::models::{Link, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime};
+use crate::models::{
+    Link, LinkField, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime,
+};
 
 pub struct Producer;
 
@@ -30,12 +32,22 @@ impl Producer {
         };
         let includes = Self::includes(&finished_round);
         let mut anchor_trigger =
-            Self::link_from_includes(&local_id, &current_round, &includes, true);
+            Self::link_from_includes(&local_id, &current_round, &includes, LinkField::Trigger);
         let mut anchor_proof =
-            Self::link_from_includes(&local_id, &current_round, &includes, false);
+            Self::link_from_includes(&local_id, &current_round, &includes, LinkField::Proof);
         let witness = Self::witness(&finished_round);
-        Self::update_link_from_witness(&mut anchor_trigger, finished_round.round(), &witness, true);
-        Self::update_link_from_witness(&mut anchor_proof, finished_round.round(), &witness, false);
+        Self::update_link_from_witness(
+            &mut anchor_trigger,
+            current_round.round(),
+            &witness,
+            LinkField::Trigger,
+        );
+        Self::update_link_from_witness(
+            &mut anchor_proof,
+            current_round.round(),
+            &witness,
+            LinkField::Proof,
+        );
         let time = Self::get_time(
             &finished_round,
             &local_id,
@@ -67,8 +79,8 @@ impl Producer {
 
         Some(Point::new(key_pair, PointBody {
             location: Location {
-                round: current_round.round().clone(),
-                author: local_id.clone(),
+                round: current_round.round(),
+                author: local_id,
             },
             time,
             payload,
@@ -118,87 +130,67 @@ impl Producer {
     fn link_from_includes(
         local_id: &PeerId,
         current_round: &DagRound,
-        includes: &Vec<Arc<Point>>,
-        is_for_trigger: bool,
+        includes: &[Arc<Point>],
+        link_field: LinkField,
     ) -> Link {
-        match current_round.anchor_stage() {
-            Some(AnchorStage::Trigger { leader, .. }) if is_for_trigger && leader == local_id => {
-                Link::ToSelf
+        use AnchorStage::*;
+
+        match (current_round.anchor_stage(), link_field) {
+            (Some(Trigger { leader, .. }), LinkField::Trigger)
+            | (Some(Proof { leader, .. }), LinkField::Proof)
+                if leader == local_id =>
+            {
+                return Link::ToSelf;
             }
-            Some(AnchorStage::Proof { leader, .. }) if !is_for_trigger && leader == local_id => {
-                Link::ToSelf
-            }
-            _ => {
-                let point = includes
-                    .iter()
-                    .max_by_key(|point| {
-                        if is_for_trigger {
-                            point.anchor_trigger_round()
-                        } else {
-                            point.anchor_proof_round()
-                        }
-                    })
-                    .expect("non-empty list of includes for own point");
-                if point.body.location.round == current_round.round().prev()
-                    && ((is_for_trigger && point.body.anchor_trigger == Link::ToSelf)
-                        || (!is_for_trigger && point.body.anchor_proof == Link::ToSelf))
-                {
-                    Link::Direct(Through::Includes(point.body.location.author.clone()))
-                } else {
-                    let to = if is_for_trigger {
-                        point.anchor_trigger_id()
-                    } else {
-                        point.anchor_proof_id()
-                    };
-                    Link::Indirect {
-                        to,
-                        path: Through::Includes(point.body.location.author.clone()),
-                    }
-                }
+            _ => {}
+        }
+
+        let point = includes
+            .iter()
+            .max_by_key(|point| point.anchor_round(link_field))
+            .expect("non-empty list of includes for own point");
+
+        if point.body.location.round == current_round.round().prev()
+            && point.anchor_link(link_field) == &Link::ToSelf
+        {
+            Link::Direct(Through::Includes(point.body.location.author))
+        } else {
+            Link::Indirect {
+                to: point.anchor_id(link_field),
+                path: Through::Includes(point.body.location.author),
             }
         }
     }
 
     fn update_link_from_witness(
         link: &mut Link,
-        finished_round: &Round,
-        witness: &Vec<Arc<Point>>,
-        is_for_trigger: bool,
+        current_round: Round,
+        witness: &[Arc<Point>],
+        link_field: LinkField,
     ) {
         let link_round = match link {
             Link::ToSelf | Link::Direct(_) => return,
             Link::Indirect { to, .. } => to.location.round,
         };
-        fn last_round(point: &Point, is_for_trigger: bool) -> Round {
-            if is_for_trigger {
-                point.anchor_trigger_round()
-            } else {
-                point.anchor_proof_round()
-            }
-        }
+
         let Some(point) = witness
             .iter()
-            .filter(|point| last_round(&point, is_for_trigger) > link_round)
-            .max_by_key(|point| last_round(&point, is_for_trigger))
+            .filter(|point| point.anchor_round(link_field) > link_round)
+            .max_by_key(|point| point.anchor_round(link_field))
         else {
             return;
         };
-        if point.body.location.round == finished_round.prev()
-            && ((is_for_trigger && point.body.anchor_trigger == Link::ToSelf)
-                || (!is_for_trigger && point.body.anchor_proof == Link::ToSelf))
+
+        if point.body.location.round == current_round.prev().prev()
+            && point.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(point.body.location.author))
+            *link = Link::Direct(Through::Witness(point.body.location.author));
         } else {
-            let to = if is_for_trigger {
-                point.anchor_trigger_id()
-            } else {
-                point.anchor_proof_id()
-            };
             *link = Link::Indirect {
-                to,
+                to: point.anchor_id(link_field),
                 path: Through::Witness(point.body.location.author),
-            }
-        };
+            };
+        }
     }
 
     async fn get_time(
@@ -206,16 +198,16 @@ impl Producer {
         local_id: &PeerId,
         anchor_proof: &Link,
         prev_point: Option<&PrevPoint>,
-        includes: &Vec<Arc<Point>>,
-        witness: &Vec<Arc<Point>>,
+        includes: &[Arc<Point>],
+        witness: &[Arc<Point>],
     ) -> UnixTime {
         let mut time = UnixTime::now();
         if let Some(prev_point) = prev_point {
             if let Some(valid) = finished_round
-                .valid_point_exact(&local_id, &prev_point.digest)
+                .valid_point_exact(local_id, &prev_point.digest)
                 .await
             {
-                time = valid.point.body.time.clone().max(time);
+                time = valid.point.body.time.max(time);
             }
         }
         match anchor_proof {
@@ -229,14 +221,14 @@ impl Producer {
                     .iter()
                     .find(|point| point.body.location.author == peer_id)
                 {
-                    time = point.body.time.clone().max(time);
+                    time = point.body.time.max(time);
                 }
             }
             Link::Indirect { to, .. } => {
                 // it's sufficient to check prev point - it can't have newer anchor proof
                 if prev_point.is_none() {
                     if let Some(valid) = finished_round.valid_point(&to).await {
-                        time = valid.point.body.time.clone().max(time);
+                        time = valid.point.body.time.max(time);
                     } else {
                         panic!("last anchor proof must stay in DAG until its payload is committed")
                     }

@@ -32,13 +32,13 @@ pub fn genesis() -> Arc<Point> {
     })
 }
 
-pub fn make_peer_info(keypair: &KeyPair, address: Address, ttl: Option<u32>) -> PeerInfo {
+pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option<u32>) -> PeerInfo {
     let peer_id = PeerId::from(keypair.public_key);
 
     let now = now_sec();
     let mut peer_info = PeerInfo {
         id: peer_id,
-        address_list: vec![address.clone()].into_boxed_slice(),
+        address_list: address_list.into_boxed_slice(),
         created_at: now,
         expires_at: ttl.unwrap_or(u32::MAX),
         signature: Box::new([0; 64]),
@@ -51,8 +51,9 @@ pub fn make_peer_info(keypair: &KeyPair, address: Address, ttl: Option<u32>) -> 
 //  move current setup to tests as it provides acceptable timing
 // This dependencies should be passed from validator module to init mempool
 pub fn from_validator<T: ToSocket>(
-    socket_addr: T,
+    bind_address: T,
     secret_key: &SecretKey,
+    remote_addr: Option<Address>,
     dht_config: DhtConfig,
     network_config: NetworkConfig,
 ) -> (DhtClient, OverlayService) {
@@ -71,12 +72,14 @@ pub fn from_validator<T: ToSocket>(
         .route(overlay_service.clone())
         .build();
 
-    let network = Network::builder()
+    let mut network_builder = Network::builder()
         .with_config(network_config)
         .with_private_key(secret_key.to_bytes())
-        .with_service_name("mempool-test-network-service")
-        .build(socket_addr, router)
-        .unwrap();
+        .with_service_name("mempool-test-network-service");
+    if let Some(remote_addr) = remote_addr {
+        network_builder = network_builder.with_remote_addr(remote_addr);
+    }
+    let network = network_builder.build(bind_address, router).unwrap();
 
     dht_tasks.spawn(&network);
     overlay_tasks.spawn(&network);
@@ -103,7 +106,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::engine::Engine;
+    use crate::engine::{Engine, InputBufferStub};
 
     #[global_allocator]
     static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
@@ -122,7 +125,7 @@ mod tests {
             .map(|(_, kp)| PeerId::from(kp.public_key))
             .collect::<Vec<_>>();
 
-        let addresses = keys
+        let bind_addresses = keys
             .iter()
             .map(|_| {
                 std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
@@ -135,14 +138,16 @@ mod tests {
 
         let peer_info = keys
             .iter()
-            .zip(addresses.iter())
-            .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, addr.clone(), None)))
+            .zip(bind_addresses.iter())
+            .map(|((_, key_pair), addr)| {
+                Arc::new(make_peer_info(key_pair, vec![addr.clone()], None))
+            })
             .collect::<Vec<_>>();
 
         let mut handles = vec![];
-        for (((secret_key, key_pair), address), peer_id) in keys
+        for (((secret_key, key_pair), bind_address), peer_id) in keys
             .into_iter()
-            .zip(addresses.into_iter())
+            .zip(bind_addresses.into_iter())
             .zip(peer_info.iter().map(|p| p.id))
         {
             let all_peers = all_peers.clone();
@@ -156,8 +161,9 @@ mod tests {
                     .expect("new tokio runtime")
                     .block_on(async move {
                         let (dht_client, overlay_service) = from_validator(
-                            address,
+                            bind_address,
                             &secret_key,
+                            None,
                             DhtConfig {
                                 local_info_announce_period: Duration::from_secs(1),
                                 local_info_announce_period_max_jitter: Duration::from_secs(1),
@@ -182,6 +188,7 @@ mod tests {
                             &dht_client,
                             &overlay_service,
                             committed_tx.clone(),
+                            InputBufferStub::new(100, 3),
                         );
                         engine.init_with_genesis(all_peers.as_slice()).await;
                         tracing::info!("created engine {}", dht_client.network().peer_id());
@@ -204,7 +211,7 @@ mod tests {
 
         // check_parking_lot();
         heart_beat();
-        let handles = make_network(21, 2);
+        let handles = make_network(9, 2);
         for handle in handles {
             handle.join().unwrap();
         }

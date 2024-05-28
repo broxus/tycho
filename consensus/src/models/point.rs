@@ -204,6 +204,13 @@ pub struct PointBody {
     pub anchor_proof: Link,
 }
 
+/// Just a field accessor
+#[derive(Clone, Copy)]
+pub enum LinkField {
+    Trigger,
+    Proof,
+}
+
 // Todo: Arc<Point{...}> => Point(Arc<...{...}>)
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Point {
@@ -289,9 +296,9 @@ impl Point {
             && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(&author)
             // in contrast, evidence must contain only signatures of others
             && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
-            && self.is_link_well_formed(&self.body.anchor_proof)
-            && self.is_link_well_formed(&self.body.anchor_trigger)
-            && match (self.anchor_proof_round(), self.anchor_trigger_round()) {
+            && self.is_link_well_formed(LinkField::Proof)
+            && self.is_link_well_formed(LinkField::Trigger)
+            && match (self.anchor_round(LinkField::Proof), self.anchor_round(LinkField::Trigger)) {
                 (x, MempoolConfig::GENESIS_ROUND) => x >= MempoolConfig::GENESIS_ROUND,
                 (MempoolConfig::GENESIS_ROUND, y) => y >= MempoolConfig::GENESIS_ROUND,
                 // equality is impossible due to commit waves do not start every round;
@@ -301,8 +308,8 @@ impl Point {
             }
     }
 
-    fn is_link_well_formed(&self, link: &Link) -> bool {
-        match link {
+    fn is_link_well_formed(&self, link_field: LinkField) -> bool {
+        match self.anchor_link(link_field) {
             Link::ToSelf => true,
             Link::Direct(Through::Includes(peer)) => self.body.includes.contains_key(peer),
             Link::Direct(Through::Witness(peer)) => self.body.witness.contains_key(peer),
@@ -323,66 +330,47 @@ impl Point {
         }
     }
 
-    // TODO maybe implement field accessors parameterized by combination of enums
-
-    pub fn anchor_trigger_round(&self) -> Round {
-        self.get_linked_to_round(&self.body.anchor_trigger)
+    pub fn anchor_link(&self, link_field: LinkField) -> &'_ Link {
+        match link_field {
+            LinkField::Trigger => &self.body.anchor_trigger,
+            LinkField::Proof => &self.body.anchor_proof,
+        }
     }
 
-    pub fn anchor_proof_round(&self) -> Round {
-        self.get_linked_to_round(&self.body.anchor_proof)
-    }
-
-    pub fn anchor_trigger_id(&self) -> PointId {
-        self.get_linked_to(&self.body.anchor_trigger)
-    }
-
-    pub fn anchor_proof_id(&self) -> PointId {
-        self.get_linked_to(&self.body.anchor_proof)
-    }
-
-    pub fn anchor_trigger_through(&self) -> PointId {
-        self.get_linked_through(&self.body.anchor_trigger)
-    }
-
-    pub fn anchor_proof_through(&self) -> PointId {
-        self.get_linked_through(&self.body.anchor_proof)
-    }
-
-    fn get_linked_to_round(&self, link: &Link) -> Round {
-        match link {
-            Link::ToSelf => self.body.location.round.clone(),
+    pub fn anchor_round(&self, link_field: LinkField) -> Round {
+        match self.anchor_link(link_field) {
+            Link::ToSelf => self.body.location.round,
             Link::Direct(Through::Includes(_)) => self.body.location.round.prev(),
             Link::Direct(Through::Witness(_)) => self.body.location.round.prev().prev(),
-            Link::Indirect { to, .. } => to.location.round.clone(),
+            Link::Indirect { to, .. } => to.location.round,
         }
     }
 
-    fn get_linked_to(&self, link: &Link) -> PointId {
-        match link {
-            Link::ToSelf => self.id(),
-            Link::Direct(Through::Includes(peer)) => self.get_linked(peer, true),
-            Link::Direct(Through::Witness(peer)) => self.get_linked(peer, false),
+    /// the final destination of an anchor link
+    pub fn anchor_id(&self, link_field: LinkField) -> PointId {
+        match self.anchor_link(link_field) {
             Link::Indirect { to, .. } => to.clone(),
+            _direct => self.anchor_link_id(link_field),
         }
     }
 
-    fn get_linked_through(&self, link: &Link) -> PointId {
-        match link {
+    /// next point in path from `&self` to the anchor
+    pub fn anchor_link_id(&self, link_field: LinkField) -> PointId {
+        let (peer, is_in_includes) = match self.anchor_link(link_field) {
+            Link::ToSelf => return self.id(),
+            Link::Direct(Through::Includes(peer)) => (peer, true),
+            Link::Direct(Through::Witness(peer)) => (peer, false),
             Link::Indirect {
                 path: Through::Includes(peer),
                 ..
-            } => self.get_linked(peer, true),
+            } => (peer, true),
             Link::Indirect {
                 path: Through::Witness(peer),
                 ..
-            } => self.get_linked(peer, false),
-            _ => self.get_linked_to(link),
-        }
-    }
+            } => (peer, false),
+        };
 
-    fn get_linked(&self, peer: &PeerId, through_includes: bool) -> PointId {
-        let (through, round) = if through_includes {
+        let (map, round) = if is_in_includes {
             (&self.body.includes, self.body.location.round.prev())
         } else {
             (&self.body.witness, self.body.location.round.prev().prev())
@@ -390,9 +378,9 @@ impl Point {
         PointId {
             location: Location {
                 round,
-                author: peer.clone(),
+                author: *peer,
             },
-            digest: through
+            digest: map
                 .get(peer)
                 .expect("Coding error: usage of ill-formed point")
                 .clone(),

@@ -15,6 +15,7 @@ path = "examples/consensus_node.rs"
 [dependencies]
 ahash = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 bincode = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 dashmap = { workspace = true }
@@ -39,7 +40,7 @@ tracing-appender = { workspace = true }
 # local deps
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-util = { workspace = true, features = ["test"] }
+tycho-util = { workspace = true }
 
 [dev-dependencies]
 parking_lot = { workspace = true, features = ["deadlock_detection"] }
@@ -49,6 +50,8 @@ tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ]}
+
+tycho-util = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true

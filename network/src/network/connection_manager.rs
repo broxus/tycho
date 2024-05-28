@@ -505,13 +505,15 @@ impl ConnectionManager {
     fn dial_peer(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
         async fn dial_peer_task(
             seqno: u32,
-            connecting: Result<Connecting>,
+            endpoint: Arc<Endpoint>,
             address: Address,
             peer_id: PeerId,
             config: Arc<NetworkConfig>,
         ) -> ConnectingOutput {
             let fut = async {
-                let connection = ConnectionClosedOnDrop::new(connecting?.await?);
+                let address = address.resolve().await?;
+                let connecting = endpoint.connect_with_expected_id(&address, &peer_id)?;
+                let connection = ConnectionClosedOnDrop::new(connecting.await?);
                 handshake(&connection).await?;
                 Ok(connection)
             };
@@ -580,14 +582,10 @@ impl ConnectionManager {
         };
 
         if let Some(entry) = entry {
-            let target_address = address.clone();
-            let connecting = self
-                .endpoint
-                .connect_with_expected_id(address.clone(), peer_id);
             entry.abort_handle = Some(self.pending_connections.spawn(dial_peer_task(
                 entry.last_seqno,
-                connecting,
-                target_address,
+                self.endpoint.clone(),
+                address.clone(),
                 *peer_id,
                 self.config.clone(),
             )));

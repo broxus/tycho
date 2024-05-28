@@ -57,7 +57,7 @@ impl Broadcaster {
         );
         task.run().await;
         self.bcasts_outdated.extend(task.bcast_futs);
-        self.bcasts_outdated.extend(task.bcasts_outdated);
+        //self.bcasts_outdated.extend(task.bcasts_outdated); // TODO: move only broadcasts from actual round and ignore previous
         task.signatures
     }
 }
@@ -66,7 +66,6 @@ struct BroadcasterTask {
     log_id: Arc<String>,
     dispatcher: Dispatcher,
     bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
-
     current_round: Round,
     point_digest: Digest,
     bcaster_signal: mpsc::Sender<BroadcasterSignal>,
@@ -101,7 +100,7 @@ impl BroadcasterTask {
     ) -> Self {
         let peer_updates = peer_schedule.updates();
         let signers = peer_schedule
-            .peers_for(&point.body.location.round.next())
+            .peers_for(point.body.location.round.next())
             .iter()
             .map(|(peer_id, _)| *peer_id)
             .collect::<FastHashSet<_>>();
@@ -113,12 +112,11 @@ impl BroadcasterTask {
             collectors.len()
         );
         let bcast_request = Dispatcher::broadcast_request(&point);
-        let sig_request = Dispatcher::signature_request(&point.body.location.round);
+        let sig_request = Dispatcher::signature_request(point.body.location.round);
         Self {
             log_id,
             dispatcher: dispatcher.clone(),
             bcasts_outdated,
-
             current_round: point.body.location.round,
             point_digest: point.digest.clone(),
             bcaster_signal,
@@ -163,7 +161,7 @@ impl BroadcasterTask {
         }
         loop {
             tokio::select! {
-                Some(_) = self.bcasts_outdated.next() => {} // let them complete
+                 Some(_) = self.bcasts_outdated.next() => {} // let them complete
                 Some(collector_signal) = self.collector_signal.recv() => {
                     if self.should_finish(collector_signal).await {
                         break;
@@ -224,14 +222,14 @@ impl BroadcasterTask {
                 // self.bcast_peers.push(peer_id); // let it retry
                 self.sig_peers.insert(peer_id); // lighter weight retry loop
                 tracing::error!(
-                    "{} @ {:?} bcaster <= collector {peer_id:.4?} broadcast error : {error}",
+                    "{} @ {:?} bcaster => collector {peer_id:.4?} error : {error}",
                     self.log_id,
                     self.current_round
                 );
             }
             Ok(_) => {
                 tracing::debug!(
-                    "{} @ {:?} bcaster <= collector {peer_id:.4?} : broadcast accepted",
+                    "{} @ {:?} bcaster => collector {peer_id:.4?} : broadcast accepted",
                     self.log_id,
                     self.current_round
                 );
@@ -290,9 +288,9 @@ impl BroadcasterTask {
     }
 
     fn broadcast(&mut self, peer_id: &PeerId) {
-        if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
+        if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.bcast_futs
-                .push(self.dispatcher.send(&peer_id, &self.bcast_request));
+                .push(self.dispatcher.send(peer_id, &self.bcast_request));
             tracing::debug!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast",
                 self.log_id,
@@ -308,9 +306,9 @@ impl BroadcasterTask {
     }
 
     fn request_signature(&mut self, peer_id: &PeerId) {
-        if self.removed_peers.is_empty() || !self.removed_peers.remove(&peer_id) {
+        if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.sig_futs
-                .push(self.dispatcher.query(&peer_id, &self.sig_request));
+                .push(self.dispatcher.query(peer_id, &self.sig_request));
             tracing::debug!(
                 "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request",
                 self.log_id,
