@@ -183,24 +183,22 @@ impl ExecutionManager {
         let (config, params) = self.get_execute_params(shard_account.lt.clone())?;
         let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
             let mut account_root = shard_account.account_root.clone();
-            let transaction = match &new_msg {
+            let mut transaction = match &new_msg {
                 AsyncMessage::Recover(new_msg_cell)
                 | AsyncMessage::Mint(new_msg_cell)
                 | AsyncMessage::Ext(_, new_msg_cell)
                 | AsyncMessage::Int(_, new_msg_cell, _)
                 | AsyncMessage::NewInt(_, new_msg_cell) => {
-                    let mut transaction_res =
-                        execute_ordinary_message(new_msg_cell, &mut account_root, params, &config);
-                    // TODO replace with batch set
-                    if let Ok(transaction) = transaction_res.as_mut() {
-                        shard_account.add_transaction(transaction, account_root)?;
-                    }
-                    transaction_res
+                    execute_ordinary_message(new_msg_cell, &mut account_root, params, &config)
                 }
                 AsyncMessage::TickTock(ticktock_) => {
                     execute_ticktock_message(*ticktock_, &mut account_root, params, &config)
                 }
             };
+            if let Ok(transaction) = transaction.as_mut() {
+                // TODO replace with batch set
+                shard_account.add_transaction(transaction, account_root)?;
+            }
             Ok((transaction, new_msg, shard_account))
                 as Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)>
         })

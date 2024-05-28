@@ -7,8 +7,8 @@ use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, Usage
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-    CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OutMsg,
-    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
+    CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OptionalAccount,
+    OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
     ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, StateInit, TickTock,
     Transaction, ValueFlow,
 };
@@ -430,7 +430,7 @@ pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, Accou
 #[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
-    pub shard_account: ShardAccount,
+    pub shard_account: ShardAccount, // TODO: refactor account root and shard account into one
     pub orig_libs: Dict<HashBytes, SimpleLib>,
     pub account_root: Cell,
     pub last_trans_hash: HashBytes,
@@ -548,6 +548,11 @@ impl ShardAccountStuff {
             new: new_state,
         })?;
         self.account_root = account_root;
+        self.shard_account = ShardAccount {
+            account: Lazy::from_raw(self.account_root.clone()),
+            last_trans_hash: self.last_trans_hash.clone(),
+            last_trans_lt: self.last_trans_lt,
+        };
         let mut builder = everscale_types::cell::CellBuilder::new();
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
         let tr_root = builder.build()?;
