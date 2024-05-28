@@ -529,8 +529,6 @@ impl CollatorStdImpl {
         count: usize,
         collation_data: &mut BlockCollationData,
     ) -> Result<(Vec<(MsgInfo, Cell)>, bool)> {
-        // TODO: was written in a hurry, should be reviewed and optimized
-
         tracing::trace!(
             target: tracing_targets::COLLATOR,
             "Collator ({}): read_next_externals: shard: {}, count: {}",

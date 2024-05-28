@@ -114,13 +114,13 @@ pub(super) async fn stub_get_anchor_by_id(
 
         if res.is_some() {
             if first_attempt {
-                tracing::info!(
+                tracing::debug!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
                     "Requested anchor (id: {}) found in local cache",
                     anchor_id,
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
                     "STUB: Returned anchor (id: {}) from mempool (responded in {} ms)",
                     anchor_id,
@@ -129,7 +129,7 @@ pub(super) async fn stub_get_anchor_by_id(
             }
             return Ok(res);
         } else if first_attempt {
-            tracing::info!(
+            tracing::debug!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 "There is no required anchor (id: {}) in cache. STUB: Requested it from mempool. Waiting...",
                 anchor_id,
@@ -148,18 +148,11 @@ pub(super) async fn stub_get_next_anchor(
     anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
     prev_anchor_id: MempoolAnchorId,
 ) -> Result<Arc<MempoolAnchor>> {
-    tracing::info!(
-        target: tracing_targets::MEMPOOL_ADAPTER,
-        "Trying to enquire read lock on anchors cache to get anchor (id: {})...",
-        prev_anchor_id,
-    );
     let mut stub_first_attempt = true;
     let mut request_timer = std::time::Instant::now();
     loop {
         {
-            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Trying to enquire read lock on anchors cache...");
             let anchors_cache_r = anchors_cache.read();
-            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Read lock on anchors cache enquired");
 
             let mut range = anchors_cache_r.range((
                 std::ops::Bound::Excluded(prev_anchor_id),
@@ -168,14 +161,14 @@ pub(super) async fn stub_get_next_anchor(
 
             if let Some((next_id, next)) = range.next() {
                 if stub_first_attempt {
-                    tracing::info!(
+                    tracing::debug!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "Found in cache next anchor (id: {}) after specified previous (id: {})",
                         next_id,
                         prev_anchor_id,
                     );
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
                         "STUB: Returned next anchor (id: {}) after previous (id: {}) from mempool (responded in {} ms)",
                         next_id,
@@ -185,7 +178,7 @@ pub(super) async fn stub_get_next_anchor(
                 }
                 return Ok(next.clone());
             } else if stub_first_attempt {
-                tracing::info!(
+                tracing::debug!(
                     target: tracing_targets::MEMPOOL_ADAPTER,
                     "There is no next anchor in cache after previous (id: {}). STUB: Requested it from mempool. Waiting...",
                     prev_anchor_id
@@ -198,7 +191,6 @@ pub(super) async fn stub_get_next_anchor(
             request_timer = std::time::Instant::now();
         }
         stub_first_attempt = false;
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Waiting for 1020 ms...");
         tokio::time::sleep(tokio::time::Duration::from_millis(1020)).await;
     }
 }
