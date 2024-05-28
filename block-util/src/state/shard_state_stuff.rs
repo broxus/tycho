@@ -134,7 +134,26 @@ impl AsRef<ShardStateUnsplit> for ShardStateStuff {
     }
 }
 
-struct Inner {
+unsafe impl arc_swap::RefCnt for ShardStateStuff {
+    type Base = Inner;
+
+    fn into_ptr(me: Self) -> *mut Self::Base {
+        arc_swap::RefCnt::into_ptr(me.inner)
+    }
+
+    fn as_ptr(me: &Self) -> *mut Self::Base {
+        arc_swap::RefCnt::as_ptr(&me.inner)
+    }
+
+    unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
+        Self {
+            inner: arc_swap::RefCnt::from_ptr(ptr),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct Inner {
     block_id: BlockId,
     shard_state: Box<ShardStateUnsplit>,
     shard_state_extra: Option<McStateExtra>,

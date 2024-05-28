@@ -2856,6 +2856,7 @@ name = "tycho-block-util"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "bytes",
  "everscale-types",
  "hex",
