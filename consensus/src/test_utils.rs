@@ -1,12 +1,11 @@
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use anyhow::Context;
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use itertools::Itertools;
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
@@ -14,9 +13,8 @@ use tycho_network::{
 };
 use tycho_util::time::now_sec;
 
-use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
-use crate::models::{Link, LinkField, Location, Point, PointBody, PointId, Round, Ugly, UnixTime};
+use crate::models::{Link, Location, Point, PointBody, PointId, Round, Ugly, UnixTime};
 
 const GENESIS_SECRET_KEY_BYTES: [u8; 32] = [0xAE; 32];
 const GENESIS_MILLIS: u64 = 1713225727398;
@@ -177,7 +175,7 @@ pub async fn check_anchors(
         }
 
         guard.retain(|key, value| {
-            if (value.len() == nodes_count) {
+            if value.len() == nodes_count {
                 refs_guard.remove(key);
                 false
             } else {
