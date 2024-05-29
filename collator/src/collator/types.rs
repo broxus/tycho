@@ -7,8 +7,8 @@ use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, Usage
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-    CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OptionalAccount,
-    OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
+    CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OutMsg,
+    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
     ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, StateInit, TickTock,
     Transaction, ValueFlow,
 };
@@ -442,29 +442,6 @@ pub(super) struct ShardAccountStuff {
 }
 
 impl ShardAccountStuff {
-    // pub fn update_shard_state(
-    //     &mut self,
-    //     shard_accounts: &mut ShardAccounts,
-    // ) -> Result<AccountBlock> {
-    // let account = self.shard_account.load_account()?;
-    // if account.is_none() {
-    //     // shard_accounts.remove(self.account_addr.clone())?;
-    // } else {
-    //     let shard_acc = ShardAccount::with_account_root(
-    //         self.account_root(),
-    //         self.last_trans_hash.clone(),
-    //         self.last_trans_lt,
-    //     );
-    //     let value = shard_acc.write_to_new_cell()?;
-    //     shard_accounts.set_builder_serialized(
-    //         self.account_addr().clone(),
-    //         &value,
-    //         &account.aug()?,
-    //     )?;
-    // }
-    // AccountBlock::with_params(&self.account_addr, &self.transactions, &self.state_update)
-    // }
-
     pub fn update_public_libraries(&self, libraries: &mut Dict<HashBytes, LibDescr>) -> Result<()> {
         let opt_account = self.shard_account.account.load()?;
         let state_init = match opt_account.state() {
@@ -502,7 +479,7 @@ impl ShardAccountStuff {
         let binding = shard_account.account.clone();
         let account_root = binding.inner();
         let shard_account_state = account_root.repr_hash();
-        let last_trans_hash = shard_account.last_trans_hash.clone();
+        let last_trans_hash = shard_account.last_trans_hash;
         let last_trans_lt = shard_account.last_trans_lt;
         let orig_libs = shard_account
             .load_account()?
@@ -527,8 +504,8 @@ impl ShardAccountStuff {
             lt,
             transactions: Default::default(),
             state_update: Lazy::new(&HashUpdate {
-                old: shard_account_state.clone(),
-                new: shard_account_state.clone(),
+                old: *shard_account_state,
+                new: *shard_account_state,
             })?,
             transactions_count: 0,
         })
@@ -538,26 +515,26 @@ impl ShardAccountStuff {
         transaction: &mut Transaction,
         account_root: Cell,
     ) -> Result<()> {
-        transaction.prev_trans_hash = self.last_trans_hash.clone();
+        transaction.prev_trans_hash = self.last_trans_hash;
         transaction.prev_trans_lt = self.last_trans_lt;
 
-        let new_state = account_root.repr_hash().clone();
+        let new_state = account_root.repr_hash();
         let old_state = self.state_update.load()?.old;
         self.state_update = Lazy::new(&HashUpdate {
             old: old_state,
-            new: new_state,
+            new: *new_state,
         })?;
         self.account_root = account_root;
         self.shard_account = ShardAccount {
             account: Lazy::from_raw(self.account_root.clone()),
-            last_trans_hash: self.last_trans_hash.clone(),
+            last_trans_hash: self.last_trans_hash,
             last_trans_lt: self.last_trans_lt,
         };
         let mut builder = everscale_types::cell::CellBuilder::new();
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
         let tr_root = builder.build()?;
 
-        self.last_trans_hash = tr_root.repr_hash().clone();
+        self.last_trans_hash = *tr_root.repr_hash();
         self.last_trans_lt = transaction.lt;
 
         // TODO calculate key
@@ -580,7 +557,7 @@ impl ShardAccountStuff {
             self.account_addr
         );
 
-        let mut lib_descr = match libraries.get(&key)? {
+        let mut lib_descr = match libraries.get(key)? {
             Some(ld) => ld,
             None => bail!(
                 "cannot remove public library {} of account {} because this public \
@@ -599,7 +576,7 @@ impl ShardAccountStuff {
             );
         }
 
-        if !lib_descr.publishers.remove(&self.account_addr)?.is_some() {
+        if lib_descr.publishers.remove(self.account_addr)?.is_none() {
             bail!(
                 "cannot remove public library {} of account {} because this public library \
                 LibDescr record does not list this account as one of publishers",
@@ -613,9 +590,9 @@ impl ShardAccountStuff {
                 "library {} has no publishers left, removing altogether",
                 key
             );
-            libraries.remove(&key)?;
+            libraries.remove(key)?;
         } else {
-            libraries.set(&key, &lib_descr)?;
+            libraries.set(key, &lib_descr)?;
         }
 
         Ok(())
@@ -637,13 +614,13 @@ impl ShardAccountStuff {
             bail!("Can't add library {} because it mismatch given key", key);
         }
 
-        let lib_descr = if let Some(mut old_lib_descr) = libraries.get(&key)? {
+        let lib_descr = if let Some(mut old_lib_descr) = libraries.get(key)? {
             if old_lib_descr.lib.repr_hash() != library.repr_hash() {
                 bail!("cannot add public library {} of account {} because existing LibDescr \
                     record for this library does not contain a library root cell with required hash",
                     key, self.account_addr);
             }
-            if old_lib_descr.publishers.get(&self.account_addr)?.is_some() {
+            if old_lib_descr.publishers.get(self.account_addr)?.is_some() {
                 bail!(
                     "cannot add public library {} of account {} because this public library's \
                     LibDescr record already lists this account as a publisher",
@@ -651,18 +628,18 @@ impl ShardAccountStuff {
                     self.account_addr
                 );
             }
-            old_lib_descr.publishers.set(&self.account_addr, &())?;
+            old_lib_descr.publishers.set(self.account_addr, ())?;
             old_lib_descr
         } else {
             let mut dict = Dict::new();
-            dict.set(&self.account_addr, &())?;
+            dict.set(self.account_addr, ())?;
             LibDescr {
                 lib: library.clone(),
                 publishers: dict,
             }
         };
 
-        libraries.set(&key, &lib_descr)?;
+        libraries.set(key, &lib_descr)?;
 
         Ok(())
     }

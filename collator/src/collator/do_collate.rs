@@ -1084,8 +1084,8 @@ impl CollatorStdImpl {
         );
 
         let max_lt = exec_manager.max_lt.load(Ordering::Acquire);
-        let shard_account = exec_manager.get_shard_account_stuff(account, max_lt)?;
-        let tick_tock = shard_account
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, max_lt)?;
+        let tick_tock = shard_account_stuff
             .shard_account
             .load_account()?
             .map(|account| {

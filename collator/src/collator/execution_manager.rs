@@ -55,6 +55,7 @@ pub(super) struct ExecutionManager {
 
 impl ExecutionManager {
     /// constructor
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gen_utime: u32,
         start_lt: u64,
@@ -66,7 +67,6 @@ impl ExecutionManager {
         group_limit: u32,
         shard_accounts: ShardAccounts,
     ) -> Self {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "shard_accounts = {shard_accounts:?}");
         Self {
             libraries,
             gen_utime,
@@ -105,8 +105,8 @@ impl ExecutionManager {
         // TODO check externals is not exist accounts needed ?
         for (account_id, msg) in group {
             let max_lt = self.max_lt.load(Ordering::Acquire);
-            let shard_account = self.get_shard_account_stuff(account_id, max_lt)?;
-            futures.push(self.execute_message(account_id, msg, shard_account));
+            let shard_account_stuff = self.get_shard_account_stuff(account_id, max_lt)?;
+            futures.push(self.execute_message(account_id, msg, shard_account_stuff));
         }
         let now = std::time::Instant::now();
 
@@ -125,9 +125,12 @@ impl ExecutionManager {
         drop(futures);
 
         let mut result = vec![];
-        for (transaction, msg, shard_account) in executed_messages {
-            self.update_shard_account(shard_account.account_addr, shard_account.clone())?;
-            result.push((shard_account.account_addr, msg, transaction?));
+        for (transaction, msg, shard_account_stuff) in executed_messages {
+            result.push((shard_account_stuff.account_addr, msg, transaction?));
+            self.update_shard_account_stuff_cache(
+                shard_account_stuff.account_addr,
+                shard_account_stuff,
+            )?;
         }
 
         let duration = now.elapsed().as_micros() as u64;
@@ -143,7 +146,7 @@ impl ExecutionManager {
         account_id: AccountId,
         max_lt: u64,
     ) -> Result<ShardAccountStuff> {
-        let shard_account = if let Some(a) = self.changed_accounts.get(&account_id) {
+        let shard_account_stuff = if let Some(a) = self.changed_accounts.get(&account_id) {
             a.clone()
         } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
             ShardAccountStuff::new(account_id, shard_account.clone(), max_lt)?
@@ -157,7 +160,7 @@ impl ExecutionManager {
                 .clone();
             ShardAccountStuff::new(account_id, shard_account, max_lt)?
         };
-        Ok(shard_account)
+        Ok(shard_account_stuff)
     }
 
     /// execute message
@@ -165,7 +168,7 @@ impl ExecutionManager {
         &self,
         account_id: AccountId,
         new_msg: AsyncMessage,
-        mut shard_account: ShardAccountStuff,
+        mut shard_account_stuff: ShardAccountStuff,
     ) -> Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)> {
         tracing::trace!(
             target: tracing_targets::EXEC_MANAGER,
@@ -180,9 +183,9 @@ impl ExecutionManager {
             },
             account_id,
         );
-        let (config, params) = self.get_execute_params(shard_account.lt.clone())?;
+        let (config, params) = self.get_execute_params(shard_account_stuff.lt.clone())?;
         let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
-            let mut account_root = shard_account.account_root.clone();
+            let mut account_root = shard_account_stuff.account_root.clone();
             let mut transaction = match &new_msg {
                 AsyncMessage::Recover(new_msg_cell)
                 | AsyncMessage::Mint(new_msg_cell)
@@ -197,9 +200,9 @@ impl ExecutionManager {
             };
             if let Ok(transaction) = transaction.as_mut() {
                 // TODO replace with batch set
-                shard_account.add_transaction(transaction, account_root)?;
+                shard_account_stuff.add_transaction(transaction, account_root)?;
             }
-            Ok((transaction, new_msg, shard_account))
+            Ok((transaction, new_msg, shard_account_stuff))
                 as Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)>
         })
         .await??;
@@ -212,7 +215,7 @@ impl ExecutionManager {
         Ok((transaction_res, msg, shard_account_stuff))
     }
 
-    fn update_shard_account(
+    fn update_shard_account_stuff_cache(
         &mut self,
         account_id: AccountId,
         mut account_stuff: ShardAccountStuff,
@@ -236,10 +239,11 @@ impl ExecutionManager {
     ) -> Result<Box<Transaction>> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
         let max_lt = self.max_lt.load(Ordering::Acquire);
-        let shard_account = self.get_shard_account_stuff(account_id, max_lt)?;
-        let (transaction, _, shard_account) =
-            self.execute_message(account_id, msg, shard_account).await?;
-        self.update_shard_account(account_id, shard_account)?;
+        let shard_account_stuff = self.get_shard_account_stuff(account_id, max_lt)?;
+        let (transaction, _, shard_account_stuff) = self
+            .execute_message(account_id, msg, shard_account_stuff)
+            .await?;
+        self.update_shard_account_stuff_cache(account_id, shard_account_stuff)?;
         transaction
     }
 

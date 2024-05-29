@@ -33,31 +33,31 @@ impl CollatorStdImpl {
 
         let new_config_opt: Option<BlockchainConfig> = None;
 
-        for (account_id, updated_shard_account) in exec_manager.changed_accounts.drain() {
+        for (account_id, updated_shard_account_stuff) in exec_manager.changed_accounts.drain() {
             // TODO: get updated blockchain config if it stored in account
-            let account = updated_shard_account.shard_account.load_account()?;
+            let account = updated_shard_account_stuff.shard_account.load_account()?;
             match account {
                 None => {
-                    shard_accounts.remove(updated_shard_account.account_addr)?;
+                    shard_accounts.remove(updated_shard_account_stuff.account_addr)?;
                 }
                 Some(account) => {
                     shard_accounts.set(
-                        updated_shard_account.account_addr,
+                        updated_shard_account_stuff.account_addr,
                         &DepthBalanceInfo {
                             split_depth: 0, // TODO: fix
                             balance: account.balance,
                         },
-                        &updated_shard_account.shard_account,
+                        &updated_shard_account_stuff.shard_account,
                     )?;
                 }
             }
             if collation_data.block_id_short.shard.is_masterchain() {
-                updated_shard_account.update_public_libraries(&mut exec_manager.libraries)?;
+                updated_shard_account_stuff.update_public_libraries(&mut exec_manager.libraries)?;
             }
             let acc_block = AccountBlock {
-                account: updated_shard_account.account_addr,
-                transactions: updated_shard_account.transactions,
-                state_update: updated_shard_account.state_update, // TODO: fix state update
+                account: updated_shard_account_stuff.account_addr,
+                transactions: updated_shard_account_stuff.transactions,
+                state_update: updated_shard_account_stuff.state_update, // TODO: fix state update
             };
 
             if !acc_block.transactions.is_empty() {
@@ -68,7 +68,6 @@ impl CollatorStdImpl {
         // TODO: update new_config_opt from hard fork
 
         // calc value flow
-        // TODO: init collation_data.value_flow
         let mut value_flow = collation_data.value_flow.clone();
 
         let mut in_msgs = InMsgDescr::new();
@@ -76,10 +75,8 @@ impl CollatorStdImpl {
         for (msg_id, msg) in collation_data.in_msgs.iter() {
             in_msgs.set(msg_id, msg.compute_fees()?, msg)?;
         }
-
-        // TODO: init collation_data.in_msgs
         value_flow.imported = in_msgs.root_extra().value_imported.clone();
-        // TODO: init collation_data.out_msgs
+
         let mut out_msgs = OutMsgDescr::new();
         // TODO: use more effective algorithm than iter and set
         for (msg_id, msg) in collation_data.out_msgs.iter() {
