@@ -77,17 +77,15 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    pub fn builder() -> RpcStateBuilder<()> {
+    pub fn builder() -> RpcStateBuilder<((), ())> {
         RpcStateBuilder {
             config: RpcConfig::default(),
-            mandatory_fields: (),
+            mandatory_fields: ((), ()),
         }
     }
 
-    pub fn make_endpoint(&self) -> RpcEndpoint {
-        RpcEndpoint {
-            state: self.clone(),
-        }
+    pub async fn bind_endpoint(&self) -> Result<RpcEndpoint> {
+        RpcEndpoint::bind(self.clone()).await
     }
 
     pub fn config(&self) -> &RpcConfig {

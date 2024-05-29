@@ -14,7 +14,6 @@ pub trait ParseParams {
     fn parse_params(self, params: &RawValue) -> Result<Self::Params, serde_json::Error>;
 }
 
-#[macro_export]
 macro_rules! declare_jrpc_method {
     (
         $(#[$($meta:tt)*])*
@@ -54,6 +53,8 @@ macro_rules! declare_jrpc_method {
         }
     };
 }
+
+pub(crate) use declare_jrpc_method;
 
 pub struct Jrpc<T: ParseParams> {
     pub id: i64,

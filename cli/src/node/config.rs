@@ -9,6 +9,7 @@ use tycho_core::block_strider::BlockchainBlockProviderConfig;
 use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
+use tycho_rpc::RpcConfig;
 use tycho_storage::StorageConfig;
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +58,8 @@ pub struct NodeConfig {
     pub blockchain_rpc_service: BlockchainRpcServiceConfig,
 
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
+
+    pub rpc: Option<RpcConfig>,
 }
 
 impl Default for NodeConfig {
@@ -73,6 +76,7 @@ impl Default for NodeConfig {
             storage: StorageConfig::default(),
             blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
+            rpc: Some(RpcConfig::default()),
         }
     }
 }

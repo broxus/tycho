@@ -6,22 +6,27 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::RequestExt;
 use futures_util::Future;
+use tokio::net::TcpListener;
 
 use crate::state::RpcState;
 
 mod jrpc;
 
 pub struct RpcEndpoint {
-    pub(crate) state: RpcState,
+    listener: TcpListener,
+    state: RpcState,
 }
 
 impl RpcEndpoint {
-    pub fn serve(self) -> Result<impl Future<Output = ()> + Send + 'static> {
+    pub async fn bind(state: RpcState) -> Result<Self> {
+        let listener = TcpListener::bind(state.config().listen_addr).await?;
+        Ok(Self { listener, state })
+    }
+
+    pub async fn serve(self) -> std::io::Result<()> {
         use tower::ServiceBuilder;
         use tower_http::cors::CorsLayer;
         use tower_http::timeout::TimeoutLayer;
-
-        let listen_addr = self.state.config().listen_addr;
 
         // Prepare middleware
         let service = ServiceBuilder::new()
@@ -42,9 +47,7 @@ impl RpcEndpoint {
             .with_state(self.state);
 
         // Start server
-        let listener = std::net::TcpListener::bind(listen_addr)?;
-        let future = axum::serve(listener.try_into()?, router);
-        Ok(async move { future.await.unwrap() })
+        axum::serve(self.listener, router).await
     }
 }
 

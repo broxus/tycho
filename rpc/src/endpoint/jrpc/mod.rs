@@ -10,12 +10,22 @@ use serde::{Deserialize, Serialize};
 use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
 use tycho_util::serde_helpers;
 
-use self::extractor::{Jrpc, JrpcErrorResponse, JrpcOkResponse};
-use crate::declare_jrpc_method;
+use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
 use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
 mod extractor;
+
+declare_jrpc_method! {
+    pub enum MethodParams: Method {
+        SendMessage(SendMessageRequest),
+        GetContractState(GetContractStateRequest),
+        GetAccountsByCodeHash(GetAccountsByCodeHashRequest),
+        GetTransactionsList(GetTransactionsListRequest),
+        GetTransaction(GetTransactionRequest),
+        GetDstTransaction(GetDstTransactionRequest),
+    }
+}
 
 pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response {
     match req.params {
@@ -107,17 +117,6 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
             Err(e) => error_to_response(req.id, e),
         },
-    }
-}
-
-declare_jrpc_method! {
-    pub enum MethodParams: Method {
-        SendMessage(SendMessageRequest),
-        GetContractState(GetContractStateRequest),
-        GetAccountsByCodeHash(GetAccountsByCodeHashRequest),
-        GetTransactionsList(GetTransactionsListRequest),
-        GetTransaction(GetTransactionRequest),
-        GetDstTransaction(GetDstTransactionRequest),
     }
 }
 

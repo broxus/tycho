@@ -27,7 +27,7 @@ use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     OptionalBlockStuff, PersistentBlockStriderState, StateSubscriber, StateSubscriberContext,
-    StorageBlockProvider,
+    StateSubscriberExt, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
@@ -35,6 +35,7 @@ use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
 };
+use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
@@ -242,6 +243,7 @@ pub struct Node {
 
     pub state_tracker: MinRefMcStateTracker,
     pub blockchain_block_provider_config: BlockchainBlockProviderConfig,
+    pub rpc_config: Option<RpcConfig>,
 }
 
 impl Node {
@@ -348,6 +350,7 @@ impl Node {
             storage,
             state_tracker,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
+            rpc_config: node_config.rpc,
         })
     }
 
@@ -476,6 +479,32 @@ impl Node {
     }
 
     async fn run(&self, last_block_id: &BlockId) -> Result<()> {
+        // Create RPC
+        let rpc_state = if let Some(config) = &self.rpc_config {
+            let rpc_state = RpcState::builder()
+                .with_config(config.clone())
+                .with_storage(self.storage.clone())
+                .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
+                .build();
+
+            let endpoint = rpc_state
+                .bind_endpoint()
+                .await
+                .wrap_err("failed to setup RPC server endpoint")?;
+
+            tracing::info!(listen_addr = %config.listen_addr, "RPC server started");
+            tokio::task::spawn(async move {
+                if let Err(e) = endpoint.serve().await {
+                    tracing::error!("RPC server failed: {e:?}");
+                }
+                tracing::info!("RPC server stopped");
+            });
+
+            Some(rpc_state)
+        } else {
+            None
+        };
+
         // Ensure that there are some neighbours
         tracing::info!("waiting for initial neighbours");
         self.blockchain_rpc_client
@@ -593,7 +622,7 @@ impl Node {
             .with_state_subscriber(
                 self.state_tracker.clone(),
                 self.storage.clone(),
-                collator_state_subscriber,
+                collator_state_subscriber.chain(rpc_state),
             )
             .build();
 

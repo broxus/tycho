@@ -8,7 +8,7 @@ use tycho_util::serde_helpers;
 pub struct RpcConfig {
     /// TCP socket address to listen for incoming RPC connections.
     ///
-    /// Default: `0.0.0.0:80`
+    /// Default: `0.0.0.0:8000`
     pub listen_addr: SocketAddr,
 
     /// Whether to generate a stub keyblock from zerostate.
@@ -27,7 +27,7 @@ pub struct RpcConfig {
 impl Default for RpcConfig {
     fn default() -> Self {
         Self {
-            listen_addr: (Ipv4Addr::UNSPECIFIED, 80).into(),
+            listen_addr: (Ipv4Addr::UNSPECIFIED, 8000).into(),
             generate_stub_keyblock: false,
             transactions_gc: Some(Default::default()),
         }
