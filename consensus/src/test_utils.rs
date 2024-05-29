@@ -1,6 +1,12 @@
+use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use anyhow::Context;
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
+use itertools::Itertools;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
@@ -8,8 +14,9 @@ use tycho_network::{
 };
 use tycho_util::time::now_sec;
 
+use crate::dag::DagRound;
 use crate::engine::MempoolConfig;
-use crate::models::{Link, Location, Point, PointBody, UnixTime};
+use crate::models::{Link, LinkField, Location, Point, PointBody, PointId, Round, Ugly, UnixTime};
 
 const GENESIS_SECRET_KEY_BYTES: [u8; 32] = [0xAE; 32];
 const GENESIS_MILLIS: u64 = 1713225727398;
@@ -80,12 +87,110 @@ pub fn from_validator<T: ToSocket>(
     if let Some(remote_addr) = remote_addr {
         network_builder = network_builder.with_remote_addr(remote_addr);
     }
+
     let network = network_builder.build(bind_address, router).unwrap();
 
     dht_tasks.spawn(&network);
     overlay_tasks.spawn(&network);
 
     (dht_service.make_client(&network), overlay_service)
+}
+
+pub async fn check_anchors(
+    mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
+    key_pair: Arc<KeyPair>,
+    anchors_hashmap: Arc<tokio::sync::Mutex<HashMap<Round, HashMap<Arc<String>, PointId>>>>,
+    known_round_refs: Arc<tokio::sync::Mutex<HashMap<Round, Vec<PointId>>>>,
+    nodes_count: usize,
+) {
+    let peer_id = Arc::new(format!("{:?}", PeerId::from(key_pair.public_key).ugly()));
+
+    loop {
+        let (anchor, refs) = committed
+            .recv()
+            .await
+            .expect("committed anchor reader must be alive");
+        let anchor_id = anchor.id();
+
+        let anchor_round = anchor.body.location.round;
+        let mut guard = anchors_hashmap.lock().await;
+
+        // check if we don't skip round
+        match guard.entry(anchor_round.prev()) {
+            Occupied(entry) => {
+                let round_anc = entry.get();
+                if round_anc.get(&peer_id).is_none() {
+                    panic!(
+                        "Node {} skipped anchor at {:?} but commited anchor at {:?}",
+                        &peer_id,
+                        anchor_round.prev(),
+                        anchor_round
+                    );
+                }
+                // it is ok to get next new round if we still commited prev anchors but other nodes did not
+            }
+            Vacant(_) => (), // we already finished prev anchor round successfully and cleaned HM
+        }
+
+        match guard.entry(anchor_round) {
+            Occupied(mut round_peers_entry) => {
+                let round_peers = round_peers_entry.get_mut();
+                if round_peers.len() >= nodes_count {
+                    panic!("We have more anchors than nodes at round: {anchor_round:?}");
+                }
+
+                if let Some(point) = round_peers.get(&peer_id) {
+                    panic!(
+                        "We have already anchor {:?} for round: {anchor_round:?} and node {peer_id}",
+                        point.location
+                    );
+                }
+
+                round_peers.insert(peer_id.clone(), anchor_id);
+            }
+            Vacant(entry) => {
+                let mut peer_map = HashMap::new();
+                peer_map.insert(peer_id.clone(), anchor_id);
+                entry.insert(peer_map);
+            }
+        }
+
+        let mut refs_guard = known_round_refs.lock().await;
+        match refs_guard.get(&anchor_round) {
+            Some(round) => {
+                if round.len() != refs.len() {
+                    panic!("Commited points size differs for round: {anchor_round:?}");
+                }
+
+                for (rr, rf) in round.iter().zip(refs.iter()) {
+                    if rr.digest != rf.digest {
+                        panic!(
+                            "Points are not equal or order is different for round {anchor_round:?}"
+                        )
+                    }
+                }
+            }
+            None => {
+                let point_refs = refs.iter().map(|x| x.id()).collect::<Vec<_>>();
+                refs_guard.insert(anchor_round, point_refs);
+            }
+        }
+
+        guard.retain(|key, value| {
+            if (value.len() == nodes_count) {
+                refs_guard.remove(key);
+                false
+            } else {
+                true
+            }
+        });
+
+        tracing::info!("Anchor hashmap len: {}", guard.len());
+        tracing::info!("Refs hashmap ken: {}", refs_guard.len());
+
+        drop(guard);
+        drop(refs_guard);
+    }
 }
 
 pub async fn drain_anchors(mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>) {
@@ -145,6 +250,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
+        let anchors_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let refs_map = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+
         let mut handles = vec![];
         for (((secret_key, key_pair), bind_address), peer_id) in keys
             .into_iter()
@@ -153,6 +261,9 @@ mod tests {
         {
             let all_peers = all_peers.clone();
             let peer_info = peer_info.clone();
+            let anchors_map = anchors_map.clone();
+            let refs_map = refs_map.clone();
+
             let handle = std::thread::spawn(move || {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
@@ -183,7 +294,17 @@ mod tests {
                         }
 
                         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-                        tokio::spawn(drain_anchors(committed_rx));
+
+                        tokio::spawn(check_anchors(
+                            committed_rx,
+                            key_pair.clone(),
+                            anchors_map,
+                            refs_map,
+                            node_count,
+                        ));
+
+                        // tokio::spawn(drain_anchors(committed_rx));
+
                         let mut engine = Engine::new(
                             key_pair,
                             &dht_client,
@@ -212,7 +333,7 @@ mod tests {
 
         // check_parking_lot();
         heart_beat();
-        let handles = make_network(9, 2);
+        let handles = make_network(19, 2);
         for handle in handles {
             handle.join().unwrap();
         }

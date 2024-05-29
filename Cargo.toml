@@ -65,7 +65,7 @@ rlimit = "0.10.1"
 rustc_version = "0.4"
 rustls = "0.23"
 rustls-webpki = "0.102"
-serde = "1.0"
+serde = {version = "1.0", features = ["std", "rc"]}
 serde_json = "1.0.114"
 serde_path_to_error = "0.1"
 sha2 = "0.10.8"

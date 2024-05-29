@@ -142,7 +142,7 @@ impl Display for UnixTime {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Location {
     pub round: Round,
     pub author: PeerId,
