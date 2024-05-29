@@ -2,18 +2,19 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
+use crate::internal_queue::snapshot_manager::SnapshotManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, Lt, QueueDiff};
 pub trait QueueIterator: Send {
     /// Get next message
-    fn next(&mut self, with_new: bool) -> Option<IterItem>;
+    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
     /// Peek next message
-    fn peek(&mut self) -> Option<IterItem>;
+    fn peek(&mut self, with_new: bool) -> Result<Option<IterItem>>;
     /// Take diff from iterator
     /// Move current position to commited position
     /// Create new transaction
@@ -29,53 +30,25 @@ pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
     current_position: HashMap<ShardIdent, InternalMessageKey>,
     commited_current_position: HashMap<ShardIdent, InternalMessageKey>,
-    messages: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
+    messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     new_messages: HashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+    snapshot_manager: SnapshotManager,
 }
 
 impl QueueIteratorImpl {
     pub fn new(
-        shards_from: FastHashMap<ShardIdent, u64>,
-        shards_to: FastHashMap<ShardIdent, u64>,
-        snapshots: Vec<Box<impl StateSnapshot + ?Sized>>,
+        snapshot_manager: SnapshotManager,
         for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
-        let shards_with_ranges: &mut HashMap<ShardIdent, ShardRange> = &mut HashMap::new();
-        for from in shards_from {
-            for to in &shards_to {
-                let iter_range_from = IterRange {
-                    shard_id: from.0,
-                    lt: from.1,
-                };
-                let iter_range_to = IterRange {
-                    shard_id: *to.0,
-                    lt: *to.1,
-                };
-                Self::traverse_and_collect_ranges(
-                    shards_with_ranges,
-                    &iter_range_from,
-                    &iter_range_to,
-                );
-            }
-        }
-
-        let mut messages = BinaryHeap::default();
-
-        for snapshot in snapshots {
-            let snapshot_messages =
-                snapshot.get_outgoing_messages_by_shard(shards_with_ranges, &for_shard)?;
-
-            for snapshot_message in snapshot_messages {
-                messages.push(Reverse(snapshot_message));
-            }
-        }
+        let mut messages_for_current_shard = BinaryHeap::default();
 
         Ok(Self {
             for_shard,
-            messages,
+            messages_for_current_shard,
             current_position: Default::default(),
             new_messages: Default::default(),
             commited_current_position: Default::default(),
+            snapshot_manager,
         })
     }
 }
@@ -100,105 +73,62 @@ fn update_shard_range(
         });
 }
 
-impl QueueIteratorImpl {
-    fn traverse_and_collect_ranges(
-        touched_shards: &mut HashMap<ShardIdent, ShardRange>,
-        from_range: &IterRange,
-        to_range: &IterRange,
-    ) {
-        if from_range.shard_id == to_range.shard_id
-            || from_range.shard_id.intersects(&to_range.shard_id)
-        {
-            update_shard_range(
-                touched_shards,
-                from_range.shard_id,
-                Some(from_range.lt),
-                Some(to_range.lt),
-            );
-        } else if from_range.shard_id.is_parent_of(&to_range.shard_id)
-            || from_range.shard_id.is_child_of(&to_range.shard_id)
-        {
-            update_shard_range(
-                touched_shards,
-                from_range.shard_id,
-                Some(from_range.lt),
-                None,
-            );
-            update_shard_range(touched_shards, to_range.shard_id, None, Some(to_range.lt));
+impl QueueIterator for QueueIteratorImpl {
+    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>> {
+        if let Some(next_message) = self.snapshot_manager.next() {
+            return Ok(Some(IterItem {
+                message_with_source: next_message.clone(),
+                is_new: false,
+            }));
         }
 
-        if let Some(common_ancestor) = find_common_ancestor(from_range.shard_id, to_range.shard_id)
-        {
-            update_shard_range(
-                touched_shards,
-                from_range.shard_id,
-                Some(from_range.lt),
-                None,
-            );
-            update_shard_range(touched_shards, to_range.shard_id, None, Some(to_range.lt));
+        if with_new {
+            if let Some(next_message) = self.messages_for_current_shard.pop() {
+                let message_key = next_message.0.message.key();
 
-            let mut current_shard = if from_range.shard_id.is_ancestor_of(&to_range.shard_id) {
-                to_range.shard_id
-            } else {
-                from_range.shard_id
-            };
-
-            while current_shard != common_ancestor {
-                if let Some(parent_shard) = current_shard.merge() {
-                    update_shard_range(touched_shards, parent_shard, None, None);
-                    current_shard = parent_shard;
+                if self.new_messages.remove(&message_key).is_some() {
+                    return Ok(Some(IterItem {
+                        message_with_source: next_message.0.clone(),
+                        is_new: true,
+                    }));
                 } else {
-                    break;
+                    bail!(
+                        "Message is not in new messages but in current shard messages: {:?}",
+                        message_key
+                    );
                 }
             }
         }
+
+        Ok(None)
     }
-}
 
-impl QueueIterator for QueueIteratorImpl {
-    fn next(&mut self, with_new: bool) -> Option<IterItem> {
-        if let Some(message_with_source) = self.messages.peek() {
-            let message = message_with_source.0.message.clone();
-            let message_key = message.key();
+    fn peek(&mut self, with_new: bool) -> Result<Option<IterItem>> {
+        if let Some(next_message) = self.snapshot_manager.peek() {
+            return Ok(Some(IterItem {
+                message_with_source: next_message.clone(),
+                is_new: false,
+            }));
+        }
 
-            let is_new = self.new_messages.contains_key(&message_key);
+        if with_new {
+            if let Some(next_message) = self.messages_for_current_shard.peek() {
+                let message_key = next_message.0.message.key();
 
-            return if with_new || !is_new {
-                let message_with_source = self.messages.pop()?.0;
-
-                if is_new {
-                    // remove if read message for current shard and it's new
-                    tracing::trace!(
-                        target: crate::tracing_targets::MQ,
-                        "Removing message from new messages because it's read: {:?}",
-                        message_with_source);
-                    self.new_messages.remove(&message_key);
+                if self.new_messages.contains_key(&message_key) {
+                    return Ok(Some(IterItem {
+                        message_with_source: next_message.0.clone(),
+                        is_new: true,
+                    }));
+                } else {
+                    bail!(
+                        "Message is not in new messages but in current shard messages: {:?}",
+                        message_key
+                    );
                 }
-
-                // self.new_messages.remove(&message_key);
-                Some(IterItem {
-                    message_with_source,
-                    is_new,
-                })
-            } else {
-                None
-            };
+            }
         }
-        None
-    }
-
-    fn peek(&mut self) -> Option<IterItem> {
-        if let Some(message_with_source) = self.messages.peek() {
-            let message_key = message_with_source.0.message.key();
-
-            let is_new = self.new_messages.contains_key(&message_key);
-
-            return Some(IterItem {
-                message_with_source: message_with_source.0.clone(),
-                is_new,
-            });
-        }
-        None
+        Ok(None)
     }
 
     fn take_diff(&mut self) -> QueueDiff {
@@ -255,7 +185,8 @@ impl QueueIterator for QueueIteratorImpl {
                 target: crate::tracing_targets::MQ,
                 "Adding messages directly because it's for current shard: {:?}",
                 message_with_source);
-            self.messages.push(Reverse(Arc::new(message_with_source)));
+            self.messages_for_current_shard
+                .push(Reverse(Arc::new(message_with_source)));
         };
         Ok(())
     }
@@ -270,6 +201,90 @@ fn find_common_ancestor(shard1: ShardIdent, shard2: ShardIdent) -> Option<ShardI
         None
     }
 }
+
+pub struct QueueIteratorExt;
+
+impl QueueIteratorExt {
+    pub fn collect_ranges(
+        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_to: FastHashMap<ShardIdent, u64>,
+    ) -> HashMap<ShardIdent, ShardRange> {
+        let mut shards_with_ranges = HashMap::new();
+        for from in shards_from {
+            for to in &shards_to {
+                let iter_range_from = IterRange {
+                    shard_id: from.0,
+                    lt: from.1,
+                };
+                let iter_range_to = IterRange {
+                    shard_id: *to.0,
+                    lt: *to.1,
+                };
+                Self::traverse_and_collect_ranges(
+                    &mut shards_with_ranges,
+                    &iter_range_from,
+                    &iter_range_to,
+                );
+            }
+        }
+
+        shards_with_ranges
+    }
+
+    pub fn traverse_and_collect_ranges(
+        touched_shards: &mut HashMap<ShardIdent, ShardRange>,
+        from_range: &IterRange,
+        to_range: &IterRange,
+    ) {
+        if from_range.shard_id == to_range.shard_id
+            || from_range.shard_id.intersects(&to_range.shard_id)
+        {
+            update_shard_range(
+                touched_shards,
+                from_range.shard_id,
+                Some(from_range.lt),
+                Some(to_range.lt),
+            );
+        } else if from_range.shard_id.is_parent_of(&to_range.shard_id)
+            || from_range.shard_id.is_child_of(&to_range.shard_id)
+        {
+            update_shard_range(
+                touched_shards,
+                from_range.shard_id,
+                Some(from_range.lt),
+                None,
+            );
+            update_shard_range(touched_shards, to_range.shard_id, None, Some(to_range.lt));
+        }
+
+        if let Some(common_ancestor) = find_common_ancestor(from_range.shard_id, to_range.shard_id)
+        {
+            update_shard_range(
+                touched_shards,
+                from_range.shard_id,
+                Some(from_range.lt),
+                None,
+            );
+            update_shard_range(touched_shards, to_range.shard_id, None, Some(to_range.lt));
+
+            let mut current_shard = if from_range.shard_id.is_ancestor_of(&to_range.shard_id) {
+                to_range.shard_id
+            } else {
+                from_range.shard_id
+            };
+
+            while current_shard != common_ancestor {
+                if let Some(parent_shard) = current_shard.merge() {
+                    update_shard_range(touched_shards, parent_shard, None, None);
+                    current_shard = parent_shard;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // #[cfg(test)]
 // mod tests {
 //     use std::collections::HashMap;

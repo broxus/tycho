@@ -535,16 +535,9 @@ impl Node {
             test_validators_keypairs: vec![],
         };
 
-        let queue_config = QueueConfig {
-            persistent_state_config: PersistentStateConfig {
-                database_url: "db_url".to_string(),
-            },
-        };
-
         let shards = vec![];
         let session_state_factory = SessionStateImplFactory::new(shards);
-        let persistent_state_factory =
-            PersistentStateImplFactory::new(queue_config.persistent_state_config);
+        let persistent_state_factory = PersistentStateImplFactory::new(self.storage.clone());
 
         let queue_factory = QueueFactoryStdImpl {
             session_state_factory,

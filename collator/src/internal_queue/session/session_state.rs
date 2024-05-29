@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
 use crate::internal_queue::shard::Shard;
-use crate::internal_queue::snapshot::StateSnapshot;
+use crate::internal_queue::snapshot::{ShardRange, StateSnapshot};
 use crate::internal_queue::types::QueueDiff;
 
 // FACTORY
@@ -52,7 +52,11 @@ impl SessionStateFactory for SessionStateImplFactory {
 #[trait_variant::make(SessionState: Send)]
 pub trait LocalSessionState {
     fn new(shards: &[ShardIdent]) -> Self;
-    async fn snapshot(&self) -> Box<dyn StateSnapshot>;
+    async fn snapshot(
+        &self,
+        ranges: HashMap<ShardIdent, ShardRange>,
+        for_shard_id: ShardIdent,
+    ) -> Box<dyn StateSnapshot>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
     async fn merge_shards(
         &self,
@@ -88,14 +92,22 @@ impl SessionState for SessionStateStdImpl {
         }
     }
 
-    async fn snapshot(&self) -> Box<dyn StateSnapshot> {
+    async fn snapshot(
+        &self,
+        ranges: HashMap<ShardIdent, ShardRange>,
+        for_shard_id: ShardIdent,
+    ) -> Box<dyn StateSnapshot> {
         let shards_flat_read = self.shards_flat.read().await;
         let mut flat_shards = HashMap::new();
         for (shard_ident, shard_lock) in shards_flat_read.iter() {
             let shard = shard_lock.read().await;
             flat_shards.insert(*shard_ident, shard.clone());
         }
-        Box::new(SessionStateSnapshot::new(flat_shards))
+        Box::new(SessionStateSnapshot::new(
+            flat_shards,
+            &ranges,
+            &for_shard_id,
+        ))
     }
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
