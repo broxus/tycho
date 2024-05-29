@@ -84,18 +84,18 @@ impl ExecutionManager {
         }
     }
 
-    /// execute messages set
-    pub fn execute_msgs_set(&mut self, msgs: Vec<AsyncMessage>) {
+    /// Set messages that will be executed
+    pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 
-    /// tick
-    pub async fn tick(
+    /// Run one execution tick of parallel transactions
+    pub async fn execute_tick(
         &mut self,
         offset: u32,
     ) -> Result<(u32, Vec<(AccountId, AsyncMessage, Box<Transaction>)>)> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute manager messages set tick with {offset}");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {offset}");
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
 
@@ -179,7 +179,8 @@ impl ExecutionManager {
                 AsyncMessage::Ext(_, _) => "Ext",
                 AsyncMessage::Int(_, _, _) => "Int",
                 AsyncMessage::NewInt(_, _) => "NewInt",
-                AsyncMessage::TickTock(_) => "TickTock",
+                AsyncMessage::TickTock(TickTock::Tick) => "Tick",
+                AsyncMessage::TickTock(TickTock::Tock) => "Tock",
             },
             account_id,
         );

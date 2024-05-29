@@ -286,19 +286,13 @@ impl CollatorStdImpl {
                 }
             }
 
-            tracing::debug!(
-                target: tracing_targets::COLLATOR,
-                "Set size {}",
-                msgs_set.len(),
-            );
-
             if msgs_set.is_empty() {
                 // no any messages to process - exit loop
                 break;
             }
 
             let msgs_len = msgs_set.len() as u32;
-            exec_manager.execute_msgs_set(msgs_set.clone()); // STUB: clone to use msgs_set in stub logic
+            exec_manager.set_msgs_for_execution(msgs_set.clone()); // STUB: clone to use msgs_set in stub logic
             let mut msgs_set_offset = collation_data.processed_upto.processed_offset;
             let mut msgs_set_full_processed = false;
 
@@ -321,7 +315,7 @@ impl CollatorStdImpl {
                     msgs_set = left_msgs;
                     executed_msgs_count
                 } else {
-                    let (new_offset, group) = exec_manager.tick(msgs_set_offset).await?;
+                    let (new_offset, group) = exec_manager.execute_tick(msgs_set_offset).await?;
                     let executed_msgs_count = group.len();
                     for (_account_id, msg_info, transaction) in group {
                         let new_internal_messages = new_transaction(
@@ -963,7 +957,7 @@ impl CollatorStdImpl {
         collator_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        tracing::trace!("{}: create_special_transactions", self.collator_descr);
+        tracing::trace!(target: tracing_targets::COLLATOR, "{}: create_special_transactions", self.collator_descr);
 
         let account_id = self
             .working_state()
@@ -978,7 +972,6 @@ impl CollatorStdImpl {
             exec_manager,
         )
         .await?;
-        // self.check_stop_flag()?;
 
         let account_id = self.working_state().mc_data.config().get_minter_address()?;
         self.create_special_transaction(
@@ -1002,6 +995,7 @@ impl CollatorStdImpl {
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         tracing::trace!(
+            target: tracing_targets::COLLATOR,
             "{}: create_special_transaction: recover {} to account {}",
             self.collator_descr,
             amount.tokens,
@@ -1050,22 +1044,19 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        tracing::trace!("{}: create_ticktock_transactions", self.collator_descr);
-        let config_address = self.working_state().mc_data.config().address;
+        tracing::trace!(target: tracing_targets::COLLATOR, "{}: create_ticktock_transactions", self.collator_descr);
         let fundamental_dict = self
             .working_state()
             .mc_data
             .config()
             .get_fundamental_addresses()?;
         for account in fundamental_dict.keys() {
-            // TODO: uncomment when ticktock is implemented
-            // self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
-            //     .await?;
-            // self.check_stop_flag()?;
+            self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
+                .await?;
         }
-        // TODO: uncomment when ticktock is implemented
-        // self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
-        //     .await?;
+        // TODO: uncomment when ticktock is implemented for config account
+        // let config_address = self.working_state().mc_data.config().address;
+        // self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager).await?;
         Ok(())
     }
 
@@ -1077,6 +1068,7 @@ impl CollatorStdImpl {
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         tracing::trace!(
+            target: tracing_targets::COLLATOR,
             "{}: create_ticktock_transaction({}) acc: {}",
             self.collator_descr,
             if tock { "tock" } else { "tick" },
