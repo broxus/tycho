@@ -202,6 +202,8 @@ pub struct PointBody {
     pub anchor_trigger: Link,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
     pub anchor_proof: Link,
+    /// time of previous anchor candidate
+    pub anchor_time: UnixTime,
 }
 
 /// Just a field accessor
@@ -270,6 +272,7 @@ impl Point {
     pub fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
         let author = &self.body.location.author;
+        let is_time_ok = self.body.time >= self.body.anchor_time;
         let is_special_ok = match self.body.location.round {
             MempoolConfig::GENESIS_ROUND => {
                 self.body.includes.is_empty()
@@ -291,7 +294,7 @@ impl Point {
             }
             _ => false,
         };
-        is_special_ok
+        is_time_ok && is_special_ok
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
             && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(&author)
             // in contrast, evidence must contain only signatures of others

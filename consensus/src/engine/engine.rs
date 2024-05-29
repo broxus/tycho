@@ -294,7 +294,7 @@ impl Engine {
         payload: Vec<Bytes>,
     ) -> Option<Arc<Point>> {
         if let Some(own_point) =
-            Producer::new_point(&current_dag_round, prev_point.as_deref(), payload).await
+            Producer::new_point(&current_dag_round, prev_point.as_deref(), payload)
         {
             let state = current_dag_round
                 .insert_exact_sign(&own_point, &peer_schedule, &downloader)
