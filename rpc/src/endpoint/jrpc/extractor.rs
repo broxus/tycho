@@ -34,7 +34,7 @@ macro_rules! declare_jrpc_method {
             )*
         }
 
-        impl crate::endpoint::jrpc::extractor::ParseParams for $method_name_enum {
+        impl $crate::endpoint::jrpc::extractor::ParseParams for $method_name_enum {
             type Params = $method_enum;
 
             fn parse_params(self, params: &serde_json::value::RawValue) -> Result<Self::Params, serde_json::Error> {

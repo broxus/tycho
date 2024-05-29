@@ -190,26 +190,28 @@ impl Inner {
         if is_masterchain {
             // Search in masterchain cache
             match &*self.mc_accounts.read() {
-                None => Ok(LoadedAccountState::NotReady),
+                None => Err(RpcStateError::NotReady),
                 Some(cache) => cache.get(&address.address),
             }
         } else {
             let cache = self.sc_accounts.read();
-            let mut state = Ok(LoadedAccountState::NotReady);
+            let mut state = Err(RpcStateError::NotReady);
 
             // Search in all shard caches
             let mut gen_utime = 0;
+            let mut found = false;
             for (shard, cache) in &*cache {
-                if !shard.contains_account(&address.address) {
+                if !shard.contains_account(&address.address) || cache.gen_utime < gen_utime {
                     continue;
                 }
 
                 gen_utime = cache.gen_utime;
                 state = cache.get(&address.address);
+                found = true;
             }
 
             // Handle case when account is not found in any shard
-            if matches!(&state, Ok(LoadedAccountState::NotReady) if gen_utime > 0) {
+            if !found && gen_utime > 0 {
                 state = Ok(LoadedAccountState::NotFound {
                     timings: GenTimings {
                         gen_lt: 0,
@@ -307,7 +309,6 @@ impl Inner {
 }
 
 pub enum LoadedAccountState {
-    NotReady,
     NotFound {
         timings: GenTimings,
     },
@@ -347,6 +348,8 @@ type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcStateError {
+    #[error("not ready")]
+    NotReady,
     #[error("not supported")]
     NotSupported,
     #[error("internal: {0}")]

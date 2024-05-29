@@ -15,11 +15,11 @@ use crate::proto::overlay;
 pub trait BroadcastListener: Send + Sync + 'static {
     type HandleMessageFut<'a>: Future<Output = ()> + Send + 'a;
 
-    fn handle_message<'a>(
-        &'a self,
+    fn handle_message(
+        &self,
         meta: Arc<InboundRequestMeta>,
         message: Bytes,
-    ) -> Self::HandleMessageFut<'a>;
+    ) -> Self::HandleMessageFut<'_>;
 }
 
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
@@ -29,11 +29,7 @@ impl BroadcastListener for NoopBroadcastListener {
     type HandleMessageFut<'a> = futures_util::future::Ready<()>;
 
     #[inline]
-    fn handle_message<'a>(
-        &'a self,
-        _: Arc<InboundRequestMeta>,
-        _: Bytes,
-    ) -> Self::HandleMessageFut<'a> {
+    fn handle_message(&self, _: Arc<InboundRequestMeta>, _: Bytes) -> Self::HandleMessageFut<'_> {
         futures_util::future::ready(())
     }
 }
@@ -271,7 +267,7 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     inner
                         .broadcast_listener
                         .handle_message(req.metadata, req.body)
-                        .await
+                        .await;
                 })
             }
             constructor => {
