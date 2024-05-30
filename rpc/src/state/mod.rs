@@ -1,6 +1,8 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
@@ -16,7 +18,7 @@ use tycho_util::FastHashMap;
 
 use crate::config::RpcConfig;
 use crate::endpoint::RpcEndpoint;
-use crate::models::GenTimings;
+use crate::models::{GenTimings, StateTimings};
 
 pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient)> {
     config: RpcConfig,
@@ -34,6 +36,8 @@ impl RpcStateBuilder {
                 blockchain_rpc_client,
                 mc_accounts: Default::default(),
                 sc_accounts: Default::default(),
+                is_ready: AtomicBool::new(false),
+                timings: ArcSwap::new(Default::default()),
             }),
         }
     }
@@ -92,8 +96,16 @@ impl RpcState {
         &self.inner.config
     }
 
+    pub fn is_ready(&self) -> bool {
+        self.inner.is_ready.load(Ordering::Acquire)
+    }
+
     pub fn is_full(&self) -> bool {
         self.inner.storage.rpc_storage().is_some()
+    }
+
+    pub fn load_timings(&self) -> arc_swap::Guard<Arc<StateTimings>> {
+        self.inner.timings.load()
     }
 
     pub async fn broadcast_external_message(&self, message: &[u8]) {
@@ -183,6 +195,8 @@ struct Inner {
     blockchain_rpc_client: BlockchainRpcClient,
     mc_accounts: RwLock<Option<CachedAccounts>>,
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
+    is_ready: AtomicBool,
+    timings: ArcSwap<StateTimings>,
 }
 
 impl Inner {

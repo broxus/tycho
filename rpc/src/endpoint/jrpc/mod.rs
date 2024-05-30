@@ -21,6 +21,8 @@ mod extractor;
 declare_jrpc_method! {
     pub enum MethodParams: Method {
         GetCapabilities(GetCapabilitiesRequest),
+        GetStatus(GetStatusRequest),
+        GetTimings(GetTimingsRequest),
         SendMessage(SendMessageRequest),
         GetContractState(GetContractStateRequest),
         GetAccountsByCodeHash(GetAccountsByCodeHashRequest),
@@ -33,6 +35,16 @@ declare_jrpc_method! {
 pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response {
     match req.params {
         MethodParams::GetCapabilities(_) => ok_to_response(req.id, get_capabilities(&state)),
+        MethodParams::GetStatus(_) => ok_to_response(req.id, GetStatusResponse {
+            ready: state.is_ready(),
+        }),
+        MethodParams::GetTimings(_) => {
+            if state.is_ready() {
+                ok_to_response(req.id, state.load_timings().as_ref())
+            } else {
+                error_to_response(req.id, RpcStateError::NotReady)
+            }
+        }
         MethodParams::SendMessage(p) => {
             let Ok(data) = BocRepr::encode(p.message) else {
                 return JrpcErrorResponse {
@@ -130,6 +142,12 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
 pub struct GetCapabilitiesRequest {}
 
 #[derive(Debug, Deserialize)]
+pub struct GetStatusRequest {}
+
+#[derive(Debug, Deserialize)]
+pub struct GetTimingsRequest {}
+
+#[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     #[serde(with = "BocRepr")]
     pub message: Box<OwnedMessage>,
@@ -200,6 +218,11 @@ fn get_capabilities(state: &RpcState) -> &'static RawValue {
 
         serde_json::value::to_raw_value(&capabilities).unwrap()
     })
+}
+
+#[derive(Serialize)]
+pub struct GetStatusResponse {
+    ready: bool,
 }
 
 #[derive(Serialize)]
