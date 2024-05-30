@@ -300,6 +300,11 @@ impl ZerostateConfig {
     fn build_masterchain_state(self, now: u32) -> Result<ShardStateUnsplit> {
         let mut state = make_shard_state(self.global_id, ShardIdent::MASTERCHAIN, now);
 
+        let config = BlockchainConfig {
+            address: self.params.get::<ConfigParam0>()?.unwrap(),
+            params: self.params.clone(),
+        };
+
         {
             let mut accounts = ShardAccounts::new();
             for (account, mut account_state) in self.accounts {
@@ -332,6 +337,10 @@ impl ZerostateConfig {
                     },
                 )?;
             }
+
+            // Update the config account
+            update_config_account(&mut accounts, &config)?;
+
             assert_eq!(state.total_balance, accounts.root_extra().balance);
             state.accounts = Lazy::new(&accounts)?;
         }
@@ -366,10 +375,7 @@ impl ZerostateConfig {
 
         state.custom = Some(Lazy::new(&McStateExtra {
             shards: ShardHashes::from_shards(shards.iter().map(|(ident, descr)| (ident, descr)))?,
-            config: BlockchainConfig {
-                address: self.params.get::<ConfigParam0>()?.unwrap(),
-                params: self.params.clone(),
-            },
+            config,
             validator_info: ValidatorInfo {
                 validator_list_hash_short: 0,
                 catchain_seqno: 0,
@@ -638,6 +644,47 @@ fn make_default_params() -> Result<BlockchainConfigParams> {
     params.set_fundamental_addresses(&[HashBytes([0x00; 32]), HashBytes([0x33; 32])])?;
 
     Ok(params)
+}
+
+fn update_config_account(accounts: &mut ShardAccounts, config: &BlockchainConfig) -> Result<()> {
+    let Some(config_root) = config.params.as_dict().root().clone() else {
+        anyhow::bail!("cannot set empty config account");
+    };
+
+    let Some((depth_balance, mut shard_account)) = accounts.get(&config.address)? else {
+        anyhow::bail!("config account not found");
+    };
+
+    let Some(mut account) = shard_account.load_account()? else {
+        anyhow::bail!("empty config account");
+    };
+
+    // Update the first reference in the account data
+    match &mut account.state {
+        AccountState::Active(state) => {
+            let mut builder = CellBuilder::new();
+            builder.store_reference(config_root)?;
+
+            if let Some(data) = state.data.take() {
+                let mut data = data.as_slice()?;
+                data.load_reference()?; // skip the first reference
+                builder.store_slice(data)?;
+            }
+
+            state.data = Some(builder.build()?);
+        }
+        AccountState::Uninit | AccountState::Frozen(..) => {
+            anyhow::bail!("config account is not active")
+        }
+    }
+
+    shard_account.account = Lazy::new(&OptionalAccount(Some(account)))?;
+
+    // Update the account entry in the dict
+    accounts.set(&config.address, depth_balance, shard_account)?;
+
+    // Done
+    Ok(())
 }
 
 fn build_config_account(
