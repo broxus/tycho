@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
@@ -7,6 +8,7 @@ use base64::prelude::{Engine as _, BASE64_STANDARD};
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
 use tycho_util::serde_helpers;
 
@@ -18,6 +20,7 @@ mod extractor;
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
+        GetCapabilities(GetCapabilitiesRequest),
         SendMessage(SendMessageRequest),
         GetContractState(GetContractStateRequest),
         GetAccountsByCodeHash(GetAccountsByCodeHashRequest),
@@ -29,6 +32,7 @@ declare_jrpc_method! {
 
 pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response {
     match req.params {
+        MethodParams::GetCapabilities(_) => ok_to_response(req.id, get_capabilities(&state)),
         MethodParams::SendMessage(p) => {
             let Ok(data) = BocRepr::encode(p.message) else {
                 return JrpcErrorResponse {
@@ -39,7 +43,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
                 .into_response();
             };
             state.broadcast_external_message(&data).await;
-            JrpcOkResponse::new(req.id, ()).into_response()
+            ok_to_response(req.id, ())
         }
         MethodParams::GetContractState(p) => {
             let item = match state.get_account_state(&p.address) {
@@ -123,6 +127,9 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
 // === Requests ===
 
 #[derive(Debug, Deserialize)]
+pub struct GetCapabilitiesRequest {}
+
+#[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
     #[serde(with = "BocRepr")]
     pub message: Box<OwnedMessage>,
@@ -166,6 +173,34 @@ pub struct GetDstTransactionRequest {
 }
 
 // === Responses ===
+
+// NOTE: `RpcState` full/not-full state is determined only once at startup,
+// so it is ok to cache the response.
+fn get_capabilities(state: &RpcState) -> &'static RawValue {
+    static RESULT: OnceLock<Box<RawValue>> = OnceLock::new();
+    RESULT.get_or_init(|| {
+        let mut capabilities = vec![
+            "getCapabilities",
+            "getLatestKeyBlock",
+            "getBlockchainConfig",
+            "getStatus",
+            "getTimings",
+            "getContractState",
+            "sendMessage",
+        ];
+
+        if state.is_full() {
+            capabilities.extend([
+                "getTransactionsList",
+                "getTransaction",
+                "getDstTransaction",
+                "getAccountsByCodeHash",
+            ]);
+        }
+
+        serde_json::value::to_raw_value(&capabilities).unwrap()
+    })
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", tag = "type")]

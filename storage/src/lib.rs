@@ -87,6 +87,7 @@ impl StorageBuilder {
 
         let rpc_db = if self.init_rpc_storage {
             // Half the resources for the RPC storage
+            // TODO: Is it ok to use exactly half?
             threads = std::cmp::max(2, threads / 2);
             fdlimit = std::cmp::max(256, fdlimit / 2);
 

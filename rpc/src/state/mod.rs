@@ -92,6 +92,10 @@ impl RpcState {
         &self.inner.config
     }
 
+    pub fn is_full(&self) -> bool {
+        self.inner.storage.rpc_storage().is_some()
+    }
+
     pub async fn broadcast_external_message(&self, message: &[u8]) {
         self.inner
             .blockchain_rpc_client
