@@ -78,9 +78,9 @@ impl Dag {
 
         Self::log_committed(&log_id, next_dag_round.round().prev(), &ordered);
 
-        for anchor_with_history in ordered {
+        for points in ordered {
             committed
-                .send(anchor_with_history) // not recoverable
+                .send(points) // not recoverable
                 .expect("Failed to send anchor commit message tp mpsc channel");
         }
     }
