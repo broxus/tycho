@@ -56,7 +56,7 @@ pin-project-lite = "0.2"
 public-ip = "0.2"
 pkcs8 = "0.10"
 quick_cache = "0.4.1"
-quinn = { version = "0.11.0", default-features = false, features = ["runtime-tokio", "rustls"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls"] }
 rand = "0.8"
 rand_pcg = { version = "0.3" }
 rcgen = "0.13.1"

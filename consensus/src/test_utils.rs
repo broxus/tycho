@@ -1,11 +1,8 @@
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use anyhow::Context;
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
-use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_network::{
     Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
@@ -113,22 +110,22 @@ pub async fn check_anchors(
         let anchor_round = anchor.body.location.round;
         let mut guard = anchors_hashmap.lock().await;
 
-        // check if we don't skip round
-        match guard.entry(anchor_round.prev()) {
-            Occupied(entry) => {
-                let round_anc = entry.get();
-                if round_anc.get(&peer_id).is_none() {
+        // get last previous anchor round and check if we don't have previous
+        guard.iter().for_each(|(key, value)| {
+            if key < &anchor_round {
+                tracing::info!(
+                    "Checking consistency of prev round {:?} for node {}",
+                    &key,
+                    &peer_id
+                );
+                if value.get(&peer_id).is_none() {
                     panic!(
-                        "Node {} skipped anchor at {:?} but commited anchor at {:?}",
-                        &peer_id,
-                        anchor_round.prev(),
-                        anchor_round
+                        "Missing anchor for node {} at {:?} but received newer anchor {:?}",
+                        &peer_id, key, &anchor_round
                     );
                 }
-                // it is ok to get next new round if we still commited prev anchors but other nodes did not
             }
-            Vacant(_) => (), // we already finished prev anchor round successfully and cleaned HM
-        }
+        });
 
         match guard.entry(anchor_round) {
             Occupied(mut round_peers_entry) => {
@@ -331,7 +328,7 @@ mod tests {
 
         // check_parking_lot();
         heart_beat();
-        let handles = make_network(19, 2);
+        let handles = make_network(9, 2);
         for handle in handles {
             handle.join().unwrap();
         }

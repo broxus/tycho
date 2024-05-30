@@ -7,7 +7,6 @@ use futures_util::StreamExt;
 use itertools::Itertools;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
-use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
