@@ -305,7 +305,11 @@ impl Node {
         );
 
         // Setup storage
-        let storage = Storage::new(node_config.storage).wrap_err("failed to create storage")?;
+        let storage = Storage::builder()
+            .with_config(node_config.storage)
+            .with_rpc_storage(node_config.rpc.is_some())
+            .build()
+            .wrap_err("failed to create storage")?;
         tracing::info!(
             root_dir = %storage.root().path().display(),
             "initialized storage"

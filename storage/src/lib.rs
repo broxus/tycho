@@ -21,25 +21,25 @@ mod util {
     mod stored_value;
 }
 
-const DB_SUBDIR: &str = "rocksdb";
+const BASE_DB_SUBDIR: &str = "base";
+const RPC_DB_SUBDIR: &str = "rpc";
 const FILES_SUBDIR: &str = "files";
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct Storage {
-    inner: Arc<Inner>,
+pub struct StorageBuilder {
+    config: StorageConfig,
+    init_rpc_storage: bool,
 }
 
-impl Storage {
-    pub fn new(config: StorageConfig) -> Result<Self> {
-        let root = FileDb::new(&config.root_dir)?;
+impl StorageBuilder {
+    pub fn build(self) -> Result<Storage> {
+        let root = FileDb::new(&self.config.root_dir)?;
 
         let file_db = root.create_subdir(FILES_SUBDIR)?;
 
-        let caches = weedb::Caches::with_capacity(config.rocksdb_lru_capacity.as_u64() as _);
+        let caches = weedb::Caches::with_capacity(self.config.rocksdb_lru_capacity.as_u64() as _);
 
-        let threads = std::thread::available_parallelism()?.get();
-        let fdlimit = match fdlimit::raise_fd_limit() {
+        let mut threads = std::thread::available_parallelism()?.get();
+        let mut fdlimit = match fdlimit::raise_fd_limit() {
             // New fd limit
             Ok(fdlimit::Outcome::LimitRaised { to, .. }) => to,
             // Current soft limit
@@ -50,42 +50,60 @@ impl Storage {
             }
         };
 
-        let base_db = BaseDb::builder_prepared(config.root_dir.join(DB_SUBDIR), caches)
-            .with_metrics_enabled(config.rocksdb_enable_metrics)
-            .with_options(|opts, _| {
-                opts.set_paranoid_checks(false);
+        let update_options = |opts: &mut rocksdb::Options, threads: usize, fdlimit: u64| {
+            opts.set_paranoid_checks(false);
 
-                // bigger base level size - less compactions
-                // parallel compactions finishes faster - less write stalls
+            // bigger base level size - less compactions
+            // parallel compactions finishes faster - less write stalls
 
-                opts.set_max_subcompactions(threads as u32 / 2);
+            opts.set_max_subcompactions(threads as u32 / 2);
 
-                // io
-                opts.set_max_open_files(fdlimit as i32);
+            // io
+            opts.set_max_open_files(fdlimit as i32);
 
-                // logging
-                opts.set_log_level(rocksdb::LogLevel::Info);
-                opts.set_keep_log_file_num(2);
-                opts.set_recycle_log_file_num(2);
+            // logging
+            opts.set_log_level(rocksdb::LogLevel::Info);
+            opts.set_keep_log_file_num(2);
+            opts.set_recycle_log_file_num(2);
 
-                // cf
-                opts.create_if_missing(true);
-                opts.create_missing_column_families(true);
+            // cf
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
 
-                // cpu
-                opts.set_max_background_jobs(std::cmp::max((threads as i32) / 2, 2));
-                opts.increase_parallelism(threads as i32);
+            // cpu
+            opts.set_max_background_jobs(std::cmp::max((threads as i32) / 2, 2));
+            opts.increase_parallelism(threads as i32);
 
-                opts.set_allow_concurrent_memtable_write(false);
-                opts.set_enable_write_thread_adaptive_yield(true);
+            opts.set_allow_concurrent_memtable_write(false);
+            opts.set_enable_write_thread_adaptive_yield(true);
 
-                // debug
-                // NOTE: could slower everything a bit in some cloud environments.
-                //       See: https://github.com/facebook/rocksdb/issues/3889
-                //
-                // opts.enable_statistics();
-                // opts.set_stats_dump_period_sec(600);
-            })
+            // debug
+            // NOTE: could slower everything a bit in some cloud environments.
+            //       See: https://github.com/facebook/rocksdb/issues/3889
+            //
+            // opts.enable_statistics();
+            // opts.set_stats_dump_period_sec(600);
+        };
+
+        let rpc_db = if self.init_rpc_storage {
+            // Half the resources for the RPC storage
+            threads = std::cmp::max(2, threads / 2);
+            fdlimit = std::cmp::max(256, fdlimit / 2);
+
+            tracing::debug!(threads, fdlimit, subdir = RPC_DB_SUBDIR);
+            RpcDb::builder_prepared(self.config.root_dir.join(RPC_DB_SUBDIR), caches.clone())
+                .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+                .with_options(|opts, _| update_options(opts, threads, fdlimit))
+                .build()
+                .map(Some)?
+        } else {
+            None
+        };
+
+        tracing::debug!(threads, fdlimit, subdir = BASE_DB_SUBDIR, "opening RocksDB");
+        let base_db = BaseDb::builder_prepared(self.config.root_dir.join(BASE_DB_SUBDIR), caches)
+            .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+            .with_options(|opts, _| update_options(opts, threads, fdlimit))
             .build()?;
 
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
@@ -101,15 +119,17 @@ impl Storage {
             &file_db,
             block_handle_storage.clone(),
             block_storage.clone(),
-            config.cells_cache_size.as_u64(),
+            self.config.cells_cache_size.as_u64(),
         )?;
         let persistent_state_storage =
             PersistentStateStorage::new(base_db.clone(), &file_db, block_handle_storage.clone())?;
         let node_state_storage = NodeStateStorage::new(base_db.clone());
 
+        let rpc_state = rpc_db.map(RpcStorage::new);
+
         // TODO: preload archive ids
 
-        Ok(Self {
+        Ok(Storage {
             inner: Arc::new(Inner {
                 root,
                 base_db,
@@ -120,9 +140,34 @@ impl Storage {
                 block_connection_storage,
                 node_state_storage,
                 runtime_storage,
-                rpc_state: None,
+                rpc_state,
             }),
         })
+    }
+
+    pub fn with_config(mut self, config: StorageConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn with_rpc_storage(mut self, init_rpc_storage: bool) -> Self {
+        self.init_rpc_storage = init_rpc_storage;
+        self
+    }
+}
+
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct Storage {
+    inner: Arc<Inner>,
+}
+
+impl Storage {
+    pub fn builder() -> StorageBuilder {
+        StorageBuilder {
+            config: StorageConfig::default(),
+            init_rpc_storage: false,
+        }
     }
 
     /// Creates a new temporary storage with potato config.
@@ -132,7 +177,9 @@ impl Storage {
     #[cfg(any(test, feature = "test"))]
     pub fn new_temp() -> Result<(Self, tempfile::TempDir)> {
         let tmp_dir = tempfile::tempdir()?;
-        let storage = Storage::new(StorageConfig::new_potato(tmp_dir.path()))?;
+        let storage = Storage::builder()
+            .with_config(StorageConfig::new_potato(tmp_dir.path()))
+            .build()?;
         Ok((storage, tmp_dir))
     }
 

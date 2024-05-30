@@ -5,7 +5,6 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::RequestExt;
-use futures_util::Future;
 use tokio::net::TcpListener;
 
 use crate::state::RpcState;

@@ -594,12 +594,14 @@ mod test {
         }
         tracing::info!("Decompressed the archive");
 
-        let storage = Storage::new(StorageConfig {
-            root_dir: current_test_path.join("db"),
-            rocksdb_enable_metrics: false,
-            rocksdb_lru_capacity: ByteSize::mb(256),
-            cells_cache_size: ByteSize::mb(256),
-        })?;
+        let storage = Storage::builder()
+            .with_config(StorageConfig {
+                root_dir: current_test_path.join("db"),
+                rocksdb_enable_metrics: false,
+                rocksdb_lru_capacity: ByteSize::mb(256),
+                cells_cache_size: ByteSize::mb(256),
+            })
+            .build()?;
         let base_db = storage.base_db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 
