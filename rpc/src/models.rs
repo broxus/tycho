@@ -1,4 +1,5 @@
-use everscale_types::cell::HashBytes;
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
 
@@ -50,4 +51,18 @@ pub struct StateTimings {
     pub mc_time_diff: i64,
     pub shard_client_time_diff: i64,
     pub smallest_known_lt: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LatestKeyBlockRef<'a> {
+    #[serde(with = "BocRepr")]
+    pub block: &'a Block,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatestBlockchainConfigRef<'a> {
+    pub global_id: i32,
+    #[serde(with = "BocRepr")]
+    pub config: &'a BlockchainConfig,
 }

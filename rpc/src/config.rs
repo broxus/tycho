@@ -16,6 +16,11 @@ pub struct RpcConfig {
     /// Default: `false`.
     pub generate_stub_keyblock: bool,
 
+    /// Number of virtual shards.
+    ///
+    /// Default: `4` (= 16 virtual shards).
+    pub shard_split_depth: u8,
+
     /// Transactions garbage collector configuration.
     ///
     /// Default: clear all transactions older than `1 week` every `1 hour`.
@@ -29,6 +34,7 @@ impl Default for RpcConfig {
         Self {
             listen_addr: (Ipv4Addr::UNSPECIFIED, 8000).into(),
             generate_stub_keyblock: false,
+            shard_split_depth: 4,
             transactions_gc: Some(Default::default()),
         }
     }

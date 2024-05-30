@@ -220,8 +220,8 @@ impl Storage {
         &self.inner.node_state_storage
     }
 
-    pub fn rpc_storage(&self) -> &Option<RpcStorage> {
-        &self.inner.rpc_state
+    pub fn rpc_storage(&self) -> Option<&RpcStorage> {
+        self.inner.rpc_state.as_ref()
     }
 }
 

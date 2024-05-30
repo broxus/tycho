@@ -21,6 +21,8 @@ mod extractor;
 declare_jrpc_method! {
     pub enum MethodParams: Method {
         GetCapabilities(GetCapabilitiesRequest),
+        GetLatestKeyBlock(GetLatestKeyBlockRequest),
+        GetBlockchainConfig(GetBlockchainConfigRequest),
         GetStatus(GetStatusRequest),
         GetTimings(GetTimingsRequest),
         SendMessage(SendMessageRequest),
@@ -35,6 +37,14 @@ declare_jrpc_method! {
 pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response {
     match req.params {
         MethodParams::GetCapabilities(_) => ok_to_response(req.id, get_capabilities(&state)),
+        MethodParams::GetLatestKeyBlock(_) => match &*state.load_latest_key_block_json() {
+            Some(config) => ok_to_response(req.id, config.as_ref()),
+            None => error_to_response(req.id, RpcStateError::NotReady),
+        },
+        MethodParams::GetBlockchainConfig(_) => match &*state.load_blockchain_config_json() {
+            Some(config) => ok_to_response(req.id, config.as_ref()),
+            None => error_to_response(req.id, RpcStateError::NotReady),
+        },
         MethodParams::GetStatus(_) => ok_to_response(req.id, GetStatusResponse {
             ready: state.is_ready(),
         }),
@@ -140,6 +150,12 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
 
 #[derive(Debug, Deserialize)]
 pub struct GetCapabilitiesRequest {}
+
+#[derive(Debug, Deserialize)]
+pub struct GetLatestKeyBlockRequest {}
+
+#[derive(Debug, Deserialize)]
+pub struct GetBlockchainConfigRequest {}
 
 #[derive(Debug, Deserialize)]
 pub struct GetStatusRequest {}

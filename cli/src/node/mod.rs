@@ -491,6 +491,8 @@ impl Node {
                 .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
                 .build();
 
+            rpc_state.init(last_block_id).await?;
+
             let endpoint = rpc_state
                 .bind_endpoint()
                 .await

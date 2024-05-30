@@ -29,6 +29,10 @@ impl RpcStorage {
         }
     }
 
+    pub fn min_tx_lt(&self) -> u64 {
+        self.min_tx_lt.load(Ordering::Acquire)
+    }
+
     pub fn update_snapshot(&self) {
         let snapshot = Arc::new(self.db.owned_snapshot());
         self.snapshot.store(Some(snapshot));
@@ -167,7 +171,11 @@ impl RpcStorage {
         skip_all,
         fields(shard = %shard_state.block_id().shard)
     )]
-    pub async fn reset_accounts(&self, shard_state: ShardStateStuff) -> Result<()> {
+    pub async fn reset_accounts(
+        &self,
+        shard_state: ShardStateStuff,
+        split_depth: u8,
+    ) -> Result<()> {
         let shard_ident = shard_state.block_id().shard;
         let Ok(workchain) = i8::try_from(shard_ident.workchain()) else {
             return Ok(());
@@ -189,7 +197,7 @@ impl RpcStorage {
             split_shard(
                 &shard_ident,
                 shard_state.state().load_accounts()?.dict(),
-                4,
+                split_depth,
                 &mut virtual_shards,
             )
             .context("failed to split shard state into virtual shards")?;
@@ -205,7 +213,7 @@ impl RpcStorage {
         tokio::task::spawn_blocking(move || {
             let _guard = span.enter();
 
-            tracing::info!("started building new code hash indices");
+            tracing::info!(split_depth, "started building new code hash indices");
             let started_at = Instant::now();
 
             let raw = db.rocksdb().as_ref();
