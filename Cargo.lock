@@ -2806,6 +2806,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "fs_extra",
  "hex",
  "rand",
  "serde",

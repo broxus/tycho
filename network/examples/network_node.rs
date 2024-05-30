@@ -79,6 +79,8 @@ struct CmdRun {
     /// local node address
     addr: SocketAddr,
 
+    remote_addr: Address,
+
     /// node secret key
     #[clap(long)]
     key: String,
@@ -101,7 +103,12 @@ impl CmdRun {
             .unwrap_or_default();
         let global_config = GlobalConfig::from_file(self.global_config)?;
 
-        let node = Node::new(parse_key(&self.key)?, self.addr.into(), node_config)?;
+        let node = Node::new(
+            parse_key(&self.key)?,
+            self.addr.into(),
+            self.remote_addr,
+            node_config,
+        )?;
 
         let mut initial_peer_count = 0usize;
         for peer in global_config.bootstrap_peers {
@@ -215,7 +222,12 @@ struct Node {
 }
 
 impl Node {
-    fn new(key: ed25519::SecretKey, address: Address, config: NodeConfig) -> Result<Self> {
+    fn new(
+        key: ed25519::SecretKey,
+        address: Address,
+        remote_addr: Address,
+        config: NodeConfig,
+    ) -> Result<Self> {
         let keypair = everscale_crypto::ed25519::KeyPair::from(&key);
 
         let (dht_tasks, dht_service) = DhtService::builder(keypair.public_key.into())
@@ -228,6 +240,7 @@ impl Node {
             .with_config(config.network)
             .with_private_key(key.to_bytes())
             .with_service_name("test-service")
+            .with_remote_addr(remote_addr)
             .build(address, router)?;
 
         dht_tasks.spawn(&network);
