@@ -17,6 +17,11 @@ overlay.response.ok value:T = overlay.Response T;
 */
 overlay.response.err code:int = overlay.Response T;
 
+/**
+* Message broadcast prefix
+*/
+overlay.broadcastPrefix = overlay.BroadcastPrefix;
+
 // Blockchain public overlay
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -89,6 +94,12 @@ blockchain.persistentStatePart.found data:bytes = blockchain.PersistentStatePart
 * Raw data bytes
 */
 blockchain.data data:bytes = blockchain.Data;
+
+
+/**
+* External message broadcast.
+*/
+blockchain.broadcast.message data:bytes = blockchain.Broadcast;
 
 ---functions---
 

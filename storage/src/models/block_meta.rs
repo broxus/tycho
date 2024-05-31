@@ -13,9 +13,9 @@ pub struct BlockMetaData {
 }
 
 impl BlockMetaData {
-    pub fn zero_state(gen_utime: u32) -> Self {
+    pub fn zero_state(gen_utime: u32, is_key_block: bool) -> Self {
         Self {
-            is_key_block: true,
+            is_key_block,
             gen_utime,
             mc_ref_seqno: 0,
         }

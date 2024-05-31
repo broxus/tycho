@@ -10,12 +10,12 @@ use crate::models::*;
 use crate::util::*;
 
 pub struct BlockHandleStorage {
-    db: Arc<Db>,
+    db: BaseDb,
     cache: Arc<FastDashMap<BlockId, WeakBlockHandle>>,
 }
 
 impl BlockHandleStorage {
-    pub fn new(db: Arc<Db>) -> Self {
+    pub fn new(db: BaseDb) -> Self {
         Self {
             db,
             cache: Arc::new(Default::default()),

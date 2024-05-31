@@ -58,6 +58,12 @@ pub enum ArchiveInfo {
     NotFound,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, id = "blockchain.broadcast.message", scheme = "proto.tl")]
+pub struct MessageBroadcastRef<'tl> {
+    pub data: &'tl [u8],
+}
+
 /// Blockchain RPC models.
 pub mod rpc {
     use super::*;

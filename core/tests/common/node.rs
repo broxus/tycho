@@ -102,7 +102,12 @@ impl Node {
         } = NodeBase::with_random_key();
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
             .with_peer_resolver(peer_resolver)
-            .build(BlockchainRpcService::new(storage, Default::default()));
+            .build(
+                BlockchainRpcService::builder()
+                    .with_storage(storage)
+                    .without_broadcast_listener()
+                    .build(),
+            );
         overlay_service.add_public_overlay(&public_overlay);
 
         let dht_client = dht_service.make_client(&network);

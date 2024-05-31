@@ -83,7 +83,7 @@ impl BlockStriderState for TempBlockStriderState {
         assert!(block_id.is_masterchain());
         let mut commited = self.top_blocks.lock().unwrap();
         if commited.0.seqno < block_id.seqno {
-            *commited = (block_id.clone(), shard_heights.clone());
+            *commited = (*block_id, shard_heights.clone());
         }
     }
 

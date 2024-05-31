@@ -10,18 +10,19 @@ use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
+use weedb::{rocksdb, BoundedCfHandle};
 
 use crate::db::*;
 
 pub struct CellStorage {
-    db: Arc<Db>,
+    db: BaseDb,
     cells_cache: Arc<FastDashMap<HashBytes, Weak<StorageCell>>>,
     raw_cells_cache: RawCellsCache,
     pending: PendingOperations,
 }
 
 impl CellStorage {
-    pub fn new(db: Arc<Db>, cache_size_bytes: u64) -> Arc<Self> {
+    pub fn new(db: BaseDb, cache_size_bytes: u64) -> Arc<Self> {
         let cells_cache = Default::default();
         let raw_cells_cache = RawCellsCache::new(cache_size_bytes);
 
@@ -73,7 +74,7 @@ impl CellStorage {
 
         struct Context<'a> {
             cells_cf: BoundedCfHandle<'a>,
-            db: &'a Db,
+            db: &'a BaseDb,
             raw_cells_cache: &'a RawCellsCache,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, u32>,
@@ -82,7 +83,7 @@ impl CellStorage {
         }
 
         impl<'a> Context<'a> {
-            fn new(db: &'a Db, raw_cells_cache: &'a RawCellsCache) -> Self {
+            fn new(db: &'a BaseDb, raw_cells_cache: &'a RawCellsCache) -> Self {
                 Self {
                     cells_cf: db.cells.cf(),
                     db,
@@ -171,7 +172,7 @@ impl CellStorage {
             fn flush_new_cells(&mut self) -> Result<(), rocksdb::Error> {
                 if self.new_cell_count > 0 {
                     self.db
-                        .raw()
+                        .rocksdb()
                         .write(std::mem::take(&mut self.new_cells_batch))?;
                     self.new_cell_count = 0;
                 }
@@ -192,7 +193,7 @@ impl CellStorage {
                     batch.merge_cf(&self.cells_cf, key, self.buffer.as_slice());
                 }
 
-                self.db.raw().write(batch)
+                self.db.rocksdb().write(batch)
             }
         }
 
@@ -238,7 +239,7 @@ impl CellStorage {
         }
 
         struct Context<'a> {
-            db: &'a Db,
+            db: &'a BaseDb,
             raw_cache: &'a RawCellsCache,
             alloc: &'a Bump,
             transaction: FastHashMap<HashBytes, CellWithRefs<'a>>,
@@ -380,10 +381,7 @@ impl CellStorage {
             }
         }
 
-        let cell = match self
-            .raw_cells_cache
-            .get_raw(self.db.as_ref(), &hash, &self.pending)
-        {
+        let cell = match self.raw_cells_cache.get_raw(&self.db, &hash, &self.pending) {
             Ok(value) => 'cell: {
                 if let Some(value) = value {
                     let rc = &value.header.header;
@@ -921,7 +919,7 @@ impl RawCellsCache {
 
     fn get_raw(
         &self,
-        db: &Db,
+        db: &BaseDb,
         key: &HashBytes,
         pending: &PendingOperations,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
@@ -949,7 +947,7 @@ impl RawCellsCache {
 
     fn get_raw_for_delete(
         &self,
-        db: &Db,
+        db: &BaseDb,
         key: &HashBytes,
         refs_buffer: &mut Vec<HashBytes>,
     ) -> Result<i64, CellStorageError> {

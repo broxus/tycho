@@ -27,7 +27,7 @@ use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     OptionalBlockStuff, PersistentBlockStriderState, StateSubscriber, StateSubscriberContext,
-    StorageBlockProvider,
+    StateSubscriberExt, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
@@ -35,6 +35,7 @@ use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_network::{
     DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
 };
+use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
@@ -242,6 +243,7 @@ pub struct Node {
 
     pub state_tracker: MinRefMcStateTracker,
     pub blockchain_block_provider_config: BlockchainBlockProviderConfig,
+    pub rpc_config: Option<RpcConfig>,
 }
 
 impl Node {
@@ -303,15 +305,23 @@ impl Node {
         );
 
         // Setup storage
-        let storage = Storage::new(node_config.storage).wrap_err("failed to create storage")?;
+        let storage = Storage::builder()
+            .with_config(node_config.storage)
+            .with_rpc_storage(node_config.rpc.is_some())
+            .build()
+            .wrap_err("failed to create storage")?;
         tracing::info!(
             root_dir = %storage.root().path().display(),
             "initialized storage"
         );
 
         // Setup blockchain rpc
-        let blockchain_rpc_service =
-            BlockchainRpcService::new(storage.clone(), node_config.blockchain_rpc_service);
+        // TODO: Add broadcast listener
+        let blockchain_rpc_service = BlockchainRpcService::builder()
+            .with_config(node_config.blockchain_rpc_service)
+            .with_storage(storage.clone())
+            .without_broadcast_listener()
+            .build();
 
         let public_overlay =
             PublicOverlay::builder(global_config.zerostate.compute_public_overlay_id())
@@ -344,6 +354,7 @@ impl Node {
             storage,
             state_tracker,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
+            rpc_config: node_config.rpc,
         })
     }
 
@@ -447,7 +458,7 @@ impl Node {
         for state in to_import {
             let (handle, status) =
                 handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
-                    is_key_block: true,
+                    is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
                     mc_ref_seqno: 0,
                 });
@@ -472,6 +483,34 @@ impl Node {
     }
 
     async fn run(&self, last_block_id: &BlockId) -> Result<()> {
+        // Create RPC
+        let rpc_state = if let Some(config) = &self.rpc_config {
+            let rpc_state = RpcState::builder()
+                .with_config(config.clone())
+                .with_storage(self.storage.clone())
+                .with_blockchain_rpc_client(self.blockchain_rpc_client.clone())
+                .build();
+
+            rpc_state.init(last_block_id).await?;
+
+            let endpoint = rpc_state
+                .bind_endpoint()
+                .await
+                .wrap_err("failed to setup RPC server endpoint")?;
+
+            tracing::info!(listen_addr = %config.listen_addr, "RPC server started");
+            tokio::task::spawn(async move {
+                if let Err(e) = endpoint.serve().await {
+                    tracing::error!("RPC server failed: {e:?}");
+                }
+                tracing::info!("RPC server stopped");
+            });
+
+            Some(rpc_state)
+        } else {
+            None
+        };
+
         // Ensure that there are some neighbours
         tracing::info!("waiting for initial neighbours");
         self.blockchain_rpc_client
@@ -514,11 +553,21 @@ impl Node {
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
+        // NOTE: Stub adapter
+        let mempool_factory = |listener| MempoolAdapterExtFilesStubImpl::new(listener);
+
+        // // TODO: Fix panic on empty initial nodes list
+        // let mempool_factory = MempoolAdapterFactoryStd::new(
+        //     self.keypair.clone(),
+        //     self.dht_client.clone(),
+        //     self.overlay_service.clone(),
+        // );
+
         let collation_manager = CollationManager::start(
             collation_config,
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
-            MempoolAdapterExtFilesStubImpl::new,
+            mempool_factory,
             ValidatorStdImplFactory {
                 network: ValidatorNetwork {
                     overlay_service: self.overlay_service.clone(),
@@ -591,7 +640,7 @@ impl Node {
             .with_state_subscriber(
                 self.state_tracker.clone(),
                 self.storage.clone(),
-                collator_state_subscriber,
+                collator_state_subscriber.chain(rpc_state),
             )
             .build();
 

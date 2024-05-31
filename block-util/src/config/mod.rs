@@ -19,6 +19,7 @@ impl BlockchainConfigExt for BlockchainConfig {
     ) -> Result<bool> {
         // TODO: refer to https://github.com/everx-labs/ever-block/blob/master/src/config_params.rs#L452
         // STUB: currently should not be invoked in prototype
-        todo!()
+        // todo!()
+        Ok(true)
     }
 }

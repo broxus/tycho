@@ -68,7 +68,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Write zerostate to db
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
         &block_id,
-        BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap()),
+        BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap(), true),
     );
 
     let zerostate = ShardStateStuff::from_root(

@@ -91,6 +91,7 @@ gen_network n: build_debug
         $TYCHO_BIN tool gen-key > "$TEMP_DIR/keys${i}.json"
 
         PORT=$((20000 + i))
+        RPC_PORT=$((8000 + i))
 
         KEY=$(jq -r .secret < "$TEMP_DIR/keys${i}.json")
         DHT_ENTRY=$($TYCHO_BIN tool gen-dht "127.0.0.1:$PORT" --key "$KEY")
@@ -98,6 +99,7 @@ gen_network n: build_debug
         GLOBAL_CONFIG=$(echo "$GLOBAL_CONFIG" | jq ".bootstrap_peers += [$DHT_ENTRY]")
 
         NODE_CONFIG=$(echo "$NODE_CONFIG" | jq ".port = $PORT | .storage.root_dir = \"$TEMP_DIR/db${i}\"")
+        NODE_CONFIG=$(echo "$NODE_CONFIG" | jq "if .rpc.listen_addr? then .rpc.listen_addr = \"0.0.0.0:$RPC_PORT\" else . end")
         echo "$NODE_CONFIG" > "$TEMP_DIR/config${i}.json"
     done
 

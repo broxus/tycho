@@ -24,18 +24,7 @@ impl BlockProvider for StorageBlockProvider {
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
         Box::pin(async {
             let block_storage = self.storage.block_storage();
-
-            let get_next_block = || async {
-                let rx = block_storage
-                    .subscribe_to_next_block(*prev_block_id)
-                    .await?;
-
-                let block = rx.await?;
-
-                Ok::<_, anyhow::Error>(block)
-            };
-
-            match get_next_block().await {
+            match block_storage.wait_for_next_block(prev_block_id).await {
                 Ok(block) => Some(Ok(block)),
                 Err(e) => Some(Err(e)),
             }
@@ -45,15 +34,7 @@ impl BlockProvider for StorageBlockProvider {
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
         Box::pin(async {
             let block_storage = self.storage.block_storage();
-
-            let get_block = || async {
-                let rx = block_storage.subscribe_to_block(*block_id).await?;
-                let block = rx.await?;
-
-                Ok::<_, anyhow::Error>(block)
-            };
-
-            match get_block().await {
+            match block_storage.wait_for_block(block_id).await {
                 Ok(block) => Some(Ok(block)),
                 Err(e) => Some(Err(e)),
             }

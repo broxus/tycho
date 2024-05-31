@@ -1,6 +1,6 @@
-use std::sync::Arc;
-
 use everscale_types::models::*;
+use parking_lot::RwLock;
+use weedb::{ColumnFamily, Table};
 
 use crate::db::*;
 use crate::models::*;
@@ -8,12 +8,35 @@ use crate::util::*;
 
 /// Stores relations between blocks
 pub struct BlockConnectionStorage {
-    db: Arc<Db>,
+    db: BaseDb,
+    next1_subscriptions: SlotSubscriptions<BlockId, BlockId>,
+    store_next1: RwLock<()>,
 }
 
 impl BlockConnectionStorage {
-    pub fn new(db: Arc<Db>) -> Self {
-        Self { db }
+    pub fn new(db: BaseDb) -> Self {
+        Self {
+            db,
+            next1_subscriptions: Default::default(),
+            store_next1: RwLock::new(()),
+        }
+    }
+
+    pub async fn wait_for_next1(&self, prev_block_id: &BlockId) -> BlockId {
+        let guard = self.store_next1.write();
+
+        // Try to load the block data
+        if let Some(block_id) = self.load_connection(prev_block_id, BlockConnection::Next1) {
+            return block_id;
+        }
+
+        // Add subscription for the block and drop the lock
+        let rx = self.next1_subscriptions.subscribe(prev_block_id);
+
+        // NOTE: Guard must be dropped before awaiting
+        drop(guard);
+
+        rx.await
     }
 
     pub fn store_connection(
@@ -22,6 +45,13 @@ impl BlockConnectionStorage {
         direction: BlockConnection,
         connected_block_id: &BlockId,
     ) {
+        let is_next1 = direction == BlockConnection::Next1;
+        let guard = if is_next1 {
+            Some(self.store_next1.read())
+        } else {
+            None
+        };
+
         // Use strange match because all columns have different types
         let store = match direction {
             BlockConnection::Prev1 if !handle.meta().has_prev1() => {
@@ -43,6 +73,13 @@ impl BlockConnectionStorage {
             _ => return,
         };
 
+        if is_next1 {
+            self.next1_subscriptions
+                .notify(handle.id(), connected_block_id);
+        }
+
+        drop(guard);
+
         if !store {
             return;
         }
@@ -63,7 +100,7 @@ impl BlockConnectionStorage {
                 id.to_vec(),
             );
 
-            self.db.raw().write(write_batch).unwrap();
+            self.db.rocksdb().write(write_batch).unwrap();
         } else {
             self.db
                 .block_handles

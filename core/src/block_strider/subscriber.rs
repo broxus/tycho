@@ -66,6 +66,18 @@ pub trait StateSubscriber: Send + Sync + 'static {
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a>;
 }
 
+impl<T: StateSubscriber> StateSubscriber for Option<T> {
+    // TODO: Replace with a custom future to reduce allocations.
+    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+        match self {
+            Some(subscriber) => Box::pin(subscriber.handle_state(cx)),
+            None => Box::pin(future::ready(Ok(()))),
+        }
+    }
+}
+
 impl<T: StateSubscriber> StateSubscriber for Box<T> {
     type HandleStateFut<'a> = T::HandleStateFut<'a>;
 
