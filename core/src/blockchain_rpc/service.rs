@@ -1,15 +1,38 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use bytes::Buf;
+use bytes::{Buf, Bytes};
+use futures_util::Future;
 use serde::{Deserialize, Serialize};
-use tycho_network::{Response, Service, ServiceRequest};
+use tycho_network::{InboundRequestMeta, Response, Service, ServiceRequest};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 
 use crate::blockchain_rpc::INTERNAL_ERROR_CODE;
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
+
+pub trait BroadcastListener: Send + Sync + 'static {
+    type HandleMessageFut<'a>: Future<Output = ()> + Send + 'a;
+
+    fn handle_message(
+        &self,
+        meta: Arc<InboundRequestMeta>,
+        message: Bytes,
+    ) -> Self::HandleMessageFut<'_>;
+}
+
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct NoopBroadcastListener;
+
+impl BroadcastListener for NoopBroadcastListener {
+    type HandleMessageFut<'a> = futures_util::future::Ready<()>;
+
+    #[inline]
+    fn handle_message(&self, _: Arc<InboundRequestMeta>, _: Bytes) -> Self::HandleMessageFut<'_> {
+        futures_util::future::ready(())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -35,34 +58,102 @@ impl Default for BlockchainRpcServiceConfig {
     }
 }
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct BlockchainRpcService {
-    inner: Arc<Inner>,
+pub struct BlockchainRpcServiceBuilder<MandatoryFields> {
+    config: BlockchainRpcServiceConfig,
+    mandatory_fields: MandatoryFields,
 }
 
-impl BlockchainRpcService {
-    pub fn new(storage: Storage, config: BlockchainRpcServiceConfig) -> Self {
-        Self {
-            inner: Arc::new(Inner { storage, config }),
+impl<B> BlockchainRpcServiceBuilder<(B, Storage)>
+where
+    B: BroadcastListener,
+{
+    pub fn build(self) -> BlockchainRpcService<B> {
+        let (broadcast_listener, storage) = self.mandatory_fields;
+
+        BlockchainRpcService {
+            inner: Arc::new(Inner {
+                storage,
+                config: self.config,
+                broadcast_listener,
+            }),
         }
     }
 }
 
-impl Service<ServiceRequest> for BlockchainRpcService {
+impl<T1> BlockchainRpcServiceBuilder<(T1, ())> {
+    pub fn with_storage(self, storage: Storage) -> BlockchainRpcServiceBuilder<(T1, Storage)> {
+        let (broadcast_listener, _) = self.mandatory_fields;
+
+        BlockchainRpcServiceBuilder {
+            config: self.config,
+            mandatory_fields: (broadcast_listener, storage),
+        }
+    }
+}
+
+impl<T2> BlockchainRpcServiceBuilder<((), T2)> {
+    pub fn with_broadcast_listener<T1>(
+        self,
+        broadcast_listener: T1,
+    ) -> BlockchainRpcServiceBuilder<(T1, T2)>
+    where
+        T1: BroadcastListener,
+    {
+        let (_, storage) = self.mandatory_fields;
+
+        BlockchainRpcServiceBuilder {
+            config: self.config,
+            mandatory_fields: (broadcast_listener, storage),
+        }
+    }
+
+    pub fn without_broadcast_listener(
+        self,
+    ) -> BlockchainRpcServiceBuilder<(NoopBroadcastListener, T2)> {
+        let (_, storage) = self.mandatory_fields;
+
+        BlockchainRpcServiceBuilder {
+            config: self.config,
+            mandatory_fields: (NoopBroadcastListener, storage),
+        }
+    }
+}
+
+impl<T1, T2> BlockchainRpcServiceBuilder<(T1, T2)> {
+    pub fn with_config(self, config: BlockchainRpcServiceConfig) -> Self {
+        Self { config, ..self }
+    }
+}
+
+#[derive(Clone)]
+#[repr(transparent)]
+pub struct BlockchainRpcService<B = NoopBroadcastListener> {
+    inner: Arc<Inner<B>>,
+}
+
+impl BlockchainRpcService<()> {
+    pub fn builder() -> BlockchainRpcServiceBuilder<((), ())> {
+        BlockchainRpcServiceBuilder {
+            config: Default::default(),
+            mandatory_fields: ((), ()),
+        }
+    }
+}
+
+impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
     type QueryResponse = Response;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
-    type OnMessageFuture = futures_util::future::Ready<()>;
+    type OnMessageFuture = BoxFutureOrNoop<()>;
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
         level = "debug",
-        name = "on_blockchain_server_query",
+        name = "on_blockchain_service_query",
         skip_all,
         fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        let (constructor, body) = match self.inner.try_handle_prefix(&req) {
+        let (constructor, body) = match try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
                 tracing::debug!("failed to deserialize query: {e}");
@@ -149,9 +240,41 @@ impl Service<ServiceRequest> for BlockchainRpcService {
         })
     }
 
-    #[inline]
-    fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
-        futures_util::future::ready(())
+    #[tracing::instrument(
+        level = "debug",
+        name = "on_blockchain_service_message",
+        skip_all,
+        fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
+    )]
+    fn on_message(&self, mut req: ServiceRequest) -> Self::OnMessageFuture {
+        // TODO: Do nothing if `B` is `NoopBroadcastListener` via `castaway` ?
+
+        // Require message body to contain at least two constructors.
+        if req.body.len() < 8 {
+            return BoxFutureOrNoop::Noop;
+        }
+
+        // Skip broadcast prefix
+        if req.body.get_u32_le() != overlay::BroadcastPrefix::TL_ID {
+            return BoxFutureOrNoop::Noop;
+        }
+
+        // Read (without consuming) the next constructor.
+        match req.body.as_ref().get_u32_le() {
+            MessageBroadcastRef::TL_ID => {
+                let inner = self.inner.clone();
+                BoxFutureOrNoop::future(async move {
+                    inner
+                        .broadcast_listener
+                        .handle_message(req.metadata, req.body)
+                        .await;
+                })
+            }
+            constructor => {
+                tracing::debug!("unknown broadcast constructor: {constructor:08x}");
+                BoxFutureOrNoop::Noop
+            }
+        }
     }
 
     #[inline]
@@ -160,27 +283,15 @@ impl Service<ServiceRequest> for BlockchainRpcService {
     }
 }
 
-struct Inner {
+struct Inner<B> {
     storage: Storage,
     config: BlockchainRpcServiceConfig,
+    broadcast_listener: B,
 }
 
-impl Inner {
+impl<B> Inner<B> {
     fn storage(&self) -> &Storage {
         &self.storage
-    }
-
-    fn try_handle_prefix<'a>(
-        &self,
-        req: &'a ServiceRequest,
-    ) -> Result<(u32, &'a [u8]), tl_proto::TlError> {
-        let body = req.as_ref();
-        if body.len() < 4 {
-            return Err(tl_proto::TlError::UnexpectedEof);
-        }
-
-        let constructor = std::convert::identity(body).get_u32_le();
-        Ok((constructor, body))
     }
 
     fn handle_get_next_key_block_ids(
@@ -211,15 +322,7 @@ impl Inner {
                 );
             }
 
-            let mut ids = Vec::with_capacity(limit);
-            while let Some(id) = iterator.next() {
-                ids.push(id);
-                if ids.len() >= limit {
-                    break;
-                }
-            }
-
-            Ok::<_, anyhow::Error>(ids)
+            Ok::<_, anyhow::Error>(iterator.take(limit).collect::<Vec<_>>())
         };
 
         match get_next_key_block_ids() {
@@ -410,4 +513,14 @@ impl Inner {
             }
         }
     }
+}
+
+fn try_handle_prefix(req: &ServiceRequest) -> Result<(u32, &[u8]), tl_proto::TlError> {
+    let body = req.as_ref();
+    if body.len() < 4 {
+        return Err(tl_proto::TlError::UnexpectedEof);
+    }
+
+    let constructor = std::convert::identity(body).get_u32_le();
+    Ok((constructor, body))
 }

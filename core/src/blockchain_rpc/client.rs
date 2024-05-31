@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::BlockId;
-use tycho_network::PublicOverlay;
+use futures_util::stream::{FuturesUnordered, StreamExt};
+use tycho_network::{PublicOverlay, Request};
 
 use crate::overlay_client::{Error, PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
+use crate::proto::overlay::BroadcastPrefix;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -30,6 +32,49 @@ impl BlockchainRpcClient {
 
     pub fn overlay_client(&self) -> &PublicOverlayClient {
         &self.inner.overlay_client
+    }
+
+    pub async fn broadcast_external_message(&self, message: &[u8]) {
+        struct ExternalMessage<'a> {
+            data: &'a [u8],
+        }
+
+        impl<'a> tl_proto::TlWrite for ExternalMessage<'a> {
+            type Repr = tl_proto::Boxed;
+
+            fn max_size_hint(&self) -> usize {
+                4 + MessageBroadcastRef { data: self.data }.max_size_hint()
+            }
+
+            fn write_to<P>(&self, packet: &mut P)
+            where
+                P: tl_proto::TlPacket,
+            {
+                packet.write_u32(BroadcastPrefix::TL_ID);
+                MessageBroadcastRef { data: self.data }.write_to(packet);
+            }
+        }
+
+        // TODO: Add a proper target selector
+        // TODO: Add rate limiting
+        const TARGET_COUNT: usize = 5;
+
+        let req = Request::from_tl(ExternalMessage { data: message });
+
+        let client = &self.inner.overlay_client;
+
+        // TODO: Reuse vector
+        let neighbours = client.neighbours().choose_multiple(TARGET_COUNT).await;
+        let mut futures = FuturesUnordered::new();
+        for neighbour in neighbours {
+            futures.push(client.send_raw(neighbour, req.clone()));
+        }
+
+        while let Some(res) = futures.next().await {
+            if let Err(e) = res {
+                tracing::warn!("failed to broadcast external message: {e}");
+            }
+        }
     }
 
     pub async fn get_next_key_block_ids(

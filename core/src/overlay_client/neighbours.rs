@@ -45,7 +45,12 @@ impl Neighbours {
 
     pub async fn choose(&self) -> Option<Neighbour> {
         let selection_index = self.inner.selection_index.lock().await;
-        selection_index.get(&mut rand::thread_rng())
+        selection_index.choose(&mut rand::thread_rng())
+    }
+
+    pub async fn choose_multiple(&self, n: usize) -> Vec<Neighbour> {
+        let selection_index = self.inner.selection_index.lock().await;
+        selection_index.choose_multiple(&mut rand::thread_rng(), n)
     }
 
     pub async fn update_selection_index(&self) {
@@ -132,7 +137,7 @@ struct Inner {
 struct SelectionIndex {
     /// Neighbour indices with cumulative weight.
     indices_with_weights: Vec<(Neighbour, u32)>,
-    /// Optional uniform distribution [0; total_weight).
+    /// Optional uniform distribution `[0; total_weight)`.
     distribution: Option<UniformInt<u32>>,
 }
 
@@ -164,7 +169,7 @@ impl SelectionIndex {
         // TODO: fallback to uniform sample from any neighbour
     }
 
-    fn get<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<Neighbour> {
+    fn choose<R: Rng + ?Sized>(&self, rng: &mut R) -> Option<Neighbour> {
         let chosen_weight = self.distribution.as_ref()?.sample(rng);
 
         // Find the first item which has a weight higher than the chosen weight.
@@ -176,5 +181,70 @@ impl SelectionIndex {
             .get(i)
             .map(|(neighbour, _)| neighbour)
             .cloned()
+    }
+
+    fn choose_multiple<R: Rng + ?Sized>(&self, rng: &mut R, mut n: usize) -> Vec<Neighbour> {
+        struct Element<'a> {
+            key: f64,
+            neighbour: &'a Neighbour,
+        }
+
+        impl Eq for Element<'_> {}
+        impl PartialEq for Element<'_> {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                // Bitwise comparison is safe
+                self.key == other.key
+            }
+        }
+
+        impl PartialOrd for Element<'_> {
+            #[inline]
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        impl Ord for Element<'_> {
+            #[inline]
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                // Weight must not be nan
+                self.key.partial_cmp(&other.key).unwrap()
+            }
+        }
+
+        n = std::cmp::min(n, self.indices_with_weights.len());
+        if n == 0 {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::with_capacity(self.indices_with_weights.len());
+        let mut prev_total_weight = None;
+        for (neighbour, total_weight) in &self.indices_with_weights {
+            let weight = match prev_total_weight {
+                Some(prev) => total_weight - prev,
+                None => *total_weight,
+            };
+            prev_total_weight = Some(*total_weight);
+
+            debug_assert!(weight > 0);
+
+            let key = rng.gen::<f64>().powf(1.0 / weight as f64);
+            candidates.push(Element { key, neighbour });
+        }
+
+        // Partially sort the array to find the `n` elements with the greatest
+        // keys. Do this by using `select_nth_unstable` to put the elements with
+        // the *smallest* keys at the beginning of the list in `O(n)` time, which
+        // provides equivalent information about the elements with the *greatest* keys.
+        let (_, mid, greater) = candidates.select_nth_unstable(self.indices_with_weights.len() - n);
+
+        let mut result = Vec::with_capacity(n);
+        result.push(mid.neighbour.clone());
+        for element in greater {
+            result.push(element.neighbour.clone());
+        }
+
+        result
     }
 }

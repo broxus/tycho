@@ -87,6 +87,11 @@ impl PublicOverlayClient {
         self.inner.send(data).await
     }
 
+    #[inline]
+    pub async fn send_raw(&self, neighbour: Neighbour, req: Request) -> Result<(), Error> {
+        self.inner.send_impl(neighbour, req).await
+    }
+
     pub async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>, Error>
     where
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,

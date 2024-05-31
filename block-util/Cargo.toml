@@ -11,6 +11,7 @@ license.workspace = true
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 bytes = { workspace = true }
 everscale-types = { workspace = true }
 hex = { workspace = true }

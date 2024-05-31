@@ -45,16 +45,10 @@ pub trait StoredValue {
 
 /// A trait for simple buffer-based serialization
 pub trait StoredValueBuffer {
-    fn write_byte(&mut self, byte: u8);
     fn write_raw_slice(&mut self, data: &[u8]);
 }
 
 impl StoredValueBuffer for Vec<u8> {
-    #[inline(always)]
-    fn write_byte(&mut self, byte: u8) {
-        self.push(byte);
-    }
-
     #[inline(always)]
     fn write_raw_slice(&mut self, data: &[u8]) {
         self.extend_from_slice(data);
@@ -65,11 +59,6 @@ impl<T> StoredValueBuffer for SmallVec<T>
 where
     T: smallvec::Array<Item = u8>,
 {
-    #[inline(always)]
-    fn write_byte(&mut self, byte: u8) {
-        self.push(byte);
-    }
-
     #[inline(always)]
     fn write_raw_slice(&mut self, data: &[u8]) {
         self.extend_from_slice(data);

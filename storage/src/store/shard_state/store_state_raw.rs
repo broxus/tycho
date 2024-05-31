@@ -9,6 +9,7 @@ use everscale_types::models::BlockId;
 use tycho_block_util::state::*;
 use tycho_util::progress_bar::*;
 use tycho_util::FastHashMap;
+use weedb::{rocksdb, BoundedCfHandle};
 
 use super::cell_storage::*;
 use super::entries_buffer::*;
@@ -20,7 +21,7 @@ pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateRaw<'a> {
     block_id: BlockId,
-    db: &'a Db,
+    db: &'a BaseDb,
     cell_storage: &'a Arc<CellStorage>,
     min_ref_mc_state: &'a MinRefMcStateTracker,
     reader: ShardStatePacketReader,
@@ -32,7 +33,7 @@ pub struct StoreStateRaw<'a> {
 impl<'a> StoreStateRaw<'a> {
     pub(crate) fn new(
         block_id: &BlockId,
-        db: &'a Db,
+        db: &'a BaseDb,
         downloads_dir: &FileDb,
         cell_storage: &'a Arc<CellStorage>,
         min_ref_mc_state: &'a MinRefMcStateTracker,
@@ -134,7 +135,7 @@ impl<'a> StoreStateRaw<'a> {
 
         let cells_file = self.file_ctx.create_mapped_cells_file()?;
 
-        let raw = self.db.raw().as_ref();
+        let raw = self.db.rocksdb().as_ref();
         let write_options = self.db.cells.new_write_config();
 
         let mut tail = [0; 4];
@@ -436,7 +437,7 @@ struct FinalizationContext<'a> {
 }
 
 impl<'a> FinalizationContext<'a> {
-    fn new(db: &'a Db) -> Self {
+    fn new(db: &'a BaseDb) -> Self {
         Self {
             pruned_branches: Default::default(),
             cell_usages: FastHashMap::with_capacity_and_hasher(128, Default::default()),
@@ -447,10 +448,10 @@ impl<'a> FinalizationContext<'a> {
         }
     }
 
-    fn clear_temp_cells(&self, db: &Db) -> std::result::Result<(), rocksdb::Error> {
+    fn clear_temp_cells(&self, db: &BaseDb) -> std::result::Result<(), rocksdb::Error> {
         let from = &[0x00; 32];
         let to = &[0xff; 32];
-        db.raw().delete_range_cf(&self.temp_cells_cf, from, to)
+        db.rocksdb().delete_range_cf(&self.temp_cells_cf, from, to)
     }
 
     fn finalize_cell_usages(&mut self) {
@@ -567,6 +568,7 @@ mod test {
     use weedb::rocksdb::{IteratorMode, WriteBatch};
 
     use super::*;
+    use crate::{Storage, StorageConfig};
 
     #[tokio::test]
     #[ignore]
@@ -592,15 +594,19 @@ mod test {
         }
         tracing::info!("Decompressed the archive");
 
-        let db = Db::open(current_test_path.join("rocksdb"), DbConfig {
-            rocksdb_lru_capacity: ByteSize::mb(256),
-        })?;
-        let file_db = FileDb::new(current_test_path.join("file_db"))?;
-
-        let cells_storage = CellStorage::new(db.clone(), 100_000_000);
+        let storage = Storage::builder()
+            .with_config(StorageConfig {
+                root_dir: current_test_path.join("db"),
+                rocksdb_enable_metrics: false,
+                rocksdb_lru_capacity: ByteSize::mb(256),
+                cells_cache_size: ByteSize::mb(256),
+            })
+            .build()?;
+        let base_db = storage.base_db();
+        let cell_storage = &storage.shard_state_storage().cell_storage;
 
         let tracker = MinRefMcStateTracker::new();
-        let download_dir = file_db.create_subdir("downloads")?;
+        let download_dir = storage.root().create_subdir("downloads")?;
 
         for file in std::fs::read_dir(current_test_path.join("states"))? {
             let file = file?;
@@ -609,7 +615,7 @@ mod test {
             let block_id = parse_filename(filename.as_ref());
 
             let mut store_state =
-                StoreStateRaw::new(&block_id, &db, &download_dir, &cells_storage, &tracker)
+                StoreStateRaw::new(&block_id, base_db, &download_dir, cell_storage, &tracker)
                     .context("Failed to create ShardStateReplaceTransaction")?;
 
             let file = File::open(file.path())?;
@@ -637,19 +643,12 @@ mod test {
         }
         tracing::info!("Finished processing all states");
         tracing::info!("Starting gc");
-        states_gc(&cells_storage, &db).await?;
-
-        drop(db);
-        drop(cells_storage);
-        rocksdb::DB::destroy(
-            &rocksdb::Options::default(),
-            current_test_path.join("rocksdb"),
-        )?;
+        states_gc(cell_storage, base_db).await?;
 
         Ok(())
     }
 
-    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &Db) -> Result<()> {
+    async fn states_gc(cell_storage: &Arc<CellStorage>, db: &BaseDb) -> Result<()> {
         let states_iterator = db.shard_states.iterator(IteratorMode::Start);
         let bump = bumpalo::Bump::new();
 
@@ -665,7 +664,7 @@ mod test {
             cell_storage.remove_cell(&mut batch, &bump, cell.hash(LevelMask::MAX_LEVEL))?;
 
             // execute batch
-            db.raw().write_opt(batch, db.cells.write_config())?;
+            db.rocksdb().write_opt(batch, db.cells.write_config())?;
             tracing::info!("State deleted. Progress: {}/{total_states}", deleted + 1);
         }
 

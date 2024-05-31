@@ -9,7 +9,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
 use tokio::time::Instant;
 
-use crate::db::Db;
+use crate::db::BaseDb;
 use crate::store::BlockHandleStorage;
 use crate::FileDb;
 
@@ -19,7 +19,7 @@ const KEY_BLOCK_UTIME_STEP: u32 = 86400;
 const BASE_DIR: &str = "states";
 
 pub struct PersistentStateStorage {
-    db: Arc<Db>,
+    db: BaseDb,
     storage_dir: FileDb,
     block_handle_storage: Arc<BlockHandleStorage>,
     is_cancelled: Arc<AtomicBool>,
@@ -27,7 +27,7 @@ pub struct PersistentStateStorage {
 
 impl PersistentStateStorage {
     pub fn new(
-        db: Arc<Db>,
+        db: BaseDb,
         files_dir: &FileDb,
         block_handle_storage: Arc<BlockHandleStorage>,
     ) -> Result<Self> {

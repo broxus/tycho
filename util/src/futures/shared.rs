@@ -250,7 +250,7 @@ const POISONED: usize = 3;
 #[cfg(test)]
 mod tests {
     //! Addresses the original `Shared` futures issue:
-    //! https://github.com/rust-lang/futures-rs/issues/2706
+    //! <https://github.com/rust-lang/futures-rs/issues/2706/>
 
     use futures_util::FutureExt;
 
@@ -276,7 +276,7 @@ mod tests {
             }
         }
 
-        YieldNow { yielded: false }.await
+        YieldNow { yielded: false }.await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

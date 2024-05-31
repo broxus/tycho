@@ -170,7 +170,33 @@ impl BlockStuff {
     }
 }
 
-struct Inner {
+impl AsRef<Block> for BlockStuff {
+    #[inline]
+    fn as_ref(&self) -> &Block {
+        &self.inner.block
+    }
+}
+
+unsafe impl arc_swap::RefCnt for BlockStuff {
+    type Base = Inner;
+
+    fn into_ptr(me: Self) -> *mut Self::Base {
+        arc_swap::RefCnt::into_ptr(me.inner)
+    }
+
+    fn as_ptr(me: &Self) -> *mut Self::Base {
+        arc_swap::RefCnt::as_ptr(&me.inner)
+    }
+
+    unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
+        Self {
+            inner: arc_swap::RefCnt::from_ptr(ptr),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct Inner {
     id: BlockId,
     block: Block,
 }

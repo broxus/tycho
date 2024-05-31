@@ -67,3 +67,8 @@ where
         })
     }
 }
+
+/// Message broadcast prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, id = "overlay.broadcastPrefix", scheme = "proto.tl")]
+pub struct BroadcastPrefix;
