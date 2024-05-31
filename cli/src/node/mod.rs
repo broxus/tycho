@@ -458,7 +458,7 @@ impl Node {
         for state in to_import {
             let (handle, status) =
                 handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
-                    is_key_block: true,
+                    is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
                     mc_ref_seqno: 0,
                 });

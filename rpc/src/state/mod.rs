@@ -226,27 +226,27 @@ impl Inner {
         let shard_states = self.storage.shard_state_storage();
 
         // Try to init the latest known key block cache
-        let mut has_key_block = false;
         'key_block: {
             // NOTE: `+ 1` here because the `mc_block_id` might be a key block and we should use it
             let Some(handle) = block_handles.find_prev_key_block(mc_block_id.seqno + 1) else {
                 break 'key_block;
             };
 
-            let key_block = if handle.meta().has_data() {
-                blocks.load_block_data(&handle).await?
-            } else if handle.id().seqno == 0 && self.config.generate_stub_keyblock {
-                let zerostate = shard_states.load_state(handle.id()).await?;
-                make_key_block_stub(&zerostate)?
+            if handle.meta().has_data() {
+                let key_block = blocks.load_block_data(&handle).await?;
+                self.update_mc_block_cache(&key_block)?;
             } else {
-                break 'key_block;
-            };
+                let state = shard_states.load_state(handle.id()).await?;
+                let state = state.as_ref();
 
-            self.update_mc_block_cache(&key_block)?;
-            has_key_block = true;
-        }
-        if !has_key_block {
-            tracing::warn!("no key block found during initialization");
+                let Some(extra) = state.load_custom()? else {
+                    anyhow::bail!("masterchain state without extra");
+                };
+
+                self.update_timings(state.gen_utime, state.seqno);
+                self.update_config(state.global_id, &extra.config);
+                tracing::warn!("no key block found during initialization");
+            }
         }
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
@@ -336,20 +336,9 @@ impl Inner {
     fn update_mc_block_cache(&self, block: &BlockStuff) -> Result<()> {
         // Update timings
         {
-            let block_id = block.id();
-
             // TODO: Add `OnceLock` for block `info` and `custom``
             let info = block.load_info()?;
-
-            let time_diff = now_sec() as i64 - info.gen_utime as i64;
-            self.timings.store(Arc::new(StateTimings {
-                last_mc_block_seqno: block_id.seqno,
-                last_shard_client_mc_block_seqno: block_id.seqno,
-                last_mc_utime: info.gen_utime,
-                mc_time_diff: time_diff,
-                shard_client_time_diff: time_diff,
-                smallest_known_lt: self.storage.rpc_storage().map(|s| s.min_tx_lt()),
-            }));
+            self.update_timings(info.gen_utime, info.seqno);
 
             if !info.key_block {
                 return Ok(());
@@ -359,25 +348,11 @@ impl Inner {
         let custom = block.load_custom()?;
 
         // Try to update cached config:
-        'config: {
-            let Some(ref config) = custom.config else {
-                tracing::error!("key block without config");
-                break 'config;
-            };
-
-            let value = match serde_json::value::to_raw_value(&LatestBlockchainConfigRef {
-                global_id: block.as_ref().global_id,
-                config,
-            }) {
-                Ok(value) => value,
-                Err(e) => {
-                    tracing::error!("failed to serialize blockchain config: {e}");
-                    break 'config;
-                }
-            };
-
-            self.blockchain_config_json.store(Some(Arc::new(value)));
-        };
+        if let Some(ref config) = custom.config {
+            self.update_config(block.as_ref().global_id, config);
+        } else {
+            tracing::error!("key block without config");
+        }
 
         // Try to update cached key block:
         match serde_json::value::to_raw_value(&LatestKeyBlockRef {
@@ -392,6 +367,27 @@ impl Inner {
         }
 
         Ok(())
+    }
+
+    fn update_timings(&self, mc_gen_utime: u32, seqno: u32) {
+        let time_diff = now_sec() as i64 - mc_gen_utime as i64;
+        self.timings.store(Arc::new(StateTimings {
+            last_mc_block_seqno: seqno,
+            last_shard_client_mc_block_seqno: seqno,
+            last_mc_utime: mc_gen_utime,
+            mc_time_diff: time_diff,
+            shard_client_time_diff: time_diff,
+            smallest_known_lt: self.storage.rpc_storage().map(|s| s.min_tx_lt()),
+        }));
+    }
+
+    fn update_config(&self, global_id: i32, config: &BlockchainConfig) {
+        match serde_json::value::to_raw_value(&LatestBlockchainConfigRef { global_id, config }) {
+            Ok(value) => self.blockchain_config_json.store(Some(Arc::new(value))),
+            Err(e) => {
+                tracing::error!("failed to serialize blockchain config: {e}");
+            }
+        }
     }
 
     fn update_accounts_cache(
@@ -503,44 +499,6 @@ impl CachedAccounts {
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 
 type CachedJson = Arc<Box<RawValue>>;
-
-fn make_key_block_stub(zerostate: &ShardStateStuff) -> Result<BlockStuff> {
-    let state = zerostate.state();
-
-    let block_info = BlockInfo {
-        key_block: true,
-        gen_utime: state.gen_utime,
-        ..Default::default()
-    };
-
-    let extra = BlockExtra {
-        custom: Some(Lazy::new(&McBlockExtra {
-            config: Some(zerostate.config_params()?.clone()),
-            ..Default::default()
-        })?),
-        ..Default::default()
-    };
-
-    let block = Block {
-        global_id: state.global_id,
-        info: Lazy::new(&block_info)?,
-        value_flow: Lazy::new(&Default::default())?,
-        state_update: Lazy::new(&Default::default())?,
-        out_msg_queue_updates: None,
-        extra: Lazy::new(&extra)?,
-    };
-
-    let root = CellBuilder::build_from(&block)?;
-
-    let block_id = BlockId {
-        shard: ShardIdent::MASTERCHAIN,
-        seqno: 0,
-        root_hash: *root.repr_hash(),
-        file_hash: Boc::file_hash(Boc::encode(&root)),
-    };
-
-    Ok(BlockStuff::with_block(block_id, block))
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcStateError {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RpcConfig {
     /// TCP socket address to listen for incoming RPC connections.
     ///

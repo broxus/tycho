@@ -894,9 +894,11 @@ fn split_shard(
         };
 
         let (left_accounts, right_accounts) = {
-            let prefix_len = shard.prefix_len();
             builder.rewind(builder.bit_len()).unwrap();
-            builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
+            let prefix_len = shard.prefix_len();
+            if prefix_len > 0 {
+                builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;
+            }
             accounts.split_by_prefix(&builder.as_data_slice())?
         };
 

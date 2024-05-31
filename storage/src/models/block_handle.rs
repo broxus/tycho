@@ -57,7 +57,7 @@ impl BlockHandle {
 
     #[inline]
     pub fn is_key_block(&self) -> bool {
-        self.inner.meta.is_key_block() || self.inner.id.seqno == 0
+        self.inner.meta.is_key_block() || self.inner.id.is_masterchain() && self.inner.id.seqno == 0
     }
 
     #[inline]
