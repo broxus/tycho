@@ -106,11 +106,11 @@ where
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateSnapshot>> {
         let session_state_lock = self.session_state.lock().await;
-        let persistent_state_lock = self.persistent_state.read().await;
+        let _persistent_state_lock = self.persistent_state.read().await;
         vec![
             // TODO parallel
             session_state_lock.snapshot(ranges, for_shard_id).await,
-            persistent_state_lock.snapshot().await,
+            // persistent_state_lock.snapshot().await,
         ]
     }
 

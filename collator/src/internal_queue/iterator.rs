@@ -7,7 +7,7 @@ use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange, StateSnapshot};
+use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::snapshot_manager::SnapshotManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, Lt, QueueDiff};
 pub trait QueueIterator: Send {
@@ -40,7 +40,7 @@ impl QueueIteratorImpl {
         snapshot_manager: SnapshotManager,
         for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
-        let mut messages_for_current_shard = BinaryHeap::default();
+        let messages_for_current_shard = BinaryHeap::default();
 
         Ok(Self {
             for_shard,

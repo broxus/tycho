@@ -24,7 +24,6 @@ where
         WeeDbBuilder::new(path, context).with_name(Self::NAME)
     }
 
-
     fn apply_migrations(&self) -> Result<(), MigrationError> {
         let mut migrations = Migrations::<Self>::with_target_version_and_provider(
             Self::VERSION,

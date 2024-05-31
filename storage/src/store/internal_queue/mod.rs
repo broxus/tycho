@@ -1,14 +1,6 @@
 mod model;
 
-use std::hash::Hasher;
-use std::sync::Arc;
-
-use everscale_types::cell::Store;
-use everscale_types::models::*;
-
 use crate::db::*;
-use crate::rocksdb::SnapshotWithThreadMode;
-use crate::util::{StoredValue, StoredValueBuffer};
 
 pub struct InternalQueueStorage {
     db: BaseDb,
@@ -24,7 +16,6 @@ impl InternalQueueStorage {
     pub fn new(db: BaseDb) -> Self {
         Self { db }
     }
-    //
     // pub fn snapshot(&self) -> SnapshotWithThreadMode<'static, BaseDb> {
     //     unsafe { extend_lifetime(self.db.raw().snapshot()) }
     // }

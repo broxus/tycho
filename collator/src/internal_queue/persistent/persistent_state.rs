@@ -69,12 +69,12 @@ pub trait LocalPersistentState {
 
 pub struct PersistentStateStdImpl {
     // TODO remove static and use owned_snapshot
-    storage: Storage,
+    _storage: Storage,
 }
 
 impl PersistentStateStdImpl {
-    pub fn new(storage: Storage) -> Self {
-        Self { storage }
+    pub fn new(_storage: Storage) -> Self {
+        Self { _storage }
     }
 }
 
