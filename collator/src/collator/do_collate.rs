@@ -1054,9 +1054,9 @@ impl CollatorStdImpl {
             self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
                 .await?;
         }
-        // TODO: uncomment when ticktock is implemented for config account
-        // let config_address = self.working_state().mc_data.config().address;
-        // self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager).await?;
+        let config_address = self.working_state().mc_data.config().address;
+        self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
+            .await?;
         Ok(())
     }
 
