@@ -28,6 +28,7 @@ impl Serialize for LastTransactionId {
         #[serde(rename_all = "camelCase")]
         struct LastTransactionId<'a> {
             is_exact: bool,
+            #[serde(with = "serde_helpers::string")]
             lt: u64,
             hash: &'a HashBytes,
         }
@@ -63,6 +64,7 @@ pub struct LatestKeyBlockRef<'a> {
 #[serde(rename_all = "camelCase")]
 pub struct LatestBlockchainConfigRef<'a> {
     pub global_id: i32,
+    pub seqno: u32,
     #[serde(with = "BocRepr")]
     pub config: &'a BlockchainConfig,
 }

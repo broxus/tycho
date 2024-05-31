@@ -20,11 +20,11 @@ mod extractor;
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
-        GetCapabilities(GetCapabilitiesRequest),
-        GetLatestKeyBlock(GetLatestKeyBlockRequest),
-        GetBlockchainConfig(GetBlockchainConfigRequest),
-        GetStatus(GetStatusRequest),
-        GetTimings(GetTimingsRequest),
+        GetCapabilities(EmptyParams),
+        GetLatestKeyBlock(EmptyParams),
+        GetBlockchainConfig(EmptyParams),
+        GetStatus(EmptyParams),
+        GetTimings(EmptyParams),
         SendMessage(SendMessageRequest),
         GetContractState(GetContractStateRequest),
         GetAccountsByCodeHash(GetAccountsByCodeHashRequest),
@@ -101,7 +101,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
                             GetContractStateResponse::Exists {
                                 account: &account,
                                 timings,
-                                last_transaction_lt: LastTransactionId {
+                                last_transaction_id: LastTransactionId {
                                     hash: state.last_trans_hash,
                                     lt: state.last_trans_lt,
                                 },
@@ -148,20 +148,21 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
 
 // === Requests ===
 
-#[derive(Debug, Deserialize)]
-pub struct GetCapabilitiesRequest {}
+#[derive(Debug)]
+pub struct EmptyParams;
 
-#[derive(Debug, Deserialize)]
-pub struct GetLatestKeyBlockRequest {}
+impl<'de> Deserialize<'de> for EmptyParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Empty {}
 
-#[derive(Debug, Deserialize)]
-pub struct GetBlockchainConfigRequest {}
-
-#[derive(Debug, Deserialize)]
-pub struct GetStatusRequest {}
-
-#[derive(Debug, Deserialize)]
-pub struct GetTimingsRequest {}
+        // Accepts both `null` and empty object.
+        <Option<Empty>>::deserialize(deserializer).map(|_| Self)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
@@ -252,7 +253,7 @@ enum GetContractStateResponse<'a> {
         #[serde(serialize_with = "serialize_account")]
         account: &'a Account,
         timings: GenTimings,
-        last_transaction_lt: LastTransactionId,
+        last_transaction_id: LastTransactionId,
     },
     Unchanged {
         timings: GenTimings,

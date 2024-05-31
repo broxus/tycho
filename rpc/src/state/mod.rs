@@ -244,7 +244,7 @@ impl Inner {
                 };
 
                 self.update_timings(state.gen_utime, state.seqno);
-                self.update_config(state.global_id, &extra.config);
+                self.update_config(state.global_id, state.seqno, &extra.config);
                 tracing::warn!("no key block found during initialization");
             }
         }
@@ -349,7 +349,7 @@ impl Inner {
 
         // Try to update cached config:
         if let Some(ref config) = custom.config {
-            self.update_config(block.as_ref().global_id, config);
+            self.update_config(block.as_ref().global_id, block.id().seqno, config);
         } else {
             tracing::error!("key block without config");
         }
@@ -381,8 +381,12 @@ impl Inner {
         }));
     }
 
-    fn update_config(&self, global_id: i32, config: &BlockchainConfig) {
-        match serde_json::value::to_raw_value(&LatestBlockchainConfigRef { global_id, config }) {
+    fn update_config(&self, global_id: i32, seqno: u32, config: &BlockchainConfig) {
+        match serde_json::value::to_raw_value(&LatestBlockchainConfigRef {
+            global_id,
+            seqno,
+            config,
+        }) {
             Ok(value) => self.blockchain_config_json.store(Some(Arc::new(value))),
             Err(e) => {
                 tracing::error!("failed to serialize blockchain config: {e}");
