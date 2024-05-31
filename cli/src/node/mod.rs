@@ -18,7 +18,7 @@ use tycho_collator::internal_queue::persistent::persistent_state::{
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::MempoolAdapterFactoryStd;
+use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
 use tycho_collator::validator::client::retry::BackoffConfig;
@@ -553,15 +553,21 @@ impl Node {
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
+        // NOTE: Stub adapter
+        let mempool_factory = |listener| MempoolAdapterStubImpl::new(listener);
+
+        // // TODO: Fix panic on empty initial nodes list
+        // let mempool_factory = MempoolAdapterFactoryStd::new(
+        //     self.keypair.clone(),
+        //     self.dht_client.clone(),
+        //     self.overlay_service.clone(),
+        // );
+
         let collation_manager = CollationManager::start(
             collation_config,
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
-            MempoolAdapterFactoryStd::new(
-                self.keypair.clone(),
-                self.dht_client.clone(),
-                self.overlay_service.clone(),
-            ),
+            mempool_factory,
             ValidatorStdImplFactory {
                 network: ValidatorNetwork {
                     overlay_service: self.overlay_service.clone(),
