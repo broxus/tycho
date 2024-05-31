@@ -13,7 +13,7 @@ use crate::models::{
 pub struct Producer;
 
 impl Producer {
-    pub async fn new_point(
+    pub fn new_point(
         current_round: &DagRound,
         prev_point: Option<&PrevPoint>,
         payload: Vec<Bytes>,
@@ -48,19 +48,14 @@ impl Producer {
             &witness,
             LinkField::Proof,
         );
-        let time = Self::get_time(
-            &finished_round,
-            &local_id,
-            &anchor_proof,
-            prev_point,
-            &includes,
-            &witness,
-        )
-        .await;
+
+        let (time, anchor_time) = Self::get_time(&anchor_proof, prev_point, &includes, &witness);
+
         let includes = includes
             .into_iter()
             .map(|point| (point.body.location.author, point.digest.clone()))
             .collect::<BTreeMap<_, _>>();
+
         assert!(
             prev_point.map_or(true, |prev| includes
                 .get(&local_id)
@@ -72,6 +67,7 @@ impl Producer {
                 >= current_round.node_count().majority_of_others()),
             "Collected not enough evidence, check Broadcaster logic"
         );
+
         let witness = witness
             .into_iter()
             .map(|point| (point.body.location.author, point.digest.clone()))
@@ -89,6 +85,7 @@ impl Producer {
             witness,
             anchor_trigger,
             anchor_proof,
+            anchor_time,
         }))
     }
 
@@ -114,16 +111,15 @@ impl Producer {
     }
 
     fn witness(finished_round: &DagRound) -> Vec<Arc<Point>> {
-        if let Some(witness_round) = finished_round.prev().get() {
-            witness_round
+        match finished_round.prev().get() {
+            Some(witness_round) => witness_round
                 .select(|(_, loc)| {
                     loc.state()
                         .signed_point(finished_round.round())
                         .map(|valid| valid.point.clone())
                 })
-                .collect()
-        } else {
-            vec![]
+                .collect(),
+            None => vec![],
         }
     }
 
@@ -150,7 +146,7 @@ impl Producer {
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        if point.body.location.round == current_round.round().prev()
+        let link = if point.body.location.round == current_round.round().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
             Link::Direct(Through::Includes(point.body.location.author))
@@ -159,7 +155,9 @@ impl Producer {
                 to: point.anchor_id(link_field),
                 path: Through::Includes(point.body.location.author),
             }
-        }
+        };
+
+        link
     }
 
     fn update_link_from_witness(
@@ -193,53 +191,47 @@ impl Producer {
         }
     }
 
-    async fn get_time(
-        finished_round: &DagRound,
-        local_id: &PeerId,
+    fn get_time(
         anchor_proof: &Link,
         prev_point: Option<&PrevPoint>,
         includes: &[Arc<Point>],
         witness: &[Arc<Point>],
-    ) -> UnixTime {
+    ) -> (UnixTime, UnixTime) {
         let mut time = UnixTime::now();
-        if let Some(prev_point) = prev_point {
-            if let Some(valid) = finished_round
-                .valid_point_exact(local_id, &prev_point.digest)
-                .await
-            {
-                time = valid.point.body.time.max(time);
-            }
-        }
+
+        let prev_point = prev_point.and_then(|prev| {
+            includes
+                .iter()
+                .find(|point| point.digest == prev.digest)
+                .map(|point| {
+                    time = point.body.time.max(time);
+                    point
+                })
+        });
+
         match anchor_proof {
-            Link::ToSelf => {}
-            Link::Direct(through) => {
+            Link::ToSelf => {
+                let point = prev_point.expect("anchor candidate should exist");
+
+                let anchor_time = point.body.time;
+
+                (time.max(anchor_time), anchor_time)
+            }
+            Link::Direct(through) | Link::Indirect { path: through, .. } => {
                 let (peer_id, through) = match through {
                     Through::Includes(peer_id) => (peer_id, &includes),
                     Through::Witness(peer_id) => (peer_id, &witness),
                 };
-                if let Some(point) = through
-                    .iter()
+
+                let point = through
+                    .into_iter()
                     .find(|point| point.body.location.author == peer_id)
-                {
-                    time = point.body.time.max(time);
-                }
-            }
-            Link::Indirect { to, .. } => {
-                // it's sufficient to check prev point - it can't have newer anchor proof
-                if prev_point.is_none() {
-                    if let Some(valid) = finished_round.valid_point(&to).await {
-                        time = valid.point.body.time.max(time);
-                    } else {
-                        panic!("last anchor proof must stay in DAG until its payload is committed")
-                    }
-                }
+                    .expect("anchor proof should exist");
+
+                let anchor_time = point.body.anchor_time;
+
+                (time.max(anchor_time), anchor_time)
             }
         }
-        // No need to take the greatest time among all point's dependencies -
-        // only leader's time is significant and every node will have its chance
-        // (or its chain will be rejected). Better throw away a single node's point
-        // than requiring the whole consensus to wait once the point was included.
-        // Todo: use proven anchor candidate's time, as it is unique
-        time
     }
 }

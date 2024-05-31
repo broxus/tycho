@@ -5,15 +5,14 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::compose::ComposeRunner;
+use crate::helm::{ClusterType, HelmRunner};
 use crate::simulator::Simulator;
 
-mod compose;
 mod config;
 mod node;
 mod simulator;
 
-static DEFAULT_SUBNET: &str = "172.30.0.0/24";
+mod helm;
 
 fn main() -> Result<()> {
     let args: Cli = Cli::parse();
@@ -69,14 +68,22 @@ struct PrepareCommand {
     #[clap(short, long)]
     #[clap(default_value = "5")]
     nodes: usize,
+
+    #[clap(short, long)]
+    #[clap(default_value = "k3s")]
+    cluster_type: ClusterType,
 }
 
 impl PrepareCommand {
     fn run(self) -> Result<()> {
-        CleanCommand { logs: true }.run().ok();
+        CleanCommand {
+            cluster_type: self.cluster_type,
+        }
+        .run()
+        .ok();
 
-        let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
-        let mut sim = Simulator::new(config)?;
+        let config = config::ServiceConfig::new()?;
+        let mut sim = Simulator::new(config, self.cluster_type)?;
         sim.prepare(self.nodes)?;
         Ok(())
     }
@@ -85,21 +92,18 @@ impl PrepareCommand {
 #[derive(Parser)]
 struct CleanCommand {
     #[clap(short, long)]
-    #[clap(default_value = "false")]
-    logs: bool,
+    #[clap(default_value = "k3s")]
+    cluster_type: ClusterType,
 }
 
 impl CleanCommand {
     fn run(self) -> Result<()> {
-        let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
-        let compose = ComposeRunner::load_from_fs(&config)?;
-        compose.down()?;
-        if self.logs {
-            std::fs::remove_dir_all(config.logs_dir())?;
-        }
+        let config = config::ServiceConfig::new()?;
+        let helm = HelmRunner::new(config.clone(), ClusterType::K3S);
+        helm.stop_node("tycho")?;
+
         std::fs::remove_file(config.global_config_path())?;
-        std::fs::remove_file(config.compose_path())?;
-        std::fs::remove_dir_all(config.entrypoints())?;
+        std::fs::remove_file(config.helm_template_output())?;
 
         Ok(())
     }
@@ -110,20 +114,24 @@ struct StatusCommand;
 
 impl StatusCommand {
     fn run(self) -> Result<()> {
-        let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
-        let compose = ComposeRunner::load_from_fs(&config)?;
+        let config = config::ServiceConfig::new()?;
+        let compose = HelmRunner::new(config.clone(), ClusterType::K3S);
 
-        compose.execute_compose_command(&["ps"])?;
+        compose.ps()?;
         Ok(())
     }
 }
 
 #[derive(Parser)]
-struct BuildCommand;
+struct BuildCommand {
+    #[clap(short, long)]
+    #[clap(default_value = "k3s")]
+    cluster_type: ClusterType,
+}
 
 impl BuildCommand {
     fn run(self) -> Result<()> {
-        let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
+        let config = config::ServiceConfig::new()?;
         println!("Building docker image");
 
         Command::new("docker")
@@ -131,13 +139,15 @@ impl BuildCommand {
             .arg("-t")
             .arg("tycho-network")
             .arg("-f")
-            .arg(config.project_root.join("network.Dockerfile"))
-            .arg(config.project_root)
+            .arg(&config.project_root.join("network.Dockerfile"))
+            .arg(&config.project_root)
             .env("DOCKER_BUILDKIT", "1")
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn()?
             .wait()?;
+        let helm = HelmRunner::new(config.clone(), ClusterType::K3S);
+        helm.upload_image("tycho-network")?;
 
         Ok(())
     }
@@ -148,7 +158,6 @@ enum NodeCommand {
     Add(AddCommand),
     Start(NodeStartCommand),
     Stop(NodeStopCommand),
-    Info(NodeInfoCommand),
     Logs(NodeLogsCommand),
     Exec(NodeExecCommand),
     Status(StatusCommand),
@@ -156,8 +165,9 @@ enum NodeCommand {
 
 impl NodeCommand {
     fn run(self) -> Result<()> {
-        let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
-        let compose = ComposeRunner::load_from_fs(&config)?;
+        let config = config::ServiceConfig::new()?;
+        // todo: update to actual cluster type
+        let compose = HelmRunner::new(config.clone(), ClusterType::K3S);
 
         match self {
             NodeCommand::Add(a) => a.run(),
@@ -166,7 +176,6 @@ impl NodeCommand {
             NodeCommand::Logs(a) => a.run(compose),
             NodeCommand::Exec(a) => a.run(compose),
             NodeCommand::Status(a) => a.run(),
-            NodeCommand::Info(a) => a.run(compose),
         }
     }
 }
@@ -181,26 +190,20 @@ struct AddCommand {
 
 impl AddCommand {
     fn run(self) -> Result<()> {
-        let config = config::ServiceConfig::new(DEFAULT_SUBNET.to_string())?;
-        let mut sim = Simulator::new(config)?;
-        let next_node_index = sim.next_node_index();
-        sim.add_node(next_node_index, self.delay, self.loss)?;
-        sim.finalize()?;
-
-        println!("Added node-{}", next_node_index);
-        Ok(())
+        todo!()
     }
 }
 
 #[derive(Parser)]
 struct NodeStartCommand {
-    #[clap(short, long)]
     node_index: Option<usize>,
 }
 
 impl NodeStartCommand {
-    fn run(self, sim: ComposeRunner) -> Result<()> {
-        sim.start_node(self.node_index)
+    fn run(self, sim: HelmRunner) -> Result<()> {
+        sim.start_node("tycho", "tycho", None)?;
+
+        Ok(())
     }
 }
 
@@ -211,22 +214,26 @@ struct NodeStopCommand {
 }
 
 impl NodeStopCommand {
-    fn run(self, compose: ComposeRunner) -> Result<()> {
-        compose.stop_node(self.node_index)
+    fn run(self, compose: HelmRunner) -> Result<()> {
+        compose.stop_node("tycho")?;
+        Ok(())
     }
 }
 
 #[derive(Parser)]
 struct NodeLogsCommand {
     #[clap(short, long)]
-    node_index: Option<usize>,
+    #[clap(default_value = "0")]
+    node_index: usize,
     #[clap(short, long)]
     follow: bool,
 }
 
 impl NodeLogsCommand {
-    fn run(self, compose: ComposeRunner) -> Result<()> {
-        compose.logs(self.follow, self.node_index)
+    fn run(self, compose: HelmRunner) -> Result<()> {
+        compose.logs(&format!("tycho-{}", self.node_index), self.follow)?;
+
+        Ok(())
     }
 }
 
@@ -239,25 +246,8 @@ struct NodeExecCommand {
 }
 
 impl NodeExecCommand {
-    fn run(self, compose: ComposeRunner) -> Result<()> {
-        compose.exec_command(self.node_index, &self.cmd, self.args)?;
-        Ok(())
-    }
-}
-
-#[derive(Parser)]
-struct NodeInfoCommand {
-    #[clap(short, long)]
-    node_index: usize,
-}
-
-impl NodeInfoCommand {
-    fn run(self, compose: ComposeRunner) -> Result<()> {
-        let output = compose.node_info(self.node_index)?;
-        println!(
-            "Node {} artificial delay: {} ms and packet loss: {}% ",
-            self.node_index, output.delay, output.packet_loss
-        );
+    fn run(self, compose: HelmRunner) -> Result<()> {
+        compose.exec_command(&format!("tycho-{}", self.node_index), &self.args)?;
         Ok(())
     }
 }
