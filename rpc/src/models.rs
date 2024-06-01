@@ -42,15 +42,12 @@ impl Serialize for LastTransactionId {
     }
 }
 
-// TODO: Add `#[serde(rename_all = "camelCase")]` to this struct when all
-// compatibility issues are resolved (it was ommited for this struct by mistake).
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StateTimings {
     pub last_mc_block_seqno: u32,
-    pub last_shard_client_mc_block_seqno: u32,
     pub last_mc_utime: u32,
     pub mc_time_diff: i64,
-    pub shard_client_time_diff: i64,
     pub smallest_known_lt: Option<u64>,
 }
 
