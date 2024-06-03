@@ -431,9 +431,8 @@ pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, Accou
 #[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
-    pub shard_account: ShardAccount, // TODO: refactor account root and shard account into one
+    pub shard_account: ShardAccount,
     pub orig_libs: Dict<HashBytes, SimpleLib>,
-    pub account_root: Cell,
     pub last_trans_hash: HashBytes,
     pub state_update: Lazy<HashUpdate>,
     pub last_trans_lt: u64,
@@ -481,9 +480,9 @@ impl ShardAccountStuff {
     }
 
     pub fn new(account_addr: AccountId, shard_account: ShardAccount, min_lt: u64) -> Result<Self> {
-        let binding = shard_account.account.clone();
+        let binding = &shard_account.account;
         let account_root = binding.inner();
-        let shard_account_state = account_root.repr_hash();
+        let shard_account_state = *account_root.repr_hash();
         let last_trans_hash = shard_account.last_trans_hash;
         let last_trans_lt = shard_account.last_trans_lt;
         let orig_libs = shard_account
@@ -503,38 +502,21 @@ impl ShardAccountStuff {
             account_addr,
             shard_account,
             orig_libs,
-            account_root: account_root.clone(),
             last_trans_hash,
             last_trans_lt,
             lt,
             transactions: Default::default(),
             state_update: Lazy::new(&HashUpdate {
-                old: *shard_account_state,
-                new: *shard_account_state,
+                old: shard_account_state,
+                new: shard_account_state,
             })?,
             transactions_count: 0,
         })
     }
-    pub fn add_transaction(
-        &mut self,
-        transaction: &mut Transaction,
-        account_root: Cell,
-    ) -> Result<()> {
+    pub fn add_transaction(&mut self, transaction: &mut Transaction) -> Result<()> {
         transaction.prev_trans_hash = self.last_trans_hash;
         transaction.prev_trans_lt = self.last_trans_lt;
 
-        let new_state = account_root.repr_hash();
-        let old_state = self.state_update.load()?.old;
-        self.state_update = Lazy::new(&HashUpdate {
-            old: old_state,
-            new: *new_state,
-        })?;
-        self.account_root = account_root;
-        self.shard_account = ShardAccount {
-            account: Lazy::from_raw(self.account_root.clone()),
-            last_trans_hash: self.last_trans_hash,
-            last_trans_lt: self.last_trans_lt,
-        };
         let mut builder = everscale_types::cell::CellBuilder::new();
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
         let tr_root = builder.build()?;
