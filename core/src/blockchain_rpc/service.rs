@@ -247,6 +247,8 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
         fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_message(&self, mut req: ServiceRequest) -> Self::OnMessageFuture {
+        use tl_proto::{BytesMeta, TlRead};
+
         // TODO: Do nothing if `B` is `NoopBroadcastListener` via `castaway` ?
 
         // Require message body to contain at least two constructors.
@@ -259,9 +261,25 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             return BoxFutureOrNoop::Noop;
         }
 
-        // Read (without consuming) the next constructor.
-        match req.body.as_ref().get_u32_le() {
+        // Read (CONSUME) the next constructor.
+        match req.body.get_u32_le() {
             MessageBroadcastRef::TL_ID => {
+                match BytesMeta::read_from(&req.body, &mut 0) {
+                    // NOTE: `len` is 24bit integer
+                    Ok(meta) if req.body.len() == meta.prefix_len + meta.len + meta.padding => {
+                        req.body.advance(meta.prefix_len);
+                        req.body.truncate(meta.len);
+                    }
+                    Ok(_) => {
+                        tracing::debug!("malformed external message broadcast");
+                        return BoxFutureOrNoop::Noop;
+                    }
+                    Err(e) => {
+                        tracing::debug!("failed to deserialize external message broadcast: {e:?}");
+                        return BoxFutureOrNoop::Noop;
+                    }
+                }
+
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
                     inner
