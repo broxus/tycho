@@ -35,7 +35,7 @@ impl MempoolAdapterExtFilesStubImpl {
 
         let stub_anchors_cache = Arc::new(RwLock::new(BTreeMap::new()));
 
-        let externals_dir = PathBuf::from("test/externals/set01");
+        let externals_dir = PathBuf::from("test/externals/set02");
         let mut externals = fs::read_dir(externals_dir)
             .expect("externals dir not found")
             .map(|res| res.map(|e| e.path()))

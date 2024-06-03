@@ -263,7 +263,7 @@ impl CollatorStdImpl {
             data: new_block_boc,
             collated_data,
             collated_file_hash: HashBytes::ZERO,
-            chain_time: (new_block_info.gen_utime * 1000) as u64
+            chain_time: (new_block_info.gen_utime as u64 * 1000)
                 + new_block_info.gen_utime_ms as u64,
         };
 
