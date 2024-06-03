@@ -293,6 +293,30 @@ impl ColumnFamily for InternalMessages {
     }
 }
 
+impl ColumnFamilyOptions<Caches> for InternalMessages {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
+/// Stores connections data
+/// - Key: `[u8; 32]` (block root hash)
+/// - Value: `BlockId (LE)`
+pub struct ShardsInternalMessages;
+impl ColumnFamily for ShardsInternalMessages {
+    const NAME: &'static str = "shards_internal_messages";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,

@@ -68,7 +68,7 @@ impl StoredValue for ShardsInternalMessagesKey {
         lt_bytes.copy_from_slice(&reader[..8]);
         let lt = u64::from_le_bytes(lt_bytes);
 
-        *reader = &reader[8..]; // Advance the reader
+        *reader = &reader[8..];
 
         ShardsInternalMessagesKey { shard_ident, lt }
     }

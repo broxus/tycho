@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::BlockIdShort;
 use tycho_storage::Storage;
 
@@ -69,23 +70,29 @@ pub trait LocalPersistentState {
 
 pub struct PersistentStateStdImpl {
     // TODO remove static and use owned_snapshot
-    _storage: Storage,
+    storage: Storage,
 }
 
 impl PersistentStateStdImpl {
-    pub fn new(_storage: Storage) -> Self {
-        Self { _storage }
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
     }
 }
 
 impl PersistentState for PersistentStateStdImpl {
     async fn add_messages(
         &self,
-        _block_id_short: BlockIdShort,
-        _messages: Vec<Arc<EnqueuedMessage>>,
+        block_id_short: BlockIdShort,
+        messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()> {
+        let messages: Vec<(u64, HashBytes, Cell)> = messages
+            .iter()
+            .map(|m| (m.info.created_lt, m.hash, m.cell.clone()))
+            .collect();
+        self.storage
+            .internal_queue_storage()
+            .add_messages(block_id_short.shard, &messages)?;
         Ok(())
-        // self.storage.internal_queue_storage().add_messages(_messages).await
     }
 
     async fn snapshot(&self) -> Box<dyn StateSnapshot> {
