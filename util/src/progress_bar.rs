@@ -1,15 +1,23 @@
 pub struct ProgressBar {
-    name: &'static str,
     percentage_step: u64,
     current: u64,
     total: Option<u64>,
     exact_unit: Option<&'static str>,
-    mapper: Box<dyn Fn(u64) -> String + Send + 'static>,
+    mapper: Box<MapperFn>,
+    printer: Box<PrinterFn>,
 }
 
+type MapperFn = dyn Fn(u64) -> String + Send + 'static;
+type PrinterFn = dyn Fn(&dyn std::fmt::Display) + Send + 'static;
+
 impl ProgressBar {
-    pub fn builder(name: &'static str) -> ProgressBarBuilder {
-        ProgressBarBuilder::new(name)
+    pub fn builder() -> ProgressBarBuilder {
+        ProgressBarBuilder {
+            percentage_step: PERCENTAGE_STEP,
+            total: None,
+            exact_unit: None,
+            mapper: None,
+        }
     }
 
     pub fn set_total(&mut self, total: impl Into<u64>) {
@@ -54,7 +62,7 @@ impl ProgressBar {
 
     #[inline(always)]
     fn message(&self, text: impl std::fmt::Display) {
-        tracing::info!("{}... {text}", self.name);
+        (self.printer)(&text);
     }
 
     fn compute_current_progress(&self) -> Option<u64> {
@@ -66,7 +74,6 @@ impl ProgressBar {
 }
 
 pub struct ProgressBarBuilder {
-    name: &'static str,
     percentage_step: u64,
     total: Option<u64>,
     exact_unit: Option<&'static str>,
@@ -74,16 +81,6 @@ pub struct ProgressBarBuilder {
 }
 
 impl ProgressBarBuilder {
-    pub fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            percentage_step: PERCENTAGE_STEP,
-            total: None,
-            exact_unit: None,
-            mapper: None,
-        }
-    }
-
     pub fn with_mapper<F>(mut self, mapper: F) -> Self
     where
         F: Fn(u64) -> String + Send + 'static,
@@ -107,14 +104,17 @@ impl ProgressBarBuilder {
         self
     }
 
-    pub fn build(self) -> ProgressBar {
+    pub fn build<F>(self, printer: F) -> ProgressBar
+    where
+        F: Fn(&dyn std::fmt::Display) + Send + 'static,
+    {
         let pg = ProgressBar {
-            name: self.name,
             percentage_step: self.percentage_step,
             current: 0,
             total: self.total,
             exact_unit: self.exact_unit,
             mapper: self.mapper.unwrap_or_else(|| Box::new(|x| x.to_string())),
+            printer: Box::new(printer),
         };
 
         if self.total.is_some() {

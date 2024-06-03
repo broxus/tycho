@@ -69,26 +69,26 @@ blockchain.blockFull.found block_id:blockchain.blockId proof:bytes block:bytes i
 blockchain.blockFull.empty = blockchain.BlockFull;
 
 /**
-* An unsuccessul response for the 'getArchiveInfo' query
-*/
-blockchain.archiveNotFound = blockchain.ArchiveInfo;
-/**
 * A successul response for the 'getArchiveInfo' query
 *
 * @param id             archive id
 */
-blockchain.archiveInfo id:long = blockchain.ArchiveInfo;
+blockchain.archiveInfo.found id:long = blockchain.ArchiveInfo;
+/**
+* An unsuccessul response for the 'getArchiveInfo' query
+*/
+blockchain.archiveInfo.notFound = blockchain.ArchiveInfo;
 
 /**
-* An unsuccessul response for the 'getPersistentStatePart' query
-*/
-blockchain.persistentStatePart.notFound = blockchain.PersistentStatePart;
-/**
-* A successul response for the 'getPersistentStatePart' query
+* Node response when it has the requested persistent state
 *
-* @param data           persistent state part
+* @param size           state file size in bytes
 */
-blockchain.persistentStatePart.found data:bytes = blockchain.PersistentStatePart;
+blockchain.persistentStateInfo.found size:long = blockchain.PersistentStateInfo;
+/**
+* Node response when it doesn't have the requested state
+*/
+blockchain.persistentStateInfo.notFound = blockchain.PersistentStateInfo;
 
 /**
 * Raw data bytes
@@ -145,26 +145,33 @@ blockchain.getArchiveInfo
 * Get archive slice
 *
 * @param archive_id     archive id (masterchain seqno)
+* @param limit          max response size in bytes
 * @param offset         part offset in bytes
-* @param max_size       max response size in bytes
 */
 blockchain.getArchiveSlice
     archive_id:long
+    limit:int
     offset:long
-    max_size:int
     = overlay.Response blockchain.Data;
+
+/**
+* Get persistent state info
+*
+* @param block_id       requested block id
+*/
+blockchain.getPersistentStateInfo
+    block_id:blockchain.blockId
+    = overlay.Response blockchain.PersistentStateInfo;
 
 /**
 * Get persisten state part
 *
 * @param block_id       requested block id
-* @param mc_block_id    reference masterchain block id
+* @param limit          max response size in bytes
 * @param offset         part offset in bytes
-* @param max_size       max response size in bytes
 */
 blockchain.getPersistentStatePart
     block_id:blockchain.blockId
-    mc_block_id:blockchain.blockId
+    limit:int
     offset:long
-    max_size:long
-    = overlay.Response blockchain.PersistentStatePart;
+    = overlay.Response blockchain.Data;

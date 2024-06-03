@@ -22,9 +22,9 @@ pub const MAX_DEPTH: u16 = u16::MAX - 1;
 
 pub struct StoreStateRaw {
     block_id: BlockId,
-    db: &'a BaseDb,
-    cell_storage: &'a Arc<CellStorage>,
-    min_ref_mc_state: &'a MinRefMcStateTracker,
+    db: BaseDb,
+    cell_storage: Arc<CellStorage>,
+    min_ref_mc_state: MinRefMcStateTracker,
     reader: ShardStatePacketReader,
     header: Option<BocHeader>,
     cells_read: u64,
@@ -36,23 +36,23 @@ pub struct StoreStateRaw {
 impl StoreStateRaw {
     pub(crate) fn new(
         block_id: &BlockId,
-        db: &'a BaseDb,
         downloads_dir: &FileDb,
-        cell_storage: &Arc<CellStorage>,
-        min_ref_mc_state: &MinRefMcStateTracker,
+        db: BaseDb,
+        cell_storage: Arc<CellStorage>,
+        min_ref_mc_state: MinRefMcStateTracker,
     ) -> Result<Self> {
         let file_ctx =
             FilesContext::new(downloads_dir, block_id).context("failed to create files context")?;
-        let pg = ProgressBar::builder("downloading state")
+        let pg = ProgressBar::builder()
             .exact_unit("cells")
-            .build();
+            .build(|msg| tracing::info!("downloading state... {msg}"));
 
         Ok(Self {
             block_id: *block_id,
-            db: db.clone(),
+            db,
             file_ctx,
-            cell_storage: cell_storage.clone(),
-            min_ref_mc_state: min_ref_mc_state.clone(),
+            cell_storage,
+            min_ref_mc_state,
             reader: ShardStatePacketReader::new(),
             header: None,
             cells_read: 0,
@@ -129,9 +129,9 @@ impl StoreStateRaw {
         const MAX_DATA_SIZE: usize = 128;
         const CELLS_PER_BATCH: u64 = 1_000_000;
 
-        let mut progress_bar = ProgressBar::builder("processing state")
+        let mut progress_bar = ProgressBar::builder()
             .with_mapper(|x| bytesize::to_string(x, false))
-            .build();
+            .build(|msg| tracing::info!("processing state... {msg}"));
 
         let header = match &self.header {
             Some(header) => header,
@@ -626,9 +626,14 @@ mod test {
 
             let block_id = parse_filename(filename.as_ref());
 
-            let mut store_state =
-                StoreStateRaw::new(&block_id, base_db, &download_dir, cell_storage, &tracker)
-                    .context("Failed to create ShardStateReplaceTransaction")?;
+            let mut store_state = StoreStateRaw::new(
+                &block_id,
+                &download_dir,
+                base_db.clone(),
+                cell_storage.clone(),
+                tracker.clone(),
+            )
+            .context("Failed to create ShardStateReplaceTransaction")?;
 
             let file = File::open(file.path())?;
             let mut file = BufReader::new(file);
