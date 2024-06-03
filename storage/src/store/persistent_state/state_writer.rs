@@ -2,37 +2,37 @@ use std::collections::hash_map;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use everscale_types::cell::{CellDescriptor, HashBytes};
+use everscale_types::models::*;
 use smallvec::SmallVec;
 use tycho_util::FastHashMap;
 
 use crate::db::{BaseDb, FileDb, TempFile};
 
-pub struct CellWriter<'a> {
+pub struct StateWriter<'a> {
     db: &'a BaseDb,
     states_dir: &'a FileDb,
-    block_root_hash: &'a HashBytes,
+    block_id: &'a BlockId,
 }
 
-impl<'a> CellWriter<'a> {
+impl<'a> StateWriter<'a> {
     #[allow(unused)]
-    pub fn new(db: &'a BaseDb, states_dir: &'a FileDb, block_root_hash: &'a HashBytes) -> Self {
+    pub fn new(db: &'a BaseDb, states_dir: &'a FileDb, block_id: &'a BlockId) -> Self {
         Self {
             db,
             states_dir,
-            block_root_hash,
+            block_id,
         }
     }
 
     #[allow(unused)]
-    pub fn write(&self, root_hash: &[u8; 32], is_cancelled: Option<Arc<AtomicBool>>) -> Result<()> {
+    pub fn write(&self, root_hash: &HashBytes, is_cancelled: Option<&AtomicBool>) -> Result<()> {
         // Load cells from db in reverse order into the temp file
         tracing::info!("started loading cells");
         let mut intermediate = self
-            .write_rev(root_hash, &is_cancelled)
+            .write_rev(&root_hash.0, is_cancelled)
             .context("Failed to write reversed cells data")?;
         tracing::info!("finished loading cells");
         let cell_count = intermediate.cell_sizes.len() as u32;
@@ -138,7 +138,7 @@ impl<'a> CellWriter<'a> {
     fn write_rev(
         &self,
         root_hash: &[u8; 32],
-        is_cancelled: &Option<Arc<AtomicBool>>,
+        is_cancelled: Option<&AtomicBool>,
     ) -> Result<IntermediateState> {
         enum StackItem {
             New([u8; 32]),
@@ -308,7 +308,7 @@ impl<'a> CellWriter<'a> {
     }
 
     fn file_name(&self) -> PathBuf {
-        PathBuf::from(self.block_root_hash.to_string())
+        PathBuf::from(self.block_id.to_string())
     }
 }
 

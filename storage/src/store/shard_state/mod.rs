@@ -151,13 +151,13 @@ impl ShardStateStorage {
         Ok(updated)
     }
 
-    pub fn begin_store_state_raw(&'_ self, block_id: &BlockId) -> Result<StoreStateRaw> {
+    pub fn begin_store_state_raw(&self, block_id: &BlockId) -> Result<StoreStateRaw> {
         StoreStateRaw::new(
             block_id,
-            &self.db,
             &self.downloads_dir,
-            &self.cell_storage,
-            &self.min_ref_mc_state,
+            self.db.clone(),
+            self.cell_storage.clone(),
+            self.min_ref_mc_state.clone(),
         )
     }
 

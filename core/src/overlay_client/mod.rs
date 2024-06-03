@@ -99,6 +99,18 @@ impl PublicOverlayClient {
     {
         self.inner.query(data).await
     }
+
+    #[inline]
+    pub async fn query_raw<A>(
+        &self,
+        neighbour: Neighbour,
+        req: Request,
+    ) -> Result<QueryResponse<A>, Error>
+    where
+        for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
+    {
+        self.inner.query_impl(neighbour, req).await?.parse()
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -111,6 +123,8 @@ pub enum Error {
     InvalidResponse(#[source] tl_proto::TlError),
     #[error("request failed with code: {0}")]
     RequestFailed(u32),
+    #[error("internal error: {0}")]
+    Internal(#[source] anyhow::Error),
 }
 
 struct Inner {
@@ -240,27 +254,9 @@ impl Inner {
             return Err(Error::NoNeighbours);
         };
 
-        let res = self.query_impl(neighbour, Request::from_tl(data)).await?;
-
-        let response = match tl_proto::deserialize::<overlay::Response<A>>(&res.data) {
-            Ok(r) => r,
-            Err(e) => {
-                res.reject();
-                return Err(Error::InvalidResponse(e));
-            }
-        };
-
-        match response {
-            overlay::Response::Ok(data) => Ok(QueryResponse {
-                data,
-                roundtrip_ms: res.roundtrip_ms,
-                neighbour: res.neighbour,
-            }),
-            overlay::Response::Err(code) => {
-                res.reject();
-                Err(Error::RequestFailed(code))
-            }
-        }
+        self.query_impl(neighbour, Request::from_tl(data))
+            .await?
+            .parse()
     }
 
     async fn send_impl(&self, neighbour: Neighbour, req: Request) -> Result<(), Error> {
@@ -332,6 +328,14 @@ impl<A> QueryResponse<A> {
         &self.data
     }
 
+    pub fn split(self) -> (QueryResponseHandle, A) {
+        let handle = QueryResponseHandle {
+            neighbour: self.neighbour,
+            roundtrip_ms: self.roundtrip_ms,
+        };
+        (handle, self.data)
+    }
+
     pub fn accept(self) -> (Neighbour, A) {
         self.track_request(true);
         (self.neighbour, self.data)
@@ -340,6 +344,55 @@ impl<A> QueryResponse<A> {
     pub fn reject(self) -> (Neighbour, A) {
         self.track_request(false);
         (self.neighbour, self.data)
+    }
+
+    fn track_request(&self, success: bool) {
+        self.neighbour
+            .track_request(&Duration::from_millis(self.roundtrip_ms), success);
+    }
+}
+
+impl QueryResponse<Bytes> {
+    pub fn parse<A>(self) -> Result<QueryResponse<A>, Error>
+    where
+        for<'a> A: tl_proto::TlRead<'a, Repr = tl_proto::Boxed>,
+    {
+        let response = match tl_proto::deserialize::<overlay::Response<A>>(&self.data) {
+            Ok(r) => r,
+            Err(e) => {
+                self.reject();
+                return Err(Error::InvalidResponse(e));
+            }
+        };
+
+        match response {
+            overlay::Response::Ok(data) => Ok(QueryResponse {
+                data,
+                roundtrip_ms: self.roundtrip_ms,
+                neighbour: self.neighbour,
+            }),
+            overlay::Response::Err(code) => {
+                self.reject();
+                Err(Error::RequestFailed(code))
+            }
+        }
+    }
+}
+
+pub struct QueryResponseHandle {
+    neighbour: Neighbour,
+    roundtrip_ms: u64,
+}
+
+impl QueryResponseHandle {
+    pub fn accept(self) -> Neighbour {
+        self.track_request(true);
+        self.neighbour
+    }
+
+    pub fn reject(self) -> Neighbour {
+        self.track_request(false);
+        self.neighbour
     }
 
     fn track_request(&self, success: bool) {

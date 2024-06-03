@@ -7,4 +7,6 @@ pub use self::service::{
 mod client;
 mod service;
 
-pub const INTERNAL_ERROR_CODE: u32 = 1;
+pub const BAD_REQUEST_ERROR_CODE: u32 = 1;
+pub const INTERNAL_ERROR_CODE: u32 = 2;
+pub const NOT_FOUND_ERROR_CODE: u32 = 3;
