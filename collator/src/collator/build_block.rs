@@ -156,8 +156,7 @@ impl CollatorStdImpl {
             seqno: new_block_info.seqno,
             vert_seqno: 0,
             gen_utime: new_block_info.gen_utime,
-            #[cfg(feature = "venom")]
-            gen_utime_ms: info.gen_utime_ms,
+            gen_utime_ms: new_block_info.gen_utime_ms,
             gen_lt: new_block_info.end_lt,
             min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
             processed_upto: Lazy::new(&collation_data.processed_upto)?,

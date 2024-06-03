@@ -192,22 +192,23 @@ impl ExecutionManager {
         );
         let (config, params) = self.get_execute_params(shard_account_stuff.lt.clone())?;
         let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
-            let mut account_root = shard_account_stuff.account_root.clone();
+            let account_root = &mut shard_account_stuff.shard_account.account;
             let mut transaction = match &new_msg {
                 AsyncMessage::Recover(new_msg_cell)
                 | AsyncMessage::Mint(new_msg_cell)
                 | AsyncMessage::Ext(_, new_msg_cell)
                 | AsyncMessage::Int(_, new_msg_cell, _)
                 | AsyncMessage::NewInt(_, new_msg_cell) => {
-                    execute_ordinary_message(new_msg_cell, &mut account_root, params, &config)
+                    execute_ordinary_message(new_msg_cell, account_root, params, &config)
                 }
                 AsyncMessage::TickTock(ticktock_) => {
-                    execute_ticktock_message(*ticktock_, &mut account_root, params, &config)
+                    execute_ticktock_message(*ticktock_, account_root, params, &config)
                 }
             };
+
             if let Ok(transaction) = transaction.as_mut() {
                 // TODO replace with batch set
-                shard_account_stuff.add_transaction(transaction, account_root)?;
+                shard_account_stuff.add_transaction(transaction)?;
             }
             Ok((transaction, new_msg, shard_account_stuff))
                 as Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)>
@@ -223,10 +224,13 @@ impl ExecutionManager {
         mut account_stuff: ShardAccountStuff,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "update shard account for account {account_id}");
+        let binding = &account_stuff.shard_account.account;
+        let account_root = binding.inner();
+        let new_state = account_root.repr_hash();
         let old_state = account_stuff.state_update.load()?.old;
         account_stuff.state_update = Lazy::new(&HashUpdate {
             old: old_state,
-            new: *account_stuff.account_root.repr_hash(),
+            new: *new_state,
         })?;
 
         self.changed_accounts.insert(account_id, account_stuff);
@@ -277,7 +281,7 @@ impl ExecutionManager {
 /// execute ordinary message
 fn execute_ordinary_message(
     new_msg_cell: &Cell,
-    account_root: &mut Cell,
+    account_root: &mut Lazy<OptionalAccount>,
     params: ExecuteParams,
     config: &PreloadedBlockchainConfig,
 ) -> Result<Box<Transaction>> {
@@ -290,7 +294,7 @@ fn execute_ordinary_message(
 /// execute tick tock message
 fn execute_ticktock_message(
     tick_tock: TickTock,
-    account_root: &mut Cell,
+    account_root: &mut Lazy<OptionalAccount>,
     params: ExecuteParams,
     config: &PreloadedBlockchainConfig,
 ) -> Result<Box<Transaction>> {

@@ -825,7 +825,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#405a5594d5456f9b105135889a47b8ee05bbc916"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#1ca6a4e4fc1bfa12c54fcf22cf0a8ebb4871e314"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -845,7 +845,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#405a5594d5456f9b105135889a47b8ee05bbc916"
+source = "git+https://github.com/broxus/everscale-types.git?branch=feature/msgs-proc-logic#1ca6a4e4fc1bfa12c54fcf22cf0a8ebb4871e314"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1157,9 +1157,9 @@ checksum = "9a3a5bfb195931eeb336b2a7b4d761daec841b97f947d34394601737a7bba5e4"
 
 [[package]]
 name = "hyper"
-version = "0.14.28"
+version = "0.14.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf96e135eb83a2a8ddf766e426a841d8ddd7449d5f00d34ea02b41d2f19eef80"
+checksum = "f361cde2f109281a220d4307746cdfd5ee3f410da58a70377762396775634b33"
 dependencies = [
  "bytes",
  "futures-channel",
@@ -1205,7 +1205,7 @@ checksum = "6eea26c5d0b6ab9d72219f65000af310f042a740926f7b2fa3553e774036e2e7"
 dependencies = [
  "derive_builder",
  "dns-lookup",
- "hyper 0.14.28",
+ "hyper 0.14.29",
  "tokio",
  "tower-service",
  "tracing",
@@ -1863,7 +1863,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "http 0.2.12",
- "hyper 0.14.28",
+ "hyper 0.14.29",
  "hyper-system-resolver",
  "pin-project-lite",
  "thiserror",
@@ -2180,9 +2180,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.8"
+version = "0.23.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79adb16721f56eb2d843e67676896a61ce7a0fa622dc18d3e372477a029d2740"
+checksum = "a218f0f6d05669de4eabfb24f31ce802035c952429d037507b4a4a39f0e60c5b"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -2680,7 +2680,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#aae1cf4af5a451cdec58f20750623db20a2abddb"
+source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#748e51d77cde1525a6d69dbac5ad7464d8d82ca9"
 dependencies = [
  "ahash",
  "anyhow",
