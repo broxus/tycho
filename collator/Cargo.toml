@@ -50,7 +50,9 @@ tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]
+default = []
 test = []
+block-creator-stats = []
 
 [lints]
 workspace = true

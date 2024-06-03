@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -32,15 +33,15 @@ pub(super) struct ExecutionManager {
     // block's start logical time
     start_lt: u64,
     // actual maximum logical time
-    pub max_lt: Arc<AtomicU64>,
+    pub max_lt: u64,
     // this time is used if account's lt is smaller
-    pub min_lt: Arc<AtomicU64>,
+    pub min_lt: u64,
     // block random seed
     seed_block: HashBytes,
     /// blockchain config
     config: BlockchainConfig,
     /// total transaction duration
-    total_trans_duration: Arc<AtomicU64>,
+    total_trans_duration: u64,
     /// block version
     block_version: u32,
     /// messages set
@@ -59,6 +60,7 @@ impl ExecutionManager {
     pub fn new(
         gen_utime: u32,
         start_lt: u64,
+        min_lt: u64,
         max_lt: u64,
         seed_block: HashBytes,
         libraries: Dict<HashBytes, LibDescr>,
@@ -71,13 +73,13 @@ impl ExecutionManager {
             libraries,
             gen_utime,
             start_lt,
-            max_lt: Arc::new(AtomicU64::new(max_lt)),
-            min_lt: Arc::new(AtomicU64::new(max_lt)),
+            max_lt,
+            min_lt,
             seed_block,
             config,
             block_version,
             group_limit,
-            total_trans_duration: Arc::new(AtomicU64::new(0)),
+            total_trans_duration: 0,
             messages_set: Vec::new(),
             shard_accounts,
             changed_accounts: FastHashMap::default(),
@@ -100,29 +102,32 @@ impl ExecutionManager {
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
 
         let mut futures: FuturesUnordered<_> = Default::default();
-        let total_trans_duration = self.total_trans_duration.clone();
 
         // TODO check externals is not exist accounts needed ?
         for (account_id, msg) in group {
-            let max_lt = self.max_lt.load(Ordering::Acquire);
-            let shard_account_stuff = self.get_shard_account_stuff(account_id, max_lt)?;
+            let min_lt = self.min_lt;
+            let shard_account_stuff = self.get_shard_account_stuff(account_id, min_lt)?;
             futures.push(self.execute_message(account_id, msg, shard_account_stuff));
         }
         let now = std::time::Instant::now();
 
         let mut executed_messages = vec![];
+        let mut max_lt = self.max_lt;
         while let Some(executed_message) = futures.next().await {
-            let (transaction, msg, ex) = executed_message?;
+            let (transaction, msg, shard_account_stuff) = executed_message?;
             if let AsyncMessage::Ext(_, _) = &msg {
                 if let Err(ref e) = transaction {
                     tracing::error!(target: tracing_targets::EXEC_MANAGER, "failed to execute external transaction: {e:?}");
                     continue;
                 }
             }
-            executed_messages.push((transaction, msg, ex));
+            max_lt = cmp::max(max_lt, shard_account_stuff.lt.load(Ordering::Relaxed));
+            executed_messages.push((transaction, msg, shard_account_stuff));
         }
 
         drop(futures);
+
+        self.max_lt = max_lt;
 
         let mut result = vec![];
         for (transaction, msg, shard_account_stuff) in executed_messages {
@@ -136,7 +141,8 @@ impl ExecutionManager {
         let duration = now.elapsed().as_micros() as u64;
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "tick executed {duration}μ;",);
 
-        total_trans_duration.fetch_add(duration, Ordering::Relaxed);
+        self.total_trans_duration += duration;
+        self.min_lt = self.max_lt;
 
         Ok((new_offset, result))
     }
@@ -144,12 +150,12 @@ impl ExecutionManager {
     pub fn get_shard_account_stuff(
         &self,
         account_id: AccountId,
-        max_lt: u64,
+        min_lt: u64,
     ) -> Result<ShardAccountStuff> {
         let shard_account_stuff = if let Some(a) = self.changed_accounts.get(&account_id) {
             a.clone()
         } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
-            ShardAccountStuff::new(account_id, shard_account.clone(), max_lt)?
+            ShardAccountStuff::new(account_id, shard_account.clone(), min_lt)?
         } else {
             let shard_account = EMPTY_SHARD_ACCOUNT
                 .get_or_init(|| ShardAccount {
@@ -158,7 +164,7 @@ impl ExecutionManager {
                     last_trans_lt: 0,
                 })
                 .clone();
-            ShardAccountStuff::new(account_id, shard_account, max_lt)?
+            ShardAccountStuff::new(account_id, shard_account, min_lt)?
         };
         Ok(shard_account_stuff)
     }
@@ -208,11 +214,6 @@ impl ExecutionManager {
         })
         .await??;
 
-        self.max_lt.fetch_max(
-            shard_account_stuff.lt.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-
         Ok((transaction_res, msg, shard_account_stuff))
     }
 
@@ -239,12 +240,14 @@ impl ExecutionManager {
         msg: AsyncMessage,
     ) -> Result<Box<Transaction>> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
-        let max_lt = self.max_lt.load(Ordering::Acquire);
-        let shard_account_stuff = self.get_shard_account_stuff(account_id, max_lt)?;
+        let min_lt = self.min_lt;
+        let shard_account_stuff = self.get_shard_account_stuff(account_id, min_lt)?;
         let (transaction, _, shard_account_stuff) = self
             .execute_message(account_id, msg, shard_account_stuff)
             .await?;
+        self.max_lt = cmp::max(self.max_lt, shard_account_stuff.lt.load(Ordering::Relaxed));
         self.update_shard_account_stuff_cache(account_id, shard_account_stuff)?;
+        self.min_lt = self.max_lt;
         transaction
     }
 

@@ -306,7 +306,8 @@ impl PrevData {
 pub(super) struct BlockCollationData {
     // block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
-    pub chain_time: u32,
+    pub gen_utime: u32,
+    pub gen_utime_ms: u16,
     pub execute_count: u32,
     pub enqueue_count: u32,
     pub out_msg_count: u32,
@@ -479,7 +480,7 @@ impl ShardAccountStuff {
         Ok(())
     }
 
-    pub fn new(account_addr: AccountId, shard_account: ShardAccount, max_lt: u64) -> Result<Self> {
+    pub fn new(account_addr: AccountId, shard_account: ShardAccount, min_lt: u64) -> Result<Self> {
         let binding = shard_account.account.clone();
         let account_root = binding.inner();
         let shard_account_state = account_root.repr_hash();
@@ -496,7 +497,7 @@ impl ShardAccountStuff {
             })
             .unwrap_or_default();
 
-        let lt: Arc<AtomicU64> = Arc::new(max_lt.into());
+        let lt: Arc<AtomicU64> = Arc::new(min_lt.into());
         lt.fetch_max(last_trans_lt + 1, Ordering::Release);
         Ok(Self {
             account_addr,

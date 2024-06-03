@@ -80,7 +80,8 @@ impl CollatorStdImpl {
         };
         collation_data.rand_seed = rand_seed;
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
-        collation_data.chain_time = next_chain_time as u32;
+        collation_data.gen_utime = (next_chain_time / 1000) as u32;
+        collation_data.gen_utime_ms = (next_chain_time % 1000) as u16;
         collation_data.start_lt = Self::calc_start_lt(
             self.collator_descr(),
             mc_data,
@@ -130,8 +131,9 @@ impl CollatorStdImpl {
 
         // init execution manager
         let mut exec_manager = ExecutionManager::new(
-            collation_data.chain_time,
+            collation_data.gen_utime,
             collation_data.start_lt,
+            collation_data.max_lt,
             collation_data.max_lt,
             collation_data.rand_seed,
             mc_data.libraries().clone(),
@@ -310,7 +312,7 @@ impl CollatorStdImpl {
                         vec![]
                     };
                     let executed_msgs_count = msgs_set.len();
-                    collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+                    collation_data.max_lt = exec_manager.max_lt;
                     msgs_set_offset += executed_msgs_count as u32;
                     msgs_set = left_msgs;
                     executed_msgs_count
@@ -357,7 +359,7 @@ impl CollatorStdImpl {
                             );
                         }
 
-                        collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+                        collation_data.max_lt = exec_manager.max_lt;
                     }
                     msgs_set_offset = new_offset;
                     executed_msgs_count
@@ -1014,7 +1016,7 @@ impl CollatorStdImpl {
             ihr_fee: Default::default(),
             fwd_fee: Default::default(),
             created_lt: collation_data.start_lt,
-            created_at: collation_data.chain_time,
+            created_at: collation_data.gen_utime,
         });
         let msg = BaseMessage {
             info: info.clone(),
@@ -1034,7 +1036,7 @@ impl CollatorStdImpl {
             &transaction,
             async_message,
         )?;
-        collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+        collation_data.max_lt = exec_manager.max_lt;
         Ok(())
     }
 
@@ -1075,8 +1077,8 @@ impl CollatorStdImpl {
             account
         );
 
-        let max_lt = exec_manager.max_lt.load(Ordering::Acquire);
-        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, max_lt)?;
+        let min_lt = exec_manager.min_lt;
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, min_lt)?;
         let tick_tock = shard_account_stuff
             .shard_account
             .load_account()?
@@ -1102,7 +1104,7 @@ impl CollatorStdImpl {
                 &transaction,
                 async_message,
             )?;
-            collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+            collation_data.max_lt = exec_manager.max_lt;
         }
 
         Ok(())
@@ -1120,7 +1122,7 @@ impl CollatorStdImpl {
             self.collator_descr(),
         );
 
-        let gen_utime = collation_data.chain_time;
+        let gen_utime = collation_data.gen_utime;
         for TopBlockDescription {
             block_id,
             block_info,
