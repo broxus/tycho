@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -9,8 +9,7 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, McData, PrevData, WorkingState};
-use crate::internal_queue::iterator::{IterItem, QueueIterator};
-use crate::internal_queue::types::InternalMessageKey;
+use crate::internal_queue::iterator::QueueIterator;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
@@ -503,7 +502,7 @@ impl CollatorStdImpl {
 
     async fn load_has_internals(&mut self) -> Result<()> {
         let mut iterator = self.init_internal_mq_iterator().await?;
-        let has_internals = iterator.peek().is_some();
+        let has_internals = iterator.peek(true)?.is_some();
         self.update_working_state_pending_internals(Some(has_internals))?;
         Ok(())
     }
@@ -714,38 +713,38 @@ impl CollatorStdImpl {
     }
 }
 
-#[allow(unused)]
-struct QueueIteratorStubImpl;
-#[allow(unused)]
-impl QueueIteratorStubImpl {
-    pub fn create_stub() -> Self {
-        Self
-    }
-}
-#[allow(unused)]
-impl QueueIterator for QueueIteratorStubImpl {
-    fn add_message(
-        &mut self,
-        message: Arc<crate::internal_queue::types::EnqueuedMessage>,
-    ) -> anyhow::Result<()> {
-        Ok(())
-    }
-    // fn commit(&mut self) {}
-    fn take_diff(&mut self) -> crate::internal_queue::types::QueueDiff {
-        crate::internal_queue::types::QueueDiff {
-            messages: vec![],
-            processed_upto: HashMap::new(),
-        }
-    }
-    fn next(&mut self, with_new: bool) -> Option<crate::internal_queue::iterator::IterItem> {
-        None
-    }
-
-    fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
-        todo!()
-    }
-
-    fn peek(&mut self) -> Option<IterItem> {
-        todo!()
-    }
-}
+// #[allow(unused)]
+// struct QueueIteratorStubImpl;
+// #[allow(unused)]
+// impl QueueIteratorStubImpl {
+//     pub fn create_stub() -> Self {
+//         Self
+//     }
+// }
+// #[allow(unused)]
+// impl QueueIterator for QueueIteratorStubImpl {
+//     fn add_message(
+//         &mut self,
+//         message: Arc<crate::internal_queue::types::EnqueuedMessage>,
+//     ) -> anyhow::Result<()> {
+//         Ok(())
+//     }
+//     // fn commit(&mut self) {}
+//     fn take_diff(&mut self) -> crate::internal_queue::types::QueueDiff {
+//         crate::internal_queue::types::QueueDiff {
+//             messages: vec![],
+//             processed_upto: HashMap::new(),
+//         }
+//     }
+//     fn next(&mut self, with_new: bool) -> Option<crate::internal_queue::iterator::IterItem> {
+//         None
+//     }
+//
+//     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
+//         todo!()
+//     }
+//
+//     fn peek(&mut self) -> Option<IterItem> {
+//         todo!()
+//     }
+// }

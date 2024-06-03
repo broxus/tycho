@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::{BlockIdShort, IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
+use tycho_collator::internal_queue::iterator::{QueueIteratorExt, QueueIteratorImpl};
 use tycho_collator::internal_queue::persistent::persistent_state::{
     PersistentStateConfig, PersistentStateImplFactory, PersistentStateStdImpl,
 };
@@ -13,19 +14,23 @@ use tycho_collator::internal_queue::session::session_state::{
     SessionStateImplFactory, SessionStateStdImpl,
 };
 use tycho_collator::internal_queue::snapshot::IterRange;
+use tycho_collator::internal_queue::snapshot_manager::SnapshotManager;
 use tycho_collator::internal_queue::types::EnqueuedMessage;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::utils::shard::SplitMergeAction;
+use tycho_storage::Storage;
+use tycho_util::FastHashMap;
 
 fn init_queue() -> QueueImpl<SessionStateStdImpl, PersistentStateStdImpl> {
+    let (storage, _) = Storage::new_temp().unwrap();
+
     let config = QueueConfig {
-        persistent_state_config: PersistentStateConfig {
-            database_url: "db_url".to_string(),
-        },
+        persistent_state_config: PersistentStateConfig { storage },
     };
 
     let session_state_factory = SessionStateImplFactory::new(vec![]);
-    let persistent_state_factory = PersistentStateImplFactory::new(config.persistent_state_config);
+    let persistent_state_factory =
+        PersistentStateImplFactory::new(config.persistent_state_config.storage);
 
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory,
@@ -43,7 +48,7 @@ fn init_queue() -> QueueImpl<SessionStateStdImpl, PersistentStateStdImpl> {
 // 4. apply diff
 // 5. create snapshot
 // 6. read message from another shard (intershard message delivery)
-async fn intershard_message_delivery_test() {
+async fn intershard_message_delivery_test() -> anyhow::Result<()> {
     let queue = init_queue();
 
     let shard_id_1 = ShardIdent::new_full(-1);
@@ -59,30 +64,17 @@ async fn intershard_message_delivery_test() {
         .await
         .unwrap();
 
-    let iter_range_from = vec![
-        IterRange {
-            shard_id: shard_id_1,
-            lt: 0,
-        },
-        IterRange {
-            shard_id: shard_id_2,
-            lt: 0,
-        },
-    ];
+    let mut from_ranges = FastHashMap::default();
+    let mut to_ranges = FastHashMap::default();
 
-    let iter_range_to = vec![
-        IterRange {
-            shard_id: shard_id_1,
-            lt: u64::MAX,
-        },
-        IterRange {
-            shard_id: shard_id_2,
-            lt: u64::MAX,
-        },
-    ];
+    from_ranges.insert(shard_id_1, 0);
+    from_ranges.insert(shard_id_2, 0);
+
+    to_ranges.insert(shard_id_1, u64::MAX);
+    to_ranges.insert(shard_id_2, u64::MAX);
 
     let mut iterator = adapter
-        .create_iterator(shard_id_1, iter_range_from.clone(), iter_range_to.clone())
+        .create_iterator(shard_id_1, from_ranges.clone(), to_ranges.clone())
         .await
         .unwrap();
 
@@ -109,28 +101,38 @@ async fn intershard_message_delivery_test() {
         .unwrap();
 
     let block_id = BlockIdShort::default();
-    let diff = Arc::new(iterator.take_diff(block_id));
+    let diff = Arc::new(iterator.take_diff());
 
-    assert_eq!(diff.id, block_id);
+    // assert_eq!(diff.id, block_id);
     assert_eq!(diff.messages.len(), 1);
 
-    adapter.apply_diff(diff).await.unwrap();
+    adapter.apply_diff(diff, block_id).await.unwrap();
 
     let mut iterator = adapter
-        .create_iterator(shard_id_2, iter_range_from.clone(), iter_range_to.clone())
+        .create_iterator(shard_id_2, from_ranges.clone(), to_ranges.clone())
         .await
         .unwrap();
 
-    let peek_message = iterator.peek();
+    let peek_message = iterator.peek(true)?;
 
     assert!(peek_message.is_some());
 
+    let next_message = iterator.next(true)?;
+
+    assert!(next_message.is_some());
+
+    let peek_message = iterator.peek(true)?;
+
+    assert!(peek_message.is_none());
+
     let mut iterator = adapter
-        .create_iterator(shard_id_1, iter_range_from.clone(), iter_range_to.clone())
+        .create_iterator(shard_id_1, from_ranges.clone(), to_ranges.clone())
         .await
         .unwrap();
 
-    let peek_message = iterator.peek();
+    let peek_message = iterator.peek(true)?;
 
     assert!(peek_message.is_none());
+
+    Ok(())
 }

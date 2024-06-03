@@ -281,6 +281,18 @@ impl ColumnFamilyOptions<Caches> for Next2 {
     }
 }
 
+/// Stores connections data
+/// - Key: `[u8; 32]` (block root hash)
+/// - Value: `BlockId (LE)`
+pub struct InternalMessages;
+impl ColumnFamily for InternalMessages {
+    const NAME: &'static str = "internal_messages";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
 fn archive_data_merge(
     _: &[u8],
     current_value: Option<&[u8]>,

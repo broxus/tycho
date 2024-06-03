@@ -12,12 +12,12 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::persistent::persistent_state::{
-    PersistentStateConfig, PersistentStateImplFactory,
+    PersistentStateImplFactory,
 };
-use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
+use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::{MempoolAdapterExtFilesStubImpl, MempoolAdapterStubImpl};
+use tycho_collator::mempool::MempoolAdapterExtFilesStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
@@ -535,16 +535,9 @@ impl Node {
             test_validators_keypairs: vec![],
         };
 
-        let queue_config = QueueConfig {
-            persistent_state_config: PersistentStateConfig {
-                database_url: "db_url".to_string(),
-            },
-        };
-
         let shards = vec![];
         let session_state_factory = SessionStateImplFactory::new(shards);
-        let persistent_state_factory =
-            PersistentStateImplFactory::new(queue_config.persistent_state_config);
+        let persistent_state_factory = PersistentStateImplFactory::new(self.storage.clone());
 
         let queue_factory = QueueFactoryStdImpl {
             session_state_factory,

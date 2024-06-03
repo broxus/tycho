@@ -7,10 +7,11 @@ use everscale_types::models::{BlockIdShort, MsgInfo, ShardIdent};
 use tracing::instrument;
 use tycho_util::FastHashMap;
 
-use crate::internal_queue::iterator::{QueueIterator, QueueIteratorImpl};
+use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
 use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
 use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::session::session_state::SessionStateStdImpl;
+use crate::internal_queue::snapshot_manager::SnapshotManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::tracing_targets;
 use crate::utils::shard::SplitMergeAction;
@@ -98,9 +99,14 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
             target: tracing_targets::MQ_ADAPTER,
             "Creating iterator"
         );
-        let snapshots = self.queue.snapshot().await;
 
-        let iterator = QueueIteratorImpl::new(shards_from, shards_to, snapshots, for_shard_id)?;
+        let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
+
+        let snapshots = self.queue.snapshot(ranges, for_shard_id).await;
+
+        let snapshot_manager = SnapshotManager::new(snapshots);
+
+        let iterator = QueueIteratorImpl::new(snapshot_manager, for_shard_id)?;
         Ok(Box::new(iterator))
     }
 

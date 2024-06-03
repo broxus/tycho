@@ -189,7 +189,7 @@ impl CollatorStdImpl {
             // 2. Then iterate through existing internals and try to fill the set
             let mut remaining_capacity = max_messages_per_set - ext_msgs.len();
             while remaining_capacity > 0 && !all_existing_internals_finished {
-                match internal_messages_iterator.next(false) {
+                match internal_messages_iterator.next(false)? {
                     Some(int_msg) => {
                         tracing::trace!(
                             target: tracing_targets::COLLATOR,
@@ -252,7 +252,7 @@ impl CollatorStdImpl {
             //    fill next messages sets with new internals
             if msgs_set.is_empty() {
                 while remaining_capacity > 0 && !all_new_internals_finished {
-                    match internal_messages_iterator.next(true) {
+                    match internal_messages_iterator.next(true)? {
                         Some(int_msg) => {
                             let message_with_source = int_msg.message_with_source;
 
@@ -417,7 +417,7 @@ impl CollatorStdImpl {
                 collation_data.processed_upto,
             );
 
-            has_pending_internals = internal_messages_iterator.peek().is_some();
+            has_pending_internals = internal_messages_iterator.peek(true)?.is_some();
 
             if block_limits_reached {
                 // block is full - exit loop

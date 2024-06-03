@@ -1,10 +1,8 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::models::ShardIdent;
 
-use crate::internal_queue::error::QueueError;
 use crate::internal_queue::types::{EnqueuedMessage, Lt};
 
 #[derive(Debug, Clone, Eq)]
@@ -51,15 +49,7 @@ pub struct ShardRange {
 }
 
 pub trait StateSnapshot: Send {
-    fn get_outgoing_messages_by_shard(
-        &self,
-        shards: &mut HashMap<ShardIdent, ShardRange>,
-        shard_id: &ShardIdent,
-    ) -> Result<Vec<Arc<MessageWithSource>>, QueueError>;
+    fn next(&mut self) -> Option<Arc<MessageWithSource>>;
 
-    fn next(
-        &self,
-        shard_range: &HashMap<ShardIdent, ShardRange>,
-        for_shard: &ShardIdent,
-    ) -> Option<Arc<MessageWithSource>>;
+    fn peek(&self) -> Option<Arc<MessageWithSource>>;
 }
