@@ -227,7 +227,7 @@ impl BlockchainRpcClient {
                             size,
                             "malicious neighbour has a too large state",
                         );
-                        return Err(Error::Internal(anyhow::anyhow!("malicious neighbour")));
+                        continue;
                     }
                     PersistentStateInfo::NotFound => continue,
                 }
