@@ -99,6 +99,23 @@ impl CollatorStdImpl {
             collation_data.processed_upto,
         );
 
+        // show intenals proccessed upto
+        collation_data
+            .processed_upto
+            .internals
+            .iter()
+            .for_each(|result| {
+                let (shard_ident, processed_upto) = result.unwrap();
+                tracing::debug!(
+                    target: tracing_targets::COLLATOR,
+                    "Collator ({}{}): read processed_upto for shard {:?} = {:?}",
+                    self.collator_descr(),
+                    _tracing_top_shard_blocks_descr,
+                    shard_ident,
+                    processed_upto,
+                );
+            });
+
         // init ShardHashes descriptions for master
         if self.shard_id.is_masterchain() {
             let shards = prev_shard_data.observable_states()[0]
@@ -446,7 +463,7 @@ impl CollatorStdImpl {
             collation_data
                 .processed_upto
                 .internals
-                .add(shard_ident_full, processed_upto.clone())?;
+                .set(shard_ident_full, processed_upto.clone())?;
             tracing::trace!(
                 target: tracing_targets::COLLATOR,
                 "Collator ({}{}): updated processed_upto for shard {:?} = {:?}",
