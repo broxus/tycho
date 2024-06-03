@@ -243,27 +243,50 @@ impl Inner {
                     anyhow::bail!("masterchain state without extra");
                 };
 
-                self.update_timings(state.gen_utime, state.seqno);
                 self.update_config(state.global_id, state.seqno, &extra.config);
                 tracing::warn!("no key block found during initialization");
             }
         }
 
+        let mc_state = shard_states.load_state(mc_block_id).await?;
+        self.update_timings(mc_state.as_ref().gen_utime, mc_state.as_ref().seqno);
+
         if let Some(rpc_storage) = self.storage.rpc_storage() {
             rpc_storage.sync_min_tx_lt().await?;
 
-            let mc_state = shard_states.load_state(mc_block_id).await?;
+            let make_cached_accounts = |state: &ShardStateStuff| -> Result<CachedAccounts> {
+                let state_info = state.as_ref();
+                Ok(CachedAccounts {
+                    accounts: state_info.load_accounts()?.dict().clone(),
+                    mc_ref_hanlde: state.ref_mc_state_handle().clone(),
+                    gen_utime: state_info.gen_utime,
+                })
+            };
+
+            let shards = mc_state.shards()?.clone();
+
+            // Reset masterchain accounts and fill the cache
+            *self.mc_accounts.write() = Some(make_cached_accounts(&mc_state)?);
             rpc_storage
-                .reset_accounts(mc_state.clone(), self.config.shard_split_depth)
+                .reset_accounts(mc_state, self.config.shard_split_depth)
                 .await?;
 
-            for item in mc_state.shards()?.latest_blocks() {
-                let state = shard_states.load_state(&item?).await?;
+            for item in shards.latest_blocks() {
+                let block_id = item?;
+                let state = shard_states.load_state(&block_id).await?;
+
+                // Reset shard accounts and fill the cache
+                self.sc_accounts
+                    .write()
+                    .insert(block_id.shard, make_cached_accounts(&state)?);
+
                 rpc_storage
                     .reset_accounts(state, self.config.shard_split_depth)
                     .await?;
             }
         }
+
+        self.is_ready.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -328,8 +351,6 @@ impl Inner {
                 rpc_storage.update_snapshot();
             }
         }
-
-        self.is_ready.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -373,10 +394,8 @@ impl Inner {
         let time_diff = now_sec() as i64 - mc_gen_utime as i64;
         self.timings.store(Arc::new(StateTimings {
             last_mc_block_seqno: seqno,
-            last_shard_client_mc_block_seqno: seqno,
             last_mc_utime: mc_gen_utime,
             mc_time_diff: time_diff,
-            shard_client_time_diff: time_diff,
             smallest_known_lt: self.storage.rpc_storage().map(|s| s.min_tx_lt()),
         }));
     }
