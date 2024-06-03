@@ -36,7 +36,7 @@ impl CollatorStdImpl {
         for (account_id, updated_shard_account_stuff) in exec_manager.changed_accounts.drain() {
             // TODO: get updated blockchain config if it stored in account
             let account = updated_shard_account_stuff.shard_account.load_account()?;
-            match account {
+            match &account {
                 None => {
                     shard_accounts.remove(updated_shard_account_stuff.account_addr)?;
                 }
@@ -45,14 +45,15 @@ impl CollatorStdImpl {
                         updated_shard_account_stuff.account_addr,
                         &DepthBalanceInfo {
                             split_depth: 0, // TODO: fix
-                            balance: account.balance,
+                            balance: account.balance.clone(),
                         },
                         &updated_shard_account_stuff.shard_account,
                     )?;
                 }
             }
             if collation_data.block_id_short.shard.is_masterchain() {
-                updated_shard_account_stuff.update_public_libraries(&mut exec_manager.libraries)?;
+                updated_shard_account_stuff
+                    .update_public_libraries(&mut exec_manager.libraries, account)?;
             }
             let acc_block = AccountBlock {
                 account: updated_shard_account_stuff.account_addr,

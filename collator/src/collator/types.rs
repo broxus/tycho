@@ -6,9 +6,9 @@ use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, UsageTreeMode};
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
-    AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-    CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo, OutMsg,
-    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
+    Account, AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef,
+    BlockchainConfig, CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo,
+    OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
     ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, StateInit, TickTock,
     Transaction, ValueFlow,
 };
@@ -442,9 +442,13 @@ pub(super) struct ShardAccountStuff {
 }
 
 impl ShardAccountStuff {
-    pub fn update_public_libraries(&self, libraries: &mut Dict<HashBytes, LibDescr>) -> Result<()> {
-        let opt_account = self.shard_account.account.load()?;
-        let state_init = match opt_account.state() {
+    pub fn update_public_libraries(
+        &self,
+        libraries: &mut Dict<HashBytes, LibDescr>,
+        account: Option<Account>,
+    ) -> Result<()> {
+        let state = account.map(|account| account.state);
+        let state_init = match state {
             Some(AccountState::Active(ref state_init)) => Some(state_init),
             _ => None,
         };
