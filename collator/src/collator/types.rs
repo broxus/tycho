@@ -306,7 +306,8 @@ impl PrevData {
 pub(super) struct BlockCollationData {
     // block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
-    pub chain_time: u32,
+    pub gen_utime: u32,
+    pub gen_utime_ms: u16,
     pub execute_count: u32,
     pub enqueue_count: u32,
     pub out_msg_count: u32,

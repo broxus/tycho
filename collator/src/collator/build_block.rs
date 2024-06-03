@@ -127,7 +127,8 @@ impl CollatorStdImpl {
         }
         new_block_info.shard = collation_data.block_id_short.shard;
         new_block_info.seqno = collation_data.block_id_short.seqno;
-        new_block_info.gen_utime = collation_data.chain_time;
+        new_block_info.gen_utime = collation_data.gen_utime;
+        new_block_info.gen_utime_ms = collation_data.gen_utime_ms;
         new_block_info.start_lt = collation_data.start_lt;
         new_block_info.end_lt = collation_data.max_lt + 1;
         new_block_info.gen_validator_list_hash_short =
@@ -262,7 +263,8 @@ impl CollatorStdImpl {
             data: new_block_boc,
             collated_data,
             collated_file_hash: HashBytes::ZERO,
-            chain_time: new_block_info.gen_utime as u64,
+            chain_time: (new_block_info.gen_utime * 1000) as u64
+                + new_block_info.gen_utime_ms as u64,
         };
 
         let new_state_stuff = ShardStateStuff::from_state_and_root(
@@ -299,16 +301,16 @@ impl CollatorStdImpl {
             (prev_config.clone(), false)
         };
 
-        let current_chain_time = collation_data.chain_time;
-        let prev_chain_time = prev_state.state().gen_utime;
+        let current_gen_utime = collation_data.gen_utime;
+        let prev_gen_utime = prev_state.state().gen_utime;
 
         // 2. update shard_hashes and shard_fees
         let cc_config = config.get_catchain_config()?;
         let workchains = config.get_workchains()?;
         // check if need to start new collation session for shards
         let update_shard_cc = {
-            let lifetimes = current_chain_time / cc_config.shard_catchain_lifetime;
-            let prev_lifetimes = prev_chain_time / cc_config.shard_catchain_lifetime;
+            let lifetimes = current_gen_utime / cc_config.shard_catchain_lifetime;
+            let prev_lifetimes = prev_gen_utime / cc_config.shard_catchain_lifetime;
             is_key_block || (lifetimes > prev_lifetimes)
         };
         let min_ref_mc_seqno =
@@ -455,13 +457,13 @@ impl CollatorStdImpl {
 
             block_create_stats.set(creator, CreatorStats {
                 mc_blocks: BlockCounters {
-                    updated_at: collation_data.chain_time,
+                    updated_at: collation_data.gen_utime,
                     total: total_mc,
                     cnt2048: total_mc,
                     cnt65536: total_mc,
                 },
                 shard_blocks: BlockCounters {
-                    updated_at: collation_data.chain_time,
+                    updated_at: collation_data.gen_utime,
                     total: *count,
                     cnt2048: shard_scaled,
                     cnt65536: shard_scaled,
@@ -471,13 +473,13 @@ impl CollatorStdImpl {
         if !mc_updated {
             block_create_stats.set(collation_data.created_by, CreatorStats {
                 mc_blocks: BlockCounters {
-                    updated_at: collation_data.chain_time,
+                    updated_at: collation_data.gen_utime,
                     total: 1,
                     cnt2048: 1,
                     cnt65536: 1,
                 },
                 shard_blocks: BlockCounters {
-                    updated_at: collation_data.chain_time,
+                    updated_at: collation_data.gen_utime,
                     total: 0,
                     cnt2048: 0,
                     cnt65536: 0,
@@ -488,13 +490,13 @@ impl CollatorStdImpl {
         let default_shard_blocks_count = collation_data.block_create_count.values().sum();
         block_create_stats.set(HashBytes::default(), CreatorStats {
             mc_blocks: BlockCounters {
-                updated_at: collation_data.chain_time,
+                updated_at: collation_data.gen_utime,
                 total: 1,
                 cnt2048: 1,
                 cnt65536: 1,
             },
             shard_blocks: BlockCounters {
-                updated_at: collation_data.chain_time,
+                updated_at: collation_data.gen_utime,
                 total: default_shard_blocks_count,
                 cnt2048: default_shard_blocks_count << 32,
                 cnt65536: default_shard_blocks_count << 32,

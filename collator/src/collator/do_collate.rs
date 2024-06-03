@@ -80,7 +80,8 @@ impl CollatorStdImpl {
         };
         collation_data.rand_seed = rand_seed;
         collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
-        collation_data.chain_time = next_chain_time as u32;
+        collation_data.gen_utime = (next_chain_time / 1000) as u32;
+        collation_data.gen_utime_ms = (next_chain_time % 1000) as u16;
         collation_data.start_lt = Self::calc_start_lt(
             self.collator_descr(),
             mc_data,
@@ -130,7 +131,7 @@ impl CollatorStdImpl {
 
         // init execution manager
         let mut exec_manager = ExecutionManager::new(
-            collation_data.chain_time,
+            collation_data.gen_utime,
             collation_data.start_lt,
             collation_data.max_lt,
             collation_data.max_lt,
@@ -1015,7 +1016,7 @@ impl CollatorStdImpl {
             ihr_fee: Default::default(),
             fwd_fee: Default::default(),
             created_lt: collation_data.start_lt,
-            created_at: collation_data.chain_time,
+            created_at: collation_data.gen_utime,
         });
         let msg = BaseMessage {
             info: info.clone(),
@@ -1121,7 +1122,7 @@ impl CollatorStdImpl {
             self.collator_descr(),
         );
 
-        let gen_utime = collation_data.chain_time;
+        let gen_utime = collation_data.gen_utime;
         for TopBlockDescription {
             block_id,
             block_info,
