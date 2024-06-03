@@ -133,6 +133,7 @@ impl CollatorStdImpl {
             collation_data.chain_time,
             collation_data.start_lt,
             collation_data.max_lt,
+            collation_data.max_lt,
             collation_data.rand_seed,
             mc_data.libraries().clone(),
             mc_data.config().clone(),
@@ -310,7 +311,7 @@ impl CollatorStdImpl {
                         vec![]
                     };
                     let executed_msgs_count = msgs_set.len();
-                    collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+                    collation_data.max_lt = exec_manager.max_lt;
                     msgs_set_offset += executed_msgs_count as u32;
                     msgs_set = left_msgs;
                     executed_msgs_count
@@ -357,7 +358,7 @@ impl CollatorStdImpl {
                             );
                         }
 
-                        collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+                        collation_data.max_lt = exec_manager.max_lt;
                     }
                     msgs_set_offset = new_offset;
                     executed_msgs_count
@@ -1034,7 +1035,7 @@ impl CollatorStdImpl {
             &transaction,
             async_message,
         )?;
-        collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+        collation_data.max_lt = exec_manager.max_lt;
         Ok(())
     }
 
@@ -1075,8 +1076,8 @@ impl CollatorStdImpl {
             account
         );
 
-        let max_lt = exec_manager.max_lt.load(Ordering::Acquire);
-        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, max_lt)?;
+        let min_lt = exec_manager.min_lt;
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, min_lt)?;
         let tick_tock = shard_account_stuff
             .shard_account
             .load_account()?
@@ -1102,7 +1103,7 @@ impl CollatorStdImpl {
                 &transaction,
                 async_message,
             )?;
-            collation_data.max_lt = exec_manager.max_lt.load(Ordering::Acquire);
+            collation_data.max_lt = exec_manager.max_lt;
         }
 
         Ok(())
