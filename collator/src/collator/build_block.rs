@@ -376,6 +376,7 @@ impl CollatorStdImpl {
                 .block_create_stats
                 .clone()
                 .unwrap_or_default();
+            #[cfg(feature = "block-creator-stats")]
             Self::update_block_creator_stats(collation_data, &mut stats)?;
             Some(stats)
         } else {
