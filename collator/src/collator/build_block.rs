@@ -367,6 +367,9 @@ impl CollatorStdImpl {
         global_balance.try_add_assign(&collation_data.shard_fees.root_extra().create)?;
 
         // 9. update block creator stats
+        #[cfg(not(feature = "block-creator-stats"))]
+        let block_create_stats = None;
+        #[cfg(feature = "block-creator-stats")]
         let block_create_stats = if prev_state_extra
             .config
             .get_global_version()?
@@ -377,7 +380,6 @@ impl CollatorStdImpl {
                 .block_create_stats
                 .clone()
                 .unwrap_or_default();
-            #[cfg(feature = "block-creator-stats")]
             Self::update_block_creator_stats(collation_data, &mut stats)?;
             Some(stats)
         } else {
@@ -440,6 +442,7 @@ impl CollatorStdImpl {
 
         Ok(state_update)
     }
+    #[cfg(feature = "block-creator-stats")]
     fn update_block_creator_stats(
         collation_data: &BlockCollationData,
         block_create_stats: &mut Dict<HashBytes, CreatorStats>,

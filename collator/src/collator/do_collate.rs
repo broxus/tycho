@@ -1,7 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Deref;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
