@@ -2917,6 +2917,7 @@ dependencies = [
  "everscale-crypto",
  "everscale-types",
  "futures-util",
+ "indexmap",
  "parking_lot",
  "rand",
  "sha2",

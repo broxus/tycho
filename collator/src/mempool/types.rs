@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use everscale_types::models::ExtInMsgInfo;
-use everscale_types::prelude::Cell;
+use everscale_types::prelude::{Cell, HashBytes};
 
 // TYPES
 
 pub type MempoolAnchorId = u32;
 
+#[derive(Debug)]
 pub(crate) struct ExternalMessage {
     message_cell: Cell,
     message_info: ExtInMsgInfo,
@@ -18,6 +19,10 @@ impl ExternalMessage {
             message_cell,
             message_info,
         }
+    }
+
+    pub fn hash(&self) -> &HashBytes {
+        self.message_cell.repr_hash()
     }
 }
 

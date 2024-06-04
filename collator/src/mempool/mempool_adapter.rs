@@ -16,6 +16,7 @@ use tycho_consensus::{InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastHashSet;
 
+use crate::mempool::external_message_cache::ExternalMessageCache;
 use crate::mempool::types::ExternalMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
@@ -109,6 +110,7 @@ impl MempoolAdapterStdImpl {
             sender,
             InputBufferImpl::new(externals_rx),
         );
+
         tokio::spawn(async move {
             engine.init_with_genesis(&peers).await;
             engine.run().await;
@@ -121,8 +123,7 @@ impl MempoolAdapterStdImpl {
             externals_tx,
         });
 
-        // start handling mempool anchors
-        tokio::spawn(parse_points(mempool_adapter.clone(), receiver));
+        tokio::spawn(handle_anchors(mempool_adapter.clone(), receiver));
 
         mempool_adapter
     }
@@ -145,10 +146,11 @@ impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
     }
 }
 
-pub async fn parse_points(
+pub async fn handle_anchors(
     adapter: Arc<MempoolAdapterStdImpl>,
     mut rx: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
 ) {
+    let mut cache = ExternalMessageCache::new(1000);
     while let Some((anchor, points)) = rx.recv().await {
         let mut repr_hashes = FastHashSet::default();
         let mut messages = Vec::new();
@@ -189,10 +191,12 @@ pub async fn parse_points(
             }
         }
 
+        let added_messages = cache.add_dedup_messages(anchor.body.location.round.0, messages);
+
         let anchor = Arc::new(MempoolAnchor::new(
             anchor.body.location.round.0,
             anchor.body.time.as_u64(),
-            messages,
+            added_messages,
         ));
 
         adapter.add_anchor(anchor);
