@@ -1,8 +1,15 @@
 #![allow(clippy::exit)]
 
+use std::borrow::Cow;
+
 use tracing_subscriber::EnvFilter;
 
 pub fn init_logger(test_name: &str, filter: &str) {
+    let mut filter = Cow::Borrowed(filter);
+    if let Ok(env) = std::env::var(EnvFilter::DEFAULT_ENV) {
+        filter = Cow::Owned(env);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(filter).expect("tracing directives"))
         .try_init()

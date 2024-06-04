@@ -131,7 +131,7 @@ async fn persistent_storage_everscale() -> Result<()> {
 
         let persistent_state_storage = storage.persistent_state_storage();
         let persistent_state_data = persistent_state_storage
-            .read_state_part(zerostate.block_id(), limit, offset)
+            .read_state_part(zerostate.block_id(), limit as _, offset)
             .await
             .unwrap();
 
