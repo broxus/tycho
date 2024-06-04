@@ -35,7 +35,7 @@ use tycho_core::blockchain_rpc::{
 use tycho_core::global_config::{GlobalConfig, ZerostateId};
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::{
-    DhtClient, DhtService, Network, OverlayService, PeerResolver, PublicOverlay, Router,
+    DhtClient, DhtService, Network, OverlayService, PeerId, PeerResolver, PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{BlockMetaData, Storage};
@@ -463,14 +463,37 @@ impl Node {
     }
 
     async fn run(&self, last_block_id: &BlockId) -> Result<()> {
+        let peers = {
+            let mc_state = self
+                .storage
+                .shard_state_storage()
+                .load_state(&last_block_id)
+                .await?;
+
+            mc_state
+                .config_params()?
+                .params
+                .get_current_validator_set()?
+                .list;
+
+            mc_state
+                .config_params()?
+                .params
+                .get_current_validator_set()?
+                .list
+                .into_iter()
+                .map(|x| PeerId(x.public_key.0))
+                .collect::<Vec<_>>()
+        };
+
         let mempool_adapter = MempoolAdapterStdImpl::new(
             self.keypair.clone(),
             self.dht_client.clone(),
             self.overlay_service.clone(),
+            peers,
         );
 
         // Setup blockchain rpc
-        // TODO: Add broadcast listener
         let blockchain_rpc_service = BlockchainRpcService::builder()
             .with_config(self.blockchain_rpc_service_config.clone())
             .with_storage(self.storage.clone())

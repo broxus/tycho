@@ -7,14 +7,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::boc::Boc;
-use everscale_types::models::ExtInMsgInfo;
+use everscale_types::models::{ExtInMsgInfo, MsgInfo};
 use everscale_types::prelude::Load;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::{InputBufferImpl, Point};
-use tycho_network::{DhtClient, InboundRequestMeta, OverlayService};
+use tycho_network::{DhtClient, InboundRequestMeta, OverlayService, PeerId};
 use tycho_util::FastHashSet;
 
 use crate::mempool::types::ExternalMessage;
@@ -93,6 +93,7 @@ impl MempoolAdapterStdImpl {
         key_pair: Arc<KeyPair>,
         dht_client: DhtClient,
         overlay_service: OverlayService,
+        peers: Vec<PeerId>,
     ) -> Arc<Self> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
         let anchors = Arc::new(RwLock::new(BTreeMap::new()));
@@ -111,7 +112,7 @@ impl MempoolAdapterStdImpl {
         );
         tokio::spawn(async move {
             // TODO replace with some sensible init before run
-            engine.init_with_genesis(&[]).await;
+            engine.init_with_genesis(&peers).await;
             engine.run().await;
         });
 
@@ -172,8 +173,12 @@ pub async fn parse_points(
                     }
                 };
 
-                let ext_in_message = match ExtInMsgInfo::load_from(&mut slice) {
-                    Ok(message) => message,
+                let ext_in_message = match MsgInfo::load_from(&mut slice) {
+                    Ok(MsgInfo::ExtIn(message)) => message,
+                    Ok(info) => {
+                        tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, ?info, "Bad message. Unexpected message variant");
+                        continue 'message;
+                    }
                     Err(e) => {
                         tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Bad cell. Failed to deserialize to ExtInMsgInfo. Err: {e:?}");
                         continue 'message;
