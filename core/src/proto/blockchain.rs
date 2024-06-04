@@ -42,19 +42,19 @@ pub enum BlockFull {
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
-pub enum PersistentStatePart {
-    #[tl(id = "blockchain.persistentStatePart.found")]
-    Found { data: Bytes },
-    #[tl(id = "blockchain.persistentStatePart.notFound")]
+pub enum PersistentStateInfo {
+    #[tl(id = "blockchain.persistentStateInfo.found")]
+    Found { size: u64 },
+    #[tl(id = "blockchain.persistentStateInfo.notFound")]
     NotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
-    #[tl(id = "blockchain.archiveInfo", size_hint = 8)]
+    #[tl(id = "blockchain.archiveInfo.found", size_hint = 8)]
     Found { id: u64 },
-    #[tl(id = "blockchain.archiveNotFound")]
+    #[tl(id = "blockchain.archiveInfo.notFound")]
     NotFound,
 }
 
@@ -68,7 +68,7 @@ pub struct MessageBroadcastRef<'tl> {
 pub mod rpc {
     use super::*;
 
-    #[derive(Clone, TlRead, TlWrite)]
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getNextKeyBlockIds", scheme = "proto.tl")]
     pub struct GetNextKeyBlockIds {
         #[tl(with = "tl_block_id")]
@@ -76,32 +76,37 @@ pub mod rpc {
         pub max_size: u32,
     }
 
-    #[derive(Clone, TlRead, TlWrite)]
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getBlockFull", scheme = "proto.tl")]
     pub struct GetBlockFull {
         #[tl(with = "tl_block_id")]
         pub block_id: everscale_types::models::BlockId,
     }
 
-    #[derive(Clone, TlRead, TlWrite)]
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getNextBlockFull", scheme = "proto.tl")]
     pub struct GetNextBlockFull {
         #[tl(with = "tl_block_id")]
         pub prev_block_id: everscale_types::models::BlockId,
     }
 
-    #[derive(Clone, TlRead, TlWrite)]
+    #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "blockchain.getPersistentStateInfo", scheme = "proto.tl")]
+    pub struct GetPersistentStateInfo {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getPersistentStatePart", scheme = "proto.tl")]
     pub struct GetPersistentStatePart {
         #[tl(with = "tl_block_id")]
         pub block_id: everscale_types::models::BlockId,
-        #[tl(with = "tl_block_id")]
-        pub mc_block_id: everscale_types::models::BlockId,
+        pub limit: u32,
         pub offset: u64,
-        pub max_size: u64,
     }
 
-    #[derive(Clone, TlRead, TlWrite)]
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(
         boxed,
         id = "blockchain.getArchiveInfo",
@@ -112,7 +117,7 @@ pub mod rpc {
         pub mc_seqno: u32,
     }
 
-    #[derive(Clone, TlRead, TlWrite)]
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(
         boxed,
         id = "blockchain.getArchiveSlice",
@@ -121,7 +126,7 @@ pub mod rpc {
     )]
     pub struct GetArchiveSlice {
         pub archive_id: u64,
+        pub limit: u32,
         pub offset: u64,
-        pub max_size: u32,
     }
 }

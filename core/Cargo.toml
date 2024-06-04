@@ -12,6 +12,7 @@ license.workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
+bytesize = { workspace = true }
 castaway = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
@@ -33,7 +34,6 @@ tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
-bytesize = { workspace = true }
 everscale-crypto = { workspace = true }
 tempfile = { workspace = true }
 tracing-test = { workspace = true }

@@ -1,19 +1,19 @@
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bytes::{Bytes, BytesMut};
+use dashmap::DashMap;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
+use parking_lot::Mutex;
 use tokio::time::Instant;
 
-use crate::db::BaseDb;
+use crate::db::{BaseDb, FileDb, MappedFile};
 use crate::store::BlockHandleStorage;
-use crate::FileDb;
 
-mod cell_writer;
+mod state_writer;
 
 const KEY_BLOCK_UTIME_STEP: u32 = 86400;
 const BASE_DIR: &str = "states";
@@ -22,6 +22,8 @@ pub struct PersistentStateStorage {
     db: BaseDb,
     storage_dir: FileDb,
     block_handle_storage: Arc<BlockHandleStorage>,
+    descriptor_cache: Arc<DashMap<BlockId, Arc<CachedState>>>,
+    mc_seqno_to_block_ids: Mutex<BTreeMap<u32, Vec<BlockId>>>,
     is_cancelled: Arc<AtomicBool>,
 }
 
@@ -34,17 +36,58 @@ impl PersistentStateStorage {
         let storage_dir = files_dir.create_subdir(BASE_DIR)?;
         let is_cancelled = Arc::new(AtomicBool::new(false));
 
-        Ok(Self {
+        let res = Self {
             db,
             storage_dir,
             block_handle_storage,
+            descriptor_cache: Default::default(),
+            mc_seqno_to_block_ids: Default::default(),
             is_cancelled,
-        })
+        };
+        res.preload_states()?;
+
+        Ok(res)
     }
 
-    pub async fn save_state(
+    pub fn state_exists(&self, block_id: &BlockId) -> bool {
+        self.descriptor_cache.contains_key(block_id)
+    }
+
+    pub fn get_state_info(&self, block_id: &BlockId) -> Option<PersistentStateInfo> {
+        self.descriptor_cache
+            .get(block_id)
+            .map(|cached| PersistentStateInfo {
+                size: cached.file.length(),
+            })
+    }
+
+    pub async fn read_state_part(
         &self,
-        mc_block_id: &BlockId,
+        block_id: &BlockId,
+        limit: u32,
+        offset: u64,
+    ) -> Option<Vec<u8>> {
+        // NOTE: Should be noop on x64
+        let offset = usize::try_from(offset).ok()?;
+        let limit = limit as usize;
+
+        let cached = self.descriptor_cache.get(block_id)?.clone();
+        if offset > cached.file.length() {
+            return None;
+        }
+
+        // NOTE: Cached file is a mapped file, therefore it can take a while to read from it
+        tokio::task::spawn_blocking(move || {
+            let end = std::cmp::min(offset.saturating_add(limit), cached.file.length());
+            cached.file.as_slice()[offset..end].to_vec()
+        })
+        .await
+        .ok()
+    }
+
+    pub async fn store_state(
+        &self,
+        mc_seqno: u32,
         block_id: &BlockId,
         root_hash: &HashBytes,
     ) -> Result<()> {
@@ -53,21 +96,16 @@ impl PersistentStateStorage {
         let is_cancelled = Some(self.is_cancelled.clone());
 
         let db = self.db.clone();
-        let states_dir = self.prepare_persistent_states_dir(mc_block_id)?;
+        let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
 
         tokio::task::spawn_blocking(move || {
-            let cell_writer = cell_writer::CellWriter::new(&db, &states_dir, &block_id.root_hash);
-            match cell_writer.write(&root_hash.0, is_cancelled) {
-                Ok(()) => {
-                    tracing::info!(
-                        block_id = %block_id,
-                        "successfully wrote persistent state to a file",
-                    );
-                }
+            let cell_writer = state_writer::StateWriter::new(&db, &states_dir, &block_id);
+            match cell_writer.write(&root_hash, is_cancelled.as_deref()) {
+                Ok(()) => tracing::info!(block_id = %block_id, "persistent state saved"),
                 Err(e) => {
                     tracing::error!(
                         block_id = %block_id,
-                        "writing persistent state failed: {e:?}"
+                        "failed to write persistent state: {e:?}"
                     );
 
                     if let Err(e) = cell_writer.remove() {
@@ -76,89 +114,18 @@ impl PersistentStateStorage {
                 }
             }
         })
-        .await
-        .map_err(From::from)
+        .await?;
+
+        self.cache_state(mc_seqno, &block_id)
     }
 
-    pub async fn read_state_part(
-        &self,
-        mc_block_id: &BlockId,
-        block_id: &BlockId,
-        offset: u64,
-        size: u64,
-    ) -> Result<Bytes> {
-        // todo: add validation for offset and size
-        // so it won't eat all the memory
-        let mut builder = self
-            .mc_states_dir(mc_block_id)
-            .file(block_id.root_hash.to_string());
-        let file_path = builder.path().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            // TODO: cache file handles
-            let mut file = builder.read(true).open()?;
-
-            file.seek(SeekFrom::Start(offset)).with_context(|| {
-                format!(
-                    "failed to seek state file offset, path: {}",
-                    file_path.display()
-                )
-            })?;
-
-            let mut buf_reader = BufReader::new(file);
-
-            let mut result = BytesMut::zeroed(size as usize);
-            let mut result_cursor = 0;
-
-            let now = Instant::now();
-            loop {
-                match buf_reader.read(&mut result[result_cursor..]) {
-                    Ok(bytes_read) => {
-                        tracing::debug!(bytes_read, "reading state file");
-                        if bytes_read == 0 || bytes_read == size as usize {
-                            break;
-                        }
-                        result_cursor += bytes_read;
-                    }
-                    Err(e) => {
-                        return Err(anyhow::Error::new(e).context(format!(
-                            "failed to read state file. Path: {}",
-                            file_path.display()
-                        )))
-                    }
-                }
-            }
-            tracing::debug!(
-                "finished reading buffer after: {} ms",
-                now.elapsed().as_millis()
-            );
-
-            Ok(result.freeze())
-        })
-        .await
-        .unwrap()
-    }
-
-    pub fn state_exists(&self, mc_block_id: &BlockId, block_id: &BlockId) -> bool {
-        // TODO: cache file handles
-        self.mc_states_dir(mc_block_id)
-            .file_exists(block_id.root_hash.to_string())
-    }
-
-    pub fn prepare_persistent_states_dir(&self, mc_block: &BlockId) -> Result<FileDb> {
-        let states_dir = self.storage_dir.subdir_readonly(mc_block.seqno.to_string());
+    pub fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<FileDb> {
+        let states_dir = self.mc_states_dir(mc_seqno);
         if !states_dir.path().is_dir() {
-            tracing::info!(mc_block = %mc_block, "creating persistent state directory");
+            tracing::info!(mc_seqno, "creating persistent state directory");
             states_dir.create_if_not_exists()?;
         }
         Ok(states_dir)
-    }
-
-    fn mc_states_dir(&self, mc_block_id: &BlockId) -> FileDb {
-        FileDb::new_readonly(self.storage_dir.path().join(mc_block_id.seqno.to_string()))
-    }
-
-    pub fn cancel(&self) {
-        self.is_cancelled.store(true, Ordering::Release);
     }
 
     pub async fn clear_old_persistent_states(&self) -> Result<()> {
@@ -190,6 +157,24 @@ impl PersistentStateStorage {
             }
         };
 
+        // Remove cached states
+        {
+            let recent_mc_seqno = block.id().seqno;
+
+            let mut index = self.mc_seqno_to_block_ids.lock();
+            index.retain(|&mc_seqno, block_ids| {
+                if mc_seqno >= recent_mc_seqno {
+                    return true;
+                }
+
+                for block_id in block_ids.drain(..) {
+                    self.descriptor_cache.remove(&block_id);
+                }
+                false
+            });
+        }
+
+        // Remove files
         self.clear_outdated_state_entries(block.id())?;
 
         tracing::info!(
@@ -241,4 +226,106 @@ impl PersistentStateStorage {
 
         Ok(())
     }
+
+    fn preload_states(&self) -> Result<()> {
+        // For each mc_seqno directory
+        let process_states = |path: &PathBuf, mc_seqno: u32| -> Result<()> {
+            'outer: for entry in std::fs::read_dir(path)?.flatten() {
+                let path = entry.path();
+                // Skip subdirectories
+                if path.is_dir() {
+                    tracing::warn!(path = %path.display(), "unexpected directory");
+                    continue;
+                }
+
+                'file: {
+                    // Try to parse the file name as a block_id
+                    let Ok(name) = entry.file_name().into_string() else {
+                        break 'file;
+                    };
+                    let Ok(block_id) = name.parse::<BlockId>() else {
+                        break 'file;
+                    };
+
+                    // Cache the state
+                    self.cache_state(mc_seqno, &block_id)?;
+                    continue 'outer;
+                }
+                tracing::warn!(path = %path.display(), "unexpected file");
+            }
+            Ok(())
+        };
+
+        // For each entry in the storage directory
+        'outer: for entry in self.storage_dir.entries()?.flatten() {
+            let path = entry.path();
+            // Skip files
+            if path.is_file() {
+                tracing::warn!(path = %path.display(), "unexpected file");
+                continue;
+            }
+
+            'dir: {
+                // Try to parse the directory name as an mc_seqno
+                let Ok(name) = entry.file_name().into_string() else {
+                    break 'dir;
+                };
+                let Ok(mc_seqno) = name.parse::<u32>() else {
+                    break 'dir;
+                };
+
+                // Try to load files in the directory as persistent states
+                process_states(&path, mc_seqno)?;
+                continue 'outer;
+            }
+            tracing::warn!(path = %path.display(), "unexpected directory");
+        }
+        Ok(())
+    }
+
+    fn cache_state(&self, mc_seqno: u32, block_id: &BlockId) -> Result<()> {
+        use dashmap::mapref::entry::Entry;
+
+        let states = self.mc_states_dir(mc_seqno);
+        let mut file = states.file(block_id.to_string());
+
+        let mut is_new = false;
+        if let Entry::Vacant(entry) = self.descriptor_cache.entry(*block_id) {
+            let file = file
+                .read(true)
+                .write(true)
+                .create(false)
+                .append(false)
+                .open_as_mapped()?;
+
+            entry.insert(Arc::new(CachedState { file }));
+            is_new = true;
+        }
+
+        if is_new {
+            let mut index = self.mc_seqno_to_block_ids.lock();
+            index.entry(mc_seqno).or_default().push(*block_id);
+        }
+
+        Ok(())
+    }
+
+    fn mc_states_dir(&self, mc_seqno: u32) -> FileDb {
+        FileDb::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
+    }
+}
+
+impl Drop for PersistentStateStorage {
+    fn drop(&mut self) {
+        self.is_cancelled.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PersistentStateInfo {
+    pub size: usize,
+}
+
+struct CachedState {
+    file: MappedFile,
 }

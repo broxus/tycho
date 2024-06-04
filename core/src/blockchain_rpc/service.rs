@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::{Buf, Bytes};
+use bytesize::ByteSize;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{InboundRequestMeta, Response, Service, ServiceRequest};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 
-use crate::blockchain_rpc::INTERNAL_ERROR_CODE;
+use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
 
@@ -196,12 +197,20 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     Some(Response::from_tl(res))
                 })
             },
+            rpc::GetPersistentStateInfo as req => {
+                tracing::debug!(block_id = %req.block_id, "getPersistentStateInfo");
+
+                let inner = self.inner.clone();
+                BoxFutureOrNoop::future(async move {
+                    let res = inner.handle_get_persistent_state_info(&req);
+                    Some(Response::from_tl(res))
+                })
+            },
             rpc::GetPersistentStatePart as req => {
                 tracing::debug!(
                     block_id = %req.block_id,
-                    mc_block_id = %req.mc_block_id,
+                    limit = %req.limit,
                     offset = %req.offset,
-                    max_size = %req.max_size,
                     "getPersistentStatePart"
                 );
 
@@ -223,8 +232,8 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             rpc::GetArchiveSlice as req => {
                 tracing::debug!(
                     archive_id = %req.archive_id,
+                    limit = %req.limit,
                     offset = %req.offset,
-                    max_size = %req.max_size,
                     "getArchiveSlice"
                 );
 
@@ -439,44 +448,6 @@ impl<B> Inner<B> {
         }
     }
 
-    async fn handle_get_persistent_state_part(
-        &self,
-        req: &rpc::GetPersistentStatePart,
-    ) -> overlay::Response<PersistentStatePart> {
-        const PART_MAX_SIZE: u64 = 1 << 21;
-
-        let persistent_state_storage = self.storage().persistent_state_storage();
-
-        let persistent_state_request_validation = || {
-            anyhow::ensure!(
-                self.config.serve_persistent_states,
-                "persistent states are disabled"
-            );
-            anyhow::ensure!(req.max_size <= PART_MAX_SIZE, "too large max_size");
-            Ok::<_, anyhow::Error>(())
-        };
-
-        if let Err(e) = persistent_state_request_validation() {
-            tracing::warn!("persistent_state_request_validation failed: {e:?}");
-            return overlay::Response::Err(INTERNAL_ERROR_CODE);
-        }
-
-        if !persistent_state_storage.state_exists(&req.mc_block_id, &req.block_id) {
-            return overlay::Response::Ok(PersistentStatePart::NotFound);
-        }
-
-        match persistent_state_storage
-            .read_state_part(&req.mc_block_id, &req.block_id, req.offset, req.max_size)
-            .await
-        {
-            Ok(data) => overlay::Response::Ok(PersistentStatePart::Found { data }),
-            Err(e) => {
-                tracing::debug!("failed to read persistent state part: {e}");
-                overlay::Response::Ok(PersistentStatePart::NotFound)
-            }
-        }
-    }
-
     async fn handle_get_archive_info(
         &self,
         req: &rpc::GetArchiveInfo,
@@ -514,7 +485,7 @@ impl<B> Inner<B> {
             let Some(archive_slice) = block_storage.get_archive_slice(
                 req.archive_id as u32,
                 req.offset as usize,
-                req.max_size as usize,
+                req.limit as usize,
             )?
             else {
                 anyhow::bail!("archive not found");
@@ -528,6 +499,60 @@ impl<B> Inner<B> {
             Err(e) => {
                 tracing::warn!("get_archive_slice failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
+            }
+        }
+    }
+
+    fn handle_get_persistent_state_info(
+        &self,
+        req: &rpc::GetPersistentStateInfo,
+    ) -> overlay::Response<PersistentStateInfo> {
+        let persistent_state_storage = self.storage().persistent_state_storage();
+
+        let res = 'res: {
+            if self.config.serve_persistent_states {
+                if let Some(info) = persistent_state_storage.get_state_info(&req.block_id) {
+                    break 'res PersistentStateInfo::Found {
+                        size: info.size as u64,
+                    };
+                }
+            }
+            PersistentStateInfo::NotFound
+        };
+
+        overlay::Response::Ok(res)
+    }
+
+    async fn handle_get_persistent_state_part(
+        &self,
+        req: &rpc::GetPersistentStatePart,
+    ) -> overlay::Response<Data> {
+        const PART_MAX_SIZE: u64 = ByteSize::mib(2).as_u64();
+
+        let persistent_state_storage = self.storage().persistent_state_storage();
+
+        let persistent_state_request_validation = || {
+            anyhow::ensure!(
+                self.config.serve_persistent_states,
+                "persistent states are disabled"
+            );
+            anyhow::ensure!(req.limit as u64 <= PART_MAX_SIZE, "too large max_size");
+            Ok::<_, anyhow::Error>(())
+        };
+
+        if let Err(e) = persistent_state_request_validation() {
+            tracing::debug!("persistent state request validation failed: {e:?}");
+            return overlay::Response::Err(BAD_REQUEST_ERROR_CODE);
+        }
+
+        match persistent_state_storage
+            .read_state_part(&req.block_id, req.limit, req.offset)
+            .await
+        {
+            Some(data) => overlay::Response::Ok(Data { data: data.into() }),
+            None => {
+                tracing::debug!("failed to read persistent state part");
+                overlay::Response::Err(NOT_FOUND_ERROR_CODE)
             }
         }
     }

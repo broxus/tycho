@@ -5,6 +5,7 @@ use std::path::Path;
 
 /// Memory buffer that is mapped to a file
 pub struct MappedFile {
+    #[allow(unused)]
     file: File,
     length: usize,
     ptr: *mut libc::c_void,
@@ -80,6 +81,11 @@ impl MappedFile {
             buffer.len(),
         );
     }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: ptr and length were initialized once on creation
+        unsafe { std::slice::from_raw_parts(self.ptr.cast::<u8>(), self.length) }
+    }
 }
 
 impl Drop for MappedFile {
@@ -89,9 +95,6 @@ impl Drop for MappedFile {
             // TODO: how to handle this?
             panic!("failed to unmap file: {}", std::io::Error::last_os_error());
         }
-
-        let _ = self.file.set_len(0);
-        let _ = self.file.sync_all();
     }
 }
 
