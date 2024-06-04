@@ -694,3 +694,10 @@ pub trait ShardStateProvider {
     fn get_updated_accounts(&self) -> Vec<(AccountId, ShardAccount)>;
     fn update_account_state(&self, account_id: &AccountId, account: ShardAccount);
 }
+
+pub(super) struct ExecutedMessage {
+    pub transaction_result: Result<Box<Transaction>>,
+    pub in_message: AsyncMessage,
+    pub updated_shard_account_stuff: ShardAccountStuff,
+    pub transaction_duration: u64,
+}

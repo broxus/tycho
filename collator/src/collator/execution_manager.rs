@@ -18,7 +18,7 @@ use ton_executor::{
 };
 use tycho_util::FastHashMap;
 
-use super::types::AsyncMessage;
+use super::types::{AsyncMessage, ExecutedMessage};
 use crate::collator::types::{AccountId, ShardAccountStuff};
 use crate::tracing_targets;
 
@@ -109,20 +109,28 @@ impl ExecutionManager {
             let shard_account_stuff = self.get_shard_account_stuff(account_id, min_lt)?;
             futures.push(self.execute_message(account_id, msg, shard_account_stuff));
         }
-        let now = std::time::Instant::now();
 
         let mut executed_messages = vec![];
         let mut max_lt = self.max_lt;
-        while let Some(executed_message) = futures.next().await {
-            let (transaction, msg, shard_account_stuff) = executed_message?;
-            if let AsyncMessage::Ext(_, _) = &msg {
-                if let Err(ref e) = transaction {
+        while let Some(executed_message_result) = futures.next().await {
+            let executed_message = executed_message_result?;
+            let ExecutedMessage {
+                transaction_result,
+                in_message,
+                updated_shard_account_stuff,
+                ..
+            } = &executed_message;
+            if let AsyncMessage::Ext(_, _) = &in_message {
+                if let Err(ref e) = transaction_result {
                     tracing::error!(target: tracing_targets::EXEC_MANAGER, "failed to execute external transaction: {e:?}");
                     continue;
                 }
             }
-            max_lt = cmp::max(max_lt, shard_account_stuff.lt.load(Ordering::Relaxed));
-            executed_messages.push((transaction, msg, shard_account_stuff));
+            max_lt = cmp::max(
+                max_lt,
+                updated_shard_account_stuff.lt.load(Ordering::Relaxed),
+            );
+            executed_messages.push(executed_message);
         }
 
         drop(futures);
@@ -130,18 +138,27 @@ impl ExecutionManager {
         self.max_lt = max_lt;
 
         let mut result = vec![];
-        for (transaction, msg, shard_account_stuff) in executed_messages {
-            result.push((shard_account_stuff.account_addr, msg, transaction?));
+        for ExecutedMessage {
+            transaction_result,
+            in_message,
+            updated_shard_account_stuff,
+            transaction_duration,
+        } in executed_messages
+        {
+            self.total_trans_duration += transaction_duration;
+            result.push((
+                updated_shard_account_stuff.account_addr,
+                in_message,
+                transaction_result?,
+            ));
             self.update_shard_account_stuff_cache(
-                shard_account_stuff.account_addr,
-                shard_account_stuff,
+                updated_shard_account_stuff.account_addr,
+                updated_shard_account_stuff,
             )?;
         }
 
-        let duration = now.elapsed().as_micros() as u64;
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "tick executed {duration}μ;",);
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "tick executed {}ms;", self.total_trans_duration);
 
-        self.total_trans_duration += duration;
         self.min_lt = self.max_lt;
 
         Ok((new_offset, result))
@@ -175,7 +192,7 @@ impl ExecutionManager {
         account_id: AccountId,
         new_msg: AsyncMessage,
         mut shard_account_stuff: ShardAccountStuff,
-    ) -> Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)> {
+    ) -> Result<ExecutedMessage> {
         tracing::trace!(
             target: tracing_targets::EXEC_MANAGER,
             "executing {} message for account {}",
@@ -190,32 +207,39 @@ impl ExecutionManager {
             },
             account_id,
         );
+        let now = std::time::Instant::now();
         let (config, params) = self.get_execute_params(shard_account_stuff.lt.clone())?;
-        let (transaction_res, msg, shard_account_stuff) = tokio::task::spawn_blocking(move || {
-            let account_root = &mut shard_account_stuff.shard_account.account;
-            let mut transaction = match &new_msg {
-                AsyncMessage::Recover(new_msg_cell)
-                | AsyncMessage::Mint(new_msg_cell)
-                | AsyncMessage::Ext(_, new_msg_cell)
-                | AsyncMessage::Int(_, new_msg_cell, _)
-                | AsyncMessage::NewInt(_, new_msg_cell) => {
-                    execute_ordinary_message(new_msg_cell, account_root, params, &config)
-                }
-                AsyncMessage::TickTock(ticktock_) => {
-                    execute_ticktock_message(*ticktock_, account_root, params, &config)
-                }
-            };
+        let (transaction_result, in_message, updated_shard_account_stuff) =
+            tokio::task::spawn_blocking(move || {
+                let account_root = &mut shard_account_stuff.shard_account.account;
+                let mut transaction = match &new_msg {
+                    AsyncMessage::Recover(new_msg_cell)
+                    | AsyncMessage::Mint(new_msg_cell)
+                    | AsyncMessage::Ext(_, new_msg_cell)
+                    | AsyncMessage::Int(_, new_msg_cell, _)
+                    | AsyncMessage::NewInt(_, new_msg_cell) => {
+                        execute_ordinary_message(new_msg_cell, account_root, params, &config)
+                    }
+                    AsyncMessage::TickTock(ticktock_) => {
+                        execute_ticktock_message(*ticktock_, account_root, params, &config)
+                    }
+                };
 
-            if let Ok(transaction) = transaction.as_mut() {
-                // TODO replace with batch set
-                shard_account_stuff.add_transaction(transaction)?;
-            }
-            Ok((transaction, new_msg, shard_account_stuff))
-                as Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)>
+                if let Ok(transaction) = transaction.as_mut() {
+                    // TODO replace with batch set
+                    shard_account_stuff.add_transaction(transaction)?;
+                }
+                Ok((transaction, new_msg, shard_account_stuff))
+                    as Result<(Result<Box<Transaction>>, AsyncMessage, ShardAccountStuff)>
+            })
+            .await??;
+        let transaction_duration = now.elapsed().as_millis() as u64;
+        Ok(ExecutedMessage {
+            transaction_result,
+            updated_shard_account_stuff,
+            in_message,
+            transaction_duration,
         })
-        .await??;
-
-        Ok((transaction_res, msg, shard_account_stuff))
     }
 
     fn update_shard_account_stuff_cache(
@@ -246,13 +270,20 @@ impl ExecutionManager {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
         let min_lt = self.min_lt;
         let shard_account_stuff = self.get_shard_account_stuff(account_id, min_lt)?;
-        let (transaction, _, shard_account_stuff) = self
+        let ExecutedMessage {
+            transaction_result,
+            updated_shard_account_stuff,
+            ..
+        } = self
             .execute_message(account_id, msg, shard_account_stuff)
             .await?;
-        self.max_lt = cmp::max(self.max_lt, shard_account_stuff.lt.load(Ordering::Relaxed));
-        self.update_shard_account_stuff_cache(account_id, shard_account_stuff)?;
+        self.max_lt = cmp::max(
+            self.max_lt,
+            updated_shard_account_stuff.lt.load(Ordering::Relaxed),
+        );
+        self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
         self.min_lt = self.max_lt;
-        transaction
+        transaction_result
     }
 
     fn get_execute_params(
