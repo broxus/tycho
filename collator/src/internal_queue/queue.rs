@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::{Mutex, RwLock};
+use tracing::info;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::persistent::persistent_state::{
@@ -14,6 +15,7 @@ use crate::internal_queue::session::session_state::{
 };
 use crate::internal_queue::snapshot::{ShardRange, StateSnapshot};
 use crate::internal_queue::types::QueueDiff;
+use crate::tracing_targets;
 
 // FACTORY
 
@@ -50,7 +52,7 @@ pub struct QueueFactoryStdImpl {
 pub trait LocalQueue {
     async fn snapshot(
         &self,
-        ranges: HashMap<ShardIdent, ShardRange>,
+        ranges: &HashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateSnapshot>>;
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
@@ -102,15 +104,17 @@ where
 {
     async fn snapshot(
         &self,
-        ranges: HashMap<ShardIdent, ShardRange>,
+        ranges: &HashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateSnapshot>> {
         let session_state_lock = self.session_state.lock().await;
-        let _persistent_state_lock = self.persistent_state.read().await;
+        let persistent_state_lock = self.persistent_state.read().await;
         vec![
             // TODO parallel
-            session_state_lock.snapshot(ranges, for_shard_id).await,
-            // persistent_state_lock.snapshot().await,
+            session_state_lock
+                .snapshot(ranges, for_shard_id.clone())
+                .await,
+            persistent_state_lock.snapshot(ranges, for_shard_id).await,
         ]
     }
 

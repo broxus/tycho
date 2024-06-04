@@ -4,8 +4,11 @@ use anyhow::Result;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::ShardIdent;
-use weedb::rocksdb;
-use weedb::rocksdb::{SnapshotWithThreadMode, DB};
+use weedb::rocksdb::{
+    DBCommon, DBIterator, DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, ReadOptions,
+    SnapshotWithThreadMode, DB,
+};
+use weedb::{rocksdb, OwnedSnapshot};
 
 use crate::db::*;
 use crate::store::internal_queue::model::InternalMessagesKey;
@@ -15,38 +18,73 @@ pub struct InternalQueueStorage {
     db: BaseDb,
 }
 
-// unsafe fn extend_lifetime<'a>(
-//     r: SnapshotWithThreadMode<'a, DB>,
-// ) -> SnapshotWithThreadMode<'static, DB> {
-//     std::mem::transmute::<SnapshotWithThreadMode<'a, DB>, SnapshotWithThreadMode<'static, DB>>(r)
-// }
-
 impl InternalQueueStorage {
     pub fn new(db: BaseDb) -> Self {
         Self { db }
     }
 
-    pub fn snapshot(&self) -> SnapshotWithThreadMode<'static, DB> {
-        // unsafe { extend_lifetime(self.db.raw().snapshot()) }
-        todo!("SNAPSHOT")
+    pub fn snapshot(&self) -> OwnedSnapshot {
+        let snapshot = self.db.owned_snapshot();
+        snapshot
     }
 
-    pub fn add_messages(&self, _id: ShardIdent, messages: &[(u64, HashBytes, Cell)]) -> Result<()> {
-        let mut batch = rocksdb::WriteBatch::default();
+    pub fn iterator_readopts(&self, snapshot: &OwnedSnapshot) -> ReadOptions {
+        // let start_key = InternalMessagesKey {
+        //     lt: 0,
+        //     hash: HashBytes::default(),
+        // };
+        // let iterator = snapshot.iterator_cf_opt(
+        //     &self.db.internal_messages.cf(),
+        //     Default::default(),
+        //     IteratorMode::From(start_key.to_vec().as_slice(), rocksdb::Direction::Forward),
+        // );
+        // let iterator = unsafe { Self::extend_lifetime(iterator) };
+
+        let mut readopts = self.db.internal_messages.new_read_config();
+
+        readopts.set_snapshot(snapshot);
+
+        readopts
+    }
+
+    pub fn insert_messages(
+        &self,
+        shard_ident: ShardIdent,
+        messages: &Vec<(u64, HashBytes, Cell)>,
+    ) -> Result<()> {
+        let mut batch_internal_messages = rocksdb::WriteBatch::default();
+        let mut batch_shards_internal_messages = rocksdb::WriteBatch::default();
 
         for message in messages.iter() {
             let internal_message_key = InternalMessagesKey {
                 lt: message.0,
                 hash: message.1,
+                shard_ident,
             };
-            batch.put_cf(
+            batch_internal_messages.put_cf(
                 &self.db.internal_messages.cf(),
                 internal_message_key.to_vec().as_slice(),
                 Boc::encode(message.clone().2),
             );
+
+            let shard_internal_message_key = model::ShardsInternalMessagesKey {
+                shard_ident,
+                lt: message.0,
+            };
+
+            batch_shards_internal_messages.put_cf(
+                &self.db.shards_internal_messages.cf(),
+                shard_internal_message_key.to_vec().as_slice(),
+                message.1.as_slice(),
+            );
         }
 
-        self.db.rocksdb().as_ref().write(batch)?;
+        self.db.rocksdb().as_ref().write(batch_internal_messages)?;
+        self.db
+            .rocksdb()
+            .as_ref()
+            .write(batch_shards_internal_messages)?;
+
         Ok(())
     }
 

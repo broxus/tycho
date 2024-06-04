@@ -134,5 +134,17 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
 
     assert!(peek_message.is_none());
 
+    adapter.commit_diff(&block_id).await?;
+
+    // peek message from persistent state
+    let mut iterator = adapter
+        .create_iterator(shard_id_2, from_ranges.clone(), to_ranges.clone())
+        .await
+        .unwrap();
+
+    let peek_message = iterator.peek(true)?;
+
+    assert!(peek_message.is_some());
+
     Ok(())
 }
