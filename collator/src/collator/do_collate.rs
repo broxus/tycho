@@ -1093,8 +1093,7 @@ impl CollatorStdImpl {
             account
         );
 
-        let min_lt = exec_manager.min_lt;
-        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, min_lt)?;
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account)?;
         let tick_tock = shard_account_stuff
             .shard_account
             .load_account()?

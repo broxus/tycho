@@ -435,7 +435,6 @@ pub(super) struct ShardAccountStuff {
     pub orig_libs: Dict<HashBytes, SimpleLib>,
     pub last_trans_hash: HashBytes,
     pub state_update: Lazy<HashUpdate>,
-    pub last_trans_lt: u64,
     pub transactions: Transactions,
     pub transactions_count: u64,
 }
@@ -478,7 +477,7 @@ impl ShardAccountStuff {
         Ok(())
     }
 
-    pub fn new(account_addr: AccountId, shard_account: ShardAccount, min_lt: u64) -> Result<Self> {
+    pub fn new(account_addr: AccountId, shard_account: ShardAccount) -> Result<Self> {
         let binding = &shard_account.account;
         let account_root = binding.inner();
         let shard_account_state = *account_root.repr_hash();
@@ -494,13 +493,11 @@ impl ShardAccountStuff {
             })
             .unwrap_or_default();
 
-        let last_trans_lt = std::cmp::max(min_lt, shard_account.last_trans_lt);
         Ok(Self {
             account_addr,
             shard_account,
             orig_libs,
             last_trans_hash,
-            last_trans_lt,
             transactions: Default::default(),
             state_update: Lazy::new(&HashUpdate {
                 old: shard_account_state,
@@ -510,15 +507,11 @@ impl ShardAccountStuff {
         })
     }
     pub fn add_transaction(&mut self, transaction: &mut Transaction) -> Result<()> {
-        transaction.prev_trans_hash = self.last_trans_hash;
-        transaction.prev_trans_lt = self.last_trans_lt;
-
         let mut builder = everscale_types::cell::CellBuilder::new();
         transaction.store_into(&mut builder, &mut Cell::empty_context())?;
         let tr_root = builder.build()?;
 
         self.last_trans_hash = *tr_root.repr_hash();
-        self.last_trans_lt = transaction.lt;
 
         // TODO calculate key
         let key = self.transactions_count;

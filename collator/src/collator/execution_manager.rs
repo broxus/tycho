@@ -105,8 +105,7 @@ impl ExecutionManager {
 
         // TODO check externals is not exist accounts needed ?
         for (account_id, msg) in group {
-            let min_lt = self.min_lt;
-            let shard_account_stuff = self.get_shard_account_stuff(account_id, min_lt)?;
+            let shard_account_stuff = self.get_shard_account_stuff(account_id)?;
             futures.push(self.execute_message(account_id, msg, shard_account_stuff));
         }
 
@@ -126,7 +125,10 @@ impl ExecutionManager {
                     continue;
                 }
             }
-            max_lt = cmp::max(max_lt, updated_shard_account_stuff.last_trans_lt);
+            max_lt = cmp::max(
+                max_lt,
+                updated_shard_account_stuff.shard_account.last_trans_lt,
+            );
             executed_messages.push(executed_message);
         }
 
@@ -161,15 +163,11 @@ impl ExecutionManager {
         Ok((new_offset, result))
     }
 
-    pub fn get_shard_account_stuff(
-        &self,
-        account_id: AccountId,
-        min_lt: u64,
-    ) -> Result<ShardAccountStuff> {
+    pub fn get_shard_account_stuff(&self, account_id: AccountId) -> Result<ShardAccountStuff> {
         let shard_account_stuff = if let Some(a) = self.changed_accounts.get(&account_id) {
             a.clone()
         } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
-            ShardAccountStuff::new(account_id, shard_account.clone(), min_lt)?
+            ShardAccountStuff::new(account_id, shard_account.clone())?
         } else {
             let shard_account = EMPTY_SHARD_ACCOUNT
                 .get_or_init(|| ShardAccount {
@@ -178,7 +176,7 @@ impl ExecutionManager {
                     last_trans_lt: 0,
                 })
                 .clone();
-            ShardAccountStuff::new(account_id, shard_account, min_lt)?
+            ShardAccountStuff::new(account_id, shard_account)?
         };
         Ok(shard_account_stuff)
     }
@@ -205,7 +203,10 @@ impl ExecutionManager {
             account_id,
         );
         let now = std::time::Instant::now();
-        let (config, params) = self.get_execute_params(shard_account_stuff.last_trans_lt)?;
+        let (config, params) = self.get_execute_params(std::cmp::max(
+            self.min_lt,
+            shard_account_stuff.shard_account.last_trans_lt + 1,
+        ))?;
         let (transaction_result, in_message, updated_shard_account_stuff) =
             tokio::task::spawn_blocking(move || {
                 let account_root = &mut shard_account_stuff.shard_account.account;
@@ -265,8 +266,7 @@ impl ExecutionManager {
         msg: AsyncMessage,
     ) -> Result<Box<Transaction>> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
-        let min_lt = self.min_lt;
-        let shard_account_stuff = self.get_shard_account_stuff(account_id, min_lt)?;
+        let shard_account_stuff = self.get_shard_account_stuff(account_id)?;
         let ExecutedMessage {
             transaction_result,
             updated_shard_account_stuff,
@@ -274,7 +274,10 @@ impl ExecutionManager {
         } = self
             .execute_message(account_id, msg, shard_account_stuff)
             .await?;
-        self.max_lt = cmp::max(self.max_lt, updated_shard_account_stuff.last_trans_lt);
+        self.max_lt = cmp::max(
+            self.max_lt,
+            updated_shard_account_stuff.shard_account.last_trans_lt,
+        );
         self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
         self.min_lt = self.max_lt;
         transaction_result
@@ -282,7 +285,7 @@ impl ExecutionManager {
 
     fn get_execute_params(
         &self,
-        last_tr_lt: u64,
+        next_lt: u64,
     ) -> Result<(PreloadedBlockchainConfig, ExecuteParams)> {
         let state_libs = self.libraries.clone();
         let block_unixtime = self.gen_utime;
@@ -291,10 +294,11 @@ impl ExecutionManager {
         let block_version = self.block_version;
         let config = PreloadedBlockchainConfig::with_config(self.config.clone(), 0)?; // TODO: fix global id
         let params = ExecuteParams {
+            // TODO: add last transaction hash
             state_libs,
             block_unixtime,
             block_lt,
-            last_tr_lt,
+            last_tr_lt: next_lt,
             seed_block,
             block_version,
             ..ExecuteParams::default()
