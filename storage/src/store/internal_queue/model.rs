@@ -6,14 +6,16 @@ use crate::util::{StoredValue, StoredValueBuffer};
 pub struct InternalMessagesKey {
     pub lt: u64,
     pub hash: HashBytes,
+    pub shard_ident: ShardIdent
 }
 impl StoredValue for InternalMessagesKey {
-    const SIZE_HINT: usize = 40;
+    const SIZE_HINT: usize = 40 + ShardIdent::SIZE_HINT;
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
         buffer.write_raw_slice(&self.lt.to_le_bytes());
         buffer.write_raw_slice(&self.hash.0);
+        self.shard_ident.serialize(buffer);
     }
 
     fn deserialize(reader: &mut &[u8]) -> Self
@@ -35,7 +37,9 @@ impl StoredValue for InternalMessagesKey {
 
         *reader = &reader[40..];
 
-        Self { lt, hash }
+        let shard_ident = ShardIdent::deserialize(reader);
+
+        Self { lt, hash, shard_ident }
     }
 }
 

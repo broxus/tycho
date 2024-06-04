@@ -54,7 +54,7 @@ pub trait LocalSessionState {
     fn new(shards: &[ShardIdent]) -> Self;
     async fn snapshot(
         &self,
-        ranges: HashMap<ShardIdent, ShardRange>,
+        ranges: &HashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Box<dyn StateSnapshot>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
@@ -94,7 +94,7 @@ impl SessionState for SessionStateStdImpl {
 
     async fn snapshot(
         &self,
-        ranges: HashMap<ShardIdent, ShardRange>,
+        ranges: &HashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Box<dyn StateSnapshot> {
         let shards_flat_read = self.shards_flat.read().await;
@@ -105,7 +105,7 @@ impl SessionState for SessionStateStdImpl {
         }
         Box::new(SessionStateSnapshot::new(
             flat_shards,
-            &ranges,
+            ranges,
             &for_shard_id,
         ))
     }

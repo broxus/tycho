@@ -41,7 +41,7 @@ pub struct IterRange {
     pub lt: Lt,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ShardRange {
     pub shard_id: ShardIdent,
     pub from_lt: Option<Lt>,
@@ -49,7 +49,7 @@ pub struct ShardRange {
 }
 
 pub trait StateSnapshot: Send {
-    fn next(&mut self) -> Option<Arc<MessageWithSource>>;
+    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
 
     fn peek(&self) -> Option<Arc<MessageWithSource>>;
 }

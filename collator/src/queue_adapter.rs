@@ -102,7 +102,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
 
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
-        let snapshots = self.queue.snapshot(ranges, for_shard_id).await;
+        let snapshots = self.queue.snapshot(&ranges, for_shard_id).await;
 
         let snapshot_manager = SnapshotManager::new(snapshots);
 

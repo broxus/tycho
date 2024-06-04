@@ -30,6 +30,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ton_executor = { workspace = true }
 trait-variant = { workspace = true }
+weedb = { workspace = true }
 
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
