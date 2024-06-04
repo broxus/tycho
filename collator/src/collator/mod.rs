@@ -543,6 +543,9 @@ impl CollatorStdImpl {
             ranges_to.insert(shard_id, shard_description.end_lt);
         }
 
+        // for current shard read until last message
+        ranges_to.insert(self.shard_id, self.working_state().prev_shard_data.gen_lt());
+
         ranges_to.insert(
             ShardIdent::new_full(-1),
             self.working_state().mc_data.mc_state_stuff().state().gen_lt,
@@ -552,6 +555,7 @@ impl CollatorStdImpl {
             .mq_adapter
             .create_iterator(self.shard_id, ranges_from, ranges_to)
             .await?;
+
         Ok(internal_messages_iterator)
     }
 
