@@ -1,8 +1,10 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use indexmap::IndexSet;
 use rand::Rng;
-use tycho_util::time::{now_sec, shifted_interval};
+use tycho_util::time::{now_sec, shifted_interval, shifted_interval_immediate};
 
 use crate::dht::{DhtClient, DhtQueryMode, DhtService};
 use crate::network::{KnownPeerHandle, Network, WeakNetwork};
@@ -28,6 +30,7 @@ impl OverlayServiceInner {
             DiscoverPublicOverlayEntries {
                 overlay_id: OverlayId,
                 tasks: &'a mut TasksStream,
+                force: bool,
             },
             StorePublicEntries {
                 overlay_id: OverlayId,
@@ -49,6 +52,14 @@ impl OverlayServiceInner {
 
             let mut public_overlays_changed = Box::pin(public_overlays_notify.notified());
             let mut public_overlays_state = None::<PublicOverlaysState>;
+
+            let dht_peer_added = dht_service
+                .as_ref()
+                .map(|s| s.peer_added())
+                .cloned()
+                .unwrap_or_default();
+
+            let empty_overlays = OverlayIdsQueue::default();
 
             loop {
                 let action = match &mut public_overlays_state {
@@ -78,6 +89,7 @@ impl OverlayServiceInner {
                                 Some(id) => Action::DiscoverPublicOverlayEntries {
                                     overlay_id: id,
                                     tasks: &mut public_overlays_state.discover,
+                                    force: false,
                                 },
                                 None => continue,
                             },
@@ -87,6 +99,20 @@ impl OverlayServiceInner {
                                     tasks: &mut public_overlays_state.store,
                                 },
                                 None => continue,
+                            },
+                            _ = dht_peer_added.notified(), if !empty_overlays.is_empty() => {
+                                let Some(id) = empty_overlays.pop() else {
+                                    continue;
+                                };
+                                tracing::debug!(
+                                    overlay_id = %id,
+                                    "force discover public overlay peers on new DHT peer",
+                                );
+                                Action::DiscoverPublicOverlayEntries {
+                                    overlay_id: id,
+                                    tasks: &mut public_overlays_state.discover,
+                                    force: true,
+                                }
                             },
                         }
                     }
@@ -110,7 +136,8 @@ impl OverlayServiceInner {
                             )
                         });
                         discover.rebuild(iter.clone(), |_| {
-                            shifted_interval(
+                            // NOTE: Start discovery immediately
+                            shifted_interval_immediate(
                                 this.config.public_overlay_peer_discovery_period,
                                 this.config.public_overlay_peer_discovery_max_jitter,
                             )
@@ -126,7 +153,8 @@ impl OverlayServiceInner {
                                     );
                                 }
 
-                                shifted_interval(
+                                // NOTE: Start discovery immediately
+                                shifted_interval_immediate(
                                     this.config.public_overlay_peer_store_period,
                                     this.config.public_overlay_peer_store_max_jitter,
                                 )
@@ -144,17 +172,52 @@ impl OverlayServiceInner {
                             this.exchange_public_entries(&network, &overlay_id).await
                         });
                     }
-                    Action::DiscoverPublicOverlayEntries { overlay_id, tasks } => {
+                    Action::DiscoverPublicOverlayEntries {
+                        overlay_id,
+                        tasks,
+                        force,
+                    } => {
                         let Some(dht_service) = dht_service.clone() else {
                             continue;
                         };
 
+                        let empty_overlays = empty_overlays.clone();
                         tasks.spawn(&overlay_id, move || async move {
-                            this.discover_public_entries(
-                                &dht_service.make_client(&network),
-                                &overlay_id,
-                            )
-                            .await
+                            let status = this
+                                .discover_public_entries(
+                                    &dht_service.make_client(&network),
+                                    &overlay_id,
+                                )
+                                .await?;
+
+                            let mut force_exchange = false;
+                            match status {
+                                // Queue force update on each new dht peer
+                                DiscoveryStatus::Unchanged { is_empty } if is_empty => {
+                                    if empty_overlays.insert(&overlay_id) {
+                                        tracing::debug!(
+                                            %overlay_id,
+                                            "enqueued force public overlay peers discovery \
+                                            on new DHT peer",
+                                        );
+                                    }
+                                }
+                                // Update local entries on discovery
+                                DiscoveryStatus::Changed => {
+                                    this.store_public_entries(
+                                        &dht_service.make_client(&network),
+                                        &overlay_id,
+                                    )
+                                    .await?;
+                                    force_exchange = force;
+                                }
+                                _ => {}
+                            }
+
+                            if force_exchange {
+                                this.exchange_public_entries(&network, &overlay_id).await?;
+                            }
+                            Ok(())
                         });
                     }
                     Action::StorePublicEntries { overlay_id, tasks } => {
@@ -282,12 +345,12 @@ impl OverlayServiceInner {
         &self,
         dht_client: &DhtClient,
         overlay_id: &OverlayId,
-    ) -> Result<()> {
+    ) -> Result<DiscoveryStatus> {
         let overlay = if let Some(overlay) = self.public_overlays.get(overlay_id) {
             overlay.value().clone()
         } else {
             tracing::warn!(%overlay_id, "overlay not found");
-            return Ok(());
+            return Ok(DiscoveryStatus::OverlayNotFound);
         };
 
         let key_hash = tl_proto::hash(MergedValueKeyRef {
@@ -295,26 +358,33 @@ impl OverlayServiceInner {
             group_id: overlay_id.as_bytes(),
         });
 
-        let entries = match dht_client.find_value(&key_hash, DhtQueryMode::Random).await {
+        let res = dht_client.find_value(&key_hash, DhtQueryMode::Random).await;
+        let is_empty = overlay.read_entries().is_empty();
+
+        let entries = match res {
             Some(value) => match &*value {
                 Value::Merged(value) => {
                     tl_proto::deserialize::<Vec<Arc<PublicEntry>>>(&value.data)?
                 }
                 Value::Peer(_) => {
                     tracing::warn!("expected a `Value::Merged`, but got a `Value::Peer`");
-                    return Ok(());
+                    return Ok(DiscoveryStatus::Unchanged { is_empty });
                 }
             },
             None => {
                 tracing::debug!("no public entries found in the DHT");
-                return Ok(());
+                return Ok(DiscoveryStatus::Unchanged { is_empty });
             }
         };
 
-        overlay.add_untrusted_entries(&self.local_id, &entries, now_sec());
+        let updated = overlay.add_untrusted_entries(&self.local_id, &entries, now_sec());
 
-        tracing::debug!(count = entries.len(), "discovered public entries");
-        Ok(())
+        tracing::debug!(count = entries.len(), updated, "discovered public entries");
+        Ok(if updated {
+            DiscoveryStatus::Changed
+        } else {
+            DiscoveryStatus::Unchanged { is_empty }
+        })
     }
 
     #[tracing::instrument(
@@ -380,7 +450,7 @@ impl OverlayServiceInner {
         // TODO: Store the value on other nodes as well?
         dht_client.service().store_value_locally(&value)?;
 
-        tracing::debug!(count = n, "stored public entries in the DHT",);
+        tracing::debug!(count = n, "stored public entries in the DHT");
         Ok(())
     }
 
@@ -399,6 +469,49 @@ impl OverlayServiceInner {
             peer_id: self.local_id,
             created_at: now,
             signature,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscoveryStatus {
+    OverlayNotFound,
+    Unchanged { is_empty: bool },
+    Changed,
+}
+
+#[derive(Default, Clone)]
+struct OverlayIdsQueue(Arc<OverlayIdsQueueInner>);
+
+impl OverlayIdsQueue {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty.load(Ordering::Acquire)
+    }
+
+    fn insert(&self, overlay_id: &OverlayId) -> bool {
+        let added = self.0.queue.lock().unwrap().insert(*overlay_id);
+        self.0.is_empty.store(false, Ordering::Release);
+        added
+    }
+
+    fn pop(&self) -> Option<OverlayId> {
+        let mut queue = self.0.queue.lock().unwrap();
+        let overlay_id = queue.pop();
+        self.0.is_empty.store(queue.is_empty(), Ordering::Release);
+        overlay_id
+    }
+}
+
+struct OverlayIdsQueueInner {
+    queue: Mutex<IndexSet<OverlayId, ahash::RandomState>>,
+    is_empty: AtomicBool,
+}
+
+impl Default for OverlayIdsQueueInner {
+    fn default() -> Self {
+        Self {
+            queue: Mutex::new(IndexSet::default()),
+            is_empty: AtomicBool::new(true),
         }
     }
 }

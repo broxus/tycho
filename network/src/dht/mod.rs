@@ -4,7 +4,7 @@ use anyhow::Result;
 use bytes::{Buf, Bytes};
 use rand::RngCore;
 use tl_proto::TlRead;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 use tycho_util::realloc_box_enum;
 use tycho_util::time::now_sec;
 
@@ -300,6 +300,7 @@ impl DhtServiceBuilder {
             config,
             announced_peers,
             find_value_queries: Default::default(),
+            peer_added: Arc::new(Default::default()),
         });
 
         let background_tasks = DhtServiceBackgroundTasks {
@@ -357,6 +358,10 @@ impl DhtService {
 
     pub fn remove_merger(&self, group_id: &[u8; 32]) -> Option<Arc<dyn DhtValueMerger>> {
         self.0.storage.remove_merger(group_id)
+    }
+
+    pub fn peer_added(&self) -> &Arc<Notify> {
+        &self.0.peer_added
     }
 }
 
@@ -469,6 +474,7 @@ struct DhtInner {
     config: DhtConfig,
     announced_peers: broadcast::Sender<Arc<PeerInfo>>,
     find_value_queries: QueryCache<Option<Box<Value>>>,
+    peer_added: Arc<Notify>,
 }
 
 impl DhtInner {
@@ -538,12 +544,18 @@ impl DhtInner {
         }
 
         let mut routing_table = self.routing_table.lock().unwrap();
-        Ok(routing_table.add(
+        let added = routing_table.add(
             peer_info.clone(),
             self.config.max_k,
             &self.config.max_peer_info_ttl,
             |peer_info| network.known_peers().insert(peer_info, false).ok(),
-        ))
+        );
+
+        if added {
+            self.peer_added.notify_waiters();
+        }
+
+        Ok(added)
     }
 
     fn make_unsigned_peer_value<'a>(

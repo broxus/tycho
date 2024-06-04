@@ -1,4 +1,4 @@
-use std::collections::hash_map;
+use std::collections::{hash_map, VecDeque};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
@@ -9,6 +9,7 @@ use anyhow::Result;
 use arc_swap::{ArcSwap, AsRaw};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{AbortHandle, JoinSet};
+use tokio_util::time::{delay_queue, DelayQueue};
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::network::config::NetworkConfig;
@@ -37,6 +38,7 @@ pub(crate) struct ConnectionManager {
     pending_partial_connections: JoinSet<Option<PartialConnection>>,
     pending_connections: JoinSet<ConnectingOutput>,
     connection_handlers: JoinSet<()>,
+    delayed_callbacks: DelayedCallbacksQueue,
 
     pending_dials: FastHashMap<PeerId, CallbackRx>,
     dial_backoff_states: HashMap<PeerId, DialBackoffState>,
@@ -74,6 +76,7 @@ impl ConnectionManager {
             pending_partial_connections: Default::default(),
             pending_connections: Default::default(),
             connection_handlers: Default::default(),
+            delayed_callbacks: Default::default(),
             pending_dials: Default::default(),
             dial_backoff_states: Default::default(),
             active_peers,
@@ -139,6 +142,9 @@ impl ConnectionManager {
                             std::panic::resume_unwind(e.into_panic());
                         }
                     }
+                }
+                Some(peer_id) = self.delayed_callbacks.wait_for_next_expired() => {
+                    self.delayed_callbacks.execute_expired(&peer_id);
                 }
             }
         }
@@ -273,14 +279,14 @@ impl ConnectionManager {
                             timeout_at,
                         }),
                         Ok(Err(e)) => {
-                            tracing::warn!(
+                            tracing::trace!(
                                 %remote_addr,
                                 "failed to establish an incoming connection: {e}",
                             );
                             None
                         }
                         Err(_) => {
-                            tracing::warn!(
+                            tracing::trace!(
                                 %remote_addr,
                                 "incoming connection timed out",
                             );
@@ -462,6 +468,8 @@ impl ConnectionManager {
                 );
                 self.add_peer(connection);
 
+                self.delayed_callbacks.execute_resolved(&res.target_peer_id);
+
                 for callback in callbacks {
                     _ = callback.send(Ok(peer_id));
                 }
@@ -473,6 +481,20 @@ impl ConnectionManager {
                     remote_addr = %res.target_address,
                     "connection failed: {e}"
                 );
+
+                // Delay sending the error to callbacks as the target peer might be
+                // in the process of connecting to us.
+                if let Some(quinn::ConnectionError::ApplicationClosed(closed)) = e.downcast_ref() {
+                    if closed.error_code.into_inner() == 0 && !callbacks.is_empty() {
+                        self.delayed_callbacks.push(
+                            &res.target_peer_id,
+                            e,
+                            callbacks,
+                            &self.config.connection_error_delay,
+                        );
+                        return;
+                    }
+                }
 
                 for callback in callbacks {
                     _ = callback.send(Err(e.clone()));
@@ -658,6 +680,131 @@ impl Drop for ConnectionClosedOnDrop {
             let connection = unsafe { ManuallyDrop::take(&mut self.connection) };
             connection.close();
         }
+    }
+}
+
+#[derive(Default)]
+struct DelayedCallbacksQueue {
+    callbacks: FastHashMap<PeerId, VecDeque<DelayedCallbacks>>,
+    expirations: DelayQueue<PeerId>,
+}
+
+impl DelayedCallbacksQueue {
+    fn push(
+        &mut self,
+        peer_id: &PeerId,
+        error: Arc<anyhow::Error>,
+        callbacks: Vec<CallbackTx>,
+        delay: &Duration,
+    ) {
+        tracing::debug!(%peer_id, %error, "delayed connection error");
+
+        let expires_at = Instant::now() + *delay;
+        let delay_key = self.expirations.insert_at(*peer_id, expires_at.into());
+
+        let items = self.callbacks.entry(*peer_id).or_default();
+        items.push_back(DelayedCallbacks {
+            delay_key,
+            error,
+            callbacks,
+            expires_at,
+        });
+    }
+
+    async fn wait_for_next_expired(&mut self) -> Option<PeerId> {
+        let res = futures_util::future::poll_fn(|cx| self.expirations.poll_expired(cx)).await?;
+        Some(res.into_inner())
+    }
+
+    fn execute_resolved(&mut self, peer_id: &PeerId) {
+        let Some(items) = self.callbacks.remove(peer_id) else {
+            return;
+        };
+
+        let mut batches_executed = 0;
+        let mut callbacks_executed = 0;
+
+        for delayed in items {
+            batches_executed += 1;
+            callbacks_executed += delayed.callbacks.len();
+
+            let key = delayed.execute_with_ok(peer_id);
+
+            // NOTE: Delay key must exist in the queue.
+            self.expirations.remove(&key);
+        }
+
+        tracing::debug!(
+            %peer_id,
+            batches_executed,
+            callbacks_executed,
+            "executed all delayed callbacks",
+        );
+    }
+
+    fn execute_expired(&mut self, peer_id: &PeerId) {
+        let now = Instant::now();
+
+        let mut batches_executed = 0;
+        let mut callbacks_executed = 0;
+
+        'outer: {
+            if let Some(items) = self.callbacks.get_mut(peer_id) {
+                while let Some(front) = items.front() {
+                    if !front.is_expired(&now) {
+                        break 'outer;
+                    }
+
+                    if let Some(delayed) = items.pop_front() {
+                        batches_executed += 1;
+                        callbacks_executed += delayed.callbacks.len();
+
+                        let key = delayed.execute_with_error();
+
+                        // NOTE: Might not be necessary since items are stored in order,
+                        // but it's better to be safe.
+                        self.expirations.try_remove(&key);
+                    }
+                }
+            }
+
+            // There is no need to hold an empty queue for this peer
+            self.callbacks.remove(peer_id);
+        }
+
+        tracing::debug!(
+            %peer_id,
+            batches_executed,
+            callbacks_executed,
+            "executed expired delayed callbacks"
+        );
+    }
+}
+
+struct DelayedCallbacks {
+    delay_key: delay_queue::Key,
+    error: Arc<anyhow::Error>,
+    callbacks: Vec<CallbackTx>,
+    expires_at: Instant,
+}
+
+impl DelayedCallbacks {
+    fn execute_with_ok(self, peer_id: &PeerId) -> delay_queue::Key {
+        for callback in self.callbacks {
+            _ = callback.send(Ok(*peer_id));
+        }
+        self.delay_key
+    }
+
+    fn execute_with_error(self) -> delay_queue::Key {
+        for callback in self.callbacks {
+            _ = callback.send(Err(self.error.clone()));
+        }
+        self.delay_key
+    }
+
+    fn is_expired(&self, now: &Instant) -> bool {
+        *now >= self.expires_at
     }
 }
 

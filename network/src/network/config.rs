@@ -43,6 +43,12 @@ pub struct NetworkConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub max_connection_backoff: Duration,
 
+    /// Optimistic guess for some errors that there will be an incoming connection.
+    ///
+    /// Default: 3 seconds.
+    #[serde(with = "serde_helpers::humantime")]
+    pub connection_error_delay: Duration,
+
     /// Default: 100.
     pub max_concurrent_outstanding_connections: usize,
 
@@ -70,6 +76,7 @@ impl Default for NetworkConfig {
             connect_timeout: Duration::from_secs(10),
             connection_backoff: Duration::from_secs(10),
             max_connection_backoff: Duration::from_secs(60),
+            connection_error_delay: Duration::from_secs(3),
             max_concurrent_outstanding_connections: 100,
             max_concurrent_connections: None,
             active_peers_event_channel_capacity: 128,

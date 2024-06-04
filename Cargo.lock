@@ -2619,6 +2619,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "pin-project-lite",
+ "slab",
  "tokio",
 ]
 
@@ -3012,6 +3013,7 @@ dependencies = [
  "exponential-backoff",
  "futures-util",
  "hex",
+ "indexmap",
  "moka",
  "parking_lot",
  "pin-project-lite",

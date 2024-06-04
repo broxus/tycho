@@ -8,7 +8,7 @@ use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService, BroadcastListener};
 use tycho_core::overlay_client::PublicOverlayClient;
-use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStatePart};
+use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStateInfo};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
 use tycho_storage::Storage;
 
@@ -251,13 +251,11 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
         assert_eq!(response.data(), &ids);
     }
 
-    let result = client
-        .get_persistent_state_part(&BlockId::default(), &BlockId::default(), 0, 0)
-        .await;
+    let result = client.get_persistent_state_info(&BlockId::default()).await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert_eq!(response.data(), &PersistentStatePart::NotFound);
+        assert_eq!(response.data(), &PersistentStateInfo::NotFound);
     }
 
     let result = client.get_archive_info(0).await;
