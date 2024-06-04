@@ -436,7 +436,6 @@ pub(super) struct ShardAccountStuff {
     pub last_trans_hash: HashBytes,
     pub state_update: Lazy<HashUpdate>,
     pub last_trans_lt: u64,
-    pub lt: Arc<AtomicU64>,
     pub transactions: Transactions,
     pub transactions_count: u64,
 }
@@ -484,7 +483,6 @@ impl ShardAccountStuff {
         let account_root = binding.inner();
         let shard_account_state = *account_root.repr_hash();
         let last_trans_hash = shard_account.last_trans_hash;
-        let last_trans_lt = shard_account.last_trans_lt;
         let orig_libs = shard_account
             .load_account()?
             .map(|account| {
@@ -496,15 +494,13 @@ impl ShardAccountStuff {
             })
             .unwrap_or_default();
 
-        let lt: Arc<AtomicU64> = Arc::new(min_lt.into());
-        lt.fetch_max(last_trans_lt + 1, Ordering::Release);
+        let last_trans_lt = std::cmp::max(min_lt, shard_account.last_trans_lt);
         Ok(Self {
             account_addr,
             shard_account,
             orig_libs,
             last_trans_hash,
             last_trans_lt,
-            lt,
             transactions: Default::default(),
             state_update: Lazy::new(&HashUpdate {
                 old: shard_account_state,

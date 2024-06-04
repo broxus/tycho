@@ -126,10 +126,7 @@ impl ExecutionManager {
                     continue;
                 }
             }
-            max_lt = cmp::max(
-                max_lt,
-                updated_shard_account_stuff.lt.load(Ordering::Relaxed),
-            );
+            max_lt = cmp::max(max_lt, updated_shard_account_stuff.last_trans_lt);
             executed_messages.push(executed_message);
         }
 
@@ -208,7 +205,7 @@ impl ExecutionManager {
             account_id,
         );
         let now = std::time::Instant::now();
-        let (config, params) = self.get_execute_params(shard_account_stuff.lt.clone())?;
+        let (config, params) = self.get_execute_params(shard_account_stuff.last_trans_lt)?;
         let (transaction_result, in_message, updated_shard_account_stuff) =
             tokio::task::spawn_blocking(move || {
                 let account_root = &mut shard_account_stuff.shard_account.account;
@@ -277,10 +274,7 @@ impl ExecutionManager {
         } = self
             .execute_message(account_id, msg, shard_account_stuff)
             .await?;
-        self.max_lt = cmp::max(
-            self.max_lt,
-            updated_shard_account_stuff.lt.load(Ordering::Relaxed),
-        );
+        self.max_lt = cmp::max(self.max_lt, updated_shard_account_stuff.last_trans_lt);
         self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
         self.min_lt = self.max_lt;
         transaction_result
@@ -288,7 +282,7 @@ impl ExecutionManager {
 
     fn get_execute_params(
         &self,
-        last_tr_lt: Arc<AtomicU64>,
+        last_tr_lt: u64,
     ) -> Result<(PreloadedBlockchainConfig, ExecuteParams)> {
         let state_libs = self.libraries.clone();
         let block_unixtime = self.gen_utime;
