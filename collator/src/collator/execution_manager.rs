@@ -83,7 +83,7 @@ impl ExecutionManager {
 
     /// Set messages that will be executed
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages", msgs.len());
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 
@@ -99,7 +99,7 @@ impl ExecutionManager {
             Box<(CurrencyCollection, Lazy<Transaction>)>,
         )>,
     )> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {offset}");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {}", offset);
 
         let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
 
@@ -246,7 +246,10 @@ impl ExecutionManager {
         account_id: AccountId,
         mut account_stuff: ShardAccountStuff,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "update shard account for account {account_id}");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updating shard account {}", account_id);
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updated Account: {:?}",
+            account_stuff.shard_account.account.load()?,
+        );
         let binding = &account_stuff.shard_account.account;
         let account_root = binding.inner();
         let new_state = account_root.repr_hash();
@@ -267,7 +270,7 @@ impl ExecutionManager {
         msg: AsyncMessage,
         shard_account_stuff: ShardAccountStuff,
     ) -> Result<(AsyncMessage, Box<(CurrencyCollection, Lazy<Transaction>)>)> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute_special_transaction()");
         let ExecutedMessage {
             transaction_result,
             updated_shard_account_stuff,

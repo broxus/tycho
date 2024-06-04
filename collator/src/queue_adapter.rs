@@ -61,7 +61,7 @@ impl MessageQueueAdapterStdImpl {
 impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     #[instrument(skip(self), fields(?split_merge_actions))]
     async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
-        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updated shards in message queue");
+        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updating shards in message queue");
         for sma in split_merge_actions {
             match sma {
                 SplitMergeAction::Split(shard_id) => {
@@ -95,7 +95,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         shards_from: FastHashMap<ShardIdent, u64>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>> {
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::MQ_ADAPTER,
             "Creating iterator"
         );
@@ -115,7 +115,6 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
             target: tracing_targets::MQ_ADAPTER,
             id = ?block_id_short,
             new_messages_len = diff.messages.len(),
-            processed_upto_len = ?diff.processed_upto,
             "Applying diff to the queue"
         );
         self.queue.apply_diff(diff, block_id_short).await?;
@@ -137,7 +136,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(MsgInfo, Cell)>,
     ) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::MQ_ADAPTER,
             messages_len = messages.len(),
             "Adding messages to the iterator"
@@ -158,10 +157,10 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(ShardIdent, InternalMessageKey)>,
     ) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::MQ_ADAPTER,
             messages_len = messages.len(),
-            "Committing messages to the iterator"
+            "Committing messages to iterator"
         );
         iterator.commit(messages)
     }

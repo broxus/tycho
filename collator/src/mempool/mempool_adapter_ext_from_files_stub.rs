@@ -61,7 +61,7 @@ impl MempoolAdapterExtFilesStubImpl {
                             let mut anchor_cache_rw = stub_anchors_cache.write();
                             tracing::debug!(
                                 target: tracing_targets::MEMPOOL_ADAPTER,
-                                "Random anchor (id: {}, chain_time: {}, externals: {}) added to cache",
+                                "Anchor (id: {}, chain_time: {}, externals: {}) generated and added to cache",
                                 anchor.id(),
                                 anchor.chain_time(),
                                 anchor.externals_count(),
@@ -73,7 +73,7 @@ impl MempoolAdapterExtFilesStubImpl {
                 }
             }
         });
-        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Stub anchors generator started");
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Anchors generator with externals from files started");
 
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
 
