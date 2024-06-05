@@ -34,57 +34,61 @@ pub enum DagPoint {
 
 impl DagPoint {
     pub fn into_valid(self) -> Option<ValidPoint> {
+        #[allow(clippy::match_same_arms)]
         match self {
-            DagPoint::Trusted(valid) => Some(valid),
-            DagPoint::Suspicious(valid) => Some(valid),
+            Self::Trusted(valid) => Some(valid),
+            Self::Suspicious(valid) => Some(valid),
             _ => None,
         }
     }
 
     pub fn into_trusted(self) -> Option<ValidPoint> {
         match self {
-            DagPoint::Trusted(valid) => Some(valid),
+            Self::Trusted(valid) => Some(valid),
             _ => None,
         }
     }
 
     pub fn valid(&self) -> Option<&'_ ValidPoint> {
+        #[allow(clippy::match_same_arms)]
         match self {
-            DagPoint::Trusted(valid) => Some(valid),
-            DagPoint::Suspicious(valid) => Some(valid),
+            Self::Trusted(valid) => Some(valid),
+            Self::Suspicious(valid) => Some(valid),
             _ => None,
         }
     }
 
     pub fn trusted(&self) -> Option<&'_ ValidPoint> {
         match self {
-            DagPoint::Trusted(valid) => Some(valid),
+            Self::Trusted(valid) => Some(valid),
             _ => None,
         }
     }
 
     pub fn id(&self) -> PointId {
         PointId {
-            location: self.location().clone(),
+            location: *self.location(),
             digest: self.digest().clone(),
         }
     }
 
     pub fn location(&self) -> &'_ Location {
+        #[allow(clippy::match_same_arms)]
         match self {
-            DagPoint::Trusted(valid) => &valid.point.body.location,
-            DagPoint::Suspicious(valid) => &valid.point.body.location,
-            DagPoint::Invalid(point) => &point.body.location,
-            DagPoint::NotExists(id) => &id.location,
+            Self::Trusted(valid) => &valid.point.body.location,
+            Self::Suspicious(valid) => &valid.point.body.location,
+            Self::Invalid(point) => &point.body.location,
+            Self::NotExists(id) => &id.location,
         }
     }
 
     pub fn digest(&self) -> &'_ Digest {
+        #[allow(clippy::match_same_arms)]
         match self {
-            DagPoint::Trusted(valid) => &valid.point.digest,
-            DagPoint::Suspicious(valid) => &valid.point.digest,
-            DagPoint::Invalid(point) => &point.digest,
-            DagPoint::NotExists(id) => &id.digest,
+            Self::Trusted(valid) => &valid.point.digest,
+            Self::Suspicious(valid) => &valid.point.digest,
+            Self::Invalid(point) => &point.digest,
+            Self::NotExists(id) => &id.digest,
         }
     }
 }

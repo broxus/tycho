@@ -1,7 +1,9 @@
+use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
 #[derive(Debug)]
@@ -21,7 +23,7 @@ impl<'de> Deserialize<'de> for PointByIdResponse {
         D: Deserializer<'de>,
     {
         let opt = Option::<Point>::deserialize(deserializer)?;
-        Ok(PointByIdResponse(opt.map(|point| Arc::new(point))))
+        Ok(PointByIdResponse(opt.map(Arc::new)))
     }
 }
 
@@ -38,9 +40,21 @@ pub enum SignatureResponse {
     /// * malformed point
     /// * equivocation
     /// * invalid dependency
-    /// * signer is on a future round
+    /// * signer is more than 1 round in front of us
     /// * signer's clock are too far in the future (probably consensus stalled for long)
     Rejected,
+}
+
+impl AltFormat for SignatureResponse {}
+impl Display for AltFmt<'_, SignatureResponse> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match AltFormat::unpack(self) {
+            SignatureResponse::Signature(_) => "Signature",
+            SignatureResponse::NoPoint => "NoPoint",
+            SignatureResponse::TryLater => "TryLater",
+            SignatureResponse::Rejected => "Rejected",
+        })
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

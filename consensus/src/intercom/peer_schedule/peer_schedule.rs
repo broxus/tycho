@@ -10,7 +10,7 @@ use tycho_network::{PeerId, PrivateOverlay};
 use tycho_util::FastHashSet;
 
 use crate::intercom::dto::PeerState;
-use crate::models::{NodeCount, Round};
+use crate::models::Round;
 
 // As validators are elected for wall-clock time range,
 // the round of validator set switch is not known beforehand
@@ -41,41 +41,17 @@ impl PeerSchedule {
         // TODO channel size is subtle: it cannot be large,
         //   but any skipped event breaks 2F+1 guarantees
         let (updates, _) = broadcast::channel(100);
-        let this = Self {
+        Self {
             inner: Arc::new(Mutex::new(PeerScheduleInner::new())),
             updates,
             local_keys,
-        };
-        this
+        }
     }
 
-    /// Does not return updates on local peer_id
+    /// Does not return updates on local `peer_id`
     pub fn updates(&self) -> broadcast::Receiver<(PeerId, PeerState)> {
         tracing::debug!("subscribing to peer updates");
         self.updates.subscribe()
-    }
-
-    // To sign a point or to query for points, we need to know the intersection of:
-    // * which nodes are in the validator set during the round of interest
-    // * which nodes are able to connect at the moment
-    pub async fn wait_for_peers(&self, round: Round, node_count: NodeCount) {
-        let mut rx = self.updates();
-        let peers = (*self.peers_for(round)).clone();
-        let local_id = self.local_id();
-        let mut resolved = peers
-            .iter()
-            .filter(|(&peer_id, &state)| state == PeerState::Resolved && peer_id != local_id)
-            .map(|(peer_id, _)| *peer_id)
-            .collect::<FastHashSet<_>>();
-        while resolved.len() < node_count.majority_of_others() {
-            match rx.recv().await {
-                Ok((peer_id, new_state)) => match new_state {
-                    PeerState::Resolved => _ = resolved.insert(peer_id),
-                    PeerState::Unknown => _ = resolved.remove(&peer_id),
-                },
-                _ => {}
-            }
-        }
     }
 
     /// Note: keep private, it's just a local shorthand
@@ -145,7 +121,6 @@ impl PeerSchedule {
             first += 1; // exclude inner.empty
         }
         (first..=last)
-            .into_iter()
             .map(|i| inner.peers_for_index_plus_one(i))
             .filter(|m| !m.is_empty())
             .collect()
@@ -200,7 +175,7 @@ impl PeerSchedule {
             .map(|peer_id| {
                 (
                     *peer_id,
-                    if resolved.contains(&peer_id) && peer_id != local_id {
+                    if resolved.contains(peer_id) && peer_id != local_id {
                         PeerState::Resolved
                     } else {
                         PeerState::Unknown

@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
@@ -9,6 +8,7 @@ use crate::dag::DagRound;
 use crate::models::{
     Link, LinkField, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime,
 };
+use crate::InputBuffer;
 
 pub struct Producer;
 
@@ -16,14 +16,15 @@ impl Producer {
     pub fn new_point(
         current_round: &DagRound,
         prev_point: Option<&PrevPoint>,
-        payload: Vec<Bytes>,
+        input_buffer: &InputBuffer,
     ) -> Option<Arc<Point>> {
         let finished_round = current_round.prev().get()?;
         let key_pair = current_round.key_pair()?;
+        let payload = input_buffer.fetch(prev_point.is_some());
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
             Some(AnchorStage::Proof { leader, .. } | AnchorStage::Trigger { leader, .. })
-                if leader == &local_id && prev_point.is_none() =>
+                if leader == local_id && prev_point.is_none() =>
             {
                 // wave leader must skip new round if it failed to produce 3 points in a row
                 return None;
@@ -32,9 +33,9 @@ impl Producer {
         };
         let includes = Self::includes(&finished_round);
         let mut anchor_trigger =
-            Self::link_from_includes(&local_id, &current_round, &includes, LinkField::Trigger);
+            Self::link_from_includes(&local_id, current_round, &includes, LinkField::Trigger);
         let mut anchor_proof =
-            Self::link_from_includes(&local_id, &current_round, &includes, LinkField::Proof);
+            Self::link_from_includes(&local_id, current_round, &includes, LinkField::Proof);
         let witness = Self::witness(&finished_round);
         Self::update_link_from_witness(
             &mut anchor_trigger,
@@ -56,11 +57,10 @@ impl Producer {
             .map(|point| (point.body.location.author, point.digest.clone()))
             .collect::<BTreeMap<_, _>>();
 
-        assert!(
-            prev_point.map_or(true, |prev| includes
-                .get(&local_id)
-                .map_or(false, |digest| digest == &prev.digest)),
-            "must include own point if it exists"
+        assert_eq!(
+            prev_point.map(|prev| &prev.digest),
+            includes.get(&local_id),
+            "must include own point if it exists and vice versa"
         );
         assert!(
             prev_point.map_or(true, |prev| prev.evidence.len()
@@ -94,8 +94,7 @@ impl Producer {
             .select(|(_, loc)| {
                 loc.state()
                     .point()
-                    .map(|dag_point| dag_point.trusted())
-                    .flatten()
+                    .and_then(|dag_point| dag_point.trusted())
                     // TODO refactor Signable: we are interested not in the round of signature,
                     //   but whether was a point already included or not (just in order not to
                     //   include it twice); repeating inclusions are suboptimal but still correct
@@ -104,7 +103,7 @@ impl Producer {
             })
             .collect::<Vec<_>>();
         assert!(
-            includes.iter().count() >= finished_round.node_count().majority(),
+            includes.len() >= finished_round.node_count().majority(),
             "Coding error: producing point with not enough includes, check Collector logic"
         );
         includes
@@ -129,7 +128,7 @@ impl Producer {
         includes: &[Arc<Point>],
         link_field: LinkField,
     ) -> Link {
-        use AnchorStage::*;
+        use AnchorStage::{Proof, Trigger};
 
         match (current_round.anchor_stage(), link_field) {
             (Some(Trigger { leader, .. }), LinkField::Trigger)
@@ -146,7 +145,7 @@ impl Producer {
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        let link = if point.body.location.round == current_round.round().prev()
+        if point.body.location.round == current_round.round().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
             Link::Direct(Through::Includes(point.body.location.author))
@@ -155,9 +154,7 @@ impl Producer {
                 to: point.anchor_id(link_field),
                 path: Through::Includes(point.body.location.author),
             }
-        };
-
-        link
+        }
     }
 
     fn update_link_from_witness(
@@ -224,9 +221,9 @@ impl Producer {
                 };
 
                 let point = through
-                    .into_iter()
+                    .iter()
                     .find(|point| point.body.location.author == peer_id)
-                    .expect("anchor proof should exist");
+                    .expect("path to anchor proof should exist in new point dependencies");
 
                 let anchor_time = point.body.anchor_time;
 

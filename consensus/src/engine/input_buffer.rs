@@ -1,82 +1,57 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
+use parking_lot::{Mutex, MutexGuard};
 use rand::{thread_rng, RngCore};
-use tokio::sync::{mpsc, Notify};
-use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 
 use crate::engine::MempoolConfig;
 
-#[async_trait]
-pub trait InputBuffer: Send + 'static {
+trait InputBufferInner: Send {
+    fn fetch_inner(&mut self, only_fresh: bool) -> Vec<Bytes>;
+}
+
+#[derive(Clone)]
+pub struct InputBuffer(Arc<Mutex<dyn InputBufferInner>>);
+
+impl InputBuffer {
     /// `only_fresh = false` to repeat the same elements if they are still buffered,
     /// use in case last round failed
-    async fn fetch(&mut self, only_fresh: bool) -> Vec<Bytes>;
+    pub fn fetch(&self, only_fresh: bool) -> Vec<Bytes> {
+        let mut inner = self.0.lock();
+        inner.fetch_inner(only_fresh)
+    }
 }
 
-pub struct InputBufferImpl {
-    abort: Arc<Notify>,
-    consumer: Option<JoinHandle<InputBufferImplInner>>,
-}
+pub struct InputBufferImpl;
 
 impl InputBufferImpl {
-    pub fn new(externals: mpsc::UnboundedReceiver<Bytes>) -> Self {
-        let abort = Arc::new(Notify::new());
-        let inner = InputBufferImplInner {
-            externals,
-            data: Default::default(),
-        };
-
-        Self {
-            consumer: Some(tokio::spawn(inner.consume(abort.clone()))),
-            abort,
+    pub fn new(externals: mpsc::UnboundedReceiver<Bytes>) -> InputBuffer {
+        let inner = Arc::new(Mutex::new(InputBufferData::default()));
+        tokio::spawn(Self::consume(inner.clone(), externals));
+        InputBuffer(inner)
+    }
+    async fn consume(
+        inner: Arc<Mutex<InputBufferData>>,
+        mut externals: mpsc::UnboundedReceiver<Bytes>,
+    ) -> ! {
+        while let Some(payload) = externals.recv().await {
+            let mut data = inner.lock();
+            data.add(payload);
+            // `fetch()` is topmost priority
+            MutexGuard::unlock_fair(data);
         }
+        panic!("externals input channel to mempool is closed");
     }
 }
 
-impl Drop for InputBufferImpl {
-    fn drop(&mut self) {
-        if let Some(handle) = self.consumer.take() {
-            handle.abort();
-        }
-    }
-}
-
-#[async_trait]
-impl InputBuffer for InputBufferImpl {
-    async fn fetch(&mut self, only_fresh: bool) -> Vec<Bytes> {
-        self.abort.notify_waiters();
-        let handle = self.consumer.take().expect("consumer must be set");
-        let mut inner = handle.await.expect("consumer failed");
-
+impl InputBufferInner for InputBufferData {
+    fn fetch_inner(&mut self, only_fresh: bool) -> Vec<Bytes> {
         if only_fresh {
-            inner.data.commit_offset();
+            self.commit_offset();
         }
-        let result = inner.data.fetch();
-
-        self.consumer = Some(tokio::spawn(inner.consume(self.abort.clone())));
-        result
-    }
-}
-
-struct InputBufferImplInner {
-    externals: mpsc::UnboundedReceiver<Bytes>,
-    data: InputBufferData,
-}
-
-impl InputBufferImplInner {
-    async fn consume(mut self, abort: Arc<Notify>) -> Self {
-        let mut notified = std::pin::pin!(abort.notified());
-        loop {
-            tokio::select! {
-                _ = &mut notified => break self,
-                payload = self.externals.recv() => {
-                    self.data.add(payload.expect("externals input channel to mempool is closed"));
-                },
-            }
-        }
+        self.fetch()
     }
 }
 
@@ -166,27 +141,26 @@ impl InputBufferData {
 pub struct InputBufferStub {
     fetch_count: usize,
     steps_until_full: usize,
-    fetches_in_step: usize,
+    points_in_step: usize,
 }
 
 impl InputBufferStub {
     /// External message is limited by 64 KiB
     const EXTERNAL_MSG_MAX_BYTES: usize = 64 * 1024;
 
-    pub fn new(fetches_in_step: usize, steps_until_full: usize) -> Self {
-        Self {
+    pub fn new(points_in_step: usize, steps_until_full: usize) -> InputBuffer {
+        InputBuffer(Arc::new(Mutex::new(Self {
             fetch_count: 0,
             steps_until_full,
-            fetches_in_step,
-        }
+            points_in_step,
+        })))
     }
 }
 
-#[async_trait]
-impl InputBuffer for InputBufferStub {
-    async fn fetch(&mut self, _: bool) -> Vec<Bytes> {
+impl InputBufferInner for InputBufferStub {
+    fn fetch_inner(&mut self, _: bool) -> Vec<Bytes> {
         self.fetch_count += 1;
-        let step = (self.fetch_count / self.fetches_in_step).min(self.steps_until_full);
+        let step = (self.fetch_count / self.points_in_step).min(self.steps_until_full);
         let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
             / self.steps_until_full
             / Self::EXTERNAL_MSG_MAX_BYTES;

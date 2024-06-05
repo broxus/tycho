@@ -61,7 +61,7 @@ impl DagLocation {
         // to make signature we are interested in the first validated point only
         // (others are at least suspicious and cannot be signed)
         match self.versions.entry(digest.clone()) {
-            btree_map::Entry::Occupied(_) => return None,
+            btree_map::Entry::Occupied(_) => None,
             btree_map::Entry::Vacant(entry) => {
                 let state = self.state.clone();
                 let shared = entry.insert(Shared::new(JoinTask::new({
@@ -91,7 +91,7 @@ pub struct InclusionState(Arc<OnceLock<Signable>>);
 
 impl InclusionState {
     /// Must not be used for downloaded dependencies
-    pub fn init(&self, first_completed: &DagPoint) {
+    pub(super) fn init(&self, first_completed: &DagPoint) {
         _ = self.0.get_or_init(|| {
             let signed = OnceLock::new();
             if first_completed.trusted().is_none() {
@@ -106,12 +106,12 @@ impl InclusionState {
     fn insert_own_point(&self, my_point: &DagPoint) {
         let signed = OnceLock::new();
         match my_point.trusted() {
-            None => assert!(false, "Coding error: own point is not trusted"),
+            None => panic!("Coding error: own point is not trusted"),
             Some(valid) => {
                 _ = signed.set(Ok(Signed {
                     at: valid.point.body.location.round,
                     with: valid.point.signature.clone(),
-                }))
+                }));
             }
         };
         let result = self.0.set(Signable {
@@ -121,7 +121,7 @@ impl InclusionState {
         assert!(
             result.is_ok(),
             "Coding error: own point initialized for inclusion twice"
-        )
+        );
     }
     pub fn is_empty(&self) -> bool {
         self.0.get().is_none()

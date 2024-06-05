@@ -1,50 +1,56 @@
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, oneshot};
-use tycho_network::{PeerId, Response, Service, ServiceRequest};
-use tycho_util::futures::BoxFutureOrNoop;
+use arc_swap::ArcSwapOption;
+use tycho_network::{Response, Service, ServiceRequest};
 
+use crate::dag::DagRound;
+use crate::effects::{AltFormat, CurrentRoundContext, Effects};
+use crate::intercom::broadcast::Signer;
 use crate::intercom::core::dto::{MPQuery, MPResponse};
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
-use crate::intercom::BroadcastFilter;
-use crate::models::{Point, PointId, Round, Ugly};
+use crate::intercom::{BroadcastFilter, Uploader};
+use crate::models::Point;
 
-pub struct Responder(Arc<ResponderInner>);
+#[derive(Clone, Default)]
+pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
+
+struct ResponderInner {
+    // state and storage components go here
+    broadcast_filter: BroadcastFilter,
+    top_dag_round: DagRound,
+    effects: Effects<CurrentRoundContext>,
+}
 
 impl Responder {
-    pub fn new(
-        log_id: Arc<String>,
-        broadcast_filter: BroadcastFilter,
-        signature_requests: mpsc::UnboundedSender<(
-            Round,
-            PeerId,
-            oneshot::Sender<SignatureResponse>,
-        )>,
-        uploads: mpsc::UnboundedSender<(PointId, oneshot::Sender<PointByIdResponse>)>,
-    ) -> Self {
-        Self(Arc::new(ResponderInner {
-            log_id,
-            broadcast_filter,
-            signature_requests,
-            uploads,
-        }))
+    pub fn update(
+        &self,
+        broadcast_filter: &BroadcastFilter,
+        top_dag_round: &DagRound,
+        round_effects: &Effects<CurrentRoundContext>,
+    ) {
+        self.0.store(Some(Arc::new(ResponderInner {
+            broadcast_filter: broadcast_filter.clone(),
+            effects: round_effects.clone(),
+            top_dag_round: top_dag_round.clone(),
+        })));
     }
 }
 
 impl Service<ServiceRequest> for Responder {
     type QueryResponse = Response;
-    type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;
+    type OnQueryFuture = futures_util::future::Ready<Option<Self::QueryResponse>>;
     type OnMessageFuture = futures_util::future::Ready<()>;
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        BoxFutureOrNoop::future(self.0.clone().handle_query(req))
+        futures_util::future::ready(self.handle_query(&req))
     }
 
     #[inline]
     fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
-        futures_util::future::ready(self.0.clone().handle_broadcast(req))
+        self.handle_broadcast(&req);
+        futures_util::future::ready(())
     }
 
     #[inline]
@@ -53,78 +59,62 @@ impl Service<ServiceRequest> for Responder {
     }
 }
 
-struct ResponderInner {
-    // state and storage components go here
-    log_id: Arc<String>,
-    broadcast_filter: BroadcastFilter,
-    signature_requests: mpsc::UnboundedSender<(Round, PeerId, oneshot::Sender<SignatureResponse>)>,
-    uploads: mpsc::UnboundedSender<(PointId, oneshot::Sender<PointByIdResponse>)>,
-}
-
-impl ResponderInner {
-    async fn handle_query(self: Arc<Self>, req: ServiceRequest) -> Option<Response> {
-        let body = MPQuery::try_from(&req)
+impl Responder {
+    fn handle_query(&self, req: &ServiceRequest) -> Option<Response> {
+        let peer_id = req.metadata.peer_id;
+        let body = MPQuery::try_from(req)
             .inspect_err(|e| {
-                tracing::error!("unexpected request from {:?}: {e:?}", req.metadata.peer_id)
+                tracing::error!(
+                    peer_id = display(peer_id.alt()),
+                    error = debug(e),
+                    "unexpected request",
+                );
             })
             .ok()?; // malformed request is a reason to ignore it
-
+        let inner = self.0.load_full();
         let response = match body {
-            MPQuery::PointById(point_id) => {
-                let (tx, rx) = oneshot::channel();
-                self.uploads.send((point_id.clone(), tx)).ok();
-                let response = rx
-                    .await // not recoverable, must be avoided, thus panic
-                    .expect("Responder point by id await of request failed");
-                tracing::debug!(
-                    "{} upload to {:.4?} : {:?} {}",
-                    self.log_id,
-                    req.metadata.peer_id,
-                    point_id.ugly(),
-                    response.0.as_ref().map_or("not found", |_| "ok"),
-                );
-                MPResponse::PointById(response)
-            }
-            MPQuery::Signature(round) => {
-                let (tx, rx) = oneshot::channel();
-                self.signature_requests
-                    .send((round, req.metadata.peer_id, tx))
-                    .ok();
-                match rx.await {
-                    Ok(response) => MPResponse::Signature(response),
-                    Err(e) => {
-                        // it's a recoverable error
-                        let response = SignatureResponse::TryLater;
-                        tracing::error!(
-                            "{} responder => collector {:.4?} @ {round:?} : \
-                            {response:?} due to oneshot {e}",
-                            self.log_id,
-                            req.metadata.peer_id
-                        );
-                        MPResponse::Signature(response)
-                    }
+            MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
+                None => PointByIdResponse(None),
+                Some(inner) => {
+                    Uploader::find(&peer_id, &point_id, &inner.top_dag_round, &inner.effects)
                 }
-            }
+            }),
+            MPQuery::Signature(round) => MPResponse::Signature(match inner {
+                None => SignatureResponse::TryLater,
+                Some(inner) => Signer::signature_response(
+                    round,
+                    &peer_id,
+                    &inner.top_dag_round,
+                    &inner.effects,
+                ),
+            }),
         };
-
-        Response::try_from(&response)
-            .inspect_err(|e| {
-                tracing::error!("failed to serialize response to {:?}: {e:?}", req.metadata)
-            })
-            .ok()
+        Some(Response::try_from(&response).expect("should serialize own response"))
     }
 
-    fn handle_broadcast(self: Arc<Self>, req: ServiceRequest) {
+    fn handle_broadcast(&self, req: &ServiceRequest) {
+        let Some(inner) = self.0.load_full() else {
+            return;
+        };
         match bincode::deserialize::<Point>(&req.body) {
-            Ok(point) => self.broadcast_filter.add(Arc::new(point)),
+            Ok(point) => {
+                let point = Arc::new(point);
+                inner.broadcast_filter.add(
+                    &req.metadata.peer_id,
+                    &point,
+                    inner.top_dag_round.round(),
+                    &inner.effects,
+                );
+            }
             Err(e) => {
+                // malformed request is a reason to ignore it
                 tracing::error!(
-                    "unexpected broadcast from {:?}: {e:?}",
+                    parent: inner.effects.span(),
+                    "cannot parse broadcast from {:?}: {e:?}",
                     req.metadata.peer_id
                 );
-                // malformed request is a reason to ignore it
-                return;
             }
         };
     }
 }
+// ResponderContext is meaningless without metrics

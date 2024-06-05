@@ -1,8 +1,10 @@
-use std::cmp::Ordering;
-use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use std::{cmp, fmt};
 
-use crate::models::{DagPoint, Point, Round, Ugly, UglyPrint};
+use cmp::Ordering;
+
+use crate::effects::{AltFmt, AltFormat};
+use crate::models::{DagPoint, Point, Round};
 
 #[derive(Debug)]
 pub enum ConsensusEvent {
@@ -15,6 +17,7 @@ pub enum ConsensusEvent {
 
 impl ConsensusEvent {
     pub fn priority(a: &Self, b: &Self) -> Ordering {
+        #[allow(clippy::match_same_arms)]
         match (a, b) {
             // all forwards first
             (ConsensusEvent::Forward(a), ConsensusEvent::Forward(b)) => a.cmp(b),
@@ -34,12 +37,13 @@ impl ConsensusEvent {
     }
 }
 
-impl Debug for UglyPrint<'_, ConsensusEvent> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self.0 {
-            ConsensusEvent::Verified(point) => write!(f, "Verified({:?})", point.ugly())?,
-            fwd => Debug::fmt(fwd, f)?,
-        };
-        Ok(())
+impl AltFormat for ConsensusEvent {}
+impl fmt::Display for AltFmt<'_, ConsensusEvent> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match AltFormat::unpack(self) {
+            ConsensusEvent::Forward(_) => "Forward",
+            ConsensusEvent::Verified(_) => "Verified",
+            ConsensusEvent::Invalid(_) => "Invalid",
+        })
     }
 }

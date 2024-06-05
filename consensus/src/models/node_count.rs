@@ -3,7 +3,7 @@ pub struct NodeCount(u8);
 
 impl std::fmt::Debug for NodeCount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "NodeCount({})", self.full())
+        f.debug_tuple("NodeCount").field(&self.full()).finish()
     }
 }
 
@@ -12,7 +12,7 @@ impl TryFrom<usize> for NodeCount {
     fn try_from(total_peers: usize) -> Result<Self, Self::Error> {
         // may occur if peer_schedule is empty
         if total_peers < 3 {
-            return Err("not enough nodes to run consensus");
+            Err("not enough nodes to run consensus")
         } else {
             Ok(NodeCount::new(total_peers))
         }

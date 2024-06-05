@@ -446,6 +446,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim 0.11.1",
+ "terminal_size",
 ]
 
 [[package]]
@@ -2434,6 +2435,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_size"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21bebf2b7c9e0a515f6e0f8c51dc0f8e4696391e6f1ff30379559f8365fb0df7"
+dependencies = [
+ "rustix",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2717,6 +2728,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-flame"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bae117ee14789185e129aaee5d93750abe67fdc5a9a62650452bfe4e122a3a9"
+dependencies = [
+ "lazy_static",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "tracing-futures"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2944,6 +2966,7 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "anyhow",
+ "arc-swap",
  "async-trait",
  "bincode",
  "bytes",
@@ -2953,6 +2976,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools",
+ "metrics",
  "parking_lot",
  "rand",
  "rand_pcg",
@@ -2963,6 +2987,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
+ "tracing-flame",
  "tracing-subscriber",
  "tycho-network",
  "tycho-storage",

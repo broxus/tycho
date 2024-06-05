@@ -1,5 +1,4 @@
 use std::mem;
-use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
@@ -10,6 +9,8 @@ use tokio::sync::mpsc;
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
+use crate::dyn_event;
+use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::dto::{PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
@@ -18,36 +19,35 @@ use crate::models::{Digest, NodeCount, Point, Round, Signature};
 type BcastResult = anyhow::Result<()>;
 type SigResult = anyhow::Result<SignatureResponse>;
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum BroadcasterSignal {
     Ok,
     Err,
 }
 
 pub struct Broadcaster {
-    log_id: Arc<String>,
     dispatcher: Dispatcher,
     // do not throw away unfinished broadcasts from previous round
     bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
 }
 
 impl Broadcaster {
-    pub fn new(log_id: Arc<String>, dispatcher: &Dispatcher) -> Self {
+    pub fn new(dispatcher: &Dispatcher) -> Self {
         Self {
-            log_id,
             dispatcher: dispatcher.clone(),
             bcasts_outdated: FuturesUnordered::new(),
         }
     }
     pub async fn run(
         &mut self,
+        round_effects: &Effects<CurrentRoundContext>,
         point: &Point,
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> FastHashMap<PeerId, Signature> {
         let mut task = BroadcasterTask::new(
-            self.log_id.clone(),
+            Effects::<BroadcasterContext>::new(round_effects, &point.digest),
             point,
             &self.dispatcher,
             peer_schedule,
@@ -56,18 +56,19 @@ impl Broadcaster {
             mem::take(&mut self.bcasts_outdated),
         );
         task.run().await;
+        // preserve only broadcasts from the last round and drop older ones as hung up
         self.bcasts_outdated.extend(task.bcast_futs);
-        // self.bcasts_outdated.extend(task.bcasts_outdated); // TODO: move only broadcasts from actual round and ignore previous
         task.signatures
     }
 }
 
 struct BroadcasterTask {
-    log_id: Arc<String>,
+    effects: Effects<BroadcasterContext>,
     dispatcher: Dispatcher,
     bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     current_round: Round,
     point_digest: Digest,
+    /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: mpsc::Sender<BroadcasterSignal>,
     collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
 
@@ -90,7 +91,7 @@ struct BroadcasterTask {
 
 impl BroadcasterTask {
     fn new(
-        log_id: Arc<String>,
+        effects: Effects<BroadcasterContext>,
         point: &Point,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
@@ -98,6 +99,7 @@ impl BroadcasterTask {
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
         bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     ) -> Self {
+        let _guard = effects.span().clone().entered();
         let peer_updates = peer_schedule.updates();
         let signers = peer_schedule
             .peers_for(point.body.location.round.next())
@@ -106,15 +108,10 @@ impl BroadcasterTask {
             .collect::<FastHashSet<_>>();
         let signers_count = NodeCount::new(signers.len());
         let collectors = peer_schedule.all_resolved();
-        tracing::debug!(
-            "{log_id} @ {:?} collectors count = {}",
-            point.body.location.round,
-            collectors.len()
-        );
-        let bcast_request = Dispatcher::broadcast_request(&point);
+        let bcast_request = Dispatcher::broadcast_request(point);
         let sig_request = Dispatcher::signature_request(point.body.location.round);
         Self {
-            log_id,
+            effects,
             dispatcher: dispatcher.clone(),
             bcasts_outdated,
             current_round: point.body.location.round,
@@ -156,8 +153,13 @@ impl BroadcasterTask {
         // * enqueued for any of two requests above
         // * rejected to sign our point (incl. rejection of the point itself and incorrect sig)
         // * successfully signed our point and dequeued
+        tracing::debug!(
+            parent: self.effects.span(),
+            collectors_count = self.bcast_peers.len(),
+            "start",
+        );
         for peer_id in mem::take(&mut self.bcast_peers) {
-            self.broadcast(&peer_id)
+            self.broadcast(&peer_id);
         }
         loop {
             tokio::select! {
@@ -168,51 +170,55 @@ impl BroadcasterTask {
                     }
                 }
                 Some((peer_id, result)) = self.bcast_futs.next() => {
-                    self.match_broadcast_result(peer_id, result)
+                    self.match_broadcast_result(peer_id, result);
                 },
                 Some((peer_id, result)) = self.sig_futs.next() =>  {
-                    self.match_signature_result(peer_id, result)
+                    self.match_signature_result(peer_id, result);
                 },
                 update = self.peer_updates.recv() => {
-                    self.match_peer_updates(update)
+                    self.match_peer_updates(update);
                 }
                 else => {
-                    panic!("bcaster unhandled");
+                    let _guard = self.effects.span().enter();
+                    panic!("unhandled match arm in Broadcaster tokio::select");
                 }
             }
         }
     }
 
     async fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
-        tracing::debug!(
-            "{} @ {:?} bcaster <= Collector::{collector_signal:?} : sigs {} of {}, rejects {} of {}",
-            self.log_id,
-            self.current_round,
-            self.signatures.len(),
-            self.signers_count.majority_of_others(),
-            self.rejections.len(),
-            self.signers_count.reliable_minority(),
-        );
-        match collector_signal {
+        let result = match collector_signal {
             // though we return successful result, it will be discarded on Err
             CollectorSignal::Finish | CollectorSignal::Err => true,
             CollectorSignal::Retry => {
                 if self.rejections.len() >= self.signers_count.reliable_minority() {
                     _ = self.bcaster_signal.send(BroadcasterSignal::Err).await;
-                    return true;
+                    true
+                } else {
+                    if self.signatures.len() >= self.signers_count.majority_of_others() {
+                        _ = self.bcaster_signal.send(BroadcasterSignal::Ok).await;
+                    }
+                    for peer_id in mem::take(&mut self.sig_peers) {
+                        self.request_signature(&peer_id);
+                    }
+                    for peer_id in mem::take(&mut self.bcast_peers) {
+                        self.broadcast(&peer_id);
+                    }
+                    false
                 }
-                if self.signatures.len() >= self.signers_count.majority_of_others() {
-                    _ = self.bcaster_signal.send(BroadcasterSignal::Ok).await;
-                }
-                for peer_id in mem::take(&mut self.sig_peers) {
-                    self.request_signature(&peer_id);
-                }
-                for peer_id in mem::take(&mut self.bcast_peers) {
-                    self.broadcast(&peer_id);
-                }
-                false
             }
-        }
+        };
+        tracing::debug!(
+            parent: self.effects.span(),
+            result = result,
+            collector_signal = debug(collector_signal),
+            signatures = self.signatures.len(),
+            "2F" = self.signers_count.majority_of_others(),
+            rejections = self.rejections.len(),
+            "F+1" = self.signers_count.reliable_minority(),
+            "ready?",
+        );
+        result
     }
 
     fn match_broadcast_result(&mut self, peer_id: PeerId, result: BcastResult) {
@@ -222,16 +228,17 @@ impl BroadcasterTask {
                 // self.bcast_peers.push(peer_id); // let it retry
                 self.sig_peers.insert(peer_id); // lighter weight retry loop
                 tracing::error!(
-                    "{} @ {:?} bcaster => collector {peer_id:.4?} error : {error}",
-                    self.log_id,
-                    self.current_round
+                    parent: self.effects.span(),
+                    peer = display(peer_id.alt()),
+                    error = display(error),
+                    "failed to send broadcast to"
                 );
             }
             Ok(_) => {
-                tracing::debug!(
-                    "{} @ {:?} bcaster => collector {peer_id:.4?} : broadcast accepted",
-                    self.log_id,
-                    self.current_round
+                tracing::trace!(
+                    parent: self.effects.span(),
+                    peer = display(peer_id.alt()),
+                    "finished broadcast to"
                 );
                 self.request_signature(&peer_id);
             }
@@ -244,25 +251,25 @@ impl BroadcasterTask {
                 // TODO distinguish timeouts from models incompatibility etc
                 self.sig_peers.insert(peer_id); // let it retry
                 tracing::error!(
-                    "{} @ {:?} bcaster <= collector {peer_id:.4?} signature request error : {error}",
-                    self.log_id,
-                    self.current_round
+                    parent: self.effects.span(),
+                    peer = display(peer_id.alt()),
+                    error = display(error),
+                    "failed to query signature from"
                 );
             }
             Ok(response) => {
-                if response == SignatureResponse::Rejected {
-                    tracing::warn!(
-                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:.4?}",
-                        self.log_id,
-                        self.current_round
-                    );
+                let level = if response == SignatureResponse::Rejected {
+                    tracing::Level::WARN
                 } else {
-                    tracing::debug!(
-                        "{} @ {:?} bcaster <= collector {peer_id:.4?} : {response:.4?}",
-                        self.log_id,
-                        self.current_round
-                    );
+                    tracing::Level::DEBUG
                 };
+                dyn_event!(
+                    parent: self.effects.span(),
+                    level,
+                    peer = display(peer_id.alt()),
+                    response = display(response.alt()),
+                    "signature response from"
+                );
                 match response {
                     SignatureResponse::Signature(signature) => {
                         if self.signers.contains(&peer_id) {
@@ -291,16 +298,16 @@ impl BroadcasterTask {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.bcast_futs
                 .push(self.dispatcher.send(peer_id, &self.bcast_request));
-            tracing::debug!(
-                "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast",
-                self.log_id,
-                self.current_round
+            tracing::trace!(
+                parent: self.effects.span(),
+                peer = display(peer_id.alt()),
+                "sending broadcast to"
             );
         } else {
             tracing::warn!(
-                "{} @ {:?} bcaster => collector {peer_id:.4?}: broadcast impossible",
-                self.log_id,
-                self.current_round
+                parent: self.effects.span(),
+                peer = display(peer_id.alt()),
+                "will not broadcast to"
             );
         }
     }
@@ -309,16 +316,16 @@ impl BroadcasterTask {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.sig_futs
                 .push(self.dispatcher.query(peer_id, &self.sig_request));
-            tracing::debug!(
-                "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request",
-                self.log_id,
-                self.current_round
+            tracing::trace!(
+                parent: self.effects.span(),
+                peer = display(peer_id.alt()),
+                "requesting signature from"
             );
         } else {
             tracing::warn!(
-                "{} @ {:?} bcaster => collector {peer_id:.4?}: signature request impossible",
-                self.log_id,
-                self.current_round
+                parent: self.effects.span(),
+                peer = display(peer_id.alt()),
+                "will not request signature from"
             );
         }
     }
@@ -327,9 +334,10 @@ impl BroadcasterTask {
         match result {
             Ok((peer_id, new_state)) => {
                 tracing::info!(
-                    "{} @ {:?} bcaster peer update: {peer_id:?} -> {new_state:?}",
-                    self.log_id,
-                    self.current_round
+                    parent: self.effects.span(),
+                    peer = display(peer_id.alt()),
+                    new_state = debug(new_state),
+                    "peer state update",
                 );
                 match new_state {
                     PeerState::Resolved => {
@@ -341,11 +349,27 @@ impl BroadcasterTask {
                 }
             }
             Err(err @ RecvError::Lagged(_)) => {
-                tracing::error!("Broadcaster peer updates {err}")
+                tracing::error!(
+                    parent: self.effects.span(),
+                    error = display(err),
+                    "peer state update"
+                );
             }
             Err(err @ RecvError::Closed) => {
-                panic!("Broadcaster peer updates {err}")
+                let _span = self.effects.span().enter();
+                panic!("peer state update {err}");
             }
         }
+    }
+}
+
+struct BroadcasterContext;
+impl EffectsContext for BroadcasterContext {}
+
+impl Effects<BroadcasterContext> {
+    fn new(parent: &Effects<CurrentRoundContext>, digest: &Digest) -> Self {
+        Self::new_child(parent.span(), || {
+            tracing::error_span!("broadcaster", digest = display(digest.alt()))
+        })
     }
 }

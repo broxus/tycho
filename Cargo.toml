@@ -88,6 +88,7 @@ tower = "0.4"
 tower-http = "0.5"
 tracing = "0.1"
 tracing-appender = "0.2.3"
+tracing-flame = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
 trait-variant = "0.1.2"

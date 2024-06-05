@@ -73,9 +73,10 @@ impl TryFrom<MPResponse> for PointByIdResponse {
     type Error = anyhow::Error;
 
     fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
-        match response {
-            MPResponse::PointById(response) => Ok(response),
-            _ => Err(anyhow!("wrapper mismatch, expected PointById")),
+        if let MPResponse::PointById(response) = response {
+            Ok(response)
+        } else {
+            Err(anyhow!("wrapper mismatch, expected PointById"))
         }
     }
 }
@@ -84,9 +85,10 @@ impl TryFrom<MPResponse> for SignatureResponse {
     type Error = anyhow::Error;
 
     fn try_from(response: MPResponse) -> Result<Self, Self::Error> {
-        match response {
-            MPResponse::Signature(response) => Ok(response),
-            _ => Err(anyhow!("wrapper mismatch, expected Signature")),
+        if let MPResponse::Signature(response) = response {
+            Ok(response)
+        } else {
+            Err(anyhow!("wrapper mismatch, expected Signature"))
         }
     }
 }

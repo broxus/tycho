@@ -12,26 +12,32 @@ use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::{Verifier, WeakDagRound};
+use crate::dyn_event;
+use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{DagPoint, NodeCount, PointId, Ugly};
+use crate::models::{DagPoint, NodeCount, PointId};
 
 type DownloadResult = anyhow::Result<PointByIdResponse>;
 
 #[derive(Clone)]
 pub struct Downloader {
-    log_id: Arc<String>,
+    inner: Arc<DownloaderInner>,
+}
+
+struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
 }
 
 impl Downloader {
-    pub fn new(log_id: Arc<String>, dispatcher: &Dispatcher, peer_schedule: &PeerSchedule) -> Self {
+    pub fn new(dispatcher: &Dispatcher, peer_schedule: &PeerSchedule) -> Self {
         Self {
-            log_id,
-            peer_schedule: peer_schedule.clone(),
-            dispatcher: dispatcher.clone(),
+            inner: Arc::new(DownloaderInner {
+                dispatcher: dispatcher.clone(),
+                peer_schedule: peer_schedule.clone(),
+            }),
         }
     }
 
@@ -43,7 +49,11 @@ impl Downloader {
         //   but then the DAG needs to store some sort of updatable state machine
         //   instead of opaque Shared<JoinTask<DagPoint>>
         dependant: PeerId,
+        parent_effects: Effects<ValidateContext>,
     ) -> DagPoint {
+        let effects = Effects::<DownloadContext>::new(&parent_effects, &point_id);
+        let span_guard = effects.span().enter();
+        let peer_schedule = &self.inner.peer_schedule;
         let Some(point_round_temp) = point_round.get() else {
             return DagPoint::NotExists(Arc::new(point_id));
         };
@@ -53,8 +63,7 @@ impl Downloader {
             "point and DAG round mismatch"
         );
         // request point from its signers (any dependant is among them as point is already verified)
-        let all_peers = self
-            .peer_schedule
+        let all_peers = peer_schedule
             .peers_for(point_round_temp.round().next())
             .iter()
             .map(|(peer_id, state)| (*peer_id, *state))
@@ -64,7 +73,7 @@ impl Downloader {
         };
         // query author no matter if it is in the next round, but that can't affect 3F+1
         let completed = match !all_peers.contains_key(&point_id.location.author)
-            && self.peer_schedule.is_resolved(&point_id.location.author)
+            && peer_schedule.is_resolved(&point_id.location.author)
         {
             true => -1,
             false => 0,
@@ -76,13 +85,17 @@ impl Downloader {
             .chain(iter::once(point_id.location.author))
             .collect();
         let (has_resolved_tx, has_resolved_rx) = watch::channel(false);
-        _ = point_round_temp; // do not leak strong ref across unlimited await
+        let updates = peer_schedule.updates();
+        // do not leak strong ref across unlimited await
+        drop(point_round_temp);
+        drop(span_guard);
         DownloadTask {
+            effects,
             weak_dag_round: point_round,
             node_count,
-            request: self.dispatcher.point_by_id_request(&point_id),
+            request: Dispatcher::point_by_id_request(&point_id),
             point_id,
-            updates: self.peer_schedule.updates(),
+            updates,
             has_resolved_tx,
             has_resolved_rx,
             in_flight: FuturesUnordered::new(),
@@ -99,6 +112,7 @@ impl Downloader {
 
 struct DownloadTask {
     parent: Downloader,
+    effects: Effects<DownloadContext>,
 
     weak_dag_round: WeakDagRound,
     node_count: NodeCount,
@@ -154,7 +168,7 @@ impl DownloadTask {
     }
 
     fn download(&mut self) {
-        self.attempt += 1;
+        self.attempt += 1; // FIXME panics on 100% load
         let count = (MempoolConfig::DOWNLOAD_PEERS as usize)
             .saturating_mul(self.attempt as usize)
             .min(self.all_peers.len());
@@ -176,6 +190,7 @@ impl DownloadTask {
     fn download_one(&mut self, peer_id: &PeerId) {
         self.in_flight.push(
             self.parent
+                .inner
                 .dispatcher
                 .query::<PointByIdResponse>(peer_id, &self.request)
                 .boxed(),
@@ -190,8 +205,10 @@ impl DownloadTask {
         match resolved {
             Err(network_err) => {
                 tracing::error!(
-                    "{} : {peer_id:.4?} network error: {network_err}",
-                    self.parent.log_id
+                    parent: self.effects.span(),
+                    peer_id = display(peer_id.alt()),
+                    error = display(network_err),
+                    "network error",
                 );
             }
             Ok(PointByIdResponse(None)) => {
@@ -199,15 +216,15 @@ impl DownloadTask {
                     // it's a ban in case permanent storage is used,
                     // the other way - peer can could have advanced on full DAG_DEPTH already
                     tracing::error!(
-                        "{} : {peer_id:.4?} must have returned {:?}",
-                        self.parent.log_id,
-                        self.point_id.ugly()
+                        parent: self.effects.span(),
+                        peer_id = display(peer_id.alt()),
+                        "must have returned",
                     );
                 } else {
                     tracing::debug!(
-                        "{} : {peer_id:.4?} didn't return {:?}",
-                        self.parent.log_id,
-                        self.point_id.ugly()
+                        parent: self.effects.span(),
+                        peer_id = display(peer_id.alt()),
+                        "didn't return",
                     );
                 }
             }
@@ -215,48 +232,44 @@ impl DownloadTask {
                 if point.id() != self.point_id {
                     // it's a ban
                     tracing::error!(
-                        "{} : {peer_id:.4?} returned wrong point",
-                        self.parent.log_id
+                        parent: self.effects.span(),
+                        peer_id = display(peer_id.alt()),
+                        author = display(self.point_id.location.author.alt()),
+                        round = self.point_id.location.round.0,
+                        digest = display(self.point_id.digest.alt()),
+                        "returned wrong point",
                     );
                 }
-                match Verifier::verify(&point, &self.parent.peer_schedule) {
+                let validated = match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
                     Ok(()) => {
-                        let validated = Verifier::validate(
+                        Verifier::validate(
                             point,
                             self.weak_dag_round.clone(),
                             self.parent.clone(),
+                            self.effects.span().clone(),
                         )
-                        .await;
-                        if validated.trusted().is_some() {
-                            tracing::debug!(
-                                "{} : downloaded dependency {:?}",
-                                self.parent.log_id,
-                                validated.ugly()
-                            )
-                        } else {
-                            tracing::error!(
-                                "{} : downloaded dependency validated as {:?}",
-                                self.parent.log_id,
-                                validated.ugly()
-                            )
-                        }
-                        return Some(validated);
+                        .await
                     }
-                    Err(invalid @ DagPoint::Invalid(_)) => {
-                        tracing::error!(
-                            "{} : downloaded dependency {:?}",
-                            self.parent.log_id,
-                            invalid.ugly()
-                        );
-                        return Some(invalid);
+                    Err(dag_point) => dag_point,
+                };
+                let level = if validated.trusted().is_some() {
+                    tracing::Level::DEBUG
+                } else if validated.valid().is_some() {
+                    tracing::Level::WARN
+                } else {
+                    tracing::Level::ERROR
+                };
+                dyn_event!(
+                    parent: self.effects.span(),
+                    level,
+                    result = display(validated.alt()),
+                    "downloaded",
+                );
+                match validated {
+                    DagPoint::NotExists(_) => {
+                        // author not reliable, it's a ban; continue
                     }
-                    Err(_not_exists) => {
-                        tracing::error!(
-                            "{} : downloaded dependency {:?}, peer is not reliable",
-                            self.parent.log_id,
-                            _not_exists.ugly()
-                        );
-                    }
+                    dag_point => return Some(dag_point),
                 }
             }
         };
@@ -274,7 +287,8 @@ impl DownloadTask {
             // mempool inclusion guarantees must be satisfied if less than 2F+1 nodes are online;
             // so we should stall, waiting for peers to connect
             if let Err(e) = self.has_resolved_rx.wait_for(|is| *is).await {
-                panic!("Downloader waiting for new resolved peer {e}")
+                let _span = self.effects.span().enter();
+                panic!("Downloader waiting for new resolved peer {e}");
             };
             self.download();
         };
@@ -296,11 +310,29 @@ impl DownloadTask {
                 }
             }
             Err(err @ RecvError::Lagged(_)) => {
-                tracing::error!("Downloader peer updates {err}")
+                tracing::error!(
+                    parent: self.effects.span(),
+                    "Downloader peer updates {err}"
+                );
             }
             Err(err @ RecvError::Closed) => {
+                let _span = self.effects.span().enter();
                 panic!("Downloader peer updates {err}")
             }
         }
+    }
+}
+struct DownloadContext;
+impl EffectsContext for DownloadContext {}
+impl Effects<DownloadContext> {
+    fn new(parent: &Effects<ValidateContext>, point_id: &PointId) -> Self {
+        Self::new_child(parent.span(), || {
+            tracing::error_span!(
+                "download",
+                author = display(point_id.location.author.alt()),
+                round = point_id.location.round.0,
+                digest = display(point_id.digest.alt()),
+            )
+        })
     }
 }
