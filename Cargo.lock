@@ -2680,7 +2680,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#748e51d77cde1525a6d69dbac5ad7464d8d82ca9"
+source = "git+https://github.com/broxus/ton-labs-executor.git?branch=shard_acc_executor#e1d9620b4a3a2e591152296ca1c79fe7835d80c9"
 dependencies = [
  "ahash",
  "anyhow",

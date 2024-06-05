@@ -31,16 +31,31 @@ impl CollatorStdImpl {
         let mut shard_accounts = prev_shard_data.observable_accounts().clone();
         let mut account_blocks = AccountBlocksDict::default();
 
-        let new_config_opt: Option<BlockchainConfig> = None;
+        let mut new_config_opt: Option<BlockchainConfig> = None;
 
         for (account_id, updated_shard_account_stuff) in exec_manager.changed_accounts.drain() {
-            // TODO: get updated blockchain config if it stored in account
             let account = updated_shard_account_stuff.shard_account.load_account()?;
             match &account {
                 None => {
                     shard_accounts.remove(updated_shard_account_stuff.account_addr)?;
                 }
                 Some(account) => {
+                    let config_address = self.working_state().mc_data.config().address;
+                    if collation_data.block_id_short.shard.is_masterchain()
+                        && config_address == account_id
+                    {
+                        if let AccountState::Active(StateInit { data, .. }) = &account.state {
+                            if let Some(data) = data {
+                                let params = data.parse::<BlockchainConfigParams>()?;
+                                let new_config = BlockchainConfig {
+                                    address: config_address,
+                                    params,
+                                };
+                                new_config_opt = Some(new_config);
+                            }
+                        }
+                    }
+
                     shard_accounts.set(
                         updated_shard_account_stuff.account_addr,
                         &DepthBalanceInfo {
@@ -130,7 +145,7 @@ impl CollatorStdImpl {
         new_block_info.gen_utime = collation_data.gen_utime;
         new_block_info.gen_utime_ms = collation_data.gen_utime_ms;
         new_block_info.start_lt = collation_data.start_lt;
-        new_block_info.end_lt = collation_data.max_lt + 1;
+        new_block_info.end_lt = collation_data.next_lt;
         new_block_info.gen_validator_list_hash_short =
             self.collation_session.collators().short_hash;
         new_block_info.gen_catchain_seqno = self.collation_session.seqno();

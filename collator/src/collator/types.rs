@@ -1,9 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::cell::{Cell, CellFamily, HashBytes, Store, UsageTree, UsageTreeMode};
+use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     Account, AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef,
@@ -318,7 +317,7 @@ pub(super) struct BlockCollationData {
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt
     // which is updating during tx execution
-    pub max_lt: u64,
+    pub next_lt: u64,
 
     pub in_msgs: BTreeMap<HashBytes, InMsg>,
     pub out_msgs: BTreeMap<HashBytes, OutMsg>,
@@ -433,10 +432,7 @@ pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
     pub orig_libs: Dict<HashBytes, SimpleLib>,
-    pub last_trans_hash: HashBytes,
     pub state_update: Lazy<HashUpdate>,
-    pub last_trans_lt: u64,
-    pub lt: Arc<AtomicU64>,
     pub transactions: Transactions,
     pub transactions_count: u64,
 }
@@ -479,12 +475,10 @@ impl ShardAccountStuff {
         Ok(())
     }
 
-    pub fn new(account_addr: AccountId, shard_account: ShardAccount, min_lt: u64) -> Result<Self> {
+    pub fn new(account_addr: AccountId, shard_account: ShardAccount) -> Result<Self> {
         let binding = &shard_account.account;
         let account_root = binding.inner();
         let shard_account_state = *account_root.repr_hash();
-        let last_trans_hash = shard_account.last_trans_hash;
-        let last_trans_lt = shard_account.last_trans_lt;
         let orig_libs = shard_account
             .load_account()?
             .map(|account| {
@@ -496,15 +490,10 @@ impl ShardAccountStuff {
             })
             .unwrap_or_default();
 
-        let lt: Arc<AtomicU64> = Arc::new(min_lt.into());
-        lt.fetch_max(last_trans_lt + 1, Ordering::Release);
         Ok(Self {
             account_addr,
             shard_account,
             orig_libs,
-            last_trans_hash,
-            last_trans_lt,
-            lt,
             transactions: Default::default(),
             state_update: Lazy::new(&HashUpdate {
                 old: shard_account_state,
@@ -513,21 +502,14 @@ impl ShardAccountStuff {
             transactions_count: 0,
         })
     }
-    pub fn add_transaction(&mut self, transaction: &mut Transaction) -> Result<()> {
-        transaction.prev_trans_hash = self.last_trans_hash;
-        transaction.prev_trans_lt = self.last_trans_lt;
-
-        let mut builder = everscale_types::cell::CellBuilder::new();
-        transaction.store_into(&mut builder, &mut Cell::empty_context())?;
-        let tr_root = builder.build()?;
-
-        self.last_trans_hash = *tr_root.repr_hash();
-        self.last_trans_lt = transaction.lt;
-
+    pub fn add_transaction(
+        &mut self,
+        total_fees: &CurrencyCollection,
+        transaction: Lazy<Transaction>,
+    ) -> Result<()> {
         // TODO calculate key
         let key = self.transactions_count;
-        self.transactions
-            .set(key, &transaction.total_fees, Lazy::new(transaction)?)?;
+        self.transactions.set(key, total_fees, transaction)?;
 
         self.transactions_count += 1;
         Ok(())
@@ -689,8 +671,9 @@ pub(super) enum AsyncMessage {
     TickTock(TickTock),
 }
 
-pub trait ShardStateProvider {
-    fn get_account_state(&self, account_id: &AccountId) -> Option<ShardAccount>;
-    fn get_updated_accounts(&self) -> Vec<(AccountId, ShardAccount)>;
-    fn update_account_state(&self, account_id: &AccountId, account: ShardAccount);
+pub(super) struct ExecutedMessage {
+    pub transaction_result: Result<Box<(CurrencyCollection, Lazy<Transaction>)>>,
+    pub in_message: AsyncMessage,
+    pub updated_shard_account_stuff: ShardAccountStuff,
+    pub transaction_duration: u64,
 }

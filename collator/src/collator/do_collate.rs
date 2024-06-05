@@ -87,7 +87,7 @@ impl CollatorStdImpl {
             prev_shard_data,
             &collation_data,
         )?;
-        collation_data.max_lt = collation_data.start_lt + 1;
+        collation_data.next_lt = collation_data.start_lt + 1;
 
         collation_data.processed_upto = prev_shard_data.processed_upto().clone();
         tracing::debug!(
@@ -149,8 +149,7 @@ impl CollatorStdImpl {
         let mut exec_manager = ExecutionManager::new(
             collation_data.gen_utime,
             collation_data.start_lt,
-            collation_data.max_lt,
-            collation_data.max_lt,
+            collation_data.next_lt,
             collation_data.rand_seed,
             mc_data.libraries().clone(),
             mc_data.config().clone(),
@@ -328,7 +327,7 @@ impl CollatorStdImpl {
                         vec![]
                     };
                     let executed_msgs_count = msgs_set.len();
-                    collation_data.max_lt = exec_manager.max_lt;
+                    collation_data.next_lt = exec_manager.min_next_lt;
                     msgs_set_offset += executed_msgs_count as u32;
                     msgs_set = left_msgs;
                     executed_msgs_count
@@ -337,10 +336,10 @@ impl CollatorStdImpl {
                     let executed_msgs_count = group.len();
                     for (_account_id, msg_info, transaction) in group {
                         let new_internal_messages = new_transaction(
-                            &self.collator_descr.clone(),
+                            &self.collator_descr,
                             &mut collation_data,
                             &self.shard_id,
-                            &transaction,
+                            transaction.1,
                             msg_info,
                         )?;
 
@@ -375,7 +374,7 @@ impl CollatorStdImpl {
                             );
                         }
 
-                        collation_data.max_lt = exec_manager.max_lt;
+                        collation_data.next_lt = exec_manager.min_next_lt;
                     }
                     msgs_set_offset = new_offset;
                     executed_msgs_count
@@ -1042,17 +1041,18 @@ impl CollatorStdImpl {
         };
         let cell = CellBuilder::build_from(msg)?;
         let async_message = f(info, cell);
-        let transaction = exec_manager
-            .execute_special_transaction(account, async_message.clone())
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account)?;
+        let (async_message, transaction) = exec_manager
+            .execute_special_transaction(account, async_message, shard_account_stuff)
             .await?;
         new_transaction(
-            &self.collator_descr.clone(),
+            &self.collator_descr,
             collation_data,
             &self.shard_id,
-            &transaction,
+            transaction.1,
             async_message,
         )?;
-        collation_data.max_lt = exec_manager.max_lt;
+        collation_data.next_lt = exec_manager.min_next_lt;
         Ok(())
     }
 
@@ -1093,8 +1093,7 @@ impl CollatorStdImpl {
             account
         );
 
-        let min_lt = exec_manager.min_lt;
-        let shard_account_stuff = exec_manager.get_shard_account_stuff(account, min_lt)?;
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account)?;
         let tick_tock = shard_account_stuff
             .shard_account
             .load_account()?
@@ -1110,17 +1109,17 @@ impl CollatorStdImpl {
         if (tick_tock.tock && tock) || (tick_tock.tick && !tock) {
             let tt = if tock { TickTock::Tock } else { TickTock::Tick };
             let async_message = AsyncMessage::TickTock(tt);
-            let transaction = exec_manager
-                .execute_special_transaction(account, async_message.clone())
+            let (async_message, transaction) = exec_manager
+                .execute_special_transaction(account, async_message, shard_account_stuff)
                 .await?;
             new_transaction(
-                &self.collator_descr.clone(),
+                &self.collator_descr,
                 collation_data,
                 &self.shard_id,
-                &transaction,
+                transaction.1,
                 async_message,
             )?;
-            collation_data.max_lt = exec_manager.max_lt;
+            collation_data.next_lt = exec_manager.min_next_lt;
         }
 
         Ok(())
@@ -1221,7 +1220,7 @@ fn new_transaction(
     collator_descr: &str,
     colator_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
-    transaction: &Transaction,
+    transaction: Lazy<Transaction>,
     in_msg: AsyncMessage,
 ) -> Result<Vec<(MsgInfo, Cell)>> {
     tracing::trace!(
@@ -1250,7 +1249,7 @@ fn new_transaction(
 
             let in_msg = InMsg::Final(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: Lazy::new(&transaction.clone())?,
+                transaction: transaction.clone(),
                 fwd_fee,
             });
 
@@ -1280,7 +1279,7 @@ fn new_transaction(
             };
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: Lazy::new(transaction)?,
+                transaction: transaction.clone(),
                 fwd_fee,
             });
 
@@ -1317,7 +1316,7 @@ fn new_transaction(
             };
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: Lazy::new(transaction)?,
+                transaction: transaction.clone(),
                 fwd_fee: Default::default(),
             });
             (in_msg, in_msg_cell)
@@ -1325,7 +1324,7 @@ fn new_transaction(
         AsyncMessage::Ext(MsgInfo::ExtIn(_), in_msg_cell) => (
             InMsg::External(InMsgExternal {
                 in_msg: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
-                transaction: Lazy::new(&transaction.clone())?,
+                transaction: transaction.clone(),
             }),
             in_msg_cell,
         ),
@@ -1341,7 +1340,9 @@ fn new_transaction(
         .in_msgs
         .insert(*in_msg_cell.repr_hash(), in_msg);
     let mut result = vec![];
-    for out_msg in transaction.iter_out_msgs() {
+    let binding = transaction.load()?;
+    let out_msgs = binding.iter_out_msgs();
+    for out_msg in out_msgs {
         let message = out_msg?;
         let msg_cell = CellBuilder::build_from(&message)?;
         let message_info = message.info;
@@ -1365,14 +1366,14 @@ fn new_transaction(
                         fwd_fee_remaining: fwd_fee,
                         message: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
                     })?,
-                    transaction: Lazy::new(&transaction.clone())?,
+                    transaction: transaction.clone(),
                 })
             }
             MsgInfo::ExtOut(_) => {
                 colator_data.out_msg_count += 1;
                 OutMsg::External(OutMsgExternal {
                     out_msg: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
-                    transaction: Lazy::new(&transaction.clone())?,
+                    transaction: transaction.clone(),
                 })
             }
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be output"),

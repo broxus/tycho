@@ -86,7 +86,7 @@ tikv-jemallocator = { version = "0.5", features = [
 tl-proto = "0.4"
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7.10", features = ["codec"] }
-ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", branch = "new_cells" }
+ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", branch = "shard_acc_executor" }
 tower = "0.4"
 tower-http = "0.5"
 tracing = "0.1"
