@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 
@@ -147,12 +147,12 @@ where
 {
     async fn on_skipped_anchor(
         &self,
-        shard_id: ShardIdent,
+        next_block_id_short: BlockIdShort,
         anchor: Arc<MempoolAnchor>,
     ) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             process_skipped_anchor,
-            shard_id,
+            next_block_id_short,
             anchor
         ))
         .await
@@ -508,11 +508,11 @@ where
     /// Get shards info from the master state,
     /// then start missing sessions for these shards, or refresh existing.
     /// For each shard run collation process if current node is included in collators subset.
+    #[tracing::instrument(skip_all, fields(mc_block_id = %mc_state.block_id().as_short_id()))]
     pub async fn refresh_collation_sessions(&mut self, mc_state: ShardStateStuff) -> Result<()> {
-        tracing::debug!(
+        tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Trying to refresh collation sessions by mc state for block ({})...",
-            mc_state.block_id().as_short_id()
+            "Trying to refresh collation sessions by mc state for block...",
         );
 
         // TODO: Possibly we have already updated collation sessions for this master block,
@@ -674,8 +674,6 @@ where
                     new_session_seqno,
                 ))?;
 
-            tracing::warn!("SUBSET: {subset:?}");
-
             // TEST: override with test subset with test keypairs defined on test run
             #[cfg(feature = "test")]
             let subset = if self.config.test_validators_keypairs.is_empty() {
@@ -829,15 +827,19 @@ where
     /// 4. If master block then update last master block chain time
     /// 5. Notify mempool about new master block (it may perform gc or nodes rotation)
     /// 6. Execute master block processing routines like for the block from bc
+    #[tracing::instrument(
+        skip_all, 
+        fields(
+            block_id = %collation_result.candidate.block_id.as_short_id(), 
+            ct = collation_result.candidate.chain_time,
+        ),
+    )]
     pub async fn process_collated_block_candidate(
         &mut self,
         collation_result: BlockCollationResult,
     ) -> Result<()> {
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Start processing block candidate (id: {}, chain_time: {})...",
-            collation_result.candidate.block_id.as_short_id(),
-            collation_result.candidate.chain_time,
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "Start processing block candidate",
         );
 
         // find session related to this block by shard
@@ -852,11 +854,8 @@ where
         let candidate_chain_time = collation_result.candidate.chain_time;
         let candidate_id = collation_result.candidate.block_id;
 
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Saving block candidate to cache (id: {}, chain_time: {})...",
-            candidate_id.as_short_id(),
-            candidate_chain_time,
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "Saving block candidate to cache...",
         );
         let new_state_stuff = collation_result.new_state_stuff;
         let new_mc_state = new_state_stuff.clone();
@@ -865,11 +864,8 @@ where
         // send validation task to validator
         // we need to send session info with the collators list to the validator
         // to understand whom we must ask for signatures
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Enqueueing block candidate validation (id: {}, chain_time: {})...",
-            candidate_id.as_short_id(),
-            candidate_chain_time,
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "Enqueueing block candidate validation...",
         );
 
         let _handle = self
@@ -881,24 +877,18 @@ where
         // when candidate is master
         if candidate_id.shard.is_masterchain() {
             // store last collated master block id and chain time
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Candidate (id: {}, chain_time: {}) is a master block",
-                candidate_id.as_short_id(),
-                candidate_chain_time,
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "Candidate is a master block",
             );
             self.process_last_collated_mc_block_chain_time(candidate_chain_time);
             self.set_last_collated_mc_block_id(candidate_id);
 
             // collate next master block right now if there are pending internals
             if collation_result.has_pending_internals {
-                tracing::debug!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "Candidate (id: {}, chain_time: {}): there are pending internals in master queue",
-                    candidate_id.as_short_id(),
-                    candidate_chain_time,
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "there are pending internals in master queue",
                 );
-                self.enqueue_mc_block_collation(candidate_chain_time, None)
+                self.enqueue_mc_block_collation(candidate_chain_time, Some(candidate_id))
                     .await?;
             } else {
                 // otherwise execute master block processing routines
@@ -954,20 +944,21 @@ where
             .await
     }
 
+    #[tracing::instrument(skip_all, fields(block_id = %next_block_id_short, ct = anchor.chain_time()))]
     async fn process_skipped_anchor(
         &mut self,
-        shard_id: ShardIdent,
+        next_block_id_short: BlockIdShort,
         anchor: Arc<MempoolAnchor>,
     ) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Will check if master block interval elapsed in {} by chain time {} from empty anchor {}",
-            shard_id,
+            next_block_id_short.shard,
             anchor.chain_time(),
             anchor.id(),
         );
         self.collate_mc_block_by_interval_or_continue_shard_collation(
-            shard_id,
+            next_block_id_short.shard,
             anchor.chain_time(),
             None,
         )
@@ -981,7 +972,7 @@ where
         &mut self,
         shard_id: ShardIdent,
         chain_time: u64,
-        trigger_shard_block_id: Option<BlockId>,
+        trigger_shard_block_id_opt: Option<BlockId>,
     ) -> Result<()> {
         // if current shard chain time elapsed master block interval
         // then stop shard collation
@@ -991,8 +982,11 @@ where
             // and if chain time elapsed master block interval in every shard
             // then run master block collation
             if let Some(next_mc_block_chain_time) = next_mc_block_chain_time_opt {
-                self.enqueue_mc_block_collation(next_mc_block_chain_time, trigger_shard_block_id)
-                    .await?;
+                self.enqueue_mc_block_collation(
+                    next_mc_block_chain_time,
+                    trigger_shard_block_id_opt,
+                )
+                .await?;
             }
         } else {
             // if master block interval not elapsed
@@ -1093,7 +1087,7 @@ where
     fn detect_top_shard_blocks_info_for_mc_block(
         &self,
         _next_mc_block_chain_time: u64,
-        _trigger_shard_block_id: Option<BlockId>,
+        _trigger_shard_block_id_opt: Option<BlockId>,
     ) -> Result<Vec<TopBlockDescription>> {
         // TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
 
@@ -1164,7 +1158,7 @@ where
     async fn enqueue_mc_block_collation(
         &mut self,
         next_mc_block_chain_time: u64,
-        trigger_shard_block_id: Option<BlockId>,
+        trigger_block_id_opt: Option<BlockId>,
     ) -> Result<()> {
         // TODO: make real implementation
 
@@ -1181,7 +1175,7 @@ where
 
         let top_shard_blocks_info = self.detect_top_shard_blocks_info_for_mc_block(
             next_mc_block_chain_time,
-            trigger_shard_block_id,
+            trigger_block_id_opt,
         )?;
 
         // TODO: We should somehow collect externals for masterchain during the shard blocks collation
@@ -1189,20 +1183,16 @@ where
 
         self.next_mc_block_chain_time = next_mc_block_chain_time;
 
-        let _tracing_top_shard_blocks_descr = top_shard_blocks_info
-            .iter()
-            .map(|TopBlockDescription { block_id, .. }| block_id.as_short_id().to_string())
-            .collect::<Vec<_>>();
-
         mc_collator
             .equeue_do_collate(next_mc_block_chain_time, top_shard_blocks_info)
             .await?;
 
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Master block collation enqueued (next_chain_time: {}, top_shard_blocks_ids: {:?})",
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "Master block collation enqueued: (block_id={} ct={})",
+            self.last_collated_mc_block_id()
+                .map(|id| BlockIdShort { shard: id.shard, seqno: id.seqno + 1 }.to_string())
+                .unwrap_or_default(),
             next_mc_block_chain_time,
-            _tracing_top_shard_blocks_descr.as_slice(),
         );
 
         Ok(())

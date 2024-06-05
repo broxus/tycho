@@ -18,11 +18,7 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         mut exec_manager: ExecutionManager,
     ) -> Result<(BlockCandidate, ShardStateStuff)> {
-        tracing::debug!(
-            target: tracing_targets::COLLATOR,
-            "Collator ({}): start finalize_block",
-            self.collator_descr(),
-        );
+        tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
@@ -204,7 +200,6 @@ impl CollatorStdImpl {
         // calc merkle update
         let new_state_root = CellBuilder::build_from(&new_state)?;
         let state_update = Self::create_merkle_update(
-            &self.collator_descr,
             prev_shard_data,
             &new_state_root,
             &self.working_state().usage_tree,
@@ -357,8 +352,8 @@ impl CollatorStdImpl {
         };
 
         prev_blocks.set(
-            &prev_state.block_id().seqno,
-            &KeyMaxLt {
+            prev_state.block_id().seqno,
+            KeyMaxLt {
                 has_key_block: prev_is_key_block,
                 max_end_lt: prev_state.state().gen_lt,
             },
@@ -435,7 +430,6 @@ impl CollatorStdImpl {
     }
 
     fn create_merkle_update(
-        collator_descr: &str,
         prev_shard_data: &PrevData,
         new_state_root: &Cell,
         usage_tree: &UsageTree,
@@ -449,14 +443,13 @@ impl CollatorStdImpl {
         );
         let state_update = merkle_update_builder.build()?;
 
-        tracing::debug!(
-            "Collator ({}): merkle update created in {}ms",
-            collator_descr,
-            timer.elapsed().as_millis(),
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "merkle update created in {}ms", timer.elapsed().as_millis(),
         );
 
         Ok(state_update)
     }
+
     #[cfg(feature = "block-creator-stats")]
     fn update_block_creator_stats(
         collation_data: &BlockCollationData,
