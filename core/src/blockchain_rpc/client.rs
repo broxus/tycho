@@ -5,7 +5,6 @@ use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
@@ -14,62 +13,46 @@ use crate::overlay_client::{Error, Neighbour, PublicOverlayClient, QueryResponse
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
 
+/// A listener for self-broadcasted messages.
+///
+/// NOTE: `async_trait` is used to add object safety to the trait.
+#[async_trait::async_trait]
 pub trait SelfBroadcastListener: Send + Sync + 'static {
-    type Output;
-
-    fn handle_message(&self, message: Bytes) -> Self::Output;
+    async fn handle_message(&self, message: Bytes);
 }
 
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
-pub struct SelfNoopBroadcastListener;
-
-impl SelfBroadcastListener for SelfNoopBroadcastListener {
-    type Output = ();
-
-    #[inline]
-    fn handle_message(&self, _: Bytes) -> Self::Output {}
+pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
+    mandatory_fields: MandatoryFields,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
 }
 
-impl SelfBroadcastListener for Arc<MempoolAdapterStdImpl> {
-    type Output = ();
-
-    fn handle_message(&self, message: Bytes) -> Self::Output {
-        self.send_external(message)
-    }
-}
-
-pub struct BlockchainRpcClientBuilder {
-    overlay_client: PublicOverlayClient,
-    broadcast_listener: Box<dyn SelfBroadcastListener<Output = ()>>,
-}
-
-impl<'a> BlockchainRpcClientBuilder {
+impl BlockchainRpcClientBuilder<PublicOverlayClient> {
     pub fn build(self) -> BlockchainRpcClient {
         BlockchainRpcClient {
             inner: Arc::new(Inner {
-                overlay_client: self.overlay_client,
+                overlay_client: self.mandatory_fields,
                 broadcast_listener: self.broadcast_listener,
             }),
         }
     }
 }
 
-impl BlockchainRpcClientBuilder {
-    pub fn with_self_broadcast_listener(
+impl BlockchainRpcClientBuilder<()> {
+    pub fn with_public_overlay_client(
         self,
-        self_broadcast_listener: impl SelfBroadcastListener<Output = ()>,
-    ) -> BlockchainRpcClientBuilder {
+        client: PublicOverlayClient,
+    ) -> BlockchainRpcClientBuilder<PublicOverlayClient> {
         BlockchainRpcClientBuilder {
-            overlay_client: self.overlay_client,
-            broadcast_listener: Box::new(self_broadcast_listener),
-        }
-    }
-
-    pub fn without_self_broadcast_listener(self) -> BlockchainRpcClientBuilder {
-        BlockchainRpcClientBuilder {
-            overlay_client: self.overlay_client,
+            mandatory_fields: client,
             broadcast_listener: self.broadcast_listener,
         }
+    }
+}
+
+impl<T> BlockchainRpcClientBuilder<T> {
+    pub fn with_self_broadcast_listener(mut self, listener: impl SelfBroadcastListener) -> Self {
+        self.broadcast_listener = Some(Box::new(listener));
+        self
     }
 }
 
@@ -81,14 +64,14 @@ pub struct BlockchainRpcClient {
 
 struct Inner {
     overlay_client: PublicOverlayClient,
-    broadcast_listener: Box<dyn SelfBroadcastListener<Output = ()>>,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
 }
 
 impl BlockchainRpcClient {
-    pub fn builder(overlay_client: PublicOverlayClient) -> BlockchainRpcClientBuilder {
+    pub fn builder() -> BlockchainRpcClientBuilder<()> {
         BlockchainRpcClientBuilder {
-            overlay_client,
-            broadcast_listener: Box::new(SelfNoopBroadcastListener),
+            mandatory_fields: (),
+            broadcast_listener: None,
         }
     }
 
@@ -121,6 +104,11 @@ impl BlockchainRpcClient {
             }
         }
 
+        // Broadcast to yourself
+        if let Some(l) = &self.inner.broadcast_listener {
+            l.handle_message(Bytes::copy_from_slice(message)).await;
+        }
+
         // TODO: Add a proper target selector
         // TODO: Add rate limiting
         const TARGET_COUNT: usize = 5;
@@ -135,11 +123,6 @@ impl BlockchainRpcClient {
         for neighbour in neighbours {
             futures.push(client.send_raw(neighbour, req.clone()));
         }
-
-        // Broadcast to yourself
-        self.inner
-            .broadcast_listener
-            .handle_message(Bytes::copy_from_slice(message));
 
         while let Some(res) = futures.next().await {
             if let Err(e) = res {

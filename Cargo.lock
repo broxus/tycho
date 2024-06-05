@@ -2874,7 +2874,9 @@ name = "tycho-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
+ "bytes",
  "clap",
  "everscale-crypto",
  "everscale-types",
@@ -2992,7 +2994,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "tycho-block-util",
- "tycho-collator",
  "tycho-network",
  "tycho-storage",
  "tycho-util",

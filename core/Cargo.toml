@@ -31,7 +31,6 @@ tracing = { workspace = true }
 tycho-block-util = { workspace = true }
 tycho-network = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-collator = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]

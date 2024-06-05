@@ -5,9 +5,6 @@ use bytes::{Buf, Bytes};
 use bytesize::ByteSize;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
-use tycho_collator::mempool::{
-    MempoolAdapter, MempoolAdapterFactory, MempoolAdapterStdImpl, MempoolEventListener,
-};
 use tycho_network::{InboundRequestMeta, Response, Service, ServiceRequest};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
@@ -34,19 +31,6 @@ impl BroadcastListener for NoopBroadcastListener {
 
     #[inline]
     fn handle_message(&self, _: Arc<InboundRequestMeta>, _: Bytes) -> Self::HandleMessageFut<'_> {
-        futures_util::future::ready(())
-    }
-}
-
-impl BroadcastListener for Arc<MempoolAdapterStdImpl> {
-    type HandleMessageFut<'a> = futures_util::future::Ready<()>;
-
-    fn handle_message<'a>(
-        &'a self,
-        _meta: Arc<InboundRequestMeta>,
-        message: Bytes,
-    ) -> Self::HandleMessageFut<'a> {
-        self.send_external(message);
         futures_util::future::ready(())
     }
 }
