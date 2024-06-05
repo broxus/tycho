@@ -386,7 +386,7 @@ pub fn calculate_group(
                             // if the offset was not set previously, and the account is skipped then
                             // it means that we need to move by current group length
                             if new_offset == offset {
-                                new_offset += group.len() as u32;
+                                new_offset += group.len() as u32 + holes_count as u32;
                             }
                         }
                     }
@@ -406,7 +406,7 @@ pub fn calculate_group(
                             // if the offset was not set previously, and the account is skipped then
                             // it means that we need to move by current group length
                             if new_offset == offset {
-                                new_offset += group.len() as u32;
+                                new_offset += group.len() as u32 + holes_count as u32;
                             }
                         }
                     }
