@@ -243,11 +243,11 @@ pub struct Node {
     pub storage: Storage,
 
     pub state_tracker: MinRefMcStateTracker,
-    pub blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     pub rpc_config: Option<RpcConfig>,
     pub public_overlay_client_config: PublicOverlayClientConfig,
     pub blockchain_rpc_service_config: BlockchainRpcServiceConfig,
+    pub blockchain_block_provider_config: BlockchainBlockProviderConfig,
 }
 
 impl Node {
@@ -331,10 +331,10 @@ impl Node {
             overlay_service,
             storage,
             state_tracker,
-            blockchain_block_provider_config: node_config.blockchain_block_provider,
             rpc_config: node_config.rpc,
             public_overlay_client_config: node_config.public_overlay_client,
             blockchain_rpc_service_config: node_config.blockchain_rpc_service,
+            blockchain_block_provider_config: node_config.blockchain_block_provider,
         })
     }
 
@@ -505,11 +505,13 @@ impl Node {
             .build(blockchain_rpc_service);
         self.overlay_service.add_public_overlay(&public_overlay);
 
-        let blockchain_rpc_client = BlockchainRpcClient::new(PublicOverlayClient::new(
+        let blockchain_rpc_client = BlockchainRpcClient::builder(PublicOverlayClient::new(
             self.network.clone(),
             public_overlay,
             self.public_overlay_client_config.clone(),
-        ));
+        ))
+        .with_self_broadcast_listener(mempool_adapter.clone())
+        .build();
 
         tracing::info!(
             overlay_id = %blockchain_rpc_client.overlay().overlay_id(),
@@ -621,7 +623,7 @@ impl Node {
             let mc_state = self
                 .storage
                 .shard_state_storage()
-                .load_state(&last_block_id)
+                .load_state(last_block_id)
                 .await?;
 
             collator_state_subscriber
@@ -719,7 +721,7 @@ fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<Shar
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, &tracker)
+    ShardStateStuff::from_root(&block_id, root, tracker)
 }
 
 fn make_shard_state(

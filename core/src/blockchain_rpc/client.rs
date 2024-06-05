@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_block_util::state::ShardStateStuff;
+use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
@@ -11,6 +13,65 @@ use tycho_util::futures::JoinTask;
 use crate::overlay_client::{Error, Neighbour, PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
+
+pub trait SelfBroadcastListener: Send + Sync + 'static {
+    type Output;
+
+    fn handle_message(&self, message: Bytes) -> Self::Output;
+}
+
+#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
+pub struct SelfNoopBroadcastListener;
+
+impl SelfBroadcastListener for SelfNoopBroadcastListener {
+    type Output = ();
+
+    #[inline]
+    fn handle_message(&self, _: Bytes) -> Self::Output {}
+}
+
+impl SelfBroadcastListener for Arc<MempoolAdapterStdImpl> {
+    type Output = ();
+
+    fn handle_message(&self, message: Bytes) -> Self::Output {
+        self.send_external(message)
+    }
+}
+
+pub struct BlockchainRpcClientBuilder {
+    overlay_client: PublicOverlayClient,
+    broadcast_listener: Box<dyn SelfBroadcastListener<Output = ()>>,
+}
+
+impl<'a> BlockchainRpcClientBuilder {
+    pub fn build(self) -> BlockchainRpcClient {
+        BlockchainRpcClient {
+            inner: Arc::new(Inner {
+                overlay_client: self.overlay_client,
+                broadcast_listener: self.broadcast_listener,
+            }),
+        }
+    }
+}
+
+impl BlockchainRpcClientBuilder {
+    pub fn with_self_broadcast_listener(
+        self,
+        self_broadcast_listener: impl SelfBroadcastListener<Output = ()>,
+    ) -> BlockchainRpcClientBuilder {
+        BlockchainRpcClientBuilder {
+            overlay_client: self.overlay_client,
+            broadcast_listener: Box::new(self_broadcast_listener),
+        }
+    }
+
+    pub fn without_self_broadcast_listener(self) -> BlockchainRpcClientBuilder {
+        BlockchainRpcClientBuilder {
+            overlay_client: self.overlay_client,
+            broadcast_listener: self.broadcast_listener,
+        }
+    }
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -20,12 +81,14 @@ pub struct BlockchainRpcClient {
 
 struct Inner {
     overlay_client: PublicOverlayClient,
+    broadcast_listener: Box<dyn SelfBroadcastListener<Output = ()>>,
 }
 
 impl BlockchainRpcClient {
-    pub fn new(overlay_client: PublicOverlayClient) -> Self {
-        Self {
-            inner: Arc::new(Inner { overlay_client }),
+    pub fn builder(overlay_client: PublicOverlayClient) -> BlockchainRpcClientBuilder {
+        BlockchainRpcClientBuilder {
+            overlay_client,
+            broadcast_listener: Box::new(SelfNoopBroadcastListener),
         }
     }
 
@@ -72,6 +135,11 @@ impl BlockchainRpcClient {
         for neighbour in neighbours {
             futures.push(client.send_raw(neighbour, req.clone()));
         }
+
+        // Broadcast to yourself
+        self.inner
+            .broadcast_listener
+            .handle_message(Bytes::copy_from_slice(message));
 
         while let Some(res) = futures.next().await {
             if let Err(e) = res {

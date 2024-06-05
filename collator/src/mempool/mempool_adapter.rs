@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,14 +6,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::boc::Boc;
-use everscale_types::models::{ExtInMsgInfo, MsgInfo};
+use everscale_types::models::MsgInfo;
 use everscale_types::prelude::Load;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::{InputBufferImpl, Point};
-use tycho_network::{DhtClient, InboundRequestMeta, OverlayService, PeerId};
+use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastHashSet;
 
 use crate::mempool::types::ExternalMessage;
@@ -111,7 +110,6 @@ impl MempoolAdapterStdImpl {
             InputBufferImpl::new(externals_rx),
         );
         tokio::spawn(async move {
-            // TODO replace with some sensible init before run
             engine.init_with_genesis(&peers).await;
             engine.run().await;
         });
