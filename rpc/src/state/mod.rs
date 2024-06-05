@@ -1,20 +1,22 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
 use serde_json::value::RawValue;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{RefMcStateHandle, ShardStateStuff};
 use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{CodeHashesIter, Storage, TransactionsIterBuilder};
+use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
@@ -42,6 +44,7 @@ impl RpcStateBuilder {
                 timings: ArcSwap::new(Default::default()),
                 latest_key_block_json: ArcSwapOption::default(),
                 blockchain_config_json: ArcSwapOption::default(),
+                transactions_gc: ArcSwapOption::default(),
             }),
         }
     }
@@ -215,10 +218,11 @@ struct Inner {
     timings: ArcSwap<StateTimings>,
     latest_key_block_json: ArcSwapOption<Box<RawValue>>,
     blockchain_config_json: ArcSwapOption<Box<RawValue>>,
+    transactions_gc: ArcSwapOption<TransactionsGc>,
 }
 
 impl Inner {
-    async fn init(&self, mc_block_id: &BlockId) -> Result<()> {
+    async fn init(self: &Arc<Self>, mc_block_id: &BlockId) -> Result<()> {
         anyhow::ensure!(mc_block_id.is_masterchain(), "not a masterchain state");
 
         let blocks = self.storage.block_storage();
@@ -284,6 +288,54 @@ impl Inner {
                     .reset_accounts(state, self.config.shard_split_depth)
                     .await?;
             }
+        }
+
+        if let Some(gc) = &self.config.transactions_gc {
+            let gc = gc.clone();
+            let this = Arc::downgrade(self);
+            let handle = tokio::spawn(async move {
+                loop {
+                    let this = match this.upgrade() {
+                        Some(item) => item,
+                        None => return,
+                    };
+
+                    if let Some(transactions_gc) = &*this.transactions_gc.load() {
+                        // Wait for a new KeyBlock notification
+                        transactions_gc.notify.notified().await;
+
+                        let persistent_storage = match this.storage.rpc_storage() {
+                            Some(persistent_storage) => persistent_storage,
+                            None => return,
+                        };
+
+                        let target_utime = now_sec().saturating_sub(gc.tx_ttl.as_secs() as u32);
+                        let min_lt = match this.find_closest_key_block_lt(target_utime).await {
+                            Ok(lt) => lt,
+                            Err(e) => {
+                                tracing::error!(
+                                    target_utime,
+                                    "failed to find the closest key block lt: {e:?}"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if let Err(e) = persistent_storage.remove_old_transactions(min_lt).await {
+                            tracing::error!(
+                                target_utime,
+                                min_lt,
+                                "failed to remove old transactions: {e:?}"
+                            );
+                        }
+                    }
+                }
+            });
+
+            self.transactions_gc.store(Some(Arc::new(TransactionsGc {
+                notify: Notify::new(),
+                handle,
+            })));
         }
 
         self.is_ready.store(true, Ordering::Release);
@@ -364,6 +416,11 @@ impl Inner {
             if !info.key_block {
                 return Ok(());
             }
+        }
+
+        // Send a new KeyBlock notification to run GC
+        if let Some(transactions_gc) = &*self.transactions_gc.load() {
+            transactions_gc.notify.notify_waiters();
         }
 
         let custom = block.load_custom()?;
@@ -481,6 +538,46 @@ impl Inner {
 
         Ok(accounts)
     }
+
+    pub async fn find_closest_key_block_lt(&self, utime: u32) -> Result<u64> {
+        let block_handle_storage = self.storage.block_handle_storage();
+
+        // Find the key block with max seqno which was preduced not later than `utime`
+        let handle = 'last_key_block: {
+            let iter = block_handle_storage.key_blocks_iterator(KeyBlocksDirection::Backward);
+            for key_block in iter {
+                let handle = block_handle_storage
+                    .load_handle(&key_block)
+                    .ok_or(anyhow!("Key block not found"))?;
+
+                if handle.meta().gen_utime() <= utime {
+                    break 'last_key_block handle;
+                }
+            }
+
+            return Ok(0);
+        };
+
+        // Load block proof
+        let block_proof = self
+            .storage
+            .block_storage()
+            .load_block_proof(&handle, false)
+            .await?;
+
+        // Read `start_lt` from virtual block info
+        let (virt_block, _) = block_proof.virtualize_block()?;
+        let info = virt_block.info.load()?;
+        Ok(info.start_lt)
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(transactions_gc) = &*self.transactions_gc.load() {
+            transactions_gc.handle.abort()
+        }
+    }
 }
 
 pub enum LoadedAccountState {
@@ -517,6 +614,11 @@ impl CachedAccounts {
             Err(e) => Err(RpcStateError::Internal(e.into())),
         }
     }
+}
+
+struct TransactionsGc {
+    notify: Notify,
+    handle: JoinHandle<()>,
 }
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
