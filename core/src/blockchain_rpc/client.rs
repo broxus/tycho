@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_block_util::state::ShardStateStuff;
@@ -12,6 +13,49 @@ use crate::overlay_client::{Error, Neighbour, PublicOverlayClient, QueryResponse
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
 
+/// A listener for self-broadcasted messages.
+///
+/// NOTE: `async_trait` is used to add object safety to the trait.
+#[async_trait::async_trait]
+pub trait SelfBroadcastListener: Send + Sync + 'static {
+    async fn handle_message(&self, message: Bytes);
+}
+
+pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
+    mandatory_fields: MandatoryFields,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
+}
+
+impl BlockchainRpcClientBuilder<PublicOverlayClient> {
+    pub fn build(self) -> BlockchainRpcClient {
+        BlockchainRpcClient {
+            inner: Arc::new(Inner {
+                overlay_client: self.mandatory_fields,
+                broadcast_listener: self.broadcast_listener,
+            }),
+        }
+    }
+}
+
+impl BlockchainRpcClientBuilder<()> {
+    pub fn with_public_overlay_client(
+        self,
+        client: PublicOverlayClient,
+    ) -> BlockchainRpcClientBuilder<PublicOverlayClient> {
+        BlockchainRpcClientBuilder {
+            mandatory_fields: client,
+            broadcast_listener: self.broadcast_listener,
+        }
+    }
+}
+
+impl<T> BlockchainRpcClientBuilder<T> {
+    pub fn with_self_broadcast_listener(mut self, listener: impl SelfBroadcastListener) -> Self {
+        self.broadcast_listener = Some(Box::new(listener));
+        self
+    }
+}
+
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct BlockchainRpcClient {
@@ -20,12 +64,14 @@ pub struct BlockchainRpcClient {
 
 struct Inner {
     overlay_client: PublicOverlayClient,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
 }
 
 impl BlockchainRpcClient {
-    pub fn new(overlay_client: PublicOverlayClient) -> Self {
-        Self {
-            inner: Arc::new(Inner { overlay_client }),
+    pub fn builder() -> BlockchainRpcClientBuilder<()> {
+        BlockchainRpcClientBuilder {
+            mandatory_fields: (),
+            broadcast_listener: None,
         }
     }
 
@@ -56,6 +102,11 @@ impl BlockchainRpcClient {
                 packet.write_u32(BroadcastPrefix::TL_ID);
                 MessageBroadcastRef { data: self.data }.write_to(packet);
             }
+        }
+
+        // Broadcast to yourself
+        if let Some(l) = &self.inner.broadcast_listener {
+            l.handle_message(Bytes::copy_from_slice(message)).await;
         }
 
         // TODO: Add a proper target selector

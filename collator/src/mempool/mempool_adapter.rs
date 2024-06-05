@@ -3,16 +3,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::boc::Boc;
-use everscale_types::models::ExtInMsgInfo;
+use everscale_types::models::MsgInfo;
 use everscale_types::prelude::Load;
 use parking_lot::RwLock;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::{InputBufferImpl, Point};
-use tycho_network::{DhtClient, OverlayService};
+use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastHashSet;
 
 use crate::mempool::types::ExternalMessage;
@@ -79,41 +80,11 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()>;
 }
 
-pub struct MempoolAdapterFactoryStd {
-    key_pair: Arc<KeyPair>,
-    dht_client: DhtClient,
-    overlay_service: OverlayService,
-}
-
-impl MempoolAdapterFactoryStd {
-    pub fn new(
-        key_pair: Arc<KeyPair>,
-        dht_client: DhtClient,
-        overlay_service: OverlayService,
-    ) -> MempoolAdapterFactoryStd {
-        Self {
-            key_pair,
-            dht_client,
-            overlay_service,
-        }
-    }
-}
-
-impl MempoolAdapterFactory for MempoolAdapterFactoryStd {
-    type Adapter = MempoolAdapterStdImpl;
-
-    fn create(&self, _: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
-        MempoolAdapterStdImpl::new(
-            self.key_pair.clone(),
-            self.dht_client.clone(),
-            self.overlay_service.clone(),
-        )
-    }
-}
-
+#[derive(Clone)]
 pub struct MempoolAdapterStdImpl {
     // TODO: replace with rocksdb
     anchors: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
+    externals_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
 }
 
 impl MempoolAdapterStdImpl {
@@ -121,6 +92,7 @@ impl MempoolAdapterStdImpl {
         key_pair: Arc<KeyPair>,
         dht_client: DhtClient,
         overlay_service: OverlayService,
+        peers: Vec<PeerId>,
     ) -> Arc<Self> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
         let anchors = Arc::new(RwLock::new(BTreeMap::new()));
@@ -129,7 +101,7 @@ impl MempoolAdapterStdImpl {
             tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
 
         // TODO receive from outside
-        let (_externals_tx, externals_rx) = mpsc::unbounded_channel();
+        let (externals_tx, externals_rx) = mpsc::unbounded_channel();
         let mut engine = tycho_consensus::Engine::new(
             key_pair,
             &dht_client,
@@ -138,14 +110,16 @@ impl MempoolAdapterStdImpl {
             InputBufferImpl::new(externals_rx),
         );
         tokio::spawn(async move {
-            // TODO replace with some sensible init before run
-            engine.init_with_genesis(&[]).await;
+            engine.init_with_genesis(&peers).await;
             engine.run().await;
         });
 
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
 
-        let mempool_adapter = Arc::new(Self { anchors });
+        let mempool_adapter = Arc::new(Self {
+            anchors,
+            externals_tx,
+        });
 
         // start handling mempool anchors
         tokio::spawn(parse_points(mempool_adapter.clone(), receiver));
@@ -153,9 +127,21 @@ impl MempoolAdapterStdImpl {
         mempool_adapter
     }
 
+    pub fn send_external(&self, message: Bytes) {
+        self.externals_tx.send(message).ok();
+    }
+
     fn add_anchor(&self, anchor: Arc<MempoolAnchor>) {
         let mut guard = self.anchors.write();
         guard.insert(anchor.id(), anchor);
+    }
+}
+
+impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
+    type Adapter = MempoolAdapterStdImpl;
+
+    fn create(&self, _listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
+        self.clone()
     }
 }
 
@@ -185,8 +171,12 @@ pub async fn parse_points(
                     }
                 };
 
-                let ext_in_message = match ExtInMsgInfo::load_from(&mut slice) {
-                    Ok(message) => message,
+                let ext_in_message = match MsgInfo::load_from(&mut slice) {
+                    Ok(MsgInfo::ExtIn(message)) => message,
+                    Ok(info) => {
+                        tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, ?info, "Bad message. Unexpected message variant");
+                        continue 'message;
+                    }
                     Err(e) => {
                         tracing::error!(target: tracing_targets::MEMPOOL_ADAPTER, "Bad cell. Failed to deserialize to ExtInMsgInfo. Err: {e:?}");
                         continue 'message;

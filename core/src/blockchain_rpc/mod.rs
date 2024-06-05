@@ -1,4 +1,4 @@
-pub use self::client::BlockchainRpcClient;
+pub use self::client::{BlockchainRpcClient, BlockchainRpcClientBuilder, SelfBroadcastListener};
 pub use self::service::{
     BlockchainRpcService, BlockchainRpcServiceBuilder, BlockchainRpcServiceConfig,
     BroadcastListener, NoopBroadcastListener,
