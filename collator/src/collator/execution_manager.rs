@@ -83,7 +83,7 @@ impl ExecutionManager {
 
     /// Set messages that will be executed
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
+        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 
@@ -386,7 +386,7 @@ pub fn calculate_group(
                             // if the offset was not set previously, and the account is skipped then
                             // it means that we need to move by current group length
                             if new_offset == offset {
-                                new_offset += group.len() as u32;
+                                new_offset += group.len() as u32 + holes_count as u32;
                             }
                         }
                     }
@@ -406,7 +406,7 @@ pub fn calculate_group(
                             // if the offset was not set previously, and the account is skipped then
                             // it means that we need to move by current group length
                             if new_offset == offset {
-                                new_offset += group.len() as u32;
+                                new_offset += group.len() as u32 + holes_count as u32;
                             }
                         }
                     }

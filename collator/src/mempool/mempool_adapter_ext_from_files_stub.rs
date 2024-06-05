@@ -50,6 +50,7 @@ impl MempoolAdapterExtFilesStubImpl {
             async move {
                 let mut anchor_id = 0;
                 let mut externals_iter = externals.into_iter();
+                let mut last_chain_time = 0;
                 loop {
                     let rnd_round_interval = rand::thread_rng().gen_range(400..600);
                     tokio::time::sleep(tokio::time::Duration::from_millis(rnd_round_interval * 6))
@@ -68,6 +69,22 @@ impl MempoolAdapterExtFilesStubImpl {
                             );
                             anchor_cache_rw.insert(anchor_id, anchor.clone());
                         }
+                        last_chain_time = anchor.chain_time();
+                        listener.on_new_anchor(anchor).await.unwrap();
+                    } else {
+                        let anchor = create_empty_anchor(anchor_id, last_chain_time);
+                        {
+                            let mut anchor_cache_rw = stub_anchors_cache.write();
+                            tracing::debug!(
+                                target: tracing_targets::MEMPOOL_ADAPTER,
+                                "Empty anchor (id: {}, chain_time: {}, externals: {}) generated and added to cache",
+                                anchor.id(),
+                                anchor.chain_time(),
+                                anchor.externals_count(),
+                            );
+                            anchor_cache_rw.insert(anchor_id, anchor.clone());
+                        }
+                        last_chain_time = anchor.chain_time();
                         listener.on_new_anchor(anchor).await.unwrap();
                     }
                 }
@@ -135,4 +152,9 @@ pub fn create_anchor_with_externals_from_file(
     }
 
     Arc::new(MempoolAnchor::new(anchor_id, timestamp, externals))
+}
+
+pub fn create_empty_anchor(anchor_id: MempoolAnchorId, last_chain_time: u64) -> Arc<MempoolAnchor> {
+    let next_chain_time = last_chain_time + 600;
+    Arc::new(MempoolAnchor::new(anchor_id, next_chain_time, vec![]))
 }

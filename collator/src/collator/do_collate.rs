@@ -381,8 +381,8 @@ impl CollatorStdImpl {
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {
             let processed_upto = InternalsProcessedUpto {
-                processed_to_msg: (message_key.lt, message_key.hash.clone()),
-                read_to_msg: (message_key.lt, message_key.hash.clone()),
+                processed_to_msg: (message_key.lt, message_key.hash),
+                read_to_msg: (message_key.lt, message_key.hash),
             };
 
             let shard_ident_full: ShardIdentFull = (*shard_ident).into();
@@ -406,7 +406,7 @@ impl CollatorStdImpl {
             .await?;
 
         // STUB: sleep to slow down collation process for analysis
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         // return collation result
         let collation_result = BlockCollationResult {
@@ -431,7 +431,7 @@ impl CollatorStdImpl {
     /// * `group_size` - max num of accounts to be processed in one tick
     fn get_msgs_execution_params(&self) -> (usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
-        (10, 4, 3)
+        (93, 30, 18)
     }
 
     /// Read specified number of externals from imported anchors
@@ -819,7 +819,7 @@ impl CollatorStdImpl {
             .config()
             .get_fee_collector_address()?;
         tracing::trace!(target: tracing_targets::COLLATOR,
-            "create_special_transactions(): mint {} to account {}",
+            "create_special_transaction(): mint {} to account {}",
             collator_data.value_flow.recovered.tokens, account_id,
         );
         self.create_special_transaction(
@@ -833,7 +833,7 @@ impl CollatorStdImpl {
 
         let account_id = self.working_state().mc_data.config().get_minter_address()?;
         tracing::trace!(target: tracing_targets::COLLATOR,
-            "create_special_transactions(): mint {} to account {}",
+            "create_special_transaction(): mint {} to account {}",
             collator_data.value_flow.minted.tokens, account_id,
         );
         self.create_special_transaction(

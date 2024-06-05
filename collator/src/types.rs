@@ -13,7 +13,12 @@ use tycho_util::FastHashMap;
 
 pub struct CollationConfig {
     pub key_pair: Arc<KeyPair>,
+
     pub mc_block_min_interval_ms: u64,
+
+    pub max_uncommitted_chain_length: u32,
+    pub uncommitted_chain_to_import_next_anchor: u32,
+
     pub max_mc_block_delta_from_bc_to_await_own: i32,
 
     pub supported_block_version: u32,
