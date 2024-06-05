@@ -140,7 +140,7 @@ impl CollatorStdImpl {
         new_block_info.gen_utime = collation_data.gen_utime;
         new_block_info.gen_utime_ms = collation_data.gen_utime_ms;
         new_block_info.start_lt = collation_data.start_lt;
-        new_block_info.end_lt = collation_data.max_lt + 1;
+        new_block_info.end_lt = collation_data.next_lt;
         new_block_info.gen_validator_list_hash_short =
             self.collation_session.collators().short_hash;
         new_block_info.gen_catchain_seqno = self.collation_session.seqno();
