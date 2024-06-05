@@ -83,7 +83,7 @@ impl ExecutionManager {
 
     /// Set messages that will be executed
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
+        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
     }
 

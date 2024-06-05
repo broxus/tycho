@@ -525,6 +525,8 @@ impl Node {
         let collation_config = CollationConfig {
             key_pair: self.keypair.clone(),
             mc_block_min_interval_ms: 2500,
+            max_uncommitted_chain_length: 32,
+            uncommitted_chain_to_import_next_anchor: 8,
             max_mc_block_delta_from_bc_to_await_own: 2,
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
