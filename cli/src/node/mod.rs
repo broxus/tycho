@@ -19,7 +19,7 @@ use tycho_collator::internal_queue::persistent::persistent_state::{
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::{MempoolAdapterFactory, MempoolAdapterStdImpl};
+use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
 use tycho_collator::validator::client::retry::BackoffConfig;

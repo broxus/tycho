@@ -45,6 +45,14 @@ where
     }
 }
 
+impl<T: MempoolAdapter> MempoolAdapterFactory for Arc<T> {
+    type Adapter = T;
+
+    fn create(&self, _listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
+        self.clone()
+    }
+}
+
 // EVENTS LISTENER
 
 #[async_trait]
@@ -135,14 +143,6 @@ impl MempoolAdapterStdImpl {
     fn add_anchor(&self, anchor: Arc<MempoolAnchor>) {
         let mut guard = self.anchors.write();
         guard.insert(anchor.id(), anchor);
-    }
-}
-
-impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
-    type Adapter = MempoolAdapterStdImpl;
-
-    fn create(&self, _listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
-        self.clone()
     }
 }
 
