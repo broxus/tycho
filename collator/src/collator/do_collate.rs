@@ -336,7 +336,7 @@ impl CollatorStdImpl {
                     let executed_msgs_count = group.len();
                     for (_account_id, msg_info, transaction) in group {
                         let new_internal_messages = new_transaction(
-                            &self.collator_descr.clone(),
+                            &self.collator_descr,
                             &mut collation_data,
                             &self.shard_id,
                             transaction.1,
@@ -1041,11 +1041,12 @@ impl CollatorStdImpl {
         };
         let cell = CellBuilder::build_from(msg)?;
         let async_message = f(info, cell);
-        let transaction = exec_manager
-            .execute_special_transaction(account, async_message.clone())
+        let shard_account_stuff = exec_manager.get_shard_account_stuff(account)?;
+        let (async_message, transaction) = exec_manager
+            .execute_special_transaction(account, async_message, shard_account_stuff)
             .await?;
         new_transaction(
-            &self.collator_descr.clone(),
+            &self.collator_descr,
             collation_data,
             &self.shard_id,
             transaction.1,
@@ -1108,11 +1109,11 @@ impl CollatorStdImpl {
         if (tick_tock.tock && tock) || (tick_tock.tick && !tock) {
             let tt = if tock { TickTock::Tock } else { TickTock::Tick };
             let async_message = AsyncMessage::TickTock(tt);
-            let transaction = exec_manager
-                .execute_special_transaction(account, async_message.clone())
+            let (async_message, transaction) = exec_manager
+                .execute_special_transaction(account, async_message, shard_account_stuff)
                 .await?;
             new_transaction(
-                &self.collator_descr.clone(),
+                &self.collator_descr,
                 collation_data,
                 &self.shard_id,
                 transaction.1,

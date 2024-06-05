@@ -34,23 +34,32 @@ impl CollatorStdImpl {
         let mut new_config_opt: Option<BlockchainConfig> = None;
 
         for (account_id, updated_shard_account_stuff) in exec_manager.changed_accounts.drain() {
-            let config_address = self.working_state().mc_data.config().address;
-            if collation_data.block_id_short.shard.is_masterchain() && config_address == account_id
-            {
-                let binding = &updated_shard_account_stuff.shard_account.account;
-                let account_root = binding.inner().clone();
-                let new_config = BlockchainConfig {
-                    address: config_address,
-                    params: BlockchainConfigParams::load_from(&mut account_root.as_slice()?)?,
-                };
-                new_config_opt = Some(new_config);
-            }
             let account = updated_shard_account_stuff.shard_account.load_account()?;
             match &account {
                 None => {
                     shard_accounts.remove(updated_shard_account_stuff.account_addr)?;
                 }
                 Some(account) => {
+                    let config_address = self.working_state().mc_data.config().address;
+                    if collation_data.block_id_short.shard.is_masterchain()
+                        && config_address == account_id
+                    {
+                        let binding = &updated_shard_account_stuff.shard_account.account;
+                        let account_root = binding.inner().clone();
+                        let params =
+                            BlockchainConfigParams::load_from(&mut account_root.as_slice()?)?;
+                        tracing::debug!(
+                            target: tracing_targets::COLLATOR,
+                            "New config params ({:?})",
+                            params.as_dict().keys().collect::<Vec<_>>(),
+                        );
+                        let new_config = BlockchainConfig {
+                            address: config_address,
+                            params,
+                        };
+                        new_config_opt = Some(new_config);
+                    }
+
                     shard_accounts.set(
                         updated_shard_account_stuff.account_addr,
                         &DepthBalanceInfo {

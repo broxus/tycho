@@ -265,12 +265,13 @@ impl ExecutionManager {
         &mut self,
         account_id: AccountId,
         msg: AsyncMessage,
-    ) -> Result<Box<(CurrencyCollection, Lazy<Transaction>)>> {
+        shard_account_stuff: ShardAccountStuff,
+    ) -> Result<(AsyncMessage, Box<(CurrencyCollection, Lazy<Transaction>)>)> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
-        let shard_account_stuff = self.get_shard_account_stuff(account_id)?;
         let ExecutedMessage {
             transaction_result,
             updated_shard_account_stuff,
+            in_message,
             ..
         } = self
             .execute_message(account_id, msg, shard_account_stuff)
@@ -280,7 +281,7 @@ impl ExecutionManager {
             updated_shard_account_stuff.shard_account.last_trans_lt + 1,
         );
         self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
-        transaction_result
+        Ok((in_message, transaction_result?))
     }
 
     fn get_execute_params(&self) -> Result<(PreloadedBlockchainConfig, ExecuteParams)> {
