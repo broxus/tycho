@@ -44,20 +44,16 @@ impl CollatorStdImpl {
                     if collation_data.block_id_short.shard.is_masterchain()
                         && config_address == account_id
                     {
-                        let binding = &updated_shard_account_stuff.shard_account.account;
-                        let account_root = binding.inner().clone();
-                        let params =
-                            BlockchainConfigParams::load_from(&mut account_root.as_slice()?)?;
-                        tracing::debug!(
-                            target: tracing_targets::COLLATOR,
-                            "New config params ({:?})",
-                            params.as_dict().keys().collect::<Vec<_>>(),
-                        );
-                        let new_config = BlockchainConfig {
-                            address: config_address,
-                            params,
-                        };
-                        new_config_opt = Some(new_config);
+                        if let AccountState::Active(StateInit { data, .. }) = &account.state {
+                            if let Some(data) = data {
+                                let params = data.parse::<BlockchainConfigParams>()?;
+                                let new_config = BlockchainConfig {
+                                    address: config_address,
+                                    params,
+                                };
+                                new_config_opt = Some(new_config);
+                            }
+                        }
                     }
 
                     shard_accounts.set(
