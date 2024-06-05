@@ -830,9 +830,9 @@ where
     /// 5. Notify mempool about new master block (it may perform gc or nodes rotation)
     /// 6. Execute master block processing routines like for the block from bc
     #[tracing::instrument(
-        skip_all, 
+        skip_all,
         fields(
-            block_id = %collation_result.candidate.block_id.as_short_id(), 
+            block_id = %collation_result.candidate.block_id.as_short_id(),
             ct = collation_result.candidate.chain_time,
         ),
     )]
@@ -978,8 +978,12 @@ where
     ) -> Result<()> {
         // if should collate master block due to current shard chain state
         // then stop current shard collation
-        let (should_collate_mc_block, next_mc_block_chain_time_opt) =
-            self.update_last_collated_chain_time_and_check_should_collate_mc_block(shard_id, chain_time, force_mc_block);
+        let (should_collate_mc_block, next_mc_block_chain_time_opt) = self
+            .update_last_collated_chain_time_and_check_should_collate_mc_block(
+                shard_id,
+                chain_time,
+                force_mc_block,
+            );
         if should_collate_mc_block {
             // and if chain time elapsed master block interval in every shard
             // then run master block collation
@@ -1032,8 +1036,11 @@ where
             true
         } else {
             // check if master block interval elapsed in current shard
-            let chain_time_elapsed = chain_time.checked_sub(self.next_mc_block_chain_time).unwrap_or_default();
-            let mc_block_interval_elapsed = chain_time_elapsed > self.config.mc_block_min_interval_ms;
+            let chain_time_elapsed = chain_time
+                .checked_sub(self.next_mc_block_chain_time)
+                .unwrap_or_default();
+            let mc_block_interval_elapsed =
+                chain_time_elapsed > self.config.mc_block_min_interval_ms;
             if mc_block_interval_elapsed {
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -1059,11 +1066,14 @@ where
                 if let Some(last_collated_chain_times) =
                     self.last_collated_chain_times_by_shards.get(active_shard)
                 {
-                    if let Some((chain_time_that_elapsed, _)) =
-                        last_collated_chain_times.iter().find(|(chain_time, force)| {
-                            *force || 
-                            (*chain_time).checked_sub(self.next_mc_block_chain_time).unwrap_or_default()
-                                > self.config.mc_block_min_interval_ms
+                    if let Some((chain_time_that_elapsed, _)) = last_collated_chain_times
+                        .iter()
+                        .find(|(chain_time, force)| {
+                            *force
+                                || (*chain_time)
+                                    .checked_sub(self.next_mc_block_chain_time)
+                                    .unwrap_or_default()
+                                    > self.config.mc_block_min_interval_ms
                         })
                     {
                         first_elapsed_chain_times.push(*chain_time_that_elapsed);
