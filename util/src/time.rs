@@ -20,3 +20,8 @@ pub fn shifted_interval(period: Duration, max_shift: Duration) -> tokio::time::I
     let shift = rand::thread_rng().gen_range(Duration::ZERO..max_shift);
     tokio::time::interval_at(tokio::time::Instant::now() + shift, period + shift)
 }
+
+pub fn shifted_interval_immediate(period: Duration, max_shift: Duration) -> tokio::time::Interval {
+    let shift = rand::thread_rng().gen_range(Duration::ZERO..max_shift);
+    tokio::time::interval(period + shift)
+}

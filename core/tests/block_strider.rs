@@ -110,11 +110,13 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     tracing::info!("making overlay requests...");
     let node = nodes.first().unwrap();
 
-    let client = BlockchainRpcClient::new(PublicOverlayClient::new(
-        node.network().clone(),
-        node.public_overlay().clone(),
-        PublicOverlayClientConfig::default(),
-    ));
+    let client = BlockchainRpcClient::builder()
+        .with_public_overlay_client(PublicOverlayClient::new(
+            node.network().clone(),
+            node.public_overlay().clone(),
+            PublicOverlayClientConfig::default(),
+        ))
+        .build();
     let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
 
     let archive = common::storage::get_archive()?;

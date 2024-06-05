@@ -45,7 +45,7 @@ impl PeerScheduleUpdater {
             }
             self.respawn_resolve_task(self.resolved_waiters(entries.downgrade()));
         }
-        self.peer_schedule.set_next_peers(&peers, &self.overlay);
+        self.peer_schedule.set_next_peers(peers, &self.overlay);
     }
 
     fn resolved_waiters(
@@ -117,7 +117,7 @@ impl PeerScheduleUpdater {
                     tracing::warn!(
                         "Skipped {qnt} peer info updates, node connectivity may suffer. \
                          Consider increasing channel capacity."
-                    )
+                    );
                 }
                 Ok(a) => {
                     tracing::warn!("{local_id:.4?} peer schedule updater missed {a:?}");

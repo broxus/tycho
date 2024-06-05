@@ -250,7 +250,7 @@ where
             match self.provider.get_next_block(&prev_block_id).await? {
                 Ok(block) => break Some(block),
                 Err(e) => {
-                    tracing::error!(?prev_block_id, "error while fetching master block: {e:?}",);
+                    tracing::error!(?prev_block_id, "error while fetching master block: {e:?}");
                     // TODO: backoff
                 }
             }

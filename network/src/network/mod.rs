@@ -278,8 +278,8 @@ impl NetworkInner {
 
     async fn connect(&self, addr: Address, peer_id: &PeerId) -> Result<PeerId> {
         #[derive(thiserror::Error, Debug)]
-        #[error(transparent)]
-        struct ConnectionError(Arc<anyhow::Error>);
+        #[error("connection error: {0}")]
+        struct ConnectionError(#[source] Arc<anyhow::Error>);
 
         let (tx, rx) = oneshot::channel();
         self.connection_manager_handle

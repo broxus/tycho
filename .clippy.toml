@@ -12,3 +12,13 @@ disallowed-methods = [
 disallowed-types = [
     { path = "std::fs::OpenOptions", reason = "use tycho_storage::FileDb instead" },
 ]
+
+# https://rust-lang.github.io/rust-clippy/master/index.html#await_holding_invalid_type
+# until #[must_not_suspend] is stabilized https://github.com/rust-lang/rust/issues/83310
+# as advised in (not merged) https://github.com/rust-lang/rust-clippy/pull/8434
+[[await-holding-invalid-types]]
+path = "tracing::span::Entered"
+reason = "drop span guard before `.await` or place your code inside `span.in_scope(|| {..})`"
+[[await-holding-invalid-types]]
+path = "tracing::span::EnteredSpan"
+reason = "drop span guard before `.await` or place your code inside `span.in_scope(|| {..})`"

@@ -164,10 +164,16 @@ pub struct PrevPoint {
     /// point author is excluded: everyone must use the proven point to validate its proof
     // Note: bincode may be non-stable on (de)serializing HashMap due to different local order
     pub evidence: BTreeMap<PeerId, Signature>,
-    // TODO if we use TL, then every node can sign hash of a point's body (not all body bytes)
-    //  so we can include that hash into PrevPoint
-    //  to check signatures inside BroadcastFilter::verify() without waiting for DAG
-    //  (if that will be fast enough to respond without overlay query timeout)
+}
+impl PrevPoint {
+    pub fn signatures_match(&self) -> bool {
+        for (peer, sig) in self.evidence.iter() {
+            if !sig.verifies(peer, &self.digest) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -202,7 +208,7 @@ pub struct PointBody {
     pub anchor_trigger: Link,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
     pub anchor_proof: Link,
-    /// time of previous anchor candidate
+    /// time of previous anchor candidate, linked through its proof
     pub anchor_time: UnixTime,
 }
 
@@ -240,15 +246,13 @@ impl Point {
 
     pub fn id(&self) -> PointId {
         PointId {
-            location: self.body.location.clone(),
+            location: self.body.location,
             digest: self.digest.clone(),
         }
     }
 
     pub fn prev_id(&self) -> Option<PointId> {
-        let Some(digest) = self.body.proof.as_ref().map(|p| &p.digest) else {
-            return None;
-        };
+        let digest = self.body.proof.as_ref().map(|p| &p.digest)?;
         Some(PointId {
             location: Location {
                 round: self.body.location.round.prev(),
@@ -272,7 +276,6 @@ impl Point {
     pub fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
         let author = &self.body.location.author;
-        let is_time_ok = self.body.time >= self.body.anchor_time;
         let is_special_ok = match self.body.location.round {
             MempoolConfig::GENESIS_ROUND => {
                 self.body.includes.is_empty()
@@ -294,13 +297,15 @@ impl Point {
             }
             _ => false,
         };
-        is_time_ok && is_special_ok
+        is_special_ok
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-            && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(&author)
+            && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(author)
             // in contrast, evidence must contain only signatures of others
             && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
             && self.is_link_well_formed(LinkField::Proof)
             && self.is_link_well_formed(LinkField::Trigger)
+            && self.body.time >= self.body.anchor_time
+            && self.body.payload.iter().fold(0, |acc, x| acc + x.len()) <= MempoolConfig::PAYLOAD_BATCH_BYTES
             && match (self.anchor_round(LinkField::Proof), self.anchor_round(LinkField::Trigger)) {
                 (x, MempoolConfig::GENESIS_ROUND) => x >= MempoolConfig::GENESIS_ROUND,
                 (MempoolConfig::GENESIS_ROUND, y) => y >= MempoolConfig::GENESIS_ROUND,
@@ -359,6 +364,7 @@ impl Point {
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_id(&self, link_field: LinkField) -> PointId {
+        #[allow(clippy::match_same_arms)]
         let (peer, is_in_includes) = match self.anchor_link(link_field) {
             Link::ToSelf => return self.id(),
             Link::Direct(Through::Includes(peer)) => (peer, true),

@@ -1,6 +1,7 @@
 use std::io::Read;
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use crc::{Crc, CRC_32_ISCSI};
 use everscale_types::cell::{CellDescriptor, LevelMask};
 use smallvec::SmallVec;
@@ -19,8 +20,8 @@ pub struct ShardStatePacketReader {
     hasher: crc::Digest<'static, u32>,
     has_crc: bool,
     offset: usize,
-    current_packet: Vec<u8>,
-    next_packet: Vec<u8>,
+    current_packet: Bytes,
+    next_packet: Bytes,
     bytes_to_skip: usize,
 }
 
@@ -213,7 +214,7 @@ impl ShardStatePacketReader {
         }
     }
 
-    pub fn set_next_packet(&mut self, packet: Vec<u8>) {
+    pub fn set_next_packet(&mut self, packet: Bytes) {
         self.next_packet = packet;
     }
 
@@ -260,7 +261,7 @@ impl ShardStatePacketReader {
                 if n > self.current_packet.len() {
                     n -= self.current_packet.len();
                     self.hasher.update(&self.current_packet);
-                    self.current_packet = Vec::new();
+                    self.current_packet = Bytes::new();
                     self.bytes_to_skip = n;
                     ReaderAction::Incomplete
                 } else {

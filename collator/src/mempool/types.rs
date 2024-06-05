@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use everscale_types::models::{ExtInMsgInfo, MsgInfo, ShardIdent};
-use everscale_types::prelude::Cell;
+use everscale_types::prelude::{Cell, HashBytes};
 
 use crate::types::ShardIdentExt;
 
@@ -24,6 +24,10 @@ impl ExternalMessage {
     }
     pub fn info(&self) -> &ExtInMsgInfo {
         &self.message_info
+    }
+
+    pub fn hash(&self) -> &HashBytes {
+        self.message_cell.repr_hash()
     }
 }
 

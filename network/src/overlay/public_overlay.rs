@@ -207,9 +207,9 @@ impl PublicOverlay {
         local_id: &PeerId,
         entries: &[Arc<PublicEntry>],
         now: u32,
-    ) {
+    ) -> bool {
         if entries.is_empty() {
-            return;
+            return false;
         }
 
         let this = self.inner.as_ref();
@@ -221,7 +221,7 @@ impl PublicOverlay {
         let to_add = loop {
             let to_add = match this.min_capacity.checked_sub(entry_count) {
                 Some(capacity) if capacity > 0 => std::cmp::min(to_add, capacity),
-                _ => return,
+                _ => return false,
             };
 
             let res = this.entry_count.compare_exchange_weak(
@@ -309,6 +309,8 @@ impl PublicOverlay {
         if changed {
             this.entries_changed.notify_waiters();
         }
+
+        changed || added > 0
     }
 
     /// Removes all expired and banned entries from the overlay.

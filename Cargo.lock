@@ -446,6 +446,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim 0.11.1",
+ "terminal_size",
 ]
 
 [[package]]
@@ -2489,6 +2490,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_size"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21bebf2b7c9e0a515f6e0f8c51dc0f8e4696391e6f1ff30379559f8365fb0df7"
+dependencies = [
+ "rustix",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2674,6 +2685,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "pin-project-lite",
+ "slab",
  "tokio",
 ]
 
@@ -2801,6 +2813,17 @@ checksum = "c06d3da6113f116aaee68e4d601191614c9053067f9ab7f6edbcb161237daa54"
 dependencies = [
  "once_cell",
  "valuable",
+]
+
+[[package]]
+name = "tracing-flame"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bae117ee14789185e129aaee5d93750abe67fdc5a9a62650452bfe4e122a3a9"
+dependencies = [
+ "lazy_static",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2959,7 +2982,9 @@ name = "tycho-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64 0.22.1",
+ "bytes",
  "clap",
  "everscale-crypto",
  "everscale-types",
@@ -2996,10 +3021,12 @@ dependencies = [
  "async-trait",
  "backon",
  "base64 0.22.1",
+ "bytes",
  "bytesize",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
+ "indexmap",
  "parking_lot",
  "rand",
  "sha2",
@@ -3027,6 +3054,7 @@ version = "0.0.1"
 dependencies = [
  "ahash",
  "anyhow",
+ "arc-swap",
  "async-trait",
  "bincode",
  "bytes",
@@ -3036,6 +3064,7 @@ dependencies = [
  "futures-util",
  "hex",
  "itertools",
+ "metrics",
  "parking_lot",
  "rand",
  "rand_pcg",
@@ -3046,6 +3075,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-appender",
+ "tracing-flame",
  "tracing-subscriber",
  "tycho-network",
  "tycho-storage",
@@ -3100,6 +3130,7 @@ dependencies = [
  "exponential-backoff",
  "futures-util",
  "hex",
+ "indexmap",
  "moka",
  "parking_lot",
  "pin-project-lite",

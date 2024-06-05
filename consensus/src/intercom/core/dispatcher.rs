@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tycho_network::{DhtClient, Network, OverlayId, OverlayService, PeerId, PrivateOverlay};
@@ -9,7 +9,7 @@ use crate::models::{Point, PointId, Round};
 
 #[derive(Clone)]
 pub struct Dispatcher {
-    pub overlay: PrivateOverlay,
+    overlay: PrivateOverlay,
     network: Network,
 }
 
@@ -20,7 +20,7 @@ impl Dispatcher {
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         responder: Responder,
-    ) -> Self {
+    ) -> (Self, PrivateOverlay) {
         let dht_service = dht_client.service();
         let peer_resolver = dht_service.make_peer_resolver().build(dht_client.network());
 
@@ -30,13 +30,15 @@ impl Dispatcher {
 
         overlay_service.add_private_overlay(&private_overlay);
 
-        Self {
-            overlay: private_overlay,
+        let this = Self {
+            overlay: private_overlay.clone(),
             network: dht_client.network().clone(),
-        }
+        };
+
+        (this, private_overlay)
     }
 
-    pub fn point_by_id_request(&self, id: &PointId) -> tycho_network::Request {
+    pub fn point_by_id_request(id: &PointId) -> tycho_network::Request {
         (&MPQuery::PointById(id.clone())).into()
     }
 
@@ -62,8 +64,7 @@ impl Dispatcher {
                 .map(move |response| {
                     let response = response
                         .and_then(|r| MPResponse::try_from(&r))
-                        .and_then(T::try_from)
-                        .map_err(|e| anyhow!("response from peer {peer_id}: {e}"));
+                        .and_then(T::try_from);
                     (peer_id, response)
                 })
                 .await
@@ -87,11 +88,7 @@ impl Dispatcher {
         async move {
             overlay
                 .send(&network, &peer_id, request)
-                .map(move |response| {
-                    let response =
-                        response.map_err(|e| anyhow!("response from peer {peer_id}: {e}"));
-                    (peer_id, response)
-                })
+                .map(move |response| (peer_id, response))
                 .await
         }
         .boxed()

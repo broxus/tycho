@@ -53,7 +53,7 @@ fn compare_cells(orig_cell: &DynCell, stored_cell: &DynCell) {
 
 #[tokio::test]
 async fn persistent_storage_everscale() -> Result<()> {
-    tracing_subscriber::fmt::try_init().ok();
+    tycho_util::test::init_logger("persistent_storage_everscale", "debug");
 
     let (storage, _tmp_dir) = Storage::new_temp()?;
     assert!(storage.node_state().load_init_mc_block_id().is_none());
@@ -107,12 +107,12 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     storage
         .persistent_state_storage()
-        .prepare_persistent_states_dir(zerostate.block_id())?;
+        .prepare_persistent_states_dir(zerostate.state().seqno)?;
 
     storage
         .persistent_state_storage()
-        .save_state(
-            zerostate.block_id(),
+        .store_state(
+            zerostate.state().seqno,
             zerostate.block_id(),
             zero_state_raw.cell.repr_hash(),
         )
@@ -121,22 +121,24 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Check if state exists
     let exist = storage
         .persistent_state_storage()
-        .state_exists(zerostate.block_id(), zerostate.block_id());
+        .state_exists(zerostate.block_id());
     assert_eq!(exist, true);
 
-    // Read persistent state
-    let offset = 0u64;
-    let max_size = 1_000_000u64;
+    // Read persistent state a couple of times to check if it is stateless
+    for _ in 0..2 {
+        let limit = bytesize::mb(1u32);
+        let offset = 0u64;
 
-    let persistent_state_storage = storage.persistent_state_storage();
-    let persistent_state_data = persistent_state_storage
-        .read_state_part(zerostate.block_id(), zerostate.block_id(), offset, max_size)
-        .await
-        .unwrap();
+        let persistent_state_storage = storage.persistent_state_storage();
+        let persistent_state_data = persistent_state_storage
+            .read_state_part(zerostate.block_id(), limit as _, offset)
+            .await
+            .unwrap();
 
-    // Check state
-    let cell = Boc::decode(&persistent_state_data)?;
-    assert_eq!(&cell, zerostate.root_cell());
+        // Check state
+        let cell = Boc::decode(&persistent_state_data)?;
+        assert_eq!(&cell, zerostate.root_cell());
+    }
 
     Ok(())
 }

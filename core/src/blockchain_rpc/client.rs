@@ -1,13 +1,60 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
+use tycho_storage::Storage;
+use tycho_util::futures::JoinTask;
 
-use crate::overlay_client::{Error, PublicOverlayClient, QueryResponse};
+use crate::overlay_client::{Error, Neighbour, PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
+
+/// A listener for self-broadcasted messages.
+///
+/// NOTE: `async_trait` is used to add object safety to the trait.
+#[async_trait::async_trait]
+pub trait SelfBroadcastListener: Send + Sync + 'static {
+    async fn handle_message(&self, message: Bytes);
+}
+
+pub struct BlockchainRpcClientBuilder<MandatoryFields = PublicOverlayClient> {
+    mandatory_fields: MandatoryFields,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
+}
+
+impl BlockchainRpcClientBuilder<PublicOverlayClient> {
+    pub fn build(self) -> BlockchainRpcClient {
+        BlockchainRpcClient {
+            inner: Arc::new(Inner {
+                overlay_client: self.mandatory_fields,
+                broadcast_listener: self.broadcast_listener,
+            }),
+        }
+    }
+}
+
+impl BlockchainRpcClientBuilder<()> {
+    pub fn with_public_overlay_client(
+        self,
+        client: PublicOverlayClient,
+    ) -> BlockchainRpcClientBuilder<PublicOverlayClient> {
+        BlockchainRpcClientBuilder {
+            mandatory_fields: client,
+            broadcast_listener: self.broadcast_listener,
+        }
+    }
+}
+
+impl<T> BlockchainRpcClientBuilder<T> {
+    pub fn with_self_broadcast_listener(mut self, listener: impl SelfBroadcastListener) -> Self {
+        self.broadcast_listener = Some(Box::new(listener));
+        self
+    }
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -17,12 +64,14 @@ pub struct BlockchainRpcClient {
 
 struct Inner {
     overlay_client: PublicOverlayClient,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
 }
 
 impl BlockchainRpcClient {
-    pub fn new(overlay_client: PublicOverlayClient) -> Self {
-        Self {
-            inner: Arc::new(Inner { overlay_client }),
+    pub fn builder() -> BlockchainRpcClientBuilder<()> {
+        BlockchainRpcClientBuilder {
+            mandatory_fields: (),
+            broadcast_listener: None,
         }
     }
 
@@ -53,6 +102,11 @@ impl BlockchainRpcClient {
                 packet.write_u32(BroadcastPrefix::TL_ID);
                 MessageBroadcastRef { data: self.data }.write_to(packet);
             }
+        }
+
+        // Broadcast to yourself
+        if let Some(l) = &self.inner.broadcast_listener {
+            l.handle_message(Bytes::copy_from_slice(message)).await;
         }
 
         // TODO: Add a proper target selector
@@ -127,15 +181,28 @@ impl BlockchainRpcClient {
     pub async fn get_archive_slice(
         &self,
         archive_id: u64,
+        limit: u32,
         offset: u64,
-        max_size: u32,
     ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
             .query::<_, Data>(&rpc::GetArchiveSlice {
                 archive_id,
+                limit,
                 offset,
-                max_size,
+            })
+            .await?;
+        Ok(data)
+    }
+
+    pub async fn get_persistent_state_info(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<QueryResponse<PersistentStateInfo>, Error> {
+        let client = &self.inner.overlay_client;
+        let data = client
+            .query::<_, PersistentStateInfo>(&rpc::GetPersistentStateInfo {
+                block_id: *block_id,
             })
             .await?;
         Ok(data)
@@ -143,20 +210,143 @@ impl BlockchainRpcClient {
 
     pub async fn get_persistent_state_part(
         &self,
-        mc_block: &BlockId,
-        block: &BlockId,
+        neighbour: &Neighbour,
+        block_id: &BlockId,
+        limit: u32,
         offset: u64,
-        max_size: u64,
-    ) -> Result<QueryResponse<PersistentStatePart>, Error> {
+    ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, PersistentStatePart>(&rpc::GetPersistentStatePart {
-                block_id: *block,
-                mc_block_id: *mc_block,
-                offset,
-                max_size,
-            })
+            .query_raw::<Data>(
+                neighbour.clone(),
+                Request::from_tl(rpc::GetPersistentStatePart {
+                    block_id: *block_id,
+                    limit,
+                    offset,
+                }),
+            )
             .await?;
         Ok(data)
+    }
+
+    pub async fn download_and_store_state(
+        &self,
+        block_id: &BlockId,
+        storage: Storage,
+    ) -> Result<ShardStateStuff, Error> {
+        const PARALLEL_REQUESTS: usize = 10;
+        const CHUNK_SIZE: u32 = 2 << 20; // 2 MB
+        const MAX_STATE_SIZE: u64 = 10 << 30; // 10 GB
+
+        // TODO: Iterate through all known (or unknown) neighbours
+        const NEIGHBOUR_COUNT: usize = 10;
+        let neighbours = self
+            .overlay_client()
+            .neighbours()
+            .choose_multiple(NEIGHBOUR_COUNT)
+            .await;
+
+        // Find a neighbour which has the requested state
+        let (neighbour, max_size) = 'info: {
+            let req = Request::from_tl(rpc::GetPersistentStateInfo {
+                block_id: *block_id,
+            });
+
+            let mut futures = FuturesUnordered::new();
+            for neighbour in neighbours {
+                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
+            }
+
+            let mut err = None;
+            while let Some(info) = futures.next().await {
+                let (handle, info) = match info {
+                    Ok(res) => res.split(),
+                    Err(e) => {
+                        err = Some(e);
+                        continue;
+                    }
+                };
+
+                match info {
+                    PersistentStateInfo::Found { size } if size <= MAX_STATE_SIZE => {
+                        break 'info (handle.accept(), size)
+                    }
+                    PersistentStateInfo::Found { size } => {
+                        let neighbour = handle.reject();
+                        tracing::warn!(
+                            peer_id = %neighbour.peer_id(),
+                            size,
+                            "malicious neighbour has a too large state",
+                        );
+                        continue;
+                    }
+                    PersistentStateInfo::NotFound => continue,
+                }
+            }
+
+            return match err {
+                None => Err(Error::Internal(anyhow::anyhow!(
+                    "no neighbour has the requested state"
+                ))),
+                Some(err) => Err(err),
+            };
+        };
+
+        // Download the state
+        let chunk_count = (max_size + CHUNK_SIZE as u64 - 1) / CHUNK_SIZE as u64;
+        let mut stream =
+            futures_util::stream::iter((0..chunk_count).map(|i| i * CHUNK_SIZE as u64))
+                .map(|offset| {
+                    let neighbour = neighbour.clone();
+                    let req = Request::from_tl(rpc::GetPersistentStatePart {
+                        block_id: *block_id,
+                        limit: CHUNK_SIZE,
+                        offset,
+                    });
+
+                    let client = self.overlay_client().clone();
+                    JoinTask::new(async move {
+                        // TODO: Retry on error
+                        client.query_raw::<Data>(neighbour, req).await
+                    })
+                })
+                .buffered(PARALLEL_REQUESTS);
+
+        let mut store_state_op = storage
+            .shard_state_storage()
+            .begin_store_state_raw(block_id)
+            .map(Box::new)
+            .map_err(Error::Internal)?;
+
+        // NOTE: Buffered items in stream will be polled because they are spawned as tasks
+        while let Some(response) = stream.next().await.transpose()? {
+            let (op, finished) = tokio::task::spawn_blocking(move || {
+                let (handle, part) = response.split();
+                match store_state_op.process_part(part.data) {
+                    Ok(finished) => Ok((store_state_op, finished)),
+                    Err(e) => {
+                        handle.reject();
+                        Err(e)
+                    }
+                }
+            })
+            .await
+            .map_err(|e| Error::Internal(e.into()))?
+            .map_err(Error::Internal)?;
+
+            if !finished {
+                store_state_op = op;
+                continue;
+            }
+
+            return tokio::task::spawn_blocking(move || op.finalize())
+                .await
+                .map_err(|e| Error::Internal(e.into()))?
+                .map_err(Error::Internal);
+        }
+
+        Err(Error::Internal(anyhow::anyhow!(
+            "downloaded incomplete state"
+        )))
     }
 }

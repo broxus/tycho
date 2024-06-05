@@ -3,6 +3,7 @@ use std::sync::{Arc, Weak};
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use tracing::Span;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
@@ -18,15 +19,15 @@ pub struct WeakDagRound(Weak<DagRoundInner>);
 
 #[derive(Clone)]
 /// do not pass to backwards-recursive async tasks
-/// (where DAG_DEPTH is just a logical limit, but is not explicitly applicable)
+/// (where `DAG_DEPTH` is just a logical limit, but is not explicitly applicable)
 /// to prevent severe memory leaks of a whole DAG round
-/// (in case congested tokio runtime reorders futures), use [WeakDagRound] for that
+/// (in case congested tokio runtime reorders futures), use [`WeakDagRound`] for that
 pub struct DagRound(Arc<DagRoundInner>);
 
 struct DagRoundInner {
     round: Round,          // immutable
     node_count: NodeCount, // immutable
-    /// if key_pair is not empty, then the node may produce block at this round,
+    /// if `key_pair` is not empty, then the node may produce block at this round,
     /// and also sign broadcasts during previous round
     key_pair: Option<Arc<KeyPair>>, // immutable
     anchor_stage: Option<AnchorStage>, // immutable
@@ -60,7 +61,7 @@ impl DagRound {
         Self(Arc::new(DagRoundInner {
             round,
             node_count: NodeCount::try_from(peers.len())
-                .expect(&format!("peer schedule updated for {round:?}")),
+                .unwrap_or_else(|_| panic!("no peers scheduled for {round:?}")),
             key_pair: peer_schedule.local_keys(round),
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
@@ -75,7 +76,7 @@ impl DagRound {
         Self(Arc::new(DagRoundInner {
             round: next_round,
             node_count: NodeCount::try_from(peers.len())
-                .expect(&format!("peer schedule updated for {next_round:?}")),
+                .unwrap_or_else(|_| panic!("no peers scheduled for {next_round:?}")),
             key_pair: peer_schedule.local_keys(next_round),
             anchor_stage: AnchorStage::of(next_round, peer_schedule),
             locations,
@@ -177,18 +178,24 @@ impl DagRound {
         &self,
         point: &Arc<Point>,
         downloader: &Downloader,
+        span: &Span,
     ) -> Option<BoxFuture<'static, InclusionState>> {
-        self.scan(point.body.location.round)
-            .and_then(|linked| linked.add_exact(&point, downloader))
+        let dag_round = span.in_scope(|| self.scan(point.body.location.round))?;
+        dag_round.add_exact(point, downloader, span)
     }
 
     fn add_exact(
         &self,
         point: &Arc<Point>,
         downloader: &Downloader,
+        span: &Span,
     ) -> Option<BoxFuture<'static, InclusionState>> {
         if point.body.location.round != self.round() {
-            panic!("Coding error: dag round mismatches point round on add")
+            let _span = span.enter();
+            panic!(
+                "Coding error: dag round mismatches point round on add {:?}",
+                point.id()
+            )
         }
         let dag_round = self.to_weak();
         let digest = &point.digest;
@@ -196,26 +203,21 @@ impl DagRound {
             let state = loc.state().clone();
             let point = point.clone();
             let downloader = downloader.clone();
-            loc.init(digest, || Verifier::validate(point, dag_round, downloader))
-                .map(|first| first.clone().map(|_| state).boxed())
+            loc.init(digest, || {
+                Verifier::validate(point, dag_round, downloader, span.clone())
+            })
+            .map(|first| first.clone().map(|_| state).boxed())
         })
     }
 
     /// for genesis and own points
-    pub async fn insert_exact_sign(
+    pub fn insert_exact_sign(
         &self,
         point: &Arc<Point>,
         peer_schedule: &PeerSchedule,
-        downloader: &Downloader,
-    ) -> Option<InclusionState> {
-        if !Verifier::verify(point, peer_schedule).is_ok() {
-            panic!("Coding error: malformed point")
-        }
-        let point = Verifier::validate(point.clone(), self.to_weak(), downloader.clone()).await;
-        if point.trusted().is_none() {
-            panic!("Coding error: not a trusted point")
-        }
-        let state = self.insert_exact(&point)?.await;
+        span: &Span,
+    ) -> InclusionState {
+        let state = self.insert_exact(&DagPoint::Trusted(ValidPoint::new(point.clone())));
         if let Some(signable) = state.signable() {
             signable.sign(
                 self.round(),
@@ -224,33 +226,30 @@ impl DagRound {
             );
         }
         if state.signed_point(self.round()).is_none() {
+            let _guard = span.enter();
             panic!("Coding or configuration error: valid point cannot be signed; time issue?")
         }
-        Some(state)
+        state
     }
 
-    pub fn insert_invalid(
-        &self,
-        dag_point: &DagPoint,
-    ) -> Option<BoxFuture<'static, InclusionState>> {
+    pub fn insert_invalid(&self, dag_point: &DagPoint) -> Option<InclusionState> {
         if dag_point.valid().is_some() {
             panic!("Coding error: failed to insert valid point as invalid")
         }
-        self.scan(dag_point.location().round)
-            .map(|linked| linked.insert_exact(dag_point))
-            .flatten()
+        let round = self.scan(dag_point.location().round)?;
+        Some(round.insert_exact(dag_point))
     }
 
-    fn insert_exact(&self, dag_point: &DagPoint) -> Option<BoxFuture<'static, InclusionState>> {
+    fn insert_exact(&self, dag_point: &DagPoint) -> InclusionState {
         if dag_point.location().round != self.round() {
             panic!("Coding error: dag round mismatches point round on insert")
         }
         self.edit(&dag_point.location().author, |loc| {
-            let state = loc.state().clone();
-            loc.init(dag_point.digest(), || {
+            loc.state().init(dag_point);
+            let _existing = loc.init(dag_point.digest(), || {
                 futures_util::future::ready(dag_point.clone())
-            })
-            .map(|first| first.clone().map(|_| state).boxed())
+            });
+            loc.state().clone()
         })
     }
 

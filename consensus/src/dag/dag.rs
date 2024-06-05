@@ -2,17 +2,16 @@ use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
-use itertools::Itertools;
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
+use crate::effects::{CurrentRoundContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{LinkField, Point, Round, Ugly, ValidPoint};
+use crate::models::{LinkField, Point, Round, ValidPoint};
 
 #[derive(Clone)]
 pub struct Dag {
@@ -54,29 +53,30 @@ impl Dag {
     // Note: cannot be non-async, as we cannot use only InclusionState:
     //   some committed point may be DagPoint::Suspicious thus not the first validated locally
     /// result is in historical order
-    pub async fn commit(
+    pub fn commit(
         self,
-        log_id: Arc<String>,
         next_dag_round: DagRound,
         committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+        effects: Effects<CurrentRoundContext>,
     ) {
-        // TODO finding the latest trigger must not take long, better try later
-        //   than wait long for some DagPoint::NotFound, slowing down whole Engine
-        let Some(latest_trigger) = Self::latest_trigger(&next_dag_round).await else {
+        // finding the latest trigger must not take long, better try later
+        // than wait long for some DagPoint::NotFound, slowing down whole Engine
+        let _guard = effects.span().enter();
+        let Some(latest_trigger) = Self::latest_trigger(&next_dag_round) else {
             return;
         };
         // when we have a valid trigger, its every point of it's subdag is validated successfully
-        let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone()).await;
+        let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone());
         let mut ordered = Vec::new();
         while let Some((anchor, anchor_round)) = anchor_stack.pop() {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
             self.drop_tail(anchor.point.body.location.round);
-            let committed = Self::gather_uncommitted(&anchor.point, &anchor_round).await;
+            let committed = Self::gather_uncommitted(&anchor.point, &anchor_round);
             ordered.push((anchor.point, committed));
         }
 
-        Self::log_committed(&log_id, next_dag_round.round().prev(), &ordered);
+        effects.log_committed(&ordered);
 
         for points in ordered {
             committed
@@ -85,7 +85,7 @@ impl Dag {
         }
     }
 
-    async fn latest_trigger(next_dag_round: &DagRound) -> Option<ValidPoint> {
+    fn latest_trigger(next_dag_round: &DagRound) -> Option<ValidPoint> {
         let mut next_dag_round = next_dag_round.clone();
         let mut latest_trigger = None;
         while let Some(current_dag_round) = next_dag_round.prev().get() {
@@ -97,21 +97,21 @@ impl Dag {
                 if is_used.load(Ordering::Relaxed) {
                     break;
                 };
-                let mut futs = FuturesUnordered::new();
-                current_dag_round.view(leader, |loc| {
-                    for (_, version) in loc.versions() {
-                        futs.push(version.clone())
-                    }
-                });
-                // Fixme We may take any first completed valid point, but we should not wait long;
-                //   can we determine the trigger some other way, maybe inside Collector?
-                while let Some((found, _)) = futs.next().await {
-                    if let Some(valid) = found.into_valid() {
-                        _ = latest_trigger.insert(valid);
-                        is_used.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                }
+                if let Some(valid) = current_dag_round
+                    .view(leader, |loc| {
+                        loc.versions()
+                            .values()
+                            // better try later than wait now if some point is still downloading
+                            .filter_map(|version| version.clone().now_or_never())
+                            // take any suitable
+                            .find_map(move |(dag_point, _)| dag_point.into_valid())
+                    })
+                    .flatten()
+                {
+                    _ = latest_trigger.insert(valid);
+                    is_used.store(true, Ordering::Relaxed);
+                    break;
+                };
             };
             next_dag_round = current_dag_round;
         }
@@ -119,9 +119,9 @@ impl Dag {
     }
 
     /// return order: newest (in depth) to oldest (on top); use with `vec.pop()`
-    async fn anchor_stack(
+    fn anchor_stack(
         last_trigger: &ValidPoint,
-        mut future_round: DagRound,
+        future_round: DagRound,
     ) -> Vec<(ValidPoint, DagRound)> {
         assert_eq!(
             last_trigger.point.prev_id(),
@@ -129,13 +129,15 @@ impl Dag {
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         let mut anchor_stack = Vec::new();
-        let Some(mut proof) = future_round.vertex_by_proof(last_trigger).await else {
-            panic!("anchor proof round not in DAG")
-        };
+        let mut proof = future_round
+            .vertex_by_proof(last_trigger)
+            .now_or_never()
+            .expect("validation must be completed")
+            .expect("latest anchor proof must be in DAG");
+        let mut proof_round = future_round
+            .scan(proof.point.body.location.round)
+            .expect("anchor proof round not in DAG while a point from it was received");
         loop {
-            let Some(proof_round) = future_round.scan(proof.point.body.location.round) else {
-                panic!("anchor proof round not in DAG while a point from it was received")
-            };
             if proof_round.round() == MempoolConfig::GENESIS_ROUND {
                 break;
             }
@@ -161,35 +163,36 @@ impl Dag {
             if is_used.load(Ordering::Relaxed) {
                 break;
             };
-            let mut proofs = FuturesUnordered::new();
-            proof_round.view(leader, |loc| {
-                for (_, version) in loc.versions() {
-                    proofs.push(version.clone())
-                }
-            });
-            let mut anchor = None;
-            'v: while let Some((proof, _)) = proofs.next().await {
-                if let Some(valid) = proof.into_valid() {
-                    let Some(valid) = proof_round.vertex_by_proof(&valid).await else {
-                        panic!("anchor proof is not linked to anchor, validation broken")
-                    };
-                    _ = anchor.insert(valid);
-                    is_used.store(true, Ordering::Relaxed);
-                    break 'v;
-                }
-            }
-            let anchor =
-                anchor.expect("any anchor proof points to anchor point, validation is broken");
-            anchor_stack.push((anchor.clone(), anchor_round.clone()));
-
-            let Some(next_proof) = proof_round
-                .valid_point(&anchor.point.anchor_id(LinkField::Proof))
-                .await
-            else {
-                break;
+            let anchor_digest = match &proof.point.body.proof {
+                Some(prev) => &prev.digest,
+                None => panic!("anchor proof must prove to anchor point, validation is broken"),
             };
-            proof = next_proof;
-            future_round = anchor_round;
+            let anchor = anchor_round
+                .view(leader, |loc| {
+                    let (dag_point, _) = loc
+                        .versions()
+                        .get(anchor_digest)
+                        .expect("anchor proof is not linked to anchor, validation broken")
+                        .clone()
+                        .now_or_never()
+                        .expect("validation must be completed");
+                    dag_point.into_valid().expect("anchor point must be valid")
+                })
+                .expect("leader location not found in dag round for anchor");
+            is_used.store(true, Ordering::Relaxed);
+
+            let next_proof_id = anchor.point.anchor_id(LinkField::Proof);
+            anchor_stack.push((anchor, anchor_round));
+
+            match proof_round.scan(next_proof_id.location.round) {
+                Some(next_proof_round) => proof_round = next_proof_round,
+                None => break,
+            };
+            proof = proof_round
+                .valid_point_exact(&next_proof_id.location.author, &next_proof_id.digest)
+                .now_or_never()
+                .expect("validation must be completed")
+                .expect("next proof point in chain must exist in its dag round");
         }
         anchor_stack
     }
@@ -204,7 +207,7 @@ impl Dag {
     /// returns historically ordered vertices
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
-    async fn gather_uncommitted(
+    fn gather_uncommitted(
         anchor: &Point,          // @ r+1
         anchor_round: &DagRound, // r+1
     ) -> Vec<Arc<Point>> {
@@ -239,22 +242,22 @@ impl Dag {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
                 // Any valid point among equivocated will do, as they include the same vertex.
-                let Some(proof /* point @ r+0 */) =
-                    proof_round.valid_point_exact(node, digest).await
-                else {
-                    panic!("point to commit not found in DAG")
-                };
+                let proof = // point @ r+0
+                    proof_round.valid_point_exact(node, digest)
+                        .now_or_never()
+                        .expect("validation must be completed")
+                        .expect("point to commit not found in DAG");
                 let author = &proof.point.body.location.author;
                 r[1].extend(proof.point.body.includes.clone()); // points @ r-1
                 r[2].extend(proof.point.body.witness.clone()); // points @ r-2
                 let Some(digest) = proof.point.body.proof.as_ref().map(|a| &a.digest) else {
                     continue;
                 };
-                let Some(vertex /* point @ r-1 */) =
-                    vertex_round.valid_point_exact(author, &digest).await
-                else {
-                    panic!("point to commit not found in DAG or wrong round")
-                };
+                let vertex = // point @ r-1
+                    vertex_round.valid_point_exact(author, digest)
+                        .now_or_never()
+                        .expect("validation must be completed")
+                        .expect("point to commit not found in DAG or wrong round");
                 // select uncommitted ones, marking them as committed
                 // to exclude from the next commit
                 if vertex
@@ -273,32 +276,5 @@ impl Dag {
         }
         uncommitted.reverse();
         uncommitted
-    }
-
-    fn log_committed(
-        log_id: &str,
-        current_round: Round,
-        committed: &Vec<(Arc<Point>, Vec<Arc<Point>>)>,
-    ) {
-        if committed.is_empty() {
-            return;
-        }
-        if tracing::enabled!(tracing::Level::INFO) {
-            let committed = committed
-                .into_iter()
-                .map(|(anchor, history)| {
-                    let history = history
-                        .iter()
-                        .map(|point| format!("{:?}", point.id().ugly()))
-                        .join(", ");
-                    format!(
-                        "anchor {:?} time {} : [ {history} ]",
-                        anchor.id().ugly(),
-                        anchor.body.time
-                    )
-                })
-                .join("  ;  ");
-            tracing::info!("{log_id} @ {current_round:?} committed {committed}");
-        }
     }
 }

@@ -1,62 +1,65 @@
-use std::sync::Arc;
-
-use tokio::sync::{mpsc, oneshot, RwLock};
-use tycho_util::futures::{JoinTask, Shared};
+use futures_util::FutureExt;
+use tycho_network::PeerId;
 
 use crate::dag::DagRound;
+use crate::dyn_event;
+use crate::effects::{AltFormat, CurrentRoundContext, Effects};
 use crate::intercom::dto::PointByIdResponse;
-use crate::models::{DagPoint, PointId, Ugly};
+use crate::models::PointId;
 
-pub struct Uploader {
-    log_id: Arc<String>,
-    requests: mpsc::UnboundedReceiver<(PointId, oneshot::Sender<PointByIdResponse>)>,
-    top_dag_round: Arc<RwLock<DagRound>>,
-}
+pub struct Uploader;
 
 impl Uploader {
-    pub fn new(
-        log_id: Arc<String>,
-        requests: mpsc::UnboundedReceiver<(PointId, oneshot::Sender<PointByIdResponse>)>,
-        top_dag_round: Arc<RwLock<DagRound>>,
-    ) -> Self {
-        Self {
-            log_id,
-            requests,
-            top_dag_round,
-        }
-    }
-
-    pub async fn run(mut self) -> ! {
-        while let Some((point_id, callback)) = self.requests.recv().await {
-            let found = match self.find(&point_id).await {
-                // uploader must hide points that it accounts as not eligible for signature
-                Some(shared) => shared.await.0.into_trusted().map(|trusted| trusted.point),
-                None => None,
-            };
-            if let Err(_) = callback.send(PointByIdResponse(found)) {
-                tracing::debug!(
-                    "{} Uploader result channel closed, requester {:?} cancelled download",
-                    self.log_id,
-                    point_id.ugly()
-                );
-            };
-        }
-        panic!("Uploader incoming channel closed")
-    }
-
-    // Note: drops strong ref to DagRound as soon as possible - to let it be gone with weak ones
-    async fn find(&self, point_id: &PointId) -> Option<Shared<JoinTask<DagPoint>>> {
-        let top_dag_round = {
-            let read = self.top_dag_round.read().await;
-            read.clone()
+    pub fn find(
+        peer_id: &PeerId,
+        point_id: &PointId,
+        top_dag_round: &DagRound,
+        effects: &Effects<CurrentRoundContext>,
+    ) -> PointByIdResponse {
+        let dag_round = if point_id.location.round > top_dag_round.round() {
+            None
+        } else {
+            top_dag_round.scan(point_id.location.round)
         };
-        if point_id.location.round > top_dag_round.round() {
-            return None;
-        }
-        top_dag_round
-            .scan(point_id.location.round)?
-            .view(&point_id.location.author, |loc| {
+        let found = dag_round.as_ref().and_then(|r| {
+            r.view(&point_id.location.author, |loc| {
                 loc.versions().get(&point_id.digest).cloned()
-            })?
+            })
+            .flatten()
+        });
+        let task_found = found.is_some();
+        let ready = found
+            .and_then(|shared| shared.now_or_never())
+            .map(|(dag_point, _)| dag_point);
+        let level = if let Some(dag_point) = ready.as_ref() {
+            if dag_point.trusted().is_some() {
+                tracing::Level::TRACE
+            } else {
+                tracing::Level::ERROR
+            }
+        } else if dag_round.is_some() {
+            tracing::Level::DEBUG
+        } else if point_id.location.round > top_dag_round.round() {
+            tracing::Level::TRACE
+        } else {
+            tracing::Level::WARN
+        };
+        dyn_event!(
+            parent: effects.span(),
+            level,
+            round_found = dag_round.is_some(),
+            task_found = task_found,
+            ready = ready.as_ref().map(|dag_point| display(dag_point.alt())),
+            peer = display(peer_id.alt()),
+            author = display(point_id.location.author.alt()),
+            round = point_id.location.round.0,
+            digest = display(point_id.digest.alt()),
+            "upload",
+        );
+        PointByIdResponse(
+            ready
+                .and_then(|dag_point| dag_point.into_trusted())
+                .map(|valid| valid.point),
+        )
     }
 }
