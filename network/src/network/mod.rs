@@ -29,6 +29,12 @@ mod peer;
 mod request_handler;
 mod wire;
 
+fn describe_metrics() {
+    connection_manager::describe_metrics();
+    request_handler::describe_metrics();
+    peer::describe_metrics();
+}
+
 pub struct NetworkBuilder<MandatoryFields = (String, [u8; 32])> {
     mandatory_fields: MandatoryFields,
     optional_fields: BuilderFields,
@@ -82,6 +88,8 @@ impl NetworkBuilder {
         S: Send + Sync + Clone + 'static,
         S: Service<ServiceRequest, QueryResponse = Response>,
     {
+        describe_metrics();
+
         let config = self.optional_fields.config.unwrap_or_default();
         let quic_config = config.quic.clone().unwrap_or_default();
         let (service_name, private_key) = self.mandatory_fields;

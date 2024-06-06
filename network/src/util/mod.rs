@@ -10,7 +10,7 @@ mod traits;
 #[cfg(test)]
 mod test;
 
-pub mod tl;
+mod tl;
 
 #[macro_export]
 macro_rules! match_tl_request {

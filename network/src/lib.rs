@@ -29,7 +29,7 @@ mod dht;
 mod network;
 mod overlay;
 mod types;
-pub mod util;
+mod util;
 
 pub mod proto {
     pub mod dht;

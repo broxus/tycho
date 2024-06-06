@@ -1,7 +1,7 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, Signature};
 use tl_proto::{TlRead, TlWrite};
-use tycho_network::util::tl;
+use tycho_util::tl;
 
 #[derive(Debug, Clone, TlRead, TlWrite)]
 #[tl(boxed, id = "queries.signaturesQueryRes", scheme = "proto.tl")]

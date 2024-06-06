@@ -22,11 +22,9 @@ use crate::types::{
     PeerInfo, Response, ServiceRequest,
 };
 
-#[derive(Debug)]
-pub(crate) enum ConnectionManagerRequest {
-    Connect(Address, PeerId, CallbackTx),
-    Shutdown(oneshot::Sender<()>),
-}
+// Histograms
+const METRIC_CONNECTION_OUT_TIME: &str = "tycho_net_conn_out_time";
+const METRIC_CONNECTION_IN_TIME: &str = "tycho_net_conn_in_time";
 
 // Counters
 const METRIC_CONNECTIONS_OUT_TOTAL: &str = "tycho_net_conn_out_total";
@@ -42,6 +40,60 @@ const METRIC_CONNECTIONS_PENDING_DIALS: &str = "tycho_net_conn_pending_dials";
 
 const METRIC_ACTIVE_PEERS: &str = "tycho_net_active_peers";
 const METRIC_KNOWN_PEERS: &str = "tycho_net_known_peers";
+
+pub fn describe_metrics() {
+    metrics::describe_histogram!(
+        METRIC_CONNECTION_OUT_TIME,
+        "Time taken to establish an outgoing connection"
+    );
+    metrics::describe_histogram!(
+        METRIC_CONNECTION_IN_TIME,
+        "Time taken to establish an incoming connection"
+    );
+
+    metrics::describe_counter!(
+        METRIC_CONNECTIONS_OUT_TOTAL,
+        "Number of established outgoing connections over time"
+    );
+    metrics::describe_counter!(
+        METRIC_CONNECTIONS_IN_TOTAL,
+        "Number of established incoming connections over time"
+    );
+    metrics::describe_counter!(
+        METRIC_CONNECTIONS_OUT_FAILED_TOTAL,
+        "Number of failed outgoing connections over time"
+    );
+    metrics::describe_counter!(
+        METRIC_CONNECTIONS_IN_FAILED_TOTAL,
+        "Number of failed incoming connections over time"
+    );
+
+    metrics::describe_gauge!(
+        METRIC_CONNECTIONS_ACTIVE,
+        "Number of currently active connections"
+    );
+    metrics::describe_gauge!(
+        METRIC_CONNECTIONS_PENDING,
+        "Number of currently pending connections"
+    );
+    metrics::describe_gauge!(
+        METRIC_CONNECTIONS_PARTIAL,
+        "Number of currently half-resolved connections"
+    );
+    metrics::describe_gauge!(
+        METRIC_CONNECTIONS_PENDING_DIALS,
+        "Number of currently pending connectivity checks"
+    );
+
+    metrics::describe_gauge!(METRIC_ACTIVE_PEERS, "Number of currently active peers");
+    metrics::describe_gauge!(METRIC_KNOWN_PEERS, "Number of currently known peers");
+}
+
+#[derive(Debug)]
+pub(crate) enum ConnectionManagerRequest {
+    Connect(Address, PeerId, CallbackTx),
+    Shutdown(oneshot::Sender<()>),
+}
 
 pub(crate) struct ConnectionManager {
     config: Arc<NetworkConfig>,
@@ -82,37 +134,6 @@ impl ConnectionManager {
         known_peers: KnownPeers,
         service: BoxCloneService<ServiceRequest, Response>,
     ) -> (Self, mpsc::Sender<ConnectionManagerRequest>) {
-        metrics::describe_counter!(
-            METRIC_CONNECTIONS_OUT_TOTAL,
-            "Number of established outgoing connections over time"
-        );
-        metrics::describe_counter!(
-            METRIC_CONNECTIONS_IN_TOTAL,
-            "Number of established incoming connections over time"
-        );
-        metrics::describe_counter!(
-            METRIC_CONNECTIONS_OUT_FAILED_TOTAL,
-            "Number of failed outgoing connections over time"
-        );
-        metrics::describe_counter!(
-            METRIC_CONNECTIONS_IN_FAILED_TOTAL,
-            "Number of failed incoming connections over time"
-        );
-
-        metrics::describe_gauge!(METRIC_CONNECTIONS_ACTIVE, "Number of active connections");
-        metrics::describe_gauge!(METRIC_CONNECTIONS_PENDING, "Number of pending connections");
-        metrics::describe_gauge!(
-            METRIC_CONNECTIONS_PARTIAL,
-            "Number of half-resolved connections"
-        );
-        metrics::describe_gauge!(
-            METRIC_CONNECTIONS_PENDING_DIALS,
-            "Number of pending connectivity checks"
-        );
-
-        metrics::describe_gauge!(METRIC_ACTIVE_PEERS, "Number of active peers");
-        metrics::describe_gauge!(METRIC_KNOWN_PEERS, "Number of known peers");
-
         let (mailbox_tx, mailbox) = mpsc::channel(config.connection_manager_channel_capacity);
         let connection_manager = Self {
             config,
@@ -387,12 +408,16 @@ impl ConnectionManager {
                 handshake(&connection).await
             };
 
+            let started_at = Instant::now();
+
             let connecting_result = tokio::time::timeout_at(timeout_at.into(), fut)
                 .await
                 .map_err(Into::into)
                 .and_then(std::convert::identity)
                 .map_err(Arc::new)
                 .map(|_| connection.disarm());
+
+            metrics::histogram!(METRIC_CONNECTION_IN_TIME).record(started_at.elapsed());
 
             ConnectingOutput {
                 seqno,
@@ -617,12 +642,16 @@ impl ConnectionManager {
                 Ok(connection)
             };
 
+            let started_at = Instant::now();
+
             let connecting_result = tokio::time::timeout(config.connect_timeout, fut)
                 .await
                 .map_err(Into::into)
                 .and_then(std::convert::identity)
                 .map_err(Arc::new)
                 .map(ConnectionClosedOnDrop::disarm);
+
+            metrics::histogram!(METRIC_CONNECTION_OUT_TIME).record(started_at.elapsed());
 
             ConnectingOutput {
                 seqno,

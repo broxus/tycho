@@ -127,7 +127,7 @@ where
             state,
         };
         self.inner.state_subscriber.handle_state(&cx).await?;
-        metrics::histogram!("tycho_subscriber_handle_block_seconds").record(started_at.elapsed());
+        metrics::histogram!("tycho_subscriber_handle_block_time").record(started_at.elapsed());
 
         // Mark block as applied
         handle_storage.store_block_applied(&handle);

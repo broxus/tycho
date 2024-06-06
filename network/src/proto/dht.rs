@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
+use tycho_util::tl;
 
 use crate::types::{PeerId, PeerInfo};
-use crate::util::{check_peer_signature, tl};
+use crate::util::check_peer_signature;
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]

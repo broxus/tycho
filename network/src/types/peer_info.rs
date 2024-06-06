@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tl_proto::{TlRead, TlWrite};
+use tycho_util::tl;
 
 use crate::types::{Address, PeerId};
-use crate::util::{check_peer_signature, tl};
+use crate::util::check_peer_signature;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PeerAffinity {

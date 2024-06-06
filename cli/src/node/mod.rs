@@ -233,7 +233,7 @@ fn init_metrics(config: &MetricsConfig) -> Result<()> {
         60.0, 120.0, 300.0, 600.0, 3600.0,
     ];
     metrics_exporter_prometheus::PrometheusBuilder::new()
-        .set_buckets_for_metric(Matcher::Prefix("time".to_string()), EXPONENTIAL_SECONDS)?
+        .set_buckets_for_metric(Matcher::Suffix("_time".to_string()), EXPONENTIAL_SECONDS)?
         .with_http_listener(config.listen_addr)
         .install()
         .wrap_err("failed to initialize a metrics exporter")

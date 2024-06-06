@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use tl_proto::{TlRead, TlWrite};
+use tycho_util::tl;
 
 use crate::types::PeerId;
-use crate::util::tl;
 
 /// A data to sign for [`PublicEntry`].
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, TlRead, TlWrite)]

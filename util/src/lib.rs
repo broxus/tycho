@@ -5,6 +5,7 @@ use std::process::Command;
 pub mod progress_bar;
 pub mod serde_helpers;
 pub mod time;
+pub mod tl;
 
 pub mod futures {
     pub use self::box_future_or_noop::BoxFutureOrNoop;
@@ -24,9 +25,17 @@ pub mod sync {
 
 #[cfg(any(test, feature = "test"))]
 pub mod test {
-    pub use logger::init_logger;
+    pub use self::logger::init_logger;
 
     mod logger;
+}
+
+pub mod metrics {
+    pub use self::gauge_guard::GaugeGuard;
+    pub use self::histogram_guard::HistogramGuard;
+
+    mod gauge_guard;
+    mod histogram_guard;
 }
 
 mod util {

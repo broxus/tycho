@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::task::JoinSet;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tycho_util::metrics::HistogramGuard;
 
 use crate::network::config::NetworkConfig;
 use crate::network::connection::{Connection, RecvStream, SendStream};
@@ -11,6 +12,49 @@ use crate::network::wire::{make_codec, recv_request, send_response};
 use crate::types::{
     BoxCloneService, DisconnectReason, InboundRequestMeta, Response, Service, ServiceRequest,
 };
+
+// Histograms
+const METRIC_IN_QUERIES_TIME: &str = "tycho_net_in_queries_time";
+const METRIC_IN_MESSAGES_TIME: &str = "tycho_net_in_messages_time";
+
+// Counters
+const METRIC_IN_QUERIES_TOTAL: &str = "tycho_net_in_queries_total";
+const METRIC_IN_MESSAGES_TOTAL: &str = "tycho_net_in_messages_total";
+const METRIC_IN_DATAGRAMS_TOTAL: &str = "tycho_net_in_datagrams_total";
+
+// Gauges
+const METRIC_REQ_HANDLERS: &str = "tycho_net_req_handlers";
+
+pub fn describe_metrics() {
+    metrics::describe_histogram!(
+        METRIC_IN_QUERIES_TIME,
+        metrics::Unit::Seconds,
+        "Duration of incoming queries handlers"
+    );
+    metrics::describe_histogram!(
+        METRIC_IN_MESSAGES_TIME,
+        metrics::Unit::Seconds,
+        "Duration of incoming messages handlers"
+    );
+
+    metrics::describe_counter!(
+        METRIC_IN_QUERIES_TOTAL,
+        "Number of incoming queries over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_MESSAGES_TOTAL,
+        "Number of incoming messages over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_DATAGRAMS_TOTAL,
+        "Number of incoming datagrams over time"
+    );
+
+    metrics::describe_gauge!(
+        METRIC_REQ_HANDLERS,
+        "Current number of incoming request handlers"
+    );
+}
 
 pub(crate) struct InboundRequestHandler {
     config: Arc<NetworkConfig>,
@@ -71,6 +115,8 @@ impl InboundRequestHandler {
                             stream,
                         );
                         inflight_requests.spawn(handler.handle());
+                        metrics::counter!(METRIC_IN_MESSAGES_TOTAL).increment(1);
+                        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
                     },
                     Err(e) => {
                         tracing::trace!("failed to accept an incoming uni stream: {e:?}");
@@ -88,6 +134,8 @@ impl InboundRequestHandler {
                             rx,
                         );
                         inflight_requests.spawn(handler.handle());
+                        metrics::counter!(METRIC_IN_QUERIES_TOTAL).increment(1);
+                        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
                     }
                     Err(e) => {
                         tracing::trace!("failed to accept an incoming bi stream: {e:?}");
@@ -110,19 +158,24 @@ impl InboundRequestHandler {
                                     .await;
                             }
                         });
+                        metrics::counter!(METRIC_IN_DATAGRAMS_TOTAL).increment(1);
+                        metrics::gauge!(METRIC_REQ_HANDLERS).increment(1);
                     },
                     Err(e) => {
                         tracing::trace!("failed to read datagram: {e:?}");
                         break e;
                     }
                 },
-                Some(req) = inflight_requests.join_next() => match req {
-                    Ok(()) => tracing::trace!("request handler task completed"),
-                    Err(e) => {
-                        if e.is_panic() {
-                            std::panic::resume_unwind(e.into_panic());
+                Some(req) = inflight_requests.join_next() => {
+                    metrics::gauge!(METRIC_REQ_HANDLERS).decrement(1);
+                    match req {
+                        Ok(()) => tracing::trace!("request handler task completed"),
+                        Err(e) => {
+                            if e.is_panic() {
+                                std::panic::resume_unwind(e.into_panic());
+                            }
+                            tracing::trace!("request handler task cancelled");
                         }
-                        tracing::trace!("request handler task cancelled");
                     }
                 }
             }
@@ -155,6 +208,8 @@ impl UniStreamRequestHandler {
     }
 
     async fn handle(self) {
+        let _histogram = HistogramGuard::begin(METRIC_IN_MESSAGES_TIME);
+
         if let Err(e) = self.do_handle().await {
             tracing::trace!("request handler task failed: {e}");
         }
@@ -196,6 +251,8 @@ impl BiStreamRequestHandler {
     }
 
     async fn handle(self) {
+        let _histogram = HistogramGuard::begin(METRIC_IN_QUERIES_TIME);
+
         if let Err(e) = self.do_handle().await {
             tracing::trace!("request handler task failed: {e}");
         }

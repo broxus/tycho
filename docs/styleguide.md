@@ -587,13 +587,13 @@ Prefix all `tycho` metrics with `tycho_`. Follow the [Prometheus naming conventi
 
 **Rationale:** The `tycho_` prefix makes it trivial to separate metrics exported by `tycho` from other metrics, such as metrics about the state of the machine that runs `tycho`.
 
-All time measurements must end with the `_sec` postfix:
+All time measurements must end with the `_time` postfix:
 
 ```rust
-metrics::histogram!("tycho_metric_name_sec").record(elapsed_time)
+metrics::histogram!("tycho_metric_name_time").record(elapsed_time)
 ```
 
-**Rationale:** The `_sec` postfix is handled by the collector, which transforms it into a lightweight histogram. Otherwise, the collector will try to build a complex summary. [Read more](https://prometheus.io/docs/practices/histograms/#quantiles)
+**Rationale:** The `_time` postfix is handled by the collector, which transforms it into a lightweight histogram. Otherwise, the collector will try to build a complex summary. [Read more](https://prometheus.io/docs/practices/histograms/#quantiles)
 
 ### Metrics performance
 
