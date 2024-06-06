@@ -64,6 +64,12 @@ pub struct PeerResolverConfig {
     /// Default: 10.
     pub fast_retry_count: u32,
 
+    /// Minimal interval between successful resolves.
+    ///
+    /// Default: 1 minute.
+    #[serde(with = "serde_helpers::humantime")]
+    pub min_successfull_resolve_interval: Duration,
+
     /// Minimal interval between the fast retries.
     ///
     /// Default: 1 second.
@@ -90,6 +96,7 @@ impl Default for PeerResolverConfig {
             min_ttl_sec: 600,
             update_before_sec: 1200,
             fast_retry_count: 10,
+            min_successfull_resolve_interval: Duration::from_secs(60),
             min_retry_interval: Duration::from_secs(1),
             max_retry_interval: Duration::from_secs(120),
             stale_retry_interval: Duration::from_secs(600),
@@ -150,14 +157,14 @@ impl PeerResolverInner {
                 return PeerResolverHandle::new_noop(peer_id);
             }
         };
-        let next_update_at = handle
+        let updater_state = handle
             .as_ref()
-            .map(|handle| self.compute_update_at(&handle.peer_info()));
+            .map(|handle| self.compute_timings(&handle.peer_info()));
 
         let data = Arc::new(PeerResolverHandleData::new(peer_id, handle));
 
         PeerResolverHandle::new(
-            JoinTask::new(self.clone().run_task(data.clone(), next_update_at)),
+            JoinTask::new(self.clone().run_task(data.clone(), updater_state)),
             data,
             self,
         )
@@ -166,23 +173,26 @@ impl PeerResolverInner {
     async fn run_task(
         self: Arc<Self>,
         data: Arc<PeerResolverHandleData>,
-        mut next_update_at: Option<u32>,
+        mut timings: Option<PeerResolverTimings>,
     ) {
         tracing::trace!(peer_id = %data.peer_id, "peer resolver task started");
 
         // TODO: Select between the loop body and `KnownPeers` update event.
         loop {
             // Wait if needed.
-            if let Some(update_at) = next_update_at {
-                let update_at = std::time::UNIX_EPOCH + Duration::from_secs(update_at as u64);
+            if let Some(t) = timings {
+                let update_at = std::time::UNIX_EPOCH + Duration::from_secs(t.update_at as u64);
                 let now = std::time::SystemTime::now();
-                if let Ok(remaining) = update_at.duration_since(now) {
-                    tokio::time::sleep(remaining).await;
-                }
+
+                let remaining = std::cmp::max(
+                    update_at.duration_since(now).unwrap_or_default(),
+                    self.config.min_successfull_resolve_interval,
+                );
+                tokio::time::sleep(remaining).await;
             }
 
             // Start resolving peer.
-            match self.resolve_peer(&data).await {
+            match self.resolve_peer(&data, &timings).await {
                 Some((network, peer_info)) => {
                     let mut handle = data.handle.lock().unwrap();
 
@@ -212,7 +222,7 @@ impl PeerResolverInner {
                         },
                     };
 
-                    next_update_at = Some(self.compute_update_at(peer_info));
+                    timings = Some(self.compute_timings(peer_info));
                 }
                 None => break,
             }
@@ -226,6 +236,7 @@ impl PeerResolverInner {
     async fn resolve_peer(
         &self,
         data: &PeerResolverHandleData,
+        prev_timings: &Option<PeerResolverTimings>,
     ) -> Option<(Network, Arc<PeerInfo>)> {
         struct Iter<'a> {
             backoff: Option<exponential_backoff::Iter<'a>>,
@@ -278,13 +289,15 @@ impl PeerResolverInner {
             {
                 let network = self.weak_network.upgrade()?;
                 if let Some(peer_info) = network.known_peers().get(&data.peer_id) {
-                    tracing::trace!(
-                        peer_id = %data.peer_id,
-                        attempts,
-                        is_stale,
-                        "peer info exists",
-                    );
-                    return Some((network, peer_info));
+                    if PeerResolverTimings::is_new_info(prev_timings, &peer_info) {
+                        tracing::trace!(
+                            peer_id = %data.peer_id,
+                            attempts,
+                            is_stale,
+                            "peer info exists",
+                        );
+                        return Some((network, peer_info));
+                    }
                 }
 
                 let dht_client = self.dht_service.make_client(&network);
@@ -301,7 +314,11 @@ impl PeerResolverInner {
                 match res {
                     // TODO: Should we move signature check into the `spawn_blocking`?
                     Ok(peer_info) if peer_info.id == data.peer_id && peer_info.is_valid(now) => {
-                        return Some((network, Arc::new(peer_info)));
+                        // NOTE: We only need a NEW peer info, otherwise the `resolve_peer`
+                        // method will be called again and again and again... without any progress.
+                        if PeerResolverTimings::is_new_info(prev_timings, &peer_info) {
+                            return Some((network, Arc::new(peer_info)));
+                        }
                     }
                     Ok(_) => {
                         tracing::trace!(
@@ -327,14 +344,36 @@ impl PeerResolverInner {
         }
     }
 
-    fn compute_update_at(&self, peer_info: &PeerInfo) -> u32 {
+    fn compute_timings(&self, peer_info: &PeerInfo) -> PeerResolverTimings {
         let real_ttl = peer_info
             .expires_at
             .saturating_sub(self.config.update_before_sec)
             .saturating_sub(peer_info.created_at);
 
         let adjusted_ttl = std::cmp::max(real_ttl, self.config.min_ttl_sec);
-        peer_info.created_at.saturating_add(adjusted_ttl)
+        PeerResolverTimings {
+            created_at: peer_info.created_at,
+            expires_at: peer_info.expires_at,
+            update_at: peer_info.created_at.saturating_add(adjusted_ttl),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PeerResolverTimings {
+    created_at: u32,
+    expires_at: u32,
+    update_at: u32,
+}
+
+impl PeerResolverTimings {
+    fn is_new_info(this: &Option<Self>, peer_info: &PeerInfo) -> bool {
+        match this {
+            Some(this) => {
+                peer_info.created_at > this.created_at && peer_info.expires_at > this.expires_at
+            }
+            None => true,
+        }
     }
 }
 
