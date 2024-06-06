@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::Result;
@@ -60,6 +60,8 @@ pub struct NodeConfig {
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
 
     pub rpc: Option<RpcConfig>,
+
+    pub metrics: Option<MetricsConfig>,
 }
 
 impl Default for NodeConfig {
@@ -77,6 +79,7 @@ impl Default for NodeConfig {
             blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
             rpc: Some(RpcConfig::default()),
+            metrics: Some(MetricsConfig::default()),
         }
     }
 }
@@ -90,5 +93,22 @@ impl NodeConfig {
         let data = serde_json::to_string_pretty(self)?;
         std::fs::write(path, data)?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MetricsConfig {
+    /// Listen address of metrics. Used by the client to gather prometheus metrics.
+    /// Default: `127.0.0.1:10000`
+    #[serde(with = "tycho_util::serde_helpers::string")]
+    pub listen_addr: SocketAddr,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10000),
+        }
     }
 }

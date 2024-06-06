@@ -28,6 +28,7 @@ exponential-backoff = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
 hex = { workspace = true }
 indexmap = { workspace = true }
+metrics = { workspace = true }
 moka = { workspace = true }
 parking_lot = { workspace = true }
 pin-project-lite = { workspace = true }

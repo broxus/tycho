@@ -92,6 +92,7 @@ gen_network n: build_debug
 
         PORT=$((20000 + i))
         RPC_PORT=$((8000 + i))
+        METRICS_PORT=$((10000 + i))
 
         KEY=$(jq -r .secret < "$TEMP_DIR/keys${i}.json")
         DHT_ENTRY=$($TYCHO_BIN tool gen-dht "127.0.0.1:$PORT" --key "$KEY")
@@ -100,6 +101,7 @@ gen_network n: build_debug
 
         NODE_CONFIG=$(echo "$NODE_CONFIG" | jq ".port = $PORT | .storage.root_dir = \"$TEMP_DIR/db${i}\"")
         NODE_CONFIG=$(echo "$NODE_CONFIG" | jq "if .rpc.listen_addr? then .rpc.listen_addr = \"0.0.0.0:$RPC_PORT\" else . end")
+        NODE_CONFIG=$(echo "$NODE_CONFIG" | jq "if .metrics.listen_addr? then .metrics.listen_addr = \"0.0.0.0:$METRICS_PORT\" else . end")
         echo "$NODE_CONFIG" > "$TEMP_DIR/config${i}.json"
     done
 

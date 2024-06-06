@@ -28,6 +28,21 @@ pub(crate) enum ConnectionManagerRequest {
     Shutdown(oneshot::Sender<()>),
 }
 
+// Counters
+const METRIC_CONNECTIONS_OUT_TOTAL: &str = "tycho_net_conn_out_total";
+const METRIC_CONNECTIONS_IN_TOTAL: &str = "tycho_net_conn_in_total";
+const METRIC_CONNECTIONS_OUT_FAILED_TOTAL: &str = "tycho_net_conn_out_failed_total";
+const METRIC_CONNECTIONS_IN_FAILED_TOTAL: &str = "tycho_net_conn_in_failed_total";
+
+// Gauges
+const METRIC_CONNECTIONS_ACTIVE: &str = "tycho_net_conn_active";
+const METRIC_CONNECTIONS_PENDING: &str = "tycho_net_conn_pending";
+const METRIC_CONNECTIONS_PARTIAL: &str = "tycho_net_conn_partial";
+const METRIC_CONNECTIONS_PENDING_DIALS: &str = "tycho_net_conn_pending_dials";
+
+const METRIC_ACTIVE_PEERS: &str = "tycho_net_active_peers";
+const METRIC_KNOWN_PEERS: &str = "tycho_net_known_peers";
+
 pub(crate) struct ConnectionManager {
     config: Arc<NetworkConfig>,
     endpoint: Arc<Endpoint>,
@@ -67,6 +82,37 @@ impl ConnectionManager {
         known_peers: KnownPeers,
         service: BoxCloneService<ServiceRequest, Response>,
     ) -> (Self, mpsc::Sender<ConnectionManagerRequest>) {
+        metrics::describe_counter!(
+            METRIC_CONNECTIONS_OUT_TOTAL,
+            "Number of established outgoing connections over time"
+        );
+        metrics::describe_counter!(
+            METRIC_CONNECTIONS_IN_TOTAL,
+            "Number of established incoming connections over time"
+        );
+        metrics::describe_counter!(
+            METRIC_CONNECTIONS_OUT_FAILED_TOTAL,
+            "Number of failed outgoing connections over time"
+        );
+        metrics::describe_counter!(
+            METRIC_CONNECTIONS_IN_FAILED_TOTAL,
+            "Number of failed incoming connections over time"
+        );
+
+        metrics::describe_gauge!(METRIC_CONNECTIONS_ACTIVE, "Number of active connections");
+        metrics::describe_gauge!(METRIC_CONNECTIONS_PENDING, "Number of pending connections");
+        metrics::describe_gauge!(
+            METRIC_CONNECTIONS_PARTIAL,
+            "Number of half-resolved connections"
+        );
+        metrics::describe_gauge!(
+            METRIC_CONNECTIONS_PENDING_DIALS,
+            "Number of pending connectivity checks"
+        );
+
+        metrics::describe_gauge!(METRIC_ACTIVE_PEERS, "Number of active peers");
+        metrics::describe_gauge!(METRIC_KNOWN_PEERS, "Number of known peers");
+
         let (mailbox_tx, mailbox) = mpsc::channel(config.connection_manager_channel_capacity);
         let connection_manager = Self {
             config,
@@ -120,6 +166,7 @@ impl ConnectionManager {
                     }
                 }
                 Some(connecting_output) = self.pending_connections.join_next() => {
+                    metrics::gauge!(METRIC_CONNECTIONS_PENDING).decrement(1);
                     match connecting_output {
                         Ok(connecting) => self.handle_connecting_result(connecting),
                         Err(e) => {
@@ -130,12 +177,15 @@ impl ConnectionManager {
                     }
                 }
                 Some(partial_connection) = self.pending_partial_connections.join_next() => {
+                    metrics::gauge!(METRIC_CONNECTIONS_PARTIAL).decrement(1);
                     // NOTE: unwrap here is to propagate panic from the spawned future
                     if let Some(PartialConnection { connection, timeout_at }) = partial_connection.unwrap() {
                         self.handle_incoming_impl(connection, None, timeout_at);
                     }
                 }
                 Some(connection_handler_output) = self.connection_handlers.join_next() => {
+                    metrics::gauge!(METRIC_CONNECTIONS_ACTIVE).decrement(1);
+
                     // NOTE: unwrap here is to propagate panic from the spawned future
                     if let Err(e) = connection_handler_output {
                         if e.is_panic() {
@@ -162,10 +212,16 @@ impl ConnectionManager {
         tracing::trace!("shutting down connection manager");
 
         self.endpoint.close();
-        self.pending_partial_connections.shutdown().await;
-        self.pending_connections.shutdown().await;
 
-        while self.connection_handlers.join_next().await.is_some() {}
+        self.pending_partial_connections.shutdown().await;
+        metrics::gauge!(METRIC_CONNECTIONS_PARTIAL).set(0);
+
+        self.pending_connections.shutdown().await;
+        metrics::gauge!(METRIC_CONNECTIONS_PENDING).set(0);
+
+        while self.connection_handlers.join_next().await.is_some() {
+            metrics::gauge!(METRIC_CONNECTIONS_ACTIVE).decrement(1);
+        }
         assert!(self.active_peers.is_empty());
 
         self.endpoint
@@ -248,6 +304,8 @@ impl ConnectionManager {
             self.dial_peer(address, &peer_info.id, tx);
             self.pending_dials.insert(peer_info.id, rx);
         }
+
+        metrics::gauge!(METRIC_CONNECTIONS_PENDING_DIALS).set(self.pending_dials.len() as f64);
     }
 
     fn handle_connect_request(&mut self, address: Address, peer_id: &PeerId, callback: CallbackTx) {
@@ -294,6 +352,7 @@ impl ConnectionManager {
                         }
                     }
                 });
+                metrics::gauge!(METRIC_CONNECTIONS_PARTIAL).increment(1);
             }
             Into0RttResult::InvalidConnection(e) => {
                 // TODO: Lower log level to trace/debug?
@@ -341,6 +400,7 @@ impl ConnectionManager {
                 connecting_result: ManuallyDrop::new(connecting_result),
                 target_address,
                 target_peer_id,
+                origin: Direction::Inbound,
             }
         }
 
@@ -427,6 +487,7 @@ impl ConnectionManager {
                 accepted,
                 timeout_at,
             )));
+            metrics::gauge!(METRIC_CONNECTIONS_PENDING).increment(1);
         }
     }
 
@@ -482,6 +543,12 @@ impl ConnectionManager {
                     "connection failed: {e}"
                 );
 
+                metrics::counter!(match res.origin {
+                    Direction::Outbound => METRIC_CONNECTIONS_OUT_FAILED_TOTAL,
+                    Direction::Inbound => METRIC_CONNECTIONS_IN_FAILED_TOTAL,
+                })
+                .increment(1);
+
                 // Delay sending the error to callbacks as the target peer might be
                 // in the process of connecting to us.
                 if let Some(quinn::ConnectionError::ApplicationClosed(closed)) = e.downcast_ref() {
@@ -505,12 +572,22 @@ impl ConnectionManager {
 
     fn add_peer(&mut self, connection: Connection) {
         if let Some(connection) = self.active_peers.add(self.endpoint.peer_id(), connection) {
+            let origin = connection.origin();
+
             let handler = InboundRequestHandler::new(
                 self.config.clone(),
                 connection,
                 self.service.clone(),
                 self.active_peers.clone(),
             );
+
+            metrics::counter!(match origin {
+                Direction::Outbound => METRIC_CONNECTIONS_OUT_TOTAL,
+                Direction::Inbound => METRIC_CONNECTIONS_IN_TOTAL,
+            })
+            .increment(1);
+
+            metrics::gauge!(METRIC_CONNECTIONS_ACTIVE).increment(1);
             self.connection_handlers.spawn(handler.start());
         }
     }
@@ -553,6 +630,7 @@ impl ConnectionManager {
                 connecting_result: ManuallyDrop::new(connecting_result),
                 target_address: address,
                 target_peer_id: peer_id,
+                origin: Direction::Outbound,
             }
         }
 
@@ -611,6 +689,7 @@ impl ConnectionManager {
                 *peer_id,
                 self.config.clone(),
             )));
+            metrics::gauge!(METRIC_CONNECTIONS_PENDING).increment(1);
         }
     }
 }
@@ -633,6 +712,7 @@ struct ConnectingOutput {
     connecting_result: ManuallyDrop<Result<Connection, Arc<anyhow::Error>>>,
     target_address: Address,
     target_peer_id: PeerId,
+    origin: Direction,
 }
 
 impl Drop for ConnectingOutput {
@@ -923,6 +1003,8 @@ impl ActivePeersInner {
     fn add(&self, local_id: &PeerId, new_connection: Connection) -> Option<Connection> {
         use dashmap::mapref::entry::Entry;
 
+        let mut added = false;
+
         let peer_id = new_connection.peer_id();
         match self.connections.entry(*peer_id) {
             Entry::Occupied(mut entry) => {
@@ -945,10 +1027,15 @@ impl ActivePeersInner {
             Entry::Vacant(entry) => {
                 self.connections_len.fetch_add(1, Ordering::Release);
                 entry.insert(new_connection.clone());
+                added = true;
             }
         }
 
         self.send_event(PeerEvent::NewPeer(*peer_id));
+
+        if added {
+            metrics::gauge!(METRIC_ACTIVE_PEERS).increment(1);
+        }
         Some(new_connection)
     }
 
@@ -957,6 +1044,8 @@ impl ActivePeersInner {
             connection.close();
             self.connections_len.fetch_sub(1, Ordering::Release);
             self.send_event(PeerEvent::LostPeer(*peer_id, reason));
+
+            metrics::gauge!(METRIC_ACTIVE_PEERS).decrement(1);
         }
     }
 
@@ -968,6 +1057,8 @@ impl ActivePeersInner {
             connection.close();
             self.connections_len.fetch_sub(1, Ordering::Release);
             self.send_event(PeerEvent::LostPeer(*peer_id, reason));
+
+            metrics::gauge!(METRIC_ACTIVE_PEERS).decrement(1);
         }
     }
 
@@ -1046,12 +1137,15 @@ impl KnownPeers {
 
     pub fn remove(&self, peer_id: &PeerId) {
         self.0.remove(peer_id);
+        metrics::gauge!(METRIC_KNOWN_PEERS).decrement(1);
     }
 
     pub fn ban(&self, peer_id: &PeerId) {
+        let mut added = false;
         match self.0.entry(*peer_id) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 entry.insert(KnownPeerState::Banned);
+                added = true;
             }
             dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
                 KnownPeerState::Banned => {}
@@ -1060,6 +1154,11 @@ impl KnownPeers {
                     None => *entry.get_mut() = KnownPeerState::Banned,
                 },
             },
+        }
+
+        if added {
+            // NOTE: "New" banned peer is a "new" known peer.
+            metrics::gauge!(METRIC_KNOWN_PEERS).increment(1);
         }
     }
 
@@ -1086,10 +1185,12 @@ impl KnownPeers {
         with_affinity: bool,
     ) -> Result<KnownPeerHandle, KnownPeersError> {
         // TODO: add capacity limit for entries without affinity
+        let mut added = false;
         let inner = match self.0.entry(peer_info.id) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let inner = KnownPeerInner::new(peer_info, with_affinity, &self.0);
                 entry.insert(KnownPeerState::Stored(Arc::downgrade(&inner)));
+                added = true;
                 inner
             }
             dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
@@ -1108,6 +1209,10 @@ impl KnownPeers {
             },
         };
 
+        if added {
+            metrics::gauge!(METRIC_KNOWN_PEERS).increment(1);
+        }
+
         Ok(KnownPeerHandle::from_inner(inner, with_affinity))
     }
 
@@ -1118,10 +1223,12 @@ impl KnownPeers {
         with_affinity: bool,
     ) -> Result<KnownPeerHandle, PeerBannedError> {
         // TODO: add capacity limit for entries without affinity
+        let mut added = false;
         let inner = match self.0.entry(peer_info.id) {
             dashmap::mapref::entry::Entry::Vacant(entry) => {
                 let inner = KnownPeerInner::new(peer_info, with_affinity, &self.0);
                 entry.insert(KnownPeerState::Stored(Arc::downgrade(&inner)));
+                added = true;
                 inner
             }
             dashmap::mapref::entry::Entry::Occupied(mut entry) => match entry.get_mut() {
@@ -1140,6 +1247,10 @@ impl KnownPeers {
                 },
             },
         };
+
+        if added {
+            metrics::gauge!(METRIC_KNOWN_PEERS).increment(1);
+        }
 
         Ok(KnownPeerHandle::from_inner(inner, with_affinity))
     }
@@ -1319,6 +1430,7 @@ impl Drop for KnownPeerHandleState {
             // If the last reference is dropped, remove the peer from the known peers cache
             if let Some(peers) = inner.weak_known_peers.upgrade() {
                 peers.remove(&inner.peer_info.load().id);
+                metrics::gauge!(METRIC_KNOWN_PEERS).decrement(1);
             }
         }
     }
