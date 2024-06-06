@@ -376,7 +376,7 @@ impl CollatorStdImpl {
                 .await?;
         }
 
-        let diff = internal_messages_iterator.take_diff();
+        let diff = Arc::new(internal_messages_iterator.take_diff());
 
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {
@@ -402,7 +402,7 @@ impl CollatorStdImpl {
             .await?;
 
         self.mq_adapter
-            .apply_diff(Arc::new(diff), candidate.block_id.as_short_id())
+            .apply_diff(diff.clone(), candidate.block_id.as_short_id())
             .await?;
 
         // STUB: sleep to slow down collation process for analysis
@@ -415,7 +415,12 @@ impl CollatorStdImpl {
             has_pending_internals,
         };
         self.listener.on_block_candidate(collation_result).await?;
-        tracing::info!(target: tracing_targets::COLLATOR, "created and sent block candidate...");
+
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "created and sent block candidate: start_lt={}, end_lt={}, txs={}, new_msgs={}, in_msgs={}, out_msgs={}",
+            collation_data.start_lt, collation_data.next_lt, block_transactions_count,
+            diff.messages.len(), collation_data.in_msgs.len(), collation_data.out_msgs.len(),
+        );
 
         // update PrevData in working state
         self.update_working_state(new_state_stuff)?;
