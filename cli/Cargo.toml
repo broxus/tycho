@@ -26,6 +26,7 @@ futures-util = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+parking_lot = { workspace = true }
 public-ip = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
@@ -62,6 +63,7 @@ rustc_version = { workspace = true }
 [features]
 default = ["jemalloc"]
 jemalloc = ["dep:tikv-jemallocator"]
+deadlock-detection = ["parking_lot/deadlock_detection"]
 
 [lints]
 workspace = true
