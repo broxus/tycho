@@ -573,7 +573,7 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         if let Some(handle) = &*self.gc_handle.load() {
-            handle.abort()
+            handle.abort();
         }
     }
 }
