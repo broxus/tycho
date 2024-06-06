@@ -11,15 +11,13 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_collator::collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::collator::CollatorStdImplFactory;
-use tycho_collator::internal_queue::persistent::persistent_state::{
-    PersistentStateConfig, PersistentStateImplFactory,
-};
-use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
+use tycho_collator::internal_queue::persistent::persistent_state::PersistentStateImplFactory;
+use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::{MempoolAdapterFactory, MempoolAdapterStdImpl};
+use tycho_collator::mempool::MempoolAdapterStdImpl;
+use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::{CollationConfig, ValidatorNetwork};
 use tycho_collator::validator::client::retry::BackoffConfig;
@@ -552,7 +550,9 @@ impl Node {
         // TODO: move into config
         let collation_config = CollationConfig {
             key_pair: self.keypair.clone(),
-            mc_block_min_interval_ms: 10000,
+            mc_block_min_interval_ms: 2500,
+            max_uncommitted_chain_length: 32,
+            uncommitted_chain_to_import_next_anchor: 8,
             max_mc_block_delta_from_bc_to_await_own: 2,
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
@@ -561,16 +561,9 @@ impl Node {
             test_validators_keypairs: vec![],
         };
 
-        let queue_config = QueueConfig {
-            persistent_state_config: PersistentStateConfig {
-                database_url: "db_url".to_string(),
-            },
-        };
-
-        let shards = vec![ShardIdent::default()];
+        let shards = vec![];
         let session_state_factory = SessionStateImplFactory::new(shards);
-        let persistent_state_factory =
-            PersistentStateImplFactory::new(queue_config.persistent_state_config);
+        let persistent_state_factory = PersistentStateImplFactory::new(self.storage.clone());
 
         let queue_factory = QueueFactoryStdImpl {
             session_state_factory,
@@ -592,7 +585,7 @@ impl Node {
                 },
                 // TODO: Move into node config
                 config: ValidatorConfig {
-                    backoff_config: BackoffConfig {
+                    error_backoff_config: BackoffConfig {
                         min_delay: Duration::from_millis(50),
                         max_delay: Duration::from_secs(10),
                         factor: 2.0,
@@ -600,6 +593,12 @@ impl Node {
                     },
                     request_timeout: Duration::from_secs(1),
                     delay_between_requests: Duration::from_millis(50),
+                    request_signatures_backoff_config: BackoffConfig {
+                        min_delay: Duration::from_millis(50),
+                        max_delay: Duration::from_secs(1),
+                        factor: 2.0,
+                        max_times: usize::MAX,
+                    },
                 },
             },
             CollatorStdImplFactory,

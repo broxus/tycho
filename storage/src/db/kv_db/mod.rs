@@ -64,6 +64,8 @@ weedb::tables! {
         pub prev2: tables::Prev2,
         pub next1: tables::Next1,
         pub next2: tables::Next2,
+        pub internal_messages: tables::InternalMessages,
+        pub shards_internal_messages: tables::ShardsInternalMessages,
     }
 }
 

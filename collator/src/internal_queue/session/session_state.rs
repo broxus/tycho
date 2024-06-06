@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::session::session_state_snapshot::SessionStateSnapshot;
 use crate::internal_queue::shard::Shard;
-use crate::internal_queue::snapshot::StateSnapshot;
+use crate::internal_queue::snapshot::{ShardRange, StateSnapshot};
 use crate::internal_queue::types::QueueDiff;
 
 // FACTORY
@@ -52,9 +52,23 @@ impl SessionStateFactory for SessionStateImplFactory {
 #[trait_variant::make(SessionState: Send)]
 pub trait LocalSessionState {
     fn new(shards: &[ShardIdent]) -> Self;
-    async fn snapshot(&self) -> Box<dyn StateSnapshot>;
+    async fn snapshot(
+        &self,
+        ranges: HashMap<ShardIdent, ShardRange>,
+        for_shard_id: ShardIdent,
+    ) -> Box<dyn StateSnapshot>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError>;
+    async fn merge_shards(
+        &self,
+        shard_1_id: &ShardIdent,
+        shard_2_id: &ShardIdent,
+    ) -> Result<(), QueueError>;
+    async fn apply_diff(
+        &self,
+        diff: Arc<QueueDiff>,
+        block_id_short: BlockIdShort,
+    ) -> Result<(), QueueError>;
+    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn remove_diff(
         &self,
         diff_id: &BlockIdShort,
@@ -78,34 +92,121 @@ impl SessionState for SessionStateStdImpl {
         }
     }
 
-    async fn snapshot(&self) -> Box<dyn StateSnapshot> {
+    async fn snapshot(
+        &self,
+        ranges: HashMap<ShardIdent, ShardRange>,
+        for_shard_id: ShardIdent,
+    ) -> Box<dyn StateSnapshot> {
         let shards_flat_read = self.shards_flat.read().await;
         let mut flat_shards = HashMap::new();
         for (shard_ident, shard_lock) in shards_flat_read.iter() {
             let shard = shard_lock.read().await;
             flat_shards.insert(*shard_ident, shard.clone());
         }
-        Box::new(SessionStateSnapshot::new(flat_shards))
+        Box::new(SessionStateSnapshot::new(
+            flat_shards,
+            &ranges,
+            &for_shard_id,
+        ))
     }
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
         let mut lock = self.shards_flat.write().await;
-        lock.get(shard_id)
+        let shard = lock
+            .get(shard_id)
             .ok_or(QueueError::ShardNotFound(*shard_id))?;
+
+        let shard_messages_len = shard.read().await.outgoing_messages.len();
+
+        if shard_messages_len > 0 {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Cannot split shard with messages"
+            )));
+        }
+
         let split = shard_id.split();
-        if let Some(split) = split {
-            lock.insert(split.0, Arc::new(RwLock::new(Shard::new(split.0))));
-            lock.insert(split.1, Arc::new(RwLock::new(Shard::new(split.1))));
-        };
+
+        let split = split.ok_or(QueueError::Other(anyhow::anyhow!("Failed to split shard")))?;
+
+        // check if the split is not already in the shards
+        if lock.contains_key(&split.0) || lock.contains_key(&split.1) {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Splitted shards already exists in the shards"
+            )));
+        }
+
+        lock.insert(split.0, Arc::new(RwLock::new(Shard::new(split.0))));
+        lock.insert(split.1, Arc::new(RwLock::new(Shard::new(split.1))));
+
         Ok(())
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>) -> Result<(), QueueError> {
+    async fn merge_shards(
+        &self,
+        shard_1_id: &ShardIdent,
+        shard_2_id: &ShardIdent,
+    ) -> Result<(), QueueError> {
+        let mut lock = self.shards_flat.write().await;
+        let shard_1 = lock
+            .get(shard_1_id)
+            .ok_or(QueueError::ShardNotFound(*shard_1_id))?;
+        let shard_2 = lock
+            .get(shard_2_id)
+            .ok_or(QueueError::ShardNotFound(*shard_2_id))?;
+        let shard_1_messages_len = shard_1.read().await.outgoing_messages.len();
+        let shard_2_messages_len = shard_2.read().await.outgoing_messages.len();
+        if shard_1_messages_len > 0 || shard_2_messages_len > 0 {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Cannot merge shards with messages"
+            )));
+        }
+
+        let merged_shard_1 = shard_1_id
+            .merge()
+            .ok_or(QueueError::Other(anyhow::anyhow!("Failed to merge shard")))?;
+        let merged_shard_2 = shard_2_id
+            .merge()
+            .ok_or(QueueError::Other(anyhow::anyhow!("Failed to merge shard")))?;
+
+        if merged_shard_1 != merged_shard_2 {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Merge shards are not equal"
+            )));
+        }
+
+        if lock.contains_key(&merged_shard_1) {
+            return Err(QueueError::Other(anyhow::anyhow!(
+                "Merged shard already exists in the shards"
+            )));
+        }
+
+        lock.insert(
+            merged_shard_1,
+            Arc::new(RwLock::new(Shard::new(merged_shard_1))),
+        );
+
+        Ok(())
+    }
+
+    async fn apply_diff(
+        &self,
+        diff: Arc<QueueDiff>,
+        block_id_short: BlockIdShort,
+    ) -> Result<(), QueueError> {
         let locker = self.shards_flat.write().await;
         let shard = locker
-            .get(&diff.id.shard)
-            .ok_or(QueueError::ShardNotFound(diff.id.shard))?;
-        shard.write().await.add_diff(diff);
+            .get(&block_id_short.shard)
+            .ok_or(QueueError::ShardNotFound(block_id_short.shard))?;
+        shard.write().await.add_diff(diff, block_id_short);
+        Ok(())
+    }
+
+    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
+        let mut lock = self.shards_flat.write().await;
+        if lock.contains_key(shard_id) {
+            return Err(QueueError::ShardAlreadyExists(*shard_id));
+        }
+        lock.insert(*shard_id, Arc::new(RwLock::new(Shard::new(*shard_id))));
         Ok(())
     }
 
@@ -132,11 +233,12 @@ impl SessionStateStdImpl {
 mod tests {
     use std::sync::Arc;
 
-    use super::*;
-    use crate::internal_queue::session::session_state::*;
-    use crate::internal_queue::types::ext_types_stubs::{
-        EnqueuedMessage, MessageContent, MessageEnvelope,
+    use everscale_types::models::{BlockIdShort, ShardIdent};
+
+    use crate::internal_queue::session::session_state::{
+        SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
     };
+    use crate::internal_queue::types::{EnqueuedMessage, QueueDiff};
 
     fn test_shard_idents() -> Vec<ShardIdent> {
         vec![ShardIdent::new_full(0)]
@@ -144,14 +246,9 @@ mod tests {
 
     fn default_message() -> Arc<EnqueuedMessage> {
         Arc::new(EnqueuedMessage {
-            created_lt: 0,
-            enqueued_lt: 0,
-            hash: "somehash".to_string(),
-            env: MessageEnvelope {
-                message: MessageContent {},
-                from_contract: "0".to_string(),
-                to_contract: "1".to_string(),
-            },
+            info: Default::default(),
+            cell: Default::default(),
+            hash: Default::default(),
         })
     }
 
@@ -175,7 +272,6 @@ mod tests {
             seqno: 0,
         };
         let diff = Arc::new(QueueDiff {
-            id: block_id,
             messages: vec![default_message()],
             processed_upto: Default::default(),
         });

@@ -16,14 +16,11 @@ use tycho_consensus::{InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastHashSet;
 
+use super::mempool_adapter_stub::{stub_get_anchor_by_id, stub_get_next_anchor};
 use crate::mempool::external_message_cache::ExternalMessageCache;
 use crate::mempool::types::ExternalMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::tracing_targets;
-
-#[cfg(test)]
-#[path = "tests/mempool_adapter_tests.rs"]
-pub(super) mod tests;
 
 // FACTORY
 
@@ -220,80 +217,14 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>> {
         // TODO: make real implementation, currently only return anchor from local cache
-        let res = {
-            let anchors_cache_r = self.anchors.read();
 
-            anchors_cache_r.get(&anchor_id).cloned()
-        };
-        if res.is_some() {
-            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Requested anchor (id: {}) found in local cache", anchor_id);
-        } else {
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                "Requested anchor (id: {}) was not found in local cache",
-                anchor_id
-            );
-            tracing::trace!(target: tracing_targets::MEMPOOL_ADAPTER, "STUB: Requesting anchor (id: {}) in mempool...", anchor_id);
-            let response_duration = tokio::time::Duration::from_millis(107);
-            tokio::time::sleep(response_duration).await;
-            tracing::info!(
-                target: tracing_targets::MEMPOOL_ADAPTER,
-                "STUB: Requested anchor (id: {}) was not found in mempool (responded in {} ms)",
-                anchor_id,
-                response_duration.as_millis(),
-            );
-        }
-        Ok(res)
+        stub_get_anchor_by_id(self.anchors.clone(), anchor_id).await
     }
 
     async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
         // TODO: make real implementation, currently only return anchor from local cache
 
-        let mut stub_first_attempt = true;
-        let mut request_timer = std::time::Instant::now();
-        loop {
-            {
-                let anchors_cache_r = self.anchors.read();
-
-                let mut range = anchors_cache_r.range((
-                    std::ops::Bound::Excluded(prev_anchor_id),
-                    std::ops::Bound::Unbounded,
-                ));
-
-                if let Some((next_id, next)) = range.next() {
-                    if stub_first_attempt {
-                        tracing::info!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "Found in cache next anchor (id: {}) after specified previous (id: {})",
-                            next_id,
-                            prev_anchor_id,
-                        );
-                    } else {
-                        tracing::info!(
-                            target: tracing_targets::MEMPOOL_ADAPTER,
-                            "STUB: Returned next anchor (id: {}) after previous (id: {}) from mempool (responded in {} ms)",
-                            next_id,
-                            prev_anchor_id,
-                            request_timer.elapsed().as_millis(),
-                        );
-                    }
-                    return Ok(next.clone());
-                } else if stub_first_attempt {
-                    tracing::info!(
-                        target: tracing_targets::MEMPOOL_ADAPTER,
-                        "There is no next anchor in cache after previous (id: {}). STUB: Requested it from mempool. Waiting...",
-                        prev_anchor_id
-                    );
-                }
-            }
-
-            // stub waiting some time until new emulated anchors be added to cache
-            if stub_first_attempt {
-                request_timer = std::time::Instant::now();
-            }
-            stub_first_attempt = false;
-            tokio::time::sleep(tokio::time::Duration::from_millis(1020)).await;
-        }
+        stub_get_next_anchor(self.anchors.clone(), prev_anchor_id).await
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {

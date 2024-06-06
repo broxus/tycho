@@ -16,7 +16,7 @@ bytes = { workspace = true }
 bytesize = { workspace = true }
 crc = { workspace = true }
 dashmap = { workspace = true }
-everscale-types = { workspace = true, features = ["tycho"] }
+everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }
 hex = { workspace = true }
 humantime = { workspace = true }

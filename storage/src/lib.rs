@@ -128,6 +128,8 @@ impl StorageBuilder {
 
         let rpc_state = rpc_db.map(RpcStorage::new);
 
+        let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
+
         // TODO: preload archive ids
 
         Ok(Storage {
@@ -142,6 +144,7 @@ impl StorageBuilder {
                 node_state_storage,
                 runtime_storage,
                 rpc_state,
+                internal_queue_storage,
             }),
         })
     }
@@ -223,6 +226,10 @@ impl Storage {
     pub fn rpc_storage(&self) -> Option<&RpcStorage> {
         self.inner.rpc_state.as_ref()
     }
+
+    pub fn internal_queue_storage(&self) -> &InternalQueueStorage {
+        &self.inner.internal_queue_storage
+    }
 }
 
 struct Inner {
@@ -236,6 +243,6 @@ struct Inner {
     shard_state_storage: ShardStateStorage,
     node_state_storage: NodeStateStorage,
     persistent_state_storage: PersistentStateStorage,
-
     rpc_state: Option<RpcStorage>,
+    internal_queue_storage: InternalQueueStorage,
 }

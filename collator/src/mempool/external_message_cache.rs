@@ -1,4 +1,3 @@
-use std::ops::Index;
 use std::sync::Arc;
 
 use everscale_types::cell::HashBytes;

@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use tycho_network::{Network, PeerId, PrivateOverlay, Request};
 
 use crate::tracing_targets;
-use crate::validator::network::dto::SignaturesQuery;
+use crate::validator::network::dto::{SignaturesQueryRequest, SignaturesQueryResponse};
 
 pub struct ValidatorClient {
     pub network: Network,
@@ -24,10 +24,10 @@ impl ValidatorClient {
 
     pub async fn request_signatures(
         &self,
-        payload: SignaturesQuery,
+        payload: SignaturesQueryRequest,
         timeout_duration: Duration,
-    ) -> Result<SignaturesQuery> {
-        tracing::debug!(target: tracing_targets::VALIDATOR, "Requesting signatures from validator1111");
+    ) -> Result<SignaturesQueryResponse> {
+        tracing::trace!(target: tracing_targets::VALIDATOR, "Requesting signatures from validator");
         let payload = Request::from_tl(payload);
         match tokio::time::timeout(
             timeout_duration,
@@ -36,7 +36,9 @@ impl ValidatorClient {
         )
         .await
         {
-            Ok(Ok(response)) => response.parse_tl::<SignaturesQuery>().map_err(Into::into),
+            Ok(Ok(response)) => response
+                .parse_tl::<SignaturesQueryResponse>()
+                .map_err(Into::into),
             Ok(Err(e)) => Err(anyhow!("Network error: {}", e)),
             Err(elapsed) => Err(anyhow!("Timeout during request. Elapsed: {:?}", elapsed)),
         }

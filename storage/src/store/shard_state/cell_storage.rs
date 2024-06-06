@@ -797,6 +797,13 @@ impl CellImpl for StorageCell {
 
         None
     }
+
+    fn stats(&self) -> CellTreeStats {
+        // TODO: make real implementation
+
+        // STUB: just return default value
+        Default::default()
+    }
 }
 
 impl Drop for StorageCell {

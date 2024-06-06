@@ -94,7 +94,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {:?}", block_id);
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
         let state = self
             .storage
             .shard_state_storage()
@@ -104,7 +104,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {:?}", block_id);
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
         let block_storage = self.storage.block_storage();
@@ -116,12 +116,12 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block handle: {:?}", block_id);
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block handle: {}", block_id.as_short_id());
         Ok(self.storage.block_handle_storage().load_handle(block_id))
     }
 
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {:?}", block.block_id);
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block.block_id.as_short_id());
         let mut blocks = self.blocks.lock().await;
         let block_id = block.block_id;
         blocks
@@ -147,7 +147,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {:?}", state.block_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
 
         let mut to_split = Vec::new();

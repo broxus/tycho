@@ -13,6 +13,7 @@ license.workspace = true
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 futures-util = { workspace = true }
@@ -26,7 +27,9 @@ tokio = { workspace = true, features = ["macros", "rt", "signal"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+ton_executor = { workspace = true }
 trait-variant = { workspace = true }
+
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
 
@@ -49,7 +52,9 @@ tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 
 [features]
+default = []
 test = []
+block-creator-stats = []
 
 [lints]
 workspace = true

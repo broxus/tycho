@@ -1,16 +1,20 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::models::ShardIdent;
 
-use crate::internal_queue::error::QueueError;
-use crate::internal_queue::types::ext_types_stubs::{EnqueuedMessage, Lt};
+use crate::internal_queue::types::{EnqueuedMessage, Lt};
 
-#[derive(Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct MessageWithSource {
     pub shard_id: ShardIdent,
     pub message: Arc<EnqueuedMessage>,
+}
+
+impl MessageWithSource {
+    pub fn new(shard_id: ShardIdent, message: Arc<EnqueuedMessage>) -> Self {
+        MessageWithSource { shard_id, message }
+    }
 }
 
 impl PartialEq<Self> for MessageWithSource {
@@ -31,11 +35,13 @@ impl Ord for MessageWithSource {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct IterRange {
     pub shard_id: ShardIdent,
     pub lt: Lt,
 }
 
+#[derive(Debug)]
 pub struct ShardRange {
     pub shard_id: ShardIdent,
     pub from_lt: Option<Lt>,
@@ -43,9 +49,7 @@ pub struct ShardRange {
 }
 
 pub trait StateSnapshot: Send {
-    fn get_outgoing_messages_by_shard(
-        &self,
-        shards: &mut HashMap<ShardIdent, ShardRange>,
-        shard_id: &ShardIdent,
-    ) -> Result<Vec<Arc<MessageWithSource>>, QueueError>;
+    fn next(&mut self) -> Option<Arc<MessageWithSource>>;
+
+    fn peek(&self) -> Option<Arc<MessageWithSource>>;
 }

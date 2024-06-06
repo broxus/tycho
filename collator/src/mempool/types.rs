@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
-use everscale_types::models::ExtInMsgInfo;
+use everscale_types::models::{ExtInMsgInfo, MsgInfo, ShardIdent};
 use everscale_types::prelude::{Cell, HashBytes};
+
+use crate::types::ShardIdentExt;
 
 // TYPES
 
 pub type MempoolAnchorId = u32;
 
 #[derive(Debug)]
-pub(crate) struct ExternalMessage {
+pub struct ExternalMessage {
     message_cell: Cell,
     message_info: ExtInMsgInfo,
 }
@@ -20,12 +22,25 @@ impl ExternalMessage {
             message_info,
         }
     }
+    pub fn info(&self) -> &ExtInMsgInfo {
+        &self.message_info
+    }
 
     pub fn hash(&self) -> &HashBytes {
         self.message_cell.repr_hash()
     }
 }
 
+impl From<&ExternalMessage> for (MsgInfo, Cell) {
+    fn from(value: &ExternalMessage) -> Self {
+        (
+            MsgInfo::ExtIn(value.message_info.clone()),
+            value.message_cell.clone(),
+        )
+    }
+}
+
+#[derive(Debug)]
 pub struct MempoolAnchor {
     id: MempoolAnchorId,
     chain_time: u64,
@@ -53,8 +68,10 @@ impl MempoolAnchor {
         self.externals.len()
     }
 
-    pub fn has_externals(&self) -> bool {
-        !self.externals.is_empty()
+    pub fn check_has_externals_for(&self, shard_id: &ShardIdent) -> bool {
+        self.externals
+            .iter()
+            .any(|ext| shard_id.contains_address(&ext.info().dst))
     }
 
     pub fn externals_iterator(

@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{Block, BlockId, OwnedMessage, ShardIdent, Signature};
+use everscale_types::models::{
+    Block, BlockId, BlockInfo, CurrencyCollection, IntAddr, ShardIdent, Signature, ValueFlow,
+};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
@@ -10,7 +12,12 @@ use tycho_util::FastHashMap;
 
 pub struct CollationConfig {
     pub key_pair: Arc<KeyPair>,
+
     pub mc_block_min_interval_ms: u64,
+
+    pub max_uncommitted_chain_length: u32,
+    pub uncommitted_chain_to_import_next_anchor: u32,
+
     pub max_mc_block_delta_from_bc_to_await_own: i32,
 
     pub supported_block_version: u32,
@@ -25,63 +32,20 @@ pub struct CollationConfig {
 pub struct BlockCollationResult {
     pub candidate: BlockCandidate,
     pub new_state_stuff: ShardStateStuff,
+    /// There are unprocessed internals in shard queue after block collation
+    pub has_pending_internals: bool,
 }
 
 #[derive(Clone)]
 pub struct BlockCandidate {
-    block_id: BlockId,
-    block: Block,
-    prev_blocks_ids: Vec<BlockId>,
-    top_shard_blocks_ids: Vec<BlockId>,
-    data: Vec<u8>,
-    collated_data: Vec<u8>,
-    collated_file_hash: HashBytes,
-    chain_time: u64,
-}
-
-impl BlockCandidate {
-    pub fn new(
-        block_id: BlockId,
-        block: Block,
-        prev_blocks_ids: Vec<BlockId>,
-        top_shard_blocks_ids: Vec<BlockId>,
-        data: Vec<u8>,
-        collated_data: Vec<u8>,
-        collated_file_hash: HashBytes,
-        chain_time: u64,
-    ) -> Self {
-        Self {
-            block_id,
-            block,
-            prev_blocks_ids,
-            top_shard_blocks_ids,
-            data,
-            collated_data,
-            collated_file_hash,
-            chain_time,
-        }
-    }
-    pub fn block_id(&self) -> &BlockId {
-        &self.block_id
-    }
-    pub fn block(&self) -> &Block {
-        &self.block
-    }
-    pub fn shard_id(&self) -> &ShardIdent {
-        &self.block_id.shard
-    }
-    pub fn chain_time(&self) -> u64 {
-        self.chain_time
-    }
-    pub fn prev_blocks_ids(&self) -> &[BlockId] {
-        &self.prev_blocks_ids
-    }
-    pub fn top_shard_blocks_ids(&self) -> &[BlockId] {
-        &self.top_shard_blocks_ids
-    }
-    pub fn data(&self) -> &[u8] {
-        &self.data
-    }
+    pub block_id: BlockId,
+    pub block: Block,
+    pub prev_blocks_ids: Vec<BlockId>,
+    pub top_shard_blocks_ids: Vec<BlockId>,
+    pub data: Vec<u8>,
+    pub collated_data: Vec<u8>,
+    pub collated_file_hash: HashBytes,
+    pub chain_time: u64,
 }
 
 #[derive(Clone)]
@@ -186,26 +150,24 @@ impl CollationSessionInfo {
     }
 }
 
-pub(crate) struct MessageContainer {
-    id_hash: HashBytes,
-    pub message: Arc<OwnedMessage>,
+pub(crate) trait IntAdrExt {
+    fn get_address(&self) -> HashBytes;
 }
-impl MessageContainer {
-    pub fn from_message(message: Arc<OwnedMessage>) -> Self {
-        let id_hash = *message.body.0.repr_hash();
-        Self { id_hash, message }
-    }
-    pub fn id_hash(&self) -> &HashBytes {
-        &self.id_hash
+impl IntAdrExt for IntAddr {
+    fn get_address(&self) -> HashBytes {
+        match self {
+            Self::Std(std_addr) => std_addr.address,
+            Self::Var(var_addr) => HashBytes::from_slice(var_addr.address.as_slice()),
+        }
     }
 }
 
-pub(crate) trait MessageExt {
-    fn id_hash(&self) -> &HashBytes;
+pub(crate) trait ShardIdentExt {
+    fn contains_address(&self, addr: &IntAddr) -> bool;
 }
-impl MessageExt for OwnedMessage {
-    fn id_hash(&self) -> &HashBytes {
-        self.body.0.repr_hash()
+impl ShardIdentExt for ShardIdent {
+    fn contains_address(&self, addr: &IntAddr) -> bool {
+        self.workchain() == addr.workchain() && self.contains_account(&addr.get_address())
     }
 }
 
@@ -231,4 +193,19 @@ pub struct NodeNetwork {
     pub overlay_service: OverlayService,
     pub peer_resolver: PeerResolver,
     pub dht_client: DhtClient,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProofFunds {
+    pub fees_collected: CurrencyCollection,
+    pub funds_created: CurrencyCollection,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopBlockDescription {
+    pub block_id: BlockId,
+    pub block_info: BlockInfo,
+    pub value_flow: ValueFlow,
+    pub proof_funds: ProofFunds,
+    pub creators: Vec<HashBytes>,
 }

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::{bail, Result};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
@@ -10,7 +8,8 @@ use tycho_block_util::state::ShardStateStuff;
 
 use super::execution_manager::ExecutionManager;
 use super::CollatorStdImpl;
-use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData, ShardAccountStuff};
+use crate::collator::types::{AccountBlocksDict, BlockCollationData, PrevData};
+use crate::tracing_targets;
 use crate::types::BlockCandidate;
 
 impl CollatorStdImpl {
@@ -19,39 +18,87 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         mut exec_manager: ExecutionManager,
     ) -> Result<(BlockCandidate, ShardStateStuff)> {
+        tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
+
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 
         // update shard accounts tree and prepare accounts blocks
-        let shard_accounts = prev_shard_data.observable_accounts().clone();
-        let account_blocks = AccountBlocksDict::default();
-        let mut changed_accounts = HashMap::new();
+        let mut shard_accounts = prev_shard_data.observable_accounts().clone();
+        let mut account_blocks = AccountBlocksDict::default();
 
-        let new_config_opt: Option<BlockchainConfig> = None;
+        let mut new_config_opt: Option<BlockchainConfig> = None;
 
-        for (account_id, (sender, handle)) in exec_manager.changed_accounts.drain() {
-            // drop sender to stop the task that process messages and force it to return updated shard account
-            std::mem::drop(sender);
-            let shard_acc_stuff = handle.await??;
-            // TODO: read account
-            // TODO: get updated blockchain config if it stored in account
-            // TODO: if have transactions, build AccountBlock and add to account_blocks
-            changed_accounts.insert(account_id, shard_acc_stuff);
+        for (account_id, updated_shard_account_stuff) in exec_manager.changed_accounts.drain() {
+            let account = updated_shard_account_stuff.shard_account.load_account()?;
+            match &account {
+                None => {
+                    shard_accounts.remove(updated_shard_account_stuff.account_addr)?;
+                }
+                Some(account) => {
+                    let config_address = self.working_state().mc_data.config().address;
+                    if collation_data.block_id_short.shard.is_masterchain()
+                        && config_address == account_id
+                    {
+                        if let AccountState::Active(StateInit { data, .. }) = &account.state {
+                            if let Some(data) = data {
+                                let params = data.parse::<BlockchainConfigParams>()?;
+                                let new_config = BlockchainConfig {
+                                    address: config_address,
+                                    params,
+                                };
+                                new_config_opt = Some(new_config);
+                            }
+                        }
+                    }
+
+                    shard_accounts.set(
+                        updated_shard_account_stuff.account_addr,
+                        &DepthBalanceInfo {
+                            split_depth: 0, // TODO: fix
+                            balance: account.balance.clone(),
+                        },
+                        &updated_shard_account_stuff.shard_account,
+                    )?;
+                }
+            }
+            if collation_data.block_id_short.shard.is_masterchain() {
+                updated_shard_account_stuff
+                    .update_public_libraries(&mut exec_manager.libraries, account)?;
+            }
+            let acc_block = AccountBlock {
+                account: updated_shard_account_stuff.account_addr,
+                transactions: updated_shard_account_stuff.transactions,
+                state_update: updated_shard_account_stuff.state_update, // TODO: fix state update
+            };
+
+            if !acc_block.transactions.is_empty() {
+                account_blocks.set(account_id, acc_block.transactions.root_extra(), &acc_block)?;
+            }
         }
 
         // TODO: update new_config_opt from hard fork
 
         // calc value flow
-        // TODO: init collation_data.value_flow
         let mut value_flow = collation_data.value_flow.clone();
-        // TODO: init collation_data.in_msgs
-        value_flow.imported = collation_data.in_msgs.root_extra().value_imported.clone();
-        // TODO: init collation_data.out_msgs
-        value_flow.exported = collation_data.out_msgs.root_extra().clone();
+
+        let mut in_msgs = InMsgDescr::new();
+        // TODO: use more effective algorithm than iter and set
+        for (msg_id, msg) in collation_data.in_msgs.iter() {
+            in_msgs.set(msg_id, msg.compute_fees()?, msg)?;
+        }
+        value_flow.imported = in_msgs.root_extra().value_imported.clone();
+
+        let mut out_msgs = OutMsgDescr::new();
+        // TODO: use more effective algorithm than iter and set
+        for (msg_id, msg) in collation_data.out_msgs.iter() {
+            out_msgs.set(msg_id, msg.compute_exported_value()?, msg)?;
+        }
+        value_flow.exported = out_msgs.root_extra().clone();
         value_flow.fees_collected = account_blocks.root_extra().clone();
         value_flow
             .fees_collected
-            .try_add_assign_tokens(collation_data.in_msgs.root_extra().fees_collected)?;
+            .try_add_assign_tokens(in_msgs.root_extra().fees_collected)?;
         value_flow
             .fees_collected
             .try_add_assign(&value_flow.fees_imported)?;
@@ -62,10 +109,8 @@ impl CollatorStdImpl {
 
         // build master state extra or get a ref to last applied master block
         // TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
-        let (out_msg_queue_info, _min_ref_mc_seqno) =
-            collation_data.out_msg_queue_stuff.get_out_msg_queue_info();
         // collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
-        let (mc_state_extra, master_ref) = if self.shard_id.is_masterchain() {
+        let (mc_state_extra, master_ref) = if collation_data.block_id_short.shard.is_masterchain() {
             let (extra, min_ref_mc_seqno) =
                 self.create_mc_state_extra(collation_data, new_config_opt)?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
@@ -93,9 +138,10 @@ impl CollatorStdImpl {
         }
         new_block_info.shard = collation_data.block_id_short.shard;
         new_block_info.seqno = collation_data.block_id_short.seqno;
-        new_block_info.gen_utime = collation_data.chain_time;
+        new_block_info.gen_utime = collation_data.gen_utime;
+        new_block_info.gen_utime_ms = collation_data.gen_utime_ms;
         new_block_info.start_lt = collation_data.start_lt;
-        new_block_info.end_lt = collation_data.max_lt + 1;
+        new_block_info.end_lt = collation_data.next_lt;
         new_block_info.gen_validator_list_hash_short =
             self.collation_session.collators().short_hash;
         new_block_info.gen_catchain_seqno = self.collation_session.seqno();
@@ -121,13 +167,10 @@ impl CollatorStdImpl {
             seqno: new_block_info.seqno,
             vert_seqno: 0,
             gen_utime: new_block_info.gen_utime,
-            #[cfg(feature = "venom")]
-            gen_utime_ms: info.gen_utime_ms,
+            gen_utime_ms: new_block_info.gen_utime_ms,
             gen_lt: new_block_info.end_lt,
             min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
-            out_msg_queue_info: Lazy::new(&out_msg_queue_info)?,
-            // TODO: Check if total fits into 4 refs
-            externals_processed_upto: collation_data.externals_processed_upto.clone(),
+            processed_upto: Lazy::new(&collation_data.processed_upto)?,
             before_split: new_block_info.before_split,
             accounts: Lazy::new(&shard_accounts)?,
             overload_history: 0,
@@ -143,20 +186,13 @@ impl CollatorStdImpl {
 
         new_state
             .total_validator_fees
-            .checked_add(&value_flow.fees_collected)?;
-
-        new_state
-            .total_balance
             .try_add_assign(&value_flow.fees_collected)?;
+        new_state
+            .total_validator_fees
+            .try_sub_assign(&value_flow.recovered)?;
 
-        // TODO:
-        // new_state
-        //     .total_validator_fees
-        //     .try_sub_assign(&value_flow.recovered)?;
-
-        if self.shard_id.is_masterchain() {
-            new_state.libraries =
-                self.update_public_libraries(exec_manager.libraries.clone(), &changed_accounts)?;
+        if collation_data.block_id_short.shard.is_masterchain() {
+            new_state.libraries = exec_manager.libraries;
         }
 
         // TODO: update smc on hard fork
@@ -164,7 +200,6 @@ impl CollatorStdImpl {
         // calc merkle update
         let new_state_root = CellBuilder::build_from(&new_state)?;
         let state_update = Self::create_merkle_update(
-            &self.collator_descr,
             prev_shard_data,
             &new_state_root,
             &self.working_state().usage_tree,
@@ -172,15 +207,14 @@ impl CollatorStdImpl {
 
         // calc block extra
         let mut new_block_extra = BlockExtra {
-            in_msg_description: Lazy::new(&collation_data.in_msgs)?,
-            out_msg_description: Lazy::new(&collation_data.out_msgs)?,
+            in_msg_description: Lazy::new(&in_msgs)?,
+            out_msg_description: Lazy::new(&out_msgs)?,
             account_blocks: Lazy::new(&account_blocks)?,
             rand_seed: collation_data.rand_seed,
+            created_by: collation_data.created_by,
             ..Default::default()
         };
 
-        // TODO: fill created_by
-        // extra.created_by = self.created_by.clone();
         if let Some(mc_state_extra) = mc_state_extra {
             let new_mc_block_extra = McBlockExtra {
                 shards: mc_state_extra.shards.clone(),
@@ -230,16 +264,17 @@ impl CollatorStdImpl {
         // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
 
-        let block_candidate = BlockCandidate::new(
-            new_block_id,
-            new_block,
-            prev_shard_data.blocks_ids().clone(),
-            collation_data.top_shard_blocks_ids.clone(),
-            new_block_boc,
+        let block_candidate = BlockCandidate {
+            block_id: new_block_id,
+            block: new_block,
+            prev_blocks_ids: prev_shard_data.blocks_ids().clone(),
+            top_shard_blocks_ids: collation_data.top_shard_blocks_ids.clone(),
+            data: new_block_boc,
             collated_data,
-            HashBytes::ZERO,
-            new_block_info.gen_utime as u64,
-        );
+            collated_file_hash: HashBytes::ZERO,
+            chain_time: (new_block_info.gen_utime as u64 * 1000)
+                + new_block_info.gen_utime_ms as u64,
+        };
 
         let new_state_stuff = ShardStateStuff::from_state_and_root(
             &new_block_id,
@@ -275,16 +310,16 @@ impl CollatorStdImpl {
             (prev_config.clone(), false)
         };
 
-        let current_chain_time = collation_data.chain_time;
-        let prev_chain_time = prev_state.state().gen_utime;
+        let current_gen_utime = collation_data.gen_utime;
+        let prev_gen_utime = prev_state.state().gen_utime;
 
         // 2. update shard_hashes and shard_fees
         let cc_config = config.get_catchain_config()?;
         let workchains = config.get_workchains()?;
         // check if need to start new collation session for shards
         let update_shard_cc = {
-            let lifetimes = current_chain_time / cc_config.shard_catchain_lifetime;
-            let prev_lifetimes = prev_chain_time / cc_config.shard_catchain_lifetime;
+            let lifetimes = current_gen_utime / cc_config.shard_catchain_lifetime;
+            let prev_lifetimes = prev_gen_utime / cc_config.shard_catchain_lifetime;
             is_key_block || (lifetimes > prev_lifetimes)
         };
         let min_ref_mc_seqno =
@@ -315,18 +350,18 @@ impl CollatorStdImpl {
             root_hash: prev_state.block_id().root_hash,
             file_hash: prev_state.block_id().file_hash,
         };
-        // TODO: use AugDict::set when it be implemented
-        // prev_blocks.set(
-        //     &prev_state.block_id().seqno,
-        //     &KeyBlockRef {
-        //         is_key_block,
-        //         block_ref: prev_blk_ref.clone(),
-        //     },
-        //     &KeyMaxLt {
-        //         has_key_block: is_key_block,
-        //         max_end_lt: prev_state.state().gen_lt,
-        //     },
-        // )?;
+
+        prev_blocks.set(
+            prev_state.block_id().seqno,
+            KeyMaxLt {
+                has_key_block: prev_is_key_block,
+                max_end_lt: prev_state.state().gen_lt,
+            },
+            &KeyBlockRef {
+                is_key_block: prev_is_key_block,
+                block_ref: prev_blk_ref.clone(),
+            },
+        )?;
 
         // 7. update last_key_block
         let last_key_block = if prev_state_extra.after_key_block {
@@ -342,6 +377,9 @@ impl CollatorStdImpl {
         global_balance.try_add_assign(&collation_data.shard_fees.root_extra().create)?;
 
         // 9. update block creator stats
+        #[cfg(not(feature = "block-creator-stats"))]
+        let block_create_stats = None;
+        #[cfg(feature = "block-creator-stats")]
         let block_create_stats = if prev_state_extra
             .config
             .get_global_version()?
@@ -352,7 +390,7 @@ impl CollatorStdImpl {
                 .block_create_stats
                 .clone()
                 .unwrap_or_default();
-            self.update_block_creator_stats(collation_data, &mut stats)?;
+            Self::update_block_creator_stats(collation_data, &mut stats)?;
             Some(stats)
         } else {
             None
@@ -377,43 +415,21 @@ impl CollatorStdImpl {
     fn update_shard_config(
         &self,
         collation_data: &mut BlockCollationData,
-        wc_set: &Dict<i32, WorkchainDescription>,
-        update_cc: bool,
+        _wc_set: &Dict<i32, WorkchainDescription>,
+        _update_cc: bool,
     ) -> Result<u32> {
         // TODO: here should be the split/merge logic, refer to old node impl
 
         // STUB: just do nothing for now: no split/merge, no session rotation
         let mut min_ref_mc_seqno = u32::max_value();
-        for (_shard_id, shard_descr) in collation_data.shards_mut()? {
+        for shard_descr in collation_data.shards_mut()?.values_mut() {
             min_ref_mc_seqno = std::cmp::min(min_ref_mc_seqno, shard_descr.min_ref_mc_seqno);
         }
 
         Ok(min_ref_mc_seqno)
     }
 
-    fn update_block_creator_stats(
-        &self,
-        collation_data: &BlockCollationData,
-        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
-    ) -> Result<()> {
-        // TODO: implement if we really need it
-        // STUB: do not update anything
-        Ok(())
-    }
-
-    fn update_public_libraries(
-        &self,
-        mut libraries: Dict<HashBytes, LibDescr>,
-        accounts: &HashMap<HashBytes, ShardAccountStuff>,
-    ) -> Result<Dict<HashBytes, LibDescr>> {
-        for (_, acc) in accounts.iter() {
-            acc.update_public_libraries(&mut libraries)?;
-        }
-        Ok(libraries)
-    }
-
     fn create_merkle_update(
-        collator_descr: &str,
         prev_shard_data: &PrevData,
         new_state_root: &Cell,
         usage_tree: &UsageTree,
@@ -427,12 +443,76 @@ impl CollatorStdImpl {
         );
         let state_update = merkle_update_builder.build()?;
 
-        tracing::debug!(
-            "Collator ({}): merkle update created in {}ms",
-            collator_descr,
-            timer.elapsed().as_millis(),
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "merkle update created in {}ms", timer.elapsed().as_millis(),
         );
 
         Ok(state_update)
+    }
+
+    #[cfg(feature = "block-creator-stats")]
+    fn update_block_creator_stats(
+        collation_data: &BlockCollationData,
+        block_create_stats: &mut Dict<HashBytes, CreatorStats>,
+    ) -> Result<()> {
+        let mut mc_updated = false;
+        for (creator, count) in &collation_data.block_create_count {
+            let shard_scaled = count << 32;
+            let total_mc = if collation_data.created_by == *creator {
+                mc_updated = true;
+                1
+            } else {
+                0
+            };
+
+            block_create_stats.set(creator, CreatorStats {
+                mc_blocks: BlockCounters {
+                    updated_at: collation_data.gen_utime,
+                    total: total_mc,
+                    cnt2048: total_mc,
+                    cnt65536: total_mc,
+                },
+                shard_blocks: BlockCounters {
+                    updated_at: collation_data.gen_utime,
+                    total: *count,
+                    cnt2048: shard_scaled,
+                    cnt65536: shard_scaled,
+                },
+            })?;
+        }
+        if !mc_updated {
+            block_create_stats.set(collation_data.created_by, CreatorStats {
+                mc_blocks: BlockCounters {
+                    updated_at: collation_data.gen_utime,
+                    total: 1,
+                    cnt2048: 1,
+                    cnt65536: 1,
+                },
+                shard_blocks: BlockCounters {
+                    updated_at: collation_data.gen_utime,
+                    total: 0,
+                    cnt2048: 0,
+                    cnt65536: 0,
+                },
+            })?;
+        }
+
+        let default_shard_blocks_count = collation_data.block_create_count.values().sum();
+        block_create_stats.set(HashBytes::default(), CreatorStats {
+            mc_blocks: BlockCounters {
+                updated_at: collation_data.gen_utime,
+                total: 1,
+                cnt2048: 1,
+                cnt65536: 1,
+            },
+            shard_blocks: BlockCounters {
+                updated_at: collation_data.gen_utime,
+                total: default_shard_blocks_count,
+                cnt2048: default_shard_blocks_count << 32,
+                cnt65536: default_shard_blocks_count << 32,
+            },
+        })?;
+        // TODO: prune CreatorStats https://github.com/ton-blockchain/ton/blob/master/validator/impl/collator.cpp#L4191
+        Ok(())
     }
 }

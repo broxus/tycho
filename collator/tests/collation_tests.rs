@@ -5,7 +5,6 @@ use anyhow::Result;
 use everscale_types::models::{BlockId, GlobalCapability, ShardIdent};
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
-use tycho_collator::collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::persistent::persistent_state::{
     PersistentStateConfig, PersistentStateImplFactory,
@@ -14,6 +13,7 @@ use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFact
 use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::{MempoolAdapterStdImpl, MempoolAdapterStubImpl};
+use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::CollationConfig;
@@ -84,6 +84,8 @@ async fn test_collation_process_on_stubs() {
     let config = CollationConfig {
         key_pair: node_1_keypair.clone(),
         mc_block_min_interval_ms: 10000,
+        max_uncommitted_chain_length: 32,
+        uncommitted_chain_to_import_next_anchor: 8,
         max_mc_block_delta_from_bc_to_await_own: 2,
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
@@ -100,11 +102,17 @@ async fn test_collation_process_on_stubs() {
 
     let node_network = tycho_collator::test_utils::create_node_network();
     let validator_config = ValidatorConfig {
-        backoff_config: BackoffConfig {
+        request_signatures_backoff_config: BackoffConfig {
+            min_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(150),
+            factor: 2.0,
+            max_times: 999999999,
+        },
+        error_backoff_config: BackoffConfig {
             min_delay: Duration::from_millis(50),
             max_delay: Duration::from_secs(1),
             factor: 2.0,
-            max_times: 999999,
+            max_times: 999999999,
         },
         request_timeout: Duration::from_millis(1000),
         delay_between_requests: Duration::from_millis(50),

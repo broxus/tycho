@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
+use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::BlockIdShort;
+use tycho_storage::Storage;
 
-use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
+// use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
 use crate::internal_queue::snapshot::StateSnapshot;
-use crate::internal_queue::types::ext_types_stubs::EnqueuedMessage;
+use crate::internal_queue::types::EnqueuedMessage;
 
 // CONFIG
 
 pub struct PersistentStateConfig {
-    pub database_url: String,
+    pub storage: Storage,
 }
 
 // FACTORY
@@ -27,12 +29,12 @@ where
 }
 
 pub struct PersistentStateImplFactory {
-    pub config: PersistentStateConfig,
+    pub storage: Storage,
 }
 
-impl PersistentStateImplFactory {
-    pub fn new(config: PersistentStateConfig) -> Self {
-        Self { config }
+impl<'a> PersistentStateImplFactory {
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
     }
 }
 
@@ -40,7 +42,8 @@ impl PersistentStateFactory for PersistentStateImplFactory {
     type PersistentState = PersistentStateStdImpl;
 
     fn create(&self) -> Self::PersistentState {
-        PersistentStateStdImpl::new(self.config.database_url.clone())
+        // self.storage.persistent_state_storage()
+        PersistentStateStdImpl::new(self.storage.clone())
     }
 }
 
@@ -65,25 +68,37 @@ pub trait LocalPersistentState {
 
 // IMPLEMENTATION
 
-pub struct PersistentStateStdImpl {}
+pub struct PersistentStateStdImpl {
+    // TODO remove static and use owned_snapshot
+    storage: Storage,
+}
 
 impl PersistentStateStdImpl {
-    pub fn new(_database_url: String) -> Self {
-        Self {}
+    pub fn new(storage: Storage) -> Self {
+        Self { storage }
     }
 }
 
 impl PersistentState for PersistentStateStdImpl {
     async fn add_messages(
         &self,
-        _block_id_short: BlockIdShort,
-        _messages: Vec<Arc<EnqueuedMessage>>,
+        block_id_short: BlockIdShort,
+        messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()> {
+        let messages: Vec<(u64, HashBytes, Cell)> = messages
+            .iter()
+            .map(|m| (m.info.created_lt, m.hash, m.cell.clone()))
+            .collect();
+        self.storage
+            .internal_queue_storage()
+            .add_messages(block_id_short.shard, &messages)?;
         Ok(())
     }
 
     async fn snapshot(&self) -> Box<dyn StateSnapshot> {
-        Box::new(PersistentStateSnapshot {})
+        todo!("Implement snapshot")
+        // let snapshot = self.storage.internal_queue_storage().snapshot();
+        // Box::new(PersistentStateSnapshot::new(snapshot))
     }
 
     async fn gc() {

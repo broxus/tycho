@@ -1,19 +1,25 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+// use std::sync::Arc;
 
-use everscale_types::models::ShardIdent;
-
-use crate::internal_queue::error::QueueError;
-use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
-
-pub struct PersistentStateSnapshot {}
-
-impl StateSnapshot for PersistentStateSnapshot {
-    fn get_outgoing_messages_by_shard(
-        &self,
-        _shards: &mut HashMap<ShardIdent, ShardRange>,
-        _shard_id: &ShardIdent,
-    ) -> Result<Vec<Arc<MessageWithSource>>, QueueError> {
-        Ok(vec![])
-    }
-}
+// use tycho_storage::rocksdb::{SnapshotWithThreadMode, DB};
+//
+// use crate::internal_queue::snapshot::{MessageWithSource, StateSnapshot};
+//
+// pub struct PersistentStateSnapshot {
+//     snapshot: SnapshotWithThreadMode<'static, DB>,
+// }
+//
+// impl PersistentStateSnapshot {
+//     pub fn new(snapshot: SnapshotWithThreadMode<'static, DB>) -> Self {
+//         Self { snapshot }
+//     }
+// }
+//
+// impl StateSnapshot for PersistentStateSnapshot {
+//     fn next(&mut self) -> Option<Arc<MessageWithSource>> {
+//         None
+//     }
+//
+//     fn peek(&self) -> Option<Arc<MessageWithSource>> {
+//         None
+//     }
+// }
