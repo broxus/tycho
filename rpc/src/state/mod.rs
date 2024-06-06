@@ -44,7 +44,8 @@ impl RpcStateBuilder {
                 timings: ArcSwap::new(Default::default()),
                 latest_key_block_json: ArcSwapOption::default(),
                 blockchain_config_json: ArcSwapOption::default(),
-                transactions_gc: ArcSwapOption::default(),
+                gc_notify: Notify::new(),
+                gc_handle: ArcSwapOption::default(),
             }),
         }
     }
@@ -218,7 +219,9 @@ struct Inner {
     timings: ArcSwap<StateTimings>,
     latest_key_block_json: ArcSwapOption<Box<RawValue>>,
     blockchain_config_json: ArcSwapOption<Box<RawValue>>,
-    transactions_gc: ArcSwapOption<TransactionsGc>,
+    // GC
+    gc_notify: Notify,
+    gc_handle: ArcSwapOption<JoinHandle<()>>,
 }
 
 impl Inner {
@@ -300,42 +303,37 @@ impl Inner {
                         None => return,
                     };
 
-                    if let Some(transactions_gc) = &*this.transactions_gc.load() {
-                        // Wait for a new KeyBlock notification
-                        transactions_gc.notify.notified().await;
+                    // Wait for a new KeyBlock notification
+                    this.gc_notify.notified().await;
 
-                        let persistent_storage = match this.storage.rpc_storage() {
-                            Some(persistent_storage) => persistent_storage,
-                            None => return,
-                        };
+                    let persistent_storage = match this.storage.rpc_storage() {
+                        Some(persistent_storage) => persistent_storage,
+                        None => return,
+                    };
 
-                        let target_utime = now_sec().saturating_sub(gc.tx_ttl.as_secs() as u32);
-                        let min_lt = match this.find_closest_key_block_lt(target_utime).await {
-                            Ok(lt) => lt,
-                            Err(e) => {
-                                tracing::error!(
-                                    target_utime,
-                                    "failed to find the closest key block lt: {e:?}"
-                                );
-                                continue;
-                            }
-                        };
-
-                        if let Err(e) = persistent_storage.remove_old_transactions(min_lt).await {
+                    let target_utime = now_sec().saturating_sub(gc.tx_ttl.as_secs() as u32);
+                    let min_lt = match this.find_closest_key_block_lt(target_utime).await {
+                        Ok(lt) => lt,
+                        Err(e) => {
                             tracing::error!(
                                 target_utime,
-                                min_lt,
-                                "failed to remove old transactions: {e:?}"
+                                "failed to find the closest key block lt: {e:?}"
                             );
+                            continue;
                         }
+                    };
+
+                    if let Err(e) = persistent_storage.remove_old_transactions(min_lt).await {
+                        tracing::error!(
+                            target_utime,
+                            min_lt,
+                            "failed to remove old transactions: {e:?}"
+                        );
                     }
                 }
             });
 
-            self.transactions_gc.store(Some(Arc::new(TransactionsGc {
-                notify: Notify::new(),
-                handle,
-            })));
+            self.gc_handle.store(Some(Arc::new(handle)));
         }
 
         self.is_ready.store(true, Ordering::Release);
@@ -419,8 +417,8 @@ impl Inner {
         }
 
         // Send a new KeyBlock notification to run GC
-        if let Some(transactions_gc) = &*self.transactions_gc.load() {
-            transactions_gc.notify.notify_waiters();
+        if self.config.transactions_gc.is_some() {
+            self.gc_notify.notify_waiters();
         }
 
         let custom = block.load_custom()?;
@@ -574,8 +572,8 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(transactions_gc) = &*self.transactions_gc.load() {
-            transactions_gc.handle.abort()
+        if let Some(handle) = &*self.gc_handle.load() {
+            handle.abort()
         }
     }
 }
@@ -614,11 +612,6 @@ impl CachedAccounts {
             Err(e) => Err(RpcStateError::Internal(e.into())),
         }
     }
-}
-
-struct TransactionsGc {
-    notify: Notify,
-    handle: JoinHandle<()>,
 }
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
