@@ -48,19 +48,12 @@ pub struct TransactionsGcConfig {
     /// Default: `1 week`.
     #[serde(with = "serde_helpers::humantime")]
     pub tx_ttl: Duration,
-
-    /// Interval between garbage collection runs.
-    ///
-    /// Default: `1 hour`.
-    #[serde(with = "serde_helpers::humantime")]
-    pub interval: Duration,
 }
 
 impl Default for TransactionsGcConfig {
     fn default() -> Self {
         Self {
             tx_ttl: Duration::from_secs(60 * 60 * 24 * 7),
-            interval: Duration::from_secs(60 * 60),
         }
     }
 }
