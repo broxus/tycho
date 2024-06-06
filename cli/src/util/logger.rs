@@ -5,6 +5,18 @@ use serde::de::Visitor;
 use serde::{Deserialize, Deserializer};
 use tracing_subscriber::filter::Directive;
 
+pub fn is_systemd_child() -> bool {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::getppid() == 1
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 pub struct LoggerConfig {
     directives: Vec<Directive>,
 }

@@ -10,6 +10,7 @@ use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
+use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::persistent::persistent_state::PersistentStateImplFactory;
@@ -44,7 +45,7 @@ use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::util::error::ResultExt;
-use crate::util::logger::LoggerConfig;
+use crate::util::logger::{is_systemd_child, LoggerConfig};
 use crate::util::signal;
 
 mod config;
@@ -171,7 +172,11 @@ fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
 
     let subscriber = tracing_subscriber::registry()
         .with(layer)
-        .with(fmt::layer());
+        .with(if is_systemd_child() {
+            fmt::layer().without_time().with_ansi(false).boxed()
+        } else {
+            fmt::layer().boxed()
+        });
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     if let Some(logger_config) = logger_config {

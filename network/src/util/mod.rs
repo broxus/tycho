@@ -10,8 +10,6 @@ mod traits;
 #[cfg(test)]
 mod test;
 
-mod tl;
-
 #[macro_export]
 macro_rules! match_tl_request {
     ($req_body:expr, $(tag = $tag:expr,)? {
