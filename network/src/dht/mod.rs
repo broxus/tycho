@@ -32,6 +32,49 @@ mod query;
 mod routing;
 mod storage;
 
+// Counters
+const METRIC_IN_REQ_TOTAL: &str = "tycho_net_dht_in_req_total";
+const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_net_dht_in_req_fail_total";
+
+const METRIC_IN_REQ_WITH_PEER_INFO_TOTAL: &str = "tycho_net_dht_in_req_with_peer_info_total";
+const METRIC_IN_REQ_FIND_NODE_TOTAL: &str = "tycho_net_dht_in_req_find_node_total";
+const METRIC_IN_REQ_FIND_VALUE_TOTAL: &str = "tycho_net_dht_in_req_find_value_total";
+const METRIC_IN_REQ_GET_NODE_INFO_TOTAL: &str = "tycho_net_dht_in_req_get_node_info_total";
+const METRIC_IN_REQ_STORE_TOTAL: &str = "tycho_net_dht_in_req_store_value_total";
+
+// Registered in `DhtServiceBuilder::build`
+fn describe_metrics() {
+    metrics::describe_counter!(
+        METRIC_IN_REQ_TOTAL,
+        "Number of incoming DHT requests over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_REQ_FAIL_TOTAL,
+        "Number of failed incoming DHT requests over time"
+    );
+
+    metrics::describe_counter!(
+        METRIC_IN_REQ_WITH_PEER_INFO_TOTAL,
+        "Number of incoming DHT requests with peer info over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_REQ_FIND_NODE_TOTAL,
+        "Number of incoming DHT FindNode requests over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_REQ_FIND_VALUE_TOTAL,
+        "Number of incoming DHT FindValue requests over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_REQ_GET_NODE_INFO_TOTAL,
+        "Number of incoming DHT GetNodeInfo requests over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_REQ_STORE_TOTAL,
+        "Number of incoming DHT Store requests over time"
+    );
+}
+
 #[derive(Clone)]
 pub struct DhtClient {
     inner: Arc<DhtInner>,
@@ -276,6 +319,8 @@ impl DhtServiceBuilder {
     }
 
     pub fn build(self) -> (DhtServiceBackgroundTasks, DhtService) {
+        describe_metrics();
+
         let config = self.config.unwrap_or_default();
 
         let storage = {
@@ -378,10 +423,13 @@ impl Service<ServiceRequest> for DhtService {
         fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
+        metrics::counter!(METRIC_IN_REQ_TOTAL).increment(1);
+
         let (constructor, body) = match self.0.try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
                 tracing::debug!("failed to deserialize query: {e}");
+                metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
                 return futures_util::future::ready(None);
             }
         };
@@ -389,18 +437,21 @@ impl Service<ServiceRequest> for DhtService {
         let response = crate::match_tl_request!(body, tag = constructor, {
             rpc::FindNode as ref r => {
                 tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_node");
+                metrics::counter!(METRIC_IN_REQ_FIND_NODE_TOTAL).increment(1);
 
                 let res = self.0.handle_find_node(r);
                 Some(tl_proto::serialize(res))
             },
             rpc::FindValue as ref r => {
                 tracing::debug!(key = %PeerId::wrap(&r.key), k = r.k, "find_value");
+                metrics::counter!(METRIC_IN_REQ_FIND_VALUE_TOTAL).increment(1);
 
                 let res = self.0.handle_find_value(r);
                 Some(tl_proto::serialize(res))
             },
             rpc::GetNodeInfo as _ => {
                 tracing::debug!("get_node_info");
+                metrics::counter!(METRIC_IN_REQ_GET_NODE_INFO_TOTAL).increment(1);
 
                 self.0.handle_get_node_info().map(tl_proto::serialize)
             },
@@ -408,6 +459,10 @@ impl Service<ServiceRequest> for DhtService {
             tracing::debug!("failed to deserialize query: {e}");
             None
         });
+
+        if response.is_none() {
+            metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
+        }
 
         futures_util::future::ready(response.map(|body| Response {
             version: Default::default(),
@@ -422,25 +477,36 @@ impl Service<ServiceRequest> for DhtService {
         fields(peer_id = %req.metadata.peer_id, addr = %req.metadata.remote_address)
     )]
     fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
+        metrics::counter!(METRIC_IN_REQ_TOTAL).increment(1);
+
         let (constructor, body) = match self.0.try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
                 tracing::debug!("failed to deserialize message: {e}");
+                metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
                 return futures_util::future::ready(());
             }
         };
 
+        let mut has_error = false;
         crate::match_tl_request!(body, tag = constructor, {
             rpc::StoreRef<'_> as ref r => {
                 tracing::debug!("store");
+                metrics::counter!(METRIC_IN_REQ_STORE_TOTAL).increment(1);
 
                 if let Err(e) = self.0.handle_store(r) {
                     tracing::debug!("failed to store value: {e}");
+                    has_error = true;
                 }
             }
         }, e => {
             tracing::debug!("failed to deserialize message: {e}");
+            has_error = true;
         });
+
+        if has_error {
+            metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
+        }
 
         futures_util::future::ready(())
     }
@@ -588,6 +654,8 @@ impl DhtInner {
         let mut offset = 0;
 
         if constructor == rpc::WithPeerInfo::TL_ID {
+            metrics::counter!(METRIC_IN_REQ_WITH_PEER_INFO_TOTAL).increment(1);
+
             let peer_info = rpc::WithPeerInfo::read_from(body, &mut offset)?.peer_info;
             anyhow::ensure!(
                 peer_info.id == req.metadata.peer_id,

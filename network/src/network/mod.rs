@@ -29,6 +29,7 @@ mod peer;
 mod request_handler;
 mod wire;
 
+// Registered in `NetworkBuilder::build`
 fn describe_metrics() {
     connection_manager::describe_metrics();
     request_handler::describe_metrics();

@@ -29,8 +29,8 @@ const METRIC_CONNECTION_IN_TIME: &str = "tycho_net_conn_in_time";
 // Counters
 const METRIC_CONNECTIONS_OUT_TOTAL: &str = "tycho_net_conn_out_total";
 const METRIC_CONNECTIONS_IN_TOTAL: &str = "tycho_net_conn_in_total";
-const METRIC_CONNECTIONS_OUT_FAILED_TOTAL: &str = "tycho_net_conn_out_failed_total";
-const METRIC_CONNECTIONS_IN_FAILED_TOTAL: &str = "tycho_net_conn_in_failed_total";
+const METRIC_CONNECTIONS_OUT_FAIL_TOTAL: &str = "tycho_net_conn_out_fail_total";
+const METRIC_CONNECTIONS_IN_FAIL_TOTAL: &str = "tycho_net_conn_in_fail_total";
 
 // Gauges
 const METRIC_CONNECTIONS_ACTIVE: &str = "tycho_net_conn_active";
@@ -60,11 +60,11 @@ pub fn describe_metrics() {
         "Number of established incoming connections over time"
     );
     metrics::describe_counter!(
-        METRIC_CONNECTIONS_OUT_FAILED_TOTAL,
+        METRIC_CONNECTIONS_OUT_FAIL_TOTAL,
         "Number of failed outgoing connections over time"
     );
     metrics::describe_counter!(
-        METRIC_CONNECTIONS_IN_FAILED_TOTAL,
+        METRIC_CONNECTIONS_IN_FAIL_TOTAL,
         "Number of failed incoming connections over time"
     );
 
@@ -569,8 +569,8 @@ impl ConnectionManager {
                 );
 
                 metrics::counter!(match res.origin {
-                    Direction::Outbound => METRIC_CONNECTIONS_OUT_FAILED_TOTAL,
-                    Direction::Inbound => METRIC_CONNECTIONS_IN_FAILED_TOTAL,
+                    Direction::Outbound => METRIC_CONNECTIONS_OUT_FAIL_TOTAL,
+                    Direction::Inbound => METRIC_CONNECTIONS_IN_FAIL_TOTAL,
                 })
                 .increment(1);
 
