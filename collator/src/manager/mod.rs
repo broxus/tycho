@@ -1449,6 +1449,15 @@ where
                 {
                     // 5. If master block and all shard blocks valid the extract them from entries and return
                     if !shard_block_container.is_valid() {
+                        tracing::debug!(
+                            target: tracing_targets::COLLATION_MANAGER,
+                            "Not all blocks are valid in master block ({}) subgraph",
+                            block_id.as_short_id(),
+                        );
+                        mc_block_container.restore_entry(
+                            subgraph.mc_block.entry,
+                            subgraph.mc_block.send_sync_status,
+                        )?;
                         return Ok(None);
                     }
                     subgraph.shard_blocks.push(BlockCandidateToSend {
