@@ -311,6 +311,7 @@ impl ZerostateConfig {
                 let balance = match account_state.as_mut() {
                     Some(state) => {
                         // Always ensure that the account storage stat is up-to-date
+                        state.address = StdAddr::new(-1, account).into();
                         state.storage_stat.used = compute_storage_used(state)?;
                         state.balance.clone()
                     }
