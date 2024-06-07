@@ -307,11 +307,11 @@ pub(super) struct BlockCollationData {
     pub block_id_short: BlockIdShort,
     pub gen_utime: u32,
     pub gen_utime_ms: u16,
-    pub execute_count: u32,
+    pub execute_count_all: u32,
+    pub execute_count_ext: u32,
+    pub execute_count_int: u32,
+    pub execute_count_new_int: u32,
     pub enqueue_count: u32,
-    pub out_msg_count: u32,
-    // TODO: remove if we do not need this
-    pub _msg_queue_depth_sum: u32,
     pub dequeue_count: u32,
 
     pub start_lt: u64,
@@ -413,6 +413,15 @@ impl BlockCollationData {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct CollatorStats {
+    pub total_execute_count_all: u32,
+    pub total_execute_count_ext: u32,
+    pub total_execute_count_int: u32,
+    pub total_execute_count_new_int: u32,
+    pub int_queue_length: u32,
 }
 
 pub(super) struct CachedMempoolAnchor {

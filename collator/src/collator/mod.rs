@@ -8,7 +8,7 @@ use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
-use self::types::{CachedMempoolAnchor, McData, PrevData, WorkingState};
+use self::types::{CachedMempoolAnchor, CollatorStats, McData, PrevData, WorkingState};
 use crate::internal_queue::iterator::QueueIterator;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -187,6 +187,8 @@ pub struct CollatorStdImpl {
 
     /// State tracker for creating ShardStateStuff locally
     state_tracker: MinRefMcStateTracker,
+
+    stats: CollatorStats,
 }
 
 impl CollatorStdImpl {
@@ -235,6 +237,8 @@ impl CollatorStdImpl {
             has_pending_externals: false,
 
             state_tracker,
+
+            stats: Default::default(),
         };
 
         AsyncQueuedDispatcher::run(processor, receiver);
