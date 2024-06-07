@@ -267,7 +267,10 @@ impl CollatorStdImpl {
             }
 
             if msgs_set.is_empty() {
-                // no any messages to process - exit loop
+                // no any messages to process
+                // move left bracket of the read window
+                Self::update_processed_upto_execution_offset(&mut collation_data, true, 0);
+                // exit loop
                 break;
             }
 
@@ -738,8 +741,6 @@ impl CollatorStdImpl {
             if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
                 externals.processed_to = externals.read_to;
             }
-
-            // TODO: set internals read window full pocessed
 
             collation_data.processed_upto.processed_offset = 0;
         } else {
