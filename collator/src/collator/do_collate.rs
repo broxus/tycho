@@ -1,5 +1,4 @@
-use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -544,7 +543,7 @@ impl CollatorStdImpl {
 
     fn read_next_externals_impl(
         shard_id: &ShardIdent,
-        anchors_cache: &mut BTreeMap<MempoolAnchorId, CachedMempoolAnchor>,
+        anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
         count: usize,
         collation_data: &mut BlockCollationData,
     ) -> Result<(Vec<(MsgInfo, Cell)>, bool)> {
@@ -582,33 +581,32 @@ impl CollatorStdImpl {
         let mut ext_messages = vec![];
         let mut has_pending_externals_in_last_read_anchor = false;
 
-        let mut next_key = anchors_cache.first_key_value().map_or(0, |(key, _)| *key);
+        let mut next_idx = 0;
         loop {
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                "try read next anchor next_key: {}", next_key,
+                "try read next anchor from cache",
             );
             // try read next anchor
-            let next_entry = anchors_cache.entry(next_key);
+            let next_entry = anchors_cache.get(next_idx);
             let entry = match next_entry {
-                Entry::Occupied(entry) => entry,
+                Some(entry) => entry,
                 // stop reading if there is no next anchor
-                Entry::Vacant(_) => {
+                None => {
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "no entry in anchors cache by key {}", next_key,
+                        "no next entry in anchors cache",
                     );
                     break;
                 }
             };
 
-            let key = *entry.key();
+            let key = entry.0;
             if key < was_read_upto.0 {
                 // skip and remove already processed anchor from cache
-                let _ = entry.remove();
+                let _ = anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "anchor with key {} already processed, removed from anchors cache", key,
                 );
                 // try read next anchor
-                next_key += 1;
                 continue;
             } else {
                 if read_from_anchor_opt.is_none() {
@@ -622,16 +620,15 @@ impl CollatorStdImpl {
                     "last_read_anchor: {}", key,
                 );
 
-                let anchor = &entry.get().anchor;
+                let anchor = &entry.1.anchor;
 
                 if key == was_read_upto.0 && anchor.externals_count() == was_read_upto.1 as usize {
                     // skip and remove fully processed anchor
-                    let _ = entry.remove();
+                    let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully processed, removed from anchors cache", key,
                     );
                     // try read next anchor
-                    next_key += 1;
                     continue;
                 }
 
@@ -688,7 +685,7 @@ impl CollatorStdImpl {
                     break;
                 }
                 // try read next anchor
-                next_key += 1;
+                next_idx += 1;
             }
         }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -173,7 +173,7 @@ pub struct CollatorStdImpl {
 
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
-    anchors_cache: BTreeMap<MempoolAnchorId, CachedMempoolAnchor>,
+    anchors_cache: VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
 
     last_imported_anchor_id: Option<MempoolAnchorId>,
     last_imported_anchor_chain_time: Option<u64>,
@@ -230,7 +230,7 @@ impl CollatorStdImpl {
             shard_id,
             working_state: None,
 
-            anchors_cache: BTreeMap::new(),
+            anchors_cache: VecDeque::new(),
             last_imported_anchor_id: None,
             last_imported_anchor_chain_time: None,
 
@@ -500,10 +500,10 @@ impl CollatorStdImpl {
         self.last_imported_anchor_id = Some(next_anchor.id());
         self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
         self.anchors_cache
-            .insert(next_anchor.id(), CachedMempoolAnchor {
+            .push_back((next_anchor.id(), CachedMempoolAnchor {
                 anchor: next_anchor.clone(),
                 has_externals,
-            });
+            }));
 
         Ok((next_anchor, has_externals))
     }

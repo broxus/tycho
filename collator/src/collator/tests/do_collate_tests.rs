@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::VecDeque;
 
 use everscale_types::models::{ExternalsProcessedUpto, ShardIdent};
 
@@ -11,11 +11,14 @@ use crate::test_utils::try_init_test_tracing;
 fn test_read_next_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);
 
-    let mut anchors_cache = BTreeMap::new();
+    let mut anchors_cache = VecDeque::new();
 
     let shard_id = ShardIdent::new_full(0);
 
-    for anchor_id in 1..=10 {
+    for anchor_id in 1..=40 {
+        if anchor_id % 4 != 0 {
+            continue;
+        }
         let anchor = _stub_create_random_anchor_with_stub_externals(anchor_id);
         let has_externals = anchor.check_has_externals_for(&shard_id);
         tracing::trace!(
@@ -31,10 +34,10 @@ fn test_read_next_externals() {
                 .collect::<Vec<_>>()
                 .as_slice(),
         );
-        anchors_cache.insert(anchor_id, CachedMempoolAnchor {
+        anchors_cache.push_back((anchor_id, CachedMempoolAnchor {
             anchor,
             has_externals,
-        });
+        }));
     }
 
     let mut collation_data = BlockCollationData::default();
@@ -50,15 +53,15 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 3);
     assert!(has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (1, 0));
-    assert_eq!(ext_processed_upto.read_to, (1, 3));
-    let kv = anchors_cache.first_key_value().unwrap();
-    assert_eq!(*kv.0, 1);
+    assert_eq!(ext_processed_upto.processed_to, (4, 0));
+    assert_eq!(ext_processed_upto.read_to, (4, 3));
+    let kv = anchors_cache.front().unwrap();
+    assert_eq!(kv.0, 4);
 
     collation_data.externals_reading_started = false;
     collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
-        processed_to: (1, 3),
-        read_to: (2, 1),
+        processed_to: (4, 3),
+        read_to: (8, 1),
     });
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
@@ -72,10 +75,10 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 3);
     assert!(has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (1, 3));
-    assert_eq!(ext_processed_upto.read_to, (2, 1));
-    let kv = anchors_cache.first_key_value().unwrap();
-    assert_eq!(*kv.0, 1);
+    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.read_to, (8, 3));
+    let kv = anchors_cache.front().unwrap();
+    assert_eq!(kv.0, 4);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -88,10 +91,10 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 10);
     assert!(has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (1, 3));
-    assert_eq!(ext_processed_upto.read_to, (4, 3));
-    let kv = anchors_cache.first_key_value().unwrap();
-    assert_eq!(*kv.0, 2);
+    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.read_to, (16, 6));
+    let kv = anchors_cache.front().unwrap();
+    assert_eq!(kv.0, 8);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -104,10 +107,10 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 16);
     assert!(!has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (1, 3));
-    assert_eq!(ext_processed_upto.read_to, (10, 0));
-    let kv = anchors_cache.first_key_value().unwrap();
-    assert_eq!(*kv.0, 4);
+    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.read_to, (40, 0));
+    let kv = anchors_cache.front().unwrap();
+    assert_eq!(kv.0, 20);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -120,9 +123,9 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 0);
     assert!(!has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (1, 3));
-    assert_eq!(ext_processed_upto.read_to, (10, 0));
-    let kv = anchors_cache.first_key_value();
+    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.read_to, (40, 0));
+    let kv = anchors_cache.front();
     assert!(kv.is_none());
 
     // all anchors removed from cache, should not fail on empty cache
@@ -137,8 +140,8 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 0);
     assert!(!has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (1, 3));
-    assert_eq!(ext_processed_upto.read_to, (10, 0));
-    let kv = anchors_cache.first_key_value();
+    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.read_to, (40, 0));
+    let kv = anchors_cache.front();
     assert!(kv.is_none());
 }
