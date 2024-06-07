@@ -421,6 +421,12 @@ impl CollatorStdImpl {
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
 
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "created block candidate: start_lt={}, end_lt={}, txs={}, new_msgs={}, in_msgs={}, out_msgs={}",
+            collation_data.start_lt, collation_data.next_lt, block_transactions_count,
+            diff.messages.len(), collation_data.in_msgs.len(), collation_data.out_msgs.len(),
+        );
+
         self.mq_adapter
             .apply_diff(diff.clone(), candidate.block_id.as_short_id())
             .await?;
@@ -437,6 +443,13 @@ impl CollatorStdImpl {
             new_state_stuff: new_state_stuff.clone(),
             has_pending_internals,
         };
+
+        // log collation_result
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "Created block candidate: collated_file_hash={}, block_id={}",
+            collation_result.candidate.collated_file_hash, collation_result.candidate.block_id
+        );
+
         self.listener.on_block_candidate(collation_result).await?;
 
         tracing::info!(target: tracing_targets::COLLATOR,

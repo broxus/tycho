@@ -371,13 +371,13 @@ pub async fn process_new_signatures(
 
         Ok((validation_status, NotificationStatus::NotNotified))
     } else {
-        tracing::debug!(target: tracing_targets::VALIDATOR, "Caching signatures for block");
         if block_id_short.seqno > 0 {
             let previous_block =
                 BlockIdShort::from((block_id_short.shard, block_id_short.seqno - 1));
             let previous_block = session.get_block(&previous_block);
 
             if previous_block.is_some() {
+                tracing::trace!(target: tracing_targets::VALIDATOR, "Caching signatures for block");
                 session.cache_signatures(&block_id_short, signatures);
             }
         }

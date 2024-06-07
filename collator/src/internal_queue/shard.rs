@@ -4,6 +4,7 @@ use std::sync::Arc;
 use everscale_types::models::BlockIdShort;
 
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
+use crate::tracing_targets;
 
 #[derive(Clone, Default)]
 pub struct Shard {
@@ -27,6 +28,8 @@ impl Shard {
                 self.outgoing_messages.remove(&message.key());
             }
             return Some(diff);
+        } else {
+            tracing::warn!(target: tracing_targets::MQ, "Diff not found: {:?}", diff_id);
         }
         None
     }
