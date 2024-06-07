@@ -1,20 +1,19 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{BlockIdShort, IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr};
-use tycho_collator::internal_queue::iterator::{QueueIteratorExt, QueueIteratorImpl};
-use tycho_collator::internal_queue::persistent::persistent_state::{
-    PersistentStateConfig, PersistentStateImplFactory, PersistentStateStdImpl,
+use everscale_types::cell::{CellBuilder, CellSlice, HashBytes};
+use everscale_types::models::{
+    BaseMessage, BlockIdShort, IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr,
 };
 use tycho_collator::internal_queue::queue::{
     QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
 };
-use tycho_collator::internal_queue::session::session_state::{
+use tycho_collator::internal_queue::state::persistent::persistent_state::{
+    PersistentStateConfig, PersistentStateImplFactory, PersistentStateStdImpl,
+};
+use tycho_collator::internal_queue::state::session::session_state::{
     SessionStateImplFactory, SessionStateStdImpl,
 };
-use tycho_collator::internal_queue::snapshot::IterRange;
-use tycho_collator::internal_queue::snapshot_manager::SnapshotManager;
 use tycho_collator::internal_queue::types::EnqueuedMessage;
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::utils::shard::SplitMergeAction;
@@ -86,13 +85,21 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
             .unwrap(),
     ));
     let message = MsgInfo::Int(int_message.clone());
-    let cell: Cell = Default::default();
+
+    let msg = BaseMessage {
+        info: message.clone(),
+        init: None,
+        body: CellSlice::default(),
+        layout: None,
+    };
+    let cell = CellBuilder::build_from(msg)?;
+
     let messages = vec![(message, cell.clone())];
     adapter
         .add_messages_to_iterator(&mut iterator, messages)
         .unwrap();
 
-    let enqueued_message = EnqueuedMessage::from((int_message, cell));
+    let enqueued_message = EnqueuedMessage::from((int_message.clone(), cell));
 
     let processed_messages = vec![(shard_id_1, enqueued_message.key())];
 
@@ -142,9 +149,23 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
         .await
         .unwrap();
 
-    let peek_message = iterator.peek(true)?;
-
+    let peek_message = iterator.peek(false)?;
     assert!(peek_message.is_some());
+
+    let next_message = iterator.next(false)?;
+
+    assert!(next_message.is_some());
+    // println!("{:?}", peek_message.unwrap().message_with_source.message.hash);
+    let next_message = next_message.unwrap();
+    println!("{:?}", next_message.message_with_source.message.info.dst);
+    assert_eq!(
+        next_message.message_with_source.message.info.dst,
+        int_message.dst
+    );
+    assert_eq!(next_message.message_with_source.shard_id, shard_id_1);
+
+    let next_message = iterator.next(false)?;
+    assert!(next_message.is_none());
 
     Ok(())
 }

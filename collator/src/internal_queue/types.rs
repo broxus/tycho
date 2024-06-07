@@ -8,19 +8,10 @@ use everscale_types::models::{IntAddr, IntMsgInfo, ShardIdent};
 
 pub type Lt = u64;
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct QueueDiff {
     pub messages: Vec<Arc<EnqueuedMessage>>,
     pub processed_upto: HashMap<ShardIdent, InternalMessageKey>,
-}
-
-impl QueueDiff {
-    pub fn new() -> Self {
-        QueueDiff {
-            messages: Default::default(),
-            processed_upto: Default::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]

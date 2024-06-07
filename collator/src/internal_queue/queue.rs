@@ -3,20 +3,17 @@ use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::{Mutex, RwLock};
-use tracing::info;
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::persistent::persistent_state::{
+use crate::internal_queue::state::persistent::persistent_state::{
     PersistentState, PersistentStateConfig, PersistentStateFactory, PersistentStateImplFactory,
     PersistentStateStdImpl,
 };
-use crate::internal_queue::session::session_state::{
+use crate::internal_queue::state::session::session_state::{
     SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
 };
-use crate::internal_queue::snapshot::{ShardRange, StateSnapshot};
+use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator};
 use crate::internal_queue::types::QueueDiff;
-use crate::tracing_targets;
-
 // FACTORY
 
 pub struct QueueConfig {
@@ -24,7 +21,7 @@ pub struct QueueConfig {
 }
 
 pub trait QueueFactory {
-    type Queue: Queue;
+    type Queue: LocalQueue;
 
     fn create(&self) -> Self::Queue;
 }
@@ -32,7 +29,7 @@ pub trait QueueFactory {
 impl<F, R> QueueFactory for F
 where
     F: Fn() -> R,
-    R: Queue,
+    R: LocalQueue,
 {
     type Queue = R;
 
@@ -50,11 +47,11 @@ pub struct QueueFactoryStdImpl {
 
 #[trait_variant::make(Queue: Send)]
 pub trait LocalQueue {
-    async fn snapshot(
+    async fn iterator(
         &self,
         ranges: &HashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
-    ) -> Vec<Box<dyn StateSnapshot>>;
+    ) -> Vec<Box<dyn StateIterator>>;
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
     async fn merge_shards(
         &self,
@@ -82,8 +79,8 @@ impl QueueFactory for QueueFactoryStdImpl {
         let session_state = self.session_state_factory.create();
         let persistent_state = self.persistent_state_factory.create();
         QueueImpl {
-            session_state: Mutex::new(session_state),
-            persistent_state: RwLock::new(persistent_state),
+            session_state: Arc::new(Mutex::new(session_state)),
+            persistent_state: Arc::new(RwLock::new(persistent_state)),
         }
     }
 }
@@ -93,8 +90,8 @@ where
     S: SessionState,
     P: PersistentState,
 {
-    session_state: Mutex<S>,
-    persistent_state: RwLock<P>,
+    session_state: Arc<Mutex<S>>,
+    persistent_state: Arc<RwLock<P>>,
 }
 
 impl<S, P> Queue for QueueImpl<S, P>
@@ -102,24 +99,25 @@ where
     S: SessionState + Send,
     P: PersistentState + Send + Sync,
 {
-    async fn snapshot(
+    async fn iterator(
         &self,
         ranges: &HashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
-    ) -> Vec<Box<dyn StateSnapshot>> {
-        let session_state_lock = self.session_state.lock().await;
+    ) -> Vec<Box<dyn StateIterator>> {
+        let session_iter = {
+            let session_state_lock = self.session_state.lock().await;
+            session_state_lock.iterator(ranges, for_shard_id).await
+        };
+
         let persistent_state_lock = self.persistent_state.read().await;
-        vec![
-            // TODO parallel
-            session_state_lock
-                .snapshot(ranges, for_shard_id.clone())
-                .await,
-            persistent_state_lock.snapshot(ranges, for_shard_id).await,
-        ]
+        let persistent_iter = persistent_state_lock.iterator(for_shard_id);
+
+        vec![session_iter, persistent_iter]
     }
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
-        self.session_state.lock().await.split_shard(shard_id).await
+        let session_state_lock = self.session_state.lock().await;
+        session_state_lock.split_shard(shard_id).await
     }
 
     async fn merge_shards(
@@ -127,9 +125,8 @@ where
         shard_1_id: &ShardIdent,
         shard_2_id: &ShardIdent,
     ) -> Result<(), QueueError> {
-        self.session_state
-            .lock()
-            .await
+        let session_state_lock = self.session_state.lock().await;
+        session_state_lock
             .merge_shards(shard_1_id, shard_2_id)
             .await
     }
@@ -139,25 +136,25 @@ where
         diff: Arc<QueueDiff>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
-        self.session_state
-            .lock()
-            .await
-            .apply_diff(diff, block_id_short)
-            .await
+        let session_state_lock = self.session_state.lock().await;
+        session_state_lock.apply_diff(diff, block_id_short).await
     }
 
     async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
-        self.session_state.lock().await.add_shard(shard_id).await
+        let session_state_lock = self.session_state.lock().await;
+        session_state_lock.add_shard(shard_id).await
     }
 
     async fn commit_diff(
         &self,
         diff_id: &BlockIdShort,
     ) -> Result<Option<Arc<QueueDiff>>, QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        let persistent_state_lock = self.persistent_state.write().await;
-        let diff = session_state_lock.remove_diff(diff_id).await?;
+        let diff = {
+            let session_state_lock = self.session_state.lock().await;
+            session_state_lock.remove_diff(diff_id).await?
+        };
         if let Some(diff) = &diff {
+            let persistent_state_lock = self.persistent_state.write().await;
             persistent_state_lock
                 .add_messages(*diff_id, diff.messages.clone())
                 .await?;
@@ -165,37 +162,3 @@ where
         Ok(diff)
     }
 }
-// #[cfg(test)]
-// mod tests {
-//     use everscale_types::models::ShardIdent;
-//
-//     use super::*;
-//     use crate::internal_queue::persistent::persistent_state::{
-//         PersistentStateImplFactory, PersistentStateStdImpl,
-//     };
-//
-//     #[tokio::test]
-//     async fn test_new_queue() {
-//         let base_shard = ShardIdent::new_full(0);
-//         let config = QueueConfig {
-//             persistent_state_config: PersistentStateConfig {
-//                 database_url: "db_url".to_string(),
-//             },
-//         };
-//
-//         let session_state_factory = SessionStateImplFactory::new(vec![ShardIdent::new_full(0)]);
-//         let persistent_state_factory =
-//             PersistentStateImplFactory::new(config.persistent_state_config);
-//
-//         let queue_factory = QueueFactoryStdImpl {
-//             session_state_factory,
-//             persistent_state_factory,
-//         };
-//
-//         let queue = queue_factory.create();
-//
-//         Queue::split_shard(&queue, &base_shard).await.unwrap();
-//
-//         assert_eq!(queue.session_state.lock().await.shards_count().await, 3);
-//     }
-// }

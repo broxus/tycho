@@ -17,6 +17,6 @@ impl HistogramGuard {
 
 impl Drop for HistogramGuard {
     fn drop(&mut self) {
-        metrics::histogram!(self.name).record(self.started_at.elapsed())
+        metrics::histogram!(self.name).record(self.started_at.elapsed());
     }
 }

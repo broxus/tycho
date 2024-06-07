@@ -7,8 +7,8 @@ use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::snapshot::{IterRange, MessageWithSource, ShardRange};
-use crate::internal_queue::snapshot_manager::SnapshotManager;
+use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
+use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, Lt, QueueDiff};
 pub trait QueueIterator: Send {
     /// Get next message
@@ -32,12 +32,12 @@ pub struct QueueIteratorImpl {
     commited_current_position: HashMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     new_messages: HashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
-    snapshot_manager: SnapshotManager,
+    snapshot_manager: StatesIteratorsManager,
 }
 
 impl QueueIteratorImpl {
     pub fn new(
-        snapshot_manager: SnapshotManager,
+        snapshot_manager: StatesIteratorsManager,
         for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
         let messages_for_current_shard = BinaryHeap::default();
@@ -75,7 +75,7 @@ fn update_shard_range(
 
 impl QueueIterator for QueueIteratorImpl {
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>> {
-        if let Some(next_message) = self.snapshot_manager.next() {
+        if let Some(next_message) = self.snapshot_manager.next()? {
             return Ok(Some(IterItem {
                 message_with_source: next_message.clone(),
                 is_new: false,
@@ -112,7 +112,7 @@ impl QueueIterator for QueueIteratorImpl {
     }
 
     fn peek(&mut self, with_new: bool) -> Result<Option<IterItem>> {
-        if let Some(next_message) = self.snapshot_manager.peek() {
+        if let Some(next_message) = self.snapshot_manager.peek()? {
             return Ok(Some(IterItem {
                 message_with_source: next_message.clone(),
                 is_new: false,
@@ -145,7 +145,7 @@ impl QueueIterator for QueueIteratorImpl {
             "Taking diff from iterator. New messages count: {}",
             self.new_messages.len());
 
-        let mut diff = QueueDiff::new();
+        let mut diff = QueueDiff::default();
         for (shard_id, lt) in self.commited_current_position.iter() {
             diff.processed_upto.insert(*shard_id, lt.clone());
         }
@@ -189,10 +189,12 @@ impl QueueIterator for QueueIteratorImpl {
             && self.for_shard.workchain() == dest_workchain as i32
         {
             let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
+
             tracing::trace!(
                 target: crate::tracing_targets::MQ,
                 "Adding messages directly because it's for current shard: {:?}",
                 message_with_source);
+
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));
         };
