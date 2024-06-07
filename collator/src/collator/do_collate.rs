@@ -35,7 +35,7 @@ impl CollatorStdImpl {
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
+        tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: top_shard_blocks_ids: {:?}",
             top_shard_blocks_info.as_ref().map(|v| {
                 v.iter()
@@ -230,6 +230,7 @@ impl CollatorStdImpl {
             // 4. When all externals and existing internals finished (the collected set is empty here)
             //    fill next messages sets with new internals
             if msgs_set.is_empty() {
+                let mut new_internal_messages_in_set = 0;
                 while remaining_capacity > 0 && !all_new_internals_finished {
                     match internal_messages_iterator.next(true)? {
                         Some(int_msg) => {
@@ -247,11 +248,11 @@ impl CollatorStdImpl {
                             let async_message = AsyncMessage::NewInt(int_msg_info, cell);
 
                             msgs_set.push(async_message);
-
                             internal_messages_in_set.push((
                                 message_with_source.shard_id,
                                 message_with_source.message.key(),
                             ));
+                            new_internal_messages_in_set += 1;
 
                             remaining_capacity -= 1;
                         }
@@ -260,6 +261,9 @@ impl CollatorStdImpl {
                         }
                     }
                 }
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "read {} new internals from iterator", new_internal_messages_in_set,
+                );
             }
 
             if msgs_set.is_empty() {
