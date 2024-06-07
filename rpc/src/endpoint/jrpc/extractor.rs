@@ -8,6 +8,21 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+// Counters
+const METRIC_IN_REQ_TOTAL: &str = "tycho_rpc_in_req_total";
+const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
+
+pub fn describe_metrics() {
+    metrics::describe_counter!(
+        METRIC_IN_REQ_TOTAL,
+        "Number of incoming JRPC requests over time"
+    );
+    metrics::describe_counter!(
+        METRIC_IN_REQ_FAIL_TOTAL,
+        "Number of failed incoming JRPC requests over time"
+    );
+}
+
 pub trait ParseParams {
     type Params;
 
@@ -70,6 +85,8 @@ where
     type Rejection = JrpcErrorResponse;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        metrics::counter!(METRIC_IN_REQ_TOTAL).increment(1);
+
         #[derive(Deserialize)]
         enum Unknown {
             #[serde(other)]
@@ -202,6 +219,8 @@ impl Serialize for JrpcErrorResponse {
 
 impl IntoResponse for JrpcErrorResponse {
     fn into_response(self) -> Response {
+        metrics::counter!(METRIC_IN_REQ_FAIL_TOTAL).increment(1);
+
         (StatusCode::OK, axum::Json(self)).into_response()
     }
 }
