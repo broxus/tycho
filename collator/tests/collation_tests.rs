@@ -6,13 +6,13 @@ use everscale_types::models::{BlockId, GlobalCapability, ShardIdent};
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
-use tycho_collator::internal_queue::persistent::persistent_state::{
+use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
+use tycho_collator::internal_queue::state::persistent::persistent_state::{
     PersistentStateConfig, PersistentStateImplFactory,
 };
-use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::session::session_state::SessionStateImplFactory;
+use tycho_collator::internal_queue::state::session::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
-use tycho_collator::mempool::{MempoolAdapterStdImpl, MempoolAdapterStubImpl};
+use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
@@ -120,14 +120,14 @@ async fn test_collation_process_on_stubs() {
 
     let queue_config = QueueConfig {
         persistent_state_config: PersistentStateConfig {
-            database_url: "db_url".to_string(),
+            storage: storage.clone(),
         },
     };
 
     let shards = vec![ShardIdent::default()];
     let session_state_factory = SessionStateImplFactory::new(shards);
     let persistent_state_factory =
-        PersistentStateImplFactory::new(queue_config.persistent_state_config);
+        PersistentStateImplFactory::new(queue_config.persistent_state_config.storage);
 
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory,

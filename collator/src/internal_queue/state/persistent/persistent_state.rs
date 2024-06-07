@@ -1,14 +1,13 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tycho_storage::Storage;
-use weedb::rocksdb::DBRawIterator;
 
-use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
-use crate::internal_queue::snapshot::{ShardRange, StateSnapshot};
+use crate::internal_queue::state::persistent::persistent_state_iterator::PersistentStateIterator;
+use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::types::EnqueuedMessage;
+
 // CONFIG
 
 pub struct PersistentStateConfig {
@@ -33,7 +32,7 @@ pub struct PersistentStateImplFactory {
     pub storage: Storage,
 }
 
-impl<'a> PersistentStateImplFactory {
+impl PersistentStateImplFactory {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
@@ -62,18 +61,21 @@ pub trait LocalPersistentState {
         block_id_short: BlockIdShort,
         messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()>;
-    async fn snapshot(
+
+    fn iterator(&self, receiver: ShardIdent) -> Box<dyn StateIterator>;
+
+    async fn delete_messages(
         &self,
-        ranges: &HashMap<ShardIdent, ShardRange>,
-        for_shard_id: ShardIdent,
-    ) -> Box<dyn StateSnapshot>;
-    async fn gc();
+        source_shards: Vec<ShardIdent>,
+        receiver: ShardIdent,
+        lt_from: u64,
+        lt_to: u64,
+    ) -> anyhow::Result<()>;
 }
 
 // IMPLEMENTATION
 
 pub struct PersistentStateStdImpl {
-    // TODO remove static and use owned_snapshot
     storage: Storage,
 }
 
@@ -99,40 +101,29 @@ impl PersistentState for PersistentStateStdImpl {
         Ok(())
     }
 
-    async fn snapshot(
-        &self,
-        ranges: &HashMap<ShardIdent, ShardRange>,
-        for_shard_id: ShardIdent,
-    ) -> Box<dyn StateSnapshot> {
+    fn iterator(&self, receiver: ShardIdent) -> Box<dyn StateIterator> {
         let snapshot = self.storage.internal_queue_storage().snapshot();
 
-        let mut readopts = self
+        let iter = self
             .storage
             .internal_queue_storage()
-            .iterator_readopts(&snapshot);
+            .build_iterator(&snapshot);
 
-        let cf1_handle = self
-            .storage
-            .base_db()
-            .rocksdb()
-            .cf_handle("internal_messages")
-            .unwrap();
-        let mut iter = self
-            .storage
-            .base_db()
-            .rocksdb()
-            .raw_iterator_cf_opt(&cf1_handle, readopts);
-
-        let iter = unsafe { extend_lifetime(iter) };
-
-        Box::new(PersistentStateSnapshot::new(iter))
+        Box::new(PersistentStateIterator::new(iter, receiver))
     }
 
-    async fn gc() {
-        // Garbage collection logic
+    async fn delete_messages(
+        &self,
+        source_shards: Vec<ShardIdent>,
+        receiver: ShardIdent,
+        lt_from: u64,
+        lt_to: u64,
+    ) -> anyhow::Result<()> {
+        for shard in source_shards {
+            self.storage
+                .internal_queue_storage()
+                .delete_messages(shard, receiver, lt_from, lt_to)?;
+        }
+        Ok(())
     }
-}
-
-unsafe fn extend_lifetime<'a>(r: DBRawIterator<'a>) -> DBRawIterator<'static> {
-    std::mem::transmute::<DBRawIterator<'a>, DBRawIterator<'static>>(r)
 }

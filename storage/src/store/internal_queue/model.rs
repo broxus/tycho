@@ -3,12 +3,20 @@ use everscale_types::models::ShardIdent;
 
 use crate::util::{StoredValue, StoredValueBuffer};
 
-pub struct InternalMessagesKey {
+pub struct InternalMessageKey {
     pub lt: u64,
     pub hash: HashBytes,
-    pub shard_ident: ShardIdent
+    pub shard_ident: ShardIdent,
 }
-impl StoredValue for InternalMessagesKey {
+
+impl From<&[u8]> for InternalMessageKey {
+    fn from(bytes: &[u8]) -> Self {
+        let mut reader = bytes;
+        Self::deserialize(&mut reader)
+    }
+}
+
+impl StoredValue for InternalMessageKey {
     const SIZE_HINT: usize = 40 + ShardIdent::SIZE_HINT;
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
@@ -39,13 +47,24 @@ impl StoredValue for InternalMessagesKey {
 
         let shard_ident = ShardIdent::deserialize(reader);
 
-        Self { lt, hash, shard_ident }
+        Self {
+            lt,
+            hash,
+            shard_ident,
+        }
     }
 }
 
 pub struct ShardsInternalMessagesKey {
     pub shard_ident: ShardIdent,
     pub lt: u64,
+}
+
+impl From<&[u8]> for ShardsInternalMessagesKey {
+    fn from(bytes: &[u8]) -> Self {
+        let mut reader = bytes;
+        Self::deserialize(&mut reader)
+    }
 }
 
 impl StoredValue for ShardsInternalMessagesKey {
@@ -74,6 +93,6 @@ impl StoredValue for ShardsInternalMessagesKey {
 
         *reader = &reader[8..];
 
-        ShardsInternalMessagesKey { shard_ident, lt }
+        Self { shard_ident, lt }
     }
 }

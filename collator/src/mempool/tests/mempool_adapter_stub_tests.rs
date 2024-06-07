@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::{MempoolAdapter, MempoolEventListener};
-use crate::mempool::{MempoolAdapterStdImpl, MempoolAdapterStubImpl, MempoolAnchor};
+use crate::mempool::{MempoolAdapterStubImpl, MempoolAnchor};
 use crate::test_utils::try_init_test_tracing;
 
 struct MempoolEventStubListener;

@@ -8,10 +8,10 @@ use tracing::instrument;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
-use crate::internal_queue::persistent::persistent_state::PersistentStateStdImpl;
 use crate::internal_queue::queue::{Queue, QueueImpl};
-use crate::internal_queue::session::session_state::SessionStateStdImpl;
-use crate::internal_queue::snapshot_manager::SnapshotManager;
+use crate::internal_queue::state::persistent::persistent_state::PersistentStateStdImpl;
+use crate::internal_queue::state::session::session_state::SessionStateStdImpl;
+use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::tracing_targets;
 use crate::utils::shard::SplitMergeAction;
@@ -102,11 +102,11 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
 
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
-        let snapshots = self.queue.snapshot(&ranges, for_shard_id).await;
+        let states_iterators = self.queue.iterator(&ranges, for_shard_id).await;
 
-        let snapshot_manager = SnapshotManager::new(snapshots);
+        let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
 
-        let iterator = QueueIteratorImpl::new(snapshot_manager, for_shard_id)?;
+        let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
         Ok(Box::new(iterator))
     }
 

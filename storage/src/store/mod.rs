@@ -11,7 +11,7 @@ pub use self::shard_state::*;
 mod block;
 mod block_connection;
 mod block_handle;
-mod internal_queue;
+pub(crate) mod internal_queue;
 mod node_state;
 mod persistent_state;
 mod rpc;

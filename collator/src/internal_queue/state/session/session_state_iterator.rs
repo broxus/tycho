@@ -1,16 +1,17 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use anyhow::Result;
 use everscale_types::models::ShardIdent;
 
 use crate::internal_queue::shard::Shard;
-use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
+use crate::internal_queue::state::state_iterator::{MessageWithSource, ShardRange, StateIterator};
 
-pub struct SessionStateSnapshot {
+pub struct SessionStateIterator {
     message_queue: VecDeque<Arc<MessageWithSource>>,
 }
 
-impl SessionStateSnapshot {
+impl SessionStateIterator {
     pub fn new(
         flat_shards: HashMap<ShardIdent, Shard>,
         shard_ranges: &HashMap<ShardIdent, ShardRange>,
@@ -59,13 +60,13 @@ impl SessionStateSnapshot {
     }
 }
 
-impl StateSnapshot for SessionStateSnapshot {
-    fn next(&mut self) -> Option<Arc<MessageWithSource>> {
-        self.message_queue.pop_front()
+impl StateIterator for SessionStateIterator {
+    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
+        Ok(self.message_queue.pop_front())
     }
 
-    fn peek(&self) -> Option<Arc<MessageWithSource>> {
-        self.message_queue.front().cloned()
+    fn peek(&self) -> Result<Option<Arc<MessageWithSource>>> {
+        Ok(self.message_queue.front().cloned())
     }
 }
 

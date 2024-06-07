@@ -185,7 +185,7 @@ pub struct CollatorStdImpl {
     /// Updated in the `import_next_anchor()` and `read_next_externals()`
     has_pending_externals: bool,
 
-    /// State tracker for creating ShardStateStuff locally
+    /// State tracker for creating `ShardStateStuff` locally
     state_tracker: MinRefMcStateTracker,
 
     stats: CollatorStats,

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
+use anyhow::Result;
 use everscale_types::models::ShardIdent;
 
 use crate::internal_queue::types::{EnqueuedMessage, Lt};
@@ -48,8 +49,7 @@ pub struct ShardRange {
     pub to_lt: Option<Lt>,
 }
 
-pub trait StateSnapshot: Send {
+pub trait StateIterator: Send {
     fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
-
-    fn peek(&self) -> Option<Arc<MessageWithSource>>;
+    fn peek(&self) -> Result<Option<Arc<MessageWithSource>>>;
 }

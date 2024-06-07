@@ -1,18 +1,16 @@
-mod model;
+pub(crate) mod model;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::ShardIdent;
-use weedb::rocksdb::{
-    DBCommon, DBIterator, DBRawIteratorWithThreadMode, IteratorMode, MultiThreaded, ReadOptions,
-    SnapshotWithThreadMode, DB,
-};
-use weedb::{rocksdb, OwnedSnapshot};
+use everscale_types::cell::{Cell, HashBytes, Load};
+use everscale_types::models::{IntAddr, Message, MsgInfo, ShardIdent};
+pub use model::InternalMessageKey;
+use weedb::rocksdb::WriteBatch;
+use weedb::OwnedSnapshot;
 
 use crate::db::*;
-use crate::store::internal_queue::model::InternalMessagesKey;
-use crate::util::StoredValue;
+use crate::store::internal_queue::model::ShardsInternalMessagesKey;
+use crate::util::{OwnedIterator, StoredValue};
 
 pub struct InternalQueueStorage {
     db: BaseDb,
@@ -24,58 +22,57 @@ impl InternalQueueStorage {
     }
 
     pub fn snapshot(&self) -> OwnedSnapshot {
-        let snapshot = self.db.owned_snapshot();
-        snapshot
+        self.db.owned_snapshot()
     }
 
-    pub fn iterator_readopts(&self, snapshot: &OwnedSnapshot) -> ReadOptions {
-        // let start_key = InternalMessagesKey {
-        //     lt: 0,
-        //     hash: HashBytes::default(),
-        // };
-        // let iterator = snapshot.iterator_cf_opt(
-        //     &self.db.internal_messages.cf(),
-        //     Default::default(),
-        //     IteratorMode::From(start_key.to_vec().as_slice(), rocksdb::Direction::Forward),
-        // );
-        // let iterator = unsafe { Self::extend_lifetime(iterator) };
-
+    pub fn build_iterator(&self, snapshot: &OwnedSnapshot) -> OwnedIterator {
         let mut readopts = self.db.internal_messages.new_read_config();
 
         readopts.set_snapshot(snapshot);
 
-        readopts
+        let internal_messages_cf = self.db.internal_messages.cf();
+
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&internal_messages_cf, readopts);
+
+        iter.seek_to_first();
+
+        OwnedIterator::new(iter, self.db.rocksdb().clone())
     }
 
+    /// Inserts messages into the database.
     pub fn insert_messages(
         &self,
         shard_ident: ShardIdent,
-        messages: &Vec<(u64, HashBytes, Cell)>,
+        messages: &[(u64, HashBytes, Cell)],
     ) -> Result<()> {
-        let mut batch_internal_messages = rocksdb::WriteBatch::default();
-        let mut batch_shards_internal_messages = rocksdb::WriteBatch::default();
+        let mut batch_internal_messages = WriteBatch::default();
+        let mut batch_shards_internal_messages = WriteBatch::default();
 
-        for message in messages.iter() {
-            let internal_message_key = InternalMessagesKey {
-                lt: message.0,
-                hash: message.1,
+        for (lt, hash, cell) in messages {
+            let internal_message_key = InternalMessageKey {
+                lt: *lt,
+                hash: *hash,
                 shard_ident,
             };
+
             batch_internal_messages.put_cf(
                 &self.db.internal_messages.cf(),
                 internal_message_key.to_vec().as_slice(),
-                Boc::encode(message.clone().2),
+                Boc::encode(cell.clone()),
             );
 
-            let shard_internal_message_key = model::ShardsInternalMessagesKey {
+            let shard_internal_message_key = ShardsInternalMessagesKey {
                 shard_ident,
-                lt: message.0,
+                lt: *lt,
             };
 
             batch_shards_internal_messages.put_cf(
                 &self.db.shards_internal_messages.cf(),
                 shard_internal_message_key.to_vec().as_slice(),
-                message.1.as_slice(),
+                hash.as_slice(),
             );
         }
 
@@ -88,51 +85,75 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    // pub fn store_message(&self, id: &ShardIdent, lt: u64, message: Cell) -> Result<()> {
-    //     let internal_messages = &self.db.internal_messages;
-    //     let hash = *message.repr_hash();
-    //     let internal_message_key = InternalMessagesKey { lt, hash };
-    //     let message_content = Boc::encode(message);
-    //     internal_messages.insert(internal_message_key.to_vec().as_slice(), message_content)?;
-    //     let shards_internal_messages = &self.db.shards_internal_messages;
-    //     let key = ShardsInternalMessagesKey {
-    //         shard_ident: *id,
-    //         lt,
-    //     };
-    //     shards_internal_messages.insert(key.to_vec().as_slice(), hash)?;
-    //     Ok(())
-    // }
-
-    pub fn delete_message(
+    /// Deletes messages from the database.
+    pub fn delete_messages(
         &self,
-        _shard_ident: ShardIdent,
-        _lt: u64,
-        _hash: HashBytes,
+        source: ShardIdent,
+        receiver: ShardIdent,
+        lt_from: u64,
+        lt_to: u64,
     ) -> Result<()> {
-        // delete for messages from shards_internal_messages
-        // let key_from = ShardsInternalMessagesKey { shard_ident, lt: 0 };
-        // let key_to = ShardsInternalMessagesKey { shard_ident, lt };
-        //
-        // self.db.raw().delete_range_cf(
-        //     &self.db.shards_internal_messages.cf(),
-        //     key_from.to_vec().as_slice(),
-        //     key_to.to_vec().as_slice(),
-        // )?;
-        //
-        // // remove from internal_messages
-        // let key_from = InternalMessagesKey {
-        //     lt: 0,
-        //     hash: HashBytes::default(),
-        // };
-        // let key_to = InternalMessagesKey { lt, hash };
-        //
-        // self.db.raw().delete_range_cf(
-        //     &self.db.internal_messages.cf(),
-        //     key_from.to_vec().as_slice(),
-        //     key_to.to_vec().as_slice(),
-        // )?;
-        // Ok(())
-        //
+        let mut readopts = self.db.shards_internal_messages.new_read_config();
+        let snapshot = self.snapshot();
+        readopts.set_snapshot(&snapshot);
+
+        let start_key = ShardsInternalMessagesKey {
+            shard_ident: source,
+            lt: lt_from,
+        };
+
+        let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&shards_internal_messages_cf, readopts);
+
+        iter.seek(&start_key.to_vec());
+
+        let mut batch = WriteBatch::default();
+        let internal_messages_cf = self.db.internal_messages.cf();
+
+        while iter.valid() {
+            let (mut key, value) = match (iter.key(), iter.value()) {
+                (Some(key), Some(value)) => (key, value),
+                _ => break,
+            };
+
+            let key = ShardsInternalMessagesKey::deserialize(&mut key);
+            if key.lt > lt_to {
+                break;
+            }
+
+            let cell = Boc::decode(value)?;
+            let hash = cell.repr_hash();
+            let base_message = Message::load_from(&mut cell.as_slice()?)?;
+            let dest = match base_message.info {
+                MsgInfo::Int(int_msg_info) => int_msg_info.dst,
+                _ => bail!("Expected internal message"),
+            };
+
+            let dest_addr = match dest {
+                IntAddr::Std(addr) => addr,
+                IntAddr::Var(_) => bail!("Expected standard address"),
+            };
+
+            if receiver.contains_account(&dest_addr.address) {
+                iter.next();
+                continue;
+            }
+
+            let internal_messages_key = InternalMessageKey {
+                lt: key.lt,
+                hash: *hash,
+                shard_ident: source,
+            };
+
+            batch.delete_cf(&internal_messages_cf, &internal_messages_key.to_vec());
+            batch.delete_cf(&shards_internal_messages_cf, &key.to_vec());
+            iter.next();
+        }
+
+        self.db.rocksdb().as_ref().write(batch)?;
         Ok(())
     }
 }
