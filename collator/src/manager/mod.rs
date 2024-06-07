@@ -1449,6 +1449,14 @@ where
                 {
                     // 5. If master block and all shard blocks valid the extract them from entries and return
                     if !shard_block_container.is_valid() {
+                        tracing::debug!(
+                            target: tracing_targets::COLLATION_MANAGER,
+                            "Not all blocks are valid in master block ({}) subgraph",
+                            block_id.as_short_id(),
+                        );
+                        let mut blocks_to_restore = vec![subgraph.mc_block];
+                        blocks_to_restore.append(&mut subgraph.shard_blocks);
+                        self.restore_blocks_in_cache(blocks_to_restore)?;
                         return Ok(None);
                     }
                     subgraph.shard_blocks.push(BlockCandidateToSend {
@@ -1500,8 +1508,15 @@ where
         Ok(())
     }
 
+    async fn restore_blocks_in_cache_async(
+        &mut self,
+        blocks_to_restore: Vec<BlockCandidateToSend>,
+    ) -> Result<()> {
+        self.restore_blocks_in_cache(blocks_to_restore)
+    }
+
     /// Find and restore block entries in cache updating sync statuses
-    async fn restore_blocks_in_cache(
+    fn restore_blocks_in_cache(
         &mut self,
         blocks_to_restore: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
@@ -1721,7 +1736,7 @@ where
             // queue blocks restore task
             dispatcher
                 .enqueue_task(method_to_async_task_closure!(
-                    restore_blocks_in_cache,
+                    restore_blocks_in_cache_async,
                     blocks_to_send
                 ))
                 .await?;

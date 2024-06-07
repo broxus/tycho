@@ -127,7 +127,9 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
             target: tracing_targets::MQ_ADAPTER,
             "Committing diff to the queue"
         );
-        let diff = self.queue.commit_diff(diff_id).await?;
+        // HACK: do not commit diff to avoid incorrect msgs set reading for collation
+        // let diff = self.queue.commit_diff(diff_id).await?;
+        let diff = None;
         Ok(diff)
     }
 
@@ -136,7 +138,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(MsgInfo, Cell)>,
     ) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
             messages_len = messages.len(),
             "Adding messages to the iterator"

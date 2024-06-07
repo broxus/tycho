@@ -116,7 +116,7 @@ impl BlockCandidateContainer {
                     // already synced block is valid and won't be sent to sync again
                     self.send_sync_status = SendSyncStatus::Synced;
                 } else if self.block_id().is_masterchain() {
-                    // master block is ready for when validated
+                    // master block is ready for sync when validated
                     // but shard blocks should wait for master block
                     self.send_sync_status = SendSyncStatus::Ready;
                 }

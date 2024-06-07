@@ -3250,6 +3250,7 @@ dependencies = [
  "everscale-types",
  "futures-util",
  "indexmap",
+ "metrics",
  "parking_lot",
  "rand",
  "sha2",
