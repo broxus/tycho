@@ -842,12 +842,13 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#3f6ec66f0f4541736fe32c3f09f1bd8b92532078"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#41cfd24064a85c73a15d5a319b70a49e1fc043c0"
 dependencies = [
  "ahash",
  "base64 0.21.7",
  "bitflags",
  "crc32c",
+ "dashmap",
  "everscale-crypto",
  "everscale-types-proc",
  "hex",
@@ -862,7 +863,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#3f6ec66f0f4541736fe32c3f09f1bd8b92532078"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#41cfd24064a85c73a15d5a319b70a49e1fc043c0"
 dependencies = [
  "proc-macro2",
  "quote",
