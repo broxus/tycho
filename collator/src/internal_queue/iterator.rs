@@ -84,17 +84,9 @@ impl QueueIterator for QueueIteratorImpl {
 
         if with_new {
             if let Some(next_message) = self.messages_for_current_shard.pop() {
-                tracing::trace!(
-                    target: crate::tracing_targets::MQ,
-                    "Popping message from current shard messages: {:?}",
-                    next_message.0);
                 let message_key = next_message.0.message.key();
 
                 if self.new_messages.remove(&message_key).is_some() {
-                    tracing::trace!(
-                        target: crate::tracing_targets::MQ,
-                        "Message deleted new messages and in current shard messages: {:?}",
-                        message_key);
                     return Ok(Some(IterItem {
                         message_with_source: next_message.0.clone(),
                         is_new: true,
@@ -189,11 +181,6 @@ impl QueueIterator for QueueIteratorImpl {
             && self.for_shard.workchain() == dest_workchain as i32
         {
             let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
-
-            tracing::trace!(
-                target: crate::tracing_targets::MQ,
-                "Adding messages directly because it's for current shard: {:?}",
-                message_with_source);
 
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));

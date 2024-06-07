@@ -17,6 +17,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
 futures-util = { workspace = true }
+humantime = { workspace = true }
 indexmap = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }

@@ -95,11 +95,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         shards_from: FastHashMap<ShardIdent, u64>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>> {
-        tracing::debug!(
-            target: tracing_targets::MQ_ADAPTER,
-            "Creating iterator"
-        );
-
+        let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
         let states_iterators = self.queue.iterator(&ranges, for_shard_id).await;
@@ -107,11 +103,16 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
 
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
+        tracing::trace!(
+            target: tracing_targets::MQ_ADAPTER,
+            elapsed = %humantime::format_duration(time_start.elapsed()),
+            "Iterator created"
+        );
         Ok(Box::new(iterator))
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
-        tracing::info!(
+        tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
             id = ?block_id_short,
             new_messages_len = diff.messages.len(),
@@ -123,7 +124,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
 
     #[instrument(skip(self), fields(%diff_id))]
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>> {
-        tracing::info!(
+        tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
             "Committing diff to the queue"
         );
@@ -159,7 +160,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         iterator: &mut Box<dyn QueueIterator>,
         messages: Vec<(ShardIdent, InternalMessageKey)>,
     ) -> Result<()> {
-        tracing::debug!(
+        tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
             messages_len = messages.len(),
             "Committing messages to iterator"

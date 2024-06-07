@@ -21,7 +21,7 @@ pub struct QueueConfig {
 }
 
 pub trait QueueFactory {
-    type Queue: LocalQueue;
+    type Queue: Queue;
 
     fn create(&self) -> Self::Queue;
 }
@@ -29,7 +29,7 @@ pub trait QueueFactory {
 impl<F, R> QueueFactory for F
 where
     F: Fn() -> R,
-    R: LocalQueue,
+    R: Queue,
 {
     type Queue = R;
 
@@ -109,10 +109,11 @@ where
             session_state_lock.iterator(ranges, for_shard_id).await
         };
 
-        let persistent_state_lock = self.persistent_state.read().await;
-        let persistent_iter = persistent_state_lock.iterator(for_shard_id);
+        // let persistent_state_lock = self.persistent_state.read().await;
+        // let persistent_iter = persistent_state_lock.iterator(for_shard_id);
 
-        vec![session_iter, persistent_iter]
+        // vec![session_iter, persistent_iter]
+        vec![session_iter]
     }
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
