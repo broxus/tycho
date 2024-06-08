@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
@@ -133,8 +132,10 @@ impl MempoolAdapterStdImpl {
     }
 
     fn add_anchor(&self, anchor: Arc<MempoolAnchor>) {
-        let mut guard = self.anchors.write();
-        guard.insert(anchor.id(), anchor);
+        {
+            let mut guard = self.anchors.write();
+            guard.insert(anchor.id(), anchor);
+        }
 
         self.anchor_added.notify_waiters()
     }
@@ -223,31 +224,34 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     ) -> Result<Option<Arc<MempoolAnchor>>> {
         // TODO: make real implementation, currently only return anchor from local cache
 
-        let mut guard = self.anchors.read();
-        let result = guard.get(&anchor_id).cloned();
-        Ok(result)
+        Ok(self.anchors.read().get(&anchor_id).cloned())
     }
 
     async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
         // TODO: make real implementation, currently only return anchor from local cache
         loop {
+            // NOTE: Subscribe to notification before checking
+            let anchor_added = self.anchor_added.notified();
+
             {
-                let anchors_cache_r = self.anchors.read();
-                if let Some((key, _)) = anchors_cache_r.first() {
-                    if prev_anchor_id < *key {
-                        return Err(anyhow!("Requested anchor {prev_anchor_id} is too old"));
-                    }
+                let anchors = self.anchors.read();
+                if let Some((oldest, _)) = anchors.first() {
+                    anyhow::ensure!(
+                        prev_anchor_id >= *oldest,
+                        "Requested anchor {prev_anchor_id} is too old"
+                    );
                 }
-                match anchors_cache_r.get_index_of(&prev_anchor_id) {
-                    Some(index) => {
-                        if let Some((_, value)) = anchors_cache_r.get_index(index + 1) {
-                            return Ok(value.clone());
-                        }
-                    }
-                    _ => return Err(anyhow!("Presented anchor {prev_anchor_id} is unknown")),
+
+                let Some(index) = anchors.get_index_of(&prev_anchor_id) else {
+                    anyhow::bail!("Presented anchor {prev_anchor_id} is unknown");
+                };
+
+                if let Some((_, value)) = anchors.get_index(index + 1) {
+                    return Ok(value.clone());
                 }
             }
-            self.anchor_added.notified().await;
+
+            anchor_added.await;
         }
     }
 
