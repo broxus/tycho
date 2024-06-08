@@ -184,8 +184,8 @@ pub async fn check_anchors(
             }
         });
 
-        tracing::info!("Anchor hashmap len: {}", guard.len());
-        tracing::info!("Refs hashmap ken: {}", refs_guard.len());
+        tracing::debug!("Anchor hashmap len: {}", guard.len());
+        tracing::debug!("Refs hashmap ken: {}", refs_guard.len());
 
         drop(guard);
         drop(refs_guard);
