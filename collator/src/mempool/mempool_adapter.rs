@@ -1,22 +1,22 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::boc::Boc;
 use everscale_types::models::MsgInfo;
 use everscale_types::prelude::Load;
+use indexmap::IndexMap;
 use parking_lot::RwLock;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::{InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::FastHashSet;
 
-use super::mempool_adapter_stub::{stub_get_anchor_by_id, stub_get_next_anchor};
 use crate::mempool::external_message_cache::ExternalMessageCache;
 use crate::mempool::types::ExternalMessage;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
@@ -81,8 +81,10 @@ pub trait MempoolAdapter: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct MempoolAdapterStdImpl {
     // TODO: replace with rocksdb
-    anchors: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
+    anchors: Arc<RwLock<IndexMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
     externals_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+
+    anchor_added: Arc<tokio::sync::Notify>,
 }
 
 impl MempoolAdapterStdImpl {
@@ -93,7 +95,7 @@ impl MempoolAdapterStdImpl {
         peers: Vec<PeerId>,
     ) -> Arc<Self> {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
-        let anchors = Arc::new(RwLock::new(BTreeMap::new()));
+        let anchors = Arc::new(RwLock::new(IndexMap::new()));
 
         let (sender, receiver) =
             tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
@@ -118,6 +120,7 @@ impl MempoolAdapterStdImpl {
         let mempool_adapter = Arc::new(Self {
             anchors,
             externals_tx,
+            anchor_added: Arc::new(Notify::new()),
         });
 
         tokio::spawn(handle_anchors(mempool_adapter.clone(), receiver));
@@ -132,6 +135,10 @@ impl MempoolAdapterStdImpl {
     fn add_anchor(&self, anchor: Arc<MempoolAnchor>) {
         let mut guard = self.anchors.write();
         guard.insert(anchor.id(), anchor);
+        tracing::info!("Added anchor to cache\n");
+        tracing::info!("Current state of index map: {guard:?}");
+
+        self.anchor_added.notify_waiters()
     }
 }
 
@@ -218,13 +225,32 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
     ) -> Result<Option<Arc<MempoolAnchor>>> {
         // TODO: make real implementation, currently only return anchor from local cache
 
-        stub_get_anchor_by_id(self.anchors.clone(), anchor_id).await
+        let mut guard = self.anchors.read();
+        let result = guard.get(&anchor_id).cloned();
+        Ok(result)
     }
 
     async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
         // TODO: make real implementation, currently only return anchor from local cache
-
-        stub_get_next_anchor(self.anchors.clone(), prev_anchor_id).await
+        loop {
+            {
+                let anchors_cache_r = self.anchors.read();
+                if let Some((key, _)) = anchors_cache_r.first() {
+                    if prev_anchor_id < *key {
+                        return Err(anyhow!("Requested anchor {prev_anchor_id} is too old"))
+                    }
+                }
+                match anchors_cache_r.get_index_of(&prev_anchor_id) {
+                    Some(index) => {
+                        if let Some((_, value)) = anchors_cache_r.get_index(index + 1) {
+                            return Ok(value.clone())
+                        }
+                    }
+                    _ => return Err(anyhow!("Presented anchor {prev_anchor_id} is unknown"))
+                }
+            }
+            self.anchor_added.notified().await;
+        }
     }
 
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
