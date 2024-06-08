@@ -14,7 +14,6 @@ use tokio::sync::{mpsc, Notify};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::{InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
-use tycho_util::FastHashSet;
 
 use crate::mempool::external_message_cache::ExternalMessageCache;
 use crate::mempool::types::ExternalMessage;
@@ -155,10 +154,9 @@ pub async fn handle_anchors(
 ) {
     let mut cache = ExternalMessageCache::new(1000);
     while let Some((anchor, points)) = rx.recv().await {
-        let mut repr_hashes = FastHashSet::default();
         let mut messages = Vec::new();
 
-        for point in points {
+        for point in points.iter() {
             'message: for message in &point.body.payload {
                 let cell = match Boc::decode(message) {
                     Ok(cell) => cell,
@@ -188,18 +186,26 @@ pub async fn handle_anchors(
                     }
                 };
 
-                if repr_hashes.insert(*cell.repr_hash()) {
+                if cache.check_unique(anchor.body.location.round.0, cell.repr_hash()) {
                     messages.push(Arc::new(ExternalMessage::new(cell.clone(), ext_in_message)));
                 }
             }
         }
+        cache.clean(anchor.body.location.round.0);
 
-        let added_messages = cache.add_dedup_messages(anchor.body.location.round.0, messages);
+        tracing::info!(
+            target: tracing_targets::MEMPOOL_ADAPTER,
+            round = anchor.body.location.round.0,
+            time = anchor.body.time.as_u64(),
+            externals_unique = messages.len(),
+            externals_skipped = points.len() - messages.len(),
+            "new anchor"
+        );
 
         let anchor = Arc::new(MempoolAnchor::new(
             anchor.body.location.round.0,
             anchor.body.time.as_u64(),
-            added_messages,
+            messages,
         ));
 
         adapter.add_anchor(anchor);

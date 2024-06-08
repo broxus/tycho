@@ -270,9 +270,10 @@ impl Engine {
         {
             tracing::info!(
                 parent: round_effects.span(),
-                payload_ki_bytes = own_point
-                    .body.payload.iter().map(|bytes| bytes.len()).sum::<usize>() / 1024,
                 digest = display(own_point.digest.alt()),
+                payload_bytes = own_point
+                    .body.payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
+                externals = own_point.body.payload.len(),
                 "produced point"
             );
             let state = current_dag_round.insert_exact_sign(
