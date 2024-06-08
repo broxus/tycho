@@ -241,19 +241,27 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
             {
                 let anchors = self.anchors.read();
-                if let Some((oldest, _)) = anchors.first() {
-                    anyhow::ensure!(
-                        prev_anchor_id >= *oldest,
-                        "Requested anchor {prev_anchor_id} is too old"
-                    );
-                }
 
-                let Some(index) = anchors.get_index_of(&prev_anchor_id) else {
-                    anyhow::bail!("Presented anchor {prev_anchor_id} is unknown");
-                };
+                match anchors.first() {
+                    // Continue to wait for the first anchor on node start
+                    None if prev_anchor_id == 0 => {}
+                    // Return the first anchor on node start
+                    Some((_, first)) if prev_anchor_id == 0 => return Ok(first.clone()),
+                    // Trying to get anchor that is too old
+                    Some((first_id, _)) if prev_anchor_id < *first_id => {
+                        anyhow::bail!("Requested anchor {prev_anchor_id} is too old");
+                    }
+                    _ => {
+                        // Find the index of the previous anchor
+                        let Some(index) = anchors.get_index_of(&prev_anchor_id) else {
+                            anyhow::bail!("Presented anchor {prev_anchor_id} is unknown");
+                        };
 
-                if let Some((_, value)) = anchors.get_index(index + 1) {
-                    return Ok(value.clone());
+                        // Try to get the next anchor
+                        if let Some((_, value)) = anchors.get_index(index + 1) {
+                            return Ok(value.clone());
+                        }
+                    }
                 }
             }
 
