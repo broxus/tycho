@@ -150,7 +150,7 @@ impl CollationSessionInfo {
     }
 }
 
-pub(crate) trait IntAdrExt {
+pub trait IntAdrExt {
     fn get_address(&self) -> HashBytes;
 }
 impl IntAdrExt for IntAddr {

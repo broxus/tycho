@@ -3250,6 +3250,7 @@ dependencies = [
  "everscale-crypto",
  "everscale-types",
  "futures-util",
+ "humantime",
  "indexmap",
  "metrics",
  "parking_lot",
@@ -3271,6 +3272,7 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+ "weedb",
 ]
 
 [[package]]

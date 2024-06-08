@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::BlockIdShort;
+use everscale_types::models::{BlockIdShort, ShardIdent};
 use tycho_storage::Storage;
 
-// use crate::internal_queue::persistent::persistent_state_snapshot::PersistentStateSnapshot;
-use crate::internal_queue::snapshot::StateSnapshot;
+use crate::internal_queue::state::persistent::persistent_state_iterator::PersistentStateIterator;
+use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::types::EnqueuedMessage;
 
 // CONFIG
@@ -32,7 +32,7 @@ pub struct PersistentStateImplFactory {
     pub storage: Storage,
 }
 
-impl<'a> PersistentStateImplFactory {
+impl PersistentStateImplFactory {
     pub fn new(storage: Storage) -> Self {
         Self { storage }
     }
@@ -42,7 +42,6 @@ impl PersistentStateFactory for PersistentStateImplFactory {
     type PersistentState = PersistentStateStdImpl;
 
     fn create(&self) -> Self::PersistentState {
-        // self.storage.persistent_state_storage()
         PersistentStateStdImpl::new(self.storage.clone())
     }
 }
@@ -62,14 +61,21 @@ pub trait LocalPersistentState {
         block_id_short: BlockIdShort,
         messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()>;
-    async fn snapshot(&self) -> Box<dyn StateSnapshot>;
-    async fn gc();
+
+    fn iterator(&self, receiver: ShardIdent) -> Box<dyn StateIterator>;
+
+    async fn delete_messages(
+        &self,
+        source_shards: Vec<ShardIdent>,
+        receiver: ShardIdent,
+        lt_from: u64,
+        lt_to: u64,
+    ) -> anyhow::Result<()>;
 }
 
 // IMPLEMENTATION
 
 pub struct PersistentStateStdImpl {
-    // TODO remove static and use owned_snapshot
     storage: Storage,
 }
 
@@ -91,17 +97,33 @@ impl PersistentState for PersistentStateStdImpl {
             .collect();
         self.storage
             .internal_queue_storage()
-            .add_messages(block_id_short.shard, &messages)?;
+            .insert_messages(block_id_short.shard, &messages)?;
         Ok(())
     }
 
-    async fn snapshot(&self) -> Box<dyn StateSnapshot> {
-        todo!("Implement snapshot")
-        // let snapshot = self.storage.internal_queue_storage().snapshot();
-        // Box::new(PersistentStateSnapshot::new(snapshot))
+    fn iterator(&self, receiver: ShardIdent) -> Box<dyn StateIterator> {
+        let snapshot = self.storage.internal_queue_storage().snapshot();
+
+        let iter = self
+            .storage
+            .internal_queue_storage()
+            .build_iterator(&snapshot);
+
+        Box::new(PersistentStateIterator::new(iter, receiver))
     }
 
-    async fn gc() {
-        // Garbage collection logic
+    async fn delete_messages(
+        &self,
+        source_shards: Vec<ShardIdent>,
+        receiver: ShardIdent,
+        lt_from: u64,
+        lt_to: u64,
+    ) -> anyhow::Result<()> {
+        for shard in source_shards {
+            self.storage
+                .internal_queue_storage()
+                .delete_messages(shard, receiver, lt_from, lt_to)?;
+        }
+        Ok(())
     }
 }

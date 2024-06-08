@@ -267,6 +267,7 @@ impl SessionInfo {
                     root_hash=?root_hash,
                     file_hash=?file_hash,
                     "Invalid signature");
+                panic!("Invalid signature");
             }
         }
 

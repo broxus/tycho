@@ -1,16 +1,20 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use anyhow::Result;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 
 use crate::internal_queue::shard::Shard;
-use crate::internal_queue::snapshot::{MessageWithSource, ShardRange, StateSnapshot};
+use crate::internal_queue::state::state_iterator::{MessageWithSource, ShardRange, StateIterator};
+use crate::internal_queue::types::InternalMessageKey;
+use crate::tracing_targets;
 
-pub struct SessionStateSnapshot {
+pub struct SessionStateIterator {
     message_queue: VecDeque<Arc<MessageWithSource>>,
 }
 
-impl SessionStateSnapshot {
+impl SessionStateIterator {
     pub fn new(
         flat_shards: HashMap<ShardIdent, Shard>,
         shard_ranges: &HashMap<ShardIdent, ShardRange>,
@@ -18,7 +22,6 @@ impl SessionStateSnapshot {
     ) -> Self {
         let queue = Self::prepare_queue(flat_shards, shard_ranges, shard_id);
         Self {
-            // flat_shards,
             message_queue: queue,
         }
     }
@@ -29,43 +32,60 @@ impl SessionStateSnapshot {
         shard_id: &ShardIdent,
     ) -> VecDeque<Arc<MessageWithSource>> {
         let mut message_queue = VecDeque::new();
-        if message_queue.is_empty() {
-            for (shard_ident, shard) in &flat_shards {
-                for (message_key, message) in &shard.outgoing_messages {
+
+        for (shard_ident, shard) in flat_shards.iter() {
+            if let Some(shard_range) = shard_ranges.get(shard_ident) {
+                let from_lt = match shard_range.from_lt {
+                    None => 0,
+                    Some(from_lt) => from_lt + 1,
+                };
+                let range_start = InternalMessageKey {
+                    lt: from_lt,
+                    hash: HashBytes::ZERO,
+                };
+                let range_end = InternalMessageKey {
+                    lt: shard_range.to_lt.unwrap_or(u64::MAX),
+                    hash: HashBytes([255; 32]),
+                };
+
+                let shard_size = shard.outgoing_messages.len();
+
+                tracing::trace!(
+                    target: tracing_targets::MQ,
+                    "Shard {} has {} messages",
+                    shard_ident,
+                    shard_size
+                );
+
+                // Perform a range query on the BTreeMap
+                let range = shard.outgoing_messages.range(range_start..=range_end);
+
+                for (_, message) in range {
                     if let Ok((workchain, account_hash)) = message.destination() {
                         if shard_id.contains_account(&account_hash)
                             && shard_id.workchain() == workchain as i32
                         {
-                            if let Some(shard_range) = shard_ranges.get(shard_ident) {
-                                if (shard_range.from_lt.is_none()
-                                    || message_key.lt
-                                        > shard_range.from_lt.unwrap_or(message_key.lt))
-                                    && (shard_range.to_lt.is_none()
-                                        || message_key.lt
-                                            <= shard_range.to_lt.unwrap_or(message_key.lt))
-                                {
-                                    message_queue.push_back(Arc::new(MessageWithSource::new(
-                                        *shard_ident,
-                                        message.clone(),
-                                    )));
-                                }
-                            }
+                            message_queue.push_back(Arc::new(MessageWithSource::new(
+                                *shard_ident,
+                                message.clone(),
+                            )));
                         }
                     }
                 }
             }
         }
+
         message_queue
     }
 }
 
-impl StateSnapshot for SessionStateSnapshot {
-    fn next(&mut self) -> Option<Arc<MessageWithSource>> {
-        self.message_queue.pop_front()
+impl StateIterator for SessionStateIterator {
+    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
+        Ok(self.message_queue.pop_front())
     }
 
-    fn peek(&self) -> Option<Arc<MessageWithSource>> {
-        self.message_queue.front().cloned()
+    fn peek(&self) -> Result<Option<Arc<MessageWithSource>>> {
+        Ok(self.message_queue.front().cloned())
     }
 }
 
