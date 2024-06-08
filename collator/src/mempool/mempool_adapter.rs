@@ -10,8 +10,8 @@ use everscale_types::models::MsgInfo;
 use everscale_types::prelude::Load;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
-use tokio::sync::{mpsc, Notify};
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::{mpsc, Notify};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_consensus::{InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
@@ -135,8 +135,6 @@ impl MempoolAdapterStdImpl {
     fn add_anchor(&self, anchor: Arc<MempoolAnchor>) {
         let mut guard = self.anchors.write();
         guard.insert(anchor.id(), anchor);
-        tracing::info!("Added anchor to cache\n");
-        tracing::info!("Current state of index map: {guard:?}");
 
         self.anchor_added.notify_waiters()
     }
@@ -237,16 +235,16 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                 let anchors_cache_r = self.anchors.read();
                 if let Some((key, _)) = anchors_cache_r.first() {
                     if prev_anchor_id < *key {
-                        return Err(anyhow!("Requested anchor {prev_anchor_id} is too old"))
+                        return Err(anyhow!("Requested anchor {prev_anchor_id} is too old"));
                     }
                 }
                 match anchors_cache_r.get_index_of(&prev_anchor_id) {
                     Some(index) => {
                         if let Some((_, value)) = anchors_cache_r.get_index(index + 1) {
-                            return Ok(value.clone())
+                            return Ok(value.clone());
                         }
                     }
-                    _ => return Err(anyhow!("Presented anchor {prev_anchor_id} is unknown"))
+                    _ => return Err(anyhow!("Presented anchor {prev_anchor_id} is unknown")),
                 }
             }
             self.anchor_added.notified().await;
