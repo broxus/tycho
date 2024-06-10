@@ -198,7 +198,7 @@ pub async fn handle_anchors(
             round = anchor.body.location.round.0,
             time = anchor.body.time.as_u64(),
             externals_unique = messages.len(),
-            externals_skipped = points.len() - messages.len(),
+            externals_skipped = points.len().saturating_sub(messages.len()),
             "new anchor"
         );
 
