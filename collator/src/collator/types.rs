@@ -313,6 +313,7 @@ pub(super) struct BlockCollationData {
     pub execute_count_new_int: u32,
     pub enqueue_count: u32,
     pub dequeue_count: u32,
+    pub tx_count: u32,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt

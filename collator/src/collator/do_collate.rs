@@ -308,6 +308,8 @@ impl CollatorStdImpl {
                     msgs_set_full_processed = finished;
                     let one_tick_executed_count = group.len();
 
+                    collation_data.tx_count += group.len() as u32;
+
                     do_collate_exec_msgs_elapsed += timer.elapsed();
                     timer = std::time::Instant::now();
 
@@ -476,10 +478,13 @@ impl CollatorStdImpl {
         // metrics
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        metrics::counter!("tycho_do_collate_msgs_exec_count_all_sum", &labels)
+        metrics::counter!("tycho_do_collate_msgs_exec_count_all_total", &labels)
             .increment(collation_data.execute_count_all as _);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_ext_sum", &labels)
+        metrics::counter!("tycho_do_collate_msgs_exec_count_ext_total", &labels)
             .increment(collation_data.execute_count_ext as _);
+
+        metrics::counter!("tycho_do_collate_tx_total", &labels)
+            .increment(collation_data.tx_count as _);
 
         metrics::histogram!("tycho_do_collate_msgs_exec_count_all", &labels)
             .record(collation_data.execute_count_all);
@@ -493,7 +498,7 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_do_collate_int_msgs_queue_length", &labels)
             .increment(collation_data.enqueue_count);
         metrics::gauge!("tycho_do_collate_int_msgs_queue_length", &labels)
-            .decrement(collation_data.enqueue_count);
+            .decrement(collation_data.dequeue_count);
 
         let do_collate_execute_elapsed = do_collate_fill_msgs_set_elapsed
             + do_collate_exec_msgs_elapsed

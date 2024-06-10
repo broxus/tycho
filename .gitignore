@@ -6,6 +6,7 @@ target/
 .idea/
 .vscode/
 .fleet/
+.venv
 
 perf.data*
 .scratch
