@@ -478,11 +478,6 @@ impl CollatorStdImpl {
         // metrics
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        metrics::counter!("tycho_do_collate_msgs_exec_count_all_total", &labels)
-            .increment(collation_data.execute_count_all as _);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_ext_total", &labels)
-            .increment(collation_data.execute_count_ext as _);
-
         metrics::counter!("tycho_do_collate_tx_total", &labels)
             .increment(collation_data.tx_count as _);
 

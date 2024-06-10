@@ -100,7 +100,7 @@ where
                 prev_root_cell,
             )
             .await?;
-        metrics::histogram!("tycho_apply_block_time").record(started_at.elapsed());
+        metrics::histogram!("tycho_core_apply_block_time").record(started_at.elapsed());
 
         // Update metrics
         let gen_utime = handle.meta().gen_utime() as f64;
@@ -108,14 +108,14 @@ where
         let now = tycho_util::time::now_millis() as f64 / 1000.0;
 
         if cx.block.id().is_masterchain() {
-            metrics::gauge!("tycho_last_mc_block_utime").set(gen_utime);
-            metrics::gauge!("tycho_last_mc_block_seqno").set(seqno);
-            metrics::gauge!("tycho_last_mc_block_applied").set(now);
+            metrics::gauge!("tycho_core_last_mc_block_utime").set(gen_utime);
+            metrics::gauge!("tycho_core_last_mc_block_seqno").set(seqno);
+            metrics::gauge!("tycho_core_last_mc_block_applied").set(now);
         } else {
             // TODO: only store max
-            metrics::gauge!("tycho_last_shard_block_utime").set(gen_utime);
-            metrics::gauge!("tycho_last_shard_block_seqno").set(seqno);
-            metrics::gauge!("tycho_last_shard_block_applied").set(now);
+            metrics::gauge!("tycho_core_last_sc_block_utime").set(gen_utime);
+            metrics::gauge!("tycho_core_last_sc_block_seqno").set(seqno);
+            metrics::gauge!("tycho_core_last_sc_block_applied").set(now);
         }
 
         // Process state
@@ -127,7 +127,7 @@ where
             state,
         };
         self.inner.state_subscriber.handle_state(&cx).await?;
-        metrics::histogram!("tycho_subscriber_handle_block_time").record(started_at.elapsed());
+        metrics::histogram!("tycho_core_subscriber_handle_block_time").record(started_at.elapsed());
 
         // Mark block as applied
         handle_storage.store_block_applied(&handle);

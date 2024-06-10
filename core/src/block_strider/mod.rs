@@ -19,8 +19,8 @@ pub use self::state_applier::ShardStateApplier;
 #[cfg(any(test, feature = "test"))]
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
-    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, NoopSubscriber,
-    StateSubscriber, StateSubscriberContext, StateSubscriberExt,
+    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber,
+    MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
 };
 
 mod provider;
@@ -126,7 +126,7 @@ where
         while let Some(next) = self.fetch_next_master_block().await {
             let started_at = Instant::now();
             self.process_mc_block(next.data, next.archive_data).await?;
-            metrics::histogram!("tycho_process_mc_block_time").record(started_at.elapsed());
+            metrics::histogram!("tycho_core_process_mc_block_time").record(started_at.elapsed());
         }
 
         tracing::info!("block strider loop finished");
@@ -154,11 +154,11 @@ where
         while let Some(blocks) = download_futures.next().await.transpose()? {
             process_futures.push(Box::pin(self.process_shard_blocks(&mc_block_id, blocks)));
         }
-        metrics::histogram!("tycho_download_shard_blocks_time").record(started_at.elapsed());
+        metrics::histogram!("tycho_core_download_sc_blocks_time").record(started_at.elapsed());
 
         // Wait for all shard blocks to be processed
         while process_futures.next().await.transpose()?.is_some() {}
-        metrics::histogram!("tycho_process_shard_blocks_time").record(started_at.elapsed());
+        metrics::histogram!("tycho_core_process_sc_blocks_time").record(started_at.elapsed());
 
         // Process masterchain block
         let cx = BlockSubscriberContext {
@@ -189,7 +189,7 @@ where
             tracing::debug!(block_id = %top_block_id, "fetched shard block");
             debug_assert_eq!(block.id(), &top_block_id);
 
-            metrics::histogram!("tycho_fetch_shard_block_time").record(started_at.elapsed());
+            metrics::histogram!("tycho_core_fetch_sc_block_time").record(started_at.elapsed());
 
             // Parse info in advance to make borrow checker happy
             let info = block.data.load_info()?;
@@ -234,7 +234,7 @@ where
 
             let started_at = Instant::now();
             self.subscriber.handle_block(&cx).await?;
-            metrics::histogram!("tycho_process_shard_block_time").record(started_at.elapsed());
+            metrics::histogram!("tycho_core_process_sc_block_time").record(started_at.elapsed());
 
             self.state.commit_shard(&block_id);
         }

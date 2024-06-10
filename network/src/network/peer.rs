@@ -22,31 +22,6 @@ const METRIC_OUT_MESSAGES_TOTAL: &str = "tycho_net_out_messages_total";
 const METRIC_OUT_QUERIES: &str = "tycho_net_out_queries";
 const METRIC_OUT_MESSAGES: &str = "tycho_net_out_messages";
 
-pub fn describe_metrics() {
-    metrics::describe_histogram!(
-        METRIC_OUT_QUERIES_TIME,
-        metrics::Unit::Seconds,
-        "Duration of outgoing queries"
-    );
-    metrics::describe_histogram!(
-        METRIC_OUT_MESSAGES_TIME,
-        metrics::Unit::Seconds,
-        "Duration of outgoing messages"
-    );
-
-    metrics::describe_counter!(
-        METRIC_OUT_QUERIES_TOTAL,
-        "Number of outgoing queries over time"
-    );
-    metrics::describe_counter!(
-        METRIC_OUT_MESSAGES_TOTAL,
-        "Number of outgoing messages over time"
-    );
-
-    metrics::describe_gauge!(METRIC_OUT_QUERIES, "Current number of outgoing queries");
-    metrics::describe_gauge!(METRIC_OUT_MESSAGES, "Current number of outgoing messages");
-}
-
 #[derive(Clone)]
 pub struct Peer {
     connection: Connection,

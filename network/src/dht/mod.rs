@@ -42,39 +42,6 @@ const METRIC_IN_REQ_FIND_VALUE_TOTAL: &str = "tycho_net_dht_in_req_find_value_to
 const METRIC_IN_REQ_GET_NODE_INFO_TOTAL: &str = "tycho_net_dht_in_req_get_node_info_total";
 const METRIC_IN_REQ_STORE_TOTAL: &str = "tycho_net_dht_in_req_store_value_total";
 
-// Registered in `DhtServiceBuilder::build`
-fn describe_metrics() {
-    metrics::describe_counter!(
-        METRIC_IN_REQ_TOTAL,
-        "Number of incoming DHT requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_FAIL_TOTAL,
-        "Number of failed incoming DHT requests over time"
-    );
-
-    metrics::describe_counter!(
-        METRIC_IN_REQ_WITH_PEER_INFO_TOTAL,
-        "Number of incoming DHT requests with peer info over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_FIND_NODE_TOTAL,
-        "Number of incoming DHT FindNode requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_FIND_VALUE_TOTAL,
-        "Number of incoming DHT FindValue requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_NODE_INFO_TOTAL,
-        "Number of incoming DHT GetNodeInfo requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_STORE_TOTAL,
-        "Number of incoming DHT Store requests over time"
-    );
-}
-
 #[derive(Clone)]
 pub struct DhtClient {
     inner: Arc<DhtInner>,
@@ -319,8 +286,6 @@ impl DhtServiceBuilder {
     }
 
     pub fn build(self) -> (DhtServiceBackgroundTasks, DhtService) {
-        describe_metrics();
-
         let config = self.config.unwrap_or_default();
 
         let storage = {

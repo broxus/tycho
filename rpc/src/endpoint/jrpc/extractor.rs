@@ -12,17 +12,6 @@ use serde_json::value::RawValue;
 const METRIC_IN_REQ_TOTAL: &str = "tycho_rpc_in_req_total";
 const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
 
-pub fn describe_metrics() {
-    metrics::describe_counter!(
-        METRIC_IN_REQ_TOTAL,
-        "Number of incoming JRPC requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_FAIL_TOTAL,
-        "Number of failed incoming JRPC requests over time"
-    );
-}
-
 pub trait ParseParams {
     type Params;
 

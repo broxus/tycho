@@ -8,6 +8,10 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 
+pub use self::metrics_subscriber::MetricsSubscriber;
+
+mod metrics_subscriber;
+
 // === trait BlockSubscriber ===
 
 pub struct BlockSubscriberContext {

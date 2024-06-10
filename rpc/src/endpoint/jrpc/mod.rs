@@ -35,55 +35,6 @@ const METRIC_IN_REQ_GET_TRANSACTIONS_LIST_TOTAL: &str =
 const METRIC_IN_REQ_GET_TRANSACTION_TOTAL: &str = "tycho_rpc_in_req_get_transaction_total";
 const METRIC_IN_REQ_GET_DST_TRANSACTION_TOTAL: &str = "tycho_rpc_in_req_get_dst_transaction_total";
 
-pub fn describe_metrics() {
-    extractor::describe_metrics();
-
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_CAPABILITIES_TOTAL,
-        "Number of incoming JRPC getCapabilities requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_LATEST_KEY_BLOCK_TOTAL,
-        "Number of incoming JRPC getLatestKeyBlock requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_BLOCKCHAIN_CONFIG_TOTAL,
-        "Number of incoming JRPC getBlockchainConfig requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_STATUS_TOTAL,
-        "Number of incoming JRPC getStatus requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_TIMINGS_TOTAL,
-        "Number of incoming JRPC getTimings requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_SEND_MESSAGE_TOTAL,
-        "Number of incoming JRPC sendMessage requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_CONTRACT_STATE_TOTAL,
-        "Number of incoming JRPC getContractState requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_ACCOUNTS_BY_CODE_HASH_TOTAL,
-        "Number of incoming JRPC getAccountsByCodeHash requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_TRANSACTIONS_LIST_TOTAL,
-        "Number of incoming JRPC getTransactionsList requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_TRANSACTION_TOTAL,
-        "Number of incoming JRPC getTransaction requests over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_REQ_GET_DST_TRANSACTION_TOTAL,
-        "Number of incoming JRPC getDstTransaction requests over time"
-    );
-}
-
 declare_jrpc_method! {
     pub enum MethodParams: Method {
         GetCapabilities(EmptyParams),

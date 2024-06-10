@@ -18,8 +18,6 @@ pub struct RpcEndpoint {
 
 impl RpcEndpoint {
     pub async fn bind(state: RpcState) -> Result<Self> {
-        jrpc::describe_metrics();
-
         let listener = TcpListener::bind(state.config().listen_addr).await?;
         Ok(Self { listener, state })
     }

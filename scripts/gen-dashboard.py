@@ -19,7 +19,6 @@ from dashboard_builder import (
     target,
     template,
     Expr,
-    expr_aggr,
     expr_sum_rate,
     heatmap_panel,
     yaxis,
@@ -28,37 +27,6 @@ from dashboard_builder import (
 
 def heatmap_color_warm() -> HeatmapColor:
     return HeatmapColor()
-
-
-def expr_histogram_full(
-    quantile: float,
-    metrics: str,
-    label_selectors: list[str] = [],
-    by_labels: list[str] = [],
-) -> Expr:
-    # sum(rate(metrics_bucket{label_selectors}[$__rate_interval])) by (le)
-    assert not metrics.endswith(
-        "_bucket"
-    ), f"'{metrics}' should not specify '_bucket' suffix manually"
-
-    by_labels = list(filter(lambda label: label != "le", by_labels))
-    sum_rate_of_buckets = expr_sum_rate(
-        metrics + "_bucket",
-        label_selectors=label_selectors,
-        by_labels=by_labels + ["le"],
-    )
-
-    # histogram_quantile({quantile}, {sum_rate_of_buckets})
-    return expr_aggr(
-        metric=f"{sum_rate_of_buckets}",
-        aggr_op="histogram_quantile",
-        aggr_param=f"{quantile}",
-        label_selectors=[],
-        by_labels=[],
-    ).extra(
-        # Do not attach default label selector again.
-        default_label_selectors=[]
-    )
 
 
 def create_gauge_panel(
@@ -98,12 +66,62 @@ def create_heatmap_panel(
     )
 
 
+def create_heatmap_quantile_panel(
+    metric_name: str,
+    title: str,
+    unit_format=UNITS.NUMBER_FORMAT,
+) -> Panel:
+    return timeseries_panel(
+        title=title,
+        targets=[
+            target(
+                Expr(metric_name, label_selectors=['quantile="0.95"']),
+                legend_format="{{instance}}",
+            )
+        ],
+        unit=unit_format,
+    )
+
+
 def create_row(name, metrics) -> RowPanel:
     layout = Layout(name)
     for i in range(0, len(metrics), 2):
         chunk = metrics[i : i + 2]
         layout.row(chunk)
     return layout.row_panel
+
+
+def core_bc() -> RowPanel:
+    metrics = [
+        create_counter_panel("tycho_bc_txs_total", "Number of transactions over time"),
+        create_counter_panel(
+            "tycho_bc_ext_msgs_total", "Number of external messages over time"
+        ),
+        create_counter_panel("tycho_bc_msgs_total", "Number of all messages over time"),
+        create_counter_panel(
+            "tycho_bc_contract_deploy_total", "Number of contract deployments over time"
+        ),
+        create_counter_panel(
+            "tycho_bc_contract_delete_total", "Number of contract deletions over time"
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_bc_total_gas_used", "Total gas used per block"
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_bc_in_msg_count", "Number of inbound messages per block"
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_bc_out_msg_count", "Number of outbound messages per block"
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_bc_out_in_msg_ratio", "Out/In message ratio per block"
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_bc_out_msg_acc_ratio",
+            "Out message/Account ratio per block",
+        ),
+    ]
+    return create_row("Blockchain", metrics)
 
 
 def net_conn_manager() -> RowPanel:
@@ -235,21 +253,22 @@ def net_dht() -> RowPanel:
 def core_block_strider() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_process_mc_block_time", "Masterchain block processing time"
+            "tycho_core_process_mc_block_time", "Masterchain block processing time"
         ),
         create_heatmap_panel(
-            "tycho_process_shard_block_time",
+            "tycho_core_process_sc_block_time",
             "Shard block processing time",
         ),
         create_heatmap_panel(
-            "tycho_fetch_shard_block_time", "Shard block downloading time"
+            "tycho_core_fetch_sc_block_time", "Shard block downloading time"
         ),
         create_heatmap_panel(
-            "tycho_download_shard_blocks_time",
+            "tycho_core_download_sc_blocks_time",
             "Total time to download all shard blocks",
         ),
         create_heatmap_panel(
-            "tycho_process_shard_blocks_time", "Total time to process all shard blocks"
+            "tycho_core_process_sc_blocks_time",
+            "Total time to process all shard blocks",
         ),
     ]
     return create_row("Core Block Strider", metrics)
@@ -315,11 +334,11 @@ def jrpc() -> RowPanel:
 def collator_do_collate() -> RowPanel:
     metrics = [
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_all_total",
+            "tycho_do_collate_msgs_exec_count_all_sum",
             "Number of all executed messages over time",
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_ext_total",
+            "tycho_do_collate_msgs_exec_count_ext_sum",
             "Number of executed external messages over time",
         ),
         create_counter_panel(
@@ -368,12 +387,13 @@ dashboard = Dashboard(
     templating=templates(),
     refresh="5s",
     panels=[
+        core_bc(),
+        core_block_strider(),
         collator_do_collate(),
         net_conn_manager(),
         net_request_handler(),
         net_peer(),
         net_dht(),
-        core_block_strider(),
         jrpc(),
     ],
     annotations=Annotations(),

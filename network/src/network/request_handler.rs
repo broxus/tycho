@@ -25,37 +25,6 @@ const METRIC_IN_DATAGRAMS_TOTAL: &str = "tycho_net_in_datagrams_total";
 // Gauges
 const METRIC_REQ_HANDLERS: &str = "tycho_net_req_handlers";
 
-pub fn describe_metrics() {
-    metrics::describe_histogram!(
-        METRIC_IN_QUERIES_TIME,
-        metrics::Unit::Seconds,
-        "Duration of incoming queries handlers"
-    );
-    metrics::describe_histogram!(
-        METRIC_IN_MESSAGES_TIME,
-        metrics::Unit::Seconds,
-        "Duration of incoming messages handlers"
-    );
-
-    metrics::describe_counter!(
-        METRIC_IN_QUERIES_TOTAL,
-        "Number of incoming queries over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_MESSAGES_TOTAL,
-        "Number of incoming messages over time"
-    );
-    metrics::describe_counter!(
-        METRIC_IN_DATAGRAMS_TOTAL,
-        "Number of incoming datagrams over time"
-    );
-
-    metrics::describe_gauge!(
-        METRIC_REQ_HANDLERS,
-        "Current number of incoming request handlers"
-    );
-}
-
 pub(crate) struct InboundRequestHandler {
     config: Arc<NetworkConfig>,
     connection: Connection,

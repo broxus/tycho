@@ -41,54 +41,6 @@ const METRIC_CONNECTIONS_PENDING_DIALS: &str = "tycho_net_conn_pending_dials";
 const METRIC_ACTIVE_PEERS: &str = "tycho_net_active_peers";
 const METRIC_KNOWN_PEERS: &str = "tycho_net_known_peers";
 
-pub fn describe_metrics() {
-    metrics::describe_histogram!(
-        METRIC_CONNECTION_OUT_TIME,
-        "Time taken to establish an outgoing connection"
-    );
-    metrics::describe_histogram!(
-        METRIC_CONNECTION_IN_TIME,
-        "Time taken to establish an incoming connection"
-    );
-
-    metrics::describe_counter!(
-        METRIC_CONNECTIONS_OUT_TOTAL,
-        "Number of established outgoing connections over time"
-    );
-    metrics::describe_counter!(
-        METRIC_CONNECTIONS_IN_TOTAL,
-        "Number of established incoming connections over time"
-    );
-    metrics::describe_counter!(
-        METRIC_CONNECTIONS_OUT_FAIL_TOTAL,
-        "Number of failed outgoing connections over time"
-    );
-    metrics::describe_counter!(
-        METRIC_CONNECTIONS_IN_FAIL_TOTAL,
-        "Number of failed incoming connections over time"
-    );
-
-    metrics::describe_gauge!(
-        METRIC_CONNECTIONS_ACTIVE,
-        "Number of currently active connections"
-    );
-    metrics::describe_gauge!(
-        METRIC_CONNECTIONS_PENDING,
-        "Number of currently pending connections"
-    );
-    metrics::describe_gauge!(
-        METRIC_CONNECTIONS_PARTIAL,
-        "Number of currently half-resolved connections"
-    );
-    metrics::describe_gauge!(
-        METRIC_CONNECTIONS_PENDING_DIALS,
-        "Number of currently pending connectivity checks"
-    );
-
-    metrics::describe_gauge!(METRIC_ACTIVE_PEERS, "Number of currently active peers");
-    metrics::describe_gauge!(METRIC_KNOWN_PEERS, "Number of currently known peers");
-}
-
 #[derive(Debug)]
 pub(crate) enum ConnectionManagerRequest {
     Connect(Address, PeerId, CallbackTx),
