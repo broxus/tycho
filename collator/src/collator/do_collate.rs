@@ -301,7 +301,9 @@ impl CollatorStdImpl {
                     msgs_set = left_msgs;
                     one_tick_executed_count
                 } else {
-                    let (new_offset, group) = exec_manager.execute_tick(msgs_set_offset).await?;
+                    let (new_offset, group, finished) =
+                        exec_manager.execute_tick(msgs_set_offset).await?;
+                    msgs_set_full_processed = finished;
                     let one_tick_executed_count = group.len();
 
                     do_collate_exec_msgs_elapsed_ms += timer.elapsed().as_millis() as u32;
