@@ -616,12 +616,12 @@ impl CollatorStdImpl {
             self.do_collate(next_chain_time, None).await?;
         } else {
             // otherwise import next anchor and return it notify to manager
-            tracing::info!(target: tracing_targets::COLLATOR,
+            tracing::debug!(target: tracing_targets::COLLATOR,
                 "there are no internals, will import next anchor",
             );
             let (next_anchor, has_externals) = self.import_next_anchor().await?;
             if has_externals {
-                tracing::info!(target: tracing_targets::COLLATOR,
+                tracing::debug!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals for master",
                 );
             }
@@ -697,7 +697,7 @@ impl CollatorStdImpl {
             || force_mc_block_by_uncommitted_chain
         {
             if no_pending_msgs {
-                tracing::info!(target: tracing_targets::COLLATOR,
+                tracing::debug!(target: tracing_targets::COLLATOR,
                     "there are no internals or pending externals, will import next anchor",
                 );
             } else if force_mc_block_by_uncommitted_chain {
@@ -740,7 +740,7 @@ impl CollatorStdImpl {
                         force_mc_block_by_uncommitted_chain,
                     );
                 } else {
-                    tracing::info!(target: tracing_targets::COLLATOR,
+                    tracing::debug!(target: tracing_targets::COLLATOR,
                         "just imported anchor has no externals for current shard, will notify collation manager",
                     );
                 }

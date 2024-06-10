@@ -89,6 +89,7 @@ impl ExecutionManager {
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
         tracing::debug!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
+        self.messages_groups = Some(pre_calculate_groups(&self.messages_set, self.group_limit));
     }
 
     /// Run one execution tick of parallel transactions
@@ -107,14 +108,14 @@ impl ExecutionManager {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {}", offset);
 
         // let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
-        let messages_groups = self
-            .messages_groups
-            .get_or_insert(pre_calculate_groups(&self.messages_set, self.group_limit));
+        let messages_groups = self.messages_groups.as_ref().unwrap();
         let (new_offset, group) = match messages_groups.get(&offset) {
             Some(g) => (offset + 1, g.clone()), // TODO: need to optimize without clone()
             None => return Ok((offset, vec![], true)),
         };
-        let finished = messages_groups.contains_key(&new_offset);
+        let finished = !messages_groups.contains_key(&new_offset);
+
+        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "offset {} group len: {}", offset, group.len());
 
         let mut futures: FuturesUnordered<_> = Default::default();
 
@@ -263,8 +264,8 @@ impl ExecutionManager {
         mut account_stuff: ShardAccountStuff,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updating shard account {}", account_id);
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updated Account: {:?}",
-            account_stuff.shard_account.account.load()?,
+        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "updated account {account_id} balance: {}",
+            account_stuff.shard_account.account.load()?.balance().tokens,
         );
         let binding = &account_stuff.shard_account.account;
         let account_root = binding.inner();
@@ -463,21 +464,21 @@ pub fn pre_calculate_groups(
         };
 
         let mut g_idx = 0;
-        let mut group = res.entry(g_idx).or_default();
+        let mut group_entry;
         loop {
-            if group.len() == group_limit as usize {
+            group_entry = res.entry(g_idx).or_default();
+            if group_entry.len() == group_limit as usize {
                 g_idx += 1;
-                group = res.entry(g_idx).or_default();
+                continue;
             }
-            let group_acc = group.entry(account_id);
-            match group_acc {
+            let account_entry = group_entry.entry(account_id);
+            match account_entry {
                 Entry::Vacant(entry) => {
                     entry.insert(msg.clone());
                     break;
                 }
                 Entry::Occupied(_entry) => {
                     g_idx += 1;
-                    group = res.entry(g_idx).or_default();
                 }
             }
         }
