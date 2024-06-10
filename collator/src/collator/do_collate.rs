@@ -1,11 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
+use humantime::format_duration;
 use sha2::Digest;
 
 use super::types::CachedMempoolAnchor;
@@ -140,20 +142,20 @@ impl CollatorStdImpl {
         let mut block_limits_reached = false;
         let mut block_transactions_count = 0;
 
-        let do_collate_prepare_elapsed_ms = timer.elapsed().as_millis() as u32;
+        let do_collate_prepare_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
 
         let mut internal_messages_iterator = self.init_internal_mq_iterator().await?;
 
-        let do_collate_init_iterator_elapsed_ms = timer.elapsed().as_millis() as u32;
+        let do_collate_init_iterator_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
 
         // indicate that there are still unprocessed internals when collation loop finished
         let mut has_pending_internals = false;
 
-        let mut do_collate_fill_msgs_set_elapsed_ms = 0;
-        let mut do_collate_exec_msgs_elapsed_ms = 0;
-        let mut do_collate_process_transactions_elapsed_ms = 0;
+        let mut do_collate_fill_msgs_set_elapsed = Duration::ZERO;
+        let mut do_collate_exec_msgs_elapsed = Duration::ZERO;
+        let mut do_collate_process_transactions_elapsed = Duration::ZERO;
 
         loop {
             // let mut one_set_timer = std::time::Instant::now();
@@ -283,7 +285,7 @@ impl CollatorStdImpl {
                 msgs_set = msgs_set.split_off(msgs_set_offset as usize);
             }
 
-            do_collate_fill_msgs_set_elapsed_ms += timer.elapsed().as_millis() as u32;
+            do_collate_fill_msgs_set_elapsed += timer.elapsed();
             timer = std::time::Instant::now();
 
             // execute msgs processing by groups
@@ -306,7 +308,7 @@ impl CollatorStdImpl {
                     msgs_set_full_processed = finished;
                     let one_tick_executed_count = group.len();
 
-                    do_collate_exec_msgs_elapsed_ms += timer.elapsed().as_millis() as u32;
+                    do_collate_exec_msgs_elapsed += timer.elapsed();
                     timer = std::time::Instant::now();
 
                     for (_account_id, msg_info, transaction) in group {
@@ -334,7 +336,7 @@ impl CollatorStdImpl {
                     one_tick_executed_count
                 };
 
-                do_collate_process_transactions_elapsed_ms += timer.elapsed().as_millis() as u32;
+                do_collate_process_transactions_elapsed += timer.elapsed();
                 timer = std::time::Instant::now();
 
                 // TODO: when processing transactions we should check block limits
@@ -382,7 +384,7 @@ impl CollatorStdImpl {
 
             has_pending_internals = internal_messages_iterator.peek(true)?.is_some();
 
-            do_collate_process_transactions_elapsed_ms += timer.elapsed().as_millis() as u32;
+            do_collate_process_transactions_elapsed += timer.elapsed();
             timer = std::time::Instant::now();
 
             if block_limits_reached {
@@ -435,7 +437,7 @@ impl CollatorStdImpl {
             .apply_diff(diff.clone(), candidate.block_id.as_short_id())
             .await?;
 
-        let do_collate_build_block_elapsed_ms = timer.elapsed().as_millis() as u32;
+        let do_collate_build_block_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
 
         // STUB: sleep to slow down collation process for analysis
@@ -469,60 +471,64 @@ impl CollatorStdImpl {
         self.update_working_state(new_state_stuff)?;
         self.update_working_state_pending_internals(Some(has_pending_internals))?;
 
-        let do_collate_update_state_elapsed_ms = timer.elapsed().as_millis() as u32;
+        let do_collate_update_state_elapsed = timer.elapsed();
 
         // metrics
-        metrics::counter!("tycho_do_collate_msgs_exec_count_all_sum")
-            .increment(collation_data.execute_count_all.into());
-        metrics::counter!("tycho_do_collate_msgs_exec_count_ext_sum")
-            .increment(collation_data.execute_count_ext.into());
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        metrics::histogram!("tycho_do_collate_msgs_exec_count_all")
+        metrics::counter!("tycho_do_collate_msgs_exec_count_all_sum", &labels)
+            .increment(collation_data.execute_count_all as _);
+        metrics::counter!("tycho_do_collate_msgs_exec_count_ext_sum", &labels)
+            .increment(collation_data.execute_count_ext as _);
+
+        metrics::histogram!("tycho_do_collate_msgs_exec_count_all", &labels)
             .record(collation_data.execute_count_all);
-        metrics::histogram!("tycho_do_collate_msgs_exec_count_ext")
+        metrics::histogram!("tycho_do_collate_msgs_exec_count_ext", &labels)
             .record(collation_data.execute_count_ext);
-        metrics::histogram!("tycho_do_collate_msgs_exec_count_int")
+        metrics::histogram!("tycho_do_collate_msgs_exec_count_int", &labels)
             .record(collation_data.execute_count_int);
-        metrics::histogram!("tycho_do_collate_msgs_exec_count_new_int")
+        metrics::histogram!("tycho_do_collate_msgs_exec_count_new_int", &labels)
             .record(collation_data.execute_count_new_int);
 
-        metrics::gauge!("tycho_do_collate_int_msgs_queue_length")
+        metrics::gauge!("tycho_do_collate_int_msgs_queue_length", &labels)
             .increment(collation_data.enqueue_count);
-        metrics::gauge!("tycho_do_collate_int_msgs_queue_length")
+        metrics::gauge!("tycho_do_collate_int_msgs_queue_length", &labels)
             .decrement(collation_data.enqueue_count);
 
-        let do_collate_execute_elapsed_ms = do_collate_fill_msgs_set_elapsed_ms
-            + do_collate_exec_msgs_elapsed_ms
-            + do_collate_process_transactions_elapsed_ms;
-        let do_collate_total_elapsed_ms = do_collate_prepare_elapsed_ms
-            + do_collate_init_iterator_elapsed_ms
-            + do_collate_execute_elapsed_ms
-            + do_collate_build_block_elapsed_ms
-            + do_collate_update_state_elapsed_ms;
+        let do_collate_execute_elapsed = do_collate_fill_msgs_set_elapsed
+            + do_collate_exec_msgs_elapsed
+            + do_collate_process_transactions_elapsed;
+        let do_collate_total_elapsed = do_collate_prepare_elapsed
+            + do_collate_init_iterator_elapsed
+            + do_collate_execute_elapsed
+            + do_collate_build_block_elapsed
+            + do_collate_update_state_elapsed;
 
-        metrics::histogram!("tycho_do_collate_total_elapsed_ms")
-            .record(do_collate_total_elapsed_ms);
-        metrics::histogram!("tycho_do_collate_prepare_elapsed_ms")
-            .record(do_collate_prepare_elapsed_ms);
-        metrics::histogram!("tycho_do_collate_init_iterator_elapsed_ms")
-            .record(do_collate_init_iterator_elapsed_ms);
-        metrics::histogram!("tycho_do_collate_execute_elapsed_ms")
-            .record(do_collate_execute_elapsed_ms);
-        metrics::histogram!("tycho_do_collate_build_block_elapsed_ms")
-            .record(do_collate_build_block_elapsed_ms);
-        metrics::histogram!("tycho_do_collate_update_state_elapsed_ms")
-            .record(do_collate_update_state_elapsed_ms);
+        metrics::histogram!("tycho_do_collate_total_time", &labels)
+            .record(do_collate_total_elapsed);
+        metrics::histogram!("tycho_do_collate_prepare_time", &labels)
+            .record(do_collate_prepare_elapsed);
+        metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
+            .record(do_collate_init_iterator_elapsed);
+        metrics::histogram!("tycho_do_collate_execute_time", &labels)
+            .record(do_collate_execute_elapsed);
+        metrics::histogram!("tycho_do_collate_build_block_time", &labels)
+            .record(do_collate_build_block_elapsed);
+        metrics::histogram!("tycho_do_collate_update_state_time", &labels)
+            .record(do_collate_update_state_elapsed);
 
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "Metrics: total_elapsed_ms={}, prepare_elapsed_ms={}, \
-            init_iterator_elapsed_ms={}, execute_elapsed_ms={}, \
-            fill_msgs_set_elapsed_ms={}, exec_msgs_elapsed_ms={}, process_transactions_elapsed_ms={}, \
-            build_block_elapsed_ms={}, update_state_elapsed_ms={}",
-            do_collate_total_elapsed_ms, do_collate_prepare_elapsed_ms,
-            do_collate_init_iterator_elapsed_ms, do_collate_execute_elapsed_ms,
-            do_collate_fill_msgs_set_elapsed_ms, do_collate_exec_msgs_elapsed_ms,
-            do_collate_process_transactions_elapsed_ms,
-            do_collate_build_block_elapsed_ms, do_collate_update_state_elapsed_ms,
+        tracing::info!(
+            target: tracing_targets::COLLATOR,
+            total = %format_duration(do_collate_total_elapsed),
+            prepare = %format_duration(do_collate_prepare_elapsed),
+            init_iterator = %format_duration(do_collate_init_iterator_elapsed),
+            execute = %format_duration(do_collate_execute_elapsed),
+            fill_msgs_set = %format_duration(do_collate_fill_msgs_set_elapsed),
+            exec_msgs = %format_duration(do_collate_exec_msgs_elapsed),
+            process_transactions = %format_duration(do_collate_process_transactions_elapsed),
+            build_block = %format_duration(do_collate_build_block_elapsed),
+            update_state = %format_duration(do_collate_update_state_elapsed),
+            "timings"
         );
 
         Ok(())
