@@ -1,4 +1,5 @@
 use std::cmp;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -43,6 +44,8 @@ pub(super) struct ExecutionManager {
     block_version: u32,
     /// messages set
     messages_set: Vec<AsyncMessage>,
+    /// messages groups
+    messages_groups: Option<HashMap<u32, HashMap<HashBytes, AsyncMessage>>>,
     /// group limit
     group_limit: u32,
     /// shard accounts
@@ -76,6 +79,7 @@ impl ExecutionManager {
             group_limit,
             total_trans_duration: 0,
             messages_set: Vec::new(),
+            messages_groups: None,
             shard_accounts,
             changed_accounts: FastHashMap::default(),
         }
@@ -98,17 +102,26 @@ impl ExecutionManager {
             AsyncMessage,
             Box<(CurrencyCollection, Lazy<Transaction>)>,
         )>,
+        bool,
     )> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {}", offset);
 
-        let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
+        // let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
+        let messages_groups = self
+            .messages_groups
+            .get_or_insert(pre_calculate_groups(&self.messages_set, self.group_limit));
+        let (new_offset, group) = match messages_groups.get(&offset) {
+            Some(g) => (offset + 1, g.clone()), // TODO: need to optimize without clone()
+            None => return Ok((offset, vec![], true)),
+        };
+        let finished = messages_groups.contains_key(&new_offset);
 
         let mut futures: FuturesUnordered<_> = Default::default();
 
         // TODO check externals is not exist accounts needed ?
         for (account_id, msg) in group {
             let shard_account_stuff = self.get_shard_account_stuff(account_id)?;
-            futures.push(self.execute_message(account_id, msg, shard_account_stuff));
+            futures.push(self.execute_message(account_id, msg.clone(), shard_account_stuff));
         }
 
         let mut executed_messages = vec![];
@@ -123,7 +136,10 @@ impl ExecutionManager {
             } = &executed_message;
             if let AsyncMessage::Ext(_, _) = &in_message {
                 if let Err(ref e) = transaction_result {
-                    tracing::error!(target: tracing_targets::EXEC_MANAGER, "failed to execute external transaction: {e:?}");
+                    tracing::error!(target: tracing_targets::EXEC_MANAGER,
+                        "failed to execute external transaction: in_msg: {:?}\nerror: {:?}",
+                        in_message, e,
+                    );
                     continue;
                 }
             }
@@ -160,7 +176,7 @@ impl ExecutionManager {
 
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "tick executed {}ms;", self.total_trans_duration);
 
-        Ok((new_offset, result))
+        Ok((new_offset, result, finished))
     }
 
     pub fn get_shard_account_stuff(&self, account_id: AccountId) -> Result<ShardAccountStuff> {
@@ -421,4 +437,50 @@ pub fn calculate_group(
         new_offset += group.len() as u32 + holes_count as u32;
     }
     (new_offset, group)
+}
+
+/// calculate all groups in advance
+pub fn pre_calculate_groups(
+    messages_set: &[AsyncMessage],
+    group_limit: u32,
+) -> HashMap<u32, HashMap<AccountId, AsyncMessage>> {
+    let mut res: HashMap<u32, HashMap<AccountId, AsyncMessage>> = HashMap::new();
+    for msg in messages_set {
+        let account_id = match msg {
+            AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
+                dst.as_std().map(|a| a.address).unwrap_or_default()
+            }
+            AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
+                dst.as_std().map(|a| a.address).unwrap_or_default()
+            }
+            AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
+                dst.as_std().map(|a| a.address).unwrap_or_default()
+            }
+            s => {
+                tracing::error!("wrong async message - {s:?}");
+                unreachable!()
+            }
+        };
+
+        let mut g_idx = 0;
+        let mut group = res.entry(g_idx).or_default();
+        loop {
+            if group.len() == group_limit as usize {
+                g_idx += 1;
+                group = res.entry(g_idx).or_default();
+            }
+            let group_acc = group.entry(account_id);
+            match group_acc {
+                Entry::Vacant(entry) => {
+                    entry.insert(msg.clone());
+                    break;
+                }
+                Entry::Occupied(_entry) => {
+                    g_idx += 1;
+                    group = res.entry(g_idx).or_default();
+                }
+            }
+        }
+    }
+    res
 }
