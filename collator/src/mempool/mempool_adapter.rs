@@ -155,8 +155,10 @@ pub async fn handle_anchors(
     let mut cache = ExternalMessageCache::new(1000);
     while let Some((anchor, points)) = rx.recv().await {
         let mut messages = Vec::new();
+        let mut total_messages = 0;
 
         for point in points.iter() {
+            total_messages += point.body.payload.len();
             'message: for message in &point.body.payload {
                 let cell = match Boc::decode(message) {
                     Ok(cell) => cell,
@@ -198,7 +200,7 @@ pub async fn handle_anchors(
             round = anchor.body.location.round.0,
             time = anchor.body.time.as_u64(),
             externals_unique = messages.len(),
-            externals_skipped = points.len().saturating_sub(messages.len()),
+            externals_skipped = total_messages - messages.len(),
             "new anchor"
         );
 
