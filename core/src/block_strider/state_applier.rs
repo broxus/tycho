@@ -47,6 +47,8 @@ where
         tracing::info!(id = ?cx.block.id(), "preparing block");
 
         let state_storage = self.inner.storage.shard_state_storage();
+        let handle_storage = self.inner.storage.block_handle_storage();
+        let block_storage = self.inner.storage.block_storage();
 
         // Load handle
         let handle = self
@@ -142,10 +144,19 @@ where
         metrics::histogram!("tycho_core_subscriber_handle_state_time").record(started_at.elapsed());
 
         // Mark block as applied
-        self.inner
+        let applied = self
+            .inner
             .storage
             .block_handle_storage()
             .store_block_applied(&prepared.handle);
+
+        if applied && self.inner.storage.archive_config().is_some() {
+            self.inner
+                .storage
+                .block_storage()
+                .move_into_archive(&prepared.handle)
+                .await?
+        }
 
         // Done
         Ok(())

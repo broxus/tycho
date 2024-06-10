@@ -11,7 +11,7 @@ use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
 use tycho_rpc::RpcConfig;
-use tycho_storage::StorageConfig;
+use tycho_storage::{ArchiveConfig, StorageConfig};
 
 #[derive(Debug, Deserialize)]
 pub struct NodeKeys {
@@ -56,6 +56,8 @@ pub struct NodeConfig {
 
     pub storage: StorageConfig,
 
+    pub archive: Option<ArchiveConfig>,
+
     pub blockchain_rpc_service: BlockchainRpcServiceConfig,
 
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
@@ -84,6 +86,7 @@ impl Default for NodeConfig {
             collator: CollationConfig::default(),
             rpc: Some(RpcConfig::default()),
             metrics: Some(MetricsConfig::default()),
+            archive: Some(ArchiveConfig::default())
         }
     }
 }
