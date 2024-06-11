@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use tokio::sync::{broadcast, Mutex};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, Storage};
+use tycho_util::metrics::HistogramGuard;
 
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
@@ -147,6 +149,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_collator_adapter_handle_state_time");
+
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Handle block: {}", state.block_id().as_short_id());
         let block_id = *state.block_id();
 
@@ -176,15 +180,25 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
                 match block {
                     None => {
+                        let _histogram = HistogramGuard::begin(
+                            "tycho_collator_adapter_on_block_accepted_ext_time",
+                        );
+
                         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
                         self.listener.on_block_accepted_external(state).await?;
                     }
                     Some(block) => {
+                        let _histogram =
+                            HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
+
                         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
                         self.listener.on_block_accepted(&block.block_id).await?;
                     }
                 }
             } else {
+                let _histogram =
+                    HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_alt_ext_time");
+
                 tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external. Shard ID not found in blocks buffer: {:?}", block_id);
                 self.listener.on_block_accepted_external(state).await?;
             }

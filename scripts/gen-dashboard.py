@@ -356,6 +356,20 @@ def collator_do_collate() -> RowPanel:
         create_heatmap_panel("tycho_do_collate_execute_time", "Execution time"),
         create_heatmap_panel("tycho_do_collate_build_block_time", "Build block time"),
         create_heatmap_panel("tycho_do_collate_update_state_time", "Update state time"),
+        create_heatmap_panel(
+            "tycho_collator_adapter_handle_state_time", "Handle state by collator"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_adapter_on_block_accepted_ext_time",
+            "on_block_accepted_external with blocks guard",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_adapter_on_block_accepted_alt_ext_time",
+            "on_block_accepted_external without blocks guard",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"
+        ),
     ]
     return create_row("Collator Do Collate", metrics)
 
