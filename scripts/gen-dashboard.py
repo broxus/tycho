@@ -382,16 +382,37 @@ def jrpc() -> RowPanel:
     return create_row("JRPC", metrics)
 
 
-def collator_do_collate() -> RowPanel:
+def collator_finalize_block() -> RowPanel:
     metrics = [
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_all_sum",
-            "Number of all executed messages over time",
+            "tycho_collator_finalize_block_time", "Total time to finalize block"
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_ext_sum",
-            "Number of executed external messages over time",
+            "tycho_collator_finalize_build_account_blocks_time", "Build account blocks"
         ),
+        create_counter_panel(
+            "tycho_collator_finalize_build_in_msgs_time", "Build InMsgDescr"
+        ),
+        create_counter_panel(
+            "tycho_collator_finalize_build_out_msgs_time",
+            "Build OutMsgDescr",
+        ),
+        create_counter_panel(
+            "tycho_collator_finish_build_mc_state_extra_time", "Build McStateExtra"
+        ),
+        create_counter_panel(
+            "tycho_collator_finalize_build_state_update_time", "Compute MerkleUpdate"
+        ),
+        create_counter_panel("tycho_collator_finalize_build_block_time", "Build Block"),
+        create_counter_panel(
+            "tycho_collator_finalize_build_new_state_time", "Build State"
+        ),
+    ]
+    return create_row("Finalize Block", metrics)
+
+
+def collator_do_collate() -> RowPanel:
+    metrics = [
         create_counter_panel(
             "tycho_do_collate_tx_total",
             "Number of transactions over time",
@@ -406,23 +427,26 @@ def collator_do_collate() -> RowPanel:
         ),
         create_heatmap_panel("tycho_do_collate_execute_time", "Execution time"),
         create_heatmap_panel(
-            "tycho_do_collate_fill_msgs_set_time", "Fill messages time"
+            "tycho_do_collate_execute_tick_time", "Execute Tick special transactions"
         ),
         create_heatmap_panel(
-            "tycho_do_collate_exec_msgs_time", "Execute messages time"
+            "tycho_do_collate_execute_tock_time", "Execute Tock special transactions"
         ),
         create_heatmap_panel(
-            "tycho_do_collate_process_transactions_time",
-            "Process transactions time",
+            "tycho_do_collate_fill_msgs_total_time", "Sum of fill messages times"
         ),
         create_heatmap_panel(
-            "tycho_do_collate_ticktock_special_time",
-            "Process special transactions time",
+            "tycho_do_collate_process_msgs_total_time", "Sum of execute messages times"
         ),
-        create_heatmap_panel("tycho_do_collate_build_block_time", "Build block time"),
-        create_heatmap_panel("tycho_do_collate_update_state_time", "Update state time"),
         create_heatmap_panel(
-            "tycho_collator_adapter_handle_state_time", "Handle state by collator"
+            "tycho_do_collate_process_txs_total_time",
+            "Sum of process transactions times",
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_apply_queue_diff_time", "Apply message queue diff"
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_handle_block_candidate_time", "Handle block candidate"
         ),
         create_heatmap_panel(
             "tycho_collator_adapter_on_block_accepted_ext_time",
@@ -507,6 +531,7 @@ dashboard = Dashboard(
         core_bc(),
         core_block_strider(),
         collator_do_collate(),
+        collator_finalize_block(),
         collator_execution_manager(),
         net_conn_manager(),
         net_request_handler(),

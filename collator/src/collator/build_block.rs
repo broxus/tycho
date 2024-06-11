@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use anyhow::{bail, Result};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use humantime::format_duration;
 use tokio::time::Instant;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
@@ -22,6 +25,8 @@ impl CollatorStdImpl {
     ) -> Result<(Box<BlockCandidate>, ShardStateStuff)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
+        let histogram = HistogramGuard::begin("tycho_collator_finalize_block_time");
+
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
 
@@ -32,7 +37,11 @@ impl CollatorStdImpl {
         let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
         let config_address = &self.working_state().mc_data.config().address;
 
+        let build_account_blocks_elapsed;
         let (account_blocks, shard_accounts) = {
+            let histogram =
+                HistogramGuard::begin("tycho_collator_finalize_build_account_blocks_time");
+
             let mut account_blocks = RelaxedAugDict::new();
             let mut shard_accounts =
                 RelaxedAugDict::from_full(prev_shard_data.observable_accounts());
@@ -86,6 +95,7 @@ impl CollatorStdImpl {
                 )?;
             }
 
+            build_account_blocks_elapsed = histogram.finish();
             (account_blocks.build()?, shard_accounts.build()?)
         };
 
@@ -94,22 +104,32 @@ impl CollatorStdImpl {
         // calc value flow
         let mut value_flow = collation_data.value_flow.clone();
 
+        let build_in_msgs_elapsed;
         let in_msgs = {
+            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_in_msgs_time");
+
             let mut in_msgs = RelaxedAugDict::new();
             // TODO: use more effective algorithm than iter and set
             for (msg_id, msg) in collation_data.in_msgs.iter() {
                 in_msgs.set_as_lazy(msg_id, &msg.import_fees, &msg.in_msg)?;
             }
+
+            build_in_msgs_elapsed = histogram.finish();
             in_msgs.build()?
         };
         value_flow.imported = in_msgs.root_extra().value_imported.clone();
 
+        let build_out_msgs_elapsed;
         let out_msgs = {
+            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_out_msgs_time");
+
             let mut out_msgs = RelaxedAugDict::new();
             // TODO: use more effective algorithm than iter and set
             for (msg_id, msg) in collation_data.out_msgs.iter() {
                 out_msgs.set_as_lazy(msg_id, &msg.exported_value, &msg.out_msg)?;
             }
+
+            build_out_msgs_elapsed = histogram.finish();
             out_msgs.build()?
         };
 
@@ -129,7 +149,11 @@ impl CollatorStdImpl {
         // build master state extra or get a ref to last applied master block
         // TODO: extract min_ref_mc_seqno from processed_upto info when we have many shards
         // collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
+        let build_mc_state_extra_elapsed;
         let (mc_state_extra, master_ref) = if is_masterchain {
+            let histogram =
+                HistogramGuard::begin("tycho_collator_finish_build_mc_state_extra_time");
+
             let (extra, min_ref_mc_seqno) = self.create_mc_state_extra(
                 collation_data,
                 new_config_params.map(|params| BlockchainConfig {
@@ -138,8 +162,11 @@ impl CollatorStdImpl {
                 }),
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
+
+            build_mc_state_extra_elapsed = histogram.finish();
             (Some(extra), None)
         } else {
+            build_mc_state_extra_elapsed = Duration::ZERO;
             (None, Some(mc_data.get_master_ref()))
         };
 
@@ -177,7 +204,11 @@ impl CollatorStdImpl {
             }));
         }
 
+        let build_state_update_elapsed;
         let state_update = {
+            let histogram =
+                HistogramGuard::begin("tycho_collator_finalize_build_state_update_time");
+
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
                 global_id: mc_data.global_id(),
@@ -218,70 +249,83 @@ impl CollatorStdImpl {
             let new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
             // calc merkle update
-            create_merkle_update(
+            let merkle_update = create_merkle_update(
                 prev_shard_data.pure_state_root(),
                 &new_state_root,
                 &self.working_state().usage_tree,
-            )?
+            )?;
+
+            build_state_update_elapsed = histogram.finish();
+            merkle_update
         };
 
-        // calc block extra
-        let mut new_block_extra = BlockExtra {
-            in_msg_description: Lazy::new(&in_msgs)?,
-            out_msg_description: Lazy::new(&out_msgs)?,
-            account_blocks: Lazy::new(&account_blocks)?,
-            rand_seed: collation_data.rand_seed,
-            created_by: collation_data.created_by,
-            ..Default::default()
-        };
+        let build_block_elapsed;
+        let new_block_id;
+        let new_block_boc;
+        let new_block = {
+            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_block_time");
 
-        if let Some(mc_state_extra) = mc_state_extra {
-            let new_mc_block_extra = McBlockExtra {
-                shards: mc_state_extra.shards.clone(),
-                fees: collation_data.shard_fees.clone(),
-                // TODO: Signatures for previous blocks
-                prev_block_signatures: Default::default(),
-                mint_msg: collation_data
-                    .mint_msg
-                    .as_ref()
-                    .map(Lazy::new)
-                    .transpose()?,
-                recover_create_msg: collation_data
-                    .recover_create_msg
-                    .as_ref()
-                    .map(Lazy::new)
-                    .transpose()?,
-                copyleft_msgs: Default::default(),
-                config: if mc_state_extra.after_key_block {
-                    Some(mc_state_extra.config.clone())
-                } else {
-                    None
-                },
+            // calc block extra
+            let mut new_block_extra = BlockExtra {
+                in_msg_description: Lazy::new(&in_msgs)?,
+                out_msg_description: Lazy::new(&out_msgs)?,
+                account_blocks: Lazy::new(&account_blocks)?,
+                rand_seed: collation_data.rand_seed,
+                created_by: collation_data.created_by,
+                ..Default::default()
             };
 
-            new_block_extra.custom = Some(Lazy::new(&new_mc_block_extra)?);
-        }
+            if let Some(mc_state_extra) = mc_state_extra {
+                let new_mc_block_extra = McBlockExtra {
+                    shards: mc_state_extra.shards.clone(),
+                    fees: collation_data.shard_fees.clone(),
+                    // TODO: Signatures for previous blocks
+                    prev_block_signatures: Default::default(),
+                    mint_msg: collation_data
+                        .mint_msg
+                        .as_ref()
+                        .map(Lazy::new)
+                        .transpose()?,
+                    recover_create_msg: collation_data
+                        .recover_create_msg
+                        .as_ref()
+                        .map(Lazy::new)
+                        .transpose()?,
+                    copyleft_msgs: Default::default(),
+                    config: if mc_state_extra.after_key_block {
+                        Some(mc_state_extra.config.clone())
+                    } else {
+                        None
+                    },
+                };
 
-        // construct block
-        let new_block = Block {
-            global_id: mc_data.global_id(),
-            info: Lazy::new(&new_block_info)?,
-            value_flow: Lazy::new(&value_flow)?,
-            state_update: Lazy::new(&state_update)?,
-            // do not use out msgs queue updates
-            out_msg_queue_updates: None,
-            extra: Lazy::new(&new_block_extra)?,
-        };
+                new_block_extra.custom = Some(Lazy::new(&new_mc_block_extra)?);
+            }
 
-        // TODO: Check (assert) whether the serialized block contains usage cells
-        let new_block_root = CellBuilder::build_from(&new_block)?;
+            // construct block
+            let new_block = Block {
+                global_id: mc_data.global_id(),
+                info: Lazy::new(&new_block_info)?,
+                value_flow: Lazy::new(&value_flow)?,
+                state_update: Lazy::new(&state_update)?,
+                // do not use out msgs queue updates
+                out_msg_queue_updates: None,
+                extra: Lazy::new(&new_block_extra)?,
+            };
 
-        let new_block_boc = everscale_types::boc::Boc::encode(&new_block_root);
-        let new_block_id = BlockId {
-            shard: collation_data.block_id_short.shard,
-            seqno: collation_data.block_id_short.seqno,
-            root_hash: *new_block_root.repr_hash(),
-            file_hash: Boc::file_hash(&new_block_boc),
+            build_block_elapsed = histogram.finish();
+
+            // TODO: Check (assert) whether the serialized block contains usage cells
+            let new_block_root = CellBuilder::build_from(&new_block)?;
+
+            new_block_boc = everscale_types::boc::Boc::encode(&new_block_root);
+            new_block_id = BlockId {
+                shard: collation_data.block_id_short.shard,
+                seqno: collation_data.block_id_short.seqno,
+                root_hash: *new_block_root.repr_hash(),
+                file_hash: Boc::file_hash(&new_block_boc),
+            };
+            new_block
         };
 
         // TODO: build collated data from collation_data.shard_top_block_descriptors
@@ -302,12 +346,33 @@ impl CollatorStdImpl {
         // build new shard state using merkle update
         // to get updated state without UsageTree
 
-        let _histogram = HistogramGuard::begin("tycho_collator_apply_temp_merkle_update_time");
+        let build_new_state_elapsed;
+        let new_state_stuff = {
+            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_new_state_time");
 
-        let pure_prev_state_root = prev_shard_data.pure_state_root();
-        let new_state_root = state_update.apply(pure_prev_state_root)?;
-        let new_state_stuff =
-            ShardStateStuff::from_root(&new_block_id, new_state_root, &self.state_tracker)?;
+            let pure_prev_state_root = prev_shard_data.pure_state_root();
+            let new_state_root = state_update.apply(pure_prev_state_root)?;
+            let new_state_stuff =
+                ShardStateStuff::from_root(&new_block_id, new_state_root, &self.state_tracker)?;
+
+            build_new_state_elapsed = histogram.finish();
+            new_state_stuff
+        };
+
+        let total_elapsed = histogram.finish();
+
+        tracing::debug!(
+            target: tracing_targets::COLLATOR,
+            total = %format_duration(total_elapsed),
+            build_account_blocks = %format_duration(build_account_blocks_elapsed),
+            build_in_msgs = %format_duration(build_in_msgs_elapsed),
+            build_out_msgs = %format_duration(build_out_msgs_elapsed),
+            build_mc_state_extra = %format_duration(build_mc_state_extra_elapsed),
+            build_state_update = %format_duration(build_state_update_elapsed),
+            build_block = %format_duration(build_block_elapsed),
+            build_new_state = %format_duration(build_new_state_elapsed),
+            "finalize block timings"
+        );
 
         Ok((block_candidate, new_state_stuff))
     }
