@@ -111,7 +111,7 @@ impl ShardStateStorage {
 
             let mut batch = rocksdb::WriteBatch::default();
 
-            let (pending_op, new_cell_count) = cell_storage.store_cell(&mut batch, root_cell)?;
+            let new_cell_count = cell_storage.store_cell(&mut batch, root_cell)?;
 
             let mut value = [0; 32 * 3];
             value[..32].copy_from_slice(root_hash.as_slice());
@@ -136,7 +136,7 @@ impl ShardStateStorage {
             }
 
             // Ensure that pending operation guard is dropped after the batch is written
-            drop(pending_op);
+            // drop(pending_op);
             Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
         .await?;
@@ -225,14 +225,14 @@ impl ShardStateStorage {
             let mut batch = weedb::rocksdb::WriteBatch::default();
             {
                 let _guard = self.gc_lock.lock().await;
-                let (pending_op, total) = self
+                let total = self
                     .cell_storage
                     .remove_cell(&mut batch, &alloc, root_hash)?;
                 batch.delete_cf(&shard_states_cf.bound(), key);
                 raw.write_opt(batch, cells_write_options)?;
 
                 // Ensure that pending operation guard is dropped after the batch is written
-                drop(pending_op);
+                // drop(pending_op);
 
                 removed_cells += total;
                 tracing::debug!(
