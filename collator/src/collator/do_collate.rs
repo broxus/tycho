@@ -523,6 +523,12 @@ impl CollatorStdImpl {
             .record(do_collate_init_iterator_elapsed);
         metrics::histogram!("tycho_do_collate_execute_time", &labels)
             .record(do_collate_execute_elapsed);
+        metrics::histogram!("tycho_do_collate_fill_msgs_set_time", &labels)
+            .record(do_collate_fill_msgs_set_elapsed);
+        metrics::histogram!("tycho_do_collate_exec_msgs_time", &labels)
+            .record(do_collate_exec_msgs_elapsed);
+        metrics::histogram!("tycho_do_collate_process_transactions_time", &labels)
+            .record(do_collate_process_transactions_elapsed);
         metrics::histogram!("tycho_do_collate_build_block_time", &labels)
             .record(do_collate_build_block_elapsed);
         metrics::histogram!("tycho_do_collate_update_state_time", &labels)
