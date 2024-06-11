@@ -9,6 +9,7 @@ use bumpalo::Bump;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
 use triomphe::ThinArc;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 use weedb::{rocksdb, BoundedCfHandle};
 
@@ -375,6 +376,8 @@ impl CellStorage {
         self: &Arc<Self>,
         hash: HashBytes,
     ) -> Result<Arc<StorageCell>, CellStorageError> {
+        let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
+
         if let Some(cell) = self.cells_cache.get(&hash) {
             if let Some(cell) = cell.upgrade() {
                 return Ok(cell);
