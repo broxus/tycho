@@ -361,6 +361,20 @@ def collator_do_collate() -> RowPanel:
             "tycho_do_collate_init_iterator_time", "Init iterator time"
         ),
         create_heatmap_panel("tycho_do_collate_execute_time", "Execution time"),
+        create_heatmap_panel(
+            "tycho_do_collate_fill_msgs_set_time", "Fill messages time"
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_exec_msgs_time", "Execute messages time"
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_process_transactions_time",
+            "Process transactions time",
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_ticktock_special_time",
+            "Process special transactions time",
+        ),
         create_heatmap_panel("tycho_do_collate_build_block_time", "Build block time"),
         create_heatmap_panel("tycho_do_collate_update_state_time", "Update state time"),
         create_heatmap_panel(

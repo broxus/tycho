@@ -357,9 +357,9 @@ impl CollatorStdImpl {
                     msgs_set_executed_count, msgs_set_len,
                     block_transactions_count, msgs_set_offset,
                 );
-                if block_transactions_count >= 1000 {
+                if block_transactions_count >= 10000 {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        "STUB: block limit reached: {}/1000",
+                        "STUB: block limit reached: {}/10000",
                         block_transactions_count,
                     );
                     block_limits_reached = true;
