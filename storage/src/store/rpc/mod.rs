@@ -31,6 +31,10 @@ impl RpcStorage {
         }
     }
 
+    pub fn db(&self) -> &RpcDb {
+        &self.db
+    }
+
     pub fn min_tx_lt(&self) -> u64 {
         self.min_tx_lt.load(Ordering::Acquire)
     }

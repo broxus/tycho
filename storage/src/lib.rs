@@ -1,6 +1,8 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
+use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
 
 pub use self::config::*;
@@ -138,21 +140,28 @@ impl StorageBuilder {
 
         // TODO: preload archive ids
 
-        Ok(Storage {
-            inner: Arc::new(Inner {
-                root,
-                base_db,
-                block_handle_storage,
-                block_storage,
-                shard_state_storage,
-                persistent_state_storage,
-                block_connection_storage,
-                node_state_storage,
-                runtime_storage,
-                rpc_state,
-                internal_queue_storage,
-            }),
-        })
+        let inner = Arc::new(Inner {
+            root,
+            base_db,
+            block_handle_storage,
+            block_storage,
+            shard_state_storage,
+            persistent_state_storage,
+            block_connection_storage,
+            node_state_storage,
+            runtime_storage,
+            rpc_state,
+            internal_queue_storage,
+        });
+
+        spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
+            this.base_db.refresh_metrics();
+            if let Some(rpc_state) = this.rpc_state.as_ref() {
+                rpc_state.db().refresh_metrics();
+            }
+        });
+
+        Ok(Storage { inner })
     }
 
     pub fn with_config(mut self, config: StorageConfig) -> Self {
