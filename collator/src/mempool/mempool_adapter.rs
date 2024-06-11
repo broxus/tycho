@@ -156,10 +156,13 @@ pub async fn handle_anchors(
     while let Some((anchor, points)) = rx.recv().await {
         let mut messages = Vec::new();
         let mut total_messages = 0;
+        let mut total_bytes = 0;
+        let mut messages_bytes = 0;
 
         for point in points.iter() {
             total_messages += point.body.payload.len();
             'message: for message in &point.body.payload {
+                total_bytes += message.len();
                 let cell = match Boc::decode(message) {
                     Ok(cell) => cell,
                     Err(e) => {
@@ -190,10 +193,19 @@ pub async fn handle_anchors(
 
                 if cache.check_unique(anchor.body.location.round.0, cell.repr_hash()) {
                     messages.push(Arc::new(ExternalMessage::new(cell.clone(), ext_in_message)));
+                    messages_bytes += message.len();
                 }
             }
         }
         cache.clean(anchor.body.location.round.0);
+
+        metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body.location.round.0);
+        metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
+        metrics::counter!("tycho_mempool_externals_bytes_total").increment(messages_bytes as _);
+        metrics::counter!("tycho_mempool_duplicates_count_total")
+            .increment((total_messages - messages.len()) as _);
+        metrics::counter!("tycho_mempool_duplicates_bytes_total")
+            .increment((total_bytes - messages_bytes) as _);
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
