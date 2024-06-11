@@ -16,6 +16,7 @@ use tycho_block_util::archive::{
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
+use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
 
 use crate::db::*;
@@ -569,10 +570,7 @@ impl BlockStorage {
             mc_package_entries_removed,
             total_package_entries_removed,
             total_handles_removed,
-        } = tokio::task::spawn_blocking(move || {
-            remove_blocks(db, max_blocks_per_batch, &top_blocks)
-        })
-        .await??;
+        } = rayon_run(move || remove_blocks(db, max_blocks_per_batch, &top_blocks)).await?;
 
         tracing::info!(
             %key_block_id,

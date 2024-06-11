@@ -10,6 +10,7 @@ use metrics::atomics::AtomicU64;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
@@ -131,7 +132,7 @@ impl RpcStorage {
             None => {
                 let span = tracing::Span::current();
                 let db = self.db.clone();
-                tokio::task::spawn_blocking(move || {
+                rayon_run(move || {
                     let _span = span.enter();
 
                     tracing::info!("started searching for the minimum transaction LT");
@@ -154,8 +155,7 @@ impl RpcStorage {
                     );
                     Ok::<_, rocksdb::Error>(min_lt)
                 })
-                .await
-                .unwrap()?
+                .await?
             }
         };
 
@@ -211,7 +211,7 @@ impl RpcStorage {
         // Rebuild code hashes
         let db = self.db.clone();
         let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
+        rayon_run(move || {
             let _guard = span.enter();
 
             tracing::info!(split_depth, "started building new code hash indices");
@@ -290,7 +290,6 @@ impl RpcStorage {
             Ok(())
         })
         .await
-        .unwrap()
     }
 
     #[tracing::instrument(
@@ -412,7 +411,7 @@ impl RpcStorage {
 
         let db = self.db.clone();
         let span = tracing::Span::current();
-        tokio::task::spawn_blocking(move || {
+        rayon_run(move || {
             let _span = span.enter();
 
             let raw = db.rocksdb().as_ref();
@@ -515,7 +514,6 @@ impl RpcStorage {
             Ok(())
         })
         .await
-        .unwrap()
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
@@ -530,8 +528,9 @@ impl RpcStorage {
 
         let span = tracing::Span::current();
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || {
-            let _histogram = HistogramGuard::begin("tycho_storage_update_rpc_state_time");
+        rayon_run(move || {
+            let prepare_batch_histogram =
+                HistogramGuard::begin("tycho_storage_rpc_prepare_bastch_time");
 
             let _span = span.enter();
 
@@ -546,6 +545,8 @@ impl RpcStorage {
             // Prepare buffer for full tx id
             let mut tx_key = [0u8; tables::Transactions::KEY_LEN];
             tx_key[0] = workchain as u8;
+
+            let mut tx_buffer = Vec::with_capacity(1024);
 
             // Iterate through all changed accounts in the block
             let mut non_empty_batch = false;
@@ -599,7 +600,13 @@ impl RpcStorage {
                     // Write tx data and indices
                     let tx_hash = tx_cell.inner().repr_hash();
 
-                    write_batch.put_cf(tx_cf, tx_key.as_slice(), Boc::encode(tx_cell.inner()));
+                    tx_buffer.clear();
+                    everscale_types::boc::ser::BocHeader::<ahash::RandomState>::new(
+                        tx_cell.inner().as_ref(),
+                    )
+                    .encode(&mut tx_buffer);
+
+                    write_batch.put_cf(tx_cf, tx_key.as_slice(), &tx_buffer);
                     write_batch.put_cf(tx_by_hash_cf, tx_hash.as_slice(), tx_key.as_slice());
                     if let Some(in_msg) = &tx.in_msg {
                         write_batch.put_cf(tx_by_in_msg_cf, in_msg.repr_hash(), tx_key.as_slice());
@@ -636,6 +643,11 @@ impl RpcStorage {
                 }
             }
 
+            drop(prepare_batch_histogram);
+
+            let _execute_batch_histogram =
+                HistogramGuard::begin("tycho_storage_rpc_execute_bastch_time");
+
             if non_empty_batch {
                 db.rocksdb()
                     .write_opt(write_batch, db.transactions.write_config())?;
@@ -644,7 +656,6 @@ impl RpcStorage {
             Ok(())
         })
         .await
-        .unwrap()
     }
 
     fn update_code_hash(
@@ -761,7 +772,7 @@ impl RpcStorage {
         let db = self.db.clone();
         let shard = *shard;
 
-        tokio::task::spawn_blocking(move || {
+        rayon_run(move || {
             let cf = &db.code_hashes.cf();
 
             let raw = db.rocksdb().as_ref();
@@ -802,7 +813,6 @@ impl RpcStorage {
             }
         })
         .await
-        .unwrap()
     }
 }
 

@@ -8,6 +8,7 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, BlockMetaData, Storage};
+use tycho_util::sync::rayon_run;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -168,9 +169,8 @@ where
             .load_state_update()
             .context("Failed to load state update")?;
 
-        let new_state = tokio::task::spawn_blocking(move || update.apply(&prev_root))
+        let new_state = rayon_run(move || update.apply(&prev_root))
             .await
-            .context("Failed to join blocking task")?
             .context("Failed to apply state update")?;
         let new_state = ShardStateStuff::from_root(block.id(), new_state, mc_state_tracker)
             .context("Failed to create new state")?;

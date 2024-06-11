@@ -9,6 +9,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
 use parking_lot::Mutex;
 use tokio::time::Instant;
+use tycho_util::sync::rayon_run;
 
 use crate::db::{BaseDb, FileDb, MappedFile};
 use crate::store::BlockHandleStorage;
@@ -76,7 +77,8 @@ impl PersistentStateStorage {
             return None;
         }
 
-        // NOTE: Cached file is a mapped file, therefore it can take a while to read from it
+        // NOTE: Cached file is a mapped file, therefore it can take a while to read from it.
+        // NOTE: `spawn_blocking` is called here because it is mostly IO-bound operation.
         tokio::task::spawn_blocking(move || {
             let end = std::cmp::min(offset.saturating_add(limit), cached.file.length());
             cached.file.as_slice()[offset..end].to_vec()
@@ -98,7 +100,7 @@ impl PersistentStateStorage {
         let db = self.db.clone();
         let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
 
-        tokio::task::spawn_blocking(move || {
+        rayon_run(move || {
             let cell_writer = state_writer::StateWriter::new(&db, &states_dir, &block_id);
             match cell_writer.write(&root_hash, is_cancelled.as_deref()) {
                 Ok(()) => tracing::info!(block_id = %block_id, "persistent state saved"),
@@ -114,7 +116,7 @@ impl PersistentStateStorage {
                 }
             }
         })
-        .await?;
+        .await;
 
         self.cache_state(mc_seqno, &block_id)
     }

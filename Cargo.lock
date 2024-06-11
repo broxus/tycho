@@ -3216,6 +3216,7 @@ dependencies = [
  "parking_lot",
  "public-ip",
  "rand",
+ "rayon",
  "rustc_version",
  "serde",
  "serde_json",
@@ -3428,6 +3429,7 @@ dependencies = [
 name = "tycho-storage"
 version = "0.0.1"
 dependencies = [
+ "ahash",
  "anyhow",
  "arc-swap",
  "base64 0.22.1",
@@ -3481,6 +3483,7 @@ dependencies = [
  "libc",
  "metrics",
  "rand",
+ "rayon",
  "serde",
  "serde_json",
  "serde_path_to_error",

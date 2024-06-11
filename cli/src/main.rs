@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod tools {
@@ -23,6 +23,11 @@ fn main() -> ExitCode {
         // Enable backtraces on panics by default.
         std::env::set_var("RUST_BACKTRACE", "1");
     }
+
+    rayon::ThreadPoolBuilder::new()
+        .stack_size(8 * 1024 * 1024)
+        .build_global()
+        .unwrap();
 
     match App::parse().run() {
         Ok(()) => ExitCode::SUCCESS,

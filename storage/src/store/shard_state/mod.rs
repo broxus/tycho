@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;
+use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
 
 use self::cell_storage::*;
@@ -105,7 +106,7 @@ impl ShardStateStorage {
         let block_handle_storage = self.block_handle_storage.clone();
         let handle = handle.clone();
 
-        let (new_cell_count, updated) = tokio::task::spawn_blocking(move || {
+        let (new_cell_count, updated) = rayon_run(move || {
             let root_hash = *root_cell.repr_hash();
 
             let mut batch = rocksdb::WriteBatch::default();
@@ -138,7 +139,7 @@ impl ShardStateStorage {
             drop(pending_op);
             Ok::<_, anyhow::Error>((new_cell_count, updated))
         })
-        .await??;
+        .await?;
 
         let count = if block_id.shard.is_masterchain() {
             &self.max_new_mc_cell_count

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
-use tokio::task::JoinHandle;
+use futures_util::{Future, StreamExt};
 use tracing::{Instrument, Span};
 use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
+use tycho_util::sync::rayon_run;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::{DagRound, WeakDagRound};
@@ -72,7 +72,7 @@ impl Verifier {
             panic!("Coding error: dag round mismatches point round")
         }
 
-        let signatures_fut = tokio::task::spawn_blocking({
+        let signatures_fut = rayon_run({
             let proof = point.body.proof.clone();
             let span = effects.span().clone();
             move || match proof {
@@ -264,7 +264,7 @@ impl Verifier {
     async fn check_deps(
         point: &Arc<Point>,
         mut dependencies: FuturesUnordered<Shared<JoinTask<DagPoint>>>,
-        is_sig_ok: JoinHandle<bool>,
+        is_sig_ok: impl Future<Output = bool> + Send,
     ) -> DagPoint {
         // point is well-formed if we got here, so point.proof matches point.includes
         let proven_vertex = point.body.proof.as_ref().map(|p| &p.digest);
@@ -359,7 +359,7 @@ impl Verifier {
             }
         }
 
-        if !is_sig_ok.await.expect("signature check must not fail") {
+        if !is_sig_ok.await {
             DagPoint::Invalid(point.clone())
         } else if is_suspicious {
             DagPoint::Suspicious(ValidPoint::new(point.clone()))

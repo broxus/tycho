@@ -8,6 +8,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
+use tycho_util::sync::rayon_run;
 
 use crate::overlay_client::{Error, Neighbour, PublicOverlayClient, QueryResponse};
 use crate::proto::blockchain::*;
@@ -320,7 +321,7 @@ impl BlockchainRpcClient {
 
         // NOTE: Buffered items in stream will be polled because they are spawned as tasks
         while let Some(response) = stream.next().await.transpose()? {
-            let (op, finished) = tokio::task::spawn_blocking(move || {
+            let (op, finished) = rayon_run(move || {
                 let (handle, part) = response.split();
                 match store_state_op.process_part(part.data) {
                     Ok(finished) => Ok((store_state_op, finished)),
@@ -331,7 +332,6 @@ impl BlockchainRpcClient {
                 }
             })
             .await
-            .map_err(|e| Error::Internal(e.into()))?
             .map_err(Error::Internal)?;
 
             if !finished {
@@ -339,9 +339,8 @@ impl BlockchainRpcClient {
                 continue;
             }
 
-            return tokio::task::spawn_blocking(move || op.finalize())
+            return rayon_run(move || op.finalize())
                 .await
-                .map_err(|e| Error::Internal(e.into()))?
                 .map_err(Error::Internal);
         }
 

@@ -244,12 +244,9 @@ impl SessionInfo {
             }
         }
 
+        let mut budget = 0;
         for (validator_id, public_key, block_validation_candidate, signature) in to_verify {
-            let valid_signature = tokio::task::spawn_blocking({
-                let block_bytes = block_validation_candidate.as_bytes();
-                move || public_key.verify(block_bytes, &signature.0)
-            })
-            .await?;
+            let valid_signature = public_key.verify(&block_validation_candidate, &signature.0);
 
             // TODO temporary stub. Always consider signature as valid
             // let valid_signature = true;
@@ -268,6 +265,12 @@ impl SessionInfo {
                     file_hash=?file_hash,
                     "Invalid signature");
                 panic!("Invalid signature");
+            }
+
+            budget += 1;
+            if budget > 10 {
+                budget = 0;
+                tokio::task::yield_now().await;
             }
         }
 

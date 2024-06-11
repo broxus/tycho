@@ -16,6 +16,7 @@ use ton_executor::blockchain_config::PreloadedBlockchainConfig;
 use ton_executor::{
     ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
 };
+use tycho_util::sync::rayon_run;
 use tycho_util::FastHashMap;
 
 use super::types::{AsyncMessage, ExecutedMessage};
@@ -261,34 +262,33 @@ impl ExecutionManager {
         );
         let now = std::time::Instant::now();
         let (config, params) = self.get_execute_params()?;
-        let (transaction_result, in_message, updated_shard_account_stuff) =
-            tokio::task::spawn_blocking(move || {
-                let shard_account = &mut shard_account_stuff.shard_account;
-                let mut transaction = match &new_msg {
-                    AsyncMessage::Recover(new_msg_cell)
-                    | AsyncMessage::Mint(new_msg_cell)
-                    | AsyncMessage::Ext(_, new_msg_cell)
-                    | AsyncMessage::Int(_, new_msg_cell, _)
-                    | AsyncMessage::NewInt(_, new_msg_cell) => {
-                        execute_ordinary_message(new_msg_cell, shard_account, params, &config)
-                    }
-                    AsyncMessage::TickTock(ticktock_) => {
-                        execute_ticktock_message(*ticktock_, shard_account, params, &config)
-                    }
-                };
-
-                if let Ok(transaction) = transaction.as_mut() {
-                    // TODO replace with batch set
-                    shard_account_stuff.add_transaction(&transaction.0, transaction.1.clone())?;
+        let (transaction_result, in_message, updated_shard_account_stuff) = rayon_run(move || {
+            let shard_account = &mut shard_account_stuff.shard_account;
+            let mut transaction = match &new_msg {
+                AsyncMessage::Recover(new_msg_cell)
+                | AsyncMessage::Mint(new_msg_cell)
+                | AsyncMessage::Ext(_, new_msg_cell)
+                | AsyncMessage::Int(_, new_msg_cell, _)
+                | AsyncMessage::NewInt(_, new_msg_cell) => {
+                    execute_ordinary_message(new_msg_cell, shard_account, params, &config)
                 }
-                Ok((transaction, new_msg, shard_account_stuff))
-                    as Result<(
-                        Result<Box<(CurrencyCollection, Lazy<Transaction>)>>,
-                        AsyncMessage,
-                        ShardAccountStuff,
-                    )>
-            })
-            .await??;
+                AsyncMessage::TickTock(ticktock_) => {
+                    execute_ticktock_message(*ticktock_, shard_account, params, &config)
+                }
+            };
+
+            if let Ok(transaction) = transaction.as_mut() {
+                // TODO replace with batch set
+                shard_account_stuff.add_transaction(&transaction.0, transaction.1.clone())?;
+            }
+            Ok((transaction, new_msg, shard_account_stuff))
+                as Result<(
+                    Result<Box<(CurrencyCollection, Lazy<Transaction>)>>,
+                    AsyncMessage,
+                    ShardAccountStuff,
+                )>
+        })
+        .await?;
         let transaction_duration = now.elapsed().as_millis() as u64;
         Ok((
             ExecutedMessage {
