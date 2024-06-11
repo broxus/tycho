@@ -530,7 +530,7 @@ impl RpcStorage {
         let db = self.db.clone();
         rayon_run(move || {
             let prepare_batch_histogram =
-                HistogramGuard::begin("tycho_storage_rpc_prepare_bastch_time");
+                HistogramGuard::begin("tycho_storage_rpc_prepare_batch_time");
 
             let _span = span.enter();
 
@@ -646,7 +646,7 @@ impl RpcStorage {
             drop(prepare_batch_histogram);
 
             let _execute_batch_histogram =
-                HistogramGuard::begin("tycho_storage_rpc_execute_bastch_time");
+                HistogramGuard::begin("tycho_storage_rpc_execute_batch_time");
 
             if non_empty_batch {
                 db.rocksdb()

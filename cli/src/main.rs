@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod tools {

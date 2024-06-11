@@ -270,6 +270,18 @@ def core_block_strider() -> RowPanel:
             "tycho_core_process_sc_blocks_time",
             "Total time to process all shard blocks",
         ),
+        create_heatmap_panel(
+            "tycho_core_state_applier_handle_block_time",
+            "Time to handle block by ShardStateApplier",
+        ),
+        create_heatmap_panel(
+            "tycho_core_metrics_subscriber_handle_block_time",
+            "Time to handle block by MetricsSubscriber",
+        ),
+        create_heatmap_panel(
+            "tycho_core_subscriber_handle_state_time",
+            "Total time to handle state by all subscribers",
+        ),
     ]
     return create_row("Core Block Strider", metrics)
 
@@ -280,8 +292,12 @@ def jrpc() -> RowPanel:
             "tycho_rpc_state_update_time", "Time to update RPC state on block"
         ),
         create_heatmap_panel(
-            "tycho_storage_update_rpc_state_time",
-            "Time to update RPC storage on block",
+            "tycho_storage_rpc_prepare_batch_time",
+            "Time to prepare RPC storage update batch",
+        ),
+        create_heatmap_panel(
+            "tycho_storage_rpc_execute_batch_time",
+            "Time to prepare RPC storage update batch",
         ),
         create_counter_panel(
             "tycho_rpc_in_req_total", "Number of incoming JRPC requests over time"

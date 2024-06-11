@@ -27,7 +27,7 @@ use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig,
     MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, StateSubscriber,
-    StateSubscriberContext, StateSubscriberExt, StorageBlockProvider,
+    StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BlockchainRpcServiceConfig, BroadcastListener,
@@ -666,9 +666,7 @@ impl Node {
             .with_state_subscriber(
                 self.state_tracker.clone(),
                 self.storage.clone(),
-                collator_state_subscriber
-                    .chain(rpc_state)
-                    .chain(MetricsSubscriber),
+                ((collator_state_subscriber, rpc_state), MetricsSubscriber),
             )
             .build();
 

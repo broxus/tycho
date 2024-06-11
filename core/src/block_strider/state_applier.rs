@@ -8,6 +8,7 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
 use tycho_storage::{BlockHandle, BlockMetaData, Storage};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
 use crate::block_strider::{
@@ -38,6 +39,8 @@ where
     }
 
     async fn handle_block_impl(&self, cx: &BlockSubscriberContext) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_core_state_applier_handle_block_time");
+
         enum RefMcStateHandles {
             Split(
                 #[allow(unused)] RefMcStateHandle,
@@ -128,7 +131,7 @@ where
             state,
         };
         self.inner.state_subscriber.handle_state(&cx).await?;
-        metrics::histogram!("tycho_core_subscriber_handle_block_time").record(started_at.elapsed());
+        metrics::histogram!("tycho_core_subscriber_handle_state_time").record(started_at.elapsed());
 
         // Mark block as applied
         handle_storage.store_block_applied(&handle);

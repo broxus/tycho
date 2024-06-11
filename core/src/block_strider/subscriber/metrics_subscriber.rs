@@ -1,6 +1,7 @@
 use anyhow::Result;
 use everscale_types::models::{AccountStatus, ComputePhase, InMsg, MsgInfo, OutMsg, TxInfo};
 use tycho_block_util::block::BlockStuff;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -32,6 +33,8 @@ impl StateSubscriber for MetricsSubscriber {
 }
 
 fn handle_block(block: &BlockStuff) -> Result<()> {
+    let _histogram = HistogramGuard::begin("tycho_core_metrics_subscriber_handle_block_time");
+
     let block_id = block.id();
     let info = block.as_ref().load_info()?;
     let extra = block.as_ref().load_extra()?;
