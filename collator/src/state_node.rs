@@ -1,15 +1,15 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::FastDashMap;
 
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
@@ -66,7 +66,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
 
 pub struct StateNodeAdapterStdImpl {
     listener: Arc<dyn StateNodeEventListener>,
-    blocks: Arc<Mutex<HashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>>>,
+    blocks: FastDashMap<ShardIdent, BTreeMap<u32, BlockStuffForSync>>,
     storage: Storage,
     broadcaster: broadcast::Sender<BlockId>,
 }
@@ -124,9 +124,9 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block.block_id.as_short_id());
-        let mut blocks = self.blocks.lock().await;
+
         let block_id = block.block_id;
-        blocks
+        self.blocks
             .entry(block.block_id.shard)
             .or_insert_with(BTreeMap::new)
             .insert(block.block_id.seqno, block);
@@ -160,9 +160,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let seqno = block_id.seqno;
 
         {
-            let blocks_guard = self.blocks.lock().await;
-            if let Some(shard_blocks) = blocks_guard.get(&shard) {
-                let block = shard_blocks.get(&seqno);
+            let has_block = if let Some(shard_blocks) = self.blocks.get(&shard) {
+                let has_block = shard_blocks.contains_key(&seqno);
 
                 if shard.is_masterchain() {
                     let prev_mc_block = shard_blocks
@@ -178,38 +177,32 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     }
                 }
 
-                match block {
-                    None => {
-                        let _histogram = HistogramGuard::begin(
-                            "tycho_collator_adapter_on_block_accepted_ext_time",
-                        );
-
-                        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
-                        self.listener.on_block_accepted_external(state).await?;
-                    }
-                    Some(block) => {
-                        let _histogram =
-                            HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
-
-                        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
-                        self.listener.on_block_accepted(&block.block_id).await?;
-                    }
-                }
+                has_block
             } else {
-                let _histogram =
-                    HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_alt_ext_time");
+                false
+            };
 
-                tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external. Shard ID not found in blocks buffer: {:?}", block_id);
-                self.listener.on_block_accepted_external(state).await?;
+            match has_block {
+                false => {
+                    let _histogram =
+                        HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_ext_time");
+
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
+                    self.listener.on_block_accepted_external(state).await?;
+                }
+                true => {
+                    let _histogram =
+                        HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
+
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
+                    self.listener.on_block_accepted(&block_id).await?;
+                }
             }
         }
 
-        {
-            let mut blocks_guard = self.blocks.lock().await;
-            for (shard, seqno) in &to_split {
-                if let Some(shard_blocks) = blocks_guard.get_mut(shard) {
-                    *shard_blocks = shard_blocks.split_off(seqno);
-                }
+        for (shard, seqno) in &to_split {
+            if let Some(mut shard_blocks) = self.blocks.get_mut(shard) {
+                *shard_blocks = shard_blocks.split_off(seqno);
             }
         }
 
@@ -224,13 +217,11 @@ impl StateNodeAdapterStdImpl {
     ) -> Option<Result<BlockStuffAug>> {
         let mut receiver = self.broadcaster.subscribe();
         loop {
-            let blocks = self.blocks.lock().await;
-            if let Some(shard_blocks) = blocks.get(&block_id.shard()) {
+            if let Some(shard_blocks) = self.blocks.get(&block_id.shard()) {
                 if let Some(block) = shard_blocks.get(&block_id.seqno()) {
                     return Some(Ok(block.block_stuff_aug.clone()));
                 }
             }
-            drop(blocks);
 
             loop {
                 match receiver.recv().await {

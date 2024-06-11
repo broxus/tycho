@@ -276,6 +276,13 @@ def core_block_strider() -> RowPanel:
 
 def jrpc() -> RowPanel:
     metrics = [
+        create_heatmap_panel(
+            "tycho_rpc_state_update_time", "Time to update RPC state on block"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_update_rpc_state_time",
+            "Time to update RPC storage on block",
+        ),
         create_counter_panel(
             "tycho_rpc_in_req_total", "Number of incoming JRPC requests over time"
         ),
@@ -362,10 +369,6 @@ def collator_do_collate() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_adapter_on_block_accepted_ext_time",
             "on_block_accepted_external with blocks guard",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_adapter_on_block_accepted_alt_ext_time",
-            "on_block_accepted_external without blocks guard",
         ),
         create_heatmap_panel(
             "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"

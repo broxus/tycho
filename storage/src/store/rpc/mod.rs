@@ -9,6 +9,7 @@ use everscale_types::prelude::*;
 use metrics::atomics::AtomicU64;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
@@ -530,6 +531,8 @@ impl RpcStorage {
         let span = tracing::Span::current();
         let db = self.db.clone();
         tokio::task::spawn_blocking(move || {
+            let _histogram = HistogramGuard::begin("tycho_storage_update_rpc_state_time");
+
             let _span = span.enter();
 
             let extra = block.block().load_extra()?;

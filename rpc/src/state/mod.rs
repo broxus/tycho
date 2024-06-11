@@ -17,6 +17,7 @@ use tycho_core::block_strider::{
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
@@ -350,6 +351,8 @@ impl Inner {
     }
 
     async fn update(&self, block: &BlockStuff, state: Option<&ShardStateStuff>) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_rpc_state_update_time");
+
         let is_masterchain = block.id().is_masterchain();
         if is_masterchain {
             self.update_mc_block_cache(block)?;
