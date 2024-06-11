@@ -202,8 +202,7 @@ impl PersistentStateStorage {
                 continue;
             };
 
-            let is_recent =
-                matches!(name.parse::<u32>(), Ok(seqno) if seqno >= recent_block_id.seqno);
+            let is_recent = matches!(name.parse::<u32>(), Ok(seqno) if seqno >= recent_block_id.seqno || seqno == 0);
 
             if !is_recent {
                 directories_to_remove.push(path);
