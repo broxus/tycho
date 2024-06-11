@@ -305,7 +305,8 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): init: building working state...", self.next_block_id_short,
         );
-        let working_state = Self::build_and_validate_working_state(mc_state, prev_states)?;
+        let working_state =
+            Self::build_and_validate_working_state(mc_state, prev_states, &self.state_tracker)?;
         self.set_working_state(working_state);
 
         // TODO: collate right now instead of queuing
@@ -344,7 +345,7 @@ impl CollatorStdImpl {
 
         let prev_states = vec![new_state_stuff];
         Self::check_prev_states_and_master(&working_state_mut.mc_data, &prev_states)?;
-        let (new_prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
+        let (new_prev_shard_data, usage_tree) = PrevData::build(prev_states, &self.state_tracker)?;
         working_state_mut.prev_shard_data = new_prev_shard_data;
         working_state_mut.usage_tree = usage_tree;
 
@@ -429,12 +430,13 @@ impl CollatorStdImpl {
     fn build_and_validate_working_state(
         mc_state: ShardStateStuff,
         prev_states: Vec<ShardStateStuff>,
+        state_tracker: &MinRefMcStateTracker,
     ) -> Result<WorkingState> {
         // TODO: make real implementation
 
         let mc_data = McData::build(mc_state)?;
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, state_tracker)?;
 
         let working_state = WorkingState {
             mc_data,

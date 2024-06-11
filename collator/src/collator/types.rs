@@ -190,7 +190,10 @@ pub(super) struct PrevData {
     processed_upto: ProcessedUptoInfo,
 }
 impl PrevData {
-    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Self, UsageTree)> {
+    pub fn build(
+        prev_states: Vec<ShardStateStuff>,
+        state_tracker: &MinRefMcStateTracker,
+    ) -> Result<(Self, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -202,11 +205,10 @@ impl PrevData {
 
         let usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess);
         let observable_root = usage_tree.track(pure_prev_state_root);
-        let tracker = MinRefMcStateTracker::new();
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
-            &tracker,
+            state_tracker,
         )?];
 
         let gen_utime = observable_states[0].state().gen_utime;
@@ -314,6 +316,8 @@ pub(super) struct BlockCollationData {
     pub enqueue_count: u32,
     pub dequeue_count: u32,
     pub tx_count: u32,
+
+    pub new_msgs_created: u32,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt
@@ -684,6 +688,5 @@ pub(super) enum AsyncMessage {
 pub(super) struct ExecutedMessage {
     pub transaction_result: Result<Box<(CurrencyCollection, Lazy<Transaction>)>>,
     pub in_message: AsyncMessage,
-    pub updated_shard_account_stuff: ShardAccountStuff,
     pub transaction_duration: u64,
 }
