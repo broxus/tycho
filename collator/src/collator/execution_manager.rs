@@ -1,6 +1,6 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
 use anyhow::Result;
@@ -45,7 +45,7 @@ pub(super) struct ExecutionManager {
     /// messages set
     messages_set: Vec<AsyncMessage>,
     /// messages groups
-    messages_groups: Option<HashMap<u32, HashMap<HashBytes, AsyncMessage>>>,
+    // messages_groups: Option<HashMap<u32, HashMap<HashBytes, AsyncMessage>>>,
     /// group limit
     group_limit: u32,
     /// shard accounts
@@ -79,7 +79,7 @@ impl ExecutionManager {
             group_limit,
             total_trans_duration: 0,
             messages_set: Vec::new(),
-            messages_groups: None,
+            // messages_groups: None,
             shard_accounts,
             changed_accounts: FastHashMap::default(),
         }
@@ -89,7 +89,7 @@ impl ExecutionManager {
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
         tracing::debug!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
         let _ = std::mem::replace(&mut self.messages_set, msgs);
-        self.messages_groups = Some(pre_calculate_groups(&self.messages_set, self.group_limit));
+        // self.messages_groups = Some(pre_calculate_groups(&self.messages_set, self.group_limit));
     }
 
     /// Run one execution tick of parallel transactions
@@ -107,13 +107,13 @@ impl ExecutionManager {
     )> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {}", offset);
 
-        // let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
-        let messages_groups = self.messages_groups.as_ref().unwrap();
-        let (new_offset, group) = match messages_groups.get(&offset) {
-            Some(g) => (offset + 1, g.clone()), // TODO: need to optimize without clone()
-            None => return Ok((offset, vec![], true)),
-        };
-        let finished = !messages_groups.contains_key(&new_offset);
+        let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
+        // let messages_groups = self.messages_groups.as_ref().unwrap();
+        // let (new_offset, group) = match messages_groups.get(&offset) {
+        //     Some(g) => (offset + 1, g.clone()), // TODO: need to optimize without clone()
+        //     None => return Ok((offset, vec![], true)),
+        // };
+        let finished = new_offset == self.messages_set.len() as u32;
 
         tracing::debug!(target: tracing_targets::EXEC_MANAGER, "offset {} group len: {}", offset, group.len());
 
@@ -352,18 +352,26 @@ fn execute_ticktock_message(
 }
 
 /// calculate group
+
 pub fn calculate_group(
     messages_set: &[AsyncMessage],
     group_limit: u32,
     offset: u32,
 ) -> (u32, HashMap<AccountId, AsyncMessage>) {
     let mut new_offset = offset;
-    let mut holes_group: HashMap<AccountId, u32> = HashMap::new();
-    let mut max_account_count = 0;
-    let mut holes_max_count: i32 = 0;
-    let mut holes_count: i32 = 0;
-    let mut group = HashMap::new();
-    for (i, msg) in messages_set.iter().enumerate() {
+    // last group number of account
+    let mut accounts_last_group: HashMap<AccountId, u32> = HashMap::new();
+    // remaining accounts, that will be ignored, because they have been taken on previous step
+    let mut remaining_ignored_accounts_count: i32 = 0;
+    // ignored after offset accounts count
+    let mut ignored_accounts_count: i32 = 0;
+    // last group number calculated from offset
+    let mut last_group_num = 0;
+    // groups that have not enough elements to be filled to group limit
+    let mut unfilled_groups: VecDeque<(u32, u32)> = VecDeque::new();
+
+    let mut result = HashMap::new();
+    'messages: for (i, msg) in messages_set.iter().enumerate() {
         let account_id = match msg {
             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
                 dst.as_std().map(|a| a.address).unwrap_or_default()
@@ -379,109 +387,176 @@ pub fn calculate_group(
                 unreachable!()
             }
         };
+        // calculation of helping elements
         if (i as u32) < offset {
-            let count = holes_group.entry(account_id).or_default();
-            *count += 1;
-            if *count > max_account_count {
-                max_account_count = *count;
-                holes_max_count = (group_limit * max_account_count) as i32 - offset as i32;
-            }
-        } else if group.len() < group_limit as usize {
-            match holes_group.get_mut(&account_id) {
-                None => {
-                    if holes_max_count > 0 {
-                        holes_group.insert(account_id, 1);
-                        holes_max_count -= 1;
-                        holes_count += 1;
+            // receiving last group number containing current account
+            let account_last_group_num = match accounts_last_group.entry(account_id) {
+                Entry::Vacant(last_group) => {
+                    last_group.insert(last_group_num);
+                    last_group_num
+                }
+                Entry::Occupied(mut last_group) => {
+                    let last_group_element = *last_group.get();
+                    if last_group_element >= last_group_num {
+                        *last_group.get_mut() = last_group_element + 1;
+                        last_group_element + 1
                     } else {
-                        // if group have this account we skip it
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            group.entry(account_id)
-                        {
-                            e.insert(msg.clone());
-                        } else {
-                            // if the offset was not set previously, and the account is skipped then
-                            // it means that we need to move by current group length
-                            if new_offset == offset {
-                                new_offset += group.len() as u32 + holes_count as u32;
-                            }
-                        }
+                        *last_group.get_mut() = last_group_num;
+                        last_group_num
                     }
                 }
-                Some(count) => {
-                    if *count != max_account_count && holes_max_count > 0 {
-                        *count += 1;
-                        holes_max_count -= 1;
-                        holes_count += 1;
-                    } else {
-                        // group has this account, but it was not taken on previous runs
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            group.entry(account_id)
-                        {
-                            e.insert(msg.clone());
-                        } else {
-                            // if the offset was not set previously, and the account is skipped then
-                            // it means that we need to move by current group length
-                            if new_offset == offset {
-                                new_offset += group.len() as u32 + holes_count as u32;
-                            }
-                        }
+            };
+
+            // filling group by number with new element, if it's equal to limit, removing it from further equations
+            match unfilled_groups
+                .iter_mut()
+                .find(|(num, _)| *num == account_last_group_num)
+            {
+                Some((_, account_last_group_len)) => {
+                    *account_last_group_len += 1;
+                    // switching last group number
+                    if *account_last_group_len == group_limit {
+                        unfilled_groups.pop_front();
+                        last_group_num += 1;
                     }
+                }
+                None => {
+                    unfilled_groups.push_back((account_last_group_num, 1));
                 }
             }
         } else {
-            break;
+            // start of result collecting
+            if (i as u32) == offset {
+                // finding last unfilled by previous steps group number, the new one will be next
+                if let Some(last_unfilled_group_num) = unfilled_groups.back().map(|(num, _)| *num) {
+                    last_group_num = last_unfilled_group_num + 1;
+                    remaining_ignored_accounts_count =
+                        (group_limit * last_group_num) as i32 - offset as i32;
+                }
+            }
+            if result.len() < group_limit as usize {
+                match accounts_last_group.get_mut(&account_id) {
+                    // it is the first time this account is being performed
+                    None => {
+                        // if it was taken by previous groups, ignore it
+                        if remaining_ignored_accounts_count > 0 {
+                            remaining_ignored_accounts_count -= 1;
+                            ignored_accounts_count += 1;
+
+                            // filling calculated unfilled groups, starting with the minimum one
+                            if let Some((first_unfilled_group_num, first_unfilled_group_len)) =
+                                unfilled_groups.front_mut()
+                            {
+                                accounts_last_group.insert(account_id, *first_unfilled_group_num);
+                                *first_unfilled_group_len += 1;
+                                if *first_unfilled_group_len == group_limit {
+                                    unfilled_groups.pop_front();
+                                }
+                            } else {
+                                // or if there were no unfilled groups, we can be sure that it was taken by previous group
+                                accounts_last_group.insert(account_id, last_group_num - 1);
+                            }
+
+                            // and continue to the next element
+                            continue 'messages;
+                        }
+
+                        if let Entry::Vacant(e) = result.entry(account_id) {
+                            e.insert(msg.clone());
+                        } else {
+                            // if the offset was not set previously, and the account is skipped then
+                            // it means that we need to move by current result length and all ignored on our way
+                            if new_offset == offset {
+                                new_offset += result.len() as u32 + ignored_accounts_count as u32;
+                            }
+                        }
+                    }
+                    // account was previously included in some groups
+                    Some(account_last_group) => {
+                        // if there is place in next unfilled groups, then it was taken by it
+                        if remaining_ignored_accounts_count > 0 {
+                            for (unfilled_group_num, unfilled_group_len) in unfilled_groups
+                                .iter_mut()
+                                .filter(|(group_num, _)| *group_num >= *account_last_group + 1)
+                            {
+                                // if we must ignore it, then we skip it, changing the last accounts group number
+                                remaining_ignored_accounts_count -= 1;
+                                ignored_accounts_count += 1;
+                                *account_last_group = *unfilled_group_num;
+                                *unfilled_group_len += 1;
+                                if *unfilled_group_len == group_limit {
+                                    unfilled_groups.pop_front();
+                                }
+                                // and continue to the next element
+                                continue 'messages;
+                            }
+                        }
+
+                        if let Entry::Vacant(e) = result.entry(account_id) {
+                            e.insert(msg.clone());
+                        } else {
+                            // if the offset was not set previously, and the account is skipped then
+                            // it means that we need to move by current result length and all ignored on our way
+                            if new_offset == offset {
+                                new_offset += result.len() as u32 + ignored_accounts_count as u32;
+                            }
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
         }
     }
-    // if new offset was not set then it means that we took all group elements and all holes on our way
+    // if new offset was not set then it means that we took all result elements and all ignored on our way
     if new_offset == offset {
-        new_offset += group.len() as u32 + holes_count as u32;
+        new_offset += result.len() as u32 + ignored_accounts_count as u32;
     }
-    (new_offset, group)
+    (new_offset, result)
 }
 
-/// calculate all groups in advance
-pub fn pre_calculate_groups(
-    messages_set: &[AsyncMessage],
-    group_limit: u32,
-) -> HashMap<u32, HashMap<AccountId, AsyncMessage>> {
-    let mut res: HashMap<u32, HashMap<AccountId, AsyncMessage>> = HashMap::new();
-    for msg in messages_set {
-        let account_id = match msg {
-            AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            s => {
-                tracing::error!("wrong async message - {s:?}");
-                unreachable!()
-            }
-        };
-
-        let mut g_idx = 0;
-        let mut group_entry;
-        loop {
-            group_entry = res.entry(g_idx).or_default();
-            if group_entry.len() == group_limit as usize {
-                g_idx += 1;
-                continue;
-            }
-            let account_entry = group_entry.entry(account_id);
-            match account_entry {
-                Entry::Vacant(entry) => {
-                    entry.insert(msg.clone());
-                    break;
-                }
-                Entry::Occupied(_entry) => {
-                    g_idx += 1;
-                }
-            }
-        }
-    }
-    res
-}
+// /// calculate all groups in advance
+// pub fn pre_calculate_groups(
+//     messages_set: &[AsyncMessage],
+//     group_limit: u32,
+// ) -> HashMap<u32, HashMap<AccountId, AsyncMessage>> {
+//     let mut res: HashMap<u32, HashMap<AccountId, AsyncMessage>> = HashMap::new();
+//     for msg in messages_set {
+//         let account_id = match msg {
+//             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
+//                 dst.as_std().map(|a| a.address).unwrap_or_default()
+//             }
+//             AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
+//                 dst.as_std().map(|a| a.address).unwrap_or_default()
+//             }
+//             AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
+//                 dst.as_std().map(|a| a.address).unwrap_or_default()
+//             }
+//             s => {
+//                 tracing::error!("wrong async message - {s:?}");
+//                 unreachable!()
+//             }
+//         };
+//
+//         let mut g_idx = 0;
+//         let mut group_entry;
+//         loop {
+//             group_entry = res.entry(g_idx).or_default();
+//             if group_entry.len() == group_limit as usize {
+//                 g_idx += 1;
+//                 continue;
+//             }
+//             let account_entry = group_entry.entry(account_id);
+//             match account_entry {
+//                 Entry::Vacant(entry) => {
+//                     entry.insert(msg.clone());
+//                     break;
+//                 }
+//                 Entry::Occupied(_entry) => {
+//                     g_idx += 1;
+//                 }
+//             }
+//         }
+//     }
+//     res
+// }
