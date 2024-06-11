@@ -321,6 +321,8 @@ impl CollatorStdImpl {
                             msg_info,
                         )?;
 
+                        collation_data.new_msgs_created += new_internal_messages.len() as u32;
+
                         if !new_internal_messages.is_empty() {
                             self.mq_adapter.add_messages_to_iterator(
                                 &mut internal_messages_iterator,
@@ -429,12 +431,6 @@ impl CollatorStdImpl {
             .finalize_block(&mut collation_data, exec_manager)
             .await?;
 
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "created block candidate: start_lt={}, end_lt={}, txs={}, new_msgs={}, in_msgs={}, out_msgs={}",
-            collation_data.start_lt, collation_data.next_lt, block_transactions_count,
-            diff.messages.len(), collation_data.in_msgs.len(), collation_data.out_msgs.len(),
-        );
-
         self.mq_adapter
             .apply_diff(diff.clone(), candidate.block_id.as_short_id())
             .await?;
@@ -461,9 +457,16 @@ impl CollatorStdImpl {
         self.listener.on_block_candidate(collation_result).await?;
 
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Created and sent block candidate: start_lt={}, end_lt={}, exec_count={}, new_msgs={}, in_msgs={}, out_msgs={}",
+            "Created and sent block candidate: start_lt={}, end_lt={}, exec_count={}, \
+            exec_ext={}, exec_int={}, exec_new_int={}, \
+            enqueue_count={}, dequeue_count={}, \
+            new_msgs_created={}, new_msgs_added={}, \
+            in_msgs={}, out_msgs={}",
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
-            diff.messages.len(), collation_data.in_msgs.len(), collation_data.out_msgs.len(),
+            collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
+            collation_data.enqueue_count, collation_data.dequeue_count,
+            collation_data.new_msgs_created, diff.messages.len(),
+            collation_data.in_msgs.len(), collation_data.out_msgs.len(),
         );
 
         self.update_stats(&collation_data);
@@ -542,7 +545,8 @@ impl CollatorStdImpl {
     fn get_msgs_execution_params(&self) -> (usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
         //(1000, 300, 188)
-        (93, 30, 18)
+        //(193, 60, 38)
+        (100, 30, 20)
     }
 
     /// Read specified number of externals from imported anchors
