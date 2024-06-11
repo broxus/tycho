@@ -512,7 +512,7 @@ where
     /// For each shard run collation process if current node is included in collators subset.
     #[tracing::instrument(skip_all, fields(mc_block_id = %mc_state.block_id().as_short_id()))]
     pub async fn refresh_collation_sessions(&mut self, mc_state: ShardStateStuff) -> Result<()> {
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Trying to refresh collation sessions by mc state for block...",
         );
@@ -620,16 +620,18 @@ where
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Will keep existing collation sessions: {:?}",
             sessions_to_keep.keys(),
         );
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Will start new collation sessions: {:?}",
-            sessions_to_start.iter().map(|(k, _)| k).collect::<Vec<_>>(),
-        );
+        if !sessions_to_start.is_empty() {
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Will start new collation sessions: {:?}",
+                sessions_to_start.iter().map(|(k, _)| k).collect::<Vec<_>>(),
+            );
+        }
 
         let cc_config = mc_state_extra.config.get_catchain_config()?;
 
@@ -645,14 +647,14 @@ where
             };
 
             if shard_id.is_masterchain() {
-                tracing::info!(
+                tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Resuming collation attempts in master chain {}",
                     shard_id,
                 );
                 collator.equeue_try_collate().await?;
             } else {
-                tracing::info!(
+                tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Updating McData in active collator for shard {} and resuming collation in it...",
                     shard_id,
@@ -766,11 +768,13 @@ where
                 .insert(shard_id, new_session_info);
         }
 
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Will finish outdated collation sessions: {:?}",
-            to_finish_sessions.keys(),
-        );
+        if !to_finish_sessions.is_empty() {
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Will finish outdated collation sessions: {:?}",
+                to_finish_sessions.keys(),
+            );
+        }
 
         // enqueue outdated sessions finish tasks
         for (finish_key, session_info) in to_finish_sessions {
@@ -785,11 +789,13 @@ where
                 .await?;
         }
 
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Will stop collators for sessions that we do not serve: {:?}",
-            to_stop_collators.keys(),
-        );
+        if !to_stop_collators.is_empty() {
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Will stop collators for sessions that we do not serve: {:?}",
+                to_stop_collators.keys(),
+            );
+        }
 
         // equeue dangling collators stop tasks
         for (stop_key, collator) in to_stop_collators {
@@ -1042,7 +1048,7 @@ where
             let mc_block_interval_elapsed =
                 chain_time_elapsed > self.config.mc_block_min_interval_ms;
             if mc_block_interval_elapsed {
-                tracing::info!(
+                tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Master block interval is {}ms, elapsed chain time {}ms exceeded the interval in current shard {}",
                     self.config.mc_block_min_interval_ms, chain_time_elapsed, shard_id,
@@ -1215,7 +1221,7 @@ where
             .equeue_do_collate(next_mc_block_chain_time, top_shard_blocks_info)
             .await?;
 
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Master block collation enqueued: (block_id={} ct={})",
             self.last_collated_mc_block_id()
                 .map(|id| BlockIdShort { shard: id.shard, seqno: id.seqno + 1 }.to_string())
@@ -1477,7 +1483,7 @@ where
             .iter()
             .map(|sb| sb.entry.key.to_string())
             .collect::<Vec<_>>();
-        tracing::info!(
+        tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Extracted valid master block ({}) subgraph for sending to sync: {:?}",
             block_id.as_short_id(),

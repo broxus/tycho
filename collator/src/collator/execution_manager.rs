@@ -264,8 +264,8 @@ impl ExecutionManager {
         mut account_stuff: ShardAccountStuff,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updating shard account {}", account_id);
-        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "updated account {account_id} balance: {}",
-            account_stuff.shard_account.account.load()?.balance().tokens,
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updated account {} balance: {}",
+            account_id, account_stuff.shard_account.account.load()?.balance().tokens,
         );
         let binding = &account_stuff.shard_account.account;
         let account_root = binding.inner();
