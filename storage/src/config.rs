@@ -13,7 +13,7 @@ pub struct StorageConfig {
 
     /// Whether to enable `RocksDB` metrics.
     ///
-    /// Default: `false`.
+    /// Default: `true`.
     pub rocksdb_enable_metrics: bool,
 
     /// `RocksDB` LRU cache capacity.
@@ -82,7 +82,7 @@ impl Default for StorageConfig {
             root_dir: PathBuf::from("./db"),
             cells_cache_size,
             rocksdb_lru_capacity,
-            rocksdb_enable_metrics: false,
+            rocksdb_enable_metrics: true,
         }
     }
 }

@@ -282,6 +282,9 @@ def core_block_strider() -> RowPanel:
             "tycho_core_subscriber_handle_state_time",
             "Total time to handle state by all subscribers",
         ),
+        create_heatmap_panel(
+            "tycho_storage_load_cell_time", "Time to load cell from storage"
+        ),
     ]
     return create_row("Core Block Strider", metrics)
 
