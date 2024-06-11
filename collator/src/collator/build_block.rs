@@ -161,7 +161,7 @@ impl CollatorStdImpl {
 
         // build new state
         let global_id = prev_shard_data.observable_states()[0].state().global_id;
-        let mut new_state = Box::new(ShardStateUnsplit {
+        let mut new_observable_state = Box::new(ShardStateUnsplit {
             global_id,
             shard_ident: new_block_info.shard,
             seqno: new_block_info.seqno,
@@ -184,24 +184,24 @@ impl CollatorStdImpl {
             shard_block_refs: None,
         });
 
-        new_state
+        new_observable_state
             .total_validator_fees
             .try_add_assign(&value_flow.fees_collected)?;
-        new_state
+        new_observable_state
             .total_validator_fees
             .try_sub_assign(&value_flow.recovered)?;
 
         if collation_data.block_id_short.shard.is_masterchain() {
-            new_state.libraries = exec_manager.libraries;
+            new_observable_state.libraries = exec_manager.libraries;
         }
 
         // TODO: update smc on hard fork
 
         // calc merkle update
-        let new_state_root = CellBuilder::build_from(&new_state)?;
+        let new_observable_state_root = CellBuilder::build_from(&new_observable_state)?;
         let state_update = Self::create_merkle_update(
             prev_shard_data,
-            &new_state_root,
+            &new_observable_state_root,
             &self.working_state().usage_tree,
         )?;
 
@@ -276,12 +276,12 @@ impl CollatorStdImpl {
                 + new_block_info.gen_utime_ms as u64,
         };
 
-        let new_state_stuff = ShardStateStuff::from_state_and_root(
-            &new_block_id,
-            new_state,
-            new_state_root,
-            &self.state_tracker,
-        )?;
+        // build new shard state using merkle update
+        // to get updated state without UsageTree
+        let pure_prev_state_root = prev_shard_data.pure_state_root();
+        let new_state_root = state_update.apply(pure_prev_state_root)?;
+        let new_state_stuff =
+            ShardStateStuff::from_root(&new_block_id, new_state_root, &self.state_tracker)?;
 
         Ok((block_candidate, new_state_stuff))
     }
