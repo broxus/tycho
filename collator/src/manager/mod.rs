@@ -18,11 +18,12 @@ use self::types::{
 };
 use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
+use crate::manager::types::BlockCandidateEntry;
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
-    BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
+    BlockCandidate, BlockCollationResult, BlockSignatures, CollationConfig, CollationSessionId,
     CollationSessionInfo, OnValidatedBlockEvent, ProofFunds, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
@@ -1416,6 +1417,7 @@ where
                 OnValidatedBlockEvent::Valid(bs) => (true, false, bs.signatures),
                 OnValidatedBlockEvent::Invalid => (false, false, Default::default()),
             };
+
             block_container.set_validation_result(is_valid, already_synced, signatures);
 
             Ok(block_container)

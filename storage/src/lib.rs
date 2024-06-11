@@ -5,17 +5,17 @@ use anyhow::Result;
 use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
 
-pub use self::config::*;
 pub use self::archive_config::*;
+pub use self::config::*;
 pub use self::db::*;
 pub use self::models::*;
 pub use self::store::*;
 
+mod archive_config;
 mod config;
 mod db;
 mod models;
 mod store;
-mod archive_config;
 
 mod util {
     pub use self::owned_iterator::*;

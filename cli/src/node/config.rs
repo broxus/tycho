@@ -86,7 +86,7 @@ impl Default for NodeConfig {
             collator: CollationConfig::default(),
             rpc: Some(RpcConfig::default()),
             metrics: Some(MetricsConfig::default()),
-            archive: Some(ArchiveConfig::default())
+            archive: Some(ArchiveConfig::default()),
         }
     }
 }
