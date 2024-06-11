@@ -167,7 +167,7 @@ impl PersistentStateStorage {
 
             let mut index = self.mc_seqno_to_block_ids.lock();
             index.retain(|&mc_seqno, block_ids| {
-                if mc_seqno >= recent_mc_seqno {
+                if mc_seqno >= recent_mc_seqno || mc_seqno == 0 {
                     return true;
                 }
 
