@@ -1287,10 +1287,9 @@ fn new_transaction(
     let mut result = vec![];
     let binding = transaction.load()?;
     let out_msgs = binding.iter_out_msgs();
-    for out_msg in out_msgs {
-        let message = out_msg?;
-        let msg_cell = CellBuilder::build_from(&message)?;
-        let message_info = message.info;
+    for (message, msg_cell) in out_msgs.zip(binding.out_msgs.values()) {
+        let message_info = message?.info;
+        let msg_cell = msg_cell?;
         let out_msg = match message_info.clone() {
             MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
                 collation_data.enqueue_count += 1;
@@ -1313,7 +1312,7 @@ fn new_transaction(
                         cur_addr,
                         next_addr,
                         fwd_fee_remaining: fwd_fee,
-                        message: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
+                        message: Lazy::load_from(&mut msg_cell.as_slice()?)?,
                     })?,
                     transaction: transaction.clone(),
                 })
@@ -1324,7 +1323,7 @@ fn new_transaction(
                     msg_cell.repr_hash(), message_info,
                 );
                 OutMsg::External(OutMsgExternal {
-                    out_msg: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
+                    out_msg: Lazy::load_from(&mut msg_cell.as_slice()?)?,
                     transaction: transaction.clone(),
                 })
             }
@@ -1333,7 +1332,7 @@ fn new_transaction(
 
         collation_data
             .out_msgs
-            .insert(*msg_cell.repr_hash(), out_msg.clone());
+            .insert(*msg_cell.repr_hash(), out_msg);
         result.push((message_info, msg_cell));
     }
     Ok(result)
