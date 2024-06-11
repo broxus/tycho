@@ -42,12 +42,12 @@ pub(super) struct ExecutionManager {
     total_trans_duration: u64,
     /// block version
     block_version: u32,
-    /// messages set
-    messages_set: Vec<AsyncMessage>,
     /// messages groups
-    messages_groups: Option<HashMap<u32, HashMap<HashBytes, AsyncMessage>>>,
+    messages_groups: HashMap<u32, HashMap<HashBytes, Vec<AsyncMessage>>>,
     /// group limit
-    group_limit: u32,
+    group_limit: usize,
+    /// group vertical size
+    group_vert_size: usize,
     /// shard accounts
     pub shard_accounts: ShardAccounts,
     /// changed accounts
@@ -65,7 +65,8 @@ impl ExecutionManager {
         libraries: Dict<HashBytes, LibDescr>,
         config: BlockchainConfig,
         block_version: u32,
-        group_limit: u32,
+        group_limit: usize,
+        group_vert_size: usize,
         shard_accounts: ShardAccounts,
     ) -> Self {
         Self {
@@ -77,9 +78,9 @@ impl ExecutionManager {
             config,
             block_version,
             group_limit,
+            group_vert_size,
             total_trans_duration: 0,
-            messages_set: Vec::new(),
-            messages_groups: None,
+            messages_groups: HashMap::new(),
             shard_accounts,
             changed_accounts: FastHashMap::default(),
         }
@@ -87,9 +88,38 @@ impl ExecutionManager {
 
     /// Set messages that will be executed
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
-        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "adding set of {} messages for execution", msgs.len());
-        let _ = std::mem::replace(&mut self.messages_set, msgs);
-        self.messages_groups = Some(pre_calculate_groups(&self.messages_set, self.group_limit));
+        let msgs_count = msgs.len();
+        self.messages_groups = pre_calculate_groups(msgs, self.group_limit, self.group_vert_size);
+        // let _trace_groups = self
+        //     .messages_groups
+        //     .iter()
+        //     .map(|(k, g)| {
+        //         format!(
+        //             "{}: {:?}",
+        //             k,
+        //             g.values().map(|v| v.len()).collect::<Vec<_>>().as_slice()
+        //         )
+        //     })
+        //     .collect::<Vec<_>>()
+        //     .as_slice();
+        tracing::info!(target: tracing_targets::EXEC_MANAGER,
+            "added set of {} messages for execution: \
+            calculated {} groups (group_limit={}, group_vert_size={}): \
+            groups: {:?}",
+            msgs_count, self.messages_groups.len(), self.group_limit, self.group_vert_size,
+            self
+            .messages_groups
+            .iter()
+            .map(|(k, g)| {
+                format!(
+                    "{}: {:?}",
+                    k,
+                    g.values().map(|v| v.len()).collect::<Vec<_>>().as_slice()
+                )
+            })
+            .collect::<Vec<_>>()
+            .as_slice(),
+        );
     }
 
     /// Run one execution tick of parallel transactions
@@ -107,75 +137,68 @@ impl ExecutionManager {
     )> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {}", offset);
 
-        // let (new_offset, group) = calculate_group(&self.messages_set, self.group_limit, offset);
-        let messages_groups = self.messages_groups.as_ref().unwrap();
-        let (new_offset, group) = match messages_groups.get(&offset) {
-            Some(g) => (offset + 1, g.clone()), // TODO: need to optimize without clone()
+        let (new_offset, group) = match self.messages_groups.remove(&offset) {
+            Some(group) => (offset + 1, group),
             None => return Ok((offset, vec![], true)),
         };
-        let finished = !messages_groups.contains_key(&new_offset);
+        let finished = !self.messages_groups.contains_key(&new_offset);
 
         tracing::debug!(target: tracing_targets::EXEC_MANAGER, "offset {} group len: {}", offset, group.len());
 
         let mut futures: FuturesUnordered<_> = Default::default();
 
         // TODO check externals is not exist accounts needed ?
-        for (account_id, msg) in group {
+        for (account_id, msgs) in group {
             let shard_account_stuff = self.get_shard_account_stuff(account_id)?;
-            futures.push(self.execute_message(account_id, msg.clone(), shard_account_stuff));
+            futures.push(self.execute_messages(account_id, msgs, shard_account_stuff));
         }
 
-        let mut executed_messages = vec![];
+        let mut result = vec![];
+        let mut updated_shard_account_stuffs = vec![];
+        let mut total_tick_trans_duration = 0;
         let mut min_next_lt = self.min_next_lt;
-        while let Some(executed_message_result) = futures.next().await {
-            let executed_message = executed_message_result?;
-            let ExecutedMessage {
-                transaction_result,
-                in_message,
-                updated_shard_account_stuff,
-                ..
-            } = &executed_message;
-            if let AsyncMessage::Ext(_, _) = &in_message {
-                if let Err(ref e) = transaction_result {
-                    tracing::error!(target: tracing_targets::EXEC_MANAGER,
-                        "failed to execute external transaction: in_msg: {:?}\nerror: {:?}",
-                        in_message, e,
-                    );
-                    continue;
+        while let Some(executed_msgs_result) = futures.next().await {
+            let (executed_msgs, updated_shard_account_stuff) = executed_msgs_result?;
+            for executed_msg in executed_msgs {
+                let ExecutedMessage {
+                    transaction_result,
+                    in_message,
+                    transaction_duration,
+                } = executed_msg;
+                if let AsyncMessage::Ext(_, _) = &in_message {
+                    if let Err(ref e) = transaction_result {
+                        tracing::error!(target: tracing_targets::EXEC_MANAGER,
+                            "failed to execute external transaction: in_msg: {:?}\nerror: {:?}",
+                            in_message, e,
+                        );
+                        continue;
+                    }
                 }
+                total_tick_trans_duration += transaction_duration;
+                result.push((
+                    updated_shard_account_stuff.account_addr,
+                    in_message,
+                    transaction_result?,
+                ));
             }
             min_next_lt = cmp::max(
                 min_next_lt,
                 updated_shard_account_stuff.shard_account.last_trans_lt + 1,
             );
-            executed_messages.push(executed_message);
+            updated_shard_account_stuffs.push(updated_shard_account_stuff);
         }
 
         drop(futures);
 
-        self.min_next_lt = min_next_lt;
-
-        let mut result = vec![];
-        for ExecutedMessage {
-            transaction_result,
-            in_message,
-            updated_shard_account_stuff,
-            transaction_duration,
-        } in executed_messages
-        {
-            self.total_trans_duration += transaction_duration;
-            result.push((
-                updated_shard_account_stuff.account_addr,
-                in_message,
-                transaction_result?,
-            ));
+        for shard_account_stuff in updated_shard_account_stuffs {
             self.update_shard_account_stuff_cache(
-                updated_shard_account_stuff.account_addr,
-                updated_shard_account_stuff,
+                shard_account_stuff.account_addr,
+                shard_account_stuff,
             )?;
         }
 
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "tick executed {}ms;", self.total_trans_duration);
+        self.total_trans_duration += total_tick_trans_duration;
+        self.min_next_lt = min_next_lt;
 
         Ok((new_offset, result, finished))
     }
@@ -198,13 +221,30 @@ impl ExecutionManager {
         Ok(shard_account_stuff)
     }
 
+    pub async fn execute_messages(
+        &self,
+        account_id: AccountId,
+        msgs: Vec<AsyncMessage>,
+        mut shard_account_stuff: ShardAccountStuff,
+    ) -> Result<(Vec<ExecutedMessage>, ShardAccountStuff)> {
+        let mut results = vec![];
+        for msg in msgs {
+            let (executed_msg, updated_shard_account_stuff) = self
+                .execute_one_message(account_id, msg, shard_account_stuff)
+                .await?;
+            results.push(executed_msg);
+            shard_account_stuff = updated_shard_account_stuff;
+        }
+        Ok((results, shard_account_stuff))
+    }
+
     /// execute message
-    pub async fn execute_message(
+    pub async fn execute_one_message(
         &self,
         account_id: AccountId,
         new_msg: AsyncMessage,
         mut shard_account_stuff: ShardAccountStuff,
-    ) -> Result<ExecutedMessage> {
+    ) -> Result<(ExecutedMessage, ShardAccountStuff)> {
         tracing::trace!(
             target: tracing_targets::EXEC_MANAGER,
             "executing {} message for account {}",
@@ -250,12 +290,14 @@ impl ExecutionManager {
             })
             .await??;
         let transaction_duration = now.elapsed().as_millis() as u64;
-        Ok(ExecutedMessage {
-            transaction_result,
+        Ok((
+            ExecutedMessage {
+                transaction_result,
+                in_message,
+                transaction_duration,
+            },
             updated_shard_account_stuff,
-            in_message,
-            transaction_duration,
-        })
+        ))
     }
 
     fn update_shard_account_stuff_cache(
@@ -288,13 +330,15 @@ impl ExecutionManager {
         shard_account_stuff: ShardAccountStuff,
     ) -> Result<(AsyncMessage, Box<(CurrencyCollection, Lazy<Transaction>)>)> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute_special_transaction()");
-        let ExecutedMessage {
-            transaction_result,
+        let (
+            ExecutedMessage {
+                transaction_result,
+                in_message,
+                ..
+            },
             updated_shard_account_stuff,
-            in_message,
-            ..
-        } = self
-            .execute_message(account_id, msg, shard_account_stuff)
+        ) = self
+            .execute_one_message(account_id, msg, shard_account_stuff)
             .await?;
         self.min_next_lt = cmp::max(
             self.min_next_lt,
@@ -442,10 +486,11 @@ pub fn calculate_group(
 
 /// calculate all groups in advance
 pub fn pre_calculate_groups(
-    messages_set: &[AsyncMessage],
-    group_limit: u32,
-) -> HashMap<u32, HashMap<AccountId, AsyncMessage>> {
-    let mut res: HashMap<u32, HashMap<AccountId, AsyncMessage>> = HashMap::new();
+    messages_set: Vec<AsyncMessage>,
+    group_limit: usize,
+    group_vert_size: usize,
+) -> HashMap<u32, HashMap<AccountId, Vec<AsyncMessage>>> {
+    let mut res: HashMap<u32, HashMap<AccountId, Vec<AsyncMessage>>> = HashMap::new();
     for msg in messages_set {
         let account_id = match msg {
             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
@@ -467,18 +512,24 @@ pub fn pre_calculate_groups(
         let mut group_entry;
         loop {
             group_entry = res.entry(g_idx).or_default();
-            if group_entry.len() == group_limit as usize {
+            if group_entry.len() == group_limit {
                 g_idx += 1;
                 continue;
             }
             let account_entry = group_entry.entry(account_id);
             match account_entry {
                 Entry::Vacant(entry) => {
-                    entry.insert(msg.clone());
+                    entry.insert(vec![msg]);
                     break;
                 }
-                Entry::Occupied(_entry) => {
-                    g_idx += 1;
+                Entry::Occupied(mut entry) => {
+                    let msgs = entry.get_mut();
+                    if msgs.len() < group_vert_size {
+                        msgs.push(msg);
+                        break;
+                    } else {
+                        g_idx += 1;
+                    }
                 }
             }
         }

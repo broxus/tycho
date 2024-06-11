@@ -686,6 +686,5 @@ pub(super) enum AsyncMessage {
 pub(super) struct ExecutedMessage {
     pub transaction_result: Result<Box<(CurrencyCollection, Lazy<Transaction>)>>,
     pub in_message: AsyncMessage,
-    pub updated_shard_account_stuff: ShardAccountStuff,
     pub transaction_duration: u64,
 }

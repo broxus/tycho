@@ -110,7 +110,7 @@ impl CollatorStdImpl {
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // prepare to read and execute internals and externals
-        let (max_messages_per_set, min_externals_per_set, group_size) =
+        let (max_messages_per_set, min_externals_per_set, group_limit, group_vert_size) =
             self.get_msgs_execution_params();
 
         // init execution manager
@@ -122,11 +122,15 @@ impl CollatorStdImpl {
             mc_data.libraries().clone(),
             mc_data.config().clone(),
             self.config.supported_block_version,
-            group_size as u32,
+            group_limit,
+            group_vert_size,
             prev_shard_data.observable_accounts().clone(),
         );
 
         const STUB_SKIP_EXECUTION: bool = false;
+
+        let do_collate_prepare_elapsed = timer.elapsed();
+        timer = std::time::Instant::now();
 
         // execute tick transaction and special transactions (mint, recover)
         if self.shard_id.is_masterchain() && !STUB_SKIP_EXECUTION {
@@ -142,7 +146,7 @@ impl CollatorStdImpl {
         let mut block_limits_reached = false;
         let mut block_transactions_count = 0;
 
-        let do_collate_prepare_elapsed = timer.elapsed();
+        let mut do_collate_ticktock_special_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
 
         let mut internal_messages_iterator = self.init_internal_mq_iterator().await?;
@@ -292,8 +296,8 @@ impl CollatorStdImpl {
             while !msgs_set_full_processed {
                 let one_tick_executed_count = if STUB_SKIP_EXECUTION {
                     // STUB: skip real execution
-                    let left_msgs = if msgs_set.len() > group_size {
-                        msgs_set.split_off(group_size - 1)
+                    let left_msgs = if msgs_set.len() > group_limit {
+                        msgs_set.split_off(group_limit - 1)
                     } else {
                         vec![]
                     };
@@ -403,6 +407,9 @@ impl CollatorStdImpl {
                 .await?;
         }
 
+        do_collate_ticktock_special_elapsed += timer.elapsed();
+        timer = std::time::Instant::now();
+
         // let do_collate_execute_elapsed_ms = timer.elapsed().as_millis() as u32;
         // timer = std::time::Instant::now();
 
@@ -505,7 +512,8 @@ impl CollatorStdImpl {
             + do_collate_init_iterator_elapsed
             + do_collate_execute_elapsed
             + do_collate_build_block_elapsed
-            + do_collate_update_state_elapsed;
+            + do_collate_update_state_elapsed
+            + do_collate_ticktock_special_elapsed;
 
         metrics::histogram!("tycho_do_collate_total_time", &labels)
             .record(do_collate_total_elapsed);
@@ -519,6 +527,10 @@ impl CollatorStdImpl {
             .record(do_collate_build_block_elapsed);
         metrics::histogram!("tycho_do_collate_update_state_time", &labels)
             .record(do_collate_update_state_elapsed);
+        if self.shard_id.is_masterchain() {
+            metrics::histogram!("tycho_do_collate_ticktock_special_time", &labels)
+                .record(do_collate_ticktock_special_elapsed);
+        }
 
         tracing::info!(
             target: tracing_targets::COLLATOR,
@@ -531,22 +543,24 @@ impl CollatorStdImpl {
             process_transactions = %format_duration(do_collate_process_transactions_elapsed),
             build_block = %format_duration(do_collate_build_block_elapsed),
             update_state = %format_duration(do_collate_update_state_elapsed),
+            ticktop_special = %format_duration(do_collate_ticktock_special_elapsed),
             "timings"
         );
 
         Ok(())
     }
 
-    /// `(set_size, min_externals_per_set, group_size)`
+    /// `(set_size, min_externals_per_set, group_limit, group_vert_size)`
     /// * `set_size` - max num of messages to be processed in one iteration;
     /// * `min_externals_per_set` - min num of externals that should be included in the set
     ///                           when there are a lot of internals and externals
-    /// * `group_size` - max num of accounts to be processed in one tick
-    fn get_msgs_execution_params(&self) -> (usize, usize, usize) {
+    /// * `group_limit` - max num of accounts to be processed in one tick
+    /// * `group_vert_size` - max num of messages per account in group
+    fn get_msgs_execution_params(&self) -> (usize, usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
         //(1000, 300, 188)
         //(193, 60, 38)
-        (100, 30, 20)
+        (200, 80, 100, 10)
     }
 
     /// Read specified number of externals from imported anchors
