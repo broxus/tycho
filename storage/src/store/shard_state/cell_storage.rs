@@ -74,23 +74,23 @@ impl CellStorage {
         struct Context<'a> {
             cells_cf: BoundedCfHandle<'a>,
             db: &'a BaseDb,
-            raw_cells_cache: &'a RawCellsCache,
             buffer: Vec<u8>,
             transaction: FastHashMap<HashBytes, u32>,
             new_cells_batch: rocksdb::WriteBatch,
             new_cell_count: usize,
+            raw_cache: &'a RawCellsCache,
         }
 
         impl<'a> Context<'a> {
-            fn new(db: &'a BaseDb, raw_cells_cache: &'a RawCellsCache) -> Self {
+            fn new(db: &'a BaseDb, raw_cache: &'a RawCellsCache) -> Self {
                 Self {
                     cells_cf: db.cells.cf(),
                     db,
-                    raw_cells_cache,
                     buffer: Vec::with_capacity(512),
                     transaction: Default::default(),
                     new_cells_batch: rocksdb::WriteBatch::default(),
                     new_cell_count: 0,
+                    raw_cache,
                 }
             }
 
@@ -153,7 +153,7 @@ impl CellStorage {
                             &mut self.buffer,
                         );
 
-                        self.raw_cells_cache.add_refs(key, 1);
+                        self.raw_cache.add_refs(key, 1);
 
                         self.new_cells_batch
                             .put_cf(&self.cells_cf, key, self.buffer.as_slice());
@@ -188,7 +188,7 @@ impl CellStorage {
 
                     self.buffer.clear();
                     refcount::add_positive_refount(refs_diff, None, &mut self.buffer);
-                    self.raw_cells_cache.add_refs(key, refs_diff);
+                    self.raw_cache.add_refs(key, refs_diff);
                     batch.merge_cf(&self.cells_cf, key, self.buffer.as_slice());
                 }
 
@@ -846,17 +846,6 @@ impl StorageCellReferenceData {
 
 struct RawCellsCache(Cache<HashBytes, RawCellsCacheItem, CellSizeEstimator, FastHasherState>);
 
-impl RawCellsCache {
-    #[allow(unused)]
-    pub(crate) fn hit_ratio(&self) -> f64 {
-        (if self.0.hits() > 0 {
-            self.0.hits() as f64 / (self.0.hits() + self.0.misses()) as f64
-        } else {
-            0.0
-        }) * 100.0
-    }
-}
-
 type RawCellsCacheItem = ThinArc<AtomicI64, u8>;
 
 #[derive(Clone, Copy)]
@@ -921,24 +910,32 @@ impl RawCellsCache {
         key: &HashBytes,
         // pending: &PendingOperations,
     ) -> Result<Option<RawCellsCacheItem>, rocksdb::Error> {
-        use quick_cache::GuardResult;
+        use quick_cache::sync::GuardResult;
 
         match self.0.get_value_or_guard(key, None) {
             GuardResult::Value(value) => Ok(Some(value)),
-            GuardResult::Guard(g) => Ok(if let Some(value) = db.cells.get(key.as_slice())? {
-                let (rc, data) = refcount::decode_value_with_rc(value.as_ref());
-                data.map(|value| {
-                    let value = RawCellsCacheItem::from_header_and_slice(AtomicI64::new(rc), value);
-                    // pending.run_if_none(|| {
-                    // Insert value to the cache only if there are no pending operations
-                    _ = g.insert(value.clone());
-                    //});
+            GuardResult::Guard(g) => Ok(
+                if let Some(value) = {
+                    let _histogram =
+                        HistogramGuard::begin("tycho_storage_get_cell_from_rocksdb_time");
+                    let res = db.cells.get(key.as_slice())?;
+                    res
+                } {
+                    let (rc, data) = refcount::decode_value_with_rc(value.as_ref());
+                    data.map(|value| {
+                        let value =
+                            RawCellsCacheItem::from_header_and_slice(AtomicI64::new(rc), value);
+                        // pending.run_if_none(|| {
+                        // Insert value to the cache only if there are no pending operations
+                        _ = g.insert(value.clone());
+                        //});
 
-                    value
-                })
-            } else {
-                None
-            }),
+                        value
+                    })
+                } else {
+                    None
+                },
+            ),
             GuardResult::Timeout => unreachable!(),
         }
     }

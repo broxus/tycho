@@ -285,6 +285,9 @@ def core_block_strider() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_load_cell_time", "Time to load cell from storage"
         ),
+        create_heatmap_panel(
+            "tycho_storage_get_cell_from_rocksdb_time", "Time to load cell from RocksDB"
+        ),
     ]
     return create_row("Core Block Strider", metrics)
 
