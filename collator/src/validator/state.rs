@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature};
 use tokio::sync::RwLock;
-use tycho_util::{FastDashMap, FastHashMap};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
@@ -157,7 +156,7 @@ impl SessionInfo {
         block_id_short: &BlockIdShort,
     ) -> Vec<Arc<ValidatorInfo>> {
         if let Some(ref_data) = self.blocks_signatures.get(block_id_short) {
-            let validators_with_signatures: std::collections::HashSet<_> =
+            let validators_with_signatures: FastHashSet<_> =
                 ref_data.1.valid_signatures.keys().collect();
 
             self.validators
@@ -382,7 +381,7 @@ impl SessionInfo {
 
 /// Standard implementation of `ValidationState`.
 pub struct ValidationStateStdImpl {
-    sessions: RwLock<HashMap<(ShardIdent, u32), Arc<SessionInfo>>>,
+    sessions: RwLock<FastHashMap<(ShardIdent, u32), Arc<SessionInfo>>>,
 }
 
 impl ValidationState for ValidationStateStdImpl {

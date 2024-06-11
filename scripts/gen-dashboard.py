@@ -303,7 +303,7 @@ def jrpc() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_storage_rpc_execute_batch_time",
-            "Time to prepare RPC storage update batch",
+            "Time to execute RPC storage update batch",
         ),
         create_counter_panel(
             "tycho_rpc_in_req_total", "Number of incoming JRPC requests over time"

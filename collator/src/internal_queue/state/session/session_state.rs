@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::RwLock;
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::shard::Shard;
@@ -54,7 +54,7 @@ pub trait LocalSessionState {
     fn new(shards: &[ShardIdent]) -> Self;
     async fn iterator(
         &self,
-        ranges: &HashMap<ShardIdent, ShardRange>,
+        ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Box<dyn StateIterator>;
     async fn split_shard(&self, shard_ident: &ShardIdent) -> Result<(), QueueError>;
@@ -78,12 +78,12 @@ pub trait LocalSessionState {
 // IMPLEMENTATION
 
 pub struct SessionStateStdImpl {
-    shards_flat: RwLock<HashMap<ShardIdent, Arc<RwLock<Shard>>>>,
+    shards_flat: RwLock<FastHashMap<ShardIdent, Arc<RwLock<Shard>>>>,
 }
 
 impl SessionState for SessionStateStdImpl {
     fn new(shards: &[ShardIdent]) -> Self {
-        let mut shards_flat = HashMap::new();
+        let mut shards_flat = FastHashMap::default();
         for &shard in shards {
             shards_flat.insert(shard, Arc::new(RwLock::new(Shard::default())));
         }
@@ -94,11 +94,11 @@ impl SessionState for SessionStateStdImpl {
 
     async fn iterator(
         &self,
-        ranges: &HashMap<ShardIdent, ShardRange>,
+        ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Box<dyn StateIterator> {
         let shards_flat_read = self.shards_flat.read().await;
-        let mut flat_shards = HashMap::new();
+        let mut flat_shards = FastHashMap::default();
         for (shard_ident, shard_lock) in shards_flat_read.iter() {
             let shard = shard_lock.read().await;
             flat_shards.insert(*shard_ident, shard.clone());

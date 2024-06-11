@@ -1,6 +1,5 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
-use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use anyhow::Result;
@@ -44,7 +43,7 @@ pub(super) struct ExecutionManager {
     /// block version
     block_version: u32,
     /// messages groups
-    messages_groups: HashMap<u32, HashMap<HashBytes, Vec<AsyncMessage>>>,
+    messages_groups: FastHashMap<u32, FastHashMap<HashBytes, Vec<AsyncMessage>>>,
     /// group limit
     group_limit: usize,
     /// group vertical size
@@ -81,7 +80,7 @@ impl ExecutionManager {
             group_limit,
             group_vert_size,
             total_trans_duration: 0,
-            messages_groups: HashMap::new(),
+            messages_groups: FastHashMap::default(),
             shard_accounts,
             changed_accounts: FastHashMap::default(),
         }
@@ -400,13 +399,13 @@ pub fn calculate_group(
     messages_set: &[AsyncMessage],
     group_limit: u32,
     offset: u32,
-) -> (u32, HashMap<AccountId, AsyncMessage>) {
+) -> (u32, FastHashMap<AccountId, AsyncMessage>) {
     let mut new_offset = offset;
-    let mut holes_group: HashMap<AccountId, u32> = HashMap::new();
+    let mut holes_group: FastHashMap<AccountId, u32> = FastHashMap::default();
     let mut max_account_count = 0;
     let mut holes_max_count: i32 = 0;
     let mut holes_count: i32 = 0;
-    let mut group = HashMap::new();
+    let mut group = FastHashMap::default();
     for (i, msg) in messages_set.iter().enumerate() {
         let account_id = match msg {
             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
@@ -489,8 +488,8 @@ pub fn pre_calculate_groups(
     messages_set: Vec<AsyncMessage>,
     group_limit: usize,
     group_vert_size: usize,
-) -> HashMap<u32, HashMap<AccountId, Vec<AsyncMessage>>> {
-    let mut res: HashMap<u32, HashMap<AccountId, Vec<AsyncMessage>>> = HashMap::new();
+) -> FastHashMap<u32, FastHashMap<AccountId, Vec<AsyncMessage>>> {
+    let mut res: FastHashMap<u32, FastHashMap<AccountId, Vec<AsyncMessage>>> = Default::default();
     for msg in messages_set {
         let account_id = match msg {
             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {

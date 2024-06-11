@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -10,6 +9,7 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use tycho_util::FastHashMap;
 
 use crate::util::compute_storage_used;
 use crate::util::error::ResultExt;
@@ -127,7 +127,7 @@ struct ZerostateConfig {
     elector_balance: Tokens,
 
     #[serde(with = "serde_account_states")]
-    accounts: HashMap<HashBytes, OptionalAccount>,
+    accounts: FastHashMap<HashBytes, OptionalAccount>,
 
     validators: Vec<ed25519::PublicKey>,
 
@@ -801,7 +801,7 @@ mod serde_account_states {
     use super::*;
 
     pub fn serialize<S>(
-        value: &HashMap<HashBytes, OptionalAccount>,
+        value: &FastHashMap<HashBytes, OptionalAccount>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -820,7 +820,7 @@ mod serde_account_states {
 
     pub fn deserialize<'de, D>(
         deserializer: D,
-    ) -> Result<HashMap<HashBytes, OptionalAccount>, D::Error>
+    ) -> Result<FastHashMap<HashBytes, OptionalAccount>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -828,7 +828,7 @@ mod serde_account_states {
         #[repr(transparent)]
         struct WrappedValue(#[serde(with = "BocRepr")] OptionalAccount);
 
-        <HashMap<HashBytes, WrappedValue>>::deserialize(deserializer)
+        <FastHashMap<HashBytes, WrappedValue>>::deserialize(deserializer)
             .map(|map| map.into_iter().map(|(k, v)| (k, v.0)).collect())
     }
 }

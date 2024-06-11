@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,6 +9,7 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
+use tycho_util::FastHashMap;
 
 use super::types::CachedMempoolAnchor;
 use super::CollatorStdImpl;
@@ -93,7 +94,7 @@ impl CollatorStdImpl {
                         .ok()
                         .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
                 })
-                .collect::<HashMap<_, _>>();
+                .collect::<FastHashMap<_, _>>();
 
             collation_data.set_shards(shards);
 
@@ -1154,7 +1155,7 @@ impl CollatorStdImpl {
 
     pub fn update_shard_block_info(
         &self,
-        shardes: &mut HashMap<ShardIdent, Box<ShardDescription>>,
+        shardes: &mut FastHashMap<ShardIdent, Box<ShardDescription>>,
         shard_id: ShardIdent,
         shard_description: Box<ShardDescription>,
     ) -> Result<()> {

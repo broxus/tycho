@@ -1,8 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::{Mutex, RwLock};
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::persistent::persistent_state::{
@@ -49,7 +49,7 @@ pub struct QueueFactoryStdImpl {
 pub trait LocalQueue {
     async fn iterator(
         &self,
-        ranges: &HashMap<ShardIdent, ShardRange>,
+        ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>>;
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
@@ -101,7 +101,7 @@ where
 {
     async fn iterator(
         &self,
-        ranges: &HashMap<ShardIdent, ShardRange>,
+        ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>> {
         let session_iter = {

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
@@ -12,6 +12,7 @@ use everscale_types::models::{
     Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_util::FastHashMap;
 
 use crate::mempool::MempoolAnchor;
 use crate::types::ProofFunds;
@@ -335,7 +336,7 @@ pub(super) struct BlockCollationData {
     /// Ids of top blocks from shards that be included in the master block
     pub top_shard_blocks_ids: Vec<BlockId>,
 
-    shards: Option<HashMap<ShardIdent, Box<ShardDescription>>>,
+    shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
     shards_max_end_lt: u64,
 
     // TODO: setup update logic when ShardFees would be implemented
@@ -350,22 +351,22 @@ pub(super) struct BlockCollationData {
 
     pub rand_seed: HashBytes,
 
-    pub block_create_count: HashMap<HashBytes, u64>,
+    pub block_create_count: FastHashMap<HashBytes, u64>,
 
     // TODO: set from anchor
     pub created_by: HashBytes,
 }
 
 impl BlockCollationData {
-    pub fn shards(&self) -> Result<&HashMap<ShardIdent, Box<ShardDescription>>> {
+    pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_ref()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
     }
-    pub fn set_shards(&mut self, shards: HashMap<ShardIdent, Box<ShardDescription>>) {
+    pub fn set_shards(&mut self, shards: FastHashMap<ShardIdent, Box<ShardDescription>>) {
         self.shards = Some(shards);
     }
-    pub fn shards_mut(&mut self) -> Result<&mut HashMap<ShardIdent, Box<ShardDescription>>> {
+    pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_mut()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))

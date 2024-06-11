@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
@@ -13,7 +13,7 @@ pub(super) type BlockSeqno = u32;
 #[derive(Default)]
 pub(super) struct BlocksCache {
     pub master: BTreeMap<BlockCacheKey, BlockCandidateContainer>,
-    pub shards: HashMap<ShardIdent, BTreeMap<BlockSeqno, BlockCandidateContainer>>,
+    pub shards: FastHashMap<ShardIdent, BTreeMap<BlockSeqno, BlockCandidateContainer>>,
 }
 
 pub struct BlockCandidateEntry {

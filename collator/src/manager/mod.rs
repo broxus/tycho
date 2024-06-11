@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_util::FastHashMap;
 
 use self::types::{
     BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache,
@@ -74,10 +75,10 @@ where
     collator_factory: CF,
     validator: Arc<V>,
 
-    active_collation_sessions: HashMap<ShardIdent, Arc<CollationSessionInfo>>,
-    collation_sessions_to_finish: HashMap<CollationSessionId, Arc<CollationSessionInfo>>,
-    active_collators: HashMap<ShardIdent, CF::Collator>,
-    collators_to_stop: HashMap<CollationSessionId, CF::Collator>,
+    active_collation_sessions: FastHashMap<ShardIdent, Arc<CollationSessionInfo>>,
+    collation_sessions_to_finish: FastHashMap<CollationSessionId, Arc<CollationSessionInfo>>,
+    active_collators: FastHashMap<ShardIdent, CF::Collator>,
+    collators_to_stop: FastHashMap<CollationSessionId, CF::Collator>,
 
     state_tracker: MinRefMcStateTracker,
 
@@ -91,7 +92,7 @@ where
     /// chain time for next master block to be collated
     next_mc_block_chain_time: u64,
 
-    last_collated_chain_times_by_shards: HashMap<ShardIdent, Vec<(u64, bool)>>,
+    last_collated_chain_times_by_shards: FastHashMap<ShardIdent, Vec<(u64, bool)>>,
 }
 
 #[async_trait]
@@ -247,10 +248,10 @@ where
             collator_factory,
             validator,
             state_tracker: MinRefMcStateTracker::default(),
-            active_collation_sessions: HashMap::new(),
-            collation_sessions_to_finish: HashMap::new(),
-            active_collators: HashMap::new(),
-            collators_to_stop: HashMap::new(),
+            active_collation_sessions: FastHashMap::default(),
+            collation_sessions_to_finish: FastHashMap::default(),
+            active_collators: FastHashMap::default(),
+            collators_to_stop: FastHashMap::default(),
 
             blocks_cache: BlocksCache::default(),
 
@@ -259,7 +260,7 @@ where
             last_collated_mc_block_chain_time: 0,
             next_mc_block_chain_time: 0,
 
-            last_collated_chain_times_by_shards: HashMap::new(),
+            last_collated_chain_times_by_shards: FastHashMap::default(),
         };
         AsyncQueuedDispatcher::run(processor, receiver);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks queue dispatcher started");

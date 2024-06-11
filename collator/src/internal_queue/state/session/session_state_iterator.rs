@@ -1,9 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::shard::Shard;
 use crate::internal_queue::state::state_iterator::{MessageWithSource, ShardRange, StateIterator};
@@ -16,8 +17,8 @@ pub struct SessionStateIterator {
 
 impl SessionStateIterator {
     pub fn new(
-        flat_shards: HashMap<ShardIdent, Shard>,
-        shard_ranges: &HashMap<ShardIdent, ShardRange>,
+        flat_shards: FastHashMap<ShardIdent, Shard>,
+        shard_ranges: &FastHashMap<ShardIdent, ShardRange>,
         shard_id: &ShardIdent,
     ) -> Self {
         let queue = Self::prepare_queue(flat_shards, shard_ranges, shard_id);
@@ -27,8 +28,8 @@ impl SessionStateIterator {
     }
 
     fn prepare_queue(
-        flat_shards: HashMap<ShardIdent, Shard>,
-        shard_ranges: &HashMap<ShardIdent, ShardRange>,
+        flat_shards: FastHashMap<ShardIdent, Shard>,
+        shard_ranges: &FastHashMap<ShardIdent, ShardRange>,
         shard_id: &ShardIdent,
     ) -> VecDeque<Arc<MessageWithSource>> {
         let mut message_queue = VecDeque::new();

@@ -1,17 +1,17 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::{IntAddr, IntMsgInfo, ShardIdent};
+use tycho_util::FastHashMap;
 
 pub type Lt = u64;
 
 #[derive(Default, Debug, Clone)]
 pub struct QueueDiff {
     pub messages: Vec<Arc<EnqueuedMessage>>,
-    pub processed_upto: HashMap<ShardIdent, InternalMessageKey>,
+    pub processed_upto: FastHashMap<ShardIdent, InternalMessageKey>,
 }
 
 #[derive(Debug, Clone)]

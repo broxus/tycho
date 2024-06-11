@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use ahash::HashMap;
 use anyhow::Result;
 use arc_swap::{ArcSwap, AsRaw};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -60,7 +59,7 @@ pub(crate) struct ConnectionManager {
     delayed_callbacks: DelayedCallbacksQueue,
 
     pending_dials: FastHashMap<PeerId, CallbackRx>,
-    dial_backoff_states: HashMap<PeerId, DialBackoffState>,
+    dial_backoff_states: FastHashMap<PeerId, DialBackoffState>,
 
     active_peers: ActivePeers,
     known_peers: KnownPeers,

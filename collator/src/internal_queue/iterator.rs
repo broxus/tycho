@@ -1,5 +1,5 @@
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -28,10 +28,10 @@ pub trait QueueIterator: Send {
 
 pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
-    current_position: HashMap<ShardIdent, InternalMessageKey>,
-    commited_current_position: HashMap<ShardIdent, InternalMessageKey>,
+    current_position: FastHashMap<ShardIdent, InternalMessageKey>,
+    commited_current_position: FastHashMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
-    new_messages: HashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+    new_messages: FastHashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     snapshot_manager: StatesIteratorsManager,
 }
 
@@ -59,7 +59,7 @@ pub struct IterItem {
 }
 
 fn update_shard_range(
-    touched_shards: &mut HashMap<ShardIdent, ShardRange>,
+    touched_shards: &mut FastHashMap<ShardIdent, ShardRange>,
     shard_id: ShardIdent,
     from_lt: Option<Lt>,
     to_lt: Option<Lt>,
@@ -205,8 +205,8 @@ impl QueueIteratorExt {
     pub fn collect_ranges(
         shards_from: FastHashMap<ShardIdent, u64>,
         shards_to: FastHashMap<ShardIdent, u64>,
-    ) -> HashMap<ShardIdent, ShardRange> {
-        let mut shards_with_ranges = HashMap::new();
+    ) -> FastHashMap<ShardIdent, ShardRange> {
+        let mut shards_with_ranges = FastHashMap::default();
         for from in shards_from {
             for to in &shards_to {
                 let iter_range_from = IterRange {
@@ -229,7 +229,7 @@ impl QueueIteratorExt {
     }
 
     pub fn traverse_and_collect_ranges(
-        touched_shards: &mut HashMap<ShardIdent, ShardRange>,
+        touched_shards: &mut FastHashMap<ShardIdent, ShardRange>,
         from_range: &IterRange,
         to_range: &IterRange,
     ) {
