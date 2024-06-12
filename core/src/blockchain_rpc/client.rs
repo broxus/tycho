@@ -168,6 +168,19 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
+    pub async fn get_key_block_proof(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<QueryResponse<Data>, Error> {
+        let client = &self.inner.overlay_client;
+        let data = client
+            .query::<_, Data>(&rpc::GetKeyBlockProof {
+                block_id: *block_id,
+            })
+            .await?;
+        Ok(data)
+    }
+
     pub async fn get_archive_info(
         &self,
         mc_seqno: u32,

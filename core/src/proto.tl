@@ -133,6 +133,15 @@ blockchain.getNextBlockFull
     = overlay.Response blockchain.blockFull;
 
 /**
+* Get key block proof
+*
+* @param block_id  key block id
+*/
+blockchain.getKeyBlockProof
+    block_id:blockchain.blockId
+    = overlay.Response blockchain.Data;
+
+/**
 * Get archive info
 *
 * @param mc_seqno       masterchain block seqno

@@ -91,6 +91,13 @@ pub mod rpc {
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]
+    #[tl(boxed, id = "blockchain.getKeyBlockProof", scheme = "proto.tl")]
+    pub struct GetKeyBlockProof {
+        #[tl(with = "tl_block_id")]
+        pub block_id: everscale_types::models::BlockId,
+    }
+
+    #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(boxed, id = "blockchain.getPersistentStateInfo", scheme = "proto.tl")]
     pub struct GetPersistentStateInfo {
         #[tl(with = "tl_block_id")]
