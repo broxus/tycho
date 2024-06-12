@@ -88,25 +88,12 @@ impl ExecutionManager {
 
     /// Set messages that will be executed
     pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
-        let msgs_count = msgs.len();
+        let msgs_set_size = msgs.len();
         self.messages_groups = pre_calculate_groups(msgs, self.group_limit, self.group_vert_size);
-        // let _trace_groups = self
-        //     .messages_groups
-        //     .iter()
-        //     .map(|(k, g)| {
-        //         format!(
-        //             "{}: {:?}",
-        //             k,
-        //             g.values().map(|v| v.len()).collect::<Vec<_>>().as_slice()
-        //         )
-        //     })
-        //     .collect::<Vec<_>>()
-        //     .as_slice();
         tracing::info!(target: tracing_targets::EXEC_MANAGER,
-            "added set of {} messages for execution: \
-            calculated {} groups (group_limit={}, group_vert_size={}): \
-            groups: {:?}",
-            msgs_count, self.messages_groups.len(), self.group_limit, self.group_vert_size,
+            msgs_set_size, groups_calculated = self.messages_groups.len(),
+            group_limit = self.group_limit, group_vert_size = self.group_vert_size,
+            "added set of messages for execution, calculated groups: {:?}",
             self
             .messages_groups
             .iter()

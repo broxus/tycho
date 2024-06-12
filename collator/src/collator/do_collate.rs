@@ -213,8 +213,8 @@ impl CollatorStdImpl {
             }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "read {} externals",
-                ext_msgs.len(),
+                ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
+                "read externals and internals",
             );
 
             // 3. Join existing internals and externals
@@ -228,8 +228,8 @@ impl CollatorStdImpl {
                     .map(|(msg_info, cell)| AsyncMessage::Ext(msg_info, cell))
                     .collect();
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "read additional {} externals",
-                    ext_msgs.len(),
+                    ext_count = ext_msgs.len(),
+                    "read additional externals",
                 );
                 msgs_set.append(&mut ext_msgs);
             }
@@ -277,7 +277,8 @@ impl CollatorStdImpl {
                     }
                 }
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "read {} new internals from iterator", new_internal_messages_in_set,
+                    new_int_count = new_internal_messages_in_set,
+                    "read new internals from iterator",
                 );
             }
 
@@ -398,24 +399,22 @@ impl CollatorStdImpl {
                 msgs_set_executed_count += one_tick_executed_count;
                 block_transactions_count += one_tick_executed_count;
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "processed {}/{} messages from set, total {}, offset = {}",
+                    "processed messages from set {}/{}, total {}, offset = {}",
                     msgs_set_executed_count, msgs_set_len,
                     block_transactions_count, msgs_set_offset,
                 );
+                if block_transactions_count >= 10000 {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "STUB: block limit reached: {}/10000",
+                        block_transactions_count,
+                    );
+                    block_limits_reached = true;
+                    break;
+                }
 
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
-            }
-
-            // TODO STUB: block limit checking outside
-            if block_transactions_count >= 10000 {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "STUB: block limit reached: {}/10000",
-                    block_transactions_count,
-                );
-                block_limits_reached = true;
-                break;
             }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
@@ -515,27 +514,6 @@ impl CollatorStdImpl {
 
         self.listener.on_block_candidate(collation_result).await?;
 
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "Created and sent block candidate: start_lt={}, end_lt={}, exec_count={}, \
-            exec_ext={}, exec_int={}, exec_new_int={}, \
-            enqueue_count={}, dequeue_count={}, \
-            new_msgs_added_to_diff={}, \
-            in_msgs={}, out_msgs={} read_new_msgs_from_iterator={} inserted_new_msgs_to_iterator={} txs={}",
-            collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
-            collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
-            collation_data.enqueue_count, collation_data.dequeue_count,
-            diff.messages.len(),
-            collation_data.in_msgs.len(),
-            collation_data.out_msgs.len(),
-            collation_data.read_new_msgs_from_iterator,
-            collation_data.inserted_new_msgs_to_iterator, block_transactions_count
-        );
-
-        assert_eq!(
-            collation_data.enqueue_count,
-            collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
-        );
-
         self.update_stats(&collation_data);
         tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
@@ -598,6 +576,28 @@ impl CollatorStdImpl {
                 .record(do_collate_ticktock_special_elapsed);
         }
 
+        tracing::info!(target: tracing_targets::COLLATOR,
+            "Created and sent block candidate: collation_time={} ,\
+            start_lt={}, end_lt={}, exec_count={}, \
+            exec_ext={}, exec_int={}, exec_new_int={}, \
+            enqueue_count={}, dequeue_count={}, \
+            new_msgs_created={}, new_msgs_added={}, \
+            in_msgs={}, out_msgs={}, \
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={}",
+            do_collate_total_elapsed.as_millis(),
+            collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
+            collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
+            collation_data.enqueue_count, collation_data.dequeue_count,
+            collation_data.new_msgs_created, diff.messages.len(),
+            collation_data.in_msgs.len(), collation_data.out_msgs.len(),
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator,
+        );
+
+        assert_eq!(
+            collation_data.enqueue_count,
+            collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
+        );
+
         tracing::info!(
             target: tracing_targets::COLLATOR,
             total = %format_duration(do_collate_total_elapsed),
@@ -624,9 +624,8 @@ impl CollatorStdImpl {
     /// * `group_vert_size` - max num of messages per account in group
     fn get_msgs_execution_params(&self) -> (usize, usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
-        //(1000, 300, 188)
         //(193, 60, 38)
-        (200, 80, 100, 10)
+        (500, 200, 100, 20)
     }
 
     /// Read specified number of externals from imported anchors
