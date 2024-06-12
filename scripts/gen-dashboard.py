@@ -435,6 +435,17 @@ def collator_do_collate() -> RowPanel:
     return create_row("Collator Do Collate", metrics)
 
 
+def collator_execution_manager() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_message_execution_time",
+            "Message execution time",
+            yaxis(UNITS.SECONDS),
+        ),
+    ]
+    return create_row("Collator Execution Manager", metrics)
+
+
 def templates() -> Templating:
     return Templating(
         list=[
