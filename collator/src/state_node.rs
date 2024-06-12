@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent};
 use tokio::sync::broadcast;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
