@@ -8,18 +8,21 @@ use anyhow::{Context, Result};
 use bumpalo::Bump;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
+use scc::HashIndex;
 use triomphe::ThinArc;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
+use tycho_util::{FastHashMap, FastHasherState};
 use weedb::{rocksdb, BoundedCfHandle};
 
 use crate::db::*;
 
 pub struct CellStorage {
     db: BaseDb,
-    cells_cache: Arc<FastDashMap<HashBytes, Weak<StorageCell>>>,
+    cells_cache: Arc<CellsIndex>,
     raw_cells_cache: RawCellsCache,
 }
+
+type CellsIndex = HashIndex<HashBytes, Weak<StorageCell>, FastHasherState>;
 
 impl CellStorage {
     pub fn new(db: BaseDb, cache_size_bytes: u64) -> Arc<Self> {
@@ -375,10 +378,12 @@ impl CellStorage {
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self.cells_cache.get(&hash) {
-            if let Some(cell) = cell.upgrade() {
-                return Ok(cell);
-            }
+        if let Some(cell) = self
+            .cells_cache
+            .peek(&hash, &scc::ebr::Guard::new())
+            .and_then(|c| c.upgrade())
+        {
+            return Ok(cell);
         }
 
         let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
@@ -396,7 +401,7 @@ impl CellStorage {
             }
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
-        self.cells_cache.insert(hash, Arc::downgrade(&cell));
+        _ = self.cells_cache.insert(hash, Arc::downgrade(&cell));
 
         Ok(cell)
     }
@@ -660,9 +665,7 @@ impl StorageCell {
         Some(unsafe { &(*slot).storage_cell })
     }
 
-    // Note: this is intentionally monomorphic
-    #[inline(never)]
-    fn initialize_inner(state: &AtomicU8, init: &mut dyn FnMut() -> bool) {
+    fn initialize_inner(state: &AtomicU8, init: &mut impl FnMut() -> bool) {
         struct Guard<'a> {
             state: &'a AtomicU8,
             new_state: u8,

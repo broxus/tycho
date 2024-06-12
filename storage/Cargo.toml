@@ -28,6 +28,7 @@ parking_lot = { workspace = true }
 parking_lot_core = { workspace = true }
 quick_cache = { workspace = true }
 rlimit = { workspace = true }
+scc = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
