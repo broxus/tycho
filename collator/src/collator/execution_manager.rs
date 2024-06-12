@@ -93,8 +93,7 @@ impl ExecutionManager {
         tracing::info!(target: tracing_targets::EXEC_MANAGER,
             msgs_set_size, groups_calculated = self.messages_groups.len(),
             group_limit = self.group_limit, group_vert_size = self.group_vert_size,
-            "added set of messages for execution, calculated groups: {:?}",
-            self
+            groups = ?self
             .messages_groups
             .iter()
             .map(|(k, g)| {
@@ -106,6 +105,7 @@ impl ExecutionManager {
             })
             .collect::<Vec<_>>()
             .as_slice(),
+            "added set of messages for execution, groups pre calculated",
         );
     }
 
@@ -498,15 +498,16 @@ pub fn pre_calculate_groups(
         let mut group_entry;
         loop {
             group_entry = res.entry(g_idx).or_default();
-            if group_entry.len() == group_limit {
-                g_idx += 1;
-                continue;
-            }
+            let group_len = group_entry.len();
             let account_entry = group_entry.entry(account_id);
             match account_entry {
                 Entry::Vacant(entry) => {
-                    entry.insert(vec![msg]);
-                    break;
+                    if group_len < group_limit {
+                        entry.insert(vec![msg]);
+                        break;
+                    } else {
+                        g_idx += 1;
+                    }
                 }
                 Entry::Occupied(mut entry) => {
                     let msgs = entry.get_mut();

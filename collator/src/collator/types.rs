@@ -313,6 +313,8 @@ pub(super) struct BlockCollationData {
 
     pub tx_count: u32,
 
+    pub total_execute_msgs_time_mc: u128,
+
     pub execute_count_all: u32,
     pub execute_count_ext: u32,
     pub execute_count_int: u32,
@@ -427,6 +429,9 @@ impl BlockCollationData {
 
 #[derive(Debug, Default)]
 pub(super) struct CollatorStats {
+    pub total_execute_msgs_time_mc: u128,
+    pub avg_exec_msgs_per_1000_ms: u128,
+
     pub total_execute_count_all: u32,
     pub total_execute_count_ext: u32,
     pub total_execute_count_int: u32,

@@ -488,9 +488,6 @@ impl CollatorStdImpl {
 
         self.listener.on_block_candidate(collation_result).await?;
 
-        self.update_stats(&collation_data);
-        tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
-
         // update PrevData in working state
         self.update_working_state(new_state_stuff)?;
         self.update_working_state_pending_internals(Some(has_pending_internals))?;
@@ -526,6 +523,7 @@ impl CollatorStdImpl {
             + do_collate_build_block_elapsed
             + do_collate_update_state_elapsed
             + do_collate_ticktock_special_elapsed;
+        collation_data.total_execute_msgs_time_mc = do_collate_exec_msgs_elapsed.as_micros();
 
         metrics::histogram!("tycho_do_collate_total_time", &labels)
             .record(do_collate_total_elapsed);
@@ -550,8 +548,11 @@ impl CollatorStdImpl {
                 .record(do_collate_ticktock_special_elapsed);
         }
 
+        self.update_stats(&collation_data);
+        tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
+
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Created and sent block candidate: collation_time={} ,\
+            "Created and sent block candidate: collation_time={}, \
             start_lt={}, end_lt={}, exec_count={}, \
             exec_ext={}, exec_int={}, exec_new_int={}, \
             enqueue_count={}, dequeue_count={}, \
@@ -1197,6 +1198,13 @@ impl CollatorStdImpl {
 
     fn update_stats(&mut self, collation_data: &BlockCollationData) {
         self.stats.total_execute_count_all += collation_data.execute_count_all;
+
+        self.stats.total_execute_msgs_time_mc += collation_data.total_execute_msgs_time_mc;
+        self.stats.avg_exec_msgs_per_1000_ms =
+            (self.stats.total_execute_count_all as u128 * 1_000 * 1_000)
+                .checked_div(self.stats.total_execute_msgs_time_mc)
+                .unwrap_or_default();
+
         self.stats.total_execute_count_ext += collation_data.execute_count_ext;
         self.stats.total_execute_count_int += collation_data.execute_count_int;
         self.stats.total_execute_count_new_int += collation_data.execute_count_new_int;
