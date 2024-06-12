@@ -347,7 +347,6 @@ impl CollatorStdImpl {
                         msg_info,
                     )?;
 
-
                     collation_data.new_msgs_created += new_messages.len() as u32;
 
                     for (msg_info, cell) in new_messages.iter() {

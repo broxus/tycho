@@ -40,14 +40,20 @@ impl SessionStateIterator {
                     None => 0,
                     Some(from_lt) => from_lt + 1,
                 };
-                let range_start = InternalMessageKey {
+                let mut range_start = InternalMessageKey {
                     lt: from_lt,
                     hash: HashBytes::ZERO,
                 };
+
                 let range_end = InternalMessageKey {
                     lt: shard_range.to_lt.unwrap_or(u64::MAX),
                     hash: HashBytes([255; 32]),
                 };
+
+                // TODO fix when range start from 0 to 0
+                if range_start > range_end {
+                    range_start = range_end.clone();
+                }
 
                 let shard_size = shard.outgoing_messages.len();
 
