@@ -136,7 +136,7 @@ impl MempoolAdapterStdImpl {
             guard.insert(anchor.id(), anchor);
         }
 
-        self.anchor_added.notify_waiters()
+        self.anchor_added.notify_waiters();
     }
 }
 

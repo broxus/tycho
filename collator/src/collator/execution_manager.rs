@@ -395,7 +395,7 @@ fn execute_ticktock_message(
 }
 
 /// calculate group
-pub fn calculate_group(
+pub fn _calculate_group(
     messages_set: &[AsyncMessage],
     group_limit: u32,
     offset: u32,
