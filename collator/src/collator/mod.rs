@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
@@ -535,18 +536,21 @@ impl CollatorStdImpl {
             let (shard_id_full, processed_upto_info) = entry?;
             ranges_from.insert(
                 ShardIdent::try_from(shard_id_full)?,
-                processed_upto_info.processed_to_msg.0,
+                (
+                    processed_upto_info.processed_to_msg.0,
+                    processed_upto_info.processed_to_msg.1,
+                ),
             );
         }
 
         if !ranges_from.contains_key(&ShardIdent::new_full(-1)) {
-            ranges_from.insert(ShardIdent::new_full(-1), 0);
+            ranges_from.insert(ShardIdent::new_full(-1), (0, HashBytes::ZERO));
         }
 
         for mc_shard_hash in mc_data.mc_state_extra().shards.iter() {
             let (shard_id, _) = mc_shard_hash?;
             if !ranges_from.contains_key(&shard_id) {
-                ranges_from.insert(shard_id, 0);
+                ranges_from.insert(shard_id, (0, HashBytes::ZERO));
             }
         }
 

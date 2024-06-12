@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use everscale_types::cell::{CellBuilder, CellSlice, HashBytes};
+use everscale_types::models::LibRef::Hash;
 use everscale_types::models::{
     BaseMessage, BlockIdShort, IntAddr, IntMsgInfo, MsgInfo, ShardIdent, StdAddr,
 };
@@ -66,8 +67,8 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
     let mut from_ranges = FastHashMap::default();
     let mut to_ranges = FastHashMap::default();
 
-    from_ranges.insert(shard_id_1, 0);
-    from_ranges.insert(shard_id_2, 0);
+    from_ranges.insert(shard_id_1, (0, HashBytes::ZERO));
+    from_ranges.insert(shard_id_2, (0, HashBytes::ZERO));
 
     to_ranges.insert(shard_id_1, u64::MAX);
     to_ranges.insert(shard_id_2, u64::MAX);
@@ -84,7 +85,8 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
         HashBytes::from_str("67a092821012f7a197ab3a221c36086e2fde95df021cb9839641dbcd0bed9fa8")
             .unwrap(),
     ));
-    let message = MsgInfo::Int(int_message.clone());
+    let int_msg = int_message.clone();
+    let message = MsgInfo::Int(int_msg.clone());
 
     let msg = BaseMessage {
         info: message.clone(),
@@ -94,9 +96,8 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
     };
     let cell = CellBuilder::build_from(msg)?;
 
-    let messages = vec![(message, cell.clone())];
     adapter
-        .add_messages_to_iterator(&mut iterator, messages)
+        .add_message_to_iterator(&mut iterator, (int_msg, cell.clone()))
         .unwrap();
 
     let enqueued_message = EnqueuedMessage::from((int_message.clone(), cell));
