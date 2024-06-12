@@ -144,28 +144,28 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
     adapter.commit_diff(&block_id).await?;
 
     // peek message from persistent state
-    // let mut iterator = adapter
-    //     .create_iterator(shard_id_2, from_ranges.clone(), to_ranges.clone())
-    //     .await
-    //     .unwrap();
-    //
-    // let peek_message = iterator.peek(false)?;
-    // assert!(peek_message.is_some());
-    //
-    // let next_message = iterator.next(false)?;
-    //
-    // assert!(next_message.is_some());
-    // // println!("{:?}", peek_message.unwrap().message_with_source.message.hash);
-    // let next_message = next_message.unwrap();
-    // println!("{:?}", next_message.message_with_source.message.info.dst);
-    // assert_eq!(
-    //     next_message.message_with_source.message.info.dst,
-    //     int_message.dst
-    // );
-    // assert_eq!(next_message.message_with_source.shard_id, shard_id_1);
-    //
-    // let next_message = iterator.next(false)?;
-    // assert!(next_message.is_none());
+    let mut iterator = adapter
+        .create_iterator(shard_id_2, from_ranges.clone(), to_ranges.clone())
+        .await
+        .unwrap();
+
+    let peek_message = iterator.peek(false)?;
+    assert!(peek_message.is_some());
+
+    let next_message = iterator.next(false)?;
+
+    assert!(next_message.is_some());
+    // println!("{:?}", peek_message.unwrap().message_with_source.message.hash);
+    let next_message = next_message.unwrap();
+    println!("{:?}", next_message.message_with_source.message.info.dst);
+    assert_eq!(
+        next_message.message_with_source.message.info.dst,
+        int_message.dst
+    );
+    assert_eq!(next_message.message_with_source.shard_id, shard_id_1);
+
+    let next_message = iterator.next(false)?;
+    assert!(next_message.is_none());
 
     Ok(())
 }
