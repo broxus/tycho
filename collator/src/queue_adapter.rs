@@ -28,7 +28,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, (u64, HashBytes)>,
+        shards_from: FastHashMap<ShardIdent, u64>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
@@ -40,7 +40,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     fn add_message_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator>,
-        messages: (IntMsgInfo, Cell),
+        message: (IntMsgInfo, Cell),
     ) -> Result<()>;
     /// Commit processed messages in the iterator
     /// Save last message position for each shard
@@ -92,7 +92,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, (u64, HashBytes)>,
+        shards_from: FastHashMap<ShardIdent, u64>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>> {
         let time_start = std::time::Instant::now();
@@ -139,10 +139,6 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         iterator: &mut Box<dyn QueueIterator>,
         message: (IntMsgInfo, Cell),
     ) -> Result<()> {
-        tracing::trace!(
-            target: tracing_targets::MQ_ADAPTER,
-            "Adding messages to the iterator"
-        );
         let message = Arc::new(EnqueuedMessage::from((message.0, message.1)));
         iterator.add_message(message)?;
         Ok(())

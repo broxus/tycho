@@ -3,14 +3,11 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::state::state_iterator::{
-    IterRangeFrom, IterRangeTo, MessageWithSource, ShardRange,
-};
+use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, Lt, QueueDiff};
 pub trait QueueIterator: Send {
@@ -65,7 +62,6 @@ fn update_shard_range(
     touched_shards: &mut FastHashMap<ShardIdent, ShardRange>,
     shard_id: ShardIdent,
     from_lt: Option<Lt>,
-    from_hash: Option<HashBytes>,
     to_lt: Option<Lt>,
 ) {
     touched_shards
@@ -73,7 +69,6 @@ fn update_shard_range(
         .or_insert_with(|| ShardRange {
             shard_id,
             from_lt,
-            from_hash,
             to_lt,
         });
 }
@@ -236,18 +231,17 @@ pub struct QueueIteratorExt;
 
 impl QueueIteratorExt {
     pub fn collect_ranges(
-        shards_from: FastHashMap<ShardIdent, (u64, HashBytes)>,
+        shards_from: FastHashMap<ShardIdent, u64>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> FastHashMap<ShardIdent, ShardRange> {
         let mut shards_with_ranges = FastHashMap::default();
         for from in shards_from {
             for to in &shards_to {
-                let iter_range_from = IterRangeFrom {
+                let iter_range_from = IterRange {
                     shard_id: from.0,
-                    lt: from.1 .0,
-                    hash: from.1 .1,
+                    lt: from.1,
                 };
-                let iter_range_to = IterRangeTo {
+                let iter_range_to = IterRange {
                     shard_id: *to.0,
                     lt: *to.1,
                 };
@@ -264,8 +258,8 @@ impl QueueIteratorExt {
 
     pub fn traverse_and_collect_ranges(
         touched_shards: &mut FastHashMap<ShardIdent, ShardRange>,
-        from_range: &IterRangeFrom,
-        to_range: &IterRangeTo,
+        from_range: &IterRange,
+        to_range: &IterRange,
     ) {
         if from_range.shard_id == to_range.shard_id
             || from_range.shard_id.intersects(&to_range.shard_id)
@@ -274,7 +268,6 @@ impl QueueIteratorExt {
                 touched_shards,
                 from_range.shard_id,
                 Some(from_range.lt),
-                Some(from_range.hash),
                 Some(to_range.lt),
             );
         } else if from_range.shard_id.is_parent_of(&to_range.shard_id)
@@ -284,16 +277,9 @@ impl QueueIteratorExt {
                 touched_shards,
                 from_range.shard_id,
                 Some(from_range.lt),
-                Some(from_range.hash),
                 None,
             );
-            update_shard_range(
-                touched_shards,
-                to_range.shard_id,
-                None,
-                None,
-                Some(to_range.lt),
-            );
+            update_shard_range(touched_shards, to_range.shard_id, None, Some(to_range.lt));
         }
 
         if let Some(common_ancestor) = find_common_ancestor(from_range.shard_id, to_range.shard_id)
@@ -302,16 +288,9 @@ impl QueueIteratorExt {
                 touched_shards,
                 from_range.shard_id,
                 Some(from_range.lt),
-                Some(from_range.hash),
                 None,
             );
-            update_shard_range(
-                touched_shards,
-                to_range.shard_id,
-                None,
-                None,
-                Some(to_range.lt),
-            );
+            update_shard_range(touched_shards, to_range.shard_id, None, Some(to_range.lt));
 
             let mut current_shard = if from_range.shard_id.is_ancestor_of(&to_range.shard_id) {
                 to_range.shard_id
@@ -321,7 +300,7 @@ impl QueueIteratorExt {
 
             while current_shard != common_ancestor {
                 if let Some(parent_shard) = current_shard.merge() {
-                    update_shard_range(touched_shards, parent_shard, None, None, None);
+                    update_shard_range(touched_shards, parent_shard, None, None);
                     current_shard = parent_shard;
                 } else {
                     break;

@@ -347,14 +347,10 @@ impl CollatorStdImpl {
                         msg_info,
                     )?;
 
+
                     collation_data.new_msgs_created += new_messages.len() as u32;
 
                     for (msg_info, cell) in new_messages.iter() {
-                        tracing::trace!(target: tracing_targets::COLLATOR,
-                            "new message created: {:?}",
-                            msg_info,
-                        );
-
                         if let MsgInfo::Int(int_msg_info) = msg_info {
                             messages_inserted_to_iterator += 1;
                             collation_data.inserted_new_msgs_to_iterator += 1;
@@ -385,28 +381,19 @@ impl CollatorStdImpl {
                     collation_data.tx_count, msgs_set_offset,
                 );
 
-                if collation_data.tx_count >= 10000 {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "STUB: block limit reached: {}/10000",
-                        collation_data.tx_count,
-                    );
-                    block_limits_reached = true;
-                    break;
-                }
-
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
             }
 
             // HACK: temporary always full process msgs set and check block limits after
-            // if collation_data.tx_count >= 10000 {
-            //     tracing::debug!(target: tracing_targets::COLLATOR,
-            //         "STUB: block limit reached: {}/10000",
-            //         collation_data.tx_count,
-            //     );
-            //     block_limits_reached = true;
-            // }
+            if collation_data.tx_count >= 10000 {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "STUB: block limit reached: {}/10000",
+                    collation_data.tx_count,
+                );
+                block_limits_reached = true;
+            }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "Inserted message to iterator last set: {}",
@@ -581,10 +568,10 @@ impl CollatorStdImpl {
             collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator,
         );
 
-        // assert_eq!(
-        //     collation_data.enqueue_count,
-        //     collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
-        // );
+        assert_eq!(
+            collation_data.enqueue_count,
+            collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
+        );
 
         tracing::info!(
             target: tracing_targets::COLLATOR,
