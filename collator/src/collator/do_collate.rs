@@ -403,18 +403,19 @@ impl CollatorStdImpl {
                     msgs_set_executed_count, msgs_set_len,
                     block_transactions_count, msgs_set_offset,
                 );
-                if block_transactions_count >= 10000 {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "STUB: block limit reached: {}/10000",
-                        block_transactions_count,
-                    );
-                    block_limits_reached = true;
-                    break;
-                }
 
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
+            }
+
+            // HACK: temporary always full process msgs set and check block limits after
+            if block_transactions_count >= 10000 {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "STUB: block limit reached: {}/10000",
+                    block_transactions_count,
+                );
+                block_limits_reached = true;
             }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
