@@ -154,12 +154,13 @@ where
             let session_state_lock = self.session_state.lock().await;
             session_state_lock.remove_diff(diff_id).await?
         };
-        if let Some(diff) = &diff {
-            let persistent_state_lock = self.persistent_state.write().await;
-            persistent_state_lock
-                .add_messages(*diff_id, diff.messages.clone())
-                .await?;
-        }
+
+        // if let Some(diff) = &diff {
+        //     let persistent_state_lock = self.persistent_state.write().await;
+        //     persistent_state_lock
+        //         .add_messages(*diff_id, diff.messages.clone())
+        //         .await?;
+        // }
         Ok(diff)
     }
 }

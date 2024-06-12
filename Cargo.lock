@@ -842,16 +842,16 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#5f1326c84b1b88c4e1eb835139568097fa13f6c9"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#3655c23f138a3eea4bac9808e9fb6b97e3e11a0a"
 dependencies = [
  "ahash",
  "base64 0.21.7",
  "bitflags",
  "crc32c",
- "dashmap",
  "everscale-crypto",
  "everscale-types-proc",
  "hex",
+ "scc",
  "serde",
  "sha2",
  "smallvec",
@@ -862,7 +862,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#5f1326c84b1b88c4e1eb835139568097fa13f6c9"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#3655c23f138a3eea4bac9808e9fb6b97e3e11a0a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1410,7 +1410,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c2a198fb6b0eada2a8df47933734e6d35d350665a33a3593d7164fa52c75c19"
 dependencies = [
  "cfg-if",
- "windows-targets 0.52.5",
+ "windows-targets 0.48.5",
 ]
 
 [[package]]

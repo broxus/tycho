@@ -129,8 +129,8 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
             "Committing diff to the queue"
         );
         // HACK: do not commit diff to avoid incorrect msgs set reading for collation
-        // let diff = self.queue.commit_diff(diff_id).await?;
-        let diff = None;
+        let diff = self.queue.commit_diff(diff_id).await?;
+        // let diff = None;
         Ok(diff)
     }
 
