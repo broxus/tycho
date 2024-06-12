@@ -310,18 +310,19 @@ pub(super) struct BlockCollationData {
     pub block_id_short: BlockIdShort,
     pub gen_utime: u32,
     pub gen_utime_ms: u16,
+
+    pub tx_count: u32,
+
     pub execute_count_all: u32,
     pub execute_count_ext: u32,
     pub execute_count_int: u32,
     pub execute_count_new_int: u32,
     pub enqueue_count: u32,
     pub dequeue_count: u32,
-    pub inserted_new_msgs_to_iterator: u32,
-    pub read_new_msgs_from_iterator: u32,
-
-    pub tx_count: u32,
 
     pub new_msgs_created: u32,
+    pub inserted_new_msgs_to_iterator: u32,
+    pub read_new_msgs_from_iterator: u32,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt

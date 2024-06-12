@@ -129,13 +129,11 @@ impl CollatorStdImpl {
             prev_shard_data.observable_accounts().clone(),
         );
 
-        const STUB_SKIP_EXECUTION: bool = false;
-
         let do_collate_prepare_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
 
         // execute tick transaction and special transactions (mint, recover)
-        if self.shard_id.is_masterchain() && !STUB_SKIP_EXECUTION {
+        if self.shard_id.is_masterchain() {
             self.create_ticktock_transactions(false, &mut collation_data, &mut exec_manager)
                 .await?;
             self.create_special_transactions(&mut collation_data, &mut exec_manager)
@@ -146,7 +144,6 @@ impl CollatorStdImpl {
         let mut all_new_internals_finished = false;
 
         let mut block_limits_reached = false;
-        let mut block_transactions_count = 0;
 
         let mut do_collate_ticktock_special_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
@@ -292,13 +289,9 @@ impl CollatorStdImpl {
 
             let msgs_set_len = msgs_set.len() as u32;
             let mut msgs_set_executed_count = 0;
-            exec_manager.set_msgs_for_execution(msgs_set.clone()); // STUB: clone to use msgs_set in stub logic
+            exec_manager.set_msgs_for_execution(msgs_set);
             let mut msgs_set_offset = collation_data.processed_upto.processed_offset;
             let mut msgs_set_full_processed = false;
-
-            if STUB_SKIP_EXECUTION && msgs_set_offset > 0 {
-                msgs_set = msgs_set.split_off(msgs_set_offset as usize);
-            }
 
             do_collate_fill_msgs_set_elapsed += timer.elapsed();
             timer = std::time::Instant::now();
@@ -308,87 +301,71 @@ impl CollatorStdImpl {
             let mut executed_messages = 0;
             // execute msgs processing by groups
             while !msgs_set_full_processed {
-                let one_tick_executed_count = if STUB_SKIP_EXECUTION {
-                    // STUB: skip real execution
-                    let left_msgs = if msgs_set.len() > group_limit {
-                        msgs_set.split_off(group_limit - 1)
-                    } else {
-                        vec![]
-                    };
-                    let one_tick_executed_count = msgs_set.len();
-                    collation_data.next_lt = exec_manager.min_next_lt;
-                    msgs_set_offset += one_tick_executed_count as u32;
-                    msgs_set = left_msgs;
-                    one_tick_executed_count
-                } else {
-                    let (new_offset, group, finished) =
-                        exec_manager.execute_tick(msgs_set_offset).await?;
-                    msgs_set_full_processed = finished;
-                    let one_tick_executed_count = group.len();
+                let (new_offset, group, finished) =
+                    exec_manager.execute_tick(msgs_set_offset).await?;
+                msgs_set_full_processed = finished;
 
-                    collation_data.tx_count += group.len() as u32;
+                let one_tick_executed_count = group.len();
 
-                    do_collate_exec_msgs_elapsed += timer.elapsed();
-                    timer = std::time::Instant::now();
+                do_collate_exec_msgs_elapsed += timer.elapsed();
+                timer = std::time::Instant::now();
 
-                    for (_account_id, msg_info, transaction) in group {
-                        match msg_info {
-                            AsyncMessage::Int(ref msg_info, ref cell, _)
-                            | AsyncMessage::NewInt(ref msg_info, ref cell) => {
-                                if let MsgInfo::Int(int_msg_info) = msg_info {
-                                    let hash = cell.repr_hash();
-                                    let key = InternalMessageKey {
-                                        lt: int_msg_info.created_lt,
-                                        hash: *hash,
-                                    };
+                for (_account_id, msg_info, transaction) in group {
+                    match msg_info {
+                        AsyncMessage::Int(ref msg_info, ref cell, _)
+                        | AsyncMessage::NewInt(ref msg_info, ref cell) => {
+                            if let MsgInfo::Int(int_msg_info) = msg_info {
+                                let hash = cell.repr_hash();
+                                let key = InternalMessageKey {
+                                    lt: int_msg_info.created_lt,
+                                    hash: *hash,
+                                };
 
-                                    match internal_messages_sources.get(&key).cloned() {
-                                        Some(shard_ident) => {
-                                            executed_internal_messages.push((shard_ident, key));
-                                        }
-                                        None => {
-                                            return Err(anyhow!(
-                                                "Internal message source \
+                                match internal_messages_sources.get(&key).cloned() {
+                                    Some(shard_ident) => {
+                                        executed_internal_messages.push((shard_ident, key));
+                                    }
+                                    None => {
+                                        return Err(anyhow!(
+                                            "Internal message source \
                                             shard not found for key: {:?}",
-                                                key
-                                            ));
-                                        }
+                                            key
+                                        ));
                                     }
                                 }
                             }
-                            _ => {}
                         }
-
-                        executed_messages += 1;
-
-                        let new_internal_messages = new_transaction(
-                            &mut collation_data,
-                            &self.shard_id,
-                            transaction.1,
-                            msg_info,
-                        )?;
-
-                        collation_data.new_msgs_created += new_internal_messages.len() as u32;
-
-                        if !new_internal_messages.is_empty() {
-                            collation_data.inserted_new_msgs_to_iterator +=
-                                new_internal_messages.len() as u32;
-                            messages_inserted_to_iterator += new_internal_messages.len();
-                            self.mq_adapter.add_messages_to_iterator(
-                                &mut internal_messages_iterator,
-                                new_internal_messages,
-                            )?;
-                        } else {
-                            tracing::trace!(target: tracing_targets::COLLATOR,
-                                "no new internal messages created",
-                            );
-                        }
-
-                        collation_data.next_lt = exec_manager.min_next_lt;
+                        _ => {}
                     }
-                    msgs_set_offset = new_offset;
-                    one_tick_executed_count
-                };
+
+                    executed_messages += 1;
+
+                    let new_internal_messages = new_transaction(
+                        &mut collation_data,
+                        &self.shard_id,
+                        transaction.1,
+                        msg_info,
+                    )?;
+
+                    collation_data.new_msgs_created += new_internal_messages.len() as u32;
+
+                    if !new_internal_messages.is_empty() {
+                        collation_data.inserted_new_msgs_to_iterator +=
+                            new_internal_messages.len() as u32;
+                        messages_inserted_to_iterator += new_internal_messages.len();
+                        self.mq_adapter.add_messages_to_iterator(
+                            &mut internal_messages_iterator,
+                            new_internal_messages,
+                        )?;
+                    } else {
+                        tracing::trace!(target: tracing_targets::COLLATOR,
+                            "no new internal messages created",
+                        );
+                    }
+
+                    collation_data.next_lt = exec_manager.min_next_lt;
+                }
+                msgs_set_offset = new_offset;
 
                 do_collate_process_transactions_elapsed += timer.elapsed();
                 timer = std::time::Instant::now();
@@ -397,11 +374,11 @@ impl CollatorStdImpl {
                 //      currently we simply check only transactions count
                 //      but needs to make good implementation futher
                 msgs_set_executed_count += one_tick_executed_count;
-                block_transactions_count += one_tick_executed_count;
+                collation_data.tx_count += one_tick_executed_count as u32;
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "processed messages from set {}/{}, total {}, offset = {}",
                     msgs_set_executed_count, msgs_set_len,
-                    block_transactions_count, msgs_set_offset,
+                    collation_data.tx_count, msgs_set_offset,
                 );
 
                 if msgs_set_offset == msgs_set_len {
@@ -410,10 +387,10 @@ impl CollatorStdImpl {
             }
 
             // HACK: temporary always full process msgs set and check block limits after
-            if block_transactions_count >= 10000 {
+            if collation_data.tx_count >= 10000 {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "STUB: block limit reached: {}/10000",
-                    block_transactions_count,
+                    collation_data.tx_count,
                 );
                 block_limits_reached = true;
             }
@@ -460,7 +437,7 @@ impl CollatorStdImpl {
         }
 
         // execute tock transaction
-        if self.shard_id.is_masterchain() && !STUB_SKIP_EXECUTION {
+        if self.shard_id.is_masterchain() {
             self.create_ticktock_transactions(true, &mut collation_data, &mut exec_manager)
                 .await?;
         }
@@ -502,9 +479,6 @@ impl CollatorStdImpl {
 
         let do_collate_build_block_elapsed = timer.elapsed();
         timer = std::time::Instant::now();
-
-        // STUB: sleep to slow down collation process for analysis
-        // tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         // return collation result
         let collation_result = BlockCollationResult {
