@@ -600,7 +600,7 @@ impl CollatorStdImpl {
     fn get_msgs_execution_params(&self) -> (usize, usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
         //(193, 60, 38)
-        (500, 200, 100, 20)
+        (1000, 400, 1000, 1000)
     }
 
     /// Read specified number of externals from imported anchors
