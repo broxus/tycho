@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::ShardIdent;
+use everscale_types::prelude::HashBytes;
 
 use crate::internal_queue::types::{EnqueuedMessage, Lt};
 
@@ -37,7 +38,14 @@ impl Ord for MessageWithSource {
 }
 
 #[derive(Debug, Clone)]
-pub struct IterRange {
+pub struct IterRangeFrom {
+    pub shard_id: ShardIdent,
+    pub lt: Lt,
+    pub hash: HashBytes,
+}
+
+#[derive(Debug, Clone)]
+pub struct IterRangeTo {
     pub shard_id: ShardIdent,
     pub lt: Lt,
 }
@@ -46,6 +54,7 @@ pub struct IterRange {
 pub struct ShardRange {
     pub shard_id: ShardIdent,
     pub from_lt: Option<Lt>,
+    pub from_hash: Option<HashBytes>,
     pub to_lt: Option<Lt>,
 }
 

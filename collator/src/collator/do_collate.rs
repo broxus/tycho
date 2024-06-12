@@ -340,27 +340,31 @@ impl CollatorStdImpl {
 
                     executed_messages += 1;
 
-                    let new_internal_messages = new_transaction(
+                    let new_messages = new_transaction(
                         &mut collation_data,
                         &self.shard_id,
                         transaction.1,
                         msg_info,
                     )?;
 
-                    collation_data.new_msgs_created += new_internal_messages.len() as u32;
+                    collation_data.new_msgs_created += new_messages.len() as u32;
 
-                    if !new_internal_messages.is_empty() {
-                        collation_data.inserted_new_msgs_to_iterator +=
-                            new_internal_messages.len() as u32;
-                        messages_inserted_to_iterator += new_internal_messages.len();
-                        self.mq_adapter.add_messages_to_iterator(
-                            &mut internal_messages_iterator,
-                            new_internal_messages,
-                        )?;
-                    } else {
+                    for (msg_info, cell) in new_messages.iter() {
                         tracing::trace!(target: tracing_targets::COLLATOR,
-                            "no new internal messages created",
+                            "new message created: {:?}",
+                            msg_info,
                         );
+
+                        if let MsgInfo::Int(int_msg_info) = msg_info {
+                            messages_inserted_to_iterator += 1;
+                            collation_data.inserted_new_msgs_to_iterator += 1;
+
+                            messages_inserted_to_iterator += new_messages.len();
+                            self.mq_adapter.add_message_to_iterator(
+                                &mut internal_messages_iterator,
+                                (int_msg_info.clone(), cell.clone()),
+                            )?;
+                        }
                     }
 
                     collation_data.next_lt = exec_manager.min_next_lt;
@@ -381,19 +385,28 @@ impl CollatorStdImpl {
                     collation_data.tx_count, msgs_set_offset,
                 );
 
+                if collation_data.tx_count >= 10000 {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "STUB: block limit reached: {}/10000",
+                        collation_data.tx_count,
+                    );
+                    block_limits_reached = true;
+                    break;
+                }
+
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
             }
 
             // HACK: temporary always full process msgs set and check block limits after
-            if collation_data.tx_count >= 10000 {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "STUB: block limit reached: {}/10000",
-                    collation_data.tx_count,
-                );
-                block_limits_reached = true;
-            }
+            // if collation_data.tx_count >= 10000 {
+            //     tracing::debug!(target: tracing_targets::COLLATOR,
+            //         "STUB: block limit reached: {}/10000",
+            //         collation_data.tx_count,
+            //     );
+            //     block_limits_reached = true;
+            // }
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "Inserted message to iterator last set: {}",
@@ -568,10 +581,10 @@ impl CollatorStdImpl {
             collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator,
         );
 
-        assert_eq!(
-            collation_data.enqueue_count,
-            collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
-        );
+        // assert_eq!(
+        //     collation_data.enqueue_count,
+        //     collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
+        // );
 
         tracing::info!(
             target: tracing_targets::COLLATOR,

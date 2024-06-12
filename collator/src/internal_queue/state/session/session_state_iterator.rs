@@ -38,11 +38,14 @@ impl SessionStateIterator {
             if let Some(shard_range) = shard_ranges.get(shard_ident) {
                 let from_lt = match shard_range.from_lt {
                     None => 0,
-                    Some(from_lt) => from_lt + 1,
+                    Some(from_lt) => from_lt /*+ 1 ???*/,
                 };
+
+                let from_hash = shard_range.from_hash.unwrap_or_else(|| HashBytes::ZERO);
+
                 let range_start = InternalMessageKey {
                     lt: from_lt,
-                    hash: HashBytes::ZERO,
+                    hash: from_hash,
                 };
                 let range_end = InternalMessageKey {
                     lt: shard_range.to_lt.unwrap_or(u64::MAX),

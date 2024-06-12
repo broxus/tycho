@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
-use everscale_types::cell::Cell;
-use everscale_types::models::{BlockIdShort, MsgInfo, ShardIdent};
+use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::models::{BlockIdShort, IntMsgInfo, MsgInfo, ShardIdent};
 use tracing::instrument;
 use tycho_util::FastHashMap;
 
@@ -28,7 +29,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_from: FastHashMap<ShardIdent, (u64, HashBytes)>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
@@ -37,10 +38,10 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     /// Return `None` if specified diff does not exist.
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>>;
     /// Add new messages to the iterator
-    fn add_messages_to_iterator(
+    fn add_message_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator>,
-        messages: Vec<(MsgInfo, Cell)>,
+        messages: (IntMsgInfo, Cell),
     ) -> Result<()>;
     /// Commit processed messages in the iterator
     /// Save last message position for each shard
@@ -92,7 +93,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, u64>,
+        shards_from: FastHashMap<ShardIdent, (u64, HashBytes)>,
         shards_to: FastHashMap<ShardIdent, u64>,
     ) -> Result<Box<dyn QueueIterator>> {
         let time_start = std::time::Instant::now();
@@ -134,24 +135,17 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(diff)
     }
 
-    fn add_messages_to_iterator(
+    fn add_message_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator>,
-        messages: Vec<(MsgInfo, Cell)>,
+        message: (IntMsgInfo, Cell),
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
-            messages_len = messages.len(),
             "Adding messages to the iterator"
         );
-        for (msg_info, cell) in messages {
-            let int_msg_info = match msg_info {
-                MsgInfo::Int(int_msg_info) => int_msg_info,
-                _ => bail!("Only internal messages are supported"),
-            };
-            let message = Arc::new(EnqueuedMessage::from((int_msg_info, cell)));
-            iterator.add_message(message)?;
-        }
+        let message = Arc::new(EnqueuedMessage::from((message.0, message.1)));
+        iterator.add_message(message)?;
         Ok(())
     }
 
