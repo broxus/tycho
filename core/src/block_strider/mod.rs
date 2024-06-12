@@ -1,11 +1,16 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::Future;
 use tokio::time::Instant;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug, ShardHeights};
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_storage::Storage;
+use tycho_util::futures::JoinTask;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 #[cfg(any(test, feature = "test"))]
@@ -28,27 +33,31 @@ mod state;
 mod state_applier;
 mod subscriber;
 
-pub struct BlockStriderBuilder<T, P, B>(BlockStrider<T, P, B>);
+pub struct BlockStriderBuilder<T, P, B> {
+    state: T,
+    provider: P,
+    subscriber: B,
+}
 
 impl<T2, T3> BlockStriderBuilder<(), T2, T3> {
     #[inline]
     pub fn with_state<T: BlockStriderState>(self, state: T) -> BlockStriderBuilder<T, T2, T3> {
-        BlockStriderBuilder(BlockStrider {
+        BlockStriderBuilder {
             state,
-            provider: self.0.provider,
-            subscriber: self.0.subscriber,
-        })
+            provider: self.provider,
+            subscriber: self.subscriber,
+        }
     }
 }
 
 impl<T1, T3> BlockStriderBuilder<T1, (), T3> {
     #[inline]
     pub fn with_provider<P: BlockProvider>(self, provider: P) -> BlockStriderBuilder<T1, P, T3> {
-        BlockStriderBuilder(BlockStrider {
-            state: self.0.state,
+        BlockStriderBuilder {
+            state: self.state,
             provider,
-            subscriber: self.0.subscriber,
-        })
+            subscriber: self.subscriber,
+        }
     }
 }
 
@@ -58,11 +67,11 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
     where
         B: BlockSubscriber,
     {
-        BlockStriderBuilder(BlockStrider {
-            state: self.0.state,
-            provider: self.0.provider,
+        BlockStriderBuilder {
+            state: self.state,
+            provider: self.provider,
             subscriber,
-        })
+        }
     }
 }
 
@@ -76,11 +85,11 @@ impl<T1, T2> BlockStriderBuilder<T1, T2, ()> {
     where
         S: StateSubscriber,
     {
-        BlockStriderBuilder(BlockStrider {
-            state: self.0.state,
-            provider: self.0.provider,
+        BlockStriderBuilder {
+            state: self.state,
+            provider: self.provider,
             subscriber: ShardStateApplier::new(mc_state_tracker, storage, state_subscriber),
-        })
+        }
     }
 }
 
@@ -91,23 +100,27 @@ where
     B: BlockSubscriber,
 {
     pub fn build(self) -> BlockStrider<T, P, B> {
-        self.0
+        BlockStrider {
+            state: self.state,
+            provider: Arc::new(self.provider),
+            subscriber: Arc::new(self.subscriber),
+        }
     }
 }
 
 pub struct BlockStrider<T, P, B> {
     state: T,
-    provider: P,
-    subscriber: B,
+    provider: Arc<P>,
+    subscriber: Arc<B>,
 }
 
 impl BlockStrider<(), (), ()> {
     pub fn builder() -> BlockStriderBuilder<(), (), ()> {
-        BlockStriderBuilder(BlockStrider {
+        BlockStriderBuilder {
             state: (),
             provider: (),
             subscriber: (),
-        })
+        }
     }
 }
 
@@ -123,10 +136,13 @@ where
     pub async fn run(self) -> Result<()> {
         tracing::info!("block strider loop started");
 
-        while let Some(next) = self.fetch_next_master_block().await {
-            let started_at = Instant::now();
+        let mut next_master_fut = JoinTask::new(self.fetch_next_master_block());
+        while let Some(next) = next_master_fut.await {
+            // NOTE: Start fetching the next master block in parallel to the processing of the current one
+            next_master_fut = JoinTask::new(self.fetch_next_master_block());
+
+            let _histogram = HistogramGuard::begin("tycho_core_process_strider_step_time");
             self.process_mc_block(next.data, next.archive_data).await?;
-            metrics::histogram!("tycho_core_process_mc_block_time").record(started_at.elapsed());
         }
 
         tracing::info!("block strider loop finished");
@@ -139,6 +155,21 @@ where
         tracing::debug!(%mc_block_id, "processing masterchain block");
 
         let started_at = Instant::now();
+
+        // Begin preparing master block in the background
+        let prepared_master = {
+            let cx = Box::new(BlockSubscriberContext {
+                mc_block_id,
+                block: block.clone(),
+                archive_data,
+            });
+            let subscriber = self.subscriber.clone();
+            JoinTask::new(async move {
+                let _histogram = HistogramGuard::begin("tycho_core_prepare_mc_block_time");
+                let prepared = subscriber.prepare_block(&cx).await;
+                (cx, prepared)
+            })
+        };
 
         // Start downloading shard blocks
         let mut shard_heights = FastHashMap::default();
@@ -160,13 +191,11 @@ where
         while process_futures.next().await.transpose()?.is_some() {}
         metrics::histogram!("tycho_core_process_sc_blocks_time").record(started_at.elapsed());
 
-        // Process masterchain block
-        let cx = BlockSubscriberContext {
-            mc_block_id,
-            block,
-            archive_data,
-        };
-        self.subscriber.handle_block(&cx).await?;
+        // Finally handle the masterchain block
+        let (cx, prepared) = prepared_master.await;
+
+        let _histogram = HistogramGuard::begin("tycho_core_process_mc_block_time");
+        self.subscriber.handle_block(&cx, prepared?).await?;
 
         let shard_heights = ShardHeights::from(shard_heights);
         self.state.commit_master(&mc_block_id, &shard_heights);
@@ -184,12 +213,15 @@ where
         let mut result = Vec::new();
         while top_block_id.seqno > 0 && !self.state.is_commited(&top_block_id) {
             // Download block
-            let started_at = Instant::now();
-            let block = self.fetch_block(&top_block_id).await?;
-            tracing::debug!(block_id = %top_block_id, "fetched shard block");
-            debug_assert_eq!(block.id(), &top_block_id);
+            let block = {
+                let _histogram = HistogramGuard::begin("tycho_core_download_sc_block_time");
 
-            metrics::histogram!("tycho_core_fetch_sc_block_time").record(started_at.elapsed());
+                let block = self.fetch_block(&top_block_id).await?;
+                tracing::debug!(block_id = %top_block_id, "fetched shard block");
+                debug_assert_eq!(block.id(), &top_block_id);
+
+                block
+            };
 
             // Parse info in advance to make borrow checker happy
             let info = block.data.load_info()?;
@@ -223,35 +255,54 @@ where
         mc_block_id: &BlockId,
         mut blocks: Vec<BlockStuffAug>,
     ) -> Result<()> {
-        while let Some(block) = blocks.pop() {
-            let block_id = *block.id();
-
-            let cx: BlockSubscriberContext = BlockSubscriberContext {
+        let start_preparing_block = |block: BlockStuffAug| {
+            let cx = Box::new(BlockSubscriberContext {
                 mc_block_id: *mc_block_id,
                 block: block.data,
                 archive_data: block.archive_data,
-            };
+            });
+            let subscriber = self.subscriber.clone();
+            JoinTask::new(async move {
+                let _histogram = HistogramGuard::begin("tycho_core_prepare_sc_block_time");
 
-            let started_at = Instant::now();
-            self.subscriber.handle_block(&cx).await?;
-            metrics::histogram!("tycho_core_process_sc_block_time").record(started_at.elapsed());
+                let prepared = subscriber.prepare_block(&cx).await;
+                (cx, prepared)
+            })
+        };
 
-            self.state.commit_shard(&block_id);
+        let mut prepare_task = blocks.pop().map(start_preparing_block);
+
+        while let Some(prepared) = prepare_task.take() {
+            let (cx, prepared) = prepared.await;
+            prepare_task = blocks.pop().map(start_preparing_block);
+
+            let _histogram = HistogramGuard::begin("tycho_core_process_sc_block_time");
+
+            self.subscriber.handle_block(&cx, prepared?).await?;
+
+            self.state.commit_shard(&cx.block.id());
         }
 
         Ok(())
     }
 
-    async fn fetch_next_master_block(&self) -> Option<BlockStuffAug> {
+    fn fetch_next_master_block(
+        &self,
+    ) -> impl Future<Output = Option<BlockStuffAug>> + Send + 'static {
+        let _histogram = HistogramGuard::begin("tycho_core_download_mc_block_time");
+
         let prev_block_id = self.state.load_last_mc_block_id();
         tracing::debug!(%prev_block_id, "fetching next master block");
 
-        loop {
-            match self.provider.get_next_block(&prev_block_id).await? {
-                Ok(block) => break Some(block),
-                Err(e) => {
-                    tracing::error!(?prev_block_id, "error while fetching master block: {e:?}");
-                    // TODO: backoff
+        let provider = self.provider.clone();
+        async move {
+            loop {
+                match provider.get_next_block(&prev_block_id).await? {
+                    Ok(block) => break Some(block),
+                    Err(e) => {
+                        tracing::error!(?prev_block_id, "error while fetching master block: {e:?}");
+                        // TODO: backoff
+                    }
                 }
             }
         }

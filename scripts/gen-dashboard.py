@@ -253,14 +253,28 @@ def net_dht() -> RowPanel:
 def core_block_strider() -> RowPanel:
     metrics = [
         create_heatmap_panel(
+            "tycho_core_process_strider_step_time",
+            "Time to process block strider step",
+        ),
+        create_heatmap_panel(
+            "tycho_core_download_mc_block_time", "Masterchain block downloading time"
+        ),
+        create_heatmap_panel(
+            "tycho_core_prepare_mc_block_time", "Masterchain block preparing time"
+        ),
+        create_heatmap_panel(
             "tycho_core_process_mc_block_time", "Masterchain block processing time"
+        ),
+        create_heatmap_panel(
+            "tycho_core_download_sc_block_time", "Shard block downloading time"
+        ),
+        create_heatmap_panel(
+            "tycho_core_prepare_sc_block_time",
+            "Shard block preparing time",
         ),
         create_heatmap_panel(
             "tycho_core_process_sc_block_time",
             "Shard block processing time",
-        ),
-        create_heatmap_panel(
-            "tycho_core_fetch_sc_block_time", "Shard block downloading time"
         ),
         create_heatmap_panel(
             "tycho_core_download_sc_blocks_time",
@@ -271,16 +285,24 @@ def core_block_strider() -> RowPanel:
             "Total time to process all shard blocks",
         ),
         create_heatmap_panel(
+            "tycho_core_state_applier_prepare_block_time",
+            "Time to prepare block by ShardStateApplier",
+        ),
+        create_heatmap_panel(
             "tycho_core_state_applier_handle_block_time",
             "Time to handle block by ShardStateApplier",
         ),
         create_heatmap_panel(
-            "tycho_core_metrics_subscriber_handle_block_time",
-            "Time to handle block by MetricsSubscriber",
-        ),
-        create_heatmap_panel(
             "tycho_core_subscriber_handle_state_time",
             "Total time to handle state by all subscribers",
+        ),
+        create_heatmap_panel(
+            "tycho_core_apply_block_time",
+            "Time to apply and save block state",
+        ),
+        create_heatmap_panel(
+            "tycho_core_metrics_subscriber_handle_block_time",
+            "Time to handle block by MetricsSubscriber",
         ),
         create_heatmap_panel(
             "tycho_storage_load_cell_time", "Time to load cell from storage"

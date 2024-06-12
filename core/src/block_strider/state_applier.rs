@@ -38,21 +38,15 @@ where
         }
     }
 
-    async fn handle_block_impl(&self, cx: &BlockSubscriberContext) -> Result<()> {
-        let _histogram = HistogramGuard::begin("tycho_core_state_applier_handle_block_time");
+    async fn prepare_block_impl(
+        &self,
+        cx: &BlockSubscriberContext,
+    ) -> Result<ShardApplierPrepared> {
+        let _histogram = HistogramGuard::begin("tycho_core_state_applier_prepare_block_time");
 
-        enum RefMcStateHandles {
-            Split(
-                #[allow(unused)] RefMcStateHandle,
-                #[allow(unused)] RefMcStateHandle,
-            ),
-            Single(#[allow(unused)] RefMcStateHandle),
-        }
-
-        tracing::info!(id = ?cx.block.id(), "applying block");
+        tracing::info!(id = ?cx.block.id(), "preparing block");
 
         let state_storage = self.inner.storage.shard_state_storage();
-        let handle_storage = self.inner.storage.block_handle_storage();
 
         // Load handle
         let handle = self
@@ -60,7 +54,7 @@ where
             .await?;
 
         // Load previous states
-        let (prev_root_cell, _handles) = {
+        let (prev_root_cell, handles) = {
             let (prev_id, prev_id_alt) = cx
                 .block
                 .construct_prev_id()
@@ -95,7 +89,6 @@ where
         };
 
         // Apply state
-        let started_at = std::time::Instant::now();
         let state = self
             .compute_and_store_state_update(
                 &cx.block,
@@ -104,11 +97,26 @@ where
                 prev_root_cell,
             )
             .await?;
-        metrics::histogram!("tycho_core_apply_block_time").record(started_at.elapsed());
+
+        Ok(ShardApplierPrepared {
+            handle,
+            state,
+            _prev_handles: handles,
+        })
+    }
+
+    async fn handle_block_impl(
+        &self,
+        cx: &BlockSubscriberContext,
+        prepared: ShardApplierPrepared,
+    ) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_core_state_applier_handle_block_time");
+
+        tracing::info!(id = ?cx.block.id(), "handling block");
 
         // Update metrics
-        let gen_utime = handle.meta().gen_utime() as f64;
-        let seqno = handle.id().seqno as f64;
+        let gen_utime = prepared.handle.meta().gen_utime() as f64;
+        let seqno = prepared.handle.id().seqno as f64;
         let now = tycho_util::time::now_millis() as f64 / 1000.0;
 
         if cx.block.id().is_masterchain() {
@@ -128,13 +136,16 @@ where
             mc_block_id: cx.mc_block_id,
             block: cx.block.clone(), // TODO: rewrite without clone
             archive_data: cx.archive_data.clone(), // TODO: rewrite without clone
-            state,
+            state: prepared.state,
         };
         self.inner.state_subscriber.handle_state(&cx).await?;
         metrics::histogram!("tycho_core_subscriber_handle_state_time").record(started_at.elapsed());
 
         // Mark block as applied
-        handle_storage.store_block_applied(&handle);
+        self.inner
+            .storage
+            .block_handle_storage()
+            .store_block_applied(&prepared.handle);
 
         // Done
         Ok(())
@@ -167,6 +178,8 @@ where
         handle: &BlockHandle,
         prev_root: Cell,
     ) -> Result<ShardStateStuff> {
+        let _histogram = HistogramGuard::begin("tycho_core_apply_block_time");
+
         let update = block
             .block()
             .load_state_update()
@@ -201,11 +214,36 @@ impl<S> BlockSubscriber for ShardStateApplier<S>
 where
     S: StateSubscriber,
 {
+    type Prepared = ShardApplierPrepared;
+
+    type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
 
-    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
-        Box::pin(self.handle_block_impl(cx))
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        Box::pin(self.prepare_block_impl(cx))
     }
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        prepared: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        Box::pin(self.handle_block_impl(cx, prepared))
+    }
+}
+
+pub struct ShardApplierPrepared {
+    handle: BlockHandle,
+    state: ShardStateStuff,
+    _prev_handles: RefMcStateHandles,
+}
+
+enum RefMcStateHandles {
+    Split(
+        #[allow(unused)] RefMcStateHandle,
+        #[allow(unused)] RefMcStateHandle,
+    ),
+    Single(#[allow(unused)] RefMcStateHandle),
 }
 
 struct Inner<S> {

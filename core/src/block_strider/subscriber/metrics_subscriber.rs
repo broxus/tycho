@@ -11,9 +11,20 @@ use crate::block_strider::{
 pub struct MetricsSubscriber;
 
 impl BlockSubscriber for MetricsSubscriber {
+    type Prepared = ();
+
+    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
     type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
 
-    fn handle_block(&self, cx: &BlockSubscriberContext) -> Self::HandleBlockFut<'_> {
+    fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        futures_util::future::ready(Ok(()))
+    }
+
+    fn handle_block(
+        &self,
+        cx: &BlockSubscriberContext,
+        _: Self::Prepared,
+    ) -> Self::HandleBlockFut<'_> {
         if let Err(e) = handle_block(&cx.block) {
             tracing::error!("failed to handle block: {e:?}");
         }

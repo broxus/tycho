@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{BlockIdShort, IntMsgInfo, MsgInfo, ShardIdent};
+use everscale_types::models::{BlockIdShort, IntMsgInfo, ShardIdent};
 use tracing::instrument;
 use tycho_util::FastHashMap;
 

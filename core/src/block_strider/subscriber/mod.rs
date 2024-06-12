@@ -21,24 +21,59 @@ pub struct BlockSubscriberContext {
 }
 
 pub trait BlockSubscriber: Send + Sync + 'static {
+    type Prepared: Send;
+
+    type PrepareBlockFut<'a>: Future<Output = Result<Self::Prepared>> + Send + 'a;
     type HandleBlockFut<'a>: Future<Output = Result<()>> + Send + 'a;
 
-    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a>;
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a>;
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        prepared: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a>;
 }
 
 impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
+    type Prepared = T::Prepared;
+
+    type PrepareBlockFut<'a> = T::PrepareBlockFut<'a>;
     type HandleBlockFut<'a> = T::HandleBlockFut<'a>;
 
-    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
-        <T as BlockSubscriber>::handle_block(self, cx)
+    #[inline]
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        <T as BlockSubscriber>::prepare_block(self, cx)
+    }
+
+    #[inline]
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        prepared: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        <T as BlockSubscriber>::handle_block(self, cx, prepared)
     }
 }
 
 impl<T: BlockSubscriber> BlockSubscriber for Arc<T> {
+    type Prepared = T::Prepared;
+
+    type PrepareBlockFut<'a> = T::PrepareBlockFut<'a>;
     type HandleBlockFut<'a> = T::HandleBlockFut<'a>;
 
-    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
-        <T as BlockSubscriber>::handle_block(self, cx)
+    #[inline]
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        <T as BlockSubscriber>::prepare_block(self, cx)
+    }
+
+    #[inline]
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        prepared: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        <T as BlockSubscriber>::handle_block(self, cx, prepared)
     }
 }
 
@@ -117,9 +152,22 @@ impl<B: StateSubscriber> StateSubscriberExt for B {
 pub struct NoopSubscriber;
 
 impl BlockSubscriber for NoopSubscriber {
+    type Prepared = ();
+
+    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
     type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
 
-    fn handle_block(&self, _cx: &BlockSubscriberContext) -> Self::HandleBlockFut<'_> {
+    #[inline]
+    fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'_> {
+        futures_util::future::ready(Ok(()))
+    }
+
+    #[inline]
+    fn handle_block(
+        &self,
+        _cx: &BlockSubscriberContext,
+        _: Self::Prepared,
+    ) -> Self::HandleBlockFut<'_> {
         futures_util::future::ready(Ok(()))
     }
 }
@@ -140,11 +188,30 @@ pub struct ChainSubscriber<T1, T2> {
 }
 
 impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for ChainSubscriber<T1, T2> {
+    type Prepared = (T1::Prepared, T2::Prepared);
+
+    type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
 
-    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
-        let left = self.left.handle_block(cx);
-        let right = self.right.handle_block(cx);
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        let left = self.left.prepare_block(cx);
+        let right = self.right.prepare_block(cx);
+
+        Box::pin(async move {
+            match future::join(left, right).await {
+                (Ok(l), Ok(r)) => Ok((l, r)),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            }
+        })
+    }
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        (left_prepared, right_prepared): Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        let left = self.left.handle_block(cx, left_prepared);
+        let right = self.right.handle_block(cx, right_prepared);
 
         Box::pin(async move {
             left.await?;
@@ -170,11 +237,30 @@ impl<T1: StateSubscriber, T2: StateSubscriber> StateSubscriber for ChainSubscrib
 // === (T1, T2) aka `join` ===
 
 impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for (T1, T2) {
+    type Prepared = (T1::Prepared, T2::Prepared);
+
+    type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
 
-    fn handle_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::HandleBlockFut<'a> {
-        let left = self.0.handle_block(cx);
-        let right = self.1.handle_block(cx);
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        let left = self.0.prepare_block(cx);
+        let right = self.1.prepare_block(cx);
+
+        Box::pin(async move {
+            match future::join(left, right).await {
+                (Ok(l), Ok(r)) => Ok((l, r)),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            }
+        })
+    }
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        (left_prepared, right_prepared): Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        let left = self.0.handle_block(cx, left_prepared);
+        let right = self.1.handle_block(cx, right_prepared);
 
         Box::pin(async move {
             let (l, r) = future::join(left, right).await;
@@ -205,9 +291,28 @@ pub mod test {
     pub struct PrintSubscriber;
 
     impl BlockSubscriber for PrintSubscriber {
+        type Prepared = ();
+
+        type PrepareBlockFut<'a> = future::Ready<Result<()>>;
         type HandleBlockFut<'a> = future::Ready<Result<()>>;
 
-        fn handle_block(&self, cx: &BlockSubscriberContext) -> Self::HandleBlockFut<'_> {
+        fn prepare_block<'a>(
+            &'a self,
+            cx: &'a BlockSubscriberContext,
+        ) -> Self::PrepareBlockFut<'_> {
+            tracing::info!(
+                block_id = %cx.block.id(),
+                mc_block_id = %cx.mc_block_id,
+                "preparing block"
+            );
+            future::ready(Ok(()))
+        }
+
+        fn handle_block(
+            &self,
+            cx: &BlockSubscriberContext,
+            _: Self::Prepared,
+        ) -> Self::HandleBlockFut<'_> {
             tracing::info!(
                 block_id = %cx.block.id(),
                 mc_block_id = %cx.mc_block_id,
