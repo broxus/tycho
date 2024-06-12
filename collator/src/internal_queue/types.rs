@@ -59,7 +59,7 @@ impl Ord for EnqueuedMessage {
     }
 }
 
-#[derive(Debug, Ord, Eq, PartialEq, PartialOrd, Hash, Clone)]
+#[derive(Default, Debug, Ord, Eq, PartialEq, PartialOrd, Hash, Clone)]
 pub struct InternalMessageKey {
     pub lt: Lt,
     pub hash: HashBytes,

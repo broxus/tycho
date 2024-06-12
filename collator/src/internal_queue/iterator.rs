@@ -86,7 +86,7 @@ impl QueueIterator for QueueIteratorImpl {
             if let Some(next_message) = self.messages_for_current_shard.pop() {
                 let message_key = next_message.0.message.key();
 
-                if self.new_messages.remove(&message_key).is_some() {
+                if self.new_messages.contains_key(&message_key) {
                     return Ok(Some(IterItem {
                         message_with_source: next_message.0.clone(),
                         is_new: true,
@@ -132,18 +132,49 @@ impl QueueIterator for QueueIteratorImpl {
     }
 
     fn take_diff(&mut self) -> QueueDiff {
-        tracing::debug!(
+        tracing::trace!(
             target: crate::tracing_targets::MQ,
             "Taking diff from iterator. New messages count: {}",
             self.new_messages.len());
 
         let mut diff = QueueDiff::default();
+
         for (shard_id, lt) in self.commited_current_position.iter() {
             diff.processed_upto.insert(*shard_id, lt.clone());
         }
+
+        let current_shard_processed_upto = self
+            .commited_current_position
+            .get(&self.for_shard)
+            .cloned()
+            .unwrap_or_default();
+
+        let amount_before = self.new_messages.len();
+
+        let mut inserted_new_messages = 0;
+
+        tracing::debug!(target: crate::tracing_targets::COLLATOR, "Current shard processed upto: {:?}",current_shard_processed_upto);
+
         for message in self.new_messages.values() {
-            diff.messages.push(message.clone());
+            let (dest_workchain, dest_account) = message.destination().unwrap();
+            if self.for_shard.contains_account(&dest_account)
+                && self.for_shard.workchain() == dest_workchain as i32
+            {
+                if message.key() > current_shard_processed_upto {
+                    diff.messages.push(message.clone());
+                    inserted_new_messages += 1;
+                }
+            } else {
+                diff.messages.push(message.clone());
+                inserted_new_messages += 1;
+            }
         }
+
+        tracing::trace!(
+            target: crate::tracing_targets::MQ,
+            "Inserted {} messages out of {} to diff",
+            inserted_new_messages,
+            amount_before);
 
         self.current_position
             .clone_from(&self.commited_current_position);
@@ -161,9 +192,9 @@ impl QueueIterator for QueueIteratorImpl {
 
         for message in messages {
             // insert only if key greater then current
-            if let Some(current_key) = self.commited_current_position.get(&message.0) {
+            if let Some(current_key) = self.commited_current_position.get_mut(&message.0) {
                 if message.1 > *current_key {
-                    self.commited_current_position.insert(message.0, message.1);
+                    current_key.clone_from(&message.1);
                 }
             } else {
                 self.commited_current_position.insert(message.0, message.1);
@@ -174,14 +205,11 @@ impl QueueIterator for QueueIteratorImpl {
 
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
         self.new_messages.insert(message.key(), message.clone());
-
         let (dest_workchain, dest_account) = message.destination()?;
-
         if self.for_shard.contains_account(&dest_account)
             && self.for_shard.workchain() == dest_workchain as i32
         {
             let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
-
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));
         };
