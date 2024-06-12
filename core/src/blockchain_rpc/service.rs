@@ -192,6 +192,15 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     Some(Response::from_tl(res))
                 })
             },
+            rpc::GetKeyBlockProof as req => {
+                tracing::debug!(block_id = %req.block_id, "getKeyBlockProof");
+
+                let inner = self.inner.clone();
+                BoxFutureOrNoop::future(async move {
+                    let res = inner.handle_get_key_block_proof(&req).await;
+                    Some(Response::from_tl(res))
+                })
+            },
             rpc::GetPersistentStateInfo as req => {
                 tracing::debug!(block_id = %req.block_id, "getPersistentStateInfo");
 
@@ -433,6 +442,33 @@ impl<B> Inner<B> {
             Ok(block_full) => overlay::Response::Ok(block_full),
             Err(e) => {
                 tracing::warn!("get_next_block_full failed: {e:?}");
+                overlay::Response::Err(INTERNAL_ERROR_CODE)
+            }
+        }
+    }
+
+    async fn handle_get_key_block_proof(
+        &self,
+        req: &rpc::GetKeyBlockProof,
+    ) -> overlay::Response<Data> {
+        let block_handle_storage = self.storage().block_handle_storage();
+        let block_storage = self.storage().block_storage();
+
+        let get_key_block_proof = async {
+            match block_handle_storage.load_handle(&req.block_id) {
+                Some(handle) if handle.meta().has_proof() => {
+                    block_storage.load_block_proof_raw(&handle, false).await
+                }
+                _ => anyhow::bail!("proof not found"),
+            }
+        };
+
+        match get_key_block_proof.await {
+            Ok(key_block_proof) => overlay::Response::Ok(Data {
+                data: key_block_proof.into(),
+            }),
+            Err(e) => {
+                tracing::warn!("get_key_block_proof failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }
