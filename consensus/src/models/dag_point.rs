@@ -28,6 +28,7 @@ pub enum DagPoint {
     Suspicious(ValidPoint),
     /// invalidates dependent point; needed to blame equivocation
     Invalid(Arc<Point>),
+    /// point hash or signature mismatch, not well-formed, download failed - i.e. unusable point;
     /// invalidates dependent point; blame author of dependent point
     NotExists(Arc<PointId>),
 }

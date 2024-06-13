@@ -65,7 +65,7 @@ impl Debug for AltFmt<'_, PointId> {
 
 impl AltFormat for DagPoint {}
 impl Display for AltFmt<'_, DagPoint> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         f.write_str(match AltFormat::unpack(self) {
             DagPoint::Trusted(_) => "Trusted",
             DagPoint::Suspicious(_) => "Suspicious",

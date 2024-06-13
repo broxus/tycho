@@ -104,7 +104,7 @@ impl Dag {
                             // better try later than wait now if some point is still downloading
                             .filter_map(|version| version.clone().now_or_never())
                             // take any suitable
-                            .find_map(move |(dag_point, _)| dag_point.into_valid())
+                            .find_map(move |dag_point| dag_point.into_valid())
                     })
                     .flatten()
                 {
@@ -169,7 +169,7 @@ impl Dag {
             };
             let anchor = anchor_round
                 .view(leader, |loc| {
-                    let (dag_point, _) = loc
+                    let dag_point = loc
                         .versions()
                         .get(anchor_digest)
                         .expect("anchor proof is not linked to anchor, validation broken")
@@ -200,7 +200,7 @@ impl Dag {
     fn drop_tail(&self, anchor_at: Round) {
         if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
             let mut rounds = self.rounds.lock();
-            *rounds = rounds.split_off(&Round(tail));
+            rounds.retain(|k, _| k.0 >= tail);
         };
     }
 

@@ -3,15 +3,18 @@ use std::sync::{Arc, Weak};
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use tokio::sync::mpsc;
 use tracing::Span;
 use tycho_network::PeerId;
+use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
-use crate::dag::{DagLocation, InclusionState, Verifier};
+use crate::dag::{DagLocation, DagPointFuture, InclusionState, Verifier};
+use crate::effects::{CollectorContext, Effects, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, NodeCount, Point, PointId, Round, ValidPoint};
+use crate::models::{DagPoint, Digest, Location, NodeCount, Point, PointId, Round, ValidPoint};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -61,7 +64,7 @@ impl DagRound {
         Self(Arc::new(DagRoundInner {
             round,
             node_count: NodeCount::try_from(peers.len())
-                .unwrap_or_else(|_| panic!("no peers scheduled for {round:?}")),
+                .unwrap_or_else(|e| panic!("{e} for {round:?}")),
             key_pair: peer_schedule.local_keys(round),
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
@@ -76,7 +79,7 @@ impl DagRound {
         Self(Arc::new(DagRoundInner {
             round: next_round,
             node_count: NodeCount::try_from(peers.len())
-                .unwrap_or_else(|_| panic!("no peers scheduled for {next_round:?}")),
+                .unwrap_or_else(|e| panic!("{e} for {next_round:?}")),
             key_pair: peer_schedule.local_keys(next_round),
             anchor_stage: AnchorStage::of(next_round, peer_schedule),
             locations,
@@ -113,7 +116,7 @@ impl DagRound {
         self.0.anchor_stage.as_ref()
     }
 
-    pub fn edit<F, R>(&self, author: &PeerId, edit: F) -> R
+    fn edit<F, R>(&self, author: &PeerId, edit: F) -> R
     where
         F: FnOnce(&mut DagLocation) -> R,
     {
@@ -159,55 +162,85 @@ impl DagRound {
     }
 
     pub async fn valid_point(&self, point_id: &PointId) -> Option<ValidPoint> {
-        match self.scan(point_id.location.round) {
-            Some(linked) => {
-                linked
-                    .valid_point_exact(&point_id.location.author, &point_id.digest)
-                    .await
-            }
-            None => None,
-        }
+        self.scan(point_id.location.round)?
+            .valid_point_exact(&point_id.location.author, &point_id.digest)
+            .await
     }
 
     pub async fn valid_point_exact(&self, node: &PeerId, digest: &Digest) -> Option<ValidPoint> {
-        let point_fut = self.view(node, |loc| loc.versions().get(digest).cloned())??;
-        point_fut.await.0.into_valid()
+        self.view(node, |loc| loc.versions().get(digest).cloned())??
+            .await
+            .into_valid()
     }
 
-    pub fn add(
+    pub fn add_collected_exact(
         &self,
         point: &Arc<Point>,
         downloader: &Downloader,
-        span: &Span,
+        effects: &Effects<CollectorContext>,
     ) -> Option<BoxFuture<'static, InclusionState>> {
-        let dag_round = span.in_scope(|| self.scan(point.body.location.round))?;
-        dag_round.add_exact(point, downloader, span)
-    }
-
-    fn add_exact(
-        &self,
-        point: &Arc<Point>,
-        downloader: &Downloader,
-        span: &Span,
-    ) -> Option<BoxFuture<'static, InclusionState>> {
-        if point.body.location.round != self.round() {
-            let _span = span.enter();
-            panic!(
-                "Coding error: dag round mismatches point round on add {:?}",
-                point.id()
-            )
-        }
-        let dag_round = self.to_weak();
+        let _guard = effects.span().enter();
+        assert_eq!(
+            point.body.location.round,
+            self.round(),
+            "Coding error: point round does not match dag round"
+        );
         let digest = &point.digest;
         self.edit(&point.body.location.author, |loc| {
             let state = loc.state().clone();
             let point = point.clone();
             let downloader = downloader.clone();
-            loc.init(digest, || {
-                Verifier::validate(point, dag_round, downloader, span.clone())
+            loc.init(digest, |state| {
+                // FIXME: prior Responder refactor: could not sign during validation,
+                //   because current DAG round could advance concurrently;
+                //   now current dag round changes consistently,
+                //   maybe its possible to reduce locking in 'inclusion state'
+                let state = state.clone();
+                DagPointFuture::Broadcast(Shared::new(JoinTask::new(
+                    Verifier::validate(point, self.to_weak(), downloader, effects.span().clone())
+                        .inspect(move |dag_point| state.init(dag_point)),
+                )))
             })
             .map(|first| first.clone().map(|_| state).boxed())
         })
+    }
+
+    /// notice: `round` must exactly match point's round,
+    /// otherwise dependency will resolve to [`DagPoint::NotExists`]
+    pub fn dependency_exact(
+        &self,
+        author: &PeerId,
+        digest: &Digest,
+        depender: &PeerId,
+        downloader: &Downloader,
+        effects: &Effects<ValidateContext>,
+    ) -> DagPointFuture {
+        let future = self.edit(author, |loc| {
+            loc.get_or_init(digest, move |state| {
+                let downloader = downloader.clone();
+                let effects = effects.clone();
+                let state = state.clone();
+                let (tx, rx) = mpsc::unbounded_channel();
+                let point_id = PointId {
+                    location: Location {
+                        author: *author,
+                        round: self.round(),
+                    },
+                    digest: digest.clone(),
+                };
+                DagPointFuture::Download {
+                    task: Shared::new(JoinTask::new(
+                        downloader
+                            .run(point_id, self.to_weak(), rx, effects)
+                            .inspect(move |dag_point| state.init(dag_point)),
+                    )),
+                    dependents: tx,
+                }
+            })
+            .clone()
+        });
+        future.add_depender(depender);
+        future
     }
 
     /// for genesis and own points
@@ -225,29 +258,33 @@ impl DagRound {
                 MempoolConfig::sign_time_range(),
             );
         }
-        if state.signed_point(self.round()).is_none() {
-            let _guard = span.enter();
-            panic!("Coding or configuration error: valid point cannot be signed; time issue?")
-        }
+        let _guard = span.enter();
+        assert!(
+            state.signed_point(self.round()).is_some(),
+            "Coding or configuration error: valid point cannot be signed; time issue?"
+        );
         state
     }
 
     pub fn insert_invalid(&self, dag_point: &DagPoint) -> Option<InclusionState> {
-        if dag_point.valid().is_some() {
-            panic!("Coding error: failed to insert valid point as invalid")
-        }
+        assert!(
+            dag_point.valid().is_none(),
+            "Coding error: failed to insert valid point as invalid"
+        );
         let round = self.scan(dag_point.location().round)?;
         Some(round.insert_exact(dag_point))
     }
 
     fn insert_exact(&self, dag_point: &DagPoint) -> InclusionState {
-        if dag_point.location().round != self.round() {
-            panic!("Coding error: dag round mismatches point round on insert")
-        }
+        assert_eq!(
+            dag_point.location().round,
+            self.round(),
+            "Coding error: dag round mismatches point round on insert"
+        );
         self.edit(&dag_point.location().author, |loc| {
-            loc.state().init(dag_point);
-            let _existing = loc.init(dag_point.digest(), || {
-                futures_util::future::ready(dag_point.clone())
+            let _existing = loc.init(dag_point.digest(), |state| {
+                state.init(dag_point);
+                DagPointFuture::Local(futures_util::future::ready(dag_point.clone()))
             });
             loc.state().clone()
         })
@@ -259,12 +296,19 @@ impl DagRound {
             "Coding error: cannot scan DAG rounds chain for a future round"
         );
         let mut visited = self.clone();
-        if round == self.round() {
+        if visited.round() == round {
             return Some(visited);
         }
         while let Some(dag_round) = visited.prev().get() {
             match dag_round.round().cmp(&round) {
-                core::cmp::Ordering::Less => return None,
+                core::cmp::Ordering::Less => panic!(
+                    "Coding error: linked list of dag rounds cannot contain gaps, \
+                    found {} to be prev for {}, scanned for {} from {}",
+                    dag_round.round().0,
+                    visited.round().0,
+                    round.0,
+                    self.round().0
+                ),
                 core::cmp::Ordering::Equal => return Some(dag_round),
                 core::cmp::Ordering::Greater => visited = dag_round,
             }

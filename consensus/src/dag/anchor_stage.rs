@@ -24,13 +24,11 @@ impl AnchorStage {
         // reproducible global coin
         let leader_index = rand_pcg::Pcg32::seed_from_u64(anchor_candidate_round as u64)
             .gen_range(0..leader_peers.len());
-        let Some(leader) = leader_peers
+        let leader = leader_peers
             .iter()
             .nth(leader_index)
             .map(|(peer_id, _)| peer_id)
-        else {
-            panic!("selecting a leader from an empty validator set")
-        };
+            .expect("selecting a leader from an empty validator set");
         // the leader cannot produce three points in a row, so we have an undefined leader,
         // rather than an intentional leaderless support round - all represented by `None`
         if !current_peers.contains_key(leader) {

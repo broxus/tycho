@@ -18,6 +18,11 @@ use crate::models::{Link, Location, Point, PointBody, PointId, Round, UnixTime};
 const GENESIS_SECRET_KEY_BYTES: [u8; 32] = [0xAE; 32];
 const GENESIS_MILLIS: u64 = 1713225727398;
 
+// TODO this must be passed via config file
+pub fn genesis_point_id() -> PointId {
+    genesis().id()
+}
+
 pub fn genesis() -> Arc<Point> {
     let genesis_keys = KeyPair::from(&SecretKey::from_bytes(GENESIS_SECRET_KEY_BYTES));
 

@@ -9,7 +9,7 @@ use tycho_util::FastHashSet;
 
 use crate::dag::{DagRound, InclusionState};
 use crate::dyn_event;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
+use crate::effects::{AltFormat, CollectorContext, CurrentRoundContext, Effects, EffectsContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::broadcast::dto::ConsensusEvent;
 use crate::intercom::dto::SignatureResponse;
@@ -312,17 +312,20 @@ impl CollectorTask {
                     }
                     x if x == self.next_dag_round.round() => self
                         .next_dag_round
-                        .add(point, &self.downloader, self.effects.span())
+                        .add_collected_exact(point, &self.downloader, &self.effects)
                         .map(|task| self.next_includes.push(task))
                         .is_some(),
                     x if x == self.current_round.round() => self
                         .current_round
-                        .add(point, &self.downloader, self.effects.span())
+                        .add_collected_exact(point, &self.downloader, &self.effects)
                         .map(|task| self.includes.push(task))
                         .is_some(),
                     _ => self
                         .current_round
-                        .add(point, &self.downloader, self.effects.span())
+                        .scan(point.body.location.round)
+                        .and_then(|round| {
+                            round.add_collected_exact(point, &self.downloader, &self.effects)
+                        })
                         // maybe other's dependency, but too old to be included
                         .is_some(),
                 };
@@ -405,7 +408,6 @@ impl CollectorTask {
     }
 }
 
-struct CollectorContext;
 impl EffectsContext for CollectorContext {}
 
 impl Effects<CollectorContext> {

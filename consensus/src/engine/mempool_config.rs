@@ -48,16 +48,22 @@ impl MempoolConfig {
     /// (dependencies and/or signatures), and waiting for slow nodes
     pub const RETRY_INTERVAL: Duration = Duration::from_millis(150);
 
-    /// should not be less than 3 (as in average 1 of 3 is unreliable and another one did not sign);
-    /// includes at least the author of dependant point and the author of dependency point;
-    /// increases exponentially on every attempt, until every node out of 2F+1 is queried once
-    /// or a verifiable point is found (ill-formed or incorrectly signed points are not eligible)
-    pub const DOWNLOAD_PEERS: u8 = 3;
-
     /// hard limit on cached external messages ring buffer, see [`Self::PAYLOAD_BATCH_BYTES`]
     pub const PAYLOAD_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
-    /// every failed response is accounted as point is not found;
-    /// 1/3+1 failed responses leads to invalidation of the point and all its dependants
-    pub const DOWNLOAD_SPAWN_INTERVAL: Duration = Duration::from_millis(50);
+    /// should not be less than 3 (as in average 1 of 3 is unreliable and another one did not sign);
+    /// value is multiplied by the current attempt number, until 2F+1 successfully responded
+    /// or a verifiable point is found (ill-formed or incorrectly signed points are not eligible)
+    pub const DOWNLOAD_PEERS: u8 = 5;
+
+    /// [`Downloader`](crate::intercom::Downloader) makes responses in groups after previous
+    /// group completed or this interval elapsed (in order to not wait for some slow responding peer)
+    ///
+    /// 2F+1 "point not found" responses lead to invalidation of all referencing points;
+    /// failed network queries are retried after all peers were queried the same amount of times,
+    /// and only successful responses that point is not found are taken into account.
+    ///
+    /// Notice that reliable peers respond immediately with points they already have
+    /// validated successfully, or return `None`.
+    pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(30);
 }

@@ -42,3 +42,5 @@ impl<T: EffectsContext> Effects<T> {
 pub struct CurrentRoundContext;
 #[derive(Clone)]
 pub struct ValidateContext;
+#[derive(Clone)]
+pub struct CollectorContext;

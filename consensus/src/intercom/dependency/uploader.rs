@@ -28,9 +28,7 @@ impl Uploader {
             .flatten()
         });
         let task_found = found.is_some();
-        let ready = found
-            .and_then(|shared| shared.now_or_never())
-            .map(|(dag_point, _)| dag_point);
+        let ready = found.and_then(|shared| shared.now_or_never());
         let level = if let Some(dag_point) = ready.as_ref() {
             if dag_point.trusted().is_some() {
                 tracing::Level::TRACE

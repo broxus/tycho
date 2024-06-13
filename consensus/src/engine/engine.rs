@@ -16,7 +16,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
     PeerSchedule, PeerScheduleUpdater, Responder,
 };
-use crate::models::{Point, PrevPoint, Round};
+use crate::models::{Link, Point, PrevPoint, Round};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -92,19 +92,26 @@ impl Engine {
     pub async fn init_with_genesis(&mut self, next_peers: &[PeerId]) {
         let genesis = crate::test_utils::genesis();
         let span = tracing::error_span!("init engine with genesis");
-        let span_guard = span.enter();
+        let _guard = span.enter();
         // check only genesis round as it is widely used in point validation.
         // if some nodes use distinct genesis data, their first points will be rejected
         assert_eq!(
-            genesis.body.location.round,
-            MempoolConfig::GENESIS_ROUND,
-            "genesis point round must match genesis round from config"
+            genesis.id(),
+            crate::test_utils::genesis_point_id(),
+            "genesis point id does not match one from config"
         );
+        assert!(
+            genesis.is_integrity_ok(),
+            "genesis point does not pass integrity check"
+        );
+        assert!(genesis.is_well_formed(), "genesis point is not well formed");
         // finished epoch
         self.peer_schedule
-            .set_next_start(genesis.body.location.round);
-        self.peer_schedule_updater
-            .set_next_peers(&[genesis.body.location.author], false);
+            .set_next_start(MempoolConfig::GENESIS_ROUND);
+        self.peer_schedule_updater.set_next_peers(
+            &[crate::test_utils::genesis_point_id().location.author],
+            false,
+        );
         self.peer_schedule.rotate();
         // current epoch
         self.peer_schedule
@@ -120,16 +127,6 @@ impl Engine {
             current_dag_round.insert_exact_sign(&genesis, &self.peer_schedule, &span);
         self.collector
             .init(current_dag_round.round().next(), iter::once(genesis_state));
-        drop(span_guard);
-        Self::expect_trusted_point(
-            current_dag_round.to_weak(),
-            genesis.clone(),
-            self.peer_schedule.clone(),
-            self.downloader.clone(),
-            span,
-        )
-        .await
-        .expect("genesis must be valid");
     }
 
     pub async fn run(mut self) -> ! {
@@ -185,7 +182,7 @@ impl Engine {
                 let downloader = self.downloader.clone();
                 async move {
                     if let Some(own_point) = own_point_fut.await.expect("new point producer") {
-                        let paranoid = Self::expect_trusted_point(
+                        let paranoid = Self::expect_own_trusted_point(
                             own_ppint_round,
                             own_point.clone(),
                             peer_schedule.clone(),
@@ -274,6 +271,8 @@ impl Engine {
                 payload_bytes = own_point
                     .body.payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
                 externals = own_point.body.payload.len(),
+                is_proof = Some(own_point.body.anchor_proof == Link::ToSelf).filter(|x| *x),
+                is_trigger = Some(own_point.body.anchor_trigger == Link::ToSelf).filter(|x| *x),
                 "produced point"
             );
             let state = current_dag_round.insert_exact_sign(
@@ -300,7 +299,7 @@ impl Engine {
             .join("; \n")
     }
 
-    fn expect_trusted_point(
+    fn expect_own_trusted_point(
         point_round: WeakDagRound,
         point: Arc<Point>,
         peer_schedule: Arc<PeerSchedule>,
@@ -308,16 +307,21 @@ impl Engine {
         span: Span,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            if Verifier::verify(&point, &peer_schedule).is_err() {
+            if let Err(dag_point) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = span.enter();
-                panic!("Failed to verify, expected Trusted point: {:?}", point.id())
+                panic!(
+                    "Failed to verify own point: {} {:?}",
+                    dag_point.alt(),
+                    point.id()
+                )
             }
             let dag_point =
                 Verifier::validate(point.clone(), point_round, downloader, span.clone()).await;
             if dag_point.trusted().is_none() {
                 let _guard = span.enter();
                 panic!(
-                    "Failed to validate, expected Trusted point: {:?}",
+                    "Failed to validate own point: {} {:?}",
+                    dag_point.alt(),
                     point.id()
                 )
             };

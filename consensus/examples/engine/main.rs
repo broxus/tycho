@@ -17,9 +17,8 @@ mod logger;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    Cli::parse().run().await
+fn main() -> anyhow::Result<()> {
+    Cli::parse().run()
 }
 
 /// Tycho network node.
@@ -47,7 +46,7 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(self) -> anyhow::Result<()> {
+    fn run(self) -> anyhow::Result<()> {
         let fun = if self.flame {
             logger::flame
         } else {

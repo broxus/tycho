@@ -27,7 +27,7 @@ impl Display for Digest {
 impl Debug for Digest {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("Digest(")?;
-        std::fmt::Display::fmt(self, f)?;
+        Display::fmt(self, f)?;
         f.write_str(")")
     }
 }
@@ -56,7 +56,7 @@ impl Display for Signature {
 impl Debug for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str("Signature(")?;
-        std::fmt::Display::fmt(self, f)?;
+        Display::fmt(self, f)?;
         f.write_str(")")
     }
 }
@@ -282,6 +282,7 @@ impl Point {
                     && self.body.witness.is_empty()
                     && self.body.payload.is_empty()
                     && self.body.proof.is_none()
+                    && self.body.time == self.body.anchor_time
                     && self.body.anchor_proof == Link::ToSelf
                     && self.body.anchor_trigger == Link::ToSelf
             }
@@ -364,35 +365,172 @@ impl Point {
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_id(&self, link_field: LinkField) -> PointId {
-        #[allow(clippy::match_same_arms)]
-        let (peer, is_in_includes) = match self.anchor_link(link_field) {
+        let (digest, location) = match self.anchor_link(link_field) {
             Link::ToSelf => return self.id(),
-            Link::Direct(Through::Includes(peer)) => (peer, true),
-            Link::Direct(Through::Witness(peer)) => (peer, false),
-            Link::Indirect {
+            Link::Direct(Through::Includes(peer))
+            | Link::Indirect {
                 path: Through::Includes(peer),
                 ..
-            } => (peer, true),
-            Link::Indirect {
+            } => (self.body.includes.get(peer), Location {
+                author: *peer,
+                round: self.body.location.round.prev(),
+            }),
+            Link::Direct(Through::Witness(peer))
+            | Link::Indirect {
                 path: Through::Witness(peer),
                 ..
-            } => (peer, false),
-        };
-
-        let (map, round) = if is_in_includes {
-            (&self.body.includes, self.body.location.round.prev())
-        } else {
-            (&self.body.witness, self.body.location.round.prev().prev())
+            } => (self.body.witness.get(peer), Location {
+                author: *peer,
+                round: self.body.location.round.prev().prev(),
+            }),
         };
         PointId {
-            location: Location {
-                round,
-                author: *peer,
-            },
-            digest: map
-                .get(peer)
+            location,
+            digest: digest
                 .expect("Coding error: usage of ill-formed point")
                 .clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use everscale_crypto::ed25519::SecretKey;
+    use rand::{thread_rng, RngCore};
+    use tycho_util::sync::rayon_run;
+
+    use super::*;
+
+    const PEERS: usize = 100;
+    const MSG_COUNT: usize = 1000;
+    const MSG_BYTES: usize = 2 * 1000;
+
+    fn new_key_pair() -> KeyPair {
+        let mut secret_bytes: [u8; 32] = [0; 32];
+        thread_rng().fill_bytes(&mut secret_bytes);
+        KeyPair::from(&SecretKey::from_bytes(secret_bytes))
+    }
+
+    fn point_body(key_pair: &KeyPair) -> PointBody {
+        let mut payload = Vec::with_capacity(MSG_COUNT);
+        for _ in 0..MSG_COUNT {
+            let mut data = vec![0; MSG_BYTES];
+            thread_rng().fill_bytes(data.as_mut_slice());
+            payload.push(Bytes::from(data));
+        }
+
+        let mut includes = BTreeMap::default();
+        for _ in 0..PEERS {
+            let key_pair = new_key_pair();
+            let peer_id = PeerId::from(key_pair.public_key);
+            let digest = Digest(*key_pair.secret_key.nonce());
+            includes.insert(peer_id, digest);
+        }
+
+        PointBody {
+            location: Location {
+                round: Round(thread_rng().next_u32()),
+                author: PeerId::from(key_pair.public_key),
+            },
+            time: UnixTime::now(),
+            payload,
+            proof: None,
+            includes,
+            witness: Default::default(),
+            anchor_trigger: Link::ToSelf,
+            anchor_proof: Link::ToSelf,
+            anchor_time: UnixTime::now(),
+        }
+    }
+    fn sig_data() -> (Digest, Vec<(PeerId, Signature)>) {
+        let digest = Digest([12; 32]);
+        let mut data = Vec::with_capacity(PEERS);
+        for _ in 0..PEERS {
+            let key_pair = new_key_pair();
+            let sig = Signature::new(&key_pair, &digest);
+            let peer_id = PeerId::from(key_pair.public_key);
+            data.push((peer_id, sig));
+        }
+        (digest, data)
+    }
+
+    #[test]
+    pub fn check_sig() {
+        let (digest, data) = sig_data();
+
+        let timer = Instant::now();
+        for (peer_id, sig) in data.iter() {
+            assert!(sig.verifies(peer_id, &digest), "invalid signature");
+        }
+        let elapsed = timer.elapsed();
+        println!(
+            "check {PEERS} sigs took {}",
+            humantime::format_duration(elapsed)
+        );
+    }
+
+    #[tokio::test]
+    pub async fn check_sig_on_rayon() {
+        let (digest, data) = sig_data();
+        rayon_run(|| ()).await;
+
+        let timer = Instant::now();
+        let fut = rayon_run(move || {
+            for (peer_id, sig) in data.iter() {
+                assert!(sig.verifies(peer_id, &digest), "invalid signature");
+            }
+        });
+        let elapsed_start = timer.elapsed();
+        fut.await;
+        let elapsed_run = timer.elapsed();
+
+        println!(
+            "init rayon took {}",
+            humantime::format_duration(elapsed_start)
+        );
+        println!(
+            "check {PEERS} with rayon took {}",
+            humantime::format_duration(elapsed_run)
+        );
+    }
+
+    #[test]
+    pub fn check_new_point() {
+        let point_key_pair = new_key_pair();
+        let point_body = point_body(&point_key_pair);
+        let point = Point::new(&point_key_pair, point_body.clone());
+
+        let timer = Instant::now();
+        let body = bincode::serialize(&point_body).expect("shouldn't happen");
+        let bincode_elapsed = timer.elapsed();
+
+        let timer = Instant::now();
+        let mut hasher = Sha256::new();
+        hasher.update(body.as_slice());
+        let digest = Digest(hasher.finalize().into());
+        let sha_elapsed = timer.elapsed();
+        assert_eq!(digest, point.digest, "point digest");
+
+        let timer = Instant::now();
+        let sig = Signature::new(&point_key_pair, &digest);
+        let sig_elapsed = timer.elapsed();
+        assert_eq!(sig, point.signature, "point signature");
+
+        println!(
+            "bincode {} bytes of point with {} bytes payload took {}",
+            body.len(),
+            point_body
+                .payload
+                .iter()
+                .fold(0, |acc, bytes| acc + bytes.len()),
+            humantime::format_duration(bincode_elapsed)
+        );
+        println!("sha256 took {}", humantime::format_duration(sha_elapsed));
+        println!(
+            "total {}",
+            humantime::format_duration(bincode_elapsed + sha_elapsed + sig_elapsed)
+        )
     }
 }
