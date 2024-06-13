@@ -842,7 +842,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#67cb1246c53bb7b82fa2f83f297c0c47ea89c934"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#32467d0b2d85f2b6d897ed523458c86b2606eaac"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -862,7 +862,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#67cb1246c53bb7b82fa2f83f297c0c47ea89c934"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#32467d0b2d85f2b6d897ed523458c86b2606eaac"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2928,7 +2928,7 @@ dependencies = [
 [[package]]
 name = "ton_executor"
 version = "2.0.0"
-source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#1173654cb7e14a98e1978b0a843187e1b96e7e43"
+source = "git+https://github.com/broxus/ton-labs-executor.git?branch=new_cells#23dadb03e6fb06db2091e9c996796fb5901fc3eb"
 dependencies = [
  "ahash",
  "anyhow",
