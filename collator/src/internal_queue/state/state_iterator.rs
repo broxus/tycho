@@ -6,6 +6,7 @@ use everscale_types::models::ShardIdent;
 
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 
+
 #[derive(Debug, Clone, Eq)]
 pub struct MessageWithSource {
     pub shard_id: ShardIdent,
