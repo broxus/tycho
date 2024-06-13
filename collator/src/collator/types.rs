@@ -726,43 +726,27 @@ impl ShardDescriptionExt for ShardDescription {
     }
 }
 
-// /// Async message
-// pub(super) enum AsyncMessage {
-//     Ordinary(Box<OrdinaryMessage>),
-//     Special(TickTock),
-// }
-
-// impl AsyncMessage {
-//     pub fn display_kind(&self) -> &str {
-//         match self {
-//             AsyncMessage::Ordinary(msg) => msg.display_kind(),
-//             AsyncMessage::Special(TickTock::Tick) => "Tick",
-//             AsyncMessage::Special(TickTock::Tock) => "Tock",
-//         }
-//     }
-// }
-
-pub struct AsyncMessage {
+pub struct ParsedMessage {
     pub info: MsgInfo,
     pub cell: Cell,
     pub special_origin: Option<SpecialOrigin>,
     pub dequeued: Option<Dequeued>,
 }
 
-impl AsyncMessage {
-    pub fn kind(&self) -> AsyncMessageKind {
+impl ParsedMessage {
+    pub fn kind(&self) -> ParsedMessageKind {
         match (&self.info, self.special_origin) {
-            (_, Some(SpecialOrigin::Recover)) => AsyncMessageKind::Recover,
-            (_, Some(SpecialOrigin::Mint)) => AsyncMessageKind::Mint,
-            (MsgInfo::ExtIn(_), _) => AsyncMessageKind::ExtIn,
-            (MsgInfo::Int(_), _) => AsyncMessageKind::Int,
-            (MsgInfo::ExtOut(_), _) => AsyncMessageKind::ExtOut,
+            (_, Some(SpecialOrigin::Recover)) => ParsedMessageKind::Recover,
+            (_, Some(SpecialOrigin::Mint)) => ParsedMessageKind::Mint,
+            (MsgInfo::ExtIn(_), _) => ParsedMessageKind::ExtIn,
+            (MsgInfo::Int(_), _) => ParsedMessageKind::Int,
+            (MsgInfo::ExtOut(_), _) => ParsedMessageKind::ExtOut,
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AsyncMessageKind {
+pub enum ParsedMessageKind {
     Recover,
     Mint,
     ExtIn,
