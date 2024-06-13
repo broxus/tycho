@@ -1,5 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,11 +38,12 @@ impl SessionStateIterator {
         for (shard_ident, shard) in flat_shards.iter() {
             if let Some(shard_range) = shard_ranges.get(shard_ident) {
                 let range_start = match shard_range.clone().from {
-                    None => Included(InternalMessageKey::default()),
-                    Some(from_lt) => Excluded(from_lt),
+                    None => Bound::Included(InternalMessageKey::default()),
+                    Some(from_lt) => Bound::Excluded(from_lt),
                 };
 
-                let range_end = Included(shard_range.clone().to.unwrap_or(InternalMessageKey::MAX));
+                let range_end =
+                    Bound::Included(shard_range.clone().to.unwrap_or(InternalMessageKey::MAX));
 
                 let shard_size = shard.outgoing_messages.len();
 
