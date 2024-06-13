@@ -93,7 +93,7 @@ impl Default for MsgsExecutionParams {
 }
 
 pub struct BlockCollationResult {
-    pub candidate: BlockCandidate,
+    pub candidate: Box<BlockCandidate>,
     pub new_state_stuff: ShardStateStuff,
     /// There are unprocessed internals in shard queue after block collation
     pub has_pending_internals: bool,

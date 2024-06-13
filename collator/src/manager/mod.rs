@@ -1310,7 +1310,7 @@ where
     }
 
     /// Store block in a cache structure that allow to append signatures
-    fn store_candidate(&mut self, candidate: BlockCandidate) -> Result<()> {
+    fn store_candidate(&mut self, candidate: Box<BlockCandidate>) -> Result<()> {
         // TODO: in future we may store to cache a block received from blockchain before,
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
