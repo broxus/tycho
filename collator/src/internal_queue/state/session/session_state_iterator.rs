@@ -83,6 +83,7 @@ impl SessionStateIterator {
         metrics::histogram!("tycho_session_iterator_subqueue_size", &labels)
             .record(message_queue.len() as f64);
 
+
         message_queue
     }
 }
