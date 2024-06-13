@@ -32,6 +32,8 @@ tracing-subscriber = { workspace = true }
 ton_executor = { workspace = true }
 trait-variant = { workspace = true }
 weedb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }

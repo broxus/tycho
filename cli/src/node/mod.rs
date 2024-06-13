@@ -271,6 +271,7 @@ pub struct Node {
     pub public_overlay_client_config: PublicOverlayClientConfig,
     pub blockchain_rpc_service_config: BlockchainRpcServiceConfig,
     pub blockchain_block_provider_config: BlockchainBlockProviderConfig,
+    pub collation_config: CollationConfig,
 }
 
 impl Node {
@@ -358,6 +359,7 @@ impl Node {
             public_overlay_client_config: node_config.public_overlay_client,
             blockchain_rpc_service_config: node_config.blockchain_rpc_service,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
+            collation_config: node_config.collator,
         })
     }
 
@@ -569,20 +571,6 @@ impl Node {
         // Create collator
         tracing::info!("starting collator");
 
-        // TODO: move into config
-        let collation_config = CollationConfig {
-            key_pair: self.keypair.clone(),
-            mc_block_min_interval_ms: 2500,
-            max_uncommitted_chain_length: 31,
-            uncommitted_chain_to_import_next_anchor: 2,
-            max_mc_block_delta_from_bc_to_await_own: 2,
-            supported_block_version: 50,
-            supported_capabilities: supported_capabilities(),
-            max_collate_threads: 1,
-            #[cfg(test)]
-            test_validators_keypairs: vec![],
-        };
-
         let shards = vec![];
         let session_state_factory = SessionStateImplFactory::new(shards);
         let persistent_state_factory = PersistentStateImplFactory::new(self.storage.clone());
@@ -595,7 +583,8 @@ impl Node {
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
         let collation_manager = CollationManager::start(
-            collation_config,
+            self.keypair.clone(),
+            self.collation_config.clone(),
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
             mempool_adapter,
@@ -624,6 +613,8 @@ impl Node {
                 },
             },
             CollatorStdImplFactory,
+            #[cfg(test)]
+            vec![],
         );
 
         let collator_state_subscriber = CollatorStateSubscriber {
@@ -792,29 +783,4 @@ fn make_shard_state(
     };
 
     ShardStateStuff::from_root(&block_id, root, &tracker)
-}
-
-fn supported_capabilities() -> u64 {
-    GlobalCapabilities::from([
-        GlobalCapability::CapCreateStatsEnabled,
-        GlobalCapability::CapBounceMsgBody,
-        GlobalCapability::CapReportVersion,
-        GlobalCapability::CapShortDequeue,
-        GlobalCapability::CapInitCodeHash,
-        GlobalCapability::CapOffHypercube,
-        GlobalCapability::CapFixTupleIndexBug,
-        GlobalCapability::CapFastStorageStat,
-        GlobalCapability::CapMyCode,
-        GlobalCapability::CapFullBodyInBounced,
-        GlobalCapability::CapStorageFeeToTvm,
-        GlobalCapability::CapWorkchains,
-        GlobalCapability::CapStcontNewFormat,
-        GlobalCapability::CapFastStorageStatBugfix,
-        GlobalCapability::CapResolveMerkleCell,
-        GlobalCapability::CapFeeInGasUnits,
-        GlobalCapability::CapBounceAfterFailedAction,
-        GlobalCapability::CapSuspendedList,
-        GlobalCapability::CapsTvmBugfixes2022,
-    ])
-    .into_inner()
 }

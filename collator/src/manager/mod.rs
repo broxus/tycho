@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
@@ -65,6 +66,7 @@ pub struct CollationManager<CF, V>
 where
     CF: CollatorFactory,
 {
+    keypair: Arc<KeyPair>,
     config: Arc<CollationConfig>,
 
     dispatcher: Arc<AsyncQueuedDispatcher<Self>>,
@@ -93,6 +95,9 @@ where
     next_mc_block_chain_time: u64,
 
     last_collated_chain_times_by_shards: FastHashMap<ShardIdent, Vec<(u64, bool)>>,
+
+    #[cfg(any(test, feature = "test"))]
+    test_validators_keypairs: Vec<Arc<KeyPair>>,
 }
 
 #[async_trait]
@@ -203,13 +208,16 @@ where
     CF: CollatorFactory,
     V: Validator,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn start<STF, MPF, VF>(
+        keypair: Arc<KeyPair>,
         config: CollationConfig,
         mq_adapter: Arc<dyn MessageQueueAdapter>,
         state_node_adapter_factory: STF,
         mpool_adapter_factory: MPF,
         validator_factory: VF,
         collator_factory: CF,
+        #[cfg(any(test, feature = "test"))] test_validators_keypairs: Vec<Arc<KeyPair>>,
     ) -> RunningCollationManager<CF, V>
     where
         STF: StateNodeAdapterFactory,
@@ -234,12 +242,13 @@ where
         let validator = validator_factory.create(ValidatorContext {
             listeners: vec![arc_dispatcher.clone()],
             state_node_adapter: state_node_adapter.clone(),
-            keypair: config.key_pair.clone(),
+            keypair: keypair.clone(),
         });
 
         let validator = Arc::new(validator);
 
         let processor = Self {
+            keypair,
             config: Arc::new(config),
             dispatcher: arc_dispatcher.clone(),
             state_node_adapter: state_node_adapter.clone(),
@@ -261,6 +270,9 @@ where
             next_mc_block_chain_time: 0,
 
             last_collated_chain_times_by_shards: FastHashMap::default(),
+
+            #[cfg(any(test, feature = "test"))]
+            test_validators_keypairs,
         };
         AsyncQueuedDispatcher::run(processor, receiver);
         tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks queue dispatcher started");
@@ -681,11 +693,11 @@ where
 
             // TEST: override with test subset with test keypairs defined on test run
             #[cfg(feature = "test")]
-            let subset = if self.config.test_validators_keypairs.is_empty() {
+            let subset = if self.test_validators_keypairs.is_empty() {
                 subset
             } else {
                 let mut test_subset = vec![];
-                for (i, keypair) in self.config.test_validators_keypairs.iter().enumerate() {
+                for (i, keypair) in self.test_validators_keypairs.iter().enumerate() {
                     let val_descr = &subset[i];
                     test_subset.push(everscale_types::models::ValidatorDescription {
                         public_key: keypair.public_key.to_bytes().into(),
@@ -705,7 +717,7 @@ where
                 subset,
             );
 
-            let local_pubkey_opt = find_us_in_collators_set(&self.config, &subset);
+            let local_pubkey_opt = find_us_in_collators_set(&self.keypair, &subset);
 
             let new_session_info = Arc::new(CollationSessionInfo::new(
                 shard_id.workchain(),
@@ -714,7 +726,7 @@ where
                     validators: subset,
                     short_hash: hash_short,
                 },
-                Some(self.config.key_pair.clone()),
+                Some(self.keypair.clone()),
             ));
 
             if let Some(_local_pubkey) = local_pubkey_opt {

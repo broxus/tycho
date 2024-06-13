@@ -16,7 +16,7 @@ use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::CollationConfig;
+use tycho_collator::types::{CollationConfig, MsgsExecutionParams};
 use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
@@ -82,20 +82,19 @@ async fn test_collation_process_on_stubs() {
     let node_1_keypair = Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd));
 
     let config = CollationConfig {
-        key_pair: node_1_keypair.clone(),
-        mc_block_min_interval_ms: 10000,
-        max_uncommitted_chain_length: 32,
-        uncommitted_chain_to_import_next_anchor: 8,
-        max_mc_block_delta_from_bc_to_await_own: 2,
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
-        max_collate_threads: 1,
-
-        #[cfg(feature = "test")]
-        test_validators_keypairs: vec![
-            node_1_keypair,
-            // Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd)),
-        ],
+        mc_block_min_interval_ms: 10000,
+        max_mc_block_delta_from_bc_to_await_own: 2,
+        max_uncommitted_chain_length: 31,
+        uncommitted_chain_to_import_next_anchor: 8,
+        block_txs_limit: 14,
+        msgs_exec_params: MsgsExecutionParams {
+            set_size: 9,
+            min_externals_per_set: 3,
+            group_limit: 4,
+            group_vert_size: 2,
+        },
     };
 
     tracing::info!("Trying to start CollationManager");
@@ -137,15 +136,21 @@ async fn test_collation_process_on_stubs() {
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
     let manager = CollationManager::start(
+        node_1_keypair.clone(),
         config,
         Arc::new(message_queue_adapter),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
-        |listener| MempoolAdapterStubImpl::new(listener),
+        MempoolAdapterStubImpl::new,
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
             config: validator_config,
         },
         CollatorStdImplFactory,
+        #[cfg(feature = "test")]
+        vec![
+            node_1_keypair,
+            // Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd)),
+        ],
     );
 
     let state_node_adapter = StrangeBlockProvider {

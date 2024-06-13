@@ -1,11 +1,11 @@
 use anyhow::Result;
-use everscale_crypto::ed25519::PublicKey;
+use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::boc::BocRepr;
 use everscale_types::models::ValidatorDescription;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
 use super::types::BlockCandidateEntry;
-use crate::types::{BlockStuffForSync, CollationConfig};
+use crate::types::BlockStuffForSync;
 
 pub fn build_block_stuff_for_sync(
     block_candidate: &BlockCandidateEntry,
@@ -28,10 +28,10 @@ pub fn build_block_stuff_for_sync(
 }
 
 pub fn find_us_in_collators_set(
-    config: &CollationConfig,
+    keypair: &KeyPair,
     collators_set: &[ValidatorDescription],
 ) -> Option<PublicKey> {
-    let local_pubkey = config.key_pair.public_key;
+    let local_pubkey = keypair.public_key;
     let local_pubkey_hash = local_pubkey.as_bytes();
     for node in collators_set {
         if local_pubkey_hash == &node.public_key {

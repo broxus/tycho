@@ -386,10 +386,10 @@ impl CollatorStdImpl {
             }
 
             // HACK: temporary always full process msgs set and check block limits after
-            if collation_data.tx_count >= 10000 {
+            if collation_data.tx_count >= self.config.block_txs_limit {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "STUB: block limit reached: {}/10000",
-                    collation_data.tx_count,
+                    "STUB: block limit reached: {}/{}",
+                    collation_data.tx_count, self.config.block_txs_limit,
                 );
                 block_limits_reached = true;
             }
@@ -599,8 +599,13 @@ impl CollatorStdImpl {
     /// * `group_vert_size` - max num of messages per account in group
     fn get_msgs_execution_params(&self) -> (usize, usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
-        //(193, 60, 38)
-        (1000, 400, 1000, 1000)
+        let params = &self.config.msgs_exec_params;
+        (
+            params.set_size as _,
+            params.min_externals_per_set as _,
+            params.group_limit as _,
+            params.group_vert_size as _,
+        )
     }
 
     /// Read specified number of externals from imported anchors

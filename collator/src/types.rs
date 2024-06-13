@@ -3,30 +3,93 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{
-    Block, BlockId, BlockInfo, CurrencyCollection, IntAddr, ShardIdent, Signature, ValueFlow,
+    Block, BlockId, BlockInfo, CurrencyCollection, GlobalCapabilities, GlobalCapability, IntAddr,
+    ShardIdent, Signature, ValueFlow,
 };
+use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
 use tycho_util::FastHashMap;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct CollationConfig {
-    pub key_pair: Arc<KeyPair>,
-
-    pub mc_block_min_interval_ms: u64,
-
-    pub max_uncommitted_chain_length: u32,
-    pub uncommitted_chain_to_import_next_anchor: u32,
-
-    pub max_mc_block_delta_from_bc_to_await_own: i32,
-
     pub supported_block_version: u32,
     pub supported_capabilities: u64,
 
-    pub max_collate_threads: u16,
+    pub mc_block_min_interval_ms: u64,
+    pub max_mc_block_delta_from_bc_to_await_own: i32,
+    pub max_uncommitted_chain_length: u32,
+    pub uncommitted_chain_to_import_next_anchor: u32,
 
-    #[cfg(any(test, feature = "test"))]
-    pub test_validators_keypairs: Vec<Arc<KeyPair>>,
+    pub block_txs_limit: u32,
+
+    pub msgs_exec_params: MsgsExecutionParams,
+}
+
+impl Default for CollationConfig {
+    fn default() -> Self {
+        Self {
+            supported_block_version: 50,
+            supported_capabilities: supported_capabilities(),
+
+            mc_block_min_interval_ms: 2500,
+            max_mc_block_delta_from_bc_to_await_own: 2,
+
+            max_uncommitted_chain_length: 31,
+            uncommitted_chain_to_import_next_anchor: 4,
+
+            block_txs_limit: 20000,
+
+            msgs_exec_params: MsgsExecutionParams::default(),
+        }
+    }
+}
+
+fn supported_capabilities() -> u64 {
+    GlobalCapabilities::from([
+        GlobalCapability::CapCreateStatsEnabled,
+        GlobalCapability::CapBounceMsgBody,
+        GlobalCapability::CapReportVersion,
+        GlobalCapability::CapShortDequeue,
+        GlobalCapability::CapInitCodeHash,
+        GlobalCapability::CapOffHypercube,
+        GlobalCapability::CapFixTupleIndexBug,
+        GlobalCapability::CapFastStorageStat,
+        GlobalCapability::CapMyCode,
+        GlobalCapability::CapFullBodyInBounced,
+        GlobalCapability::CapStorageFeeToTvm,
+        GlobalCapability::CapWorkchains,
+        GlobalCapability::CapStcontNewFormat,
+        GlobalCapability::CapFastStorageStatBugfix,
+        GlobalCapability::CapResolveMerkleCell,
+        GlobalCapability::CapFeeInGasUnits,
+        GlobalCapability::CapBounceAfterFailedAction,
+        GlobalCapability::CapSuspendedList,
+        GlobalCapability::CapsTvmBugfixes2022,
+    ])
+    .into_inner()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
+pub struct MsgsExecutionParams {
+    pub set_size: u32,
+    pub min_externals_per_set: u32,
+    pub group_limit: u32,
+    pub group_vert_size: u32,
+}
+
+impl Default for MsgsExecutionParams {
+    fn default() -> Self {
+        Self {
+            set_size: 1000,
+            min_externals_per_set: 300,
+            group_limit: 1000,
+            group_vert_size: 1000,
+        }
+    }
 }
 
 pub struct BlockCollationResult {
