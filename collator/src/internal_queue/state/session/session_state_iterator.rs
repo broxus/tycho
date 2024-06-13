@@ -1,9 +1,9 @@
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
+use std::collections::BinaryHeap;
+use std::ops::Bound::{Excluded, Included};
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
@@ -37,36 +37,23 @@ impl SessionStateIterator {
 
         for (shard_ident, shard) in flat_shards.iter() {
             if let Some(shard_range) = shard_ranges.get(shard_ident) {
-                let from_lt = match shard_range.from_lt {
-                    None => 0,
-                    Some(from_lt) => from_lt + 1,
-                };
-                let mut range_start = InternalMessageKey {
-                    lt: from_lt,
-                    hash: HashBytes::ZERO,
+                let range_start = match shard_range.clone().from {
+                    None => Included(InternalMessageKey::default()),
+                    Some(from_lt) => Excluded(from_lt),
                 };
 
-                let range_end = InternalMessageKey {
-                    lt: shard_range.to_lt.unwrap_or(u64::MAX),
-                    hash: HashBytes([255; 32]),
-                };
-
-                // TODO fix when range start from 0 to 0
-                if range_start > range_end {
-                    range_start = range_end.clone();
-                }
+                let range_end = Included(shard_range.clone().to.unwrap_or(InternalMessageKey::MAX));
 
                 let shard_size = shard.outgoing_messages.len();
 
                 tracing::trace!(
                     target: tracing_targets::MQ,
-                    "Shard {} has {} messages",
-                    shard_ident,
+                    "Full queue has {} messages",
                     shard_size
                 );
 
                 // Perform a range query on the BTreeMap
-                let range = shard.outgoing_messages.range(range_start..=range_end);
+                let range = shard.outgoing_messages.range((range_start, range_end));
 
                 for (_, message) in range {
                     if let Ok((workchain, account_hash)) = message.destination() {
@@ -82,6 +69,18 @@ impl SessionStateIterator {
                 }
             }
         }
+
+        tracing::info!(
+            target: tracing_targets::MQ,
+            "Message queue for iterator {} has {} messages",
+            shard_id,
+            message_queue.len()
+        );
+
+        let labels = [("workchain", shard_id.workchain().to_string())];
+
+        metrics::histogram!("tycho_session_iterator_subqueue_size", &labels)
+            .record(message_queue.len() as f64);
 
         message_queue
     }

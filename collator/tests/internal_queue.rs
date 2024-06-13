@@ -14,7 +14,7 @@ use tycho_collator::internal_queue::state::persistent::persistent_state::{
 use tycho_collator::internal_queue::state::session::session_state::{
     SessionStateImplFactory, SessionStateStdImpl,
 };
-use tycho_collator::internal_queue::types::EnqueuedMessage;
+use tycho_collator::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 use tycho_collator::queue_adapter::{MessageQueueAdapter, MessageQueueAdapterStdImpl};
 use tycho_collator::utils::shard::SplitMergeAction;
 use tycho_storage::Storage;
@@ -66,11 +66,11 @@ async fn intershard_message_delivery_test() -> anyhow::Result<()> {
     let mut from_ranges = FastHashMap::default();
     let mut to_ranges = FastHashMap::default();
 
-    from_ranges.insert(shard_id_1, 0);
-    from_ranges.insert(shard_id_2, 0);
+    from_ranges.insert(shard_id_1, InternalMessageKey::default());
+    from_ranges.insert(shard_id_2, InternalMessageKey::default());
 
-    to_ranges.insert(shard_id_1, u64::MAX);
-    to_ranges.insert(shard_id_2, u64::MAX);
+    to_ranges.insert(shard_id_1, InternalMessageKey::MAX);
+    to_ranges.insert(shard_id_2, InternalMessageKey::MAX);
 
     let mut iterator = adapter
         .create_iterator(shard_id_1, from_ranges.clone(), to_ranges.clone())
