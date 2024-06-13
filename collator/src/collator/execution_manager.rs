@@ -1,13 +1,12 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::dict::Dict;
 use everscale_types::models::{
-    BlockchainConfig, CurrencyCollection, ExtInMsgInfo, HashUpdate, IntMsgInfo, Lazy, LibDescr,
-    MsgInfo, OptionalAccount, ShardAccount, ShardAccounts, TickTock, Transaction,
+    CurrencyCollection, ExtInMsgInfo, HashUpdate, IntMsgInfo, Lazy, MsgInfo, OptionalAccount,
+    ShardAccount, ShardAccounts, TickTock, Transaction,
 };
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
@@ -26,22 +25,14 @@ static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 
 /// Execution manager
 pub(super) struct ExecutionManager {
-    /// libraries
-    pub libraries: Dict<HashBytes, LibDescr>,
-    /// generated unix time
-    gen_utime: u32,
-    // block's start logical time
-    start_lt: u64,
     // this time is used if account's lt is smaller
     pub min_next_lt: u64,
-    // block random seed
-    seed_block: HashBytes,
     /// blockchain config
-    config: BlockchainConfig,
+    config: Arc<PreloadedBlockchainConfig>,
+    /// vm execution params related to current block
+    pub params: Arc<ExecuteParams>,
     /// total transaction duration
     total_trans_duration: u64,
-    /// block version
-    block_version: u32,
     /// messages groups
     messages_groups: FastHashMap<u32, FastHashMap<HashBytes, Vec<AsyncMessage>>>,
     /// group limit
@@ -56,27 +47,18 @@ pub(super) struct ExecutionManager {
 
 impl ExecutionManager {
     /// constructor
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        gen_utime: u32,
-        start_lt: u64,
         min_next_lt: u64,
-        seed_block: HashBytes,
-        libraries: Dict<HashBytes, LibDescr>,
-        config: BlockchainConfig,
-        block_version: u32,
+        config: Arc<PreloadedBlockchainConfig>,
+        params: Arc<ExecuteParams>,
         group_limit: usize,
         group_vert_size: usize,
         shard_accounts: ShardAccounts,
     ) -> Self {
         Self {
-            libraries,
-            gen_utime,
-            start_lt,
             min_next_lt,
-            seed_block,
             config,
-            block_version,
+            params,
             group_limit,
             group_vert_size,
             total_trans_duration: 0,
@@ -215,7 +197,9 @@ impl ExecutionManager {
         mut shard_account_stuff: ShardAccountStuff,
     ) -> Result<(Vec<ExecutedMessage>, ShardAccountStuff)> {
         let mut results = vec![];
-        let (config, params, min_next_lt) = self.get_execute_params()?;
+        let min_next_lt = self.min_next_lt;
+        let config = self.config.clone();
+        let params = self.params.clone();
 
         rayon_run(move || {
             for msg in msgs {
@@ -322,7 +306,9 @@ impl ExecutionManager {
         shard_account_stuff: ShardAccountStuff,
     ) -> Result<(AsyncMessage, Box<(CurrencyCollection, Lazy<Transaction>)>)> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute_special_transaction()");
-        let (config, params, min_next_lt) = self.get_execute_params()?;
+        let min_next_lt = self.min_next_lt;
+        let config = self.config.clone();
+        let params = self.params.clone();
         let (
             ExecutedMessage {
                 transaction_result,
@@ -347,24 +333,6 @@ impl ExecutionManager {
         );
         self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
         Ok((in_message, transaction_result?))
-    }
-
-    fn get_execute_params(&self) -> Result<(PreloadedBlockchainConfig, ExecuteParams, u64)> {
-        let state_libs = self.libraries.clone();
-        let block_unixtime = self.gen_utime;
-        let block_lt = self.start_lt;
-        let seed_block = self.seed_block;
-        let block_version = self.block_version;
-        let config = PreloadedBlockchainConfig::with_config(self.config.clone(), 0)?; // TODO: fix global id
-        let params = ExecuteParams {
-            state_libs,
-            block_unixtime,
-            block_lt,
-            seed_block,
-            block_version,
-            ..ExecuteParams::default()
-        };
-        Ok((config, params, self.min_next_lt))
     }
 }
 

@@ -28,6 +28,7 @@ impl CollatorStdImpl {
         let mut account_blocks = AccountBlocksDict::default();
 
         let mut new_config_opt: Option<BlockchainConfig> = None;
+        let mut updated_state_libs = exec_manager.params.state_libs.clone();
 
         for (account_id, updated_shard_account_stuff) in exec_manager.changed_accounts.drain() {
             let account = updated_shard_account_stuff.shard_account.load_account()?;
@@ -64,7 +65,7 @@ impl CollatorStdImpl {
             }
             if collation_data.block_id_short.shard.is_masterchain() {
                 updated_shard_account_stuff
-                    .update_public_libraries(&mut exec_manager.libraries, account)?;
+                    .update_public_libraries(&mut updated_state_libs, account)?;
             }
             let acc_block = AccountBlock {
                 account: updated_shard_account_stuff.account_addr,
@@ -192,7 +193,7 @@ impl CollatorStdImpl {
             .try_sub_assign(&value_flow.recovered)?;
 
         if collation_data.block_id_short.shard.is_masterchain() {
-            new_observable_state.libraries = exec_manager.libraries;
+            new_observable_state.libraries = updated_state_libs;
         }
 
         // TODO: update smc on hard fork
