@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, VecDeque};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -12,7 +13,7 @@ use crate::internal_queue::types::InternalMessageKey;
 use crate::tracing_targets;
 
 pub struct SessionStateIterator {
-    message_queue: VecDeque<Arc<MessageWithSource>>,
+    message_queue: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
 }
 
 impl SessionStateIterator {
@@ -31,8 +32,8 @@ impl SessionStateIterator {
         flat_shards: FastHashMap<ShardIdent, Shard>,
         shard_ranges: &FastHashMap<ShardIdent, ShardRange>,
         shard_id: &ShardIdent,
-    ) -> VecDeque<Arc<MessageWithSource>> {
-        let mut message_queue = VecDeque::new();
+    ) -> BinaryHeap<Reverse<Arc<MessageWithSource>>> {
+        let mut message_queue = BinaryHeap::new();
 
         for (shard_ident, shard) in flat_shards.iter() {
             if let Some(shard_range) = shard_ranges.get(shard_ident) {
@@ -72,10 +73,10 @@ impl SessionStateIterator {
                         if shard_id.contains_account(&account_hash)
                             && shard_id.workchain() == workchain as i32
                         {
-                            message_queue.push_back(Arc::new(MessageWithSource::new(
+                            message_queue.push(Reverse(Arc::new(MessageWithSource::new(
                                 *shard_ident,
                                 message.clone(),
-                            )));
+                            ))));
                         }
                     }
                 }
@@ -88,11 +89,11 @@ impl SessionStateIterator {
 
 impl StateIterator for SessionStateIterator {
     fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
-        Ok(self.message_queue.pop_front())
+        Ok(self.message_queue.pop().map(|reverse| reverse.0))
     }
 
     fn peek(&self) -> Result<Option<Arc<MessageWithSource>>> {
-        Ok(self.message_queue.front().cloned())
+        Ok(self.message_queue.peek().map(|reverse| reverse.clone().0))
     }
 }
 

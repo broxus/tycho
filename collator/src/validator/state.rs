@@ -259,9 +259,10 @@ impl SessionInfo {
             } else {
                 let root_hash = HashBytes(block_validation_candidate.root_hash);
                 let file_hash = HashBytes(block_validation_candidate.file_hash);
-                tracing::warn!(target: tracing_targets::VALIDATOR, validator_id=%validator_id,
+                tracing::error!(target: tracing_targets::VALIDATOR, validator_id=%validator_id,
                     root_hash=?root_hash,
                     file_hash=?file_hash,
+                    block= %block_id_short,
                     "Invalid signature");
                 panic!("Invalid signature");
             }

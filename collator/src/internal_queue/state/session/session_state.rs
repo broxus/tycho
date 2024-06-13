@@ -222,7 +222,9 @@ impl SessionState for SessionStateStdImpl {
                 .ok_or(QueueError::ShardNotFound(block_id_short.shard))?
                 .clone()
         };
+
         shard_arc.write().await.add_diff(diff, block_id_short);
+
         Ok(())
     }
 
