@@ -215,7 +215,7 @@ impl ExecutionManager {
         mut shard_account_stuff: ShardAccountStuff,
     ) -> Result<(Vec<ExecutedMessage>, ShardAccountStuff)> {
         let mut results = vec![];
-        let (config, params) = self.get_execute_params()?;
+        let (config, params, min_next_lt) = self.get_execute_params()?;
 
         rayon_run(move || {
             for msg in msgs {
@@ -223,6 +223,7 @@ impl ExecutionManager {
                     account_id,
                     msg,
                     shard_account_stuff,
+                    min_next_lt,
                     &config,
                     &params,
                 )?;
@@ -239,6 +240,7 @@ impl ExecutionManager {
         account_id: AccountId,
         new_msg: AsyncMessage,
         mut shard_account_stuff: ShardAccountStuff,
+        min_next_lt: u64,
         config: &PreloadedBlockchainConfig,
         params: &ExecuteParams,
     ) -> Result<(ExecutedMessage, ShardAccountStuff)> {
@@ -264,10 +266,10 @@ impl ExecutionManager {
             | AsyncMessage::Ext(_, new_msg_cell)
             | AsyncMessage::Int(_, new_msg_cell, _)
             | AsyncMessage::NewInt(_, new_msg_cell) => {
-                execute_ordinary_message(new_msg_cell, shard_account, params, config)
+                execute_ordinary_message(new_msg_cell, shard_account, min_next_lt, params, config)
             }
             AsyncMessage::TickTock(ticktock_) => {
-                execute_ticktock_message(*ticktock_, shard_account, params, config)
+                execute_ticktock_message(*ticktock_, shard_account, min_next_lt, params, config)
             }
         };
 
@@ -320,7 +322,7 @@ impl ExecutionManager {
         shard_account_stuff: ShardAccountStuff,
     ) -> Result<(AsyncMessage, Box<(CurrencyCollection, Lazy<Transaction>)>)> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute_special_transaction()");
-        let (config, params) = self.get_execute_params()?;
+        let (config, params, min_next_lt) = self.get_execute_params()?;
         let (
             ExecutedMessage {
                 transaction_result,
@@ -329,35 +331,40 @@ impl ExecutionManager {
             },
             updated_shard_account_stuff,
         ) = rayon_run(move || {
-            Self::execute_one_message(account_id, msg, shard_account_stuff, &config, &params)
+            Self::execute_one_message(
+                account_id,
+                msg,
+                shard_account_stuff,
+                min_next_lt,
+                &config,
+                &params,
+            )
         })
         .await?;
         self.min_next_lt = cmp::max(
-            self.min_next_lt,
+            min_next_lt,
             updated_shard_account_stuff.shard_account.last_trans_lt + 1,
         );
         self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
         Ok((in_message, transaction_result?))
     }
 
-    fn get_execute_params(&self) -> Result<(PreloadedBlockchainConfig, ExecuteParams)> {
+    fn get_execute_params(&self) -> Result<(PreloadedBlockchainConfig, ExecuteParams, u64)> {
         let state_libs = self.libraries.clone();
         let block_unixtime = self.gen_utime;
         let block_lt = self.start_lt;
         let seed_block = self.seed_block;
         let block_version = self.block_version;
-        let min_lt = self.min_next_lt;
         let config = PreloadedBlockchainConfig::with_config(self.config.clone(), 0)?; // TODO: fix global id
         let params = ExecuteParams {
             state_libs,
             block_unixtime,
             block_lt,
-            min_lt,
             seed_block,
             block_version,
             ..ExecuteParams::default()
         };
-        Ok((config, params))
+        Ok((config, params, self.min_next_lt))
     }
 }
 
@@ -365,12 +372,19 @@ impl ExecutionManager {
 fn execute_ordinary_message(
     new_msg_cell: &Cell,
     shard_account: &mut ShardAccount,
+    min_next_lt: u64,
     params: &ExecuteParams,
     config: &PreloadedBlockchainConfig,
 ) -> Result<Box<(CurrencyCollection, Lazy<Transaction>)>> {
     let executor = OrdinaryTransactionExecutor::new();
     executor
-        .execute_with_libs_and_params(Some(new_msg_cell), shard_account, params, config)
+        .execute_with_libs_and_params(
+            Some(new_msg_cell),
+            shard_account,
+            min_next_lt,
+            params,
+            config,
+        )
         .map(Box::new)
 }
 
@@ -378,12 +392,13 @@ fn execute_ordinary_message(
 fn execute_ticktock_message(
     tick_tock: TickTock,
     shard_account: &mut ShardAccount,
+    min_next_lt: u64,
     params: &ExecuteParams,
     config: &PreloadedBlockchainConfig,
 ) -> Result<Box<(CurrencyCollection, Lazy<Transaction>)>> {
     let executor = TickTockTransactionExecutor::new(tick_tock);
     executor
-        .execute_with_libs_and_params(None, shard_account, params, config)
+        .execute_with_libs_and_params(None, shard_account, min_next_lt, params, config)
         .map(Box::new)
 }
 

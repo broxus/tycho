@@ -100,7 +100,7 @@ weedb = "0.3.1"
 x509-parser = "0.15"
 
 # TODO: RIIR
-ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", branch = "shard_acc_executor" }
+ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", branch = "new_cells" }
 
 # local deps
 tycho-block-util = { path = "./block-util" }
