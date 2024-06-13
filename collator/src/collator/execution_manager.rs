@@ -7,9 +7,9 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
-use ton_executor::blockchain_config::PreloadedBlockchainConfig;
 use ton_executor::{
-    ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
+    ExecuteParams, ExecutorOutput, OrdinaryTransactionExecutor, PreloadedBlockchainConfig,
+    TickTockTransactionExecutor, TransactionExecutor,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
@@ -141,13 +141,12 @@ impl ExecutionManager {
                     }
                 }
 
-                let (total_fees, transaction) = tx.result?;
+                let executor_output = tx.result?;
 
                 items.push(ExecutedTickItem {
                     account_addr: executed.account_state.account_addr,
                     in_message: tx.in_message,
-                    total_fees,
-                    transaction,
+                    executor_output,
                 });
             }
 
@@ -332,8 +331,7 @@ impl ExecutedTick {
 pub struct ExecutedTickItem {
     pub account_addr: AccountId,
     pub in_message: Box<AsyncMessage>,
-    pub total_fees: CurrencyCollection,
-    pub transaction: Lazy<Transaction>,
+    pub executor_output: ExecutorOutput,
 }
 
 pub struct ExecutedTransactions {
@@ -345,8 +343,6 @@ pub struct ExecutedOrdinaryTransaction {
     pub result: Result<ExecutorOutput>,
     pub in_message: Box<AsyncMessage>,
 }
-
-pub type ExecutorOutput = (CurrencyCollection, Lazy<Transaction>);
 
 fn execute_ordinary_transaction(
     account_stuff: &mut ShardAccountStuff,
@@ -373,13 +369,16 @@ fn execute_ordinary_transaction(
         config,
     );
 
-    if let Ok((total_fees, transaction)) = &result {
+    if let Ok((total_fees, executor_output)) = &result {
         // TODO replace with batch set
         let tx_lt = shard_account.last_trans_lt;
-        account_stuff.add_transaction(tx_lt, total_fees, transaction)?;
+        account_stuff.add_transaction(tx_lt, total_fees, &executor_output.transaction)?;
     }
 
-    Ok(ExecutedOrdinaryTransaction { result, in_message })
+    Ok(ExecutedOrdinaryTransaction {
+        result: result.map(|(_, exec_out)| exec_out),
+        in_message,
+    })
 }
 
 fn execute_ticktock_transaction(
@@ -401,14 +400,14 @@ fn execute_ticktock_transaction(
     let shard_account = &mut account_stuff.shard_account;
 
     // NOTE: Failed (without tx) ticktock execution is considered as a fatal error
-    let (total_fees, transaction) = TickTockTransactionExecutor::new(tick_tock)
+    let (total_fees, executor_output) = TickTockTransactionExecutor::new(tick_tock)
         .execute_with_libs_and_params(None, shard_account, min_lt, params, config)?;
 
     // TODO replace with batch set
     let tx_lt = shard_account.last_trans_lt;
-    account_stuff.add_transaction(tx_lt, &total_fees, &transaction)?;
+    account_stuff.add_transaction(tx_lt, &total_fees, &executor_output.transaction)?;
 
-    Ok((total_fees, transaction))
+    Ok(executor_output)
 }
 
 // TODO: Update

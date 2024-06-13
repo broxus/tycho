@@ -8,8 +8,7 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
-use ton_executor::blockchain_config::PreloadedBlockchainConfig;
-use ton_executor::ExecuteParams;
+use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
 use tycho_util::FastHashMap;
 
 use super::types::{CachedMempoolAnchor, SpecialOrigin};
@@ -339,7 +338,7 @@ impl CollatorStdImpl {
                     let new_messages = new_transaction(
                         &mut collation_data,
                         &self.shard_id,
-                        item.transaction,
+                        item.executor_output,
                         item.in_message,
                     )?;
 
@@ -1081,12 +1080,12 @@ impl CollatorStdImpl {
             .execute_ordinary_transaction(account_stuff, in_message)
             .await?;
 
-        let (_total_fees, transaction) = executed.result?;
+        let executor_output = executed.result?;
 
         new_transaction(
             collation_data,
             &self.shard_id,
-            transaction,
+            executor_output,
             executed.in_message,
         )?;
 
@@ -1142,7 +1141,7 @@ impl CollatorStdImpl {
             return Ok(());
         };
 
-        let (_async_message, _transaction) = exec_manager
+        let _executor_output = exec_manager
             .execute_ticktock_transaction(account_stuff, tick_tock)
             .await?;
 
@@ -1257,13 +1256,13 @@ impl CollatorStdImpl {
 fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
-    transaction: Lazy<Transaction>,
+    executor_output: ExecutorOutput,
     in_msg: Box<AsyncMessage>,
 ) -> Result<Vec<Box<AsyncMessage>>> {
     tracing::trace!(
         target: tracing_targets::COLLATOR,
         message_hash = %in_msg.cell.repr_hash(),
-        transaction_hash = %transaction.inner().repr_hash(),
+        transaction_hash = %executor_output.transaction.inner().repr_hash(),
         "process new transaction from message",
     );
 
@@ -1281,7 +1280,7 @@ fn new_transaction(
                     fwd_fee_remaining: Default::default(),
                     message: Lazy::from_raw(in_msg.cell),
                 })?,
-                transaction: transaction.clone(),
+                transaction: executor_output.transaction.clone(),
                 fwd_fee: Default::default(),
             });
 
@@ -1295,7 +1294,7 @@ fn new_transaction(
             import_fees = ImportFees::default();
             Lazy::new(&InMsg::External(InMsgExternal {
                 in_msg: Lazy::from_raw(in_msg.cell),
-                transaction: transaction.clone(),
+                transaction: executor_output.transaction.clone(),
             }))?
         }
         // Dequeued messages have a dedicated `InMsg` type
@@ -1318,7 +1317,7 @@ fn new_transaction(
 
             let in_msg = InMsg::Final(InMsgFinal {
                 in_msg_envelope: envelope.clone(),
-                transaction: transaction.clone(),
+                transaction: executor_output.transaction.clone(),
                 fwd_fee,
             });
             import_fees = in_msg.compute_fees()?;
@@ -1354,7 +1353,7 @@ fn new_transaction(
             };
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: transaction.clone(),
+                transaction: executor_output.transaction.clone(),
                 fwd_fee,
             });
 
@@ -1400,10 +1399,7 @@ fn new_transaction(
 
     let mut out_messages = vec![];
 
-    let binding = transaction.load()?;
-
-    // TODO: Get out messages from executor
-    for out_msg_cell in binding.out_msgs.values() {
+    for out_msg_cell in executor_output.out_msgs.values() {
         let out_msg_cell = out_msg_cell?;
         let out_msg_hash = *out_msg_cell.repr_hash();
         let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
@@ -1434,7 +1430,7 @@ fn new_transaction(
                         fwd_fee_remaining: *fwd_fee,
                         message: Lazy::from_raw(out_msg_cell.clone()),
                     })?,
-                    transaction: transaction.clone(),
+                    transaction: executor_output.transaction.clone(),
                 });
 
                 collation_data
@@ -1442,7 +1438,7 @@ fn new_transaction(
                     .insert(out_msg_hash, PreparedOutMsg {
                         out_msg: Lazy::new(&out_msg)?,
                         exported_value: out_msg.compute_exported_value()?,
-                        new_tx: Some(transaction.clone()),
+                        new_tx: Some(executor_output.transaction.clone()),
                     });
 
                 out_messages.push(Box::new(AsyncMessage {
@@ -1455,7 +1451,7 @@ fn new_transaction(
             MsgInfo::ExtOut(_) => {
                 let out_msg = OutMsg::External(OutMsgExternal {
                     out_msg: Lazy::from_raw(out_msg_cell),
-                    transaction: transaction.clone(),
+                    transaction: executor_output.transaction.clone(),
                 });
 
                 collation_data
