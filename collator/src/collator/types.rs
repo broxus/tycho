@@ -1,15 +1,15 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::{AugDict, Dict};
 use everscale_types::models::{
     Account, AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef,
-    BlockchainConfig, CurrencyCollection, HashUpdate, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo,
-    OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
-    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, StateInit, TickTock,
-    Transaction, ValueFlow,
+    BlockchainConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr,
+    McStateExtra, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
@@ -98,12 +98,14 @@ pub(super) struct WorkingState {
 }
 
 pub(super) struct McData {
+    global_id: i32,
     mc_state_extra: McStateExtra,
     prev_key_block_seqno: u32,
     // TODO: remove if we do not need this
     _prev_key_block: Option<BlockId>,
     mc_state_stuff: ShardStateStuff,
 }
+
 impl McData {
     pub fn build(mc_state_stuff: ShardStateStuff) -> Result<Self> {
         let mc_state_extra = mc_state_stuff.state_extra()?;
@@ -129,11 +131,16 @@ impl McData {
         };
 
         Ok(Self {
+            global_id: mc_state_stuff.state().global_id,
             mc_state_extra: mc_state_extra.clone(),
             _prev_key_block: prev_key_block,
             prev_key_block_seqno,
             mc_state_stuff,
         })
+    }
+
+    pub fn global_id(&self) -> i32 {
+        self.global_id
     }
 
     pub fn prev_key_block_seqno(&self) -> u32 {
@@ -190,6 +197,7 @@ pub(super) struct PrevData {
 
     processed_upto: ProcessedUptoInfo,
 }
+
 impl PrevData {
     pub fn build(
         prev_states: Vec<ShardStateStuff>,
@@ -331,8 +339,8 @@ pub(super) struct BlockCollationData {
     // which is updating during tx execution
     pub next_lt: u64,
 
-    pub in_msgs: BTreeMap<HashBytes, InMsg>,
-    pub out_msgs: BTreeMap<HashBytes, OutMsg>,
+    pub in_msgs: BTreeMap<HashBytes, PreparedInMsg>,
+    pub out_msgs: BTreeMap<HashBytes, PreparedOutMsg>,
 
     pub processed_upto: ProcessedUptoInfo,
     pub externals_reading_started: bool,
@@ -361,6 +369,19 @@ pub(super) struct BlockCollationData {
 
     // TODO: set from anchor
     pub created_by: HashBytes,
+}
+
+#[derive(Debug)]
+pub struct PreparedInMsg {
+    pub in_msg: Lazy<InMsg>,
+    pub import_fees: ImportFees,
+}
+
+#[derive(Debug)]
+pub struct PreparedOutMsg {
+    pub out_msg: Lazy<OutMsg>,
+    pub exported_value: CurrencyCollection,
+    pub new_tx: Option<Lazy<Transaction>>,
 }
 
 impl BlockCollationData {
@@ -455,137 +476,165 @@ pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, Accou
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
-    pub orig_libs: Dict<HashBytes, SimpleLib>,
-    pub state_update: Lazy<HashUpdate>,
+    pub special: SpecialFlags,
+    pub initial_state_hash: HashBytes,
+    pub libraries: Dict<HashBytes, SimpleLib>,
     pub transactions: Transactions,
-    pub transactions_count: u64,
 }
 
 impl ShardAccountStuff {
-    pub fn update_public_libraries(
-        &self,
-        libraries: &mut Dict<HashBytes, LibDescr>,
-        account: Option<Account>,
-    ) -> Result<()> {
-        let state = account.map(|account| account.state);
-        let state_init = match state {
-            Some(AccountState::Active(ref state_init)) => Some(state_init),
-            _ => None,
-        };
-        let new_libs = state_init.map(|v| v.libraries.clone()).unwrap_or_default();
-        if new_libs.root() != self.orig_libs.root() {
-            for entry in new_libs.iter_union(&self.orig_libs) {
-                let (key, new_value, old_value) = entry?;
-                match (new_value, old_value) {
-                    (Some(new), Some(old)) => {
-                        if new.public && !old.public {
-                            self.add_public_library(key, new.root, libraries)?;
-                        } else if !new.public && old.public {
-                            self.remove_public_library(key, libraries)?;
-                        }
-                    }
-                    (Some(new), None) if new.public => {
-                        self.add_public_library(key, new.root, libraries)?;
-                    }
-                    (None, Some(old)) if old.public => {
-                        self.remove_public_library(key, libraries)?;
-                    }
-                    _ => {
-                        continue;
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
+    pub fn new(account_addr: &AccountId, shard_account: ShardAccount) -> Result<Self> {
+        let initial_state_hash = *shard_account.account.inner().repr_hash();
 
-    pub fn new(account_addr: AccountId, shard_account: ShardAccount) -> Result<Self> {
-        let binding = &shard_account.account;
-        let account_root = binding.inner();
-        let shard_account_state = *account_root.repr_hash();
-        let orig_libs = shard_account
+        // TODO: Add intrinsic to everscale_types for a more optimal way to get libraries
+        let (libraries, special) = shard_account
             .load_account()?
-            .map(|account| {
-                if let AccountState::Active(StateInit { ref libraries, .. }) = account.state {
-                    libraries.clone()
+            .and_then(|account| {
+                if let AccountState::Active(StateInit {
+                    libraries, special, ..
+                }) = account.state
+                {
+                    Some((libraries, special.unwrap_or_default()))
                 } else {
-                    Default::default()
+                    None
                 }
             })
             .unwrap_or_default();
 
         Ok(Self {
-            account_addr,
+            account_addr: *account_addr,
             shard_account,
-            orig_libs,
+            special,
+            initial_state_hash,
+            libraries,
             transactions: Default::default(),
-            state_update: Lazy::new(&HashUpdate {
-                old: shard_account_state,
-                new: shard_account_state,
-            })?,
-            transactions_count: 0,
         })
     }
+
+    pub fn new_empty(account_addr: &AccountId) -> Self {
+        static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
+
+        let shard_account = EMPTY_SHARD_ACCOUNT
+            .get_or_init(|| ShardAccount {
+                account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
+                last_trans_hash: Default::default(),
+                last_trans_lt: 0,
+            })
+            .clone();
+
+        let initial_state_hash = *shard_account.account.inner().repr_hash();
+
+        Self {
+            account_addr: *account_addr,
+            shard_account,
+            special: Default::default(),
+            initial_state_hash,
+            libraries: Dict::new(),
+            transactions: Default::default(),
+        }
+    }
+
+    pub fn build_hash_update(&self) -> Lazy<HashUpdate> {
+        Lazy::new(&HashUpdate {
+            old: self.initial_state_hash,
+            new: *self.shard_account.account.inner().repr_hash(),
+        })
+        .unwrap()
+    }
+
     pub fn add_transaction(
         &mut self,
+        lt: u64,
         total_fees: &CurrencyCollection,
-        transaction: Lazy<Transaction>,
+        transaction: &Lazy<Transaction>,
     ) -> Result<()> {
-        // TODO calculate key
-        let key = self.transactions_count;
-        self.transactions.set(key, total_fees, transaction)?;
+        self.transactions.set(lt, total_fees, transaction)?;
+        Ok(())
+    }
 
-        self.transactions_count += 1;
+    pub fn update_public_libraries(
+        &self,
+        loaded_account: &Option<Account>,
+        global_libraries: &mut Dict<HashBytes, LibDescr>,
+    ) -> Result<()> {
+        static EMPTY_LIBS: Dict<HashBytes, SimpleLib> = Dict::new();
+
+        let new_libraries = match loaded_account {
+            Some(Account {
+                state: AccountState::Active(s),
+                ..
+            }) => &s.libraries,
+            _ => &EMPTY_LIBS,
+        };
+
+        if new_libraries.root() == self.libraries.root() {
+            return Ok(());
+        }
+
+        for entry in new_libraries.iter_union(&self.libraries) {
+            let (ref key, new_value, old_value) = entry?;
+            match (new_value, old_value) {
+                (Some(new), Some(old)) => {
+                    if new.public && !old.public {
+                        self.add_public_library(key, &new.root, global_libraries)?;
+                    } else if !new.public && old.public {
+                        self.remove_public_library(key, global_libraries)?;
+                    }
+                }
+                (Some(new), None) if new.public => {
+                    self.add_public_library(key, &new.root, global_libraries)?;
+                }
+                (None, Some(old)) if old.public => {
+                    self.remove_public_library(key, global_libraries)?;
+                }
+                _ => continue,
+            }
+        }
         Ok(())
     }
 
     pub fn remove_public_library(
         &self,
-        key: HashBytes,
-        libraries: &mut Dict<HashBytes, LibDescr>,
+        key: &HashBytes,
+        global_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<()> {
         tracing::trace!(
-            "Removing public library {} of account {}",
-            key,
+            account_addr = %self.account_addr,
+            library = %key,
+            "removing public library",
+        );
+
+        let Some(mut lib_descr) = global_libraries.get(key)? else {
+            anyhow::bail!(
+                "cannot remove public library {key} of account {} because this public \
+                library did not exist",
+                self.account_addr
+            )
+        };
+
+        anyhow::ensure!(
+            lib_descr.lib.repr_hash() == key,
+            "cannot remove public library {key} of account {} because this public library \
+            LibDescr record does not contain a library root cell with required hash",
             self.account_addr
         );
 
-        let mut lib_descr = match libraries.get(key)? {
-            Some(ld) => ld,
-            None => bail!(
-                "cannot remove public library {} of account {} because this public \
-                library did not exist",
-                key,
-                self.account_addr
-            ),
-        };
-
-        if *lib_descr.lib.repr_hash() != key {
-            bail!(
-                "cannot remove public library {} of account {} because this public library \
-                LibDescr record does not contain a library root cell with required hash",
-                key,
-                self.account_addr
-            );
-        }
-
-        if lib_descr.publishers.remove(self.account_addr)?.is_none() {
-            bail!(
-                "cannot remove public library {} of account {} because this public library \
-                LibDescr record does not list this account as one of publishers",
-                key,
-                self.account_addr
-            );
-        }
+        anyhow::ensure!(
+            lib_descr.publishers.remove(self.account_addr)?.is_some(),
+            "cannot remove public library {key} of account {} because this public library \
+            LibDescr record does not list this account as one of publishers",
+            self.account_addr
+        );
 
         if lib_descr.publishers.is_empty() {
             tracing::debug!(
-                "library {} has no publishers left, removing altogether",
-                key
+                account_addr = %self.account_addr,
+                library = %key,
+                "library has no publishers left, removing altogether",
             );
-            libraries.remove(key)?;
+            global_libraries.remove(key)?;
         } else {
-            libraries.set(key, &lib_descr)?;
+            global_libraries.set(key, &lib_descr)?;
         }
 
         Ok(())
@@ -593,34 +642,36 @@ impl ShardAccountStuff {
 
     pub fn add_public_library(
         &self,
-        key: HashBytes,
-        library: Cell,
-        libraries: &mut Dict<HashBytes, LibDescr>,
+        key: &HashBytes,
+        library: &Cell,
+        global_libraries: &mut Dict<HashBytes, LibDescr>,
     ) -> Result<()> {
         tracing::trace!(
-            "Adding public library {} of account {}",
-            key,
-            self.account_addr
+            account_addr = %self.account_addr,
+            library = %key,
+            "adding public library",
         );
 
-        if key != *library.repr_hash() {
-            bail!("Can't add library {} because it mismatch given key", key);
-        }
+        anyhow::ensure!(
+            library.repr_hash() == key,
+            "cannot add library {key} because its root has a different hash",
+        );
 
-        let lib_descr = if let Some(mut old_lib_descr) = libraries.get(key)? {
-            if old_lib_descr.lib.repr_hash() != library.repr_hash() {
-                bail!("cannot add public library {} of account {} because existing LibDescr \
-                    record for this library does not contain a library root cell with required hash",
-                    key, self.account_addr);
-            }
-            if old_lib_descr.publishers.get(self.account_addr)?.is_some() {
-                bail!(
-                    "cannot add public library {} of account {} because this public library's \
-                    LibDescr record already lists this account as a publisher",
-                    key,
-                    self.account_addr
-                );
-            }
+        let lib_descr = if let Some(mut old_lib_descr) = global_libraries.get(key)? {
+            anyhow::ensure!(
+                old_lib_descr.lib.repr_hash() == library.repr_hash(),
+                "cannot add public library {key} of account {} because existing LibDescr \
+                data has a different root cell hash",
+                self.account_addr,
+            );
+
+            anyhow::ensure!(
+                old_lib_descr.publishers.get(&self.account_addr)?.is_none(),
+                "cannot add public library {key} of account {} because this public library's \
+                LibDescr record already lists this account as a publisher",
+                self.account_addr,
+            );
+
             old_lib_descr.publishers.set(self.account_addr, ())?;
             old_lib_descr
         } else {
@@ -632,7 +683,7 @@ impl ShardAccountStuff {
             }
         };
 
-        libraries.set(key, &lib_descr)?;
+        global_libraries.set(key, &lib_descr)?;
 
         Ok(())
     }
@@ -645,6 +696,7 @@ pub trait ShardDescriptionExt {
         value_flow: &ValueFlow,
     ) -> ShardDescription;
 }
+
 impl ShardDescriptionExt for ShardDescription {
     fn from_block_info(
         block_id: BlockId,
@@ -678,25 +730,57 @@ impl ShardDescriptionExt for ShardDescription {
     }
 }
 
-/// Async message
-#[derive(Clone, Debug)]
-pub(super) enum AsyncMessage {
-    /// 0 - msg info, 1 - msg cell
-    Recover(Cell),
-    /// 0 - msg info, 1 - msg cell
-    Mint(Cell),
-    /// 0 - msg info, 1 - msg cell
-    Ext(MsgInfo, Cell),
-    /// 0 - msg info, 1 - msg cell, 2 - is from current shard
-    Int(MsgInfo, Cell, bool),
-    /// 0 - msg info, 1 - msg cell
-    NewInt(MsgInfo, Cell),
-    /// 0 - tick tock msg
-    TickTock(TickTock),
+// /// Async message
+// pub(super) enum AsyncMessage {
+//     Ordinary(Box<OrdinaryMessage>),
+//     Special(TickTock),
+// }
+
+// impl AsyncMessage {
+//     pub fn display_kind(&self) -> &str {
+//         match self {
+//             AsyncMessage::Ordinary(msg) => msg.display_kind(),
+//             AsyncMessage::Special(TickTock::Tick) => "Tick",
+//             AsyncMessage::Special(TickTock::Tock) => "Tock",
+//         }
+//     }
+// }
+
+pub struct AsyncMessage {
+    pub info: MsgInfo,
+    pub cell: Cell,
+    pub special_origin: Option<SpecialOrigin>,
+    pub dequeued: Option<Dequeued>,
 }
 
-pub(super) struct ExecutedMessage {
-    pub transaction_result: Result<Box<(CurrencyCollection, Lazy<Transaction>)>>,
-    pub in_message: AsyncMessage,
-    pub transaction_duration: u64,
+impl AsyncMessage {
+    pub fn kind(&self) -> AsyncMessageKind {
+        match (&self.info, self.special_origin) {
+            (_, Some(SpecialOrigin::Recover)) => AsyncMessageKind::Recover,
+            (_, Some(SpecialOrigin::Mint)) => AsyncMessageKind::Mint,
+            (MsgInfo::ExtIn(_), _) => AsyncMessageKind::ExtIn,
+            (MsgInfo::Int(_), _) => AsyncMessageKind::Int,
+            (MsgInfo::ExtOut(_), _) => AsyncMessageKind::ExtOut,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncMessageKind {
+    Recover,
+    Mint,
+    ExtIn,
+    Int,
+    ExtOut,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialOrigin {
+    Recover,
+    Mint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dequeued {
+    pub same_shard: bool,
 }

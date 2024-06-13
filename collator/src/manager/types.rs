@@ -18,7 +18,7 @@ pub(super) struct BlocksCache {
 
 pub struct BlockCandidateEntry {
     pub key: BlockCacheKey,
-    pub candidate: BlockCandidate,
+    pub candidate: Box<BlockCandidate>,
     pub signatures: FastHashMap<HashBytes, Signature>,
 }
 
@@ -54,7 +54,7 @@ pub struct BlockCandidateContainer {
 }
 
 impl BlockCandidateContainer {
-    pub fn new(candidate: BlockCandidate) -> Self {
+    pub fn new(candidate: Box<BlockCandidate>) -> Self {
         let block_id = candidate.block_id;
         let key = candidate.block_id.as_short_id();
         let entry = BlockCandidateEntry {

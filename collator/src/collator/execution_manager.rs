@@ -1,49 +1,43 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{
-    CurrencyCollection, ExtInMsgInfo, HashUpdate, IntMsgInfo, Lazy, MsgInfo, OptionalAccount,
-    ShardAccount, ShardAccounts, TickTock, Transaction,
-};
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures_util::{Future, StreamExt};
 use ton_executor::blockchain_config::PreloadedBlockchainConfig;
 use ton_executor::{
     ExecuteParams, OrdinaryTransactionExecutor, TickTockTransactionExecutor, TransactionExecutor,
 };
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::FastHashMap;
 
-use super::types::{AsyncMessage, ExecutedMessage};
+use super::types::AsyncMessage;
 use crate::collator::types::{AccountId, ShardAccountStuff};
 use crate::tracing_targets;
-
-static EMPTY_SHARD_ACCOUNT: OnceLock<ShardAccount> = OnceLock::new();
 
 /// Execution manager
 pub(super) struct ExecutionManager {
     // this time is used if account's lt is smaller
-    pub min_next_lt: u64,
+    min_next_lt: u64,
     /// blockchain config
     config: Arc<PreloadedBlockchainConfig>,
     /// vm execution params related to current block
-    pub params: Arc<ExecuteParams>,
-    /// total transaction duration
-    total_trans_duration: u64,
+    params: Arc<ExecuteParams>,
     /// messages groups
-    messages_groups: FastHashMap<u32, FastHashMap<HashBytes, Vec<AsyncMessage>>>,
+    message_groups: MessageGroups,
     /// group limit
     group_limit: usize,
     /// group vertical size
     group_vert_size: usize,
-    /// shard accounts
-    pub shard_accounts: ShardAccounts,
-    /// changed accounts
-    pub changed_accounts: FastHashMap<AccountId, ShardAccountStuff>,
+    accounts_cache: AccountsCache,
 }
+
+type MessageGroups = FastHashMap<u32, MessageGroup>;
+type MessageGroup = FastHashMap<HashBytes, Vec<Box<AsyncMessage>>>;
 
 impl ExecutionManager {
     /// constructor
@@ -61,454 +55,539 @@ impl ExecutionManager {
             params,
             group_limit,
             group_vert_size,
-            total_trans_duration: 0,
-            messages_groups: FastHashMap::default(),
-            shard_accounts,
-            changed_accounts: FastHashMap::default(),
+            message_groups: FastHashMap::default(),
+            accounts_cache: AccountsCache {
+                shard_accounts,
+                items: Default::default(),
+            },
         }
     }
 
+    pub fn min_next_lt(&self) -> u64 {
+        self.min_next_lt
+    }
+
+    pub fn executor_params(&self) -> &Arc<ExecuteParams> {
+        &self.params
+    }
+
+    pub fn take_changed_accounts(
+        &'_ mut self,
+    ) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> + '_ {
+        self.accounts_cache.items.drain().map(|(_, v)| v)
+    }
+
+    pub fn take_account_stuff_if<F>(
+        &mut self,
+        account_id: &AccountId,
+        f: F,
+    ) -> Result<Option<Box<ShardAccountStuff>>>
+    where
+        F: FnOnce(&ShardAccountStuff) -> bool,
+    {
+        self.accounts_cache.take_account_stuff_if(account_id, f)
+    }
+
     /// Set messages that will be executed
-    pub fn set_msgs_for_execution(&mut self, msgs: Vec<AsyncMessage>) {
-        let msgs_set_size = msgs.len();
-        self.messages_groups = pre_calculate_groups(msgs, self.group_limit, self.group_vert_size);
-        tracing::info!(target: tracing_targets::EXEC_MANAGER,
-            msgs_set_size, groups_calculated = self.messages_groups.len(),
-            group_limit = self.group_limit, group_vert_size = self.group_vert_size,
-            groups = ?self
-            .messages_groups
-            .iter()
-            .map(|(k, g)| {
-                format!(
-                    "{}: {:?}",
-                    k,
-                    g.values().map(|v| v.len()).collect::<Vec<_>>().as_slice()
-                )
-            })
-            .collect::<Vec<_>>()
-            .as_slice(),
+    pub fn set_msgs_for_execution(&mut self, msgs: Vec<Box<AsyncMessage>>) {
+        let message_count = msgs.len();
+        self.message_groups = pre_calculate_groups(msgs, self.group_limit, self.group_vert_size);
+
+        tracing::info!(
+            target: tracing_targets::EXEC_MANAGER,
+            message_count,
+            group_count = self.message_groups.len(),
+            group_limit = self.group_limit,
+            group_vert_size = self.group_vert_size,
+            groups = %DisplayMessageGroups(&self.message_groups),
             "added set of messages for execution, groups pre calculated",
         );
     }
 
     /// Run one execution tick of parallel transactions
-    pub async fn execute_tick(
-        &mut self,
-        offset: u32,
-    ) -> Result<(
-        u32,
-        Vec<(
-            AccountId,
-            AsyncMessage,
-            Box<(CurrencyCollection, Lazy<Transaction>)>,
-        )>,
-        bool,
-    )> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "messages set execution tick with offset {}", offset);
+    pub async fn tick(&mut self, offset: u32) -> Result<ExecutedTick> {
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, offset, "messages set execution tick");
 
-        let (new_offset, group) = match self.messages_groups.remove(&offset) {
+        let (new_offset, group) = match self.message_groups.remove(&offset) {
             Some(group) => (offset + 1, group),
-            None => return Ok((offset, vec![], true)),
+            None => return Ok(ExecutedTick::new_finished(offset)),
         };
-        let finished = !self.messages_groups.contains_key(&new_offset);
+        let finished = !self.message_groups.contains_key(&new_offset);
 
-        tracing::debug!(target: tracing_targets::EXEC_MANAGER, "offset {} group len: {}", offset, group.len());
-
-        let mut futures: FuturesUnordered<_> = Default::default();
+        let group_len = group.len();
+        tracing::debug!(target: tracing_targets::EXEC_MANAGER, offset, group_len);
 
         // TODO check externals is not exist accounts needed ?
+        let mut futures = FuturesUnordered::new();
         for (account_id, msgs) in group {
-            let shard_account_stuff = self.get_shard_account_stuff(account_id)?;
-            futures.push(self.execute_messages(account_id, msgs, shard_account_stuff));
+            let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
+            futures.push(self.execute_messages(shard_account_stuff, msgs));
         }
 
-        let mut result = vec![];
-        let mut updated_shard_account_stuffs = vec![];
-        let mut total_tick_trans_duration = 0;
-        let mut min_next_lt = self.min_next_lt;
+        let mut items = Vec::with_capacity(group_len);
+
         while let Some(executed_msgs_result) = futures.next().await {
-            let (executed_msgs, updated_shard_account_stuff) = executed_msgs_result?;
-            for executed_msg in executed_msgs {
-                let ExecutedMessage {
-                    transaction_result,
-                    in_message,
-                    transaction_duration,
-                } = executed_msg;
-                if let AsyncMessage::Ext(_, _) = &in_message {
-                    if let Err(ref e) = transaction_result {
-                        tracing::error!(target: tracing_targets::EXEC_MANAGER,
-                            "failed to execute external transaction: in_msg: {:?}\nerror: {:?}",
-                            in_message, e,
+            let executed = executed_msgs_result?;
+            for tx in executed.transactions {
+                if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
+                    if let Err(e) = &tx.result {
+                        tracing::error!(
+                            target: tracing_targets::EXEC_MANAGER,
+                            account_addr = %executed.account_state.account_addr,
+                            message_hash = %tx.in_message.cell.repr_hash(),
+                            "failed to execute external message: {e:?}",
                         );
                         continue;
                     }
                 }
-                total_tick_trans_duration += transaction_duration;
-                result.push((
-                    updated_shard_account_stuff.account_addr,
-                    in_message,
-                    transaction_result?,
-                ));
+
+                let (total_fees, transaction) = tx.result?;
+
+                items.push(ExecutedTickItem {
+                    account_addr: executed.account_state.account_addr,
+                    in_message: tx.in_message,
+                    total_fees,
+                    transaction,
+                });
             }
-            min_next_lt = cmp::max(
-                min_next_lt,
-                updated_shard_account_stuff.shard_account.last_trans_lt + 1,
+
+            self.min_next_lt = cmp::max(
+                self.min_next_lt,
+                executed.account_state.shard_account.last_trans_lt + 1,
             );
-            updated_shard_account_stuffs.push(updated_shard_account_stuff);
+            self.accounts_cache
+                .add_account_stuff(executed.account_state);
         }
 
-        drop(futures);
-
-        for shard_account_stuff in updated_shard_account_stuffs {
-            self.update_shard_account_stuff_cache(
-                shard_account_stuff.account_addr,
-                shard_account_stuff,
-            )?;
-        }
-
-        self.total_trans_duration += total_tick_trans_duration;
-        self.min_next_lt = min_next_lt;
-
-        Ok((new_offset, result, finished))
+        Ok(ExecutedTick {
+            new_offset,
+            finished,
+            items,
+        })
     }
 
-    pub fn get_shard_account_stuff(&self, account_id: AccountId) -> Result<ShardAccountStuff> {
-        let shard_account_stuff = if let Some(a) = self.changed_accounts.get(&account_id) {
-            a.clone()
-        } else if let Ok(Some((_depth, shard_account))) = self.shard_accounts.get(account_id) {
-            ShardAccountStuff::new(account_id, shard_account.clone())?
-        } else {
-            let shard_account = EMPTY_SHARD_ACCOUNT
-                .get_or_init(|| ShardAccount {
-                    account: Lazy::new(&OptionalAccount::EMPTY).unwrap(),
-                    last_trans_hash: Default::default(),
-                    last_trans_lt: 0,
-                })
-                .clone();
-            ShardAccountStuff::new(account_id, shard_account)?
-        };
-        Ok(shard_account_stuff)
-    }
-
-    pub async fn execute_messages(
+    fn execute_messages(
         &self,
-        account_id: AccountId,
-        msgs: Vec<AsyncMessage>,
-        mut shard_account_stuff: ShardAccountStuff,
-    ) -> Result<(Vec<ExecutedMessage>, ShardAccountStuff)> {
-        let mut results = vec![];
+        mut account_state: Box<ShardAccountStuff>,
+        msgs: Vec<Box<AsyncMessage>>,
+    ) -> impl Future<Output = Result<ExecutedTransactions>> + Send + 'static {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
 
         rayon_run(move || {
+            let mut transactions = Vec::with_capacity(msgs.len());
+
             for msg in msgs {
-                let (executed_msg, updated_shard_account_stuff) = Self::execute_one_message(
-                    account_id,
+                transactions.push(execute_ordinary_transaction(
+                    &mut account_state,
                     msg,
-                    shard_account_stuff,
                     min_next_lt,
                     &config,
                     &params,
-                )?;
-                results.push(executed_msg);
-                shard_account_stuff = updated_shard_account_stuff;
+                )?);
             }
-            Ok((results, shard_account_stuff))
+
+            Ok(ExecutedTransactions {
+                account_state,
+                transactions,
+            })
         })
-        .await
     }
 
-    /// execute message
-    pub fn execute_one_message(
-        account_id: AccountId,
-        new_msg: AsyncMessage,
-        mut shard_account_stuff: ShardAccountStuff,
-        min_next_lt: u64,
-        config: &PreloadedBlockchainConfig,
-        params: &ExecuteParams,
-    ) -> Result<(ExecutedMessage, ShardAccountStuff)> {
-        tracing::trace!(
-            target: tracing_targets::EXEC_MANAGER,
-            "executing {} message for account {}",
-            match &new_msg {
-                AsyncMessage::Recover(_) => "Recover",
-                AsyncMessage::Mint(_) => "Mint",
-                AsyncMessage::Ext(_, _) => "Ext",
-                AsyncMessage::Int(_, _, _) => "Int",
-                AsyncMessage::NewInt(_, _) => "NewInt",
-                AsyncMessage::TickTock(TickTock::Tick) => "Tick",
-                AsyncMessage::TickTock(TickTock::Tock) => "Tock",
-            },
-            account_id,
-        );
-        let now = std::time::Instant::now();
-        let shard_account = &mut shard_account_stuff.shard_account;
-        let mut transaction = match &new_msg {
-            AsyncMessage::Recover(new_msg_cell)
-            | AsyncMessage::Mint(new_msg_cell)
-            | AsyncMessage::Ext(_, new_msg_cell)
-            | AsyncMessage::Int(_, new_msg_cell, _)
-            | AsyncMessage::NewInt(_, new_msg_cell) => {
-                execute_ordinary_message(new_msg_cell, shard_account, min_next_lt, params, config)
-            }
-            AsyncMessage::TickTock(ticktock_) => {
-                execute_ticktock_message(*ticktock_, shard_account, min_next_lt, params, config)
-            }
-        };
-
-        if let Ok(transaction) = transaction.as_mut() {
-            // TODO replace with batch set
-            shard_account_stuff.add_transaction(&transaction.0, transaction.1.clone())?;
-        }
-
-        let elapsed = now.elapsed();
-        metrics::histogram!("tycho_message_execution_time").record(elapsed);
-
-        let transaction_duration = elapsed.as_millis() as u64;
-        Ok((
-            ExecutedMessage {
-                transaction_result: transaction,
-                in_message: new_msg,
-                transaction_duration,
-            },
-            shard_account_stuff,
-        ))
-    }
-
-    fn update_shard_account_stuff_cache(
+    /// Executes a single ordinary transaction.
+    pub async fn execute_ordinary_transaction(
         &mut self,
-        account_id: AccountId,
-        mut account_stuff: ShardAccountStuff,
-    ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updating shard account {}", account_id);
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "updated account {} balance: {}",
-            account_id, account_stuff.shard_account.account.load()?.balance().tokens,
-        );
-        let binding = &account_stuff.shard_account.account;
-        let account_root = binding.inner();
-        let new_state = account_root.repr_hash();
-        let old_state = account_stuff.state_update.load()?.old;
-        account_stuff.state_update = Lazy::new(&HashUpdate {
-            old: old_state,
-            new: *new_state,
-        })?;
+        mut account_stuff: Box<ShardAccountStuff>,
+        in_message: Box<AsyncMessage>,
+    ) -> Result<ExecutedOrdinaryTransaction> {
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute ordinary transaction for special message");
 
-        self.changed_accounts.insert(account_id, account_stuff);
-        Ok(())
-    }
-
-    /// execute special transaction
-    pub async fn execute_special_transaction(
-        &mut self,
-        account_id: AccountId,
-        msg: AsyncMessage,
-        shard_account_stuff: ShardAccountStuff,
-    ) -> Result<(AsyncMessage, Box<(CurrencyCollection, Lazy<Transaction>)>)> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute_special_transaction()");
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
-        let (
-            ExecutedMessage {
-                transaction_result,
+
+        let (account_stuff, executed) = rayon_run(move || {
+            let executed = execute_ordinary_transaction(
+                &mut account_stuff,
                 in_message,
-                ..
-            },
-            updated_shard_account_stuff,
-        ) = rayon_run(move || {
-            Self::execute_one_message(
-                account_id,
-                msg,
-                shard_account_stuff,
                 min_next_lt,
                 &config,
                 &params,
-            )
+            )?;
+            Ok::<_, anyhow::Error>((account_stuff, executed))
         })
         .await?;
-        self.min_next_lt = cmp::max(
-            min_next_lt,
-            updated_shard_account_stuff.shard_account.last_trans_lt + 1,
-        );
-        self.update_shard_account_stuff_cache(account_id, updated_shard_account_stuff)?;
-        Ok((in_message, transaction_result?))
+
+        self.min_next_lt = cmp::max(min_next_lt, account_stuff.shard_account.last_trans_lt + 1);
+        self.accounts_cache.add_account_stuff(account_stuff);
+        Ok(executed)
+    }
+
+    /// Executes a single ticktock transaction.
+    pub async fn execute_ticktock_transaction(
+        &mut self,
+        mut account_stuff: Box<ShardAccountStuff>,
+        tick_tock: TickTock,
+    ) -> Result<ExecutorOutput> {
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute special transaction");
+
+        let min_next_lt = self.min_next_lt;
+        let config = self.config.clone();
+        let params = self.params.clone();
+
+        let (account_stuff, executed) = rayon_run(move || {
+            let executed = execute_ticktock_transaction(
+                &mut account_stuff,
+                tick_tock,
+                min_next_lt,
+                &config,
+                &params,
+            )?;
+            Ok::<_, anyhow::Error>((account_stuff, executed))
+        })
+        .await?;
+
+        self.min_next_lt = cmp::max(min_next_lt, account_stuff.shard_account.last_trans_lt + 1);
+        self.accounts_cache.add_account_stuff(account_stuff);
+        Ok(executed)
     }
 }
 
-/// execute ordinary message
-fn execute_ordinary_message(
-    new_msg_cell: &Cell,
-    shard_account: &mut ShardAccount,
-    min_next_lt: u64,
-    params: &ExecuteParams,
-    config: &PreloadedBlockchainConfig,
-) -> Result<Box<(CurrencyCollection, Lazy<Transaction>)>> {
-    let executor = OrdinaryTransactionExecutor::new();
-    executor
-        .execute_with_libs_and_params(
-            Some(new_msg_cell),
-            shard_account,
-            min_next_lt,
-            params,
-            config,
-        )
-        .map(Box::new)
+struct AccountsCache {
+    shard_accounts: ShardAccounts,
+    items: FastHashMap<AccountId, Box<ShardAccountStuff>>,
 }
 
-/// execute tick tock message
-fn execute_ticktock_message(
-    tick_tock: TickTock,
-    shard_account: &mut ShardAccount,
-    min_next_lt: u64,
-    params: &ExecuteParams,
-    config: &PreloadedBlockchainConfig,
-) -> Result<Box<(CurrencyCollection, Lazy<Transaction>)>> {
-    let executor = TickTockTransactionExecutor::new(tick_tock);
-    executor
-        .execute_with_libs_and_params(None, shard_account, min_next_lt, params, config)
-        .map(Box::new)
-}
+impl AccountsCache {
+    fn take_account_stuff_if<F>(
+        &mut self,
+        account_id: &AccountId,
+        f: F,
+    ) -> Result<Option<Box<ShardAccountStuff>>>
+    where
+        F: FnOnce(&ShardAccountStuff) -> bool,
+    {
+        use std::collections::hash_map::Entry;
 
-/// calculate group
-pub fn _calculate_group(
-    messages_set: &[AsyncMessage],
-    group_limit: u32,
-    offset: u32,
-) -> (u32, FastHashMap<AccountId, AsyncMessage>) {
-    let mut new_offset = offset;
-    let mut holes_group: FastHashMap<AccountId, u32> = FastHashMap::default();
-    let mut max_account_count = 0;
-    let mut holes_max_count: i32 = 0;
-    let mut holes_count: i32 = 0;
-    let mut group = FastHashMap::default();
-    for (i, msg) in messages_set.iter().enumerate() {
-        let account_id = match msg {
-            AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            s => {
-                tracing::error!("wrong async message - {s:?}");
-                unreachable!()
-            }
-        };
-        if (i as u32) < offset {
-            let count = holes_group.entry(account_id).or_default();
-            *count += 1;
-            if *count > max_account_count {
-                max_account_count = *count;
-                holes_max_count = (group_limit * max_account_count) as i32 - offset as i32;
-            }
-        } else if group.len() < group_limit as usize {
-            match holes_group.get_mut(&account_id) {
-                None => {
-                    if holes_max_count > 0 {
-                        holes_group.insert(account_id, 1);
-                        holes_max_count -= 1;
-                        holes_count += 1;
-                    } else {
-                        // if group have this account we skip it
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            group.entry(account_id)
-                        {
-                            e.insert(msg.clone());
-                        } else {
-                            // if the offset was not set previously, and the account is skipped then
-                            // it means that we need to move by current group length
-                            if new_offset == offset {
-                                new_offset += group.len() as u32 + holes_count as u32;
-                            }
-                        }
-                    }
-                }
-                Some(count) => {
-                    if *count != max_account_count && holes_max_count > 0 {
-                        *count += 1;
-                        holes_max_count -= 1;
-                        holes_count += 1;
-                    } else {
-                        // group has this account, but it was not taken on previous runs
-                        if let std::collections::hash_map::Entry::Vacant(e) =
-                            group.entry(account_id)
-                        {
-                            e.insert(msg.clone());
-                        } else {
-                            // if the offset was not set previously, and the account is skipped then
-                            // it means that we need to move by current group length
-                            if new_offset == offset {
-                                new_offset += group.len() as u32 + holes_count as u32;
-                            }
-                        }
-                    }
+        match self.items.entry(*account_id) {
+            Entry::Occupied(entry) => {
+                if f(entry.get()) {
+                    return Ok(Some(entry.remove()));
                 }
             }
+            Entry::Vacant(entry) => {
+                if let Some((_, state)) = self.shard_accounts.get(account_id)? {
+                    let account_stuff = ShardAccountStuff::new(account_id, state).map(Box::new)?;
+                    if f(&account_stuff) {
+                        return Ok(Some(account_stuff));
+                    }
+
+                    // NOTE: Reuse preloaded account state as it might be used later
+                    entry.insert(account_stuff);
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn create_account_stuff(&mut self, account_id: &AccountId) -> Result<Box<ShardAccountStuff>> {
+        if let Some(account) = self.items.remove(account_id) {
+            Ok(account)
+        } else if let Some((_depth, shard_account)) = self.shard_accounts.get(account_id)? {
+            ShardAccountStuff::new(account_id, shard_account).map(Box::new)
         } else {
-            break;
+            Ok(Box::new(ShardAccountStuff::new_empty(account_id)))
         }
     }
-    // if new offset was not set then it means that we took all group elements and all holes on our way
-    if new_offset == offset {
-        new_offset += group.len() as u32 + holes_count as u32;
+
+    fn add_account_stuff(&mut self, account_stuff: Box<ShardAccountStuff>) {
+        tracing::trace!(
+            target: tracing_targets::EXEC_MANAGER,
+            account_addr = %account_stuff.account_addr,
+            "updating shard account"
+        );
+
+        self.items.insert(account_stuff.account_addr, account_stuff);
     }
-    (new_offset, group)
 }
+
+pub struct ExecutedTick {
+    pub new_offset: u32,
+    pub finished: bool,
+    pub items: Vec<ExecutedTickItem>,
+}
+
+impl ExecutedTick {
+    fn new_finished(new_offset: u32) -> Self {
+        Self {
+            new_offset,
+            finished: true,
+            items: Vec::new(),
+        }
+    }
+}
+
+pub struct ExecutedTickItem {
+    pub account_addr: AccountId,
+    pub in_message: Box<AsyncMessage>,
+    pub total_fees: CurrencyCollection,
+    pub transaction: Lazy<Transaction>,
+}
+
+pub struct ExecutedTransactions {
+    pub account_state: Box<ShardAccountStuff>,
+    pub transactions: Vec<ExecutedOrdinaryTransaction>,
+}
+
+pub struct ExecutedOrdinaryTransaction {
+    pub result: Result<ExecutorOutput>,
+    pub in_message: Box<AsyncMessage>,
+}
+
+pub type ExecutorOutput = (CurrencyCollection, Lazy<Transaction>);
+
+fn execute_ordinary_transaction(
+    account_stuff: &mut ShardAccountStuff,
+    in_message: Box<AsyncMessage>,
+    min_lt: u64,
+    config: &PreloadedBlockchainConfig,
+    params: &ExecuteParams,
+) -> Result<ExecutedOrdinaryTransaction> {
+    tracing::trace!(
+        target: tracing_targets::EXEC_MANAGER,
+        account_addr = %account_stuff.account_addr,
+        message_kind = ?in_message.kind(),
+        "executing ordinary message",
+    );
+
+    let _histogram = HistogramGuard::begin("tycho_collator_execute_ordinary_time");
+
+    let shard_account = &mut account_stuff.shard_account;
+    let result = OrdinaryTransactionExecutor::new().execute_with_libs_and_params(
+        Some(&in_message.cell),
+        shard_account,
+        min_lt,
+        params,
+        config,
+    );
+
+    if let Ok((total_fees, transaction)) = &result {
+        // TODO replace with batch set
+        let tx_lt = shard_account.last_trans_lt;
+        account_stuff.add_transaction(tx_lt, total_fees, transaction)?;
+    }
+
+    Ok(ExecutedOrdinaryTransaction { result, in_message })
+}
+
+fn execute_ticktock_transaction(
+    account_stuff: &mut ShardAccountStuff,
+    tick_tock: TickTock,
+    min_lt: u64,
+    config: &PreloadedBlockchainConfig,
+    params: &ExecuteParams,
+) -> Result<ExecutorOutput> {
+    tracing::trace!(
+        target: tracing_targets::EXEC_MANAGER,
+        account_addr = %account_stuff.account_addr,
+        kind = ?tick_tock,
+        "executing ticktock",
+    );
+
+    let _histogram = HistogramGuard::begin("tycho_collator_execute_ticktock_time");
+
+    let shard_account = &mut account_stuff.shard_account;
+
+    // NOTE: Failed (without tx) ticktock execution is considered as a fatal error
+    let (total_fees, transaction) = TickTockTransactionExecutor::new(tick_tock)
+        .execute_with_libs_and_params(None, shard_account, min_lt, params, config)?;
+
+    // TODO replace with batch set
+    let tx_lt = shard_account.last_trans_lt;
+    account_stuff.add_transaction(tx_lt, &total_fees, &transaction)?;
+
+    Ok((total_fees, transaction))
+}
+
+// TODO: Update
+/// calculate group
+// pub fn _calculate_group(
+//     messages_set: &[AsyncMessage],
+//     group_limit: u32,
+//     offset: u32,
+// ) -> (u32, FastHashMap<AccountId, AsyncMessage>) {
+//     let mut new_offset = offset;
+//     let mut holes_group: FastHashMap<AccountId, u32> = FastHashMap::default();
+//     let mut max_account_count = 0;
+//     let mut holes_max_count: i32 = 0;
+//     let mut holes_count: i32 = 0;
+//     let mut group = FastHashMap::default();
+//     for (i, msg) in messages_set.iter().enumerate() {
+//         let account_id = match msg {
+//             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
+//                 dst.as_std().map(|a| a.address).unwrap_or_default()
+//             }
+//             AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
+//                 dst.as_std().map(|a| a.address).unwrap_or_default()
+//             }
+//             AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
+//                 dst.as_std().map(|a| a.address).unwrap_or_default()
+//             }
+//             s => {
+//                 tracing::error!("wrong async message - {s:?}");
+//                 unreachable!()
+//             }
+//         };
+//         if (i as u32) < offset {
+//             let count = holes_group.entry(account_id).or_default();
+//             *count += 1;
+//             if *count > max_account_count {
+//                 max_account_count = *count;
+//                 holes_max_count = (group_limit * max_account_count) as i32 - offset as i32;
+//             }
+//         } else if group.len() < group_limit as usize {
+//             match holes_group.get_mut(&account_id) {
+//                 None => {
+//                     if holes_max_count > 0 {
+//                         holes_group.insert(account_id, 1);
+//                         holes_max_count -= 1;
+//                         holes_count += 1;
+//                     } else {
+//                         // if group have this account we skip it
+//                         if let std::collections::hash_map::Entry::Vacant(e) =
+//                             group.entry(account_id)
+//                         {
+//                             e.insert(msg.clone());
+//                         } else {
+//                             // if the offset was not set previously, and the account is skipped then
+//                             // it means that we need to move by current group length
+//                             if new_offset == offset {
+//                                 new_offset += group.len() as u32 + holes_count as u32;
+//                             }
+//                         }
+//                     }
+//                 }
+//                 Some(count) => {
+//                     if *count != max_account_count && holes_max_count > 0 {
+//                         *count += 1;
+//                         holes_max_count -= 1;
+//                         holes_count += 1;
+//                     } else {
+//                         // group has this account, but it was not taken on previous runs
+//                         if let std::collections::hash_map::Entry::Vacant(e) =
+//                             group.entry(account_id)
+//                         {
+//                             e.insert(msg.clone());
+//                         } else {
+//                             // if the offset was not set previously, and the account is skipped then
+//                             // it means that we need to move by current group length
+//                             if new_offset == offset {
+//                                 new_offset += group.len() as u32 + holes_count as u32;
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//         } else {
+//             break;
+//         }
+//     }
+//     // if new offset was not set then it means that we took all group elements and all holes on our way
+//     if new_offset == offset {
+//         new_offset += group.len() as u32 + holes_count as u32;
+//     }
+//     (new_offset, group)
+// }
 
 /// calculate all groups in advance
 pub fn pre_calculate_groups(
-    messages_set: Vec<AsyncMessage>,
+    messages_set: Vec<Box<AsyncMessage>>,
     group_limit: usize,
     group_vert_size: usize,
-) -> FastHashMap<u32, FastHashMap<AccountId, Vec<AsyncMessage>>> {
-    let mut res: FastHashMap<u32, FastHashMap<AccountId, Vec<AsyncMessage>>> = Default::default();
+) -> MessageGroups {
+    let mut res = MessageGroups::default();
     for msg in messages_set {
-        let account_id = match msg {
-            AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
+        assert_eq!(
+            msg.special_origin, None,
+            "unexpected special origin in ordinary messages set"
+        );
+
+        let account_id = match &msg.info {
+            MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
                 dst.as_std().map(|a| a.address).unwrap_or_default()
             }
-            AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
+            MsgInfo::Int(IntMsgInfo { dst, .. }) => {
                 dst.as_std().map(|a| a.address).unwrap_or_default()
             }
-            AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
-            }
-            s => {
-                tracing::error!("wrong async message - {s:?}");
-                unreachable!()
+            MsgInfo::ExtOut(info) => {
+                unreachable!("ext out message in ordinary messages set: {info:?}")
             }
         };
 
         let mut g_idx = 0;
-        let mut group_entry;
         loop {
-            group_entry = res.entry(g_idx).or_default();
+            let group_entry = res.entry(g_idx).or_default();
+
             let group_len = group_entry.len();
-            let account_entry = group_entry.entry(account_id);
-            match account_entry {
+            match group_entry.entry(account_id) {
                 Entry::Vacant(entry) => {
                     if group_len < group_limit {
                         entry.insert(vec![msg]);
                         break;
-                    } else {
-                        g_idx += 1;
                     }
+
+                    g_idx += 1;
                 }
                 Entry::Occupied(mut entry) => {
                     let msgs = entry.get_mut();
                     if msgs.len() < group_vert_size {
                         msgs.push(msg);
                         break;
-                    } else {
-                        g_idx += 1;
                     }
+
+                    g_idx += 1;
                 }
             }
         }
     }
+
     res
+}
+
+struct DisplayMessageGroup<'a>(&'a MessageGroup);
+
+impl std::fmt::Debug for DisplayMessageGroup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for DisplayMessageGroup<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for messages in self.0.values() {
+            l.entry(&messages.len());
+        }
+        l.finish()
+    }
+}
+
+struct DisplayMessageGroups<'a>(&'a MessageGroups);
+
+impl std::fmt::Debug for DisplayMessageGroups<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for DisplayMessageGroups<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut m = f.debug_map();
+        for (k, v) in self.0.iter() {
+            m.entry(k, &DisplayMessageGroup(v));
+        }
+        m.finish()
+    }
 }

@@ -1,9 +1,8 @@
 use std::collections::VecDeque;
-use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
@@ -13,11 +12,12 @@ use ton_executor::blockchain_config::PreloadedBlockchainConfig;
 use ton_executor::ExecuteParams;
 use tycho_util::FastHashMap;
 
-use super::types::CachedMempoolAnchor;
+use super::types::{CachedMempoolAnchor, SpecialOrigin};
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
-    AsyncMessage, BlockCollationData, McData, PrevData, ShardDescriptionExt,
+    AsyncMessage, BlockCollationData, Dequeued, McData, PreparedInMsg, PreparedOutMsg, PrevData,
+    ShardDescriptionExt,
 };
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::MempoolAnchorId;
@@ -57,7 +57,7 @@ impl CollatorStdImpl {
         // prepare block collation data
         // STUB: consider split/merge in future for taking prev_block_id
         let prev_block_id = prev_shard_data.blocks_ids()[0];
-        let mut collation_data = BlockCollationData::default();
+        let mut collation_data = Box::new(BlockCollationData::default());
         collation_data.block_id_short = BlockIdShort {
             shard: prev_block_id.shard,
             seqno: prev_block_id.seqno + 1,
@@ -122,7 +122,7 @@ impl CollatorStdImpl {
             collation_data.next_lt,
             Arc::new(PreloadedBlockchainConfig::with_config(
                 mc_data.config().clone(),
-                0, // TODO: fix global id
+                mc_data.global_id(),
             )?),
             Arc::new(ExecuteParams {
                 state_libs: mc_data.libraries().clone(),
@@ -145,8 +145,13 @@ impl CollatorStdImpl {
 
         // execute tick transaction and special transactions (mint, recover)
         if self.shard_id.is_masterchain() {
-            self.create_ticktock_transactions(false, &mut collation_data, &mut exec_manager)
-                .await?;
+            self.create_ticktock_transactions(
+                TickTock::Tick,
+                &mut collation_data,
+                &mut exec_manager,
+            )
+            .await?;
+
             self.create_special_transactions(&mut collation_data, &mut exec_manager)
                 .await?;
         }
@@ -177,14 +182,11 @@ impl CollatorStdImpl {
             let mut executed_internal_messages = vec![];
             let mut internal_messages_sources = FastHashMap::default();
             // build messages set
-            let mut msgs_set: Vec<AsyncMessage> = vec![];
+            let mut msgs_set: Vec<Box<AsyncMessage>> = vec![];
 
             // 1. First try to read min externals amount
             let mut ext_msgs = if self.has_pending_externals {
                 self.read_next_externals(min_externals_per_set, &mut collation_data)?
-                    .into_iter()
-                    .map(|(msg_info, cell)| AsyncMessage::Ext(msg_info, cell))
-                    .collect()
             } else {
                 vec![]
             };
@@ -199,13 +201,15 @@ impl CollatorStdImpl {
                             int_msg.message_with_source,
                         );
                         let message_with_source = int_msg.message_with_source;
-                        let int_msg_info = MsgInfo::Int(message_with_source.message.info.clone());
-                        let cell = message_with_source.message.cell.clone();
-                        let is_current_shard = message_with_source.shard_id == self.shard_id;
 
-                        let async_message = AsyncMessage::Int(int_msg_info, cell, is_current_shard);
-
-                        msgs_set.push(async_message);
+                        msgs_set.push(Box::new(AsyncMessage {
+                            info: MsgInfo::Int(message_with_source.message.info.clone()),
+                            cell: message_with_source.message.cell.clone(),
+                            special_origin: None,
+                            dequeued: Some(Dequeued {
+                                same_shard: message_with_source.shard_id == self.shard_id,
+                            }),
+                        }));
 
                         internal_messages_sources.insert(
                             message_with_source.message.key(),
@@ -230,11 +234,7 @@ impl CollatorStdImpl {
             msgs_set.append(&mut ext_msgs);
             remaining_capacity = max_messages_per_set - msgs_set.len();
             if remaining_capacity > 0 && self.has_pending_externals {
-                ext_msgs = self
-                    .read_next_externals(remaining_capacity, &mut collation_data)?
-                    .into_iter()
-                    .map(|(msg_info, cell)| AsyncMessage::Ext(msg_info, cell))
-                    .collect();
+                ext_msgs = self.read_next_externals(remaining_capacity, &mut collation_data)?;
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     ext_count = ext_msgs.len(),
                     "read additional externals",
@@ -256,20 +256,21 @@ impl CollatorStdImpl {
                                 message_with_source,
                             );
 
-                            let int_msg_info =
-                                MsgInfo::Int(message_with_source.message.info.clone());
-                            let cell = message_with_source.message.cell.clone();
-
-                            let async_message = if int_msg.is_new {
+                            let dequeued = if int_msg.is_new {
                                 collation_data.read_new_msgs_from_iterator += 1;
-                                AsyncMessage::NewInt(int_msg_info, cell)
+                                None
                             } else {
-                                let is_current_shard =
-                                    message_with_source.shard_id == self.shard_id;
-                                AsyncMessage::Int(int_msg_info, cell, is_current_shard)
+                                Some(Dequeued {
+                                    same_shard: message_with_source.shard_id == self.shard_id,
+                                })
                             };
 
-                            msgs_set.push(async_message);
+                            msgs_set.push(Box::new(AsyncMessage {
+                                info: MsgInfo::Int(message_with_source.message.info.clone()),
+                                cell: message_with_source.message.cell.clone(),
+                                special_origin: None,
+                                dequeued,
+                            }));
 
                             internal_messages_sources.insert(
                                 message_with_source.message.key(),
@@ -312,41 +313,25 @@ impl CollatorStdImpl {
             let mut executed_messages = 0;
             // execute msgs processing by groups
             while !msgs_set_full_processed {
-                let (new_offset, group, finished) =
-                    exec_manager.execute_tick(msgs_set_offset).await?;
-                msgs_set_full_processed = finished;
+                let tick = exec_manager.tick(msgs_set_offset).await?;
+                msgs_set_full_processed = tick.finished;
 
-                let one_tick_executed_count = group.len();
+                let one_tick_executed_count = tick.items.len();
 
                 do_collate_exec_msgs_elapsed += timer.elapsed();
                 timer = std::time::Instant::now();
 
-                for (_account_id, msg_info, transaction) in group {
-                    match msg_info {
-                        AsyncMessage::Int(ref msg_info, ref cell, _)
-                        | AsyncMessage::NewInt(ref msg_info, ref cell) => {
-                            if let MsgInfo::Int(int_msg_info) = msg_info {
-                                let hash = cell.repr_hash();
-                                let key = InternalMessageKey {
-                                    lt: int_msg_info.created_lt,
-                                    hash: *hash,
-                                };
+                for item in tick.items {
+                    if let MsgInfo::Int(int_msg_info) = &item.in_message.info {
+                        let key = InternalMessageKey {
+                            lt: int_msg_info.created_lt,
+                            hash: *item.in_message.cell.repr_hash(),
+                        };
 
-                                match internal_messages_sources.get(&key).cloned() {
-                                    Some(shard_ident) => {
-                                        executed_internal_messages.push((shard_ident, key));
-                                    }
-                                    None => {
-                                        return Err(anyhow!(
-                                            "Internal message source \
-                                            shard not found for key: {:?}",
-                                            key
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
+                        let Some(shard_ident) = internal_messages_sources.get(&key).cloned() else {
+                            anyhow::bail!("internal message source shard not found for: {key:?}");
+                        };
+                        executed_internal_messages.push((shard_ident, key));
                     }
 
                     executed_messages += 1;
@@ -354,28 +339,34 @@ impl CollatorStdImpl {
                     let new_messages = new_transaction(
                         &mut collation_data,
                         &self.shard_id,
-                        transaction.1,
-                        msg_info,
+                        item.transaction,
+                        item.in_message,
                     )?;
 
                     collation_data.new_msgs_created += new_messages.len() as u32;
 
-                    for (msg_info, cell) in new_messages.iter() {
-                        if let MsgInfo::Int(int_msg_info) = msg_info {
-                            messages_inserted_to_iterator += 1;
-                            collation_data.inserted_new_msgs_to_iterator += 1;
+                    for new_message in &new_messages {
+                        let MsgInfo::Int(int_msg_info) = &new_message.info else {
+                            continue;
+                        };
 
-                            messages_inserted_to_iterator += new_messages.len();
-                            self.mq_adapter.add_message_to_iterator(
-                                &mut internal_messages_iterator,
-                                (int_msg_info.clone(), cell.clone()),
-                            )?;
-                        }
+                        messages_inserted_to_iterator += 1;
+                        collation_data.inserted_new_msgs_to_iterator += 1;
+
+                        // NOTE: Is it really corrent to do this?
+                        // messages_inserted_to_iterator += new_messages.len();
+
+                        // TODO: Reduce size of parameters
+                        self.mq_adapter.add_message_to_iterator(
+                            &mut internal_messages_iterator,
+                            (int_msg_info.clone(), new_message.cell.clone()),
+                        )?;
                     }
 
-                    collation_data.next_lt = exec_manager.min_next_lt;
+                    collation_data.next_lt = exec_manager.min_next_lt();
                 }
-                msgs_set_offset = new_offset;
+
+                msgs_set_offset = tick.new_offset;
 
                 do_collate_process_transactions_elapsed += timer.elapsed();
                 timer = std::time::Instant::now();
@@ -448,8 +439,12 @@ impl CollatorStdImpl {
 
         // execute tock transaction
         if self.shard_id.is_masterchain() {
-            self.create_ticktock_transactions(true, &mut collation_data, &mut exec_manager)
-                .await?;
+            self.create_ticktock_transactions(
+                TickTock::Tock,
+                &mut collation_data,
+                &mut exec_manager,
+            )
+            .await?;
         }
 
         do_collate_ticktock_special_elapsed += timer.elapsed();
@@ -479,9 +474,12 @@ impl CollatorStdImpl {
         }
 
         // build block candidate and new state
-        let (candidate, new_state_stuff) = self
-            .finalize_block(&mut collation_data, exec_manager)
-            .await?;
+
+        // TODO: Move into rayon
+        tokio::task::yield_now().await;
+        let (candidate, new_state_stuff) =
+            self.finalize_block(&mut collation_data, exec_manager)?;
+        tokio::task::yield_now().await;
 
         self.mq_adapter
             .apply_diff(diff.clone(), candidate.block_id.as_short_id())
@@ -625,7 +623,7 @@ impl CollatorStdImpl {
         &mut self,
         count: usize,
         collation_data: &mut BlockCollationData,
-    ) -> Result<Vec<(MsgInfo, Cell)>> {
+    ) -> Result<Vec<Box<AsyncMessage>>> {
         let (res, has_pending_externals) = Self::read_next_externals_impl(
             &self.shard_id,
             &mut self.anchors_cache,
@@ -641,7 +639,7 @@ impl CollatorStdImpl {
         anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
         count: usize,
         collation_data: &mut BlockCollationData,
-    ) -> Result<(Vec<(MsgInfo, Cell)>, bool)> {
+    ) -> Result<(Vec<Box<AsyncMessage>>, bool)> {
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
             "shard: {}, count: {}", shard_id, count,
         );
@@ -756,7 +754,12 @@ impl CollatorStdImpl {
                     if shard_id.contains_address(&ext_msg.info().dst) {
                         if total_msgs_collected < count {
                             // get msgs for target shard until target count reached
-                            ext_messages.push(ext_msg.deref().into());
+                            ext_messages.push(Box::new(AsyncMessage {
+                                info: MsgInfo::ExtIn(ext_msg.info().clone()),
+                                cell: ext_msg.cell().clone(),
+                                special_origin: None,
+                                dequeued: None,
+                            }));
                             total_msgs_collected += 1;
                             msgs_collected_from_last_anchor += 1;
                             tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -943,7 +946,7 @@ impl CollatorStdImpl {
 
     fn compute_minted_amount(&self, mc_data: &McData) -> Result<CurrencyCollection> {
         // TODO: just copied from old node, needs to review
-        tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount()");
+        tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount");
 
         let mut to_mint = CurrencyCollection::default();
 
@@ -992,141 +995,162 @@ impl CollatorStdImpl {
         collator_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions()");
+        tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions");
 
-        let account_id = self
-            .working_state()
-            .mc_data
-            .config()
-            .get_fee_collector_address()?;
-        tracing::trace!(target: tracing_targets::COLLATOR,
-            "create_special_transaction(): mint {} to account {}",
-            collator_data.value_flow.recovered.tokens, account_id,
-        );
-        self.create_special_transaction(
-            account_id,
-            collator_data.value_flow.recovered.clone(),
-            |_, msg_cell| AsyncMessage::Recover(msg_cell),
-            collator_data,
-            exec_manager,
-        )
-        .await?;
+        let config = self.working_state().mc_data.config();
 
-        let account_id = self.working_state().mc_data.config().get_minter_address()?;
-        tracing::trace!(target: tracing_targets::COLLATOR,
-            "create_special_transaction(): mint {} to account {}",
-            collator_data.value_flow.minted.tokens, account_id,
-        );
-        self.create_special_transaction(
-            account_id,
-            collator_data.value_flow.minted.clone(),
-            |_, msg_cell| AsyncMessage::Mint(msg_cell),
-            collator_data,
-            exec_manager,
-        )
-        .await?;
+        // TODO: Execute in parallel if addresses are distinct?
+
+        if !collator_data.value_flow.recovered.tokens.is_zero() {
+            self.create_special_transaction(
+                &config.get_fee_collector_address()?,
+                collator_data.value_flow.recovered.clone(),
+                SpecialOrigin::Recover,
+                collator_data,
+                exec_manager,
+            )
+            .await?;
+        }
+
+        // FIXME: Minter only mints extra currencies, so this will not work
+        // TODO: Add `is_zero` to `CurrencyCollection` (but it might be heavy,
+        // since we must check all dict items)
+        if !collator_data.value_flow.minted.tokens.is_zero() {
+            self.create_special_transaction(
+                &config.get_minter_address()?,
+                collator_data.value_flow.minted.clone(),
+                SpecialOrigin::Mint,
+                collator_data,
+                exec_manager,
+            )
+            .await?;
+        }
 
         Ok(())
     }
 
     async fn create_special_transaction(
         &self,
-        account_id: HashBytes,
+        account_id: &HashBytes,
         amount: CurrencyCollection,
-        f: impl FnOnce(MsgInfo, Cell) -> AsyncMessage,
+        special_origin: SpecialOrigin,
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        if amount.tokens.is_zero() {
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            account_addr = %account_id,
+            amount = %amount.tokens,
+            ?special_origin,
+            "create_special_transaction",
+        );
+
+        let Some(account_stuff) = exec_manager.take_account_stuff_if(account_id, |_| true)? else {
             return Ok(());
-        }
-        let info = MsgInfo::Int(IntMsgInfo {
-            ihr_disabled: false,
-            bounce: true,
-            bounced: false,
-            src: IntAddr::from((-1, [0; 32].into())),
-            dst: IntAddr::from((-1, account_id)),
-            value: amount,
-            ihr_fee: Default::default(),
-            fwd_fee: Default::default(),
-            created_lt: collation_data.start_lt,
-            created_at: collation_data.gen_utime,
-        });
-        let msg = BaseMessage {
-            info: info.clone(),
-            init: None,
-            body: CellSlice::default(),
-            layout: None,
         };
-        let cell = CellBuilder::build_from(msg)?;
-        let async_message = f(info, cell);
-        let shard_account_stuff = exec_manager.get_shard_account_stuff(account_id)?;
-        let (async_message, transaction) = exec_manager
-            .execute_special_transaction(account_id, async_message, shard_account_stuff)
+
+        let in_message = {
+            let info = MsgInfo::Int(IntMsgInfo {
+                ihr_disabled: false,
+                bounce: true,
+                bounced: false,
+                src: IntAddr::from((-1, HashBytes::ZERO)),
+                dst: IntAddr::from((-1, *account_id)),
+                value: amount,
+                ihr_fee: Default::default(),
+                fwd_fee: Default::default(),
+                created_lt: collation_data.start_lt,
+                created_at: collation_data.gen_utime,
+            });
+            let cell = CellBuilder::build_from(BaseMessage {
+                info: info.clone(),
+                init: None,
+                body: CellSlice::default(),
+                layout: None,
+            })?;
+
+            Box::new(AsyncMessage {
+                info,
+                cell,
+                special_origin: Some(special_origin),
+                dequeued: None,
+            })
+        };
+
+        let executed = exec_manager
+            .execute_ordinary_transaction(account_stuff, in_message)
             .await?;
-        new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
-        collation_data.next_lt = exec_manager.min_next_lt;
+
+        let (_total_fees, transaction) = executed.result?;
+
+        new_transaction(
+            collation_data,
+            &self.shard_id,
+            transaction,
+            executed.in_message,
+        )?;
+
+        collation_data.next_lt = exec_manager.min_next_lt();
         Ok(())
     }
 
     async fn create_ticktock_transactions(
         &self,
-        tock: bool,
+        tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::COLLATOR, "create_ticktock_transactions()");
-        let fundamental_dict = self
-            .working_state()
-            .mc_data
-            .config()
-            .get_fundamental_addresses()?;
-        for account in fundamental_dict.keys() {
-            self.create_ticktock_transaction(account?, tock, collation_data, exec_manager)
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            kind = ?tick_tock,
+            "create_ticktock_transactions"
+        );
+
+        // TODO: Execute in parallel since these are unique accounts
+
+        let config = self.working_state().mc_data.config();
+        for account_id in config.get_fundamental_addresses()?.keys() {
+            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data, exec_manager)
                 .await?;
         }
-        let config_address = self.working_state().mc_data.config().address;
-        self.create_ticktock_transaction(config_address, tock, collation_data, exec_manager)
+
+        self.create_ticktock_transaction(&config.address, tick_tock, collation_data, exec_manager)
             .await?;
         Ok(())
     }
 
     async fn create_ticktock_transaction(
         &self,
-        account_id: HashBytes,
-        tock: bool,
+        account_id: &HashBytes,
+        tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
-        tracing::trace!(target: tracing_targets::COLLATOR,
-            "create_ticktock_transaction({}) to account {}",
-            if tock { "tock" } else { "tick" },
-            account_id
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            account_addr = %account_id,
+            kind = ?tick_tock,
+            "create_ticktock_transaction",
         );
 
-        let shard_account_stuff = exec_manager.get_shard_account_stuff(account_id)?;
-        let tick_tock = shard_account_stuff
-            .shard_account
-            .load_account()?
-            .map(|account| {
-                if let AccountState::Active(StateInit { ref special, .. }) = account.state {
-                    special.unwrap_or_default()
-                } else {
-                    Default::default()
-                }
-            })
-            .unwrap_or_default();
+        let Some(account_stuff) =
+            exec_manager.take_account_stuff_if(&account_id, |stuff| match tick_tock {
+                TickTock::Tick => stuff.special.tick,
+                TickTock::Tock => stuff.special.tock,
+            })?
+        else {
+            return Ok(());
+        };
 
-        if (tick_tock.tock && tock) || (tick_tock.tick && !tock) {
-            let tt = if tock { TickTock::Tock } else { TickTock::Tick };
-            let async_message = AsyncMessage::TickTock(tt);
-            let (async_message, transaction) = exec_manager
-                .execute_special_transaction(account_id, async_message, shard_account_stuff)
-                .await?;
-            new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
-            collation_data.next_lt = exec_manager.min_next_lt;
-        }
+        let (_async_message, _transaction) = exec_manager
+            .execute_ticktock_transaction(account_stuff, tick_tock)
+            .await?;
 
+        // TODO: It does nothing for ticktock, so commented for now
+        // new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
+
+        collation_data.execute_count_all += 1;
+        collation_data.next_lt = exec_manager.min_next_lt();
         Ok(())
     }
 
@@ -1181,11 +1205,7 @@ impl CollatorStdImpl {
             // TODO: Check may update shard block info
             // TODO: Implement merge algorithm in future
 
-            self.update_shard_block_info(
-                collation_data.shards_mut()?,
-                shard_id,
-                shard_descr.clone(),
-            )?;
+            self.update_shard_block_info(collation_data.shards_mut()?, shard_id, shard_descr)?;
 
             collation_data.store_shard_fees(shard_id, proof_funds)?;
             collation_data.register_shard_block_creators(creators)?;
@@ -1238,61 +1258,99 @@ fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
     transaction: Lazy<Transaction>,
-    in_msg: AsyncMessage,
-) -> Result<Vec<(MsgInfo, Cell)>> {
-    tracing::trace!(target: tracing_targets::COLLATOR,
-        "process new transaction from message {:?}\n{:?}",
-        in_msg, transaction,
+    in_msg: Box<AsyncMessage>,
+) -> Result<Vec<Box<AsyncMessage>>> {
+    tracing::trace!(
+        target: tracing_targets::COLLATOR,
+        message_hash = %in_msg.cell.repr_hash(),
+        transaction_hash = %transaction.inner().repr_hash(),
+        "process new transaction from message",
     );
+
     collation_data.execute_count_all += 1;
-    let in_msg_original = in_msg.clone();
-    let (in_msg, in_msg_cell) = match in_msg {
-        AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), in_msg_cell, current_shard) => {
+
+    let import_fees;
+    let in_msg_hash = *in_msg.cell.repr_hash();
+    let in_msg = match (in_msg.info, in_msg.special_origin) {
+        // Messages with special origin are always immediate
+        (_, Some(_)) => {
+            let in_msg = InMsg::Immediate(InMsgFinal {
+                in_msg_envelope: Lazy::new(&MsgEnvelope {
+                    cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                    next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                    fwd_fee_remaining: Default::default(),
+                    message: Lazy::from_raw(in_msg.cell),
+                })?,
+                transaction: transaction.clone(),
+                fwd_fee: Default::default(),
+            });
+
+            import_fees = in_msg.compute_fees()?;
+            Lazy::new(&in_msg)?
+        }
+        // External messages are added as is
+        (MsgInfo::ExtIn(_), _) => {
+            collation_data.execute_count_ext += 1;
+
+            import_fees = ImportFees::default();
+            Lazy::new(&InMsg::External(InMsgExternal {
+                in_msg: Lazy::from_raw(in_msg.cell),
+                transaction: transaction.clone(),
+            }))?
+        }
+        // Dequeued messages have a dedicated `InMsg` type
+        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) if in_msg.dequeued.is_some() => {
             collation_data.execute_count_int += 1;
-            let next_addr = IntermediateAddr::FULL_DEST_SAME_WORKCHAIN;
-            // NOTE: `cur_addr` is not used in current routing between shards logic, it's just here to make the code more readable
-            let cur_addr = if current_shard {
-                IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
-            } else {
-                IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
-            };
-            let msg_envelope = MsgEnvelope {
-                cur_addr,
-                next_addr,
+
+            let same_shard = in_msg.dequeued.map(|d| d.same_shard).unwrap_or_default();
+
+            let envelope = Lazy::new(&MsgEnvelope {
+                // NOTE: `cur_addr` is not used in current routing between shards logic
+                cur_addr: if same_shard {
+                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
+                } else {
+                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
+                },
+                next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
                 fwd_fee_remaining: fwd_fee,
-                message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
-            };
+                message: Lazy::from_raw(in_msg.cell),
+            })?;
 
             let in_msg = InMsg::Final(InMsgFinal {
-                in_msg_envelope: Lazy::new(&msg_envelope)?,
+                in_msg_envelope: envelope.clone(),
                 transaction: transaction.clone(),
                 fwd_fee,
             });
+            import_fees = in_msg.compute_fees()?;
 
-            if current_shard {
+            let in_msg = Lazy::new(&in_msg)?;
+
+            if same_shard {
                 let out_msg = OutMsg::DequeueImmediate(OutMsgDequeueImmediate {
-                    out_msg_envelope: Lazy::new(&msg_envelope)?,
-                    reimport: Lazy::new(&in_msg)?,
+                    out_msg_envelope: envelope.clone(),
+                    reimport: in_msg.clone(),
                 });
+                let exported_value = out_msg.compute_exported_value()?;
 
-                collation_data
-                    .out_msgs
-                    .insert(*in_msg_cell.repr_hash(), out_msg.clone());
+                collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
+                    out_msg: Lazy::new(&out_msg)?,
+                    exported_value,
+                    new_tx: None,
+                });
                 collation_data.dequeue_count += 1;
             }
 
-            (in_msg, in_msg_cell)
+            in_msg
         }
-        AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), in_msg_cell) => {
+        // New messages are added as is
+        (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) => {
             collation_data.execute_count_new_int += 1;
 
-            let next_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
-            let cur_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
             let msg_envelope = MsgEnvelope {
-                cur_addr,
-                next_addr,
+                cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                next_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
                 fwd_fee_remaining: fwd_fee,
-                message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
+                message: Lazy::from_raw(in_msg.cell),
             };
             let in_msg = InMsg::Immediate(InMsgFinal {
                 in_msg_envelope: Lazy::new(&msg_envelope)?,
@@ -1300,123 +1358,119 @@ fn new_transaction(
                 fwd_fee,
             });
 
-            let previous_transaction = match collation_data
-                .out_msgs
-                .get(in_msg_cell.repr_hash())
-                .context("New Message was not found in out msgs")?
-            {
-                OutMsg::New(previous_out_msg) => previous_out_msg.transaction.clone(),
-                _ => {
-                    bail!(
-                        "Out msgs doesn't contain out message with state New: {:?}\n{:?}",
-                        in_msg_original,
-                        transaction,
-                    );
-                }
+            import_fees = in_msg.compute_fees()?;
+            let in_msg = Lazy::new(&in_msg)?;
+
+            let prev_transaction = match collation_data.out_msgs.get(&in_msg_hash) {
+                Some(prepared) => match &prepared.new_tx {
+                    Some(tx) => tx.clone(),
+                    None => anyhow::bail!("invalid out message state for in_msg {in_msg_hash}"),
+                },
+                None => anyhow::bail!("immediate in_msg {in_msg_hash} not found in out_msgs"),
             };
 
             let out_msg = OutMsg::Immediate(OutMsgImmediate {
                 out_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: previous_transaction,
-                reimport: Lazy::new(&in_msg)?,
+                transaction: prev_transaction,
+                reimport: in_msg.clone(),
             });
+            let exported_value = out_msg.compute_exported_value()?;
 
-            collation_data
-                .out_msgs
-                .insert(*in_msg_cell.repr_hash(), out_msg.clone());
-            collation_data.enqueue_count -= 1;
-            (in_msg, in_msg_cell)
-        }
-        AsyncMessage::Mint(in_msg_cell) | AsyncMessage::Recover(in_msg_cell) => {
-            let next_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
-            let cur_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
-            let msg_envelope = MsgEnvelope {
-                cur_addr,
-                next_addr,
-                fwd_fee_remaining: Default::default(),
-                message: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
-            };
-            let in_msg = InMsg::Immediate(InMsgFinal {
-                in_msg_envelope: Lazy::new(&msg_envelope)?,
-                transaction: transaction.clone(),
-                fwd_fee: Default::default(),
+            collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
+                out_msg: Lazy::new(&out_msg)?,
+                exported_value,
+                new_tx: None,
             });
-            (in_msg, in_msg_cell)
+            collation_data.enqueue_count -= 1;
+
+            in_msg
         }
-        AsyncMessage::Ext(MsgInfo::ExtIn(_), in_msg_cell) => {
-            collation_data.execute_count_ext += 1;
-            (
-                InMsg::External(InMsgExternal {
-                    in_msg: Lazy::new(&OwnedMessage::load_from(&mut in_msg_cell.as_slice()?)?)?,
-                    transaction: transaction.clone(),
-                }),
-                in_msg_cell,
+        (msg_info, special_origin) => {
+            unreachable!(
+                "unexpected message. info: {msg_info:?}, \
+                special_origin: {special_origin:?}"
             )
         }
-        AsyncMessage::TickTock(_) => {
-            return Ok(vec![]);
-        }
-        s => {
-            tracing::error!("wrong async message - {s:?}");
-            unreachable!()
-        }
     };
-    collation_data
-        .in_msgs
-        .insert(*in_msg_cell.repr_hash(), in_msg);
-    let mut result = vec![];
+
+    collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
+        in_msg,
+        import_fees,
+    });
+
+    let mut out_messages = vec![];
+
     let binding = transaction.load()?;
-    let out_msgs = binding.iter_out_msgs();
-    for out_msg in out_msgs {
-        let message = out_msg?;
-        let msg_cell = CellBuilder::build_from(&message)?;
-        let message_info = message.info;
-        let out_msg = match message_info.clone() {
+
+    // TODO: Get out messages from executor
+    for out_msg_cell in binding.out_msgs.values() {
+        let out_msg_cell = out_msg_cell?;
+        let out_msg_hash = *out_msg_cell.repr_hash();
+        let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
+
+        tracing::trace!(
+            target: tracing_targets::COLLATOR,
+            message_hash = %out_msg_hash,
+            info = ?out_msg_info,
+            "adding out message to out_msgs",
+        );
+
+        match &out_msg_info {
             MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
                 collation_data.enqueue_count += 1;
 
                 let dst_prefix = dst.prefix();
                 let dst_workchain = dst.workchain();
-                let cur_addr = IntermediateAddr::FULL_SRC_SAME_WORKCHAIN;
-                // NOTE: `next_addr` is not used in current routing between shards logic, it's just here to make the code more readable
-                let next_addr = if contains_prefix(shard_id, dst_workchain, dst_prefix) {
-                    IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
-                } else {
-                    IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
-                };
-                tracing::trace!(target: tracing_targets::COLLATOR,
-                    "adding OutMsg::New(OutMsgNew) to out_msgs: hash={}, info={:?}",
-                    msg_cell.repr_hash(), message_info,
-                );
-                OutMsg::New(OutMsgNew {
+
+                let out_msg = OutMsg::New(OutMsgNew {
                     out_msg_envelope: Lazy::new(&MsgEnvelope {
-                        cur_addr,
-                        next_addr,
-                        fwd_fee_remaining: fwd_fee,
-                        message: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
+                        cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
+                        // NOTE: `next_addr` is not used in current routing between shards logic
+                        next_addr: if contains_prefix(shard_id, dst_workchain, dst_prefix) {
+                            IntermediateAddr::FULL_DEST_SAME_WORKCHAIN
+                        } else {
+                            IntermediateAddr::FULL_SRC_SAME_WORKCHAIN
+                        },
+                        fwd_fee_remaining: *fwd_fee,
+                        message: Lazy::from_raw(out_msg_cell.clone()),
                     })?,
                     transaction: transaction.clone(),
-                })
+                });
+
+                collation_data
+                    .out_msgs
+                    .insert(out_msg_hash, PreparedOutMsg {
+                        out_msg: Lazy::new(&out_msg)?,
+                        exported_value: out_msg.compute_exported_value()?,
+                        new_tx: Some(transaction.clone()),
+                    });
+
+                out_messages.push(Box::new(AsyncMessage {
+                    info: out_msg_info,
+                    cell: out_msg_cell,
+                    special_origin: None,
+                    dequeued: None,
+                }));
             }
             MsgInfo::ExtOut(_) => {
-                tracing::trace!(target: tracing_targets::COLLATOR,
-                    "adding OutMsg::External(OutMsgExternal) to out_msgs: hash={}, info={:?}",
-                    msg_cell.repr_hash(), message_info,
-                );
-                OutMsg::External(OutMsgExternal {
-                    out_msg: Lazy::new(&OwnedMessage::load_from(&mut msg_cell.as_slice()?)?)?,
+                let out_msg = OutMsg::External(OutMsgExternal {
+                    out_msg: Lazy::from_raw(out_msg_cell),
                     transaction: transaction.clone(),
-                })
-            }
-            MsgInfo::ExtIn(_) => bail!("External inbound message cannot be output"),
-        };
+                });
 
-        collation_data
-            .out_msgs
-            .insert(*msg_cell.repr_hash(), out_msg.clone());
-        result.push((message_info, msg_cell));
+                collation_data
+                    .out_msgs
+                    .insert(out_msg_hash, PreparedOutMsg {
+                        out_msg: Lazy::new(&out_msg)?,
+                        exported_value: out_msg.compute_exported_value()?,
+                        new_tx: None,
+                    });
+            }
+            MsgInfo::ExtIn(_) => bail!("External inbound message cannot be an output"),
+        }
     }
-    Ok(result)
+
+    Ok(out_messages)
 }
 
 pub fn contains_prefix(shard_id: &ShardIdent, workchain_id: i32, prefix_without_tag: u64) -> bool {
