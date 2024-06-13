@@ -9,6 +9,8 @@ use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
+use ton_executor::blockchain_config::PreloadedBlockchainConfig;
+use ton_executor::ExecuteParams;
 use tycho_util::FastHashMap;
 
 use super::types::CachedMempoolAnchor;
@@ -117,13 +119,22 @@ impl CollatorStdImpl {
 
         // init execution manager
         let mut exec_manager = ExecutionManager::new(
-            collation_data.gen_utime,
-            collation_data.start_lt,
             collation_data.next_lt,
-            collation_data.rand_seed,
-            mc_data.libraries().clone(),
-            mc_data.config().clone(),
-            self.config.supported_block_version,
+            Arc::new(PreloadedBlockchainConfig::with_config(
+                mc_data.config().clone(),
+                0, // TODO: fix global id
+            )?),
+            Arc::new(ExecuteParams {
+                state_libs: mc_data.libraries().clone(),
+                // generated unix time
+                block_unixtime: collation_data.gen_utime,
+                // block's start logical time
+                block_lt: collation_data.start_lt,
+                // block random seed
+                seed_block: collation_data.rand_seed,
+                block_version: self.config.supported_block_version,
+                ..ExecuteParams::default()
+            }),
             group_limit,
             group_vert_size,
             prev_shard_data.observable_accounts().clone(),
