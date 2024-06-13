@@ -154,6 +154,7 @@ pub async fn handle_anchors(
 ) {
     let mut cache = ExternalMessageCache::new(1000);
     while let Some((anchor, points)) = rx.recv().await {
+        let anchor_id: MempoolAnchorId = anchor.body.location.round.0;
         let mut messages = Vec::new();
         let mut total_messages = 0;
         let mut total_bytes = 0;
@@ -191,13 +192,12 @@ pub async fn handle_anchors(
                     }
                 };
 
-                if cache.check_unique(anchor.body.location.round.0, cell.repr_hash()) {
+                if cache.check_unique(anchor_id, cell.repr_hash()) {
                     messages.push(Arc::new(ExternalMessage::new(cell.clone(), ext_in_message)));
                     messages_bytes += message.len();
                 }
             }
         }
-        cache.clean(anchor.body.location.round.0);
 
         metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body.location.round.0);
         metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
@@ -209,7 +209,7 @@ pub async fn handle_anchors(
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            round = anchor.body.location.round.0,
+            round = anchor_id,
             time = anchor.body.time.as_u64(),
             externals_unique = messages.len(),
             externals_skipped = total_messages - messages.len(),
@@ -217,12 +217,14 @@ pub async fn handle_anchors(
         );
 
         let anchor = Arc::new(MempoolAnchor::new(
-            anchor.body.location.round.0,
+            anchor_id,
             anchor.body.time.as_u64(),
             messages,
         ));
 
         adapter.add_anchor(anchor);
+
+        cache.clean(anchor_id);
     }
 }
 
