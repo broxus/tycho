@@ -15,7 +15,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use tycho_util::FastHashMap;
 
-use super::types::AsyncMessage;
+use super::types::ParsedMessage;
 use crate::collator::types::{AccountId, ShardAccountStuff};
 use crate::tracing_targets;
 
@@ -37,7 +37,7 @@ pub(super) struct ExecutionManager {
 }
 
 type MessageGroups = FastHashMap<u32, MessageGroup>;
-type MessageGroup = FastHashMap<HashBytes, Vec<Box<AsyncMessage>>>;
+type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
 
 impl ExecutionManager {
     /// constructor
@@ -87,7 +87,7 @@ impl ExecutionManager {
     }
 
     /// Set messages that will be executed
-    pub fn set_msgs_for_execution(&mut self, msgs: Vec<Box<AsyncMessage>>) {
+    pub fn set_msgs_for_execution(&mut self, msgs: Vec<Box<ParsedMessage>>) {
         let message_count = msgs.len();
         self.message_groups = pre_calculate_groups(msgs, self.group_limit, self.group_vert_size);
 
@@ -166,7 +166,7 @@ impl ExecutionManager {
     fn execute_messages(
         &self,
         mut account_state: Box<ShardAccountStuff>,
-        msgs: Vec<Box<AsyncMessage>>,
+        msgs: Vec<Box<ParsedMessage>>,
     ) -> impl Future<Output = Result<ExecutedTransactions>> + Send + 'static {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
@@ -196,7 +196,7 @@ impl ExecutionManager {
     pub async fn execute_ordinary_transaction(
         &mut self,
         mut account_stuff: Box<ShardAccountStuff>,
-        in_message: Box<AsyncMessage>,
+        in_message: Box<ParsedMessage>,
     ) -> Result<ExecutedOrdinaryTransaction> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute ordinary transaction for special message");
 
@@ -328,7 +328,7 @@ impl ExecutedTick {
 
 pub struct ExecutedTickItem {
     pub account_addr: AccountId,
-    pub in_message: Box<AsyncMessage>,
+    pub in_message: Box<ParsedMessage>,
     pub executor_output: ExecutorOutput,
 }
 
@@ -339,12 +339,12 @@ pub struct ExecutedTransactions {
 
 pub struct ExecutedOrdinaryTransaction {
     pub result: Result<ExecutorOutput>,
-    pub in_message: Box<AsyncMessage>,
+    pub in_message: Box<ParsedMessage>,
 }
 
 fn execute_ordinary_transaction(
     account_stuff: &mut ShardAccountStuff,
-    in_message: Box<AsyncMessage>,
+    in_message: Box<ParsedMessage>,
     min_lt: u64,
     config: &PreloadedBlockchainConfig,
     params: &ExecuteParams,
@@ -500,7 +500,7 @@ fn execute_ticktock_transaction(
 
 /// calculate all groups in advance
 pub fn pre_calculate_groups(
-    messages_set: Vec<Box<AsyncMessage>>,
+    messages_set: Vec<Box<ParsedMessage>>,
     group_limit: usize,
     group_vert_size: usize,
 ) -> MessageGroups {

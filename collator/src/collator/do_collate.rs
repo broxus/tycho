@@ -15,7 +15,7 @@ use super::types::{CachedMempoolAnchor, SpecialOrigin};
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
-    AsyncMessage, BlockCollationData, Dequeued, McData, PreparedInMsg, PreparedOutMsg, PrevData,
+    ParsedMessage, BlockCollationData, Dequeued, McData, PreparedInMsg, PreparedOutMsg, PrevData,
     ShardDescriptionExt,
 };
 use crate::internal_queue::types::InternalMessageKey;
@@ -181,7 +181,7 @@ impl CollatorStdImpl {
             let mut executed_internal_messages = vec![];
             let mut internal_messages_sources = FastHashMap::default();
             // build messages set
-            let mut msgs_set: Vec<Box<AsyncMessage>> = vec![];
+            let mut msgs_set: Vec<Box<ParsedMessage>> = vec![];
 
             // 1. First try to read min externals amount
             let mut ext_msgs = if self.has_pending_externals {
@@ -201,7 +201,7 @@ impl CollatorStdImpl {
                         );
                         let message_with_source = int_msg.message_with_source;
 
-                        msgs_set.push(Box::new(AsyncMessage {
+                        msgs_set.push(Box::new(ParsedMessage {
                             info: MsgInfo::Int(message_with_source.message.info.clone()),
                             cell: message_with_source.message.cell.clone(),
                             special_origin: None,
@@ -264,7 +264,7 @@ impl CollatorStdImpl {
                                 })
                             };
 
-                            msgs_set.push(Box::new(AsyncMessage {
+                            msgs_set.push(Box::new(ParsedMessage {
                                 info: MsgInfo::Int(message_with_source.message.info.clone()),
                                 cell: message_with_source.message.cell.clone(),
                                 special_origin: None,
@@ -622,7 +622,7 @@ impl CollatorStdImpl {
         &mut self,
         count: usize,
         collation_data: &mut BlockCollationData,
-    ) -> Result<Vec<Box<AsyncMessage>>> {
+    ) -> Result<Vec<Box<ParsedMessage>>> {
         let (res, has_pending_externals) = Self::read_next_externals_impl(
             &self.shard_id,
             &mut self.anchors_cache,
@@ -638,7 +638,7 @@ impl CollatorStdImpl {
         anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
         count: usize,
         collation_data: &mut BlockCollationData,
-    ) -> Result<(Vec<Box<AsyncMessage>>, bool)> {
+    ) -> Result<(Vec<Box<ParsedMessage>>, bool)> {
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
             "shard: {}, count: {}", shard_id, count,
         );
@@ -753,7 +753,7 @@ impl CollatorStdImpl {
                     if shard_id.contains_address(&ext_msg.info().dst) {
                         if total_msgs_collected < count {
                             // get msgs for target shard until target count reached
-                            ext_messages.push(Box::new(AsyncMessage {
+                            ext_messages.push(Box::new(ParsedMessage {
                                 info: MsgInfo::ExtIn(ext_msg.info().clone()),
                                 cell: ext_msg.cell().clone(),
                                 special_origin: None,
@@ -1068,7 +1068,7 @@ impl CollatorStdImpl {
                 layout: None,
             })?;
 
-            Box::new(AsyncMessage {
+            Box::new(ParsedMessage {
                 info,
                 cell,
                 special_origin: Some(special_origin),
@@ -1257,8 +1257,8 @@ fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,
     executor_output: ExecutorOutput,
-    in_msg: Box<AsyncMessage>,
-) -> Result<Vec<Box<AsyncMessage>>> {
+    in_msg: Box<ParsedMessage>,
+) -> Result<Vec<Box<ParsedMessage>>> {
     tracing::trace!(
         target: tracing_targets::COLLATOR,
         message_hash = %in_msg.cell.repr_hash(),
@@ -1441,7 +1441,7 @@ fn new_transaction(
                         new_tx: Some(executor_output.transaction.clone()),
                     });
 
-                out_messages.push(Box::new(AsyncMessage {
+                out_messages.push(Box::new(ParsedMessage {
                     info: out_msg_info,
                     cell: out_msg_cell,
                     special_origin: None,
