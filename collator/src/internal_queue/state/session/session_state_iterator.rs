@@ -48,7 +48,15 @@ impl SessionStateIterator {
                 let shard_size = shard.outgoing_messages.len();
 
                 tracing::trace!(
+<<<<<<< HEAD
                     target: tracing_targets::MQ,
+=======
+<<<<<<< HEAD
+                    target: tracing_targets::COLLATOR,
+=======
+                    target: tracing_targets::MQ,
+>>>>>>> 0148076 (fix(collator): lost internals)
+>>>>>>> 40c667f (fix(collator): lost internals)
                     "Full queue has {} messages",
                     shard_size
                 );
@@ -82,7 +90,6 @@ impl SessionStateIterator {
 
         metrics::histogram!("tycho_session_iterator_subqueue_size", &labels)
             .record(message_queue.len() as f64);
-
 
         message_queue
     }
