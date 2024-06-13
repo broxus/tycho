@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use everscale_types::models::ShardIdent;
 
-use crate::internal_queue::types::{EnqueuedMessage, Lt};
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 
 #[derive(Debug, Clone, Eq)]
 pub struct MessageWithSource {
@@ -39,14 +39,14 @@ impl Ord for MessageWithSource {
 #[derive(Debug, Clone)]
 pub struct IterRange {
     pub shard_id: ShardIdent,
-    pub lt: Lt,
+    pub key: InternalMessageKey,
 }
 
 #[derive(Debug, Clone)]
 pub struct ShardRange {
     pub shard_id: ShardIdent,
-    pub from_lt: Option<Lt>,
-    pub to_lt: Option<Lt>,
+    pub from: Option<InternalMessageKey>,
+    pub to: Option<InternalMessageKey>,
 }
 
 pub trait StateIterator: Send {

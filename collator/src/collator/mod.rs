@@ -4,12 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::models::*;
+use everscale_types::prelude::HashBytes;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, CollatorStats, McData, PrevData, WorkingState};
 use crate::internal_queue::iterator::QueueIterator;
+use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
@@ -533,20 +535,20 @@ impl CollatorStdImpl {
 
         for entry in processed_upto.internals.iter() {
             let (shard_id_full, processed_upto_info) = entry?;
-            ranges_from.insert(
-                ShardIdent::try_from(shard_id_full)?,
-                processed_upto_info.processed_to_msg.0,
-            );
+            ranges_from.insert(ShardIdent::try_from(shard_id_full)?, InternalMessageKey {
+                lt: processed_upto_info.processed_to_msg.0,
+                hash: processed_upto_info.processed_to_msg.1,
+            });
         }
 
         if !ranges_from.contains_key(&ShardIdent::new_full(-1)) {
-            ranges_from.insert(ShardIdent::new_full(-1), 0);
+            ranges_from.insert(ShardIdent::new_full(-1), InternalMessageKey::default());
         }
 
         for mc_shard_hash in mc_data.mc_state_extra().shards.iter() {
             let (shard_id, _) = mc_shard_hash?;
             if !ranges_from.contains_key(&shard_id) {
-                ranges_from.insert(shard_id, 0);
+                ranges_from.insert(shard_id, InternalMessageKey::default());
             }
         }
 
@@ -554,16 +556,19 @@ impl CollatorStdImpl {
 
         for shard in mc_data.mc_state_extra().shards.iter() {
             let (shard_id, shard_description) = shard?;
-            ranges_to.insert(shard_id, shard_description.end_lt);
+            ranges_to.insert(shard_id, InternalMessageKey {
+                lt: shard_description.end_lt,
+                hash: HashBytes([255; 32]),
+            });
         }
 
-        // for current shard read until last message
-        ranges_to.insert(self.shard_id, self.working_state().prev_shard_data.gen_lt());
+        ranges_to.insert(ShardIdent::new_full(-1), InternalMessageKey {
+            lt: self.working_state().mc_data.mc_state_stuff().state().gen_lt,
+            hash: HashBytes([255; 32]),
+        });
 
-        ranges_to.insert(
-            ShardIdent::new_full(-1),
-            self.working_state().mc_data.mc_state_stuff().state().gen_lt,
-        );
+        // for current shard read until last message
+        ranges_to.insert(self.shard_id, InternalMessageKey::MAX);
 
         let internal_messages_iterator = self
             .mq_adapter

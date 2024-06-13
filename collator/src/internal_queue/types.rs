@@ -65,6 +65,13 @@ pub struct InternalMessageKey {
     pub hash: HashBytes,
 }
 
+impl InternalMessageKey {
+    pub const MAX: Self = Self {
+        lt: u64::MAX,
+        hash: HashBytes([u8::MAX; 32]),
+    };
+}
+
 impl EnqueuedMessage {
     pub fn key(&self) -> InternalMessageKey {
         InternalMessageKey {

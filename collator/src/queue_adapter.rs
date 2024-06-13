@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::cell::Cell;
 use everscale_types::models::{BlockIdShort, IntMsgInfo, ShardIdent};
 use tracing::instrument;
 use tycho_util::FastHashMap;
@@ -28,8 +28,8 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, u64>,
-        shards_to: FastHashMap<ShardIdent, u64>,
+        shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
+        shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
     async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
@@ -92,8 +92,8 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, u64>,
-        shards_to: FastHashMap<ShardIdent, u64>,
+        shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
+        shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
     ) -> Result<Box<dyn QueueIterator>> {
         let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
