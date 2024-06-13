@@ -476,6 +476,7 @@ dashboard = Dashboard(
         core_bc(),
         core_block_strider(),
         collator_do_collate(),
+        collator_execution_manager(),
         net_conn_manager(),
         net_request_handler(),
         net_peer(),
