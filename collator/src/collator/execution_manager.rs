@@ -71,10 +71,8 @@ impl ExecutionManager {
         &self.params
     }
 
-    pub fn take_changed_accounts(
-        &'_ mut self,
-    ) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> + '_ {
-        self.accounts_cache.items.drain().map(|(_, v)| v)
+    pub fn into_changed_accounts(self) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
+        self.accounts_cache.items.into_values()
     }
 
     pub fn take_account_stuff_if<F>(

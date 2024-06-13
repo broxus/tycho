@@ -3,14 +3,15 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
-use everscale_types::dict::{AugDict, Dict};
+use everscale_types::dict::Dict;
 use everscale_types::models::{
-    Account, AccountBlock, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef,
-    BlockchainConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr,
-    McStateExtra, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount,
-    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
-    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
+    CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo,
+    OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts,
+    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib,
+    SpecialFlags, StateInit, Transaction, ValueFlow,
 };
+use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
@@ -468,18 +469,13 @@ pub(super) struct CachedMempoolAnchor {
 
 pub(super) type AccountId = HashBytes;
 
-pub(super) type Transactions = AugDict<u64, CurrencyCollection, Lazy<Transaction>>;
-
-pub(super) type AccountBlocksDict = AugDict<HashBytes, CurrencyCollection, AccountBlock>;
-
-#[derive(Clone)]
 pub(super) struct ShardAccountStuff {
     pub account_addr: AccountId,
     pub shard_account: ShardAccount,
     pub special: SpecialFlags,
     pub initial_state_hash: HashBytes,
     pub libraries: Dict<HashBytes, SimpleLib>,
-    pub transactions: Transactions,
+    pub transactions: RelaxedAugDict<u64, CurrencyCollection, Lazy<Transaction>>,
 }
 
 impl ShardAccountStuff {
@@ -548,7 +544,7 @@ impl ShardAccountStuff {
         total_fees: &CurrencyCollection,
         transaction: &Lazy<Transaction>,
     ) -> Result<()> {
-        self.transactions.set(lt, total_fees, transaction)?;
+        self.transactions.set_any(&lt, total_fees, transaction)?;
         Ok(())
     }
 
