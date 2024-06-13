@@ -1,16 +1,16 @@
 use anyhow::{bail, Result};
-use everscale_types::dict::{AugDictExtra, DictKey};
 use everscale_types::merkle::*;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tokio::time::Instant;
 use tycho_block_util::config::BlockchainConfigExt;
+use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::ExecutionManager;
 use super::CollatorStdImpl;
-use crate::collator::types::{AccountBlocksDict, BlockCollationData};
+use crate::collator::types::BlockCollationData;
 use crate::tracing_targets;
 use crate::types::BlockCandidate;
 
@@ -18,7 +18,7 @@ impl CollatorStdImpl {
     pub(super) fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,
-        mut exec_manager: ExecutionManager,
+        exec_manager: ExecutionManager,
     ) -> Result<(Box<BlockCandidate>, ShardStateStuff)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -26,59 +26,68 @@ impl CollatorStdImpl {
         let prev_shard_data = &self.working_state().prev_shard_data;
 
         // update shard accounts tree and prepare accounts blocks
-        let mut shard_accounts = prev_shard_data.observable_accounts().clone();
-        let mut account_blocks = AccountBlocksDict::default();
-
         let mut new_config_params = None::<BlockchainConfigParams>;
         let mut global_libraries = exec_manager.executor_params().state_libs.clone();
 
         let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
         let config_address = &self.working_state().mc_data.config().address;
 
-        for updated_account in exec_manager.take_changed_accounts() {
-            let loaded_account = updated_account.shard_account.load_account()?;
-            match &loaded_account {
-                Some(account) => {
-                    if is_masterchain && &updated_account.account_addr == config_address {
-                        if let AccountState::Active(StateInit { data, .. }) = &account.state {
-                            if let Some(data) = data {
-                                new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
+        let (account_blocks, shard_accounts) = {
+            let mut account_blocks = RelaxedAugDict::new();
+            let mut shard_accounts =
+                RelaxedAugDict::from_full(prev_shard_data.observable_accounts());
+
+            for updated_account in exec_manager.into_changed_accounts() {
+                if updated_account.transactions.is_empty() {
+                    continue;
+                }
+
+                let loaded_account = updated_account.shard_account.load_account()?;
+                match &loaded_account {
+                    Some(account) => {
+                        if is_masterchain && &updated_account.account_addr == config_address {
+                            if let AccountState::Active(StateInit { data, .. }) = &account.state {
+                                if let Some(data) = data {
+                                    new_config_params =
+                                        Some(data.parse::<BlockchainConfigParams>()?);
+                                }
                             }
                         }
+
+                        shard_accounts.set_any(
+                            &updated_account.account_addr,
+                            &DepthBalanceInfo {
+                                split_depth: 0, // TODO: fix
+                                balance: account.balance.clone(),
+                            },
+                            &updated_account.shard_account,
+                        )?;
                     }
-
-                    shard_accounts.set(
-                        updated_account.account_addr,
-                        &DepthBalanceInfo {
-                            split_depth: 0, // TODO: fix
-                            balance: account.balance.clone(),
-                        },
-                        &updated_account.shard_account,
-                    )?;
+                    None => {
+                        shard_accounts.remove(&updated_account.account_addr)?;
+                    }
                 }
-                None => {
-                    shard_accounts.remove(&updated_account.account_addr)?;
+
+                if is_masterchain {
+                    updated_account
+                        .update_public_libraries(&loaded_account, &mut global_libraries)?;
                 }
-            }
 
-            if is_masterchain {
-                updated_account.update_public_libraries(&loaded_account, &mut global_libraries)?;
-            }
-
-            if !updated_account.transactions.is_empty() {
                 let account_block = AccountBlock {
                     state_update: updated_account.build_hash_update(), // TODO: fix state update
                     account: updated_account.account_addr,
-                    transactions: updated_account.transactions,
+                    transactions: updated_account.transactions.build()?,
                 };
 
-                account_blocks.set(
+                account_blocks.set_any(
                     &updated_account.account_addr,
                     account_block.transactions.root_extra(),
                     &account_block,
                 )?;
             }
-        }
+
+            (account_blocks.build()?, shard_accounts.build()?)
+        };
 
         // TODO: update new_config_opt from hard fork
 
@@ -86,40 +95,22 @@ impl CollatorStdImpl {
         let mut value_flow = collation_data.value_flow.clone();
 
         let in_msgs = {
-            let mut in_msgs_root = None::<Cell>;
+            let mut in_msgs = RelaxedAugDict::new();
             // TODO: use more effective algorithm than iter and set
             for (msg_id, msg) in collation_data.in_msgs.iter() {
-                aug_dict_set_as_lazy::<HashBytes, ImportFees, InMsg>(
-                    &mut in_msgs_root,
-                    msg_id,
-                    &msg.import_fees,
-                    &msg.in_msg,
-                )?;
+                in_msgs.set_as_lazy(msg_id, &msg.import_fees, &msg.in_msg)?;
             }
-
-            let mut in_msgs =
-                InMsgDescr::from_parts(Dict::from_raw(in_msgs_root), Default::default());
-            in_msgs.update_root_extra()?;
-            in_msgs
+            in_msgs.build()?
         };
         value_flow.imported = in_msgs.root_extra().value_imported.clone();
 
         let out_msgs = {
-            let mut out_msgs_root = None::<Cell>;
+            let mut out_msgs = RelaxedAugDict::new();
             // TODO: use more effective algorithm than iter and set
             for (msg_id, msg) in collation_data.out_msgs.iter() {
-                aug_dict_set_as_lazy::<HashBytes, CurrencyCollection, OutMsg>(
-                    &mut out_msgs_root,
-                    msg_id,
-                    &msg.exported_value,
-                    &msg.out_msg,
-                )?;
+                out_msgs.set_as_lazy(msg_id, &msg.exported_value, &msg.out_msg)?;
             }
-
-            let mut out_msgs =
-                OutMsgDescr::from_parts(Dict::from_raw(out_msgs_root), Default::default());
-            out_msgs.update_root_extra()?;
-            out_msgs
+            out_msgs.build()?
         };
 
         value_flow.exported = out_msgs.root_extra().clone();
@@ -552,35 +543,4 @@ fn create_merkle_update(
 
     metrics::histogram!("tycho_collator_create_merkle_update_time").record(elapsed);
     Ok(state_update)
-}
-
-fn aug_dict_set_as_lazy<K, A, V>(
-    dict_root: &mut Option<Cell>,
-    key: &K,
-    extra: &A,
-    value: &Lazy<V>,
-) -> Result<bool, everscale_types::error::Error>
-where
-    K: Store + DictKey,
-    for<'a> A: AugDictExtra + Store + Load<'a>,
-{
-    use everscale_types::dict::{aug_dict_insert, SetMode};
-
-    let cx = &mut Cell::empty_context();
-
-    let mut key_builder = CellBuilder::new();
-    key.store_into(&mut key_builder, cx)?;
-
-    let inserted = aug_dict_insert(
-        dict_root,
-        &mut key_builder.as_data_slice(),
-        K::BITS,
-        extra,
-        &value.inner().as_slice()?,
-        SetMode::Set,
-        A::comp_add,
-        cx,
-    )?;
-
-    Ok(inserted)
 }
