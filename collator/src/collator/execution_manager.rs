@@ -141,6 +141,9 @@ impl ExecutionManager {
 
                 let executor_output = tx.result?;
 
+                self.min_next_lt =
+                    cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
+
                 items.push(ExecutedTickItem {
                     account_addr: executed.account_state.account_addr,
                     in_message: tx.in_message,
@@ -148,10 +151,6 @@ impl ExecutionManager {
                 });
             }
 
-            self.min_next_lt = cmp::max(
-                self.min_next_lt,
-                executed.account_state.shard_account.last_trans_lt + 1,
-            );
             self.accounts_cache
                 .add_account_stuff(executed.account_state);
         }
@@ -216,7 +215,9 @@ impl ExecutionManager {
         })
         .await?;
 
-        self.min_next_lt = cmp::max(min_next_lt, account_stuff.shard_account.last_trans_lt + 1);
+        if let Ok(executor_output) = &executed.result {
+            self.min_next_lt = cmp::max(min_next_lt, executor_output.account_last_trans_lt);
+        }
         self.accounts_cache.add_account_stuff(account_stuff);
         Ok(executed)
     }
@@ -245,7 +246,7 @@ impl ExecutionManager {
         })
         .await?;
 
-        self.min_next_lt = cmp::max(min_next_lt, account_stuff.shard_account.last_trans_lt + 1);
+        self.min_next_lt = cmp::max(min_next_lt, executed.account_last_trans_lt);
         self.accounts_cache.add_account_stuff(account_stuff);
         Ok(executed)
     }
