@@ -344,6 +344,10 @@ where
     /// 2. Notify mempool about new master block
     /// 3. Enqueue collation sessions refresh task
     pub async fn process_mc_block_from_bc(&self, mc_block_id: BlockId) -> Result<()> {
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "Processing master block ({})", mc_block_id.as_short_id(),
+        );
+
         // check if we should skip this master block from the blockchain
         // because it is not far ahead of last collated by ourselves
         if !self.check_should_process_mc_block_from_bc(&mc_block_id) {
@@ -527,7 +531,8 @@ where
     pub async fn refresh_collation_sessions(&mut self, mc_state: ShardStateStuff) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Trying to refresh collation sessions by mc state for block...",
+            "Trying to refresh collation sessions by mc state for block ({})...",
+            mc_state.block_id().as_short_id(),
         );
 
         // TODO: Possibly we have already updated collation sessions for this master block,
@@ -831,12 +836,18 @@ where
         _session_info: Arc<CollationSessionInfo>,
         finish_key: CollationSessionId,
     ) -> Result<()> {
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "finish_collation_session: {:?}", finish_key,
+        );
         self.collation_sessions_to_finish.remove(&finish_key);
         Ok(())
     }
 
     /// Remove stopped collator from cache
     pub async fn process_collator_stopped(&mut self, stop_key: CollationSessionId) -> Result<()> {
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "process_collator_stopped: {:?}", stop_key,
+        );
         self.collators_to_stop.remove(&stop_key);
         Ok(())
     }
@@ -1512,6 +1523,11 @@ where
             .iter()
             .map(|key| key.to_string())
             .collect::<Vec<_>>();
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Cleaning up blocks from cache: {:?}",
+            _tracing_blocks_descr.as_slice(),
+        );
         for block_key in blocks_keys {
             if block_key.shard.is_masterchain() {
                 self.blocks_cache.master.remove(&block_key);
@@ -1543,6 +1559,11 @@ where
             .iter()
             .map(|b| b.entry.key.to_string())
             .collect::<Vec<_>>();
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Restoring blocks in cache: {:?}",
+            _tracing_blocks_descr.as_slice(),
+        );
         for block in blocks_to_restore {
             // find block in cache
             let block_container = if block.entry.key.shard.is_masterchain() {
