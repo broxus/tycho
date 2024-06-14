@@ -225,7 +225,7 @@ impl StateNodeAdapterStdImpl {
                     match self.save_block_proof(block).await {
                         Ok(_) => return Some(Ok(block.block_stuff_aug.clone())),
                         Err(e) => {
-                            tracing::error!("Failed to save block proof: {e}");
+                            tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Failed to save block proof: {e}");
                             return Some(Err(anyhow!("Failed to save block proof")));
                         }
                     }
@@ -283,7 +283,7 @@ impl StateNodeAdapterStdImpl {
                         Ok(())
                     }
                     Err(e) => {
-                        tracing::error!("Failed to prepare block proof: {e}");
+                        tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Failed to prepare block proof: {e}");
                         Err(anyhow!("Failed to prepare block proof"))
                     }
                 }

@@ -151,6 +151,7 @@ where
             .store_block_applied(&prepared.handle);
 
         if applied && self.inner.storage.archive_config().is_some() {
+            tracing::trace!("Moving block {:?} to archive", &prepared.handle.id());
             self.inner
                 .storage
                 .block_storage()
