@@ -27,6 +27,10 @@ impl<'de> Deserialize<'de> for PointByIdResponse {
     }
 }
 
+/// Denotes that broadcasts should be done via network query, not send message.
+/// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.
+pub struct BroadcastResponse;
+
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub enum SignatureResponse {
     Signature(Signature),

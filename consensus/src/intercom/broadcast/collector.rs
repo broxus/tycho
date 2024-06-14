@@ -9,7 +9,7 @@ use tycho_util::FastHashSet;
 
 use crate::dag::{DagRound, InclusionState};
 use crate::dyn_event;
-use crate::effects::{AltFormat, CollectorContext, CurrentRoundContext, Effects, EffectsContext};
+use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::broadcast::dto::ConsensusEvent;
 use crate::intercom::dto::SignatureResponse;
@@ -174,7 +174,7 @@ impl CollectorTask {
                 },
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
-                        if let Err(round) = self.match_filtered(&consensus_event) {
+                        if let Err(round) = self.match_filtered(consensus_event) {
                             _ = self.collector_signal.send(CollectorSignal::Err);
                             return Err(round)
                         }
@@ -271,7 +271,7 @@ impl CollectorTask {
         result
     }
 
-    fn match_filtered(&self, consensus_event: &ConsensusEvent) -> Result<(), Round> {
+    fn match_filtered(&self, consensus_event: ConsensusEvent) -> Result<(), Round> {
         match consensus_event {
             ConsensusEvent::Forward(consensus_round) => {
                 #[allow(clippy::match_same_arms)]
@@ -291,75 +291,35 @@ impl CollectorTask {
                 dyn_event!(
                     parent: self.effects.span(),
                     level,
-                    event = display(consensus_event.alt()),
+                    event = display("Forward"),
                     round = consensus_round.0,
                     "from bcast filter",
                 );
                 if should_fail {
-                    return Err(*consensus_round);
+                    return Err(consensus_round);
                 }
             }
-            ConsensusEvent::Verified(point) => {
-                let is_first = match point.body.location.round {
-                    x if x > self.next_dag_round.round() => {
-                        let _guard = self.effects.span().enter();
-                        panic!(
-                            "Coding error: broadcast filter advanced \
-                             while collector left behind; event: {} {:?}",
-                            consensus_event.alt(),
-                            point.id()
-                        )
-                    }
-                    x if x == self.next_dag_round.round() => self
-                        .next_dag_round
-                        .add_collected_exact(point, &self.downloader, &self.effects)
-                        .map(|task| self.next_includes.push(task))
-                        .is_some(),
-                    x if x == self.current_round.round() => self
-                        .current_round
-                        .add_collected_exact(point, &self.downloader, &self.effects)
-                        .map(|task| self.includes.push(task))
-                        .is_some(),
-                    _ => self
-                        .current_round
-                        .scan(point.body.location.round)
-                        .and_then(|round| {
-                            round.add_collected_exact(point, &self.downloader, &self.effects)
-                        })
-                        // maybe other's dependency, but too old to be included
-                        .is_some(),
-                };
-                tracing::debug!(
-                    parent: self.effects.span(),
-                    event = display(consensus_event.alt()),
-                    new = is_first,
-                    author = display(point.body.location.author.alt()),
-                    round = point.body.location.round.0,
-                    digest = display(point.digest.alt()),
-                    "from bcast filter",
-                );
-            }
-            ConsensusEvent::Invalid(dag_point) => {
-                if dag_point.location().round > self.next_dag_round.round() {
+            ConsensusEvent::Validating { point_id, task } => {
+                if point_id.location.round > self.next_dag_round.round() {
                     let _guard = self.effects.span().enter();
                     panic!(
                         "Coding error: broadcast filter advanced \
-                         while collector left behind; event: {} {:?}",
-                        consensus_event.alt(),
-                        dag_point.id()
+                         while collector left behind; Validating {:?}",
+                        point_id.alt()
                     )
-                } else {
-                    let is_first = self.next_dag_round.insert_invalid(dag_point).is_some();
-                    tracing::warn!(
-                        parent: self.effects.span(),
-                        event = display(consensus_event.alt()),
-                        new = is_first,
-                        author = display(dag_point.location().author.alt()),
-                        round = dag_point.location().round.0,
-                        digest = display(dag_point.digest().alt()),
-                        "from bcast filter",
-                    );
-                }
+                } else if point_id.location.round == self.next_dag_round.round() {
+                    self.next_includes.push(task);
+                } else if point_id.location.round == self.current_round.round() {
+                    self.includes.push(task);
+                } // else maybe other's dependency, but too old to be included
+                tracing::debug!(
+                    parent: self.effects.span(),
+                    event = display("Validating"),
+                    author = display(point_id.location.author.alt()),
+                    round = point_id.location.round.0,
+                    digest = display(point_id.digest.alt()),
+                    "from bcast filter",
+                );
             }
         };
         Ok(())
@@ -408,6 +368,7 @@ impl CollectorTask {
     }
 }
 
+struct CollectorContext;
 impl EffectsContext for CollectorContext {}
 
 impl Effects<CollectorContext> {

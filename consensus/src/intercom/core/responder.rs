@@ -8,8 +8,7 @@ use crate::effects::{AltFormat, CurrentRoundContext, Effects};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::dto::{MPQuery, MPResponse};
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
-use crate::intercom::{BroadcastFilter, Uploader};
-use crate::models::Point;
+use crate::intercom::{BroadcastFilter, Downloader, Uploader};
 
 #[derive(Clone, Default)]
 pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
@@ -18,6 +17,7 @@ struct ResponderInner {
     // state and storage components go here
     broadcast_filter: BroadcastFilter,
     top_dag_round: DagRound,
+    downloader: Downloader,
     effects: Effects<CurrentRoundContext>,
 }
 
@@ -26,12 +26,15 @@ impl Responder {
         &self,
         broadcast_filter: &BroadcastFilter,
         top_dag_round: &DagRound,
+        downloader: &Downloader,
         round_effects: &Effects<CurrentRoundContext>,
     ) {
+        broadcast_filter.advance_round(top_dag_round, downloader, round_effects);
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
-            effects: round_effects.clone(),
             top_dag_round: top_dag_round.clone(),
+            downloader: downloader.clone(),
+            effects: round_effects.clone(),
         })));
     }
 }
@@ -48,8 +51,7 @@ impl Service<ServiceRequest> for Responder {
     }
 
     #[inline]
-    fn on_message(&self, req: ServiceRequest) -> Self::OnMessageFuture {
-        self.handle_broadcast(&req);
+    fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
         futures_util::future::ready(())
     }
 
@@ -73,6 +75,19 @@ impl Responder {
             .ok()?; // malformed request is a reason to ignore it
         let inner = self.0.load_full();
         let response = match body {
+            MPQuery::Broadcast(point) => {
+                match inner {
+                    None => {} // do nothing: sender has retry loop via signature request
+                    Some(inner) => inner.broadcast_filter.add(
+                        &req.metadata.peer_id,
+                        &Arc::new(point),
+                        &inner.top_dag_round,
+                        &inner.downloader,
+                        &inner.effects,
+                    ),
+                };
+                MPResponse::Broadcast
+            }
             MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
                 None => PointByIdResponse(None),
                 Some(inner) => {
@@ -90,31 +105,6 @@ impl Responder {
             }),
         };
         Some(Response::try_from(&response).expect("should serialize own response"))
-    }
-
-    fn handle_broadcast(&self, req: &ServiceRequest) {
-        let Some(inner) = self.0.load_full() else {
-            return;
-        };
-        match bincode::deserialize::<Point>(&req.body) {
-            Ok(point) => {
-                let point = Arc::new(point);
-                inner.broadcast_filter.add(
-                    &req.metadata.peer_id,
-                    &point,
-                    inner.top_dag_round.round(),
-                    &inner.effects,
-                );
-            }
-            Err(e) => {
-                // malformed request is a reason to ignore it
-                tracing::error!(
-                    parent: inner.effects.span(),
-                    "cannot parse broadcast from {:?}: {e:?}",
-                    req.metadata.peer_id
-                );
-            }
-        };
     }
 }
 // ResponderContext is meaningless without metrics

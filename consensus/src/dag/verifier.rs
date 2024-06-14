@@ -105,14 +105,13 @@ impl Verifier {
 
         let signatures_fut = match point.body.proof.as_ref() {
             None => futures_util::future::Either::Left(futures_util::future::ready(true)),
-            Some(proof) => futures_util::future::Either::Right(rayon_run({
-                let proof = proof.clone();
-                let span = effects.span().clone();
-                move || {
-                    let _guard = span.enter();
-                    proof.signatures_match()
-                }
-            })),
+            Some(proof) => futures_util::future::Either::Right(
+                rayon_run({
+                    let proof = proof.clone();
+                    move || proof.signatures_match()
+                })
+                .instrument(effects.span().clone()),
+            ),
         };
         let check_deps_fut =
             Self::check_deps(&point, dependencies).instrument(effects.span().clone());
@@ -133,6 +132,7 @@ impl Verifier {
                 dag_point = &mut check_deps_fut, if deps_checked.is_none() => {
                     if sig_checked || dag_point.valid().is_none() {
                         // either invalid or signature check passed
+                        // this cancels `rayon_run` task as receiver is dropped
                         break dag_point;
                     } else {
                         deps_checked = Some(dag_point);

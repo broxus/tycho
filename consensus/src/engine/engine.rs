@@ -229,10 +229,12 @@ impl Engine {
                 bcaster_ready_rx,
             ));
 
-            self.responder
-                .update(&self.broadcast_filter, &next_dag_round, &round_effects);
-            self.broadcast_filter
-                .advance_round(next_dag_round.round(), &round_effects);
+            self.responder.update(
+                &self.broadcast_filter,
+                &next_dag_round,
+                &self.downloader,
+                &round_effects,
+            );
 
             match tokio::join!(collector_run, bcaster_run, commit_run) {
                 (Ok(collector_upd), Ok((bcaster, new_prev_point)), Ok(())) => {

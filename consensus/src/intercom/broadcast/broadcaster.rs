@@ -1,4 +1,5 @@
 use std::mem;
+use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
@@ -12,11 +13,11 @@ use tycho_util::{FastHashMap, FastHashSet};
 use crate::dyn_event;
 use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
-use crate::intercom::dto::{PeerState, SignatureResponse};
+use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{Digest, NodeCount, Point, Round, Signature};
 
-type BcastResult = anyhow::Result<()>;
+type BcastResult = anyhow::Result<BroadcastResponse>;
 type SigResult = anyhow::Result<SignatureResponse>;
 
 #[derive(Copy, Clone, Debug)]
@@ -41,7 +42,7 @@ impl Broadcaster {
     pub async fn run(
         &mut self,
         round_effects: &Effects<CurrentRoundContext>,
-        point: &Point,
+        point: &Arc<Point>,
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
@@ -92,7 +93,7 @@ struct BroadcasterTask {
 impl BroadcasterTask {
     fn new(
         effects: Effects<BroadcasterContext>,
-        point: &Point,
+        point: &Arc<Point>,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
@@ -297,7 +298,7 @@ impl BroadcasterTask {
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
             self.bcast_futs
-                .push(self.dispatcher.send(peer_id, &self.bcast_request));
+                .push(self.dispatcher.query(peer_id, &self.bcast_request));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),

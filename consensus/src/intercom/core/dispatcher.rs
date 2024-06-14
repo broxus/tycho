@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -46,6 +47,10 @@ impl Dispatcher {
         (&MPQuery::Signature(round)).into()
     }
 
+    pub fn broadcast_request(point: &Arc<Point>) -> tycho_network::Request {
+        (&MPQuery::Broadcast(point.as_ref().clone())).into()
+    }
+
     pub fn query<T>(
         &self,
         peer_id: &PeerId,
@@ -72,25 +77,4 @@ impl Dispatcher {
         .boxed()
     }
 
-    pub fn broadcast_request(point: &Point) -> tycho_network::Request {
-        point.into()
-    }
-
-    pub fn send(
-        &self,
-        peer_id: &PeerId,
-        request: &tycho_network::Request,
-    ) -> BoxFuture<'static, (PeerId, Result<()>)> {
-        let peer_id = *peer_id;
-        let request = request.clone();
-        let overlay = self.overlay.clone();
-        let network = self.network.clone();
-        async move {
-            overlay
-                .send(&network, &peer_id, request)
-                .map(move |response| (peer_id, response))
-                .await
-        }
-        .boxed()
-    }
 }

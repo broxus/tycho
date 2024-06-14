@@ -11,7 +11,7 @@ use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::{DagLocation, DagPointFuture, InclusionState, Verifier};
-use crate::effects::{CollectorContext, Effects, ValidateContext};
+use crate::effects::{CurrentRoundContext, Effects, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, Location, NodeCount, Point, PointId, Round, ValidPoint};
@@ -177,7 +177,7 @@ impl DagRound {
         &self,
         point: &Arc<Point>,
         downloader: &Downloader,
-        effects: &Effects<CollectorContext>,
+        effects: &Effects<CurrentRoundContext>,
     ) -> Option<BoxFuture<'static, InclusionState>> {
         let _guard = effects.span().enter();
         assert_eq!(
@@ -250,7 +250,10 @@ impl DagRound {
         peer_schedule: &PeerSchedule,
         span: &Span,
     ) -> InclusionState {
-        let state = self.insert_exact(&DagPoint::Trusted(ValidPoint::new(point.clone())));
+        let state = self.insert_exact(
+            &point.body.location.author,
+            &DagPoint::Trusted(ValidPoint::new(point.clone())),
+        );
         if let Some(signable) = state.signable() {
             signable.sign(
                 self.round(),
@@ -266,22 +269,21 @@ impl DagRound {
         state
     }
 
-    pub fn insert_invalid(&self, dag_point: &DagPoint) -> Option<InclusionState> {
+    pub fn insert_invalid_exact(&self, sender: &PeerId, dag_point: &DagPoint) {
         assert!(
             dag_point.valid().is_none(),
             "Coding error: failed to insert valid point as invalid"
         );
-        let round = self.scan(dag_point.location().round)?;
-        Some(round.insert_exact(dag_point))
+        self.insert_exact(sender, dag_point);
     }
 
-    fn insert_exact(&self, dag_point: &DagPoint) -> InclusionState {
+    fn insert_exact(&self, sender: &PeerId, dag_point: &DagPoint) -> InclusionState {
         assert_eq!(
             dag_point.location().round,
             self.round(),
             "Coding error: dag round mismatches point round on insert"
         );
-        self.edit(&dag_point.location().author, |loc| {
+        self.edit(sender, |loc| {
             let _existing = loc.init(dag_point.digest(), |state| {
                 state.init(dag_point);
                 DagPointFuture::Local(futures_util::future::ready(dag_point.clone()))
