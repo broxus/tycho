@@ -34,7 +34,7 @@ pub mod test {
 
 pub mod metrics {
     pub use self::gauge_guard::GaugeGuard;
-    pub use self::histogram_guard::HistogramGuard;
+    pub use self::histogram_guard::{HistogramGuard, HistogramGuardWithLabels};
     pub use self::metrics_loop::spawn_metrics_loop;
 
     mod gauge_guard;

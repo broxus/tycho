@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::HashBytes;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_util::metrics::HistogramGuardWithLabels;
 use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, CollatorStats, McData, PrevData, WorkingState};
@@ -375,6 +376,11 @@ impl CollatorStdImpl {
     /// Update McData in working state
     #[tracing::instrument(skip_all, fields(block_id = %self.next_block_id_short))]
     fn update_mc_data(&mut self, mc_state: ShardStateStuff) -> Result<()> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let _histogram =
+            HistogramGuardWithLabels::begin("tycho_collator_update_mc_data_time", &labels);
+
         let mc_state_block_id_short = mc_state.block_id().as_short_id();
 
         let new_mc_data = McData::build(mc_state)?;
@@ -468,6 +474,11 @@ impl CollatorStdImpl {
     /// Returns: (`next_anchor`, `has_externals`)
     async fn import_next_anchor(&mut self) -> Result<(Arc<MempoolAnchor>, bool)> {
         // TODO: make real implementation
+
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let _histogram =
+            HistogramGuardWithLabels::begin("tycho_collator_import_next_anchor_time", &labels);
 
         // TODO: use get_next_anchor() only once
         let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
@@ -606,6 +617,13 @@ impl CollatorStdImpl {
             "Check if can collate next master block",
         );
 
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let _histogram = HistogramGuardWithLabels::begin(
+            "tycho_collator_try_collate_next_master_block_time",
+            &labels,
+        );
+
         if self.has_internals().is_none() {
             self.load_has_internals().await?;
         }
@@ -650,6 +668,13 @@ impl CollatorStdImpl {
     async fn try_collate_next_shard_block_impl(&mut self) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Check if can collate next shard block",
+        );
+
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+
+        let collation_prepare_histogram = HistogramGuardWithLabels::begin(
+            "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
+            &labels,
         );
 
         if self.has_internals().is_none() {
@@ -729,6 +754,8 @@ impl CollatorStdImpl {
         } else {
             None
         };
+
+        drop(collation_prepare_histogram);
 
         // collate block if has internals or externals
         if (has_internals || has_externals) && !force_mc_block_by_uncommitted_chain {
