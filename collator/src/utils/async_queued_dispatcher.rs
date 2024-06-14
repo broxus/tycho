@@ -92,11 +92,10 @@ where
 
     async fn _enqueue_task(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
         let (task_id, task_descr) = (task.id(), task.get_descr());
-        let _ = self
-            .tasks_queue
+        self.tasks_queue
             .send(task)
             .await
-            .map_err(|err| anyhow!("dispatcher queue receiver dropped {err:?}"));
+            .map_err(|err| anyhow!("dispatcher queue receiver dropped {err:?}"))?;
         tracing::trace!(
             target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
             "Task #{} ({}): enqueued", task_id, task_descr,
@@ -106,10 +105,9 @@ where
 
     fn _enqueue_task_blocking(&self, task: AsyncTaskDesc<W, R>) -> Result<()> {
         let (task_id, task_descr) = (task.id(), task.get_descr());
-        let _ = self
-            .tasks_queue
+        self.tasks_queue
             .blocking_send(task)
-            .map_err(|err| anyhow!("dispatcher queue receiver dropped {err:?}"));
+            .map_err(|err| anyhow!("dispatcher queue receiver dropped {err:?}"))?;
         tracing::trace!(
             target: tracing_targets::ASYNC_QUEUE_DISPATCHER,
             "Task #{} ({}): enqueued (blocking)", task_id, task_descr,
