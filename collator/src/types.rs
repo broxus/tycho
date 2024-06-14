@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
@@ -10,15 +11,16 @@ use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{DhtClient, OverlayService, PeerResolver};
-use tycho_util::FastHashMap;
+use tycho_util::{serde_helpers, FastHashMap};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct CollationConfig {
     pub supported_block_version: u32,
-    pub supported_capabilities: u64,
+    pub supported_capabilities: GlobalCapabilities,
 
-    pub mc_block_min_interval_ms: u64,
+    #[serde(with = "serde_helpers::humantime")]
+    pub mc_block_min_interval: Duration,
     pub max_mc_block_delta_from_bc_to_await_own: i32,
     pub max_uncommitted_chain_length: u32,
     pub uncommitted_chain_to_import_next_anchor: u32,
@@ -34,7 +36,7 @@ impl Default for CollationConfig {
             supported_block_version: 50,
             supported_capabilities: supported_capabilities(),
 
-            mc_block_min_interval_ms: 2500,
+            mc_block_min_interval: Duration::from_millis(2500),
             max_mc_block_delta_from_bc_to_await_own: 2,
 
             max_uncommitted_chain_length: 31,
@@ -47,7 +49,7 @@ impl Default for CollationConfig {
     }
 }
 
-fn supported_capabilities() -> u64 {
+pub fn supported_capabilities() -> GlobalCapabilities {
     GlobalCapabilities::from([
         GlobalCapability::CapCreateStatsEnabled,
         GlobalCapability::CapBounceMsgBody,
@@ -69,7 +71,6 @@ fn supported_capabilities() -> u64 {
         GlobalCapability::CapSuspendedList,
         GlobalCapability::CapsTvmBugfixes2022,
     ])
-    .into_inner()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

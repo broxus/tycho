@@ -173,7 +173,7 @@ impl CollatorStdImpl {
         if capabilities.contains(GlobalCapability::CapReportVersion) {
             new_block_info.set_gen_software(Some(GlobalVersion {
                 version: self.config.supported_block_version,
-                capabilities: self.config.supported_capabilities.into(),
+                capabilities: self.config.supported_capabilities,
             }));
         }
 

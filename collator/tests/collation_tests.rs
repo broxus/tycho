@@ -16,7 +16,7 @@ use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{CollationConfig, MsgsExecutionParams};
+use tycho_collator::types::{supported_capabilities, CollationConfig, MsgsExecutionParams};
 use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
@@ -84,7 +84,7 @@ async fn test_collation_process_on_stubs() {
     let config = CollationConfig {
         supported_block_version: 50,
         supported_capabilities: supported_capabilities(),
-        mc_block_min_interval_ms: 10000,
+        mc_block_min_interval: Duration::from_secs(1),
         max_mc_block_delta_from_bc_to_await_own: 2,
         max_uncommitted_chain_length: 31,
         uncommitted_chain_to_import_next_anchor: 8,
@@ -186,29 +186,4 @@ async fn test_collation_process_on_stubs() {
             println!("Test timeout elapsed");
         }
     }
-}
-
-fn supported_capabilities() -> u64 {
-    let caps = GlobalCapability::CapCreateStatsEnabled as u64
-        | GlobalCapability::CapBounceMsgBody as u64
-        | GlobalCapability::CapReportVersion as u64
-        | GlobalCapability::CapShortDequeue as u64
-        | GlobalCapability::CapRemp as u64
-        | GlobalCapability::CapInitCodeHash as u64
-        | GlobalCapability::CapOffHypercube as u64
-        | GlobalCapability::CapFixTupleIndexBug as u64
-        | GlobalCapability::CapFastStorageStat as u64
-        | GlobalCapability::CapMyCode as u64
-        | GlobalCapability::CapCopyleft as u64
-        | GlobalCapability::CapFullBodyInBounced as u64
-        | GlobalCapability::CapStorageFeeToTvm as u64
-        | GlobalCapability::CapWorkchains as u64
-        | GlobalCapability::CapStcontNewFormat as u64
-        | GlobalCapability::CapFastStorageStatBugfix as u64
-        | GlobalCapability::CapResolveMerkleCell as u64
-        | GlobalCapability::CapFeeInGasUnits as u64
-        | GlobalCapability::CapBounceAfterFailedAction as u64
-        | GlobalCapability::CapSuspendedList as u64
-        | GlobalCapability::CapsTvmBugfixes2022 as u64;
-    caps
 }

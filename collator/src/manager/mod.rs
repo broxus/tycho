@@ -1056,6 +1056,8 @@ where
             .or_default();
         last_collated_chain_times.push((chain_time, force_mc_block));
 
+        let mc_block_min_interval_ms = self.config.mc_block_min_interval.as_millis() as u64;
+
         // check if should collate master in current shard
         let should_collate_mc_block = if force_mc_block {
             tracing::info!(
@@ -1069,20 +1071,19 @@ where
             let chain_time_elapsed = chain_time
                 .checked_sub(self.next_mc_block_chain_time)
                 .unwrap_or_default();
-            let mc_block_interval_elapsed =
-                chain_time_elapsed > self.config.mc_block_min_interval_ms;
+            let mc_block_interval_elapsed = chain_time_elapsed > mc_block_min_interval_ms;
             if mc_block_interval_elapsed {
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Master block interval is {}ms, elapsed chain time {}ms exceeded the interval in current shard {}",
-                    self.config.mc_block_min_interval_ms, chain_time_elapsed, shard_id,
+                    mc_block_min_interval_ms, chain_time_elapsed, shard_id,
                 );
             } else {
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Elapsed chain time {}ms has not elapsed master block interval {}ms in current shard \
                     - do not need to collate next master block",
-                    chain_time_elapsed, self.config.mc_block_min_interval_ms,
+                    chain_time_elapsed, mc_block_min_interval_ms,
                 );
             }
             mc_block_interval_elapsed
@@ -1103,7 +1104,7 @@ where
                                 || (*chain_time)
                                     .checked_sub(self.next_mc_block_chain_time)
                                     .unwrap_or_default()
-                                    > self.config.mc_block_min_interval_ms
+                                    > mc_block_min_interval_ms
                         })
                     {
                         first_elapsed_chain_times.push(*chain_time_that_elapsed);
@@ -1129,7 +1130,7 @@ where
                     target: tracing_targets::COLLATION_MANAGER,
                     "Master block collation forced or interval {}ms elapsed in every shard - \
                     will collate next master block with chain time {}ms",
-                    self.config.mc_block_min_interval_ms, max_first_chain_time_that_elapsed,
+                    mc_block_min_interval_ms, max_first_chain_time_that_elapsed,
                 );
                 return (
                     should_collate_mc_block,
