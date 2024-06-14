@@ -8,6 +8,7 @@ use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use self::types::{
@@ -535,6 +536,8 @@ where
             mc_state.block_id().as_short_id(),
         );
 
+        let _histogram = HistogramGuard::begin("tycho_collator_refresh_collation_sessions_time");
+
         // TODO: Possibly we have already updated collation sessions for this master block,
         //      because we may have collated it by ourselves before receiving it from the blockchain
         //      or because we have received it from the blockchain before we collated it
@@ -874,6 +877,9 @@ where
             "Start processing block candidate",
         );
 
+        let _histogram =
+            HistogramGuard::begin("tycho_collator_process_collated_block_candidate_time");
+
         // find session related to this block by shard
         let session_info = self
             .active_collation_sessions
@@ -1050,6 +1056,10 @@ where
         // Then we can collate master block if interval elapsed or have "force" flag in every shards.
         // We should take the max of first chain times that meet master block collation condition from each shard.
 
+        let _histogram = HistogramGuard::begin(
+            "tycho_collator_update_last_collated_chain_time_and_check_should_collate_mc_block_time",
+        );
+
         let last_collated_chain_times = self
             .last_collated_chain_times_by_shards
             .entry(shard_id)
@@ -1221,6 +1231,8 @@ where
     ) -> Result<()> {
         // TODO: make real implementation
 
+        let _histogram = HistogramGuard::begin("tycho_collator_enqueue_mc_block_collation_time");
+
         // get masterchain collator if exists
         let Some(mc_collator) = self.active_collators.get(&ShardIdent::MASTERCHAIN) else {
             bail!("Masterchain collator is not started yet!");
@@ -1296,6 +1308,8 @@ where
             short_id,
             validation_result.is_valid(),
         );
+
+        let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
 
         // execute required actions if block invalid
         if !validation_result.is_valid() {
