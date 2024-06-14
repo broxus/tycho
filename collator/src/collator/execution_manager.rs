@@ -352,6 +352,7 @@ fn execute_ordinary_transaction(
     tracing::trace!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
+        message_hash = %in_message.cell.repr_hash(),
         message_kind = ?in_message.kind(),
         "executing ordinary message",
     );
