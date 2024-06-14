@@ -258,7 +258,7 @@ impl StateNodeAdapterStdImpl {
                 match Self::prepare_block_proof(&block.block_id, bytes, &block.signatures) {
                     Ok(proof) => {
                         let block_proof_stuff =
-                            BlockProofStuff::new(proof.clone(), proof.proof_for.is_masterchain())?;
+                            BlockProofStuff::new(proof.clone(), !proof.proof_for.is_masterchain())?;
 
                         let mut builder = CellBuilder::new();
                         proof.store_into(&mut builder, &mut Cell::empty_context())?;
@@ -268,7 +268,7 @@ impl StateNodeAdapterStdImpl {
                         let archive_data =
                             block_proof_stuff.with_archive_data(proof_boc.as_slice());
 
-                        self.storage
+                        let result = self.storage
                             .block_storage()
                             .store_block_proof(
                                 &archive_data,
@@ -279,6 +279,8 @@ impl StateNodeAdapterStdImpl {
                                 }),
                             )
                             .await?;
+
+                        tracing::info!("Proof saved {:?}. New: {}, Updated: {}", result.handle.id(), result.new, result.updated);
 
                         Ok(())
                     }
