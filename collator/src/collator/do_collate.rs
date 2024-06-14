@@ -15,7 +15,7 @@ use super::types::{CachedMempoolAnchor, SpecialOrigin};
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
-    ParsedMessage, BlockCollationData, Dequeued, McData, PreparedInMsg, PreparedOutMsg, PrevData,
+    BlockCollationData, Dequeued, McData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData,
     ShardDescriptionExt,
 };
 use crate::internal_queue::types::InternalMessageKey;
@@ -477,7 +477,7 @@ impl CollatorStdImpl {
         // TODO: Move into rayon
         tokio::task::yield_now().await;
         let (candidate, new_state_stuff) =
-            self.finalize_block(&mut collation_data, exec_manager)?;
+            tokio::task::block_in_place(|| self.finalize_block(&mut collation_data, exec_manager))?;
         tokio::task::yield_now().await;
 
         self.mq_adapter
