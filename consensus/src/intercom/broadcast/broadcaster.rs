@@ -1,5 +1,4 @@
 use std::mem;
-use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
@@ -42,13 +41,13 @@ impl Broadcaster {
     pub async fn run(
         &mut self,
         round_effects: &Effects<CurrentRoundContext>,
-        point: &Arc<Point>,
+        point: &Point,
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> FastHashMap<PeerId, Signature> {
         let mut task = BroadcasterTask::new(
-            Effects::<BroadcasterContext>::new(round_effects, &point.digest),
+            Effects::<BroadcasterContext>::new(round_effects, point.digest()),
             point,
             &self.dispatcher,
             peer_schedule,
@@ -93,7 +92,7 @@ struct BroadcasterTask {
 impl BroadcasterTask {
     fn new(
         effects: Effects<BroadcasterContext>,
-        point: &Arc<Point>,
+        point: &Point,
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
@@ -103,20 +102,20 @@ impl BroadcasterTask {
         let _guard = effects.span().clone().entered();
         let peer_updates = peer_schedule.updates();
         let signers = peer_schedule
-            .peers_for(point.body.location.round.next())
+            .peers_for(point.body().location.round.next())
             .iter()
             .map(|(peer_id, _)| *peer_id)
             .collect::<FastHashSet<_>>();
         let signers_count = NodeCount::new(signers.len());
         let collectors = peer_schedule.all_resolved();
         let bcast_request = Dispatcher::broadcast_request(point);
-        let sig_request = Dispatcher::signature_request(point.body.location.round);
+        let sig_request = Dispatcher::signature_request(point.body().location.round);
         Self {
             effects,
             dispatcher: dispatcher.clone(),
             bcasts_outdated,
-            current_round: point.body.location.round,
-            point_digest: point.digest.clone(),
+            current_round: point.body().location.round,
+            point_digest: point.digest().clone(),
             bcaster_signal,
             collector_signal,
 

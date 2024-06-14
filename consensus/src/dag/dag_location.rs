@@ -125,8 +125,8 @@ impl InclusionState {
             None => panic!("Coding error: own point is not trusted"),
             Some(valid) => {
                 _ = signed.set(Ok(Signed {
-                    at: valid.point.body.location.round,
-                    with: valid.point.signature.clone(),
+                    at: valid.point.body().location.round,
+                    with: valid.point.signature().clone(),
                 }));
             }
         };
@@ -190,15 +190,15 @@ impl Signable {
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if time_range.contains(&valid.point.body.time) {
+            if time_range.contains(&valid.point.body().time) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {
                         at,
-                        with: Signature::new(key_pair, &valid.point.digest),
+                        with: Signature::new(key_pair, valid.point.digest()),
                     })
                 });
-            } else if &valid.point.body.time < time_range.start() {
+            } else if &valid.point.body().time < time_range.start() {
                 self.reject();
             } // else decide later
         } else {

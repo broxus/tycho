@@ -5,12 +5,12 @@ use crate::models::point::{Digest, Location, Point, PointId};
 
 #[derive(Clone, Debug)]
 pub struct ValidPoint {
-    pub point: Arc<Point>,
+    pub point: Point,
     pub is_committed: Arc<AtomicBool>,
 }
 
 impl ValidPoint {
-    pub fn new(point: Arc<Point>) -> Self {
+    pub fn new(point: Point) -> Self {
         Self {
             point,
             is_committed: Arc::new(AtomicBool::new(false)),
@@ -27,7 +27,7 @@ pub enum DagPoint {
     /// consensus will decide whether to sign its proof or not; we shall ban the author anyway
     Suspicious(ValidPoint),
     /// invalidates dependent point; needed to blame equivocation
-    Invalid(Arc<Point>),
+    Invalid(Point),
     /// point hash or signature mismatch, not well-formed, download failed - i.e. unusable point;
     /// invalidates dependent point; blame author of dependent point
     NotExists(Arc<PointId>),
@@ -76,9 +76,9 @@ impl DagPoint {
     pub fn location(&self) -> &'_ Location {
         #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => &valid.point.body.location,
-            Self::Suspicious(valid) => &valid.point.body.location,
-            Self::Invalid(point) => &point.body.location,
+            Self::Trusted(valid) => &valid.point.body().location,
+            Self::Suspicious(valid) => &valid.point.body().location,
+            Self::Invalid(point) => &point.body().location,
             Self::NotExists(id) => &id.location,
         }
     }
@@ -86,9 +86,9 @@ impl DagPoint {
     pub fn digest(&self) -> &'_ Digest {
         #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => &valid.point.digest,
-            Self::Suspicious(valid) => &valid.point.digest,
-            Self::Invalid(point) => &point.digest,
+            Self::Trusted(valid) => valid.point.digest(),
+            Self::Suspicious(valid) => valid.point.digest(),
+            Self::Invalid(point) => point.digest(),
             Self::NotExists(id) => &id.digest,
         }
     }

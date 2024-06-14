@@ -23,7 +23,7 @@ pub fn genesis_point_id() -> PointId {
     genesis().id()
 }
 
-pub fn genesis() -> Arc<Point> {
+pub fn genesis() -> Point {
     let genesis_keys = KeyPair::from(&SecretKey::from_bytes(GENESIS_SECRET_KEY_BYTES));
 
     Point::new(&genesis_keys, PointBody {
@@ -100,7 +100,7 @@ pub fn from_validator<T: ToSocket>(
 
 type PeerToAnchor = FastHashMap<PeerId, PointId>;
 pub async fn check_anchors(
-    mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
+    mut committed: UnboundedReceiver<(Point, Vec<Point>)>,
     peer_id: PeerId,
     anchors_hashmap: Arc<Mutex<FastHashMap<Round, PeerToAnchor>>>,
     known_round_refs: Arc<Mutex<FastHashMap<Round, Vec<PointId>>>>,
@@ -113,7 +113,7 @@ pub async fn check_anchors(
             .expect("committed anchor reader must be alive");
         let anchor_id = anchor.id();
 
-        let anchor_round = anchor.body.location.round;
+        let anchor_round = anchor.body().location.round;
         let mut guard = anchors_hashmap.lock().await;
 
         // get last previous anchor round and check if we don't have previous
@@ -167,7 +167,7 @@ pub async fn check_anchors(
                 }
 
                 for (rr, rf) in round.iter().zip(refs.iter()) {
-                    if rr.digest != rf.digest {
+                    if rr.digest != *rf.digest() {
                         panic!(
                             "Points are not equal or order is different for round {anchor_round:?}"
                         )
@@ -197,7 +197,7 @@ pub async fn check_anchors(
     }
 }
 
-pub async fn drain_anchors(mut committed: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>) {
+pub async fn drain_anchors(mut committed: UnboundedReceiver<(Point, Vec<Point>)>) {
     loop {
         _ = committed
             .recv()

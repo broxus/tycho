@@ -87,9 +87,9 @@ impl DagRound {
         }))
     }
 
-    pub fn genesis(genesis: &Arc<Point>, peer_schedule: &PeerSchedule) -> Self {
+    pub fn genesis(genesis: &Point, peer_schedule: &PeerSchedule) -> Self {
         let locations = FastDashMap::with_capacity_and_hasher(1, Default::default());
-        let round = genesis.body.location.round;
+        let round = genesis.body().location.round;
         Self(Arc::new(DagRoundInner {
             round,
             node_count: NodeCount::GENESIS,
@@ -150,11 +150,11 @@ impl DagRound {
     }
 
     pub async fn vertex_by_proof(&self, proof: &ValidPoint) -> Option<ValidPoint> {
-        match proof.point.body.proof {
+        match proof.point.body().proof {
             Some(ref proven) => {
-                let dag_round = self.scan(proof.point.body.location.round.prev())?;
+                let dag_round = self.scan(proof.point.body().location.round.prev())?;
                 dag_round
-                    .valid_point_exact(&proof.point.body.location.author, &proven.digest)
+                    .valid_point_exact(&proof.point.body().location.author, &proven.digest)
                     .await
             }
             None => None,
@@ -175,18 +175,18 @@ impl DagRound {
 
     pub fn add_collected_exact(
         &self,
-        point: &Arc<Point>,
+        point: &Point,
         downloader: &Downloader,
         effects: &Effects<CurrentRoundContext>,
     ) -> Option<BoxFuture<'static, InclusionState>> {
         let _guard = effects.span().enter();
         assert_eq!(
-            point.body.location.round,
+            point.body().location.round,
             self.round(),
             "Coding error: point round does not match dag round"
         );
-        let digest = &point.digest;
-        self.edit(&point.body.location.author, |loc| {
+        let digest = point.digest();
+        self.edit(&point.body().location.author, |loc| {
             let state = loc.state().clone();
             let point = point.clone();
             let downloader = downloader.clone();
@@ -246,12 +246,12 @@ impl DagRound {
     /// for genesis and own points
     pub fn insert_exact_sign(
         &self,
-        point: &Arc<Point>,
+        point: &Point,
         peer_schedule: &PeerSchedule,
         span: &Span,
     ) -> InclusionState {
         let state = self.insert_exact(
-            &point.body.location.author,
+            &point.body().location.author,
             &DagPoint::Trusted(ValidPoint::new(point.clone())),
         );
         if let Some(signable) = state.signable() {

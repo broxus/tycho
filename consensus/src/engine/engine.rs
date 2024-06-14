@@ -30,7 +30,7 @@ pub struct Engine {
     broadcast_filter: BroadcastFilter,
     collector: Collector,
     tasks: JoinSet<()>, // should be JoinSet<!>
-    committed: mpsc::UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+    committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     input_buffer: InputBuffer,
 }
 
@@ -39,7 +39,7 @@ impl Engine {
         key_pair: Arc<KeyPair>,
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
-        committed: mpsc::UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+        committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
         input_buffer: InputBuffer,
     ) -> Self {
         let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
@@ -115,7 +115,7 @@ impl Engine {
         self.peer_schedule.rotate();
         // current epoch
         self.peer_schedule
-            .set_next_start(genesis.body.location.round.next());
+            .set_next_start(genesis.body().location.round.next());
         // start updater only after peers are populated into schedule
         self.peer_schedule_updater.set_next_peers(next_peers, true);
         self.peer_schedule.rotate();
@@ -169,9 +169,7 @@ impl Engine {
                 }))
             } else {
                 drop(own_point_state_tx);
-                futures_util::future::Either::Left(futures_util::future::ready(Ok(None::<
-                    Arc<Point>,
-                >)))
+                futures_util::future::Either::Left(futures_util::future::ready(Ok(None::<Point>)))
             };
 
             let bcaster_run = tokio::spawn({
@@ -201,7 +199,7 @@ impl Engine {
                         // join the check, just not to miss it; it must have completed already
                         paranoid.await.expect("verify own produced point");
                         let prev_point = PrevPoint {
-                            digest: own_point.digest.clone(),
+                            digest: own_point.digest().clone(),
                             evidence: evidence.into_iter().collect(),
                         };
                         (broadcaster, Some(Arc::new(prev_point)))
@@ -263,18 +261,18 @@ impl Engine {
         peer_schedule: Arc<PeerSchedule>,
         own_point_state: oneshot::Sender<InclusionState>,
         input_buffer: InputBuffer,
-    ) -> Option<Arc<Point>> {
+    ) -> Option<Point> {
         if let Some(own_point) =
             Producer::new_point(&current_dag_round, prev_point.as_deref(), &input_buffer)
         {
             tracing::info!(
                 parent: round_effects.span(),
-                digest = display(own_point.digest.alt()),
+                digest = display(own_point.digest().alt()),
                 payload_bytes = own_point
-                    .body.payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
-                externals = own_point.body.payload.len(),
-                is_proof = Some(own_point.body.anchor_proof == Link::ToSelf).filter(|x| *x),
-                is_trigger = Some(own_point.body.anchor_trigger == Link::ToSelf).filter(|x| *x),
+                    .body().payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
+                externals = own_point.body().payload.len(),
+                is_proof = Some(own_point.body().anchor_proof == Link::ToSelf).filter(|x| *x),
+                is_trigger = Some(own_point.body().anchor_trigger == Link::ToSelf).filter(|x| *x),
                 "produced point"
             );
             let state = current_dag_round.insert_exact_sign(
@@ -303,7 +301,7 @@ impl Engine {
 
     fn expect_own_trusted_point(
         point_round: WeakDagRound,
-        point: Arc<Point>,
+        point: Point,
         peer_schedule: Arc<PeerSchedule>,
         downloader: Downloader,
         span: Span,
@@ -347,7 +345,7 @@ impl Effects<CurrentRoundContext> {
         })
     }
 
-    pub(crate) fn log_committed(&self, committed: &[(Arc<Point>, Vec<Arc<Point>>)]) {
+    pub(crate) fn log_committed(&self, committed: &[(Point, Vec<Point>)]) {
         if !committed.is_empty()
             && MempoolConfig::LOG_FLAVOR == LogFlavor::Truncated
             && tracing::enabled!(tracing::Level::DEBUG)
@@ -362,7 +360,7 @@ impl Effects<CurrentRoundContext> {
                     format!(
                         "anchor {:?} time {} : [ {history} ]",
                         anchor.id().alt(),
-                        anchor.body.time
+                        anchor.body().time
                     )
                 })
                 .join("  ;  ");

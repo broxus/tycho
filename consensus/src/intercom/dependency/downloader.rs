@@ -319,9 +319,9 @@ impl DownloadTask {
                 tracing::error!(
                     parent: self.effects.span(),
                     peer_id = display(peer_id.alt()),
-                    author = display(point.body.location.author.alt()),
-                    round = point.body.location.round.0,
-                    digest = display(point.digest.alt()),
+                    author = display(point.body().location.author.alt()),
+                    round = point.body().location.round.0,
+                    digest = display(point.digest().alt()),
                     "returned wrong point",
                 );
             }

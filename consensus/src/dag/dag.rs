@@ -56,7 +56,7 @@ impl Dag {
     pub fn commit(
         self,
         next_dag_round: DagRound,
-        committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+        committed: UnboundedSender<(Point, Vec<Point>)>,
         effects: Effects<CurrentRoundContext>,
     ) {
         // finding the latest trigger must not take long, better try later
@@ -71,7 +71,7 @@ impl Dag {
         while let Some((anchor, anchor_round)) = anchor_stack.pop() {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
-            self.drop_tail(anchor.point.body.location.round);
+            self.drop_tail(anchor.point.body().location.round);
             let committed = Self::gather_uncommitted(&anchor.point, &anchor_round);
             ordered.push((anchor.point, committed));
         }
@@ -135,7 +135,7 @@ impl Dag {
             .expect("validation must be completed")
             .expect("latest anchor proof must be in DAG");
         let mut proof_round = future_round
-            .scan(proof.point.body.location.round)
+            .scan(proof.point.body().location.round)
             .expect("anchor proof round not in DAG while a point from it was received");
         loop {
             if proof_round.round() == MempoolConfig::GENESIS_ROUND {
@@ -149,12 +149,13 @@ impl Dag {
                 panic!("anchor proof round is not expected, validation is broken")
             };
             assert_eq!(
-                proof.point.body.location.round,
+                proof.point.body().location.round,
                 proof_round.round(),
                 "anchor proof round does not match"
             );
             assert_eq!(
-                proof.point.body.location.author, leader,
+                proof.point.body().location.author,
+                leader,
                 "anchor proof author does not match prescribed by round"
             );
             let Some(anchor_round) = proof_round.prev().get() else {
@@ -163,7 +164,7 @@ impl Dag {
             if is_used.load(Ordering::Relaxed) {
                 break;
             };
-            let anchor_digest = match &proof.point.body.proof {
+            let anchor_digest = match &proof.point.body().proof {
                 Some(prev) => &prev.digest,
                 None => panic!("anchor proof must prove to anchor point, validation is broken"),
             };
@@ -210,10 +211,10 @@ impl Dag {
     fn gather_uncommitted(
         anchor: &Point,          // @ r+1
         anchor_round: &DagRound, // r+1
-    ) -> Vec<Arc<Point>> {
+    ) -> Vec<Point> {
         assert_eq!(
             anchor_round.round(),
-            anchor.body.location.round,
+            anchor.body().location.round,
             "passed anchor round does not match anchor point's round"
         );
         let mut proof_round /* r+0 */ = anchor_round
@@ -221,10 +222,10 @@ impl Dag {
             .get()
             .expect("previous round for anchor point round must stay in DAG");
         let mut r = [
-            anchor.body.includes.clone(), // points @ r+0
-            anchor.body.witness.clone(),  // points @ r-1
-            BTreeMap::new(),              // points @ r-2
-            BTreeMap::new(),              // points @ r-3
+            anchor.body().includes.clone(), // points @ r+0
+            anchor.body().witness.clone(),  // points @ r-1
+            BTreeMap::new(),                // points @ r-2
+            BTreeMap::new(),                // points @ r-3
         ];
         _ = anchor; // anchor payload will be committed the next time
 
@@ -247,10 +248,10 @@ impl Dag {
                         .now_or_never()
                         .expect("validation must be completed")
                         .expect("point to commit not found in DAG");
-                let author = &proof.point.body.location.author;
-                r[1].extend(proof.point.body.includes.clone()); // points @ r-1
-                r[2].extend(proof.point.body.witness.clone()); // points @ r-2
-                let Some(digest) = proof.point.body.proof.as_ref().map(|a| &a.digest) else {
+                let author = &proof.point.body().location.author;
+                r[1].extend(proof.point.body().includes.clone()); // points @ r-1
+                r[2].extend(proof.point.body().witness.clone()); // points @ r-2
+                let Some(digest) = proof.point.body().proof.as_ref().map(|a| &a.digest) else {
                     continue;
                 };
                 let vertex = // point @ r-1
@@ -266,8 +267,8 @@ impl Dag {
                     .is_ok()
                 {
                     // vertex will be skipped in r_1 as committed
-                    r[2].extend(vertex.point.body.includes.clone()); // points @ r-2
-                    r[3].extend(vertex.point.body.witness.clone()); // points @ r-3
+                    r[2].extend(vertex.point.body().includes.clone()); // points @ r-2
+                    r[3].extend(vertex.point.body().witness.clone()); // points @ r-3
                     uncommitted.push(vertex.point);
                 }
             }

@@ -1,31 +1,12 @@
 use std::fmt::{Display, Formatter};
-use std::sync::Arc;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 
 use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
-#[derive(Debug)]
-pub struct PointByIdResponse(pub Option<Arc<Point>>);
-impl Serialize for PointByIdResponse {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        self.0.as_deref().serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for PointByIdResponse {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt = Option::<Point>::deserialize(deserializer)?;
-        Ok(PointByIdResponse(opt.map(Arc::new)))
-    }
-}
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PointByIdResponse(pub Option<Point>);
 
 /// Denotes that broadcasts should be done via network query, not send message.
 /// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.

@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -38,13 +39,13 @@ impl BroadcastFilter {
     pub fn add(
         &self,
         sender: &PeerId,
-        point: &Arc<Point>,
+        point: &Point,
         top_dag_round: &DagRound,
         downloader: &Downloader,
         effects: &Effects<CurrentRoundContext>,
     ) {
         self.inner
-            .add(sender, point, top_dag_round, downloader, effects)
+            .add(sender, point, top_dag_round, downloader, effects);
     }
 
     pub fn advance_round(
@@ -85,7 +86,7 @@ impl BroadcastFilter {
     }
 }
 
-type SimpleDagLocations = BTreeMap<PeerId, BTreeMap<Digest, Arc<Point>>>;
+type SimpleDagLocations = BTreeMap<PeerId, BTreeMap<Digest, Point>>;
 struct BroadcastFilterInner {
     // defend from spam from future rounds:
     // should keep rounds greater than current dag round
@@ -110,7 +111,7 @@ impl BroadcastFilterInner {
     fn add(
         &self,
         sender: &PeerId,
-        point: &Arc<Point>,
+        point: &Point,
         top_dag_round: &DagRound,
         downloader: &Downloader,
         effects: &Effects<CurrentRoundContext>,
@@ -146,7 +147,7 @@ impl BroadcastFilterInner {
         };
 
         if round <= top_dag_round.round() {
-            let Some(point_round) = top_dag_round.scan(point.body.location.round) else {
+            let Some(point_round) = top_dag_round.scan(point.body().location.round) else {
                 return; // too old point
             };
             match verified {
@@ -182,18 +183,20 @@ impl BroadcastFilterInner {
             .last_by_peer
             .entry(author)
             .and_modify(|(last_by_peer, duplcates)| {
-                if *last_by_peer < round {
-                    *last_by_peer = round;
-                    *duplcates = 0;
-                } else if *last_by_peer == round {
-                    *duplcates += 1;
+                match round.cmp(last_by_peer) {
+                    Ordering::Less => {} // do nothing, blame later
+                    Ordering::Equal => *duplcates += 1,
+                    Ordering::Greater => {
+                        *last_by_peer = round;
+                        *duplcates = 0;
+                    }
                 }
             })
             .or_insert((round, 0));
-        if verified.is_err() || last_peer_round > round || duplicates > 0 {
+        if verified.is_err() || round < last_peer_round || duplicates > 0 {
             // we should ban a peer that broadcasts its rounds out of order,
             //   though we cannot prove this decision for other nodes
-            let level = if verified.is_err() || last_peer_round > round || duplicates >= 3 {
+            let level = if verified.is_err() || round < last_peer_round || duplicates >= 3 {
                 // that's severe errors, that require ban
                 tracing::Level::ERROR
             } else {
@@ -243,7 +246,7 @@ impl BroadcastFilterInner {
         if is_threshold_reached {
             self.output
                 .send(ConsensusEvent::Forward(round))
-                .expect("channel from filter to collector closed")
+                .expect("channel from filter to collector closed");
         } else {
             tracing::trace!(
                 parent: effects.span(),

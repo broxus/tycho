@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -47,8 +46,8 @@ impl Dispatcher {
         (&MPQuery::Signature(round)).into()
     }
 
-    pub fn broadcast_request(point: &Arc<Point>) -> tycho_network::Request {
-        (&MPQuery::Broadcast(point.as_ref().clone())).into()
+    pub fn broadcast_request(point: &Point) -> tycho_network::Request {
+        (&MPQuery::Broadcast(point.clone())).into()
     }
 
     pub fn query<T>(
@@ -76,5 +75,4 @@ impl Dispatcher {
         }
         .boxed()
     }
-
 }
