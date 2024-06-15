@@ -147,7 +147,7 @@ impl Engine {
                 .dag
                 .top(current_dag_round.round().next(), &self.peer_schedule);
 
-            let (bcaster_ready_tx, bcaster_ready_rx) = mpsc::channel(1);
+            let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
             // let this channel unbounded - there won't be many items, but every of them is essential
             let (collector_signal_tx, mut collector_signal_rx) = mpsc::unbounded_channel();
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
@@ -205,7 +205,7 @@ impl Engine {
                         (broadcaster, Some(Arc::new(prev_point)))
                     } else {
                         collector_signal_rx.close();
-                        bcaster_ready_tx.send(BroadcasterSignal::Ok).await.ok();
+                        bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                         (broadcaster, None)
                     }
                 }

@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -40,7 +40,7 @@ impl Broadcaster {
         round_effects: &Effects<CurrentRoundContext>,
         point: &Point,
         peer_schedule: &PeerSchedule,
-        bcaster_signal: mpsc::Sender<BroadcasterSignal>,
+        bcaster_signal: oneshot::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> FastHashMap<PeerId, Signature> {
         let signers = peer_schedule
@@ -65,7 +65,7 @@ impl Broadcaster {
             dispatcher: self.dispatcher.clone(),
             current_round: point.body().location.round,
             point_digest: point.digest().clone(),
-            bcaster_signal,
+            bcaster_signal: Some(bcaster_signal),
             collector_signal,
 
             peer_updates: peer_schedule.updates(),
@@ -99,7 +99,7 @@ struct BroadcasterTask {
     current_round: Round,
     point_digest: Digest,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
-    bcaster_signal: mpsc::Sender<BroadcasterSignal>,
+    bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
     collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
 
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
@@ -164,7 +164,7 @@ impl BroadcasterTask {
                     self.match_signature_result(&peer_id, result);
                 },
                 Some(collector_signal) = self.collector_signal.recv() => {
-                    if self.should_finish(collector_signal).await {
+                    if self.should_finish(collector_signal) {
                         break;
                     }
                 }
@@ -179,17 +179,21 @@ impl BroadcasterTask {
         }
     }
 
-    async fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
+    fn should_finish(&mut self, collector_signal: CollectorSignal) -> bool {
         let result = match collector_signal {
             // though we return successful result, it will be discarded on Err
             CollectorSignal::Finish | CollectorSignal::Err => true,
             CollectorSignal::Retry => {
                 if self.rejections.len() >= self.signers_count.reliable_minority() {
-                    _ = self.bcaster_signal.send(BroadcasterSignal::Err).await;
+                    if let Some(sender) = mem::take(&mut self.bcaster_signal) {
+                        _ = sender.send(BroadcasterSignal::Err);
+                    };
                     true
                 } else {
                     if self.signatures.len() >= self.signers_count.majority_of_others() {
-                        _ = self.bcaster_signal.send(BroadcasterSignal::Ok).await;
+                        if let Some(sender) = mem::take(&mut self.bcaster_signal) {
+                            _ = sender.send(BroadcasterSignal::Ok);
+                        };
                     }
                     false
                 }

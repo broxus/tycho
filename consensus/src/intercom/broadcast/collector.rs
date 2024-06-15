@@ -58,7 +58,7 @@ impl Collector {
         next_dag_round: DagRound, // r+1
         own_point_state: oneshot::Receiver<InclusionState>,
         collector_signal: mpsc::UnboundedSender<CollectorSignal>,
-        bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
+        bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Self {
         let effects = Effects::<CollectorContext>::new(&round_effects);
         let span_guard = effects.span().clone().entered();
@@ -104,12 +104,11 @@ impl Collector {
             next_includes: FuturesUnordered::new(),
 
             collector_signal,
-            bcaster_signal,
             is_bcaster_ready_ok: false,
         };
 
         drop(span_guard);
-        let result = task.run(&mut self.from_bcast_filter).await;
+        let result = task.run(&mut self.from_bcast_filter, bcaster_signal).await;
         match result {
             Ok(includes) => self.next_includes = includes,
             Err(round) => self.next_round = round,
@@ -139,7 +138,6 @@ struct CollectorTask {
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
     /// Receiver may be closed (bcaster finished), so do not require `Ok` on send
     collector_signal: mpsc::UnboundedSender<CollectorSignal>,
-    bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
     is_bcaster_ready_ok: bool,
 }
 
@@ -150,11 +148,13 @@ impl CollectorTask {
     async fn run(
         mut self,
         from_bcast_filter: &mut mpsc::UnboundedReceiver<ConsensusEvent>,
+        bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Result<FuturesUnordered<BoxFuture<'static, InclusionState>>, Round> {
         let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
+        let mut bcaster_signal = std::pin::pin!(bcaster_signal);
         loop {
             tokio::select! {
-                Some(bcaster_signal) = self.bcaster_signal.recv() => {
+                Ok(bcaster_signal) = bcaster_signal.as_mut(), if !self.is_bcaster_ready_ok => {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
                         return Err(self.next_dag_round.round().next())
@@ -198,7 +198,6 @@ impl CollectorTask {
         let result = match signal {
             BroadcasterSignal::Ok => {
                 self.is_bcaster_ready_ok = true;
-                self.bcaster_signal.close();
                 false
             }
             BroadcasterSignal::Err => true,
