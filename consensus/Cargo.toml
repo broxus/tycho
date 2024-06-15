@@ -34,6 +34,7 @@ rand_pcg = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, default-features = false }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 weedb = { workspace = true }
 

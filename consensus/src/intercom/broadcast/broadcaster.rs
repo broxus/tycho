@@ -1,23 +1,19 @@
 use std::mem;
+use std::time::Duration;
 
-use futures_util::future::BoxFuture;
-use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use anyhow::Result;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::broadcast::{self};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::dyn_event;
 use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
+use crate::intercom::broadcast::utils::{PeerQueue, QueryResponses};
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
 use crate::models::{Digest, NodeCount, Point, Round, Signature};
-
-type BcastResult = anyhow::Result<BroadcastResponse>;
-type SigResult = anyhow::Result<SignatureResponse>;
+use crate::{dyn_event, MempoolConfig};
 
 #[derive(Copy, Clone, Debug)]
 pub enum BroadcasterSignal {
@@ -28,14 +24,15 @@ pub enum BroadcasterSignal {
 pub struct Broadcaster {
     dispatcher: Dispatcher,
     // do not throw away unfinished broadcasts from previous round
-    bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+    bcast_outdated: Option<QueryResponses<BroadcastResponse>>,
 }
 
 impl Broadcaster {
     pub fn new(dispatcher: &Dispatcher) -> Self {
         Self {
             dispatcher: dispatcher.clone(),
-            bcasts_outdated: FuturesUnordered::new(),
+            // will be replaced with `None` during task execution
+            bcast_outdated: Some(QueryResponses::default()),
         }
     }
     pub async fn run(
@@ -46,18 +43,52 @@ impl Broadcaster {
         bcaster_signal: mpsc::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> FastHashMap<PeerId, Signature> {
-        let mut task = BroadcasterTask::new(
-            Effects::<BroadcasterContext>::new(round_effects, point.digest()),
-            point,
-            &self.dispatcher,
-            peer_schedule,
+        let signers = peer_schedule
+            .peers_for(point.body().location.round.next())
+            .iter()
+            .map(|(peer_id, _)| *peer_id)
+            .collect::<FastHashSet<_>>();
+        let signers_count = NodeCount::new(signers.len());
+
+        let bcast_outdated = mem::take(&mut self.bcast_outdated).expect("cannot be unset");
+        let mut bcast_queue = PeerQueue::new(Duration::ZERO..MempoolConfig::RETRY_INTERVAL / 3);
+        for peer_id in peer_schedule
+            .all_resolved()
+            .iter()
+            .filter(|peer| !bcast_outdated.contains(peer))
+        {
+            bcast_queue.push(peer_id);
+        }
+
+        let mut task = BroadcasterTask {
+            effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
+            dispatcher: self.dispatcher.clone(),
+            current_round: point.body().location.round,
+            point_digest: point.digest().clone(),
             bcaster_signal,
             collector_signal,
-            mem::take(&mut self.bcasts_outdated),
-        );
+
+            peer_updates: peer_schedule.updates(),
+            signers,
+            signers_count,
+            removed_peers: Default::default(),
+            rejections: Default::default(),
+            signatures: Default::default(),
+
+            bcast_request: Dispatcher::broadcast_request(point),
+            bcast_queue,
+            bcast_current: QueryResponses::default(),
+            bcast_outdated,
+
+            sig_request: Dispatcher::signature_request(point.body().location.round),
+            sig_queue: PeerQueue::new(
+                MempoolConfig::RETRY_INTERVAL * 2 / 3..MempoolConfig::RETRY_INTERVAL,
+            ),
+            sig_current: QueryResponses::default(),
+        };
         task.run().await;
         // preserve only broadcasts from the last round and drop older ones as hung up
-        self.bcasts_outdated.extend(task.bcast_futs);
+        self.bcast_outdated = Some(task.bcast_current);
         task.signatures
     }
 }
@@ -65,7 +96,6 @@ impl Broadcaster {
 struct BroadcasterTask {
     effects: Effects<BroadcasterContext>,
     dispatcher: Dispatcher,
-    bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
     current_round: Round,
     point_digest: Digest,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
@@ -82,59 +112,16 @@ struct BroadcasterTask {
     signatures: FastHashMap<PeerId, Signature>,
 
     bcast_request: tycho_network::Request,
-    bcast_peers: FastHashSet<PeerId>,
-    bcast_futs: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
+    bcast_queue: PeerQueue,
+    bcast_current: QueryResponses<BroadcastResponse>,
+    bcast_outdated: QueryResponses<BroadcastResponse>,
+
     sig_request: tycho_network::Request,
-    sig_peers: FastHashSet<PeerId>,
-    sig_futs: FuturesUnordered<BoxFuture<'static, (PeerId, SigResult)>>,
+    sig_queue: PeerQueue,
+    sig_current: QueryResponses<SignatureResponse>,
 }
 
 impl BroadcasterTask {
-    fn new(
-        effects: Effects<BroadcasterContext>,
-        point: &Point,
-        dispatcher: &Dispatcher,
-        peer_schedule: &PeerSchedule,
-        bcaster_signal: mpsc::Sender<BroadcasterSignal>,
-        collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
-        bcasts_outdated: FuturesUnordered<BoxFuture<'static, (PeerId, BcastResult)>>,
-    ) -> Self {
-        let _guard = effects.span().clone().entered();
-        let peer_updates = peer_schedule.updates();
-        let signers = peer_schedule
-            .peers_for(point.body().location.round.next())
-            .iter()
-            .map(|(peer_id, _)| *peer_id)
-            .collect::<FastHashSet<_>>();
-        let signers_count = NodeCount::new(signers.len());
-        let collectors = peer_schedule.all_resolved();
-        let bcast_request = Dispatcher::broadcast_request(point);
-        let sig_request = Dispatcher::signature_request(point.body().location.round);
-        Self {
-            effects,
-            dispatcher: dispatcher.clone(),
-            bcasts_outdated,
-            current_round: point.body().location.round,
-            point_digest: point.digest().clone(),
-            bcaster_signal,
-            collector_signal,
-
-            peer_updates,
-            signers,
-            signers_count,
-            removed_peers: Default::default(),
-            rejections: Default::default(),
-            signatures: Default::default(),
-
-            bcast_request,
-            bcast_peers: collectors,
-            bcast_futs: FuturesUnordered::new(),
-
-            sig_request,
-            sig_peers: Default::default(),
-            sig_futs: FuturesUnordered::new(),
-        }
-    }
     /// returns evidence for broadcast point
     pub async fn run(&mut self) {
         // how this was supposed to work:
@@ -155,26 +142,32 @@ impl BroadcasterTask {
         // * successfully signed our point and dequeued
         tracing::debug!(
             parent: self.effects.span(),
-            collectors_count = self.bcast_peers.len(),
+            current_peers = self.bcast_current.len(),
+            outdated_peers = self.bcast_outdated.len(),
             "start",
         );
-        for peer_id in mem::take(&mut self.bcast_peers) {
-            self.broadcast(&peer_id);
-        }
         loop {
             tokio::select! {
-                 Some(_) = self.bcasts_outdated.next() => {} // let them complete
+                Some((peer, _)) = self.bcast_outdated.next() => {
+                    self.broadcast(&peer);
+                }
+                Some(peer) = self.bcast_queue.next() => {
+                    self.broadcast(&peer);
+                }
+                Some((peer_id, result)) = self.bcast_current.next() => {
+                    self.match_broadcast_result(&peer_id, result);
+                },
+                Some(peer) = self.sig_queue.next() => {
+                    self.request_signature(&peer);
+                },
+                Some((peer_id, result)) = self.sig_current.next() =>  {
+                    self.match_signature_result(&peer_id, result);
+                },
                 Some(collector_signal) = self.collector_signal.recv() => {
                     if self.should_finish(collector_signal).await {
                         break;
                     }
                 }
-                Some((peer_id, result)) = self.bcast_futs.next() => {
-                    self.match_broadcast_result(peer_id, result);
-                },
-                Some((peer_id, result)) = self.sig_futs.next() =>  {
-                    self.match_signature_result(peer_id, result);
-                },
                 update = self.peer_updates.recv() => {
                     self.match_peer_updates(update);
                 }
@@ -198,12 +191,6 @@ impl BroadcasterTask {
                     if self.signatures.len() >= self.signers_count.majority_of_others() {
                         _ = self.bcaster_signal.send(BroadcasterSignal::Ok).await;
                     }
-                    for peer_id in mem::take(&mut self.sig_peers) {
-                        self.request_signature(&peer_id);
-                    }
-                    for peer_id in mem::take(&mut self.bcast_peers) {
-                        self.broadcast(&peer_id);
-                    }
                     false
                 }
             }
@@ -221,12 +208,10 @@ impl BroadcasterTask {
         result
     }
 
-    fn match_broadcast_result(&mut self, peer_id: PeerId, result: BcastResult) {
+    fn match_broadcast_result(&mut self, peer_id: &PeerId, result: Result<BroadcastResponse>) {
         match result {
             Err(error) => {
-                // TODO distinguish timeouts from models incompatibility etc
-                // self.bcast_peers.push(peer_id); // let it retry
-                self.sig_peers.insert(peer_id); // lighter weight retry loop
+                self.sig_queue.push(peer_id); // lighter weight retry loop
                 tracing::error!(
                     parent: self.effects.span(),
                     peer = display(peer_id.alt()),
@@ -234,22 +219,21 @@ impl BroadcasterTask {
                     "failed to send broadcast to"
                 );
             }
-            Ok(_) => {
+            Ok(BroadcastResponse) => {
+                self.sig_queue.push(peer_id); // give some time to validate
                 tracing::trace!(
                     parent: self.effects.span(),
                     peer = display(peer_id.alt()),
                     "finished broadcast to"
                 );
-                self.request_signature(&peer_id);
             }
         }
     }
 
-    fn match_signature_result(&mut self, peer_id: PeerId, result: SigResult) {
+    fn match_signature_result(&mut self, peer_id: &PeerId, result: Result<SignatureResponse>) {
         match result {
             Err(error) => {
-                // TODO distinguish timeouts from models incompatibility etc
-                self.sig_peers.insert(peer_id); // let it retry
+                self.sig_queue.push(peer_id); // let it retry
                 tracing::error!(
                     parent: self.effects.span(),
                     peer = display(peer_id.alt()),
@@ -272,21 +256,21 @@ impl BroadcasterTask {
                 );
                 match response {
                     SignatureResponse::Signature(signature) => {
-                        if self.signers.contains(&peer_id) {
-                            if signature.verifies(&peer_id, &self.point_digest) {
-                                self.signatures.insert(peer_id, signature);
+                        if self.signers.contains(peer_id) {
+                            if signature.verifies(peer_id, &self.point_digest) {
+                                self.signatures.insert(*peer_id, signature);
                             } else {
                                 // any invalid signature lowers our chances
                                 // to successfully finish current round
-                                self.rejections.insert(peer_id);
+                                self.rejections.insert(*peer_id);
                             }
                         }
                     }
-                    SignatureResponse::NoPoint => self.broadcast(&peer_id),
-                    SignatureResponse::TryLater => _ = self.sig_peers.insert(peer_id),
+                    SignatureResponse::NoPoint => self.broadcast(peer_id), // send data immediately
+                    SignatureResponse::TryLater => self.sig_queue.push(peer_id),
                     SignatureResponse::Rejected => {
-                        if self.signers.contains(&peer_id) {
-                            self.rejections.insert(peer_id);
+                        if self.signers.contains(peer_id) {
+                            self.rejections.insert(*peer_id);
                         }
                     }
                 }
@@ -296,8 +280,8 @@ impl BroadcasterTask {
 
     fn broadcast(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
-            self.bcast_futs
-                .push(self.dispatcher.query(peer_id, &self.bcast_request));
+            self.bcast_current
+                .push(peer_id, self.dispatcher.query(peer_id, &self.bcast_request));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),
@@ -314,8 +298,8 @@ impl BroadcasterTask {
 
     fn request_signature(&mut self, peer_id: &PeerId) {
         if self.removed_peers.is_empty() || !self.removed_peers.remove(peer_id) {
-            self.sig_futs
-                .push(self.dispatcher.query(peer_id, &self.sig_request));
+            self.sig_current
+                .push(peer_id, self.dispatcher.query(peer_id, &self.sig_request));
             tracing::trace!(
                 parent: self.effects.span(),
                 peer = display(peer_id.alt()),
