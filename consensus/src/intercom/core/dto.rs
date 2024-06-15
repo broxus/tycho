@@ -5,6 +5,13 @@ use tycho_network::{Response, ServiceRequest, Version};
 
 use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
+use crate::MempoolConfig;
+
+// 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
+// as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),
+// and 1 mapping of 32 (peer_id) to 64 (signature) valuable bytes (evidence);
+// the size of other data is fixed, and estimate is more than enough to handle `Bytes` encoding
+const LARGEST_DATA_BYTES: usize = u16::MAX as usize + MempoolConfig::PAYLOAD_BATCH_BYTES;
 
 // broadcast uses simple send_message with () return value
 impl From<&Point> for tycho_network::Request {
@@ -24,7 +31,6 @@ pub enum MPQuery {
 }
 
 impl From<&MPQuery> for tycho_network::Request {
-    // TODO: move MPRequest et al to TL - won't need to copy Point
     fn from(value: &MPQuery) -> Self {
         tycho_network::Request {
             version: Version::V1,
@@ -37,6 +43,9 @@ impl TryFrom<&ServiceRequest> for MPQuery {
     type Error = anyhow::Error;
 
     fn try_from(request: &ServiceRequest) -> Result<Self, Self::Error> {
+        if request.body.len() > LARGEST_DATA_BYTES {
+            anyhow::bail!("too large request: {} bytes", request.body.len())
+        }
         Ok(bincode::deserialize::<MPQuery>(&request.body)?)
     }
 }
@@ -64,6 +73,9 @@ impl TryFrom<&Response> for MPResponse {
     type Error = anyhow::Error;
 
     fn try_from(response: &Response) -> Result<Self, Self::Error> {
+        if response.body.len() > LARGEST_DATA_BYTES {
+            anyhow::bail!("too large response: {} bytes", response.body.len())
+        }
         match bincode::deserialize::<MPResponse>(&response.body) {
             Ok(response) => Ok(response),
             Err(e) => Err(anyhow!("failed to deserialize: {e:?}")),
