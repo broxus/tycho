@@ -567,15 +567,14 @@ impl CollatorStdImpl {
         // block time diff from now
         let block_time_diff = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .and_then(|now_unix| {
+            .map_or(0, |now_unix| {
                 let diff_time = (now_unix.as_millis() as u64)
                     .checked_sub(next_chain_time)
                     .unwrap_or_default();
                 metrics::histogram!("tycho_do_collate_block_diff_time", labels)
-                    .record(diff_time as _);
-                Ok(diff_time)
-            })
-            .unwrap_or_default();
+                    .record(diff_time as f64);
+                diff_time
+            });
 
         tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
@@ -588,7 +587,7 @@ impl CollatorStdImpl {
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={}",
-            block_time_diff.as_millis(),
+            block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
@@ -605,7 +604,7 @@ impl CollatorStdImpl {
 
         tracing::info!(
             target: tracing_targets::COLLATOR,
-            block_time_diff = %format_duration(block_time_diff),
+            block_time_diff = block_time_diff,
             from_prev_block = %format_duration(elapsed_from_prev_block),
             overhead = %format_duration(collation_mngmnt_overhead),
             total = %format_duration(total_elapsed),
