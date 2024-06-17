@@ -565,14 +565,17 @@ impl CollatorStdImpl {
             .record(collation_mngmnt_overhead);
 
         // block time diff from now
-        let block_time_diff = if let Ok(time_diff) =
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        {
-            metrics::histogram!("tycho_do_collate_block_diff_time", labels).record(time_diff);
-            time_diff
-        } else {
-            Duration::ZERO
-        };
+        let block_time_diff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .and_then(|now_unix| {
+                let diff_time = (now_unix.as_millis() as u64)
+                    .checked_sub(next_chain_time)
+                    .unwrap_or_default();
+                metrics::histogram!("tycho_do_collate_block_diff_time", labels)
+                    .record(diff_time as _);
+                Ok(diff_time)
+            })
+            .unwrap_or_default();
 
         tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
