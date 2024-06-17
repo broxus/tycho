@@ -192,6 +192,7 @@ pub struct CollatorStdImpl {
     state_tracker: MinRefMcStateTracker,
 
     stats: CollatorStats,
+    timer: std::time::Instant,
 }
 
 impl CollatorStdImpl {
@@ -242,6 +243,7 @@ impl CollatorStdImpl {
             state_tracker,
 
             stats: Default::default(),
+            timer: std::time::Instant::now(),
         };
 
         AsyncQueuedDispatcher::run(processor, receiver);
@@ -311,6 +313,8 @@ impl CollatorStdImpl {
         let working_state =
             Self::build_and_validate_working_state(mc_state, prev_states, &self.state_tracker)?;
         self.set_working_state(working_state);
+
+        self.timer = std::time::Instant::now();
 
         // TODO: collate right now instead of queuing
 
@@ -480,6 +484,8 @@ impl CollatorStdImpl {
         let _histogram =
             HistogramGuardWithLabels::begin("tycho_collator_import_next_anchor_time", &labels);
 
+        let timer = std::time::Instant::now();
+
         // TODO: use get_next_anchor() only once
         let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
             self.mpool_adapter.get_next_anchor(prev_anchor_id).await?
@@ -500,17 +506,14 @@ impl CollatorStdImpl {
                 None => self.mpool_adapter.get_next_anchor(0).await?,
             }
         };
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "imported next anchor (id: {}, chain_time: {}, externals: {})",
-            next_anchor.id(),
-            next_anchor.chain_time(),
-            next_anchor.externals_count(),
-        );
 
         let has_externals = next_anchor.check_has_externals_for(&self.shard_id);
         if has_externals {
             self.has_pending_externals = true;
         }
+
+        let chain_time_elapsed =
+            next_anchor.chain_time() - self.last_imported_anchor_chain_time.unwrap_or_default();
 
         self.last_imported_anchor_id = Some(next_anchor.id());
         self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
@@ -519,6 +522,15 @@ impl CollatorStdImpl {
                 anchor: next_anchor.clone(),
                 has_externals,
             }));
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            elapsed = timer.elapsed().as_millis(),
+            chain_time_elapsed,
+            "imported next anchor (id: {}, chain_time: {}, externals: {})",
+            next_anchor.id(),
+            next_anchor.chain_time(),
+            next_anchor.externals_count(),
+        );
 
         Ok((next_anchor, has_externals))
     }

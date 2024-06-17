@@ -417,8 +417,14 @@ def collator_do_collate() -> RowPanel:
             "tycho_do_collate_tx_total",
             "Number of transactions over time",
         ),
-        create_gauge_panel(
-            "tycho_do_collate_int_msgs_queue_length", "Internal messages queue len"
+        create_heatmap_panel(
+            "tycho_do_collate_block_diff_time", "Block time diff"
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_from_prev_block_time", "Time elapsed from prev block"
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_overhead_time", "Collation management overhead"
         ),
         create_heatmap_panel("tycho_do_collate_total_time", "Total collation time"),
         create_heatmap_panel("tycho_do_collate_prepare_time", "Collation prepare time"),
@@ -433,14 +439,14 @@ def collator_do_collate() -> RowPanel:
             "tycho_do_collate_execute_tock_time", "Execute Tock special transactions"
         ),
         create_heatmap_panel(
-            "tycho_do_collate_fill_msgs_total_time", "Sum of fill messages times"
+            "tycho_do_collate_fill_msgs_total_time", "Fill messages time"
         ),
         create_heatmap_panel(
-            "tycho_do_collate_process_msgs_total_time", "Sum of execute messages times"
+            "tycho_do_collate_process_msgs_total_time", "Execute messages time"
         ),
         create_heatmap_panel(
             "tycho_do_collate_process_txs_total_time",
-            "Sum of process transactions times",
+            "Process transactions time",
         ),
         create_heatmap_panel(
             "tycho_do_collate_apply_queue_diff_time", "Apply message queue diff"
@@ -448,24 +454,17 @@ def collator_do_collate() -> RowPanel:
         create_heatmap_panel(
             "tycho_do_collate_handle_block_candidate_time", "Handle block candidate"
         ),
-        create_heatmap_panel(
-            "tycho_collator_adapter_on_block_accepted_ext_time",
-            "on_block_accepted_external with blocks guard",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"
-        ),
         create_heatmap_panel("tycho_collator_update_mc_data_time", "update mc data"),
         create_heatmap_panel(
-            "tycho_collator_import_next_anchor_time", "import next anchor"
+            "tycho_collator_import_next_anchor_time", "import next anchor time"
         ),
         create_heatmap_panel(
             "tycho_collator_try_collate_next_master_block_time",
-            "collate next master block",
+            "try collate next master block",
         ),
         create_heatmap_panel(
             "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
-            "collate next shard block",
+            "try collate next shard block",
         ),
         create_heatmap_panel(
             "tycho_collator_refresh_collation_sessions_time",
@@ -485,6 +484,13 @@ def collator_do_collate() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_collator_process_validated_block_time", "process validated block"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_adapter_on_block_accepted_ext_time",
+            "on_block_accepted_external",
         ),
     ]
     return create_row("Collator Do Collate", metrics)

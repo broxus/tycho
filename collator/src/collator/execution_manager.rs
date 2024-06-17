@@ -175,7 +175,7 @@ impl ExecutionManager {
             let mut transactions = Vec::with_capacity(msgs.len());
 
             for msg in msgs {
-                transactions.push(execute_ordinary_transaction(
+                transactions.push(execute_ordinary_transaction_impl(
                     &mut account_state,
                     msg,
                     min_next_lt,
@@ -204,7 +204,7 @@ impl ExecutionManager {
         let params = self.params.clone();
 
         let (account_stuff, executed) = rayon_run(move || {
-            let executed = execute_ordinary_transaction(
+            let executed = execute_ordinary_transaction_impl(
                 &mut account_stuff,
                 in_message,
                 min_next_lt,
@@ -343,14 +343,14 @@ pub struct ExecutedOrdinaryTransaction {
     pub in_message: Box<ParsedMessage>,
 }
 
-fn execute_ordinary_transaction(
+fn execute_ordinary_transaction_impl(
     account_stuff: &mut ShardAccountStuff,
     in_message: Box<ParsedMessage>,
     min_lt: u64,
     config: &PreloadedBlockchainConfig,
     params: &ExecuteParams,
 ) -> Result<ExecutedOrdinaryTransaction> {
-    tracing::trace!(
+    tracing::debug!(
         target: tracing_targets::EXEC_MANAGER,
         account_addr = %account_stuff.account_addr,
         message_hash = %in_message.cell.repr_hash(),

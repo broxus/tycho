@@ -42,7 +42,7 @@ impl Default for CollationConfig {
             max_uncommitted_chain_length: 31,
             uncommitted_chain_to_import_next_anchor: 4,
 
-            block_txs_limit: 20000,
+            block_txs_limit: 10000,
 
             msgs_exec_params: MsgsExecutionParams::default(),
         }

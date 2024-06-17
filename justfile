@@ -158,6 +158,7 @@ init_node_config *flags: build_debug
           "state_node_adapter": "debug",
           "mq_adapter": "debug",
           "collator": "debug",
+          "exec_manager": "debug",
           "validator": "debug",
           "async_queued_dispatcher": "debug"
         }
