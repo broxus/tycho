@@ -21,6 +21,32 @@ impl BlockMetaData {
     }
 }
 
+impl BriefBlockInfo {
+    pub fn with_mc_seq_no(self, mc_seq_no: u32) -> BlockMetaData {
+        BlockMetaData {
+            is_key_block: self.is_key_block,
+            gen_utime: self.gen_utime,
+            mc_ref_seqno: mc_seq_no,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct BriefBlockInfo {
+    pub is_key_block: bool,
+    pub gen_utime: u32,
+    pub after_split: bool,
+}
+
+impl From<&BlockInfo> for BriefBlockInfo {
+    fn from(info: &BlockInfo) -> Self {
+        Self {
+            is_key_block: info.key_block,
+            gen_utime: info.gen_utime,
+            after_split: info.after_split,
+        }
+    }
+}
 #[derive(Debug, Default)]
 pub struct BlockMeta {
     flags: AtomicU64,

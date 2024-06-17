@@ -5,6 +5,7 @@ use anyhow::Context;
 use everscale_types::models::BlockId;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockProofStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, BriefBlockInfo};
@@ -81,7 +82,10 @@ async fn prepare_prev_key_block(
     Ok(prev_key_block)
 }
 
-async fn download_key_blocks(node: &Arc<Node>, prev_key_block: PrevKeyBlock) -> anyhow::Result<()> {
+async fn download_key_blocks(
+    node: &Arc<Node>,
+    mut prev_key_block: PrevKeyBlock,
+) -> anyhow::Result<()> {
     const BLOCKS_PER_BATCH: u32 = 10;
     const PARALLEL_REQUESTS: usize = 10;
 
@@ -144,7 +148,7 @@ async fn download_key_blocks(node: &Arc<Node>, prev_key_block: PrevKeyBlock) -> 
                         // Check whether block proof is already stored locally
                         if let Some(handle) = block_handle_storage.load_handle(&block_id) {
                             if let Ok(proof) = block_storage.load_block_proof(&handle, false).await {
-                                return proof;
+                                return WithArchiveData::loaded(proof);
                             }
                         }
 
@@ -159,7 +163,7 @@ async fn download_key_blocks(node: &Arc<Node>, prev_key_block: PrevKeyBlock) -> 
                                 match BlockProofStuff::deserialize(block_id, &data.data, false) {
                                     Ok(proof) => {
                                         handle.accept();
-                                        return proof;
+                                        return proof.with_archive_data(&data.data);
                                     },
                                     Err(e) => {
                                         tracing::error!(%block_id, "failed to deserialize block proof: {e}");
@@ -179,14 +183,54 @@ async fn download_key_blocks(node: &Arc<Node>, prev_key_block: PrevKeyBlock) -> 
         let mut proofs = stream.collect::<Vec<_>>().await;
         proofs.sort_by_key(|x| *x.id());
 
-        for _proof in &proofs {
-            // TODO: Verify block proof
-            // TODO: Store block proof
-            // TODO: Store init_mc_block_id
-        }
+        // Save previous key block to restart downloading in case of error
+        let prev_key_block_id = *prev_key_block.handle().id();
 
-        if let Some(proof) = proofs.last() {
-            tasks_tx.send(*proof.id())?;
+        let proofs_len = proofs.len();
+        for (index, proof) in proofs.into_iter().enumerate() {
+            // Verify block proof
+            match prev_key_block.check_next_proof(&proof.data) {
+                Ok(info) => {
+                    // Save block proof
+                    let block_id = proof.id();
+
+                    let handle = node
+                        .storage
+                        .block_storage()
+                        .store_block_proof(&proof, info.with_mc_seq_no(block_id.seqno).into())
+                        .await?
+                        .handle;
+
+                    let block_utime = handle.meta().gen_utime();
+                    let prev_utime = prev_key_block.handle().meta().gen_utime();
+
+                    // Update init_mc_block_id
+                    if tycho_block_util::state::is_persistent_state(block_utime, prev_utime) {
+                        node.storage
+                            .node_state()
+                            .store_init_mc_block_id(handle.id());
+                    }
+
+                    // Trigger task to getting next key blocks
+                    if index == proofs_len.saturating_sub(1) {
+                        tasks_tx.send(*proof.data.id())?;
+                    }
+
+                    // Update prev_key_block
+                    prev_key_block = PrevKeyBlock::KeyBlock {
+                        handle: Arc::new(handle),
+                        proof: Box::new(proof.data),
+                    };
+                }
+                Err(e) => {
+                    tracing::warn!("got invalid key block proof: {e:?}");
+
+                    // Restart downloading proofs
+                    tasks_tx.send(prev_key_block_id)?;
+
+                    break;
+                }
+            }
         }
     }
 
