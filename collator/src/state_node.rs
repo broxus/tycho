@@ -3,16 +3,20 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use everscale_types::models::{Block, BlockId, BlockIdShort, BlockProof, BlockSignature, ShardIdent, Signature, ValidatorBaseInfo};
-use everscale_types::prelude::{Boc, Cell, CellBuilder, CellFamily, Dict, HashBytes, Store, UsageTree, UsageTreeMode};
+use everscale_types::models::{
+    Block, BlockId, BlockIdShort, BlockProof, BlockSignature, ShardIdent, Signature,
+    ValidatorBaseInfo,
+};
+use everscale_types::prelude::{
+    Boc, Cell, CellBuilder, CellFamily, Dict, HashBytes, Store, UsageTree, UsageTreeMode,
+};
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastDashMap;
 use tycho_storage::{BlockHandle, BlockMetaData, BlockProofHandle, Storage};
-use tycho_util::FastHashMap;
+use tycho_util::metrics::HistogramGuard;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
@@ -268,7 +272,8 @@ impl StateNodeAdapterStdImpl {
                         let archive_data =
                             block_proof_stuff.with_archive_data(proof_boc.as_slice());
 
-                        let result = self.storage
+                        let result = self
+                            .storage
                             .block_storage()
                             .store_block_proof(
                                 &archive_data,
@@ -280,7 +285,12 @@ impl StateNodeAdapterStdImpl {
                             )
                             .await?;
 
-                        tracing::info!("Proof saved {:?}. New: {}, Updated: {}", result.handle.id(), result.new, result.updated);
+                        tracing::info!(
+                            "Proof saved {:?}. New: {}, Updated: {}",
+                            result.handle.id(),
+                            result.new,
+                            result.updated
+                        );
 
                         Ok(())
                     }

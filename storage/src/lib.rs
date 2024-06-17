@@ -155,7 +155,7 @@ impl StorageBuilder {
             runtime_storage,
             rpc_state,
             internal_queue_storage,
-            archive_config: self.archive_config
+            archive_config: self.archive_config,
         });
 
         spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
@@ -275,5 +275,5 @@ struct Inner {
     rpc_state: Option<RpcStorage>,
     internal_queue_storage: InternalQueueStorage,
 
-    archive_config: Option<ArchiveConfig>
+    archive_config: Option<ArchiveConfig>,
 }

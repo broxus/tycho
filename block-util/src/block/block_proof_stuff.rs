@@ -16,18 +16,13 @@ pub struct BlockProofStuff {
 }
 
 impl BlockProofStuff {
-
-
     pub fn new(proof: BlockProof, is_link: bool) -> Result<Self> {
         anyhow::ensure!(
             proof.proof_for.is_masterchain() || is_link,
             "non-masterchain blocks cannot have full proofs",
         );
 
-        Ok(Self {
-            proof,
-            is_link
-        })
+        Ok(Self { proof, is_link })
     }
     pub fn deserialize(block_id: BlockId, data: &[u8], is_link: bool) -> Result<Self> {
         let proof = BocRepr::decode::<BlockProof, _>(data)?;

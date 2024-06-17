@@ -95,7 +95,9 @@ impl BlockchainBlockProvider {
                         }
                         (Err(e), _) | (_, Err(e)) => {
                             res.reject();
-                            tracing::error!("Failed to deserialize block or block proof for block: {e}");
+                            tracing::error!(
+                                "Failed to deserialize block or block proof for block: {e}"
+                            );
                             None
                         }
                     },
@@ -110,7 +112,7 @@ impl BlockchainBlockProvider {
             if let Some(Ok((block, proof))) = block_data {
                 if let Err(e) = self.check_proof(&block.data, &proof.data).await {
                     tracing::error!("Failed to check block proof: {e}");
-                    break Some(Err(anyhow!("Invalid block")))
+                    break Some(Err(anyhow!("Invalid block")));
                 }
 
                 break Some(Ok(block));
@@ -150,8 +152,7 @@ impl BlockchainBlockProvider {
                         } else {
                             Some(Ok(BlockStuffAug::new(block, data.clone())))
                         }
-
-                    },
+                    }
                     (Err(e), _) | (_, Err(e)) => {
                         res.accept();
                         tracing::error!("failed to deserialize block: {:?}", e);
@@ -169,11 +170,7 @@ impl BlockchainBlockProvider {
         }
     }
 
-    async fn check_proof(
-        &self,
-        block: &BlockStuff,
-        proof: &BlockProofStuff,
-    ) -> anyhow::Result<()> {
+    async fn check_proof(&self, block: &BlockStuff, proof: &BlockProofStuff) -> anyhow::Result<()> {
         if block.id() != &proof.proof().proof_for {
             tracing::error!(
                 "Block proof in created not for block {:?} but for block {:?}",
@@ -213,7 +210,10 @@ impl BlockchainBlockProvider {
             };
 
             if let Err(e) = proof.check_with_master_state(&shard_state_stuff) {
-                tracing::error!("Failed to check proof for block {} with master state: {e}", block.id());
+                tracing::error!(
+                    "Failed to check proof for block {} with master state: {e}",
+                    block.id()
+                );
                 return Err(anyhow!("Request block is invalid"));
             }
         }

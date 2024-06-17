@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use everscale_crypto::ed25519::KeyPair;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{HashBytes, UsageTree};
 use everscale_types::models::{
@@ -12,7 +13,6 @@ use everscale_types::models::{
     ValidatorBaseInfo,
 };
 use everscale_types::prelude::{CellBuilder, Dict, UsageTreeMode};
-use everscale_crypto::ed25519::KeyPair;
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::metrics::HistogramGuard;
