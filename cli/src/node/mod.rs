@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
 use everscale_crypto::ed25519;
@@ -47,10 +47,12 @@ use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
+use crate::node::boot::cold_boot;
 use crate::util::error::ResultExt;
 use crate::util::logger::{is_systemd_child, LoggerConfig};
 use crate::util::signal;
 
+mod boot;
 mod config;
 
 const SERVICE_NAME: &str = "tycho-node";
@@ -149,7 +151,7 @@ impl CmdRun {
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
-            Node::new(socket_addr, keys, node_config, global_config)?
+            Arc::new(Node::new(socket_addr, keys, node_config, global_config)?)
         };
 
         // Ensure that there are some neighbours
@@ -423,7 +425,7 @@ impl Node {
     }
 
     /// Initialize the node and return the init block id.
-    async fn try_init(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
+    async fn try_init(self: &Arc<Self>, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
         match node_state.load_last_mc_block_id() {
@@ -434,16 +436,13 @@ impl Node {
             None => {
                 tracing::info!("cold init");
 
-                let zerostate_id = if let Some(zerostates) = zerostates {
-                    let zerostate_id = self.import_zerostates(zerostates).await?;
-                    node_state.store_init_mc_block_id(&zerostate_id);
-                    node_state.store_last_mc_block_id(&zerostate_id);
-                    zerostate_id
-                } else {
-                    self.download_zerostates().await?
-                };
+                let last_mc_block_id = cold_boot(self, zerostates).await?;
 
-                Ok(zerostate_id)
+                // TODO: failed when sync?
+                // node_state.store_init_mc_block_id(&zerostate_id);
+                // node_state.store_last_mc_block_id(&zerostate_id);
+
+                todo!()
             }
         }
     }
@@ -553,38 +552,63 @@ impl Node {
         Ok(zerostate_id)
     }
 
+    async fn load_or_download_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+        let storage = &self.storage;
+        let blockchain_rpc_client = &self.blockchain_rpc_client;
+
+        let block_handle_storage = storage.block_handle_storage();
+        let state = match block_handle_storage.load_handle(block_id) {
+            Some(handle) if handle.meta().has_data() => {
+                // Load state
+                let shard_state_storage = storage.shard_state_storage();
+
+                shard_state_storage
+                    .load_state(block_id)
+                    .await
+                    .context("Failed to load zerostate")?
+            }
+            _ => {
+                // Download state
+                let state = blockchain_rpc_client
+                    .download_and_store_state(block_id, storage.clone())
+                    .await?;
+
+                // Save persistent state
+                storage
+                    .persistent_state_storage()
+                    .store_state(
+                        state.state().seqno,
+                        state.block_id(),
+                        state.root_cell().repr_hash(),
+                    )
+                    .await?;
+
+                let (handle, _) = storage.block_handle_storage().create_or_load_handle(
+                    block_id,
+                    BlockMetaData::zero_state(state.state().gen_utime, true),
+                );
+
+                storage
+                    .shard_state_storage()
+                    .store_state(&handle, &state)
+                    .await?;
+
+                state
+            }
+        };
+
+        Ok(state)
+    }
+
     async fn download_zerostates(&self) -> Result<BlockId> {
         let zerostate_id = self.zerostate.as_block_id();
 
-        let state = self
-            .blockchain_rpc_client
-            .download_and_store_state(&zerostate_id, self.storage.clone())
-            .await?;
-
-        let persistent_state_storage = self.storage.persistent_state_storage();
-        persistent_state_storage
-            .store_state(
-                state.state().seqno,
-                state.block_id(),
-                state.root_cell().repr_hash(),
-            )
-            .await?;
+        let state = self.load_or_download_state(&zerostate_id).await?;
 
         for item in state.shards()?.latest_blocks() {
             let block_id = item?;
 
-            let state = self
-                .blockchain_rpc_client
-                .download_and_store_state(&block_id, self.storage.clone())
-                .await?;
-
-            persistent_state_storage
-                .store_state(
-                    state.state().seqno,
-                    state.block_id(),
-                    state.root_cell().repr_hash(),
-                )
-                .await?;
+            let _state = self.load_or_download_state(&block_id).await?;
         }
 
         Ok(zerostate_id)

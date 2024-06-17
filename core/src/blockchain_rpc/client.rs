@@ -4,6 +4,8 @@ use anyhow::Result;
 use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use tycho_block_util::archive::{ArchiveData, WithArchiveData};
+use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::Storage;
@@ -168,19 +170,6 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
-    pub async fn get_key_block_proof(
-        &self,
-        block_id: &BlockId,
-    ) -> Result<QueryResponse<Data>, Error> {
-        let client = &self.inner.overlay_client;
-        let data = client
-            .query::<_, Data>(&rpc::GetKeyBlockProof {
-                block_id: *block_id,
-            })
-            .await?;
-        Ok(data)
-    }
-
     pub async fn get_archive_info(
         &self,
         mc_seqno: u32,
@@ -239,6 +228,19 @@ impl BlockchainRpcClient {
                     offset,
                 }),
             )
+            .await?;
+        Ok(data)
+    }
+
+    pub async fn get_key_block_proof(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<QueryResponse<Data>, Error> {
+        let client = &self.inner.overlay_client;
+        let data = client
+            .query::<_, Data>(&rpc::GetKeyBlockProof {
+                block_id: *block_id,
+            })
             .await?;
         Ok(data)
     }
