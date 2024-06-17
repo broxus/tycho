@@ -40,7 +40,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{BlockMetaData, Storage};
+use tycho_storage::{BlockHandle, BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -447,7 +447,10 @@ impl Node {
         }
     }
 
-    async fn import_zerostates(&self, paths: Vec<PathBuf>) -> Result<BlockId> {
+    async fn import_zerostates(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<(BlockHandle, ShardStateStuff)> {
         // Use a separate tracker for zerostates
         let tracker = MinRefMcStateTracker::default();
 
@@ -549,23 +552,49 @@ impl Node {
         }
 
         tracing::info!("imported zerostates");
-        Ok(zerostate_id)
+
+        let state = state_storage.load_state(&zerostate_id).await?;
+        let handle = handle_storage
+            .load_handle(&zerostate_id)
+            .expect("shouldn't happen");
+
+        Ok((handle, state))
     }
 
-    async fn load_or_download_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
+    async fn download_zerostates(&self) -> Result<(BlockHandle, ShardStateStuff)> {
+        let zerostate_id = self.zerostate.as_block_id();
+
+        let (handle, state) = self.load_or_download_state(&zerostate_id).await?;
+
+        for item in state.shards()?.latest_blocks() {
+            let block_id = item?;
+
+            let _state = self.load_or_download_state(&block_id).await?;
+        }
+
+        Ok((handle, state))
+    }
+
+    async fn load_or_download_state(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<(BlockHandle, ShardStateStuff)> {
         let storage = &self.storage;
         let blockchain_rpc_client = &self.blockchain_rpc_client;
 
         let block_handle_storage = storage.block_handle_storage();
-        let state = match block_handle_storage.load_handle(block_id) {
+        let (handle, state) = match block_handle_storage.load_handle(block_id) {
             Some(handle) if handle.meta().has_data() => {
                 // Load state
                 let shard_state_storage = storage.shard_state_storage();
 
-                shard_state_storage
-                    .load_state(block_id)
-                    .await
-                    .context("Failed to load zerostate")?
+                (
+                    handle,
+                    shard_state_storage
+                        .load_state(block_id)
+                        .await
+                        .context("Failed to load zerostate")?,
+                )
             }
             _ => {
                 // Download state
@@ -593,25 +622,11 @@ impl Node {
                     .store_state(&handle, &state)
                     .await?;
 
-                state
+                (handle, state)
             }
         };
 
-        Ok(state)
-    }
-
-    async fn download_zerostates(&self) -> Result<BlockId> {
-        let zerostate_id = self.zerostate.as_block_id();
-
-        let state = self.load_or_download_state(&zerostate_id).await?;
-
-        for item in state.shards()?.latest_blocks() {
-            let block_id = item?;
-
-            let _state = self.load_or_download_state(&block_id).await?;
-        }
-
-        Ok(zerostate_id)
+        Ok((handle, state))
     }
 
     async fn run(&self, last_block_id: &BlockId) -> Result<()> {

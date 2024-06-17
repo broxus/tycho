@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use everscale_types::models::BlockId;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::block::BlockProofStuff;
-use tycho_core::overlay_client::Error;
-use tycho_core::proto::blockchain::{rpc, Data};
-use tycho_network::Request;
+use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::{BlockHandle, BriefBlockInfo};
 use tycho_util::futures::JoinTask;
 
 use crate::node::Node;
@@ -22,18 +22,18 @@ pub async fn cold_boot(
     tracing::info!("starting cold boot");
 
     // Find the last key block (or zerostate) from which we can start downloading other key blocks
-    let key_block = prepare_key_block(node, zerostates).await?;
+    let prev_key_block = prepare_prev_key_block(node, zerostates).await?;
 
     // Ensure that all key blocks until now (with some offset) are downloaded
-    download_key_blocks(node, key_block).await?;
+    download_key_blocks(node, prev_key_block).await?;
 
     todo!()
 }
 
-async fn prepare_key_block(
+async fn prepare_prev_key_block(
     node: &Arc<Node>,
     zerostates: Option<Vec<PathBuf>>,
-) -> anyhow::Result<BlockId> {
+) -> anyhow::Result<PrevKeyBlock> {
     let block_id = node
         .storage
         .node_state()
@@ -42,18 +42,46 @@ async fn prepare_key_block(
 
     tracing::info!(block_id = %block_id, "using key block");
 
-    if block_id.seqno == 0 {
-        if let Some(zerostates) = zerostates {
-            node.import_zerostates(zerostates).await?;
-        } else {
-            node.download_zerostates().await?;
-        }
-    }
+    let prev_key_block = match block_id.seqno {
+        0 => {
+            tracing::info!(%block_id, "using zero state");
 
-    Ok(block_id)
+            let (handle, state) = match zerostates {
+                Some(zerostates) => node.import_zerostates(zerostates).await?,
+                None => node.download_zerostates().await?,
+            };
+
+            PrevKeyBlock::ZeroState {
+                handle: Arc::new(handle),
+                state: Arc::new(state),
+            }
+        }
+        _ => {
+            tracing::info!(%block_id, "using key block");
+
+            let handle = node
+                .storage
+                .block_handle_storage()
+                .load_handle(&block_id)
+                .expect("shouldn't happen");
+
+            let proof = node
+                .storage
+                .block_storage()
+                .load_block_proof(&handle, false)
+                .await?;
+
+            PrevKeyBlock::KeyBlock {
+                handle: Arc::new(handle),
+                proof: Box::new(proof),
+            }
+        }
+    };
+
+    Ok(prev_key_block)
 }
 
-async fn download_key_blocks(node: &Arc<Node>, key_block: BlockId) -> anyhow::Result<()> {
+async fn download_key_blocks(node: &Arc<Node>, prev_key_block: PrevKeyBlock) -> anyhow::Result<()> {
     const BLOCKS_PER_BATCH: u32 = 10;
     const PARALLEL_REQUESTS: usize = 10;
 
@@ -99,10 +127,10 @@ async fn download_key_blocks(node: &Arc<Node>, key_block: BlockId) -> anyhow::Re
     });
 
     // Start getting next key blocks
-    tasks_tx.send(key_block)?;
+    tasks_tx.send(*prev_key_block.handle().id())?;
 
     while let Some(ids) = ids_rx.recv().await {
-        let mut stream = futures_util::stream::iter(ids)
+        let stream = futures_util::stream::iter(ids)
             .map(|block_id| {
                 let storage = node.storage.clone();
                 let blockchain_rpc_client = node.blockchain_rpc_client.clone();
@@ -165,16 +193,51 @@ async fn download_key_blocks(node: &Arc<Node>, key_block: BlockId) -> anyhow::Re
     Ok(())
 }
 
-#[derive(thiserror::Error, Debug)]
-enum ColdBootError {
-    #[error("Starting from non-key block")]
-    StartingFromNonKeyBlock,
-    #[error("Failed to load key block")]
-    FailedToLoadKeyBlock,
-    #[error("Base workchain info not found")]
-    BaseWorkchainInfoNotFound,
-    #[error("Downloaded shard state hash mismatch")]
-    ShardStateHashMismatch,
-    #[error("Persistent shard state not found")]
-    PersistentShardStateNotFound,
+enum PrevKeyBlock {
+    ZeroState {
+        handle: Arc<BlockHandle>,
+        state: Arc<ShardStateStuff>,
+    },
+    KeyBlock {
+        handle: Arc<BlockHandle>,
+        proof: Box<BlockProofStuff>,
+    },
+}
+
+impl PrevKeyBlock {
+    fn handle(&self) -> &Arc<BlockHandle> {
+        match self {
+            Self::KeyBlock { handle, .. } | Self::ZeroState { handle, .. } => handle,
+        }
+    }
+
+    fn check_next_proof(&self, next_proof: &BlockProofStuff) -> anyhow::Result<BriefBlockInfo> {
+        let (virt_block, virt_block_info) = next_proof
+            .pre_check_block_proof()
+            .context("Failed to pre check block proof")?;
+
+        let res = BriefBlockInfo::from(&virt_block_info);
+
+        match self {
+            // Check block proof with zero state
+            PrevKeyBlock::ZeroState { state, .. } => {
+                tycho_block_util::block::check_with_master_state(
+                    next_proof,
+                    state,
+                    &virt_block,
+                    &virt_block_info,
+                )
+            }
+            // Check block proof with previous key block
+            PrevKeyBlock::KeyBlock { proof, .. } => {
+                tycho_block_util::block::check_with_prev_key_block_proof(
+                    next_proof,
+                    proof,
+                    &virt_block,
+                    &virt_block_info,
+                )
+            }
+        }
+        .map(move |_| res)
+    }
 }
