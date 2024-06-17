@@ -44,10 +44,10 @@ use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
+use crate::node::boot::cold_boot;
 use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
-use crate::node::boot::cold_boot;
 use crate::util::error::ResultExt;
 use crate::util::logger::{is_systemd_child, LoggerConfig};
 use crate::util::signal;
