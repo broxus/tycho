@@ -149,30 +149,6 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
-    pub async fn vertex_by_proof(&self, proof: &ValidPoint) -> Option<ValidPoint> {
-        match proof.point.body().proof {
-            Some(ref proven) => {
-                let dag_round = self.scan(proof.point.body().location.round.prev())?;
-                dag_round
-                    .valid_point_exact(&proof.point.body().location.author, &proven.digest)
-                    .await
-            }
-            None => None,
-        }
-    }
-
-    pub async fn valid_point(&self, point_id: &PointId) -> Option<ValidPoint> {
-        self.scan(point_id.location.round)?
-            .valid_point_exact(&point_id.location.author, &point_id.digest)
-            .await
-    }
-
-    pub async fn valid_point_exact(&self, node: &PeerId, digest: &Digest) -> Option<ValidPoint> {
-        self.view(node, |loc| loc.versions().get(digest).cloned())??
-            .await
-            .into_valid()
-    }
-
     pub fn add_collected_exact(
         &self,
         point: &Point,
