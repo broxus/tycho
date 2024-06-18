@@ -19,7 +19,7 @@ pub mod futures {
 
 pub mod sync {
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
-    pub use self::rayon::rayon_run;
+    pub use self::rayon::{rayon_run, rayon_run_fifo};
 
     mod priority_semaphore;
     mod rayon;

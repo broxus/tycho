@@ -12,7 +12,7 @@ use ton_executor::{
     TickTockTransactionExecutor, TransactionExecutor,
 };
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
+use tycho_util::sync::rayon_run_fifo;
 use tycho_util::FastHashMap;
 
 use super::types::ParsedMessage;
@@ -171,7 +171,7 @@ impl ExecutionManager {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        rayon_run(move || {
+        rayon_run_fifo(move || {
             let mut transactions = Vec::with_capacity(msgs.len());
 
             for msg in msgs {
@@ -203,7 +203,7 @@ impl ExecutionManager {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let (account_stuff, executed) = rayon_run(move || {
+        let (account_stuff, executed) = rayon_run_fifo(move || {
             let executed = execute_ordinary_transaction_impl(
                 &mut account_stuff,
                 in_message,
@@ -234,7 +234,7 @@ impl ExecutionManager {
         let config = self.config.clone();
         let params = self.params.clone();
 
-        let (account_stuff, executed) = rayon_run(move || {
+        let (account_stuff, executed) = rayon_run_fifo(move || {
             let executed = execute_ticktock_transaction(
                 &mut account_stuff,
                 tick_tock,
