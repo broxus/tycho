@@ -921,8 +921,7 @@ impl RawCellsCache {
                 if let Some(value) = {
                     let _histogram =
                         HistogramGuard::begin("tycho_storage_get_cell_from_rocksdb_time");
-                    let res = db.cells.get(key.as_slice())?;
-                    res
+                    db.cells.get(key.as_slice())?
                 } {
                     let (rc, data) = refcount::decode_value_with_rc(value.as_ref());
                     data.map(|value| {

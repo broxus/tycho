@@ -35,15 +35,13 @@ impl RpcStateBuilder {
         let (storage, blockchain_rpc_client) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
-        let gc_handle = if let Some(config) = &self.config.transactions_gc {
-            Some(tokio::spawn(transactions_gc(
+        let gc_handle = self.config.transactions_gc.as_ref().map(|config| {
+            tokio::spawn(transactions_gc(
                 config.clone(),
                 storage.clone(),
                 gc_notify.clone(),
-            )))
-        } else {
-            None
-        };
+            ))
+        });
 
         RpcState {
             inner: Arc::new(Inner {

@@ -280,7 +280,7 @@ where
 
             self.subscriber.handle_block(&cx, prepared?).await?;
 
-            self.state.commit_shard(&cx.block.id());
+            self.state.commit_shard(cx.block.id());
         }
 
         Ok(())
