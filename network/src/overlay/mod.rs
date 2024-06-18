@@ -11,11 +11,13 @@ pub use self::config::OverlayConfig;
 use self::entries_merger::PublicOverlayEntriesMerger;
 pub use self::overlay_id::OverlayId;
 pub use self::private_overlay::{
-    PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
-    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard,
+    ChooseMultiplePrivateOverlayEntries, PrivateOverlay, PrivateOverlayBuilder,
+    PrivateOverlayEntries, PrivateOverlayEntriesEvent, PrivateOverlayEntriesReadGuard,
+    PrivateOverlayEntriesWriteGuard, PrivateOverlayEntryData,
 };
 pub use self::public_overlay::{
-    PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
+    ChooseMultiplePublicOverlayEntries, PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries,
+    PublicOverlayEntriesReadGuard, PublicOverlayEntryData,
 };
 use crate::dht::DhtService;
 use crate::network::Network;

@@ -1,17 +1,16 @@
 use std::borrow::Borrow;
-use std::collections::hash_map;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
+use indexmap::IndexMap;
 use parking_lot::{RwLock, RwLockReadGuard};
-use rand::seq::SliceRandom;
 use rand::Rng;
 use tokio::sync::Notify;
 use tycho_util::futures::BoxFutureOrNoop;
-use tycho_util::{FastDashSet, FastHashMap};
+use tycho_util::{FastDashSet, FastHasherState};
 
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
@@ -76,8 +75,7 @@ impl PublicOverlayBuilder {
         });
 
         let entries = PublicOverlayEntries {
-            peer_id_to_index: Default::default(),
-            data: Default::default(),
+            items: Default::default(),
             peer_resolver: self.peer_resolver,
         };
 
@@ -365,32 +363,31 @@ struct Inner {
 }
 
 pub struct PublicOverlayEntries {
-    peer_id_to_index: FastHashMap<PeerId, usize>,
-    data: Vec<PublicOverlayEntryData>,
+    items: OverlayItems,
     peer_resolver: Option<PeerResolver>,
 }
 
 impl PublicOverlayEntries {
     /// Returns `true` if the set contains no elements.
     pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
+        self.items.is_empty()
     }
 
     /// Returns the number of elements in the set, also referred to as its 'length'.
     pub fn len(&self) -> usize {
-        self.data.len()
+        self.items.len()
     }
 
     /// Returns true if the set contains the specified peer id.
     pub fn contains(&self, peer_id: &PeerId) -> bool {
-        self.peer_id_to_index.contains_key(peer_id)
+        self.items.contains_key(peer_id)
     }
 
     /// Returns an iterator over the entries.
     ///
     /// The order is not random, but is not defined.
-    pub fn iter(&self) -> std::slice::Iter<'_, PublicOverlayEntryData> {
-        self.data.iter()
+    pub fn iter(&self) -> indexmap::map::Values<'_, PeerId, PublicOverlayEntryData> {
+        self.items.values()
     }
 
     /// Returns a reference to one random element of the slice,
@@ -399,7 +396,9 @@ impl PublicOverlayEntries {
     where
         R: Rng + ?Sized,
     {
-        self.data.choose(rng)
+        let index = rng.gen_range(0..self.items.len());
+        let (_, value) = self.items.get_index(index)?;
+        Some(value)
     }
 
     /// Chooses `n` entries from the set, without repetition,
@@ -408,37 +407,36 @@ impl PublicOverlayEntries {
         &self,
         rng: &mut R,
         n: usize,
-    ) -> rand::seq::SliceChooseIter<'_, [PublicOverlayEntryData], PublicOverlayEntryData>
+    ) -> ChooseMultiplePublicOverlayEntries<'_>
     where
         R: Rng + ?Sized,
     {
-        self.data.choose_multiple(rng, n)
+        let len = self.items.len();
+        ChooseMultiplePublicOverlayEntries {
+            items: &self.items,
+            indices: rand::seq::index::sample(rng, len, n.min(len)).into_iter(),
+        }
     }
 
     /// Chooses all entries from the set, without repetition,
     /// and in random order.
-    pub fn choose_all<R>(
-        &self,
-        rng: &mut R,
-    ) -> rand::seq::SliceChooseIter<'_, [PublicOverlayEntryData], PublicOverlayEntryData>
+    pub fn choose_all<R>(&self, rng: &mut R) -> ChooseMultiplePublicOverlayEntries<'_>
     where
         R: Rng + ?Sized,
     {
-        self.data.choose_multiple(rng, self.data.len())
+        self.choose_multiple(rng, self.items.len())
     }
 
     fn insert(&mut self, item: &PublicEntry) -> UpdateStatus {
-        match self.peer_id_to_index.entry(item.peer_id) {
+        match self.items.entry(item.peer_id) {
             // No entry for the peer_id, insert a new one
-            hash_map::Entry::Vacant(entry) => {
-                entry.insert(self.data.len());
-
+            indexmap::map::Entry::Vacant(entry) => {
                 let resolver_handle = self.peer_resolver.as_ref().map_or_else(
                     || PeerResolverHandle::new_noop(&item.peer_id),
                     |resolver| resolver.insert(&item.peer_id, false),
                 );
 
-                self.data.push(PublicOverlayEntryData {
+                entry.insert(PublicOverlayEntryData {
                     entry: Arc::new(item.clone()),
                     resolver_handle,
                 });
@@ -446,9 +444,8 @@ impl PublicOverlayEntries {
                 UpdateStatus::Added
             }
             // Entry for the peer_id exists, update it if the new item is newer
-            hash_map::Entry::Occupied(entry) => {
-                let index = *entry.get();
-                let existing = &mut self.data[index];
+            indexmap::map::Entry::Occupied(mut entry) => {
+                let existing = entry.get_mut();
                 if existing.entry.created_at >= item.created_at {
                     return UpdateStatus::Skipped;
                 }
@@ -456,7 +453,7 @@ impl PublicOverlayEntries {
                 // Try to reuse the existing Arc if possible
                 match Arc::get_mut(&mut existing.entry) {
                     Some(existing) => existing.clone_from(item),
-                    None => self.data[index].entry = Arc::new(item.clone()),
+                    None => existing.entry = Arc::new(item.clone()),
                 }
                 UpdateStatus::Updated
             }
@@ -467,13 +464,7 @@ impl PublicOverlayEntries {
     where
         F: FnMut(&PublicOverlayEntryData) -> bool,
     {
-        self.data.retain(|item| {
-            let keep = f(item);
-            if !keep {
-                self.peer_id_to_index.remove(&item.entry.peer_id);
-            }
-            keep
-        });
+        self.items.retain(|_, item| f(item));
     }
 }
 
@@ -523,6 +514,34 @@ impl UpdateStatus {
     }
 }
 
+pub struct ChooseMultiplePublicOverlayEntries<'a> {
+    items: &'a OverlayItems,
+    indices: rand::seq::index::IndexVecIntoIter,
+}
+
+impl<'a> Iterator for ChooseMultiplePublicOverlayEntries<'a> {
+    type Item = &'a PublicOverlayEntryData;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().and_then(|i| {
+            let (_, value) = self.items.get_index(i)?;
+            Some(value)
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.indices.len(), Some(self.indices.len()))
+    }
+}
+
+impl ExactSizeIterator for ChooseMultiplePublicOverlayEntries<'_> {
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+}
+
+type OverlayItems = IndexMap<PeerId, PublicOverlayEntryData, FastHasherState>;
+
 #[cfg(test)]
 mod tests {
     use everscale_crypto::ed25519;
@@ -568,11 +587,7 @@ mod tests {
     fn count_entries(overlay: &PublicOverlay) -> usize {
         let tracked_count = overlay.inner.entry_count.load(Ordering::Acquire);
         let guard = overlay.read_entries();
-        assert_eq!(
-            guard.entries.data.len(),
-            guard.entries.peer_id_to_index.len(),
-        );
-        assert_eq!(guard.entries.data.len(), tracked_count);
+        assert_eq!(guard.entries.items.len(), tracked_count);
         tracked_count
     }
 

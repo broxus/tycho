@@ -18,10 +18,12 @@ pub use types::{
 };
 
 pub use self::overlay::{
-    OverlayConfig, OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
+    ChooseMultiplePrivateOverlayEntries, ChooseMultiplePublicOverlayEntries, OverlayConfig,
+    OverlayId, OverlayService, OverlayServiceBackgroundTasks, OverlayServiceBuilder,
     PrivateOverlay, PrivateOverlayBuilder, PrivateOverlayEntries, PrivateOverlayEntriesEvent,
-    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PublicOverlay,
-    PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
+    PrivateOverlayEntriesReadGuard, PrivateOverlayEntriesWriteGuard, PrivateOverlayEntryData,
+    PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
+    PublicOverlayEntryData,
 };
 pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
 
