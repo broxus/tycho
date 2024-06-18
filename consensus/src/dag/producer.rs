@@ -17,7 +17,7 @@ impl Producer {
         prev_point: Option<&PrevPoint>,
         input_buffer: &InputBuffer,
     ) -> Option<Point> {
-        let finished_round = current_round.prev().get()?;
+        let finished_round = current_round.prev().upgrade()?;
         let key_pair = current_round.key_pair()?;
         let payload = input_buffer.fetch(prev_point.is_some());
         let local_id = PeerId::from(key_pair.public_key);
@@ -109,7 +109,7 @@ impl Producer {
     }
 
     fn witness(finished_round: &DagRound) -> Vec<Point> {
-        match finished_round.prev().get() {
+        match finished_round.prev().upgrade() {
             Some(witness_round) => witness_round
                 .select(|(_, loc)| {
                     loc.state()

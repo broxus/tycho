@@ -173,7 +173,7 @@ impl Engine {
             };
 
             let bcaster_run = tokio::spawn({
-                let own_point_round = current_dag_round.to_weak();
+                let own_point_round = current_dag_round.downgrade();
                 let round_effects = round_effects.clone();
                 let peer_schedule = self.peer_schedule.clone();
                 let mut broadcaster = self.broadcaster;

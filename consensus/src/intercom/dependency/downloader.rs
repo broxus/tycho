@@ -105,7 +105,7 @@ impl Downloader {
             }
         };
         let updates = peer_schedule.updates();
-        let point_dag_round = point_dag_round_strong.to_weak();
+        let point_dag_round = point_dag_round_strong.downgrade();
         // do not leak span and strong round ref across await
         drop(point_dag_round_strong);
         drop(span_guard);

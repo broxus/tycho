@@ -59,7 +59,7 @@ impl Verifier {
             point.body().location.round > MempoolConfig::GENESIS_ROUND,
             "Coding error: can only validate points older than genesis"
         );
-        let Some(r_0) = r_0.get() else {
+        let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot (in)validate point, no round in local DAG");
             return DagPoint::Suspicious(ValidPoint::new(point.clone()));
         };
@@ -92,7 +92,7 @@ impl Verifier {
             return DagPoint::Invalid(point.clone());
         }
 
-        let Some(r_1) = r_0.prev().get() else {
+        let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot (in)validate point's 'includes', no round in local DAG");
             return DagPoint::Suspicious(ValidPoint::new(point.clone()));
         };
@@ -121,7 +121,7 @@ impl Verifier {
         let mut deps_checked = None;
         loop {
             tokio::select! {
-                is_sig_ok = signatures_fut.as_mut(), if !sig_checked => if is_sig_ok {
+                is_sig_ok = &mut signatures_fut, if !sig_checked => if is_sig_ok {
                     match deps_checked {
                         None => sig_checked = true,
                         Some(result) => break result
@@ -129,7 +129,7 @@ impl Verifier {
                 } else {
                     break DagPoint::Invalid(point.clone())
                 },
-                dag_point = check_deps_fut.as_mut(), if deps_checked.is_none() => {
+                dag_point = &mut check_deps_fut, if deps_checked.is_none() => {
                     if sig_checked || dag_point.valid().is_none() {
                         // either invalid or signature check passed
                         // this cancels `rayon_run` task as receiver is dropped
@@ -249,7 +249,7 @@ impl Verifier {
                 effects,
             ));
         }
-        let Some(r_2) = r_1.prev().get() else {
+        let Some(r_2) = r_1.prev().upgrade() else {
             tracing::info!("cannot (in)validate point's 'witness', no round in local DAG");
             return;
         };

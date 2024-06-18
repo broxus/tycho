@@ -65,7 +65,7 @@ impl Collector {
 
         let current_dag_round = next_dag_round
             .prev()
-            .get()
+            .upgrade()
             .expect("current DAG round must be linked into DAG chain");
         let includes = mem::take(&mut self.next_includes);
         includes.push(
@@ -154,7 +154,7 @@ impl CollectorTask {
         let mut bcaster_signal = std::pin::pin!(bcaster_signal);
         loop {
             tokio::select! {
-                Ok(bcaster_signal) = bcaster_signal.as_mut(), if !self.is_bcaster_ready_ok => {
+                Ok(bcaster_signal) = &mut bcaster_signal, if !self.is_bcaster_ready_ok => {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
                         return Err(self.next_dag_round.round().next())

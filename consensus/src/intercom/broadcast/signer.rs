@@ -62,7 +62,7 @@ impl Signer {
         if let Some(signable) = state.signable() {
             let is_witness = round.next() == engine_round;
             let current_dag_round_bind = if is_witness {
-                next_dag_round.prev().get()
+                next_dag_round.prev().upgrade()
             } else {
                 None
             };

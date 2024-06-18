@@ -40,7 +40,7 @@ struct DagRoundInner {
 
 impl WeakDagRound {
     const BOTTOM: Self = WeakDagRound(Weak::new());
-    pub fn get(&self) -> Option<DagRound> {
+    pub fn upgrade(&self) -> Option<DagRound> {
         self.0.upgrade().map(DagRound)
     }
 }
@@ -83,7 +83,7 @@ impl DagRound {
             key_pair: peer_schedule.local_keys(next_round),
             anchor_stage: AnchorStage::of(next_round, peer_schedule),
             locations,
-            prev: self.to_weak(),
+            prev: self.downgrade(),
         }))
     }
 
@@ -145,7 +145,7 @@ impl DagRound {
         &self.0.prev
     }
 
-    pub fn to_weak(&self) -> WeakDagRound {
+    pub fn downgrade(&self) -> WeakDagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
@@ -166,7 +166,7 @@ impl DagRound {
             let downloader = downloader.clone();
             let span = effects.span().clone();
             let state = loc.state().clone();
-            let point_dag_round = self.to_weak();
+            let point_dag_round = self.downgrade();
             let point = point.clone();
             loc.init(digest, |state| {
                 // FIXME: prior Responder refactor: could not sign during validation,
@@ -174,12 +174,10 @@ impl DagRound {
                 //   now current dag round changes consistently,
                 //   maybe its possible to reduce locking in 'inclusion state'
                 let state = state.clone();
-                DagPointFuture::Broadcast(Shared::new(JoinTask::new(async move {
-                    // offload init of validation to new tokio task
+                DagPointFuture::Broadcast(Shared::new(JoinTask::new(
                     Verifier::validate(point, point_dag_round, downloader, span)
-                        .inspect(|dag_point| state.init(dag_point))
-                        .await
-                })))
+                        .inspect(move |dag_point| state.init(dag_point)),
+                )))
             })
             .map(|first| first.clone().map(|_| state).boxed())
         })
@@ -210,12 +208,11 @@ impl DagRound {
                     digest: digest.clone(),
                 };
                 DagPointFuture::Download {
-                    task: Shared::new(JoinTask::new(async move {
+                    task: Shared::new(JoinTask::new(
                         downloader
                             .run(point_id, point_dag_round, rx, effects)
-                            .inspect(|dag_point| state.init(dag_point))
-                            .await
-                    })),
+                            .inspect(move |dag_point| state.init(dag_point)),
+                    )),
                     dependents: tx,
                 }
             })
@@ -283,7 +280,7 @@ impl DagRound {
         if visited.round() == round {
             return Some(visited);
         }
-        while let Some(dag_round) = visited.prev().get() {
+        while let Some(dag_round) = visited.prev().upgrade() {
             match dag_round.round().cmp(&round) {
                 core::cmp::Ordering::Less => panic!(
                     "Coding error: linked list of dag rounds cannot contain gaps, \

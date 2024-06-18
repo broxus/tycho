@@ -97,7 +97,7 @@ impl Dag {
     fn latest_trigger(next_dag_round: &DagRound) -> Option<ValidPoint> {
         let mut next_dag_round = next_dag_round.clone();
         let mut latest_trigger = None;
-        while let Some(current_dag_round) = next_dag_round.prev().get() {
+        while let Some(current_dag_round) = next_dag_round.prev().upgrade() {
             if let Some(AnchorStage::Trigger {
                 ref is_used,
                 ref leader,
@@ -173,7 +173,7 @@ impl Dag {
                 leader,
                 "anchor proof author does not match prescribed by round"
             );
-            let Some(anchor_round) = proof_round.prev().get() else {
+            let Some(anchor_round) = proof_round.prev().upgrade() else {
                 break;
             };
             if is_used.load(Ordering::Relaxed) {
@@ -234,7 +234,7 @@ impl Dag {
         );
         let mut proof_round /* r+0 */ = anchor_round
             .prev()
-            .get()
+            .upgrade()
             .expect("previous round for anchor point round must stay in DAG");
         let mut r = [
             anchor.body().includes.clone(), // points @ r+0
@@ -248,7 +248,7 @@ impl Dag {
 
         while let Some(vertex_round /* r-1 */) = proof_round
             .prev()
-            .get()
+            .upgrade()
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
             // take points @ r+0, and select their vertices @ r-1 for commit
