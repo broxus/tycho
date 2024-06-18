@@ -89,6 +89,7 @@ impl InputBufferData {
         );
 
         let max_data_bytes = MempoolConfig::PAYLOAD_BUFFER_BYTES - payload_bytes;
+        let data_bytes_pre = self.data_bytes;
         if self.data_bytes > max_data_bytes {
             let to_drop = self
                 .data
@@ -104,6 +105,14 @@ impl InputBufferData {
 
             self.offset_elements = self.offset_elements.saturating_sub(to_drop);
             _ = self.data.drain(..to_drop);
+
+            metrics::counter!("tycho_mempool_evicted_externals_count").increment(to_drop as _);
+
+            tracing::warn!(
+                count = to_drop,
+                size = data_bytes_pre - self.data_bytes,
+                "evicted externals",
+            );
         }
 
         self.data_bytes += payload_bytes;

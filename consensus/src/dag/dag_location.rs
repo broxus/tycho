@@ -1,10 +1,14 @@
 use std::collections::{btree_map, BTreeMap};
 use std::future::Future;
 use std::ops::RangeInclusive;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context, Poll};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
+use tokio::sync::mpsc;
+use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
 
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
@@ -30,54 +34,66 @@ pub struct DagLocation {
     /// only one of the point versions at current location
     /// may become proven by the next round point(s) of a node;
     /// even if we marked a proven point as invalid, consensus may ignore our decision
-    versions: BTreeMap<Digest, Shared<JoinTask<DagPoint>>>,
+    versions: BTreeMap<Digest, DagPointFuture>,
+}
+
+#[derive(Clone)]
+pub enum DagPointFuture {
+    Broadcast(Shared<JoinTask<DagPoint>>),
+    Download {
+        task: Shared<JoinTask<DagPoint>>,
+        dependents: mpsc::UnboundedSender<PeerId>,
+    },
+    Local(futures_util::future::Ready<DagPoint>),
+}
+
+impl DagPointFuture {
+    pub fn add_depender(&self, dependent: &PeerId) {
+        if let Self::Download { dependents, .. } = self {
+            // receiver is dropped upon completion
+            _ = dependents.send(*dependent);
+        }
+    }
+}
+
+impl Future for DagPointFuture {
+    type Output = DagPoint;
+
+    #[inline]
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut *self {
+            Self::Broadcast(task) | Self::Download { task, .. } => match task.poll_unpin(cx) {
+                Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
+                Poll::Pending => Poll::Pending,
+            },
+            Self::Local(ready) => ready.poll_unpin(cx),
+        }
+    }
 }
 
 impl DagLocation {
-    pub fn get_or_init<I, F>(&mut self, digest: &Digest, init: I) -> Shared<JoinTask<DagPoint>>
+    // point that is validated depends on other equivocated points futures (if any)
+    // in the same location, so need to keep order of futures' completion;
+    // to make signature we are interested in the single validated point only
+    // (others are at least suspicious and cannot be signed)
+    pub fn get_or_init<F>(&mut self, digest: &Digest, init: F) -> &DagPointFuture
     where
-        I: FnOnce() -> F,
-        F: Future<Output = DagPoint> + Send + 'static,
+        F: FnOnce(&InclusionState) -> DagPointFuture,
     {
-        match self.versions.entry(digest.clone()) {
-            btree_map::Entry::Occupied(entry) => entry.get().clone(),
-            btree_map::Entry::Vacant(entry) => {
-                let state = self.state.clone();
-                entry
-                    .insert(Shared::new(JoinTask::new(
-                        init().inspect(move |dag_point| state.init(dag_point)),
-                    )))
-                    .clone()
-            }
-        }
+        self.versions
+            .entry(digest.clone())
+            .or_insert_with(|| init(&self.state))
     }
-    pub fn init<I, F>(&mut self, digest: &Digest, init: I) -> Option<&'_ Shared<JoinTask<DagPoint>>>
+    pub fn init<F>(&mut self, digest: &Digest, init: F) -> Option<&DagPointFuture>
     where
-        I: FnOnce() -> F,
-        F: Future<Output = DagPoint> + Send + 'static,
+        F: FnOnce(&InclusionState) -> DagPointFuture,
     {
-        // point that is validated depends on other equivocated points futures (if any)
-        // in the same location, so order of insertion matches order of futures' completion;
-        // to make signature we are interested in the first validated point only
-        // (others are at least suspicious and cannot be signed)
         match self.versions.entry(digest.clone()) {
             btree_map::Entry::Occupied(_) => None,
-            btree_map::Entry::Vacant(entry) => {
-                let state = self.state.clone();
-                let shared = entry.insert(Shared::new(JoinTask::new({
-                    // Note: cannot sign during validation,
-                    //  because current DAG round may advance concurrently
-                    // TODO either leave output as is and reduce locking in 'inclusion state'
-                    //  (as single thread consumes them and makes signature),
-                    //  or better add global Watch CurrentDagRound (unify with broadcast filter!)
-                    //  and sign inside this future (remove futures unordered in collector)
-                    init().inspect(move |dag_point| state.init(dag_point))
-                })));
-                Some(shared)
-            }
+            btree_map::Entry::Vacant(entry) => Some(entry.insert(init(&self.state))),
         }
     }
-    pub fn versions(&self) -> &'_ BTreeMap<Digest, Shared<JoinTask<DagPoint>>> {
+    pub fn versions(&self) -> &'_ BTreeMap<Digest, DagPointFuture> {
         &self.versions
     }
     pub fn state(&self) -> &'_ InclusionState {
@@ -109,8 +125,8 @@ impl InclusionState {
             None => panic!("Coding error: own point is not trusted"),
             Some(valid) => {
                 _ = signed.set(Ok(Signed {
-                    at: valid.point.body.location.round,
-                    with: valid.point.signature.clone(),
+                    at: valid.point.body().location.round,
+                    with: valid.point.signature().clone(),
                 }));
             }
         };
@@ -174,15 +190,15 @@ impl Signable {
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if time_range.contains(&valid.point.body.time) {
+            if time_range.contains(&valid.point.body().time) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {
                         at,
-                        with: Signature::new(key_pair, &valid.point.digest),
+                        with: Signature::new(key_pair, valid.point.digest()),
                     })
                 });
-            } else if &valid.point.body.time < time_range.start() {
+            } else if &valid.point.body().time < time_range.start() {
                 self.reject();
             } // else decide later
         } else {

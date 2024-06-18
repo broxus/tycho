@@ -80,9 +80,9 @@ pub trait MempoolAdapter: Send + Sync + 'static {
 pub struct MempoolAdapterStdImpl {
     // TODO: replace with rocksdb
     anchors: Arc<RwLock<IndexMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
-    externals_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+    externals_tx: mpsc::UnboundedSender<Bytes>,
 
-    anchor_added: Arc<tokio::sync::Notify>,
+    anchor_added: Arc<Notify>,
 }
 
 impl MempoolAdapterStdImpl {
@@ -95,8 +95,7 @@ impl MempoolAdapterStdImpl {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
         let anchors = Arc::new(RwLock::new(IndexMap::new()));
 
-        let (sender, receiver) =
-            tokio::sync::mpsc::unbounded_channel::<(Arc<Point>, Vec<Arc<Point>>)>();
+        let (sender, receiver) = mpsc::unbounded_channel();
 
         // TODO receive from outside
         let (externals_tx, externals_rx) = mpsc::unbounded_channel();
@@ -150,18 +149,19 @@ impl MempoolAdapterFactory for Arc<MempoolAdapterStdImpl> {
 
 pub async fn handle_anchors(
     adapter: Arc<MempoolAdapterStdImpl>,
-    mut rx: UnboundedReceiver<(Arc<Point>, Vec<Arc<Point>>)>,
+    mut rx: UnboundedReceiver<(Point, Vec<Point>)>,
 ) {
     let mut cache = ExternalMessageCache::new(1000);
     while let Some((anchor, points)) = rx.recv().await {
+        let anchor_id: MempoolAnchorId = anchor.body().location.round.0;
         let mut messages = Vec::new();
         let mut total_messages = 0;
         let mut total_bytes = 0;
         let mut messages_bytes = 0;
 
         for point in points.iter() {
-            total_messages += point.body.payload.len();
-            'message: for message in &point.body.payload {
+            total_messages += point.body().payload.len();
+            'message: for message in &point.body().payload {
                 total_bytes += message.len();
                 let cell = match Boc::decode(message) {
                     Ok(cell) => cell,
@@ -191,15 +191,14 @@ pub async fn handle_anchors(
                     }
                 };
 
-                if cache.check_unique(anchor.body.location.round.0, cell.repr_hash()) {
+                if cache.check_unique(anchor_id, cell.repr_hash()) {
                     messages.push(Arc::new(ExternalMessage::new(cell.clone(), ext_in_message)));
                     messages_bytes += message.len();
                 }
             }
         }
-        cache.clean(anchor.body.location.round.0);
 
-        metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body.location.round.0);
+        metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body().location.round.0);
         metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
         metrics::counter!("tycho_mempool_externals_bytes_total").increment(messages_bytes as _);
         metrics::counter!("tycho_mempool_duplicates_count_total")
@@ -209,20 +208,22 @@ pub async fn handle_anchors(
 
         tracing::info!(
             target: tracing_targets::MEMPOOL_ADAPTER,
-            round = anchor.body.location.round.0,
-            time = anchor.body.time.as_u64(),
+            round = anchor_id,
+            time = anchor.body().time.as_u64(),
             externals_unique = messages.len(),
             externals_skipped = total_messages - messages.len(),
             "new anchor"
         );
 
         let anchor = Arc::new(MempoolAnchor::new(
-            anchor.body.location.round.0,
-            anchor.body.time.as_u64(),
+            anchor_id,
+            anchor.body().time.as_u64(),
             messages,
         ));
 
         adapter.add_anchor(anchor);
+
+        cache.clean(anchor_id);
     }
 }
 

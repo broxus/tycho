@@ -58,14 +58,14 @@ impl Collector {
         next_dag_round: DagRound, // r+1
         own_point_state: oneshot::Receiver<InclusionState>,
         collector_signal: mpsc::UnboundedSender<CollectorSignal>,
-        bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
+        bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Self {
         let effects = Effects::<CollectorContext>::new(&round_effects);
         let span_guard = effects.span().clone().entered();
 
         let current_dag_round = next_dag_round
             .prev()
-            .get()
+            .upgrade()
             .expect("current DAG round must be linked into DAG chain");
         let includes = mem::take(&mut self.next_includes);
         includes.push(
@@ -104,12 +104,11 @@ impl Collector {
             next_includes: FuturesUnordered::new(),
 
             collector_signal,
-            bcaster_signal,
             is_bcaster_ready_ok: false,
         };
 
         drop(span_guard);
-        let result = task.run(&mut self.from_bcast_filter).await;
+        let result = task.run(&mut self.from_bcast_filter, bcaster_signal).await;
         match result {
             Ok(includes) => self.next_includes = includes,
             Err(round) => self.next_round = round,
@@ -139,7 +138,6 @@ struct CollectorTask {
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
     /// Receiver may be closed (bcaster finished), so do not require `Ok` on send
     collector_signal: mpsc::UnboundedSender<CollectorSignal>,
-    bcaster_signal: mpsc::Receiver<BroadcasterSignal>,
     is_bcaster_ready_ok: bool,
 }
 
@@ -150,11 +148,13 @@ impl CollectorTask {
     async fn run(
         mut self,
         from_bcast_filter: &mut mpsc::UnboundedReceiver<ConsensusEvent>,
+        bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Result<FuturesUnordered<BoxFuture<'static, InclusionState>>, Round> {
         let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
+        let mut bcaster_signal = std::pin::pin!(bcaster_signal);
         loop {
             tokio::select! {
-                Some(bcaster_signal) = self.bcaster_signal.recv() => {
+                Ok(bcaster_signal) = &mut bcaster_signal, if !self.is_bcaster_ready_ok => {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
                         return Err(self.next_dag_round.round().next())
@@ -174,7 +174,7 @@ impl CollectorTask {
                 },
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
-                        if let Err(round) = self.match_filtered(&consensus_event) {
+                        if let Err(round) = self.match_filtered(consensus_event) {
                             _ = self.collector_signal.send(CollectorSignal::Err);
                             return Err(round)
                         }
@@ -198,7 +198,6 @@ impl CollectorTask {
         let result = match signal {
             BroadcasterSignal::Ok => {
                 self.is_bcaster_ready_ok = true;
-                self.bcaster_signal.close();
                 false
             }
             BroadcasterSignal::Err => true,
@@ -234,7 +233,7 @@ impl CollectorTask {
 
     fn jump_up(&mut self, state: InclusionState) -> Option<Result<(), Round>> {
         // its ok to discard invalid state from `next_includes` queue
-        let point_round = state.point()?.valid()?.point.body.location.round;
+        let point_round = state.point()?.valid()?.point.body().location.round;
         // will be signed on the next round
         self.next_includes
             .push(futures_util::future::ready(state).boxed());
@@ -271,7 +270,7 @@ impl CollectorTask {
         result
     }
 
-    fn match_filtered(&self, consensus_event: &ConsensusEvent) -> Result<(), Round> {
+    fn match_filtered(&self, consensus_event: ConsensusEvent) -> Result<(), Round> {
         match consensus_event {
             ConsensusEvent::Forward(consensus_round) => {
                 #[allow(clippy::match_same_arms)]
@@ -291,72 +290,35 @@ impl CollectorTask {
                 dyn_event!(
                     parent: self.effects.span(),
                     level,
-                    event = display(consensus_event.alt()),
+                    event = display("Forward"),
                     round = consensus_round.0,
                     "from bcast filter",
                 );
                 if should_fail {
-                    return Err(*consensus_round);
+                    return Err(consensus_round);
                 }
             }
-            ConsensusEvent::Verified(point) => {
-                let is_first = match point.body.location.round {
-                    x if x > self.next_dag_round.round() => {
-                        let _guard = self.effects.span().enter();
-                        panic!(
-                            "Coding error: broadcast filter advanced \
-                             while collector left behind; event: {} {:?}",
-                            consensus_event.alt(),
-                            point.id()
-                        )
-                    }
-                    x if x == self.next_dag_round.round() => self
-                        .next_dag_round
-                        .add(point, &self.downloader, self.effects.span())
-                        .map(|task| self.next_includes.push(task))
-                        .is_some(),
-                    x if x == self.current_round.round() => self
-                        .current_round
-                        .add(point, &self.downloader, self.effects.span())
-                        .map(|task| self.includes.push(task))
-                        .is_some(),
-                    _ => self
-                        .current_round
-                        .add(point, &self.downloader, self.effects.span())
-                        // maybe other's dependency, but too old to be included
-                        .is_some(),
-                };
-                tracing::debug!(
-                    parent: self.effects.span(),
-                    event = display(consensus_event.alt()),
-                    new = is_first,
-                    author = display(point.body.location.author.alt()),
-                    round = point.body.location.round.0,
-                    digest = display(point.digest.alt()),
-                    "from bcast filter",
-                );
-            }
-            ConsensusEvent::Invalid(dag_point) => {
-                if dag_point.location().round > self.next_dag_round.round() {
+            ConsensusEvent::Validating { point_id, task } => {
+                if point_id.location.round > self.next_dag_round.round() {
                     let _guard = self.effects.span().enter();
                     panic!(
                         "Coding error: broadcast filter advanced \
-                         while collector left behind; event: {} {:?}",
-                        consensus_event.alt(),
-                        dag_point.id()
+                         while collector left behind; Validating {:?}",
+                        point_id.alt()
                     )
-                } else {
-                    let is_first = self.next_dag_round.insert_invalid(dag_point).is_some();
-                    tracing::warn!(
-                        parent: self.effects.span(),
-                        event = display(consensus_event.alt()),
-                        new = is_first,
-                        author = display(dag_point.location().author.alt()),
-                        round = dag_point.location().round.0,
-                        digest = display(dag_point.digest().alt()),
-                        "from bcast filter",
-                    );
-                }
+                } else if point_id.location.round == self.next_dag_round.round() {
+                    self.next_includes.push(task);
+                } else if point_id.location.round == self.current_round.round() {
+                    self.includes.push(task);
+                } // else maybe other's dependency, but too old to be included
+                tracing::debug!(
+                    parent: self.effects.span(),
+                    event = display("Validating"),
+                    author = display(point_id.location.author.alt()),
+                    round = point_id.location.round.0,
+                    digest = display(point_id.digest.alt()),
+                    "from bcast filter",
+                );
             }
         };
         Ok(())
@@ -393,6 +355,7 @@ impl CollectorTask {
         dyn_event!(
             parent: self.effects.span(),
             level,
+            result = display(dag_point.alt()),
             author = display(dag_point.location().author.alt()),
             round = dag_point.location().round.0,
             digest = display(dag_point.digest().alt()),

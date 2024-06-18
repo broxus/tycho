@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -7,11 +8,12 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use super::dto::ConsensusEvent;
-use crate::dag::Verifier;
+use crate::dag::{DagRound, Verifier};
+use crate::dyn_event;
 use crate::effects::{AltFormat, CurrentRoundContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
-use crate::intercom::PeerSchedule;
+use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, Location, NodeCount, Point, PointId, Round};
 
 #[derive(Clone)]
@@ -36,19 +38,24 @@ impl BroadcastFilter {
 
     pub fn add(
         &self,
-        peer_id: &PeerId,
-        point: &Arc<Point>,
-        top_dag_round: Round,
+        sender: &PeerId,
+        point: &Point,
+        top_dag_round: &DagRound,
+        downloader: &Downloader,
         effects: &Effects<CurrentRoundContext>,
     ) {
-        let point_round = point.body.location.round;
-        if self.inner.add(peer_id, point, top_dag_round, effects) {
-            self.inner.advance_round(point_round, effects);
-        }
+        self.inner
+            .add(sender, point, top_dag_round, downloader, effects);
     }
 
-    pub fn advance_round(&self, new_round: Round, round_effects: &Effects<CurrentRoundContext>) {
-        self.inner.advance_round(new_round, round_effects);
+    pub fn advance_round(
+        &self,
+        top_dag_round: &DagRound,
+        downloader: &Downloader,
+        round_effects: &Effects<CurrentRoundContext>,
+    ) {
+        self.inner
+            .advance_round(top_dag_round, downloader, round_effects);
     }
 
     pub async fn clear_cache(self) -> ! {
@@ -79,11 +86,11 @@ impl BroadcastFilter {
     }
 }
 
-type SimpleDagLocations = BTreeMap<PeerId, BTreeMap<Digest, Arc<Point>>>;
+type SimpleDagLocations = BTreeMap<PeerId, BTreeMap<Digest, Point>>;
 struct BroadcastFilterInner {
     // defend from spam from future rounds:
     // should keep rounds greater than current dag round
-    last_by_peer: FastDashMap<PeerId, Round>,
+    last_by_peer: FastDashMap<PeerId, (Round, usize)>,
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
     by_round: FastDashMap<Round, (NodeCount, SimpleDagLocations)>,
@@ -103,11 +110,12 @@ impl BroadcastFilterInner {
     /// returns `true` if round should be advanced;
     fn add(
         &self,
-        peer_id: &PeerId,
-        point: &Arc<Point>,
-        engine_round: Round,
+        sender: &PeerId,
+        point: &Point,
+        top_dag_round: &DagRound,
+        downloader: &Downloader,
         effects: &Effects<CurrentRoundContext>,
-    ) -> bool {
+    ) {
         // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=2
 
         let PointId {
@@ -115,10 +123,10 @@ impl BroadcastFilterInner {
             digest,
         } = point.id();
 
-        let verified = if peer_id != author {
+        let verified = if sender != author {
             tracing::error!(
                 parent: effects.span(),
-                peer = display(peer_id.alt()),
+                sender = display(sender.alt()),
                 author = display(author.alt()),
                 round = round.0,
                 digest = display(digest.alt()),
@@ -138,40 +146,59 @@ impl BroadcastFilterInner {
             })
         };
 
-        if round <= engine_round {
-            let event = verified.map_or_else(ConsensusEvent::Invalid, |_| {
-                ConsensusEvent::Verified(point.clone())
-            });
-            self.output.send(event).ok();
-            return false;
+        if round <= top_dag_round.round() {
+            let Some(point_round) = top_dag_round.scan(point.body().location.round) else {
+                return; // too old point
+            };
+            match verified {
+                Ok(()) => self.send_validating(&point_round, point, downloader, effects),
+                Err(invalid) => point_round.insert_invalid_exact(sender, &invalid),
+            };
+            return;
         } // else: either consensus moved forward without us,
           // or we shouldn't accept the point yet, or it's a spam
 
-        let last_peer_round = *self
+        let (last_peer_round, duplicates) = *self
             .last_by_peer
             .entry(author)
-            .and_modify(|last_by_peer| {
-                if *last_by_peer < round {
-                    *last_by_peer = round;
+            .and_modify(|(last_by_peer, duplcates)| {
+                match round.cmp(last_by_peer) {
+                    Ordering::Less => {} // do nothing, blame later
+                    Ordering::Equal => *duplcates += 1,
+                    Ordering::Greater => {
+                        *last_by_peer = round;
+                        *duplcates = 0;
+                    }
                 }
             })
-            .or_insert(round);
-        if last_peer_round > round {
+            .or_insert((round, 0));
+        if verified.is_err() || round < last_peer_round || duplicates > 0 {
             // we should ban a peer that broadcasts its rounds out of order,
             //   though we cannot prove this decision for other nodes
-            tracing::error!(
+            let level = if verified.is_err() || round < last_peer_round || duplicates >= 3 {
+                // that's severe errors, that require ban
+                tracing::Level::ERROR
+            } else {
+                // sender could have not received our response, thus decides to retry
+                tracing::Level::WARN
+            };
+            dyn_event!(
                 parent: effects.span(),
+                level,
+                malformed = verified.is_err(),
+                out_of_order = last_peer_round > round,
+                duplicated = duplicates > 0,
                 last_round = last_peer_round.0,
+                duplicates = duplicates,
                 author = display(author.alt()),
                 round = round.0,
                 digest = display(digest.alt()),
-                "out of order"
+                "misbehaving broadcast"
             );
-            return false;
+            // do not determine next round by garbage points; it's a ban
+            return;
         };
-        if verified.is_err() {
-            return false; // do not determine next round by garbage points; it's a ban
-        }
+
         let is_threshold_reached = {
             // note: lock guard inside result
             let try_by_round_entry = self.by_round.entry(round).or_try_insert_with(|| {
@@ -190,33 +217,42 @@ impl BroadcastFilterInner {
                         .entry(author)
                         .or_default()
                         .insert(digest.clone(), point.clone());
-                    same_round.len() >= node_count.reliable_minority()
+                    // send `Forward` signal inside `add` just once per round, not for every point
+                    same_round.len() == node_count.reliable_minority()
                 }
             }
         };
-        if !is_threshold_reached {
+        if is_threshold_reached {
+            self.output
+                .send(ConsensusEvent::Forward(round))
+                .expect("channel from filter to collector closed");
+        } else {
             tracing::trace!(
                 parent: effects.span(),
-                engine_round = engine_round.0,
                 author = display(author.alt()),
                 round = round.0,
                 digest = display(digest.alt()),
                 "threshold not reached yet"
             );
         }
-        is_threshold_reached
     }
 
     /// drop everything up to the new round (inclusive), channelling cached points;
-    fn advance_round(&self, new_round: Round, effects: &Effects<CurrentRoundContext>) {
+    fn advance_round(
+        &self,
+        top_dag_round: &DagRound,
+        downloader: &Downloader,
+        effects: &Effects<CurrentRoundContext>,
+    ) {
         // concurrent callers may break historical order of messages in channel
         // until new_round is channeled, and Collector can cope with it;
         // but engine_round must be set to the greatest value under lock
+        let top_round = top_dag_round.round();
         let mut rounds = self
             .by_round
             .iter()
             .map(|el| *el.key())
-            .filter(|key| *key <= new_round)
+            .filter(|key| *key <= top_round)
             .collect::<Vec<_>>();
         rounds.sort();
         if rounds.is_empty() {
@@ -233,19 +269,21 @@ impl BroadcastFilterInner {
                 missed.push(round.0);
                 continue;
             };
+            let Some(point_round) = top_dag_round.scan(round) else {
+                missed.push(round.0);
+                continue;
+            };
             self.output
                 .send(ConsensusEvent::Forward(round))
-                .expect("channel from filter to broadcaster closed");
-            for (_, point) in points.into_iter().flat_map(|(_, v)| v.into_iter()) {
-                self.output
-                    .send(ConsensusEvent::Verified(point))
-                    .expect("channel from filter to broadcaster closed");
+                .expect("channel from filter to collector closed");
+            for (_, point) in points.iter().flat_map(|(_, v)| v.iter()) {
+                self.send_validating(&point_round, point, downloader, effects);
             }
             released.push(round.0);
         }
         tracing::debug!(
             parent: effects.span(),
-            to = new_round.0,
+            to = top_round.0,
             released = debug(released),
             missed = debug(missed),
             "advance round"
@@ -254,7 +292,27 @@ impl BroadcastFilterInner {
         // TODO there must be some config value - when node needs to sync;
         //   values too far in the future are some garbage, must ban authors
         self.by_round.retain(|round, _| {
-            new_round < *round && round.0 <= new_round.0 + MempoolConfig::COMMIT_DEPTH as u32
+            top_round < *round && round.0 <= top_round.0 + MempoolConfig::COMMIT_DEPTH as u32
         });
+    }
+
+    fn send_validating(
+        &self,
+        point_round: &DagRound,
+        point: &Point,
+        downloader: &Downloader,
+        effects: &Effects<CurrentRoundContext>,
+    ) {
+        // this may be not the first insert into DAG - in case some node received it earlier,
+        // and we've already received its point that references current broadcast
+        if let Some(first_state_fut) = point_round.add_broadcast_exact(point, downloader, effects) {
+            let validating = ConsensusEvent::Validating {
+                point_id: point.id(),
+                task: first_state_fut,
+            };
+            self.output
+                .send(validating)
+                .expect("channel from filter to collector closed");
+        }
     }
 }

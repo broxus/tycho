@@ -25,8 +25,7 @@ use crate::models::Round;
 pub struct PeerSchedule {
     // FIXME remove mutex ( parking_lot ! )
     //  and just restart updater when new peers or epoch start are known;
-    //  use copy-on-write to replace Inner as a whole;
-    //  maybe store schedule-per-round inside DAG round, but how to deal with download tasks then?
+    //  use ArcSwap to replace whole content; find and remove Arc<PeerSchedule>
     inner: Arc<Mutex<PeerScheduleInner>>,
     // Connection to self is always "Added"
     // Updates are Resolved or Removed, sent single time
@@ -79,37 +78,52 @@ impl PeerSchedule {
     /// Consensus progress is not guaranteed without witness (because of evidence requirement),
     /// but we don't care if the consensus of an ending epoch stalls at its last round.
     pub fn local_keys(&self, round: Round) -> Option<Arc<KeyPair>> {
-        if self.peers_for(round).contains_key(&self.local_id()) {
+        let inner = self.inner.lock();
+        if inner
+            .peers_for_index_plus_one(inner.index_plus_one(round))
+            .contains_key(&self.local_id())
+        {
             Some(self.local_keys.clone())
         } else {
             None
         }
     }
 
+    /// local peer id is always kept as not resolved, so always excluded from result
     pub fn all_resolved(&self) -> FastHashSet<PeerId> {
         let inner = self.inner.lock();
-        inner.all_resolved(&self.local_id())
+        inner.all_resolved()
     }
 
-    pub fn is_resolved(&self, peer_id: &PeerId) -> bool {
+    /// local peer id is always kept as not resolved
+    pub fn peer_state(&self, peer_id: &PeerId) -> Option<PeerState> {
         let inner = self.inner.lock();
-        inner.is_resolved(peer_id)
+        inner.peer_state(peer_id)
     }
 
+    /// local peer id is always kept as not resolved
     pub fn peers_for(&self, round: Round) -> Arc<BTreeMap<PeerId, PeerState>> {
         let inner = self.inner.lock();
-        inner.peers_for_index_plus_one(inner.index_plus_one(round))
+        inner
+            .peers_for_index_plus_one(inner.index_plus_one(round))
+            .clone()
     }
 
+    /// local peer id is always kept as not resolved
     pub fn peers_for_array<const N: usize>(
         &self,
         rounds: [Round; N],
     ) -> [Arc<BTreeMap<PeerId, PeerState>>; N] {
         let inner = self.inner.lock();
-        array::from_fn(|i| inner.peers_for_index_plus_one(inner.index_plus_one(rounds[i])))
+        array::from_fn(|i| {
+            inner
+                .peers_for_index_plus_one(inner.index_plus_one(rounds[i]))
+                .clone()
+        })
     }
 
-    /// does not return empty maps
+    /// does not return empty maps;
+    /// local peer id is always shown as not resolved, if it is found
     pub fn peers_for_range(&self, rounds: &Range<Round>) -> Vec<Arc<BTreeMap<PeerId, PeerState>>> {
         if rounds.end <= rounds.start {
             return vec![];
@@ -123,6 +137,7 @@ impl PeerSchedule {
         (first..=last)
             .map(|i| inner.peers_for_index_plus_one(i))
             .filter(|m| !m.is_empty())
+            .cloned()
             .collect()
     }
 
@@ -189,28 +204,27 @@ impl PeerSchedule {
         next.extend(peers);
     }
 
-    /// Returns [true] if update was successfully applied
-    pub(super) fn set_resolved(&self, peer_id: &PeerId, resolved: bool) -> bool {
+    /// Returns [true] if update was successfully applied.
+    /// Always keeps local id as [`PeerState::Unknown`]
+    pub(super) fn set_state(&self, peer_id: &PeerId, state: PeerState) -> bool {
         let mut is_applied = false;
-        let new_state = if resolved && peer_id != self.local_id() {
-            PeerState::Resolved
-        } else {
-            PeerState::Unknown
+        if peer_id == self.local_id() {
+            return false;
         };
         {
             let mut inner = self.inner.lock();
             for i in 0..inner.peers_resolved.len() {
-                let Some(b) = Arc::make_mut(&mut inner.peers_resolved[i]).get_mut(peer_id) else {
+                let Some(old) = Arc::make_mut(&mut inner.peers_resolved[i]).get_mut(peer_id) else {
                     continue;
                 };
-                if *b != new_state {
-                    *b = new_state;
+                if *old != state {
+                    *old = state;
                     is_applied = true;
                 }
             }
         }
         if is_applied {
-            _ = self.updates.send((*peer_id, new_state));
+            _ = self.updates.send((*peer_id, state));
         }
         is_applied
     }
@@ -248,30 +262,31 @@ impl PeerScheduleInner {
         }
     }
 
-    fn peers_for_index_plus_one(&self, index: u8) -> Arc<BTreeMap<PeerId, PeerState>> {
+    fn peers_for_index_plus_one(&self, index: u8) -> &'_ Arc<BTreeMap<PeerId, PeerState>> {
         match index {
-            0 => self.empty.clone(),
-            x if x <= 3 => self.peers_resolved[x as usize - 1].clone(),
+            0 => &self.empty,
+            x if x <= 3 => &self.peers_resolved[x as usize - 1],
             _ => unreachable!(),
         }
     }
 
-    fn all_resolved(&self, local_id: &PeerId) -> FastHashSet<PeerId> {
+    fn all_resolved(&self) -> FastHashSet<PeerId> {
         self.peers_resolved[0]
             .iter()
             .chain(self.peers_resolved[1].iter())
             .chain(self.peers_resolved[2].iter())
-            .filter(|(peer_id, state)| *state == &PeerState::Resolved && peer_id != local_id)
-            .map(|(peer_id, _)| *peer_id)
+            .filter(|(_, state)| *state == &PeerState::Resolved)
+            .map(|(peer_id, _)| peer_id)
+            .copied()
             .collect()
     }
 
-    fn is_resolved(&self, peer_id: &PeerId) -> bool {
+    fn peer_state(&self, peer_id: &PeerId) -> Option<PeerState> {
         // used only in Downloader, such order fits its needs
         self.peers_resolved[0]
             .get(peer_id)
             .or_else(|| self.peers_resolved[2].get(peer_id))
             .or_else(|| self.peers_resolved[1].get(peer_id))
-            .map_or(false, |state| *state == PeerState::Resolved)
+            .copied()
     }
 }

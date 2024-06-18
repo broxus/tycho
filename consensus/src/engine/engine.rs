@@ -16,7 +16,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
     PeerSchedule, PeerScheduleUpdater, Responder,
 };
-use crate::models::{Point, PrevPoint, Round};
+use crate::models::{Link, Point, PrevPoint, Round};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -30,7 +30,7 @@ pub struct Engine {
     broadcast_filter: BroadcastFilter,
     collector: Collector,
     tasks: JoinSet<()>, // should be JoinSet<!>
-    committed: mpsc::UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+    committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     input_buffer: InputBuffer,
 }
 
@@ -39,7 +39,7 @@ impl Engine {
         key_pair: Arc<KeyPair>,
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
-        committed: mpsc::UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+        committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
         input_buffer: InputBuffer,
     ) -> Self {
         let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
@@ -92,23 +92,30 @@ impl Engine {
     pub async fn init_with_genesis(&mut self, next_peers: &[PeerId]) {
         let genesis = crate::test_utils::genesis();
         let span = tracing::error_span!("init engine with genesis");
-        let span_guard = span.enter();
+        let _guard = span.enter();
         // check only genesis round as it is widely used in point validation.
         // if some nodes use distinct genesis data, their first points will be rejected
         assert_eq!(
-            genesis.body.location.round,
-            MempoolConfig::GENESIS_ROUND,
-            "genesis point round must match genesis round from config"
+            genesis.id(),
+            crate::test_utils::genesis_point_id(),
+            "genesis point id does not match one from config"
         );
+        assert!(
+            genesis.is_integrity_ok(),
+            "genesis point does not pass integrity check"
+        );
+        assert!(genesis.is_well_formed(), "genesis point is not well formed");
         // finished epoch
         self.peer_schedule
-            .set_next_start(genesis.body.location.round);
-        self.peer_schedule_updater
-            .set_next_peers(&[genesis.body.location.author], false);
+            .set_next_start(MempoolConfig::GENESIS_ROUND);
+        self.peer_schedule_updater.set_next_peers(
+            &[crate::test_utils::genesis_point_id().location.author],
+            false,
+        );
         self.peer_schedule.rotate();
         // current epoch
         self.peer_schedule
-            .set_next_start(genesis.body.location.round.next());
+            .set_next_start(genesis.body().location.round.next());
         // start updater only after peers are populated into schedule
         self.peer_schedule_updater.set_next_peers(next_peers, true);
         self.peer_schedule.rotate();
@@ -120,16 +127,6 @@ impl Engine {
             current_dag_round.insert_exact_sign(&genesis, &self.peer_schedule, &span);
         self.collector
             .init(current_dag_round.round().next(), iter::once(genesis_state));
-        drop(span_guard);
-        Self::expect_trusted_point(
-            current_dag_round.to_weak(),
-            genesis.clone(),
-            self.peer_schedule.clone(),
-            self.downloader.clone(),
-            span,
-        )
-        .await
-        .expect("genesis must be valid");
     }
 
     pub async fn run(mut self) -> ! {
@@ -150,7 +147,7 @@ impl Engine {
                 .dag
                 .top(current_dag_round.round().next(), &self.peer_schedule);
 
-            let (bcaster_ready_tx, bcaster_ready_rx) = mpsc::channel(1);
+            let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
             // let this channel unbounded - there won't be many items, but every of them is essential
             let (collector_signal_tx, mut collector_signal_rx) = mpsc::unbounded_channel();
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
@@ -172,21 +169,19 @@ impl Engine {
                 }))
             } else {
                 drop(own_point_state_tx);
-                futures_util::future::Either::Left(futures_util::future::ready(Ok(None::<
-                    Arc<Point>,
-                >)))
+                futures_util::future::Either::Left(futures_util::future::ready(Ok(None::<Point>)))
             };
 
             let bcaster_run = tokio::spawn({
-                let own_ppint_round = current_dag_round.to_weak();
+                let own_point_round = current_dag_round.downgrade();
                 let round_effects = round_effects.clone();
                 let peer_schedule = self.peer_schedule.clone();
                 let mut broadcaster = self.broadcaster;
                 let downloader = self.downloader.clone();
                 async move {
                     if let Some(own_point) = own_point_fut.await.expect("new point producer") {
-                        let paranoid = Self::expect_trusted_point(
-                            own_ppint_round,
+                        let paranoid = Self::expect_own_trusted_point(
+                            own_point_round,
                             own_point.clone(),
                             peer_schedule.clone(),
                             downloader,
@@ -204,13 +199,13 @@ impl Engine {
                         // join the check, just not to miss it; it must have completed already
                         paranoid.await.expect("verify own produced point");
                         let prev_point = PrevPoint {
-                            digest: own_point.digest.clone(),
+                            digest: own_point.digest().clone(),
                             evidence: evidence.into_iter().collect(),
                         };
                         (broadcaster, Some(Arc::new(prev_point)))
                     } else {
                         collector_signal_rx.close();
-                        bcaster_ready_tx.send(BroadcasterSignal::Ok).await.ok();
+                        bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                         (broadcaster, None)
                     }
                 }
@@ -232,10 +227,12 @@ impl Engine {
                 bcaster_ready_rx,
             ));
 
-            self.responder
-                .update(&self.broadcast_filter, &next_dag_round, &round_effects);
-            self.broadcast_filter
-                .advance_round(next_dag_round.round(), &round_effects);
+            self.responder.update(
+                &self.broadcast_filter,
+                &next_dag_round,
+                &self.downloader,
+                &round_effects,
+            );
 
             match tokio::join!(collector_run, bcaster_run, commit_run) {
                 (Ok(collector_upd), Ok((bcaster, new_prev_point)), Ok(())) => {
@@ -264,16 +261,18 @@ impl Engine {
         peer_schedule: Arc<PeerSchedule>,
         own_point_state: oneshot::Sender<InclusionState>,
         input_buffer: InputBuffer,
-    ) -> Option<Arc<Point>> {
+    ) -> Option<Point> {
         if let Some(own_point) =
             Producer::new_point(&current_dag_round, prev_point.as_deref(), &input_buffer)
         {
             tracing::info!(
                 parent: round_effects.span(),
-                digest = display(own_point.digest.alt()),
+                digest = display(own_point.digest().alt()),
                 payload_bytes = own_point
-                    .body.payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
-                externals = own_point.body.payload.len(),
+                    .body().payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
+                externals = own_point.body().payload.len(),
+                is_proof = Some(own_point.body().anchor_proof == Link::ToSelf).filter(|x| *x),
+                is_trigger = Some(own_point.body().anchor_trigger == Link::ToSelf).filter(|x| *x),
                 "produced point"
             );
             let state = current_dag_round.insert_exact_sign(
@@ -300,24 +299,29 @@ impl Engine {
             .join("; \n")
     }
 
-    fn expect_trusted_point(
+    fn expect_own_trusted_point(
         point_round: WeakDagRound,
-        point: Arc<Point>,
+        point: Point,
         peer_schedule: Arc<PeerSchedule>,
         downloader: Downloader,
         span: Span,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            if Verifier::verify(&point, &peer_schedule).is_err() {
+            if let Err(dag_point) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = span.enter();
-                panic!("Failed to verify, expected Trusted point: {:?}", point.id())
+                panic!(
+                    "Failed to verify own point: {} {:?}",
+                    dag_point.alt(),
+                    point.id()
+                )
             }
             let dag_point =
                 Verifier::validate(point.clone(), point_round, downloader, span.clone()).await;
             if dag_point.trusted().is_none() {
                 let _guard = span.enter();
                 panic!(
-                    "Failed to validate, expected Trusted point: {:?}",
+                    "Failed to validate own point: {} {:?}",
+                    dag_point.alt(),
                     point.id()
                 )
             };
@@ -341,7 +345,7 @@ impl Effects<CurrentRoundContext> {
         })
     }
 
-    pub(crate) fn log_committed(&self, committed: &[(Arc<Point>, Vec<Arc<Point>>)]) {
+    pub(crate) fn log_committed(&self, committed: &[(Point, Vec<Point>)]) {
         if !committed.is_empty()
             && MempoolConfig::LOG_FLAVOR == LogFlavor::Truncated
             && tracing::enabled!(tracing::Level::DEBUG)
@@ -356,7 +360,7 @@ impl Effects<CurrentRoundContext> {
                     format!(
                         "anchor {:?} time {} : [ {history} ]",
                         anchor.id().alt(),
-                        anchor.body.time
+                        anchor.body().time
                     )
                 })
                 .join("  ;  ");

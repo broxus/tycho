@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
-use tycho_consensus::test_utils::drain_anchors;
+use tycho_consensus::test_utils::AnchorConsumer;
 use tycho_consensus::{Engine, InputBufferStub};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId, PeerInfo};
 use tycho_util::time::now_sec;
@@ -140,7 +140,9 @@ impl CmdRun {
             InputBufferStub::new(100, 5),
         );
         engine.init_with_genesis(all_peers.as_slice()).await;
-        tokio::spawn(drain_anchors(committed_rx));
+        let mut anchor_consumer = AnchorConsumer::default();
+        anchor_consumer.add(local_id, committed_rx);
+        tokio::spawn(anchor_consumer.drain());
 
         tracing::info!(
             local_id = %dht_client.network().peer_id(),

@@ -1,17 +1,19 @@
 use std::collections::BTreeMap;
+use std::convert::identity;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
+use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
-use crate::effects::{CurrentRoundContext, Effects};
+use crate::effects::{AltFormat, CurrentRoundContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{LinkField, Point, Round, ValidPoint};
+use crate::models::{Digest, LinkField, Location, Point, PointId, Round, ValidPoint};
 
 #[derive(Clone)]
 pub struct Dag {
@@ -56,22 +58,29 @@ impl Dag {
     pub fn commit(
         self,
         next_dag_round: DagRound,
-        committed: UnboundedSender<(Arc<Point>, Vec<Arc<Point>>)>,
+        committed: UnboundedSender<(Point, Vec<Point>)>,
         effects: Effects<CurrentRoundContext>,
     ) {
         // finding the latest trigger must not take long, better try later
         // than wait long for some DagPoint::NotFound, slowing down whole Engine
-        let _guard = effects.span().enter();
+        let _parent_guard = effects.span().enter();
         let Some(latest_trigger) = Self::latest_trigger(&next_dag_round) else {
             return;
         };
+        let _span = tracing::error_span!(
+            "commit trigger",
+            author = display(&latest_trigger.point.body().location.author.alt()),
+            round = latest_trigger.point.body().location.round.0,
+            digest = display(&latest_trigger.point.digest().alt()),
+        )
+        .entered();
         // when we have a valid trigger, its every point of it's subdag is validated successfully
         let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone());
         let mut ordered = Vec::new();
         while let Some((anchor, anchor_round)) = anchor_stack.pop() {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
-            self.drop_tail(anchor.point.body.location.round);
+            self.drop_tail(anchor.point.body().location.round);
             let committed = Self::gather_uncommitted(&anchor.point, &anchor_round);
             ordered.push((anchor.point, committed));
         }
@@ -88,7 +97,7 @@ impl Dag {
     fn latest_trigger(next_dag_round: &DagRound) -> Option<ValidPoint> {
         let mut next_dag_round = next_dag_round.clone();
         let mut latest_trigger = None;
-        while let Some(current_dag_round) = next_dag_round.prev().get() {
+        while let Some(current_dag_round) = next_dag_round.prev().upgrade() {
             if let Some(AnchorStage::Trigger {
                 ref is_used,
                 ref leader,
@@ -104,7 +113,7 @@ impl Dag {
                             // better try later than wait now if some point is still downloading
                             .filter_map(|version| version.clone().now_or_never())
                             // take any suitable
-                            .find_map(move |(dag_point, _)| dag_point.into_valid())
+                            .find_map(move |dag_point| dag_point.into_valid())
                     })
                     .flatten()
                 {
@@ -129,14 +138,20 @@ impl Dag {
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         let mut anchor_stack = Vec::new();
-        let mut proof = future_round
-            .vertex_by_proof(last_trigger)
-            .now_or_never()
-            .expect("validation must be completed")
-            .expect("latest anchor proof must be in DAG");
         let mut proof_round = future_round
-            .scan(proof.point.body.location.round)
+            .scan(last_trigger.point.body().location.round.prev())
             .expect("anchor proof round not in DAG while a point from it was received");
+        let mut proof = Self::ready_valid_point(
+            &proof_round,
+            &last_trigger.point.body().location.author,
+            &last_trigger
+                .point
+                .body()
+                .proof
+                .as_ref()
+                .expect("validation broken: anchor trigger with empty proof field")
+                .digest,
+        );
         loop {
             if proof_round.round() == MempoolConfig::GENESIS_ROUND {
                 break;
@@ -149,27 +164,28 @@ impl Dag {
                 panic!("anchor proof round is not expected, validation is broken")
             };
             assert_eq!(
-                proof.point.body.location.round,
+                proof.point.body().location.round,
                 proof_round.round(),
                 "anchor proof round does not match"
             );
             assert_eq!(
-                proof.point.body.location.author, leader,
+                proof.point.body().location.author,
+                leader,
                 "anchor proof author does not match prescribed by round"
             );
-            let Some(anchor_round) = proof_round.prev().get() else {
+            let Some(anchor_round) = proof_round.prev().upgrade() else {
                 break;
             };
             if is_used.load(Ordering::Relaxed) {
                 break;
             };
-            let anchor_digest = match &proof.point.body.proof {
+            let anchor_digest = match &proof.point.body().proof {
                 Some(prev) => &prev.digest,
                 None => panic!("anchor proof must prove to anchor point, validation is broken"),
             };
             let anchor = anchor_round
                 .view(leader, |loc| {
-                    let (dag_point, _) = loc
+                    let dag_point = loc
                         .versions()
                         .get(anchor_digest)
                         .expect("anchor proof is not linked to anchor, validation broken")
@@ -188,11 +204,11 @@ impl Dag {
                 Some(next_proof_round) => proof_round = next_proof_round,
                 None => break,
             };
-            proof = proof_round
-                .valid_point_exact(&next_proof_id.location.author, &next_proof_id.digest)
-                .now_or_never()
-                .expect("validation must be completed")
-                .expect("next proof point in chain must exist in its dag round");
+            proof = Self::ready_valid_point(
+                &proof_round,
+                &next_proof_id.location.author,
+                &next_proof_id.digest,
+            );
         }
         anchor_stack
     }
@@ -200,7 +216,7 @@ impl Dag {
     fn drop_tail(&self, anchor_at: Round) {
         if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
             let mut rounds = self.rounds.lock();
-            *rounds = rounds.split_off(&Round(tail));
+            rounds.retain(|k, _| k.0 >= tail);
         };
     }
 
@@ -210,21 +226,21 @@ impl Dag {
     fn gather_uncommitted(
         anchor: &Point,          // @ r+1
         anchor_round: &DagRound, // r+1
-    ) -> Vec<Arc<Point>> {
+    ) -> Vec<Point> {
         assert_eq!(
             anchor_round.round(),
-            anchor.body.location.round,
+            anchor.body().location.round,
             "passed anchor round does not match anchor point's round"
         );
         let mut proof_round /* r+0 */ = anchor_round
             .prev()
-            .get()
+            .upgrade()
             .expect("previous round for anchor point round must stay in DAG");
         let mut r = [
-            anchor.body.includes.clone(), // points @ r+0
-            anchor.body.witness.clone(),  // points @ r-1
-            BTreeMap::new(),              // points @ r-2
-            BTreeMap::new(),              // points @ r-3
+            anchor.body().includes.clone(), // points @ r+0
+            anchor.body().witness.clone(),  // points @ r-1
+            BTreeMap::new(),                // points @ r-2
+            BTreeMap::new(),                // points @ r-3
         ];
         _ = anchor; // anchor payload will be committed the next time
 
@@ -232,7 +248,7 @@ impl Dag {
 
         while let Some(vertex_round /* r-1 */) = proof_round
             .prev()
-            .get()
+            .upgrade()
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
             // take points @ r+0, and select their vertices @ r-1 for commit
@@ -243,21 +259,15 @@ impl Dag {
                 // but some points don't have previous one to proof as vertex.
                 // Any valid point among equivocated will do, as they include the same vertex.
                 let proof = // point @ r+0
-                    proof_round.valid_point_exact(node, digest)
-                        .now_or_never()
-                        .expect("validation must be completed")
-                        .expect("point to commit not found in DAG");
-                let author = &proof.point.body.location.author;
-                r[1].extend(proof.point.body.includes.clone()); // points @ r-1
-                r[2].extend(proof.point.body.witness.clone()); // points @ r-2
-                let Some(digest) = proof.point.body.proof.as_ref().map(|a| &a.digest) else {
+                    Self::ready_valid_point(&proof_round, node, digest);
+                let author = &proof.point.body().location.author;
+                r[1].extend(proof.point.body().includes.clone()); // points @ r-1
+                r[2].extend(proof.point.body().witness.clone()); // points @ r-2
+                let Some(digest) = proof.point.body().proof.as_ref().map(|a| &a.digest) else {
                     continue;
                 };
                 let vertex = // point @ r-1
-                    vertex_round.valid_point_exact(author, digest)
-                        .now_or_never()
-                        .expect("validation must be completed")
-                        .expect("point to commit not found in DAG or wrong round");
+                    Self::ready_valid_point(&vertex_round, author, digest);
                 // select uncommitted ones, marking them as committed
                 // to exclude from the next commit
                 if vertex
@@ -266,8 +276,8 @@ impl Dag {
                     .is_ok()
                 {
                     // vertex will be skipped in r_1 as committed
-                    r[2].extend(vertex.point.body.includes.clone()); // points @ r-2
-                    r[3].extend(vertex.point.body.witness.clone()); // points @ r-3
+                    r[2].extend(vertex.point.body().includes.clone()); // points @ r-2
+                    r[3].extend(vertex.point.body().witness.clone()); // points @ r-3
                     uncommitted.push(vertex.point);
                 }
             }
@@ -276,5 +286,30 @@ impl Dag {
         }
         uncommitted.reverse();
         uncommitted
+    }
+
+    // needed only in commit where all points are validated and stored in DAG
+    fn ready_valid_point(dag_round: &DagRound, author: &PeerId, digest: &Digest) -> ValidPoint {
+        dag_round
+            .view(author, |loc| {
+                loc.versions()
+                    .get(digest)
+                    .cloned()
+                    .ok_or("point digest not found in location's versions")
+            })
+            .ok_or("point author not found among dag round's locations")
+            .and_then(identity) // flatten result
+            .and_then(|fut| fut.now_or_never().ok_or("validation must be completed"))
+            .and_then(|dag_point| dag_point.into_valid().ok_or("point is not valid"))
+            .unwrap_or_else(|msg| {
+                let point_id = PointId {
+                    location: Location {
+                        round: dag_round.round(),
+                        author: *author,
+                    },
+                    digest: digest.clone(),
+                };
+                panic!("{msg}: {:?}", point_id.alt())
+            })
     }
 }

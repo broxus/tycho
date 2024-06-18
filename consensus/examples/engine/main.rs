@@ -6,20 +6,18 @@ use std::time::Duration;
 use clap::Parser;
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use parking_lot::deadlock;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tycho_consensus::test_utils::*;
 use tycho_consensus::{Engine, InputBufferStub};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId};
-use tycho_util::FastHashMap;
 
 mod logger;
 
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    Cli::parse().run().await
+fn main() -> anyhow::Result<()> {
+    Cli::parse().run()
 }
 
 /// Tycho network node.
@@ -47,7 +45,7 @@ struct Cli {
 }
 
 impl Cli {
-    async fn run(self) -> anyhow::Result<()> {
+    fn run(self) -> anyhow::Result<()> {
         let fun = if self.flame {
             logger::flame
         } else {
@@ -95,9 +93,7 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
         .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()], None)))
         .collect::<Vec<_>>();
 
-    let anchors_map = Arc::new(Mutex::new(FastHashMap::default()));
-    let refs_map = Arc::new(Mutex::new(FastHashMap::default()));
-
+    let mut anchor_consumer = AnchorConsumer::default();
     let mut handles = vec![];
     for (((secret_key, key_pair), bind_address), peer_id) in keys
         .into_iter()
@@ -106,8 +102,8 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
     {
         let all_peers = all_peers.clone();
         let peer_info = peer_info.clone();
-        let anchors_map = anchors_map.clone();
-        let refs_map = refs_map.clone();
+        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+        anchor_consumer.add(peer_id, committed_rx);
 
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
@@ -144,16 +140,6 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
                                     .expect("add peer to dht client");
                             }
                         }
-
-                        let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-                        tokio::spawn(check_anchors(
-                            committed_rx,
-                            peer_id,
-                            anchors_map,
-                            refs_map,
-                            cli.nodes,
-                        ));
-                        // tokio::spawn(drain_anchors(committed_rx));
                         let mut engine = Engine::new(
                             key_pair,
                             &dht_client,
@@ -169,6 +155,18 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
             .unwrap();
         handles.push(handle);
     }
+    handles.push(
+        std::thread::Builder::new()
+            .name("anchor-consumer".to_string())
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .worker_threads(1)
+                    .build()
+                    .expect("new tokio runtime")
+                    .block_on(anchor_consumer.check())
+            })
+            .unwrap(),
+    );
     handles
 }
 
