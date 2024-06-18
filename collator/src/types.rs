@@ -80,6 +80,7 @@ pub struct MsgsExecutionParams {
     pub min_externals_per_set: u32,
     pub group_limit: u32,
     pub group_vert_size: u32,
+    pub max_exec_threads: u32,
 }
 
 impl Default for MsgsExecutionParams {
@@ -89,6 +90,7 @@ impl Default for MsgsExecutionParams {
             min_externals_per_set: 300,
             group_limit: 1000,
             group_vert_size: 1000,
+            max_exec_threads: 8,
         }
     }
 }

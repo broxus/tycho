@@ -94,6 +94,7 @@ async fn test_collation_process_on_stubs() {
             min_externals_per_set: 3,
             group_limit: 4,
             group_vert_size: 2,
+            ..Default::default()
         },
     };
 
