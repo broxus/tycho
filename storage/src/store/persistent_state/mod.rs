@@ -16,7 +16,7 @@ use crate::store::BlockHandleStorage;
 
 mod state_writer;
 
-const KEY_BLOCK_UTIME_STEP: u32 = 86400;
+pub const KEY_BLOCK_UTIME_STEP: u32 = 86400;
 const BASE_DIR: &str = "states";
 
 pub struct PersistentStateStorage {

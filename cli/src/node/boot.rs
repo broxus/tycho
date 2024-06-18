@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockProofStuff;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockHandle, BriefBlockInfo};
+use tycho_storage::{BlockHandle, BriefBlockInfo, KEY_BLOCK_UTIME_STEP};
 use tycho_util::futures::JoinTask;
 
 use crate::node::Node;
@@ -22,7 +22,8 @@ pub async fn cold_boot(
 ) -> anyhow::Result<BlockId> {
     tracing::info!("starting cold boot");
 
-    // Find the last key block (or zerostate) from which we can start downloading other key blocks
+    // Find the last known key block (or zerostate)
+    // from which we can start downloading other key blocks
     let prev_key_block = prepare_prev_key_block(node, zerostates).await?;
 
     // Ensure that all key blocks until now (with some offset) are downloaded
@@ -110,12 +111,8 @@ async fn download_key_blocks(
                             let (handle, data) = res.split();
                             handle.accept();
 
-                            if data.incomplete {
-                                tracing::debug!(%block_id, "stop downloading next key blocks");
-                                return;
-                            }
-
                             if ids_tx.send(data.block_ids).is_err() {
+                                tracing::debug!(%block_id, "stop downloading next key blocks");
                                 return;
                             }
 
@@ -184,7 +181,7 @@ async fn download_key_blocks(
         proofs.sort_by_key(|x| *x.id());
 
         // Save previous key block to restart downloading in case of error
-        let prev_key_block_id = *prev_key_block.handle().id();
+        let fallback_key_block = prev_key_block.clone();
 
         let proofs_len = proofs.len();
         for (index, proof) in proofs.into_iter().enumerate() {
@@ -226,17 +223,33 @@ async fn download_key_blocks(
                     tracing::warn!("got invalid key block proof: {e:?}");
 
                     // Restart downloading proofs
-                    tasks_tx.send(prev_key_block_id)?;
+                    tasks_tx.send(*fallback_key_block.handle().id())?;
+                    prev_key_block = fallback_key_block;
 
                     break;
                 }
             }
+        }
+
+        let now_utime = tycho_util::time::now_sec();
+        let last_utime = prev_key_block.handle().meta().gen_utime();
+
+        tracing::debug!(
+            now_utime,
+            last_utime,
+            last_known_block_id = %prev_key_block.handle().id(),
+        );
+
+        // Prevent infinite key blocks loading
+        if last_utime + 2 * KEY_BLOCK_UTIME_STEP > now_utime {
+            break;
         }
     }
 
     Ok(())
 }
 
+#[derive(Clone)]
 enum PrevKeyBlock {
     ZeroState {
         handle: Arc<BlockHandle>,
