@@ -33,7 +33,7 @@ impl MempoolConfig {
     pub const GENESIS_ROUND: Round = Round(1);
 
     /// hard limit on point payload (excessive will be postponed)
-    pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
+    pub const PAYLOAD_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
     // == Configs above must be globally same for consensus to run
     // ========
