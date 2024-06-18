@@ -173,7 +173,7 @@ impl BlockStorage {
 
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         let raw_block = self.load_block_data_raw_ref(handle).await?;
-        BlockStuff::deserialize(*handle.id(), raw_block.as_ref())
+        BlockStuff::deserialize(handle.id(), raw_block.as_ref())
     }
 
     pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
@@ -256,7 +256,7 @@ impl BlockStorage {
         is_link: bool,
     ) -> Result<BlockProofStuff> {
         let raw_proof = self.load_block_proof_raw_ref(handle, is_link).await?;
-        BlockProofStuff::deserialize(*handle.id(), raw_proof.as_ref(), is_link)
+        BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref(), is_link)
     }
 
     pub async fn load_block_proof_raw(

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use sha2::Digest;
@@ -57,7 +58,7 @@ impl BlockStuff {
         }
     }
 
-    pub fn deserialize_checked(id: BlockId, data: &[u8]) -> Result<Self> {
+    pub fn deserialize_checked(id: &BlockId, data: &[u8]) -> Result<Self> {
         let file_hash = sha2::Sha256::digest(data);
         anyhow::ensure!(
             id.file_hash.as_slice() == file_hash.as_slice(),
@@ -67,7 +68,7 @@ impl BlockStuff {
         Self::deserialize(id, data)
     }
 
-    pub fn deserialize(id: BlockId, data: &[u8]) -> Result<Self> {
+    pub fn deserialize(id: &BlockId, data: &[u8]) -> Result<Self> {
         let root = Boc::decode(data)?;
         anyhow::ensure!(
             &id.root_hash == root.repr_hash(),
@@ -76,12 +77,15 @@ impl BlockStuff {
 
         let block = root.parse::<Block>()?;
         Ok(Self {
-            inner: Arc::new(Inner { id, block }),
+            inner: Arc::new(Inner { id: *id, block }),
         })
     }
 
-    pub fn with_archive_data(self, data: &[u8]) -> WithArchiveData<Self> {
-        WithArchiveData::new(self, data.to_vec())
+    pub fn with_archive_data<A>(self, data: A) -> WithArchiveData<Self>
+    where
+        Bytes: From<A>,
+    {
+        WithArchiveData::new(self, data)
     }
 
     pub fn id(&self) -> &BlockId {

@@ -4,8 +4,7 @@ use anyhow::anyhow;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
+use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 
@@ -66,54 +65,45 @@ impl BlockchainBlockProvider {
 
         loop {
             let res = self.client.get_next_block_full(prev_block_id).await;
-            let block_data: Option<
-                anyhow::Result<(
-                    WithArchiveData<BlockStuff>,
-                    WithArchiveData<BlockProofStuff>,
-                )>,
-            > = match res {
-                Ok(res) => match res.data() {
-                    BlockFull::Found {
-                        block_id,
-                        block: block_data,
-                        proof: proof_data,
-                        is_link,
-                    } => match (
-                        BlockStuff::deserialize_checked(*block_id, block_data),
-                        BlockProofStuff::deserialize(*block_id, proof_data, *is_link),
-                    ) {
-                        (Ok(block), Ok(proof)) => {
-                            let block_data = block_data.clone();
-                            let block_proof_data = proof_data.clone();
-                            res.accept();
-                            Some(Ok((
-                                BlockStuffAug::new(block, block_data),
-                                BlockProofStuffAug::new(proof, block_proof_data),
-                            )))
-                        }
-                        (Err(e), _) | (_, Err(e)) => {
-                            res.reject();
-                            tracing::error!(
-                                "Failed to deserialize block or block proof for block: {e}"
-                            );
-                            None
-                        }
-                    },
-                    BlockFull::Empty => None,
-                },
-                Err(e) => {
-                    tracing::error!("failed to get next block: {e}");
-                    None
-                }
-            };
+            'res: {
+                let (handle, data) = match res {
+                    Ok(res) => res.split(),
+                    Err(e) => {
+                        tracing::error!("failed to get next block: {e}");
+                        break 'res;
+                    }
+                };
 
-            if let Some(Ok((block, proof))) = block_data {
-                if let Err(e) = self.check_proof(&block.data, &proof.data).await {
-                    tracing::error!("Failed to check block proof: {e}");
-                    break Some(Err(anyhow!("Invalid block")));
-                }
+                let BlockFull::Found {
+                    block_id,
+                    block: block_data,
+                    proof: proof_data,
+                    is_link,
+                } = data
+                else {
+                    handle.accept();
+                    break 'res;
+                };
 
-                break Some(Ok(block));
+                match (
+                    BlockStuff::deserialize_checked(&block_id, &block_data),
+                    BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
+                ) {
+                    (Ok(block), Ok(proof)) => {
+                        if let Err(e) = self.check_proof(&block, &proof).await {
+                            handle.reject();
+                            tracing::error!("got invalid mc block proof: {e}");
+                            break 'res;
+                        }
+
+                        handle.accept();
+                        return Some(Ok(block.with_archive_data(block_data)));
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        handle.reject();
+                        tracing::error!("failed to deserialize mc block or block proof: {e}");
+                    }
+                }
             }
 
             interval.tick().await;
@@ -123,66 +113,65 @@ impl BlockchainBlockProvider {
     async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
         loop {
-            let res = match self.client.get_block_full(block_id).await {
-                Ok(res) => res,
-                Err(e) => {
-                    tracing::error!("failed to get block: {:?}", e);
-                    interval.tick().await;
-                    continue;
-                }
-            };
-
             // TODO: refactor
 
-            let block: Option<anyhow::Result<WithArchiveData<BlockStuff>>> = match res.data() {
-                BlockFull::Found {
+            let res = self.client.get_block_full(block_id).await;
+            'res: {
+                let (handle, data) = match res {
+                    Ok(res) => res.split(),
+                    Err(e) => {
+                        tracing::error!("failed to get block: {e}");
+                        break 'res;
+                    }
+                };
+
+                let BlockFull::Found {
                     block_id,
-                    block: data,
+                    block: block_data,
                     proof: proof_data,
                     is_link,
-                } => match (
-                    BlockStuff::deserialize_checked(*block_id, data),
-                    BlockProofStuff::deserialize(*block_id, proof_data, *is_link),
+                } = data
+                else {
+                    handle.accept();
+                    break 'res;
+                };
+
+                match (
+                    BlockStuff::deserialize_checked(&block_id, &block_data),
+                    BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
                         if let Err(e) = self.check_proof(&block, &proof).await {
-                            Some(Err(anyhow!("Invalid block: {e}")))
-                        } else {
-                            Some(Ok(BlockStuffAug::new(block, data.clone())))
+                            handle.reject();
+                            tracing::error!("got invalid shard block proof: {e}");
+                            break 'res;
                         }
+
+                        handle.accept();
+                        return Some(Ok(block.with_archive_data(block_data)));
                     }
                     (Err(e), _) | (_, Err(e)) => {
-                        res.accept();
-                        tracing::error!("failed to deserialize block: {:?}", e);
-                        interval.tick().await;
-                        continue;
+                        handle.reject();
+                        tracing::error!("failed to deserialize shard block or block proof: {e}");
                     }
-                },
-                BlockFull::Empty => {
-                    interval.tick().await;
-                    continue;
                 }
-            };
+            }
 
-            break block;
+            interval.tick().await;
         }
     }
 
     async fn check_proof(&self, block: &BlockStuff, proof: &BlockProofStuff) -> anyhow::Result<()> {
-        if block.id() != &proof.proof().proof_for {
-            tracing::error!(
-                "Block proof in created not for block {:?} but for block {:?}",
-                block.id(),
-                &proof.proof().proof_for
-            );
-            return Err(anyhow!("Request block is invalid"));
-        }
+        anyhow::ensure!(
+            block.id() == &proof.proof().proof_for,
+            "proof_for and block id mismatch: proof_for={}, block_id={}",
+            proof.proof().proof_for,
+            block.id(),
+        );
+
         let block_info = match block.load_info() {
             Ok(block_info) => block_info,
-            Err(e) => {
-                tracing::error!("Failed to load block {} info: {e}", block.id());
-                return Err(anyhow!("Request block is invalid"));
-            }
+            Err(e) => anyhow::bail!("failed to parse block info: {e}"),
         };
 
         let previous_key_block = self
@@ -190,6 +179,7 @@ impl BlockchainBlockProvider {
             .block_handle_storage()
             .load_key_block_handle(block_info.prev_key_block_seqno);
 
+        // TODO: Use latest master state
         if let Some(key_block_handle) = previous_key_block {
             let shard_state_stuff = match self
                 .storage
@@ -215,6 +205,7 @@ impl BlockchainBlockProvider {
                 return Err(anyhow!("Request block is invalid"));
             }
         }
+
         Ok(())
     }
 }

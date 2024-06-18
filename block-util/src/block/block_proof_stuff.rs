@@ -29,11 +29,11 @@ impl BlockProofStuff {
         })
     }
 
-    pub fn deserialize(block_id: BlockId, data: &[u8], is_link: bool) -> Result<Self> {
+    pub fn deserialize(block_id: &BlockId, data: &[u8], is_link: bool) -> Result<Self> {
         let proof = BocRepr::decode::<Box<BlockProof>, _>(data)?;
 
         anyhow::ensure!(
-            proof.proof_for == block_id,
+            &proof.proof_for == block_id,
             "proof block id mismatch (found: {})",
             proof.proof_for,
         );

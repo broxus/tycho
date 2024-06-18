@@ -252,47 +252,46 @@ impl StateNodeAdapterStdImpl {
     }
 
     async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
-        match &block.block_stuff_aug.archive_data {
-            ArchiveData::New(bytes) => {
-                let block_info = block.block_stuff_aug.block().info.load()?;
-                match Self::prepare_block_proof(&block.block_id, bytes, &block.signatures) {
-                    Ok(proof) => {
-                        let is_link = !proof.proof_for.is_masterchain();
-                        let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
+        let ArchiveData::New(bytes) = &block.block_stuff_aug.archive_data else {
+            return Ok(());
+        };
 
-                        let proof_boc = BocRepr::encode(block_proof_stuff.as_ref())?;
-                        let archive_data = block_proof_stuff.with_archive_data(proof_boc);
-
-                        let result = self
-                            .storage
-                            .block_storage()
-                            .store_block_proof(
-                                &archive_data,
-                                BlockProofHandle::New(BlockMetaData {
-                                    is_key_block: block_info.key_block,
-                                    gen_utime: block_info.gen_utime,
-                                    mc_ref_seqno: block_info.min_ref_mc_seqno,
-                                }),
-                            )
-                            .await?;
-
-                        tracing::info!(
-                            "Proof saved {:?}. New: {}, Updated: {}",
-                            result.handle.id(),
-                            result.new,
-                            result.updated
-                        );
-
-                        Ok(())
-                    }
-                    Err(e) => {
-                        tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Failed to prepare block proof: {e}");
-                        Err(anyhow!("Failed to prepare block proof"))
-                    }
-                }
+        let block_info = block.block_stuff_aug.block().info.load()?;
+        let proof = match Self::prepare_block_proof(&block.block_id, bytes, &block.signatures) {
+            Ok(proof) => proof,
+            Err(e) => {
+                tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Failed to prepare block proof: {e}");
+                anyhow::bail!("Failed to prepare block proof");
             }
-            _ => Ok(()),
-        }
+        };
+
+        let is_link = !proof.proof_for.is_masterchain();
+        let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
+
+        let proof_boc = BocRepr::encode(block_proof_stuff.as_ref())?;
+        let archive_data = block_proof_stuff.with_archive_data(proof_boc);
+
+        let result = self
+            .storage
+            .block_storage()
+            .store_block_proof(
+                &archive_data,
+                BlockProofHandle::New(BlockMetaData {
+                    is_key_block: block_info.key_block,
+                    gen_utime: block_info.gen_utime,
+                    mc_ref_seqno: block_info.min_ref_mc_seqno,
+                }),
+            )
+            .await?;
+
+        tracing::info!(
+            "Proof saved {:?}. New: {}, Updated: {}",
+            result.handle.id(),
+            result.new,
+            result.updated
+        );
+
+        Ok(())
     }
 
     pub fn prepare_block_proof(

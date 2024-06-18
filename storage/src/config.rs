@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
+use tycho_util::serde_helpers;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -109,6 +110,7 @@ pub enum ArchivesGcInterval {
     /// Archives GC triggers on each persistent state
     PersistentStates {
         /// Remove archives after this interval after the new persistent state
+        #[serde(with = "serde_helpers::humantime")]
         offset: Duration,
     },
 }
