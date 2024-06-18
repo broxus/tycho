@@ -266,8 +266,6 @@ impl AccountsCache {
     where
         F: FnOnce(&ShardAccountStuff) -> bool,
     {
-        use std::collections::hash_map::Entry;
-
         match self.items.entry(*account_id) {
             Entry::Occupied(entry) => {
                 if f(entry.get()) {

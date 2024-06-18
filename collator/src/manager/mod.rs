@@ -1,6 +1,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
@@ -1295,6 +1296,7 @@ where
     /// 1. Process invalid block (currently, just panic)
     /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
+    #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id()))]
     pub async fn process_validated_block(
         &mut self,
         block_id: BlockId,
@@ -1304,9 +1306,8 @@ where
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Start processing block validation result (id: {}, is_valid: {})...",
-            short_id,
-            validation_result.is_valid(),
+            is_valid = validation_result.is_valid(),
+            "Start processing block validation result...",
         );
 
         let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
@@ -1319,8 +1320,7 @@ where
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Saving block validation result to cache (id: {})...",
-            block_id.as_short_id(),
+            "Saving block validation result to cache...",
         );
         // update block in cache with signatures info
         self.store_block_validation_result(block_id, validation_result)?;
@@ -1617,8 +1617,18 @@ where
             "Start processing validated and valid master block ({})...",
             block_id.as_short_id(),
         );
+
+        let histogram = HistogramGuard::begin("tycho_collator_process_valid_master_block_time");
+        let histogram_extract =
+            HistogramGuard::begin("tycho_collator_extract_master_block_subgraph_time");
+        let mut extract_elapsed = Default::default();
+        let mut sync_elapsed = Default::default();
+
         // extract master block with all shard blocks if valid, and process them
         if let Some(mc_block_subgraph) = self.extract_mc_block_subgraph_if_valid(block_id)? {
+            extract_elapsed = histogram_extract.finish();
+            let timer = std::time::Instant::now();
+
             let mut blocks_to_send = mc_block_subgraph.shard_blocks;
             blocks_to_send.reverse();
             blocks_to_send.push(mc_block_subgraph.mc_block);
@@ -1640,6 +1650,8 @@ where
             });
             // TODO: make proper panic and error processing without waiting for spawned task
             join_handle.await??;
+
+            sync_elapsed = timer.elapsed();
         } else {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -1647,6 +1659,14 @@ where
                 block_id.as_short_id(),
             );
         }
+
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            total = histogram.finish().as_millis(),
+            extract_subgraph = extract_elapsed.as_millis(),
+            sync = sync_elapsed.as_millis(),
+            "process_valid_master_block timings",
+        );
+
         Ok(())
     }
 
@@ -1692,6 +1712,7 @@ where
         mut blocks_to_send: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
         // TODO: it is better to send each block separately, but it will be more tricky to handle the correct cleanup
+        let histogram = HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
 
         let _tracing_blocks_to_send_descr = blocks_to_send
             .iter()
@@ -1703,6 +1724,9 @@ where
             _tracing_blocks_to_send_descr.as_slice(),
         );
 
+        let mut build_stuff_for_sync_elapsed = Duration::ZERO;
+        let mut sync_stuff_elapsed = Duration::ZERO;
+
         // skip already synced blocks that were validated by existing blocks in the state
         // send other blocks to sync
         let mut should_restore_blocks_in_cache = false;
@@ -1711,7 +1735,11 @@ where
             match block_to_send.send_sync_status {
                 SendSyncStatus::Sent | SendSyncStatus::Synced => sent_blocks.push(block_to_send),
                 _ => {
+                    let timer = std::time::Instant::now();
                     let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
+                    build_stuff_for_sync_elapsed += timer.elapsed();
+
+                    let timer = std::time::Instant::now();
                     // TODO: handle different errors types
                     if let Err(err) = state_node_adapter.accept_block(block_for_sync).await {
                         tracing::warn!(
@@ -1731,11 +1759,16 @@ where
                         block_to_send.send_sync_status = SendSyncStatus::Sent;
                         sent_blocks.push(block_to_send);
                     }
+
+                    sync_stuff_elapsed += timer.elapsed();
                 }
             }
         }
 
+        let mut commit_diffs_elapsed = Default::default();
         if !should_restore_blocks_in_cache {
+            let histogram =
+                HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
             // commit queue diffs for each block
             for sent_block in sent_blocks.iter() {
                 // TODO: handle if diff does not exist
@@ -1780,6 +1813,8 @@ where
                     ))
                     .await?;
             }
+
+            commit_diffs_elapsed = histogram.finish();
         }
 
         if should_restore_blocks_in_cache {
@@ -1797,6 +1832,18 @@ where
                 .await?;
             // TODO: should implement resending for restored blocks
         }
+
+        metrics::histogram!("tycho_collator_build_block_stuff_for_sync_time")
+            .record(build_stuff_for_sync_elapsed);
+        metrics::histogram!("tycho_collator_sync_block_stuff_time").record(sync_stuff_elapsed);
+
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            total = histogram.finish().as_millis(),
+            build_stuff_for_sync = build_stuff_for_sync_elapsed.as_millis(),
+            sync = sync_stuff_elapsed.as_millis(),
+            commit_diffs = commit_diffs_elapsed.as_millis(),
+            "send_blocks_to_sync timings",
+        );
 
         Ok(())
     }

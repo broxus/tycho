@@ -486,6 +486,24 @@ def collator_do_collate() -> RowPanel:
             "tycho_collator_process_validated_block_time", "process validated block"
         ),
         create_heatmap_panel(
+            "tycho_collator_process_valid_master_block_time", "process valid master block"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_extract_master_block_subgraph_time", "extract master block subgraph"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_send_blocks_to_sync_time", "send blocks to sync total"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_build_block_stuff_for_sync_time", "send blocks to sync: build stuff"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_sync_block_stuff_time", "send blocks to sync: sync"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_send_blocks_to_sync_commit_diffs_time", "send blocks to sync: commit diffs"
+        ),
+        create_heatmap_panel(
             "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"
         ),
         create_heatmap_panel(
