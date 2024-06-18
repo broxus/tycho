@@ -16,9 +16,9 @@ use tycho_block_util::archive::{
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
-use tycho_util::metrics::HistogramGuard;
 
 use crate::db::*;
 use crate::models::*;
