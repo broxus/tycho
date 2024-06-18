@@ -253,7 +253,7 @@ impl StateNodeAdapterStdImpl {
     }
 
     async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
-        let started_at = Instant::now();
+        let _histogram = HistogramGuard::begin("tycho_collator_save_block_proof_time");
         let ArchiveData::New(bytes) = &block.block_stuff_aug.archive_data else {
             return Ok(());
         };
@@ -286,8 +286,6 @@ impl StateNodeAdapterStdImpl {
             )
             .await?;
 
-        metrics::histogram!("tycho_collator_save_block_proof_time").record(started_at.elapsed());
-
         tracing::info!(
             "Proof saved {:?}. New: {}, Updated: {}",
             result.handle.id(),
@@ -303,7 +301,8 @@ impl StateNodeAdapterStdImpl {
         block_boc: &[u8],
         signatures: &FastHashMap<HashBytes, Signature>,
     ) -> Result<Box<BlockProof>> {
-        let started_at = Instant::now();
+        let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
+
         let mut usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess).with_subtrees();
         let cell = Boc::decode(block_boc)?;
         let tracked_cell = usage_tree.track(&cell);
@@ -331,8 +330,6 @@ impl StateNodeAdapterStdImpl {
             info.gen_catchain_seqno,
             signatures,
         )?;
-
-        metrics::histogram!("tycho_collator_prepare_block_proof_time").record(started_at.elapsed());
 
         Ok(Box::new(BlockProof {
             proof_for: *block_id,

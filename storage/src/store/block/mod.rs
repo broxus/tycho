@@ -18,6 +18,7 @@ use tycho_block_util::block::{
 };
 use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::db::*;
 use crate::models::*;
@@ -309,7 +310,7 @@ impl BlockStorage {
 
     /// Loads data and proof for the block and appends them to the corresponding archive.
     pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
-        let started_at = Instant::now();
+        let _histogram = HistogramGuard::begin("tycho_storage_move_into_archive_time");
 
         if handle.meta().is_archived() {
             return Ok(());
@@ -381,8 +382,6 @@ impl BlockStorage {
         self.db.rocksdb().write(batch)?;
 
         tracing::trace!(block_id = %handle.id(), "saved block into archive");
-        metrics::histogram!("tycho_storage_move_into_archive_time").record(started_at.elapsed());
-
         // Block will be removed after blocks gc
 
         // Done
