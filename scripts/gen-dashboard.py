@@ -56,6 +56,7 @@ def create_heatmap_panel(
     metric_name,
     title,
     unit_format=yaxis(UNITS.SECONDS),
+    labels=[],
 ) -> Panel:
     return heatmap_panel(
         title,
@@ -63,6 +64,7 @@ def create_heatmap_panel(
         yaxis=unit_format,
         color=heatmap_color_warm(),
         tooltip=Tooltip(),
+        label_selectors=labels,
     )
 
 
@@ -418,7 +420,9 @@ def collator_do_collate() -> RowPanel:
             "Number of transactions over time",
         ),
         create_heatmap_panel(
-            "tycho_do_collate_block_diff_time", "Block time diff"
+            "tycho_do_collate_block_diff_time",
+            "Block time diff",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_from_prev_block_time", "Time elapsed from prev block"
@@ -486,22 +490,26 @@ def collator_do_collate() -> RowPanel:
             "tycho_collator_process_validated_block_time", "process validated block"
         ),
         create_heatmap_panel(
-            "tycho_collator_process_valid_master_block_time", "process valid master block"
+            "tycho_collator_process_valid_master_block_time",
+            "process valid master block",
         ),
         create_heatmap_panel(
-            "tycho_collator_extract_master_block_subgraph_time", "extract master block subgraph"
+            "tycho_collator_extract_master_block_subgraph_time",
+            "extract master block subgraph",
         ),
         create_heatmap_panel(
             "tycho_collator_send_blocks_to_sync_time", "send blocks to sync total"
         ),
         create_heatmap_panel(
-            "tycho_collator_build_block_stuff_for_sync_time", "send blocks to sync: build stuff"
+            "tycho_collator_build_block_stuff_for_sync_time",
+            "send blocks to sync: build stuff",
         ),
         create_heatmap_panel(
             "tycho_collator_sync_block_stuff_time", "send blocks to sync: sync"
         ),
         create_heatmap_panel(
-            "tycho_collator_send_blocks_to_sync_commit_diffs_time", "send blocks to sync: commit diffs"
+            "tycho_collator_send_blocks_to_sync_commit_diffs_time",
+            "send blocks to sync: commit diffs",
         ),
         create_heatmap_panel(
             "tycho_collator_adapter_on_block_accepted_time", "on_block_accepted"
@@ -536,6 +544,16 @@ def templates() -> Templating:
             template(
                 name="instance",
                 query="label_values(tycho_net_known_peers, instance)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
+                name="workchain",
+                query="label_values(tycho_do_collate_block_diff_time_bucket,workchain)",
                 data_source="${source}",
                 hide=0,
                 regex=None,
