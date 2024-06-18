@@ -35,7 +35,7 @@ impl Verifier {
         if !point.is_integrity_ok() {
             Err(DagPoint::NotExists(Arc::new(point.id()))) // cannot use point body
         } else if !(point.is_well_formed() && Self::is_list_of_signers_ok(point, peer_schedule)) {
-            // the last task spawns if ok - in order not to walk through every dag round twice
+            // point links, etc. will not be used
             Err(DagPoint::Invalid(point.clone()))
         } else {
             Ok(())
@@ -103,7 +103,7 @@ impl Verifier {
         drop(r_1);
         drop(span_guard);
 
-        let signatures_fut = match point.body().proof.as_ref() {
+        let mut signatures_fut = std::pin::pin!(match point.body().proof.as_ref() {
             None => futures_util::future::Either::Left(futures_util::future::ready(true)),
             Some(proof) => futures_util::future::Either::Right(
                 rayon_run({
@@ -112,16 +112,16 @@ impl Verifier {
                 })
                 .instrument(effects.span().clone()),
             ),
-        };
-        let check_deps_fut =
-            Self::check_deps(&point, dependencies).instrument(effects.span().clone());
-        tokio::pin!(signatures_fut, check_deps_fut);
+        });
+        let mut check_deps_fut = std::pin::pin!(
+            Self::check_deps(&point, dependencies).instrument(effects.span().clone())
+        );
 
         let mut sig_checked = false;
         let mut deps_checked = None;
         loop {
             tokio::select! {
-                is_sig_ok = &mut signatures_fut, if !sig_checked => if is_sig_ok {
+                is_sig_ok = signatures_fut.as_mut(), if !sig_checked => if is_sig_ok {
                     match deps_checked {
                         None => sig_checked = true,
                         Some(result) => break result
@@ -129,7 +129,7 @@ impl Verifier {
                 } else {
                     break DagPoint::Invalid(point.clone())
                 },
-                dag_point = &mut check_deps_fut, if deps_checked.is_none() => {
+                dag_point = check_deps_fut.as_mut(), if deps_checked.is_none() => {
                     if sig_checked || dag_point.valid().is_none() {
                         // either invalid or signature check passed
                         // this cancels `rayon_run` task as receiver is dropped
@@ -209,7 +209,7 @@ impl Verifier {
             }
             Link::Indirect { .. } => {
                 // actually no need to check indirect dependencies, but let's reinsure while we can
-                dependencies.push(round.dependency_exact(
+                dependencies.push(round.add_dependency_exact(
                     &linked_id.location.author,
                     &linked_id.digest,
                     &point.body().location.author,
@@ -241,7 +241,7 @@ impl Verifier {
 
         for (author, digest) in &point.body().includes {
             // integrity check passed, so includes contain author's prev point proof
-            dependencies.push(r_1.dependency_exact(
+            dependencies.push(r_1.add_dependency_exact(
                 author,
                 digest,
                 &point.body().location.author,
@@ -254,7 +254,7 @@ impl Verifier {
             return;
         };
         for (author, digest) in &point.body().witness {
-            dependencies.push(r_2.dependency_exact(
+            dependencies.push(r_2.add_dependency_exact(
                 author,
                 digest,
                 &point.body().location.author,

@@ -355,6 +355,7 @@ impl CollectorTask {
         dyn_event!(
             parent: self.effects.span(),
             level,
+            result = display(dag_point.alt()),
             author = display(dag_point.location().author.alt()),
             round = dag_point.location().round.0,
             digest = display(dag_point.digest().alt()),

@@ -31,16 +31,23 @@ impl Uploader {
         let ready = found.and_then(|shared| shared.now_or_never());
         let level = if let Some(dag_point) = ready.as_ref() {
             if dag_point.trusted().is_some() {
+                // just fine
                 tracing::Level::TRACE
             } else {
+                // either some misbehaving author produced truly invalid point,
+                // or we trail some point marked as `Invalid` through our history
+                // and don't trust newer consensus signatures
                 tracing::Level::ERROR
             }
-        } else if dag_round.is_some() {
-            tracing::Level::DEBUG
-        } else if point_id.location.round > top_dag_round.round() {
+        } else if point_id.location.round >= top_dag_round.round().prev() {
+            // peer is from future round, we lag behind consensus and can see it from other logs
             tracing::Level::TRACE
+        } else if dag_round.is_some() {
+            // we have the round, but not the point - it is very weakly included into global DAG
+            tracing::Level::DEBUG
         } else {
-            tracing::Level::WARN
+            // dag round not found - we detected that peer lags more than `DAG_DEPTH` from us
+            tracing::Level::DEBUG
         };
         dyn_event!(
             parent: effects.span(),

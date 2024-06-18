@@ -2,7 +2,7 @@ use tycho_network::PeerId;
 
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, CurrentRoundContext, Effects};
-use crate::intercom::dto::SignatureResponse;
+use crate::intercom::dto::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
 use crate::{dyn_event, MempoolConfig};
 
@@ -15,10 +15,9 @@ impl Signer {
         effects: &Effects<CurrentRoundContext>,
     ) -> SignatureResponse {
         let response = Self::make_signature_response(round, author, next_dag_round);
-        let level = if response == SignatureResponse::Rejected {
-            tracing::Level::WARN
-        } else {
-            tracing::Level::TRACE
+        let level = match response {
+            SignatureResponse::Rejected(_) => tracing::Level::WARN,
+            _ => tracing::Level::TRACE,
         };
         dyn_event!(
             parent: effects.span(),
@@ -45,13 +44,13 @@ impl Signer {
         let engine_round = next_dag_round.round().prev();
         if round.next() < engine_round {
             // lagged too far from consensus and us, will sign only 1 round behind current;
-            return SignatureResponse::Rejected;
+            return SignatureResponse::Rejected(SignatureRejectedReason::TooOldRound);
         }
 
         let Some(point_dag_round) = next_dag_round.scan(round) else {
             // may happen on init from genesis, when DAG is not yet populated with points,
             // but a misbehaving node requests a point older than genesis, which cannot be signed
-            return SignatureResponse::Rejected;
+            return SignatureResponse::Rejected(SignatureRejectedReason::NoDagRound);
         };
         // TODO do not state().clone() - mutating closure on location is easily used;
         //  need to remove inner locks from InclusionState and leave it guarded by DashMap;
@@ -84,7 +83,7 @@ impl Signer {
         }
         match state.signed() {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.with.clone()),
-            Some(Err(())) => SignatureResponse::Rejected,
+            Some(Err(())) => SignatureResponse::Rejected(SignatureRejectedReason::CannotSign),
             None => SignatureResponse::TryLater,
         }
     }

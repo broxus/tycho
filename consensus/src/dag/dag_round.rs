@@ -149,7 +149,7 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
-    pub fn add_collected_exact(
+    pub fn add_broadcast_exact(
         &self,
         point: &Point,
         downloader: &Downloader,
@@ -163,19 +163,23 @@ impl DagRound {
         );
         let digest = point.digest();
         self.edit(&point.body().location.author, |loc| {
-            let state = loc.state().clone();
-            let point = point.clone();
             let downloader = downloader.clone();
+            let span = effects.span().clone();
+            let state = loc.state().clone();
+            let point_dag_round = self.to_weak();
+            let point = point.clone();
             loc.init(digest, |state| {
                 // FIXME: prior Responder refactor: could not sign during validation,
                 //   because current DAG round could advance concurrently;
                 //   now current dag round changes consistently,
                 //   maybe its possible to reduce locking in 'inclusion state'
                 let state = state.clone();
-                DagPointFuture::Broadcast(Shared::new(JoinTask::new(
-                    Verifier::validate(point, self.to_weak(), downloader, effects.span().clone())
-                        .inspect(move |dag_point| state.init(dag_point)),
-                )))
+                DagPointFuture::Broadcast(Shared::new(JoinTask::new(async move {
+                    // offload init of validation to new tokio task
+                    Verifier::validate(point, point_dag_round, downloader, span)
+                        .inspect(|dag_point| state.init(dag_point))
+                        .await
+                })))
             })
             .map(|first| first.clone().map(|_| state).boxed())
         })
@@ -183,7 +187,7 @@ impl DagRound {
 
     /// notice: `round` must exactly match point's round,
     /// otherwise dependency will resolve to [`DagPoint::NotExists`]
-    pub fn dependency_exact(
+    pub fn add_dependency_exact(
         &self,
         author: &PeerId,
         digest: &Digest,
@@ -192,10 +196,11 @@ impl DagRound {
         effects: &Effects<ValidateContext>,
     ) -> DagPointFuture {
         let future = self.edit(author, |loc| {
-            loc.get_or_init(digest, move |state| {
+            loc.get_or_init(digest, |state| {
                 let downloader = downloader.clone();
                 let effects = effects.clone();
                 let state = state.clone();
+                let point_dag_round = self.clone();
                 let (tx, rx) = mpsc::unbounded_channel();
                 let point_id = PointId {
                     location: Location {
@@ -205,11 +210,12 @@ impl DagRound {
                     digest: digest.clone(),
                 };
                 DagPointFuture::Download {
-                    task: Shared::new(JoinTask::new(
+                    task: Shared::new(JoinTask::new(async move {
                         downloader
-                            .run(point_id, self.to_weak(), rx, effects)
-                            .inspect(move |dag_point| state.init(dag_point)),
-                    )),
+                            .run(point_id, point_dag_round, rx, effects)
+                            .inspect(|dag_point| state.init(dag_point))
+                            .await
+                    })),
                     dependents: tx,
                 }
             })

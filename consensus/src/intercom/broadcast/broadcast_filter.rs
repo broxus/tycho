@@ -151,29 +151,8 @@ impl BroadcastFilterInner {
                 return; // too old point
             };
             match verified {
-                Ok(()) => {
-                    if let Some(first_state_fut) =
-                        point_round.add_collected_exact(point, downloader, effects)
-                    {
-                        self.output
-                            .send(ConsensusEvent::Validating {
-                                point_id: point.id(),
-                                task: first_state_fut,
-                            })
-                            .expect("channel from filter to collector closed");
-                    } else {
-                        tracing::warn!(
-                            parent: effects.span(),
-                            author = display(author.alt()),
-                            round = round.0,
-                            digest = display(digest.alt()),
-                            "duplicated broadcast"
-                        );
-                    }
-                }
-                Err(invalid) => {
-                    point_round.insert_invalid_exact(sender, &invalid);
-                }
+                Ok(()) => self.send_validating(&point_round, point, downloader, effects),
+                Err(invalid) => point_round.insert_invalid_exact(sender, &invalid),
             };
             return;
         } // else: either consensus moved forward without us,
@@ -298,16 +277,7 @@ impl BroadcastFilterInner {
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
             for (_, point) in points.iter().flat_map(|(_, v)| v.iter()) {
-                if let Some(first_state_fut) =
-                    point_round.add_collected_exact(point, downloader, effects)
-                {
-                    self.output
-                        .send(ConsensusEvent::Validating {
-                            point_id: point.id(),
-                            task: first_state_fut,
-                        })
-                        .expect("channel from filter to collector closed");
-                }
+                self.send_validating(&point_round, point, downloader, effects);
             }
             released.push(round.0);
         }
@@ -324,5 +294,25 @@ impl BroadcastFilterInner {
         self.by_round.retain(|round, _| {
             top_round < *round && round.0 <= top_round.0 + MempoolConfig::COMMIT_DEPTH as u32
         });
+    }
+
+    fn send_validating(
+        &self,
+        point_round: &DagRound,
+        point: &Point,
+        downloader: &Downloader,
+        effects: &Effects<CurrentRoundContext>,
+    ) {
+        // this may be not the first insert into DAG - in case some node received it earlier,
+        // and we've already received its point that references current broadcast
+        if let Some(first_state_fut) = point_round.add_broadcast_exact(point, downloader, effects) {
+            let validating = ConsensusEvent::Validating {
+                point_id: point.id(),
+                task: first_state_fut,
+            };
+            self.output
+                .send(validating)
+                .expect("channel from filter to collector closed");
+        }
     }
 }

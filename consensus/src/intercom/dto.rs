@@ -12,7 +12,14 @@ pub struct PointByIdResponse(pub Option<Point>);
 /// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.
 pub struct BroadcastResponse;
 
-#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SignatureRejectedReason {
+    TooOldRound,
+    NoDagRound,
+    CannotSign,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 pub enum SignatureResponse {
     Signature(Signature),
     /// peer dropped its state or just reached point's round
@@ -27,18 +34,18 @@ pub enum SignatureResponse {
     /// * invalid dependency
     /// * signer is more than 1 round in front of us
     /// * signer's clock are too far in the future (probably consensus stalled for long)
-    Rejected,
+    Rejected(SignatureRejectedReason),
 }
 
 impl AltFormat for SignatureResponse {}
 impl Display for AltFmt<'_, SignatureResponse> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match AltFormat::unpack(self) {
-            SignatureResponse::Signature(_) => "Signature",
-            SignatureResponse::NoPoint => "NoPoint",
-            SignatureResponse::TryLater => "TryLater",
-            SignatureResponse::Rejected => "Rejected",
-        })
+        match AltFormat::unpack(self) {
+            SignatureResponse::Signature(_) => f.write_str("Signature"),
+            SignatureResponse::NoPoint => f.write_str("NoPoint"),
+            SignatureResponse::TryLater => f.write_str("TryLater"),
+            SignatureResponse::Rejected(reason) => f.debug_tuple("Rejected").field(reason).finish(),
+        }
     }
 }
 

@@ -173,7 +173,7 @@ impl Engine {
             };
 
             let bcaster_run = tokio::spawn({
-                let own_ppint_round = current_dag_round.to_weak();
+                let own_point_round = current_dag_round.to_weak();
                 let round_effects = round_effects.clone();
                 let peer_schedule = self.peer_schedule.clone();
                 let mut broadcaster = self.broadcaster;
@@ -181,7 +181,7 @@ impl Engine {
                 async move {
                     if let Some(own_point) = own_point_fut.await.expect("new point producer") {
                         let paranoid = Self::expect_own_trusted_point(
-                            own_ppint_round,
+                            own_point_round,
                             own_point.clone(),
                             peer_schedule.clone(),
                             downloader,

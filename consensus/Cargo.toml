@@ -11,10 +11,12 @@ license.workspace = true
 [[example]]
 name = "consensus-node"
 path = "examples/consensus_node.rs"
+required-features = ["test"]
 
 [[example]]
 name = "engine"
 path = "examples/engine/main.rs"
+required-features = ["test"]
 
 [dependencies]
 ahash = { workspace = true }
@@ -34,7 +36,7 @@ rand_pcg = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, default-features = false }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 weedb = { workspace = true }
@@ -65,3 +67,6 @@ tycho-util = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true
+
+[features]
+test = ["dep:tokio-stream"]

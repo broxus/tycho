@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::dag::{Verifier, WeakDagRound};
+use crate::dag::{DagRound, Verifier, WeakDagRound};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
 use crate::engine::MempoolConfig;
@@ -55,28 +55,28 @@ impl Downloader {
     pub async fn run(
         self,
         point_id: PointId,
-        point_dag_round: WeakDagRound,
+        // Download task holds weak reference to containing round and does not prevent its drop,
+        // while passes weak ref to validate; so Verifier is able to break recursive validation
+        // (trust consensus on `DAG_DEPTH` at least) and does not require too deep points
+        // to be checked against their dependencies (if dag round is removed from DAG).
+        // The task will be dropped in case DAG round is dropped and no validation waits this point.
+        // Do not pass `WeakDagRound` here as it would be incorrect to return `DagPoint::NotExists`
+        // if we need to download at a very deep round - let the start of this task hold strong ref.
+        point_dag_round_strong: DagRound,
         dependers: mpsc::UnboundedReceiver<PeerId>,
         parent_effects: Effects<ValidateContext>,
     ) -> DagPoint {
         let effects = Effects::<DownloadContext>::new(&parent_effects, &point_id);
         let span_guard = effects.span().enter();
         let peer_schedule = &self.inner.peer_schedule;
-        let Some(point_round_temp) = point_dag_round.get() else {
-            tracing::warn!(
-                "marking point as NotExists as its round is already not in dag, \
-                too deep recursion must be prevented by Verifier"
-            );
-            return DagPoint::NotExists(Arc::new(point_id));
-        };
         assert_eq!(
             point_id.location.round,
-            point_round_temp.round(),
+            point_dag_round_strong.round(),
             "point and DAG round mismatch"
         );
         // request point from its signers (any depender is among them as point is already verified)
         let mut undone_peers = peer_schedule
-            .peers_for(point_round_temp.round().next())
+            .peers_for(point_dag_round_strong.round().next())
             .iter()
             .map(|(peer_id, state)| {
                 (*peer_id, PeerStatus {
@@ -87,13 +87,8 @@ impl Downloader {
                 })
             })
             .collect::<FastHashMap<_, _>>();
-        let Ok(node_count) = NodeCount::try_from(undone_peers.len()) else {
-            tracing::warn!(
-                "marking point as NotExists as its round peers are unknown, \
-                too deep recursion must be prevented by Verifier"
-            );
-            return DagPoint::NotExists(Arc::new(point_id));
-        };
+        let node_count = NodeCount::try_from(undone_peers.len())
+            .expect("validator set is unknown, must keep prev epoch's set for DAG_DEPTH rounds");
         // query author no matter if it is in the next round, but that can't affect 3F+1
         let done_peers = match undone_peers.entry(point_id.location.author) {
             Entry::Occupied(_) => 0,
@@ -110,8 +105,9 @@ impl Downloader {
             }
         };
         let updates = peer_schedule.updates();
-        // do not leak strong ref across unlimited await
-        drop(point_round_temp);
+        let point_dag_round = point_dag_round_strong.to_weak();
+        // do not leak span and strong round ref across await
+        drop(point_dag_round_strong);
         drop(span_guard);
         DownloadTask {
             parent: self,
@@ -123,7 +119,6 @@ impl Downloader {
             undone_peers,
             done_peers,
             downloading: FuturesUnordered::new(),
-            validating: FuturesUnordered::new(),
             dependers,
             updates,
             attempt: 0,
@@ -147,7 +142,6 @@ struct DownloadTask {
     undone_peers: FastHashMap<PeerId, PeerStatus>,
     done_peers: i16,
     downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse>)>>,
-    validating: FuturesUnordered<BoxFuture<'static, (PeerId, DagPoint)>>,
 
     /// populated by waiting validation tasks, source of [`mandatory`] set
     dependers: mpsc::UnboundedReceiver<PeerId>,
@@ -161,7 +155,7 @@ struct DownloadTask {
 impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
-    pub async fn run(mut self) -> DagPoint {
+    pub async fn run(&mut self) -> DagPoint {
         // always ask the author
         let author = self.point_id.location.author;
         self.add_depender(&author);
@@ -170,12 +164,8 @@ impl DownloadTask {
         let dag_point = loop {
             tokio::select! {
                 Some((peer_id, downloaded)) = self.downloading.next() =>
-                     match self.match_downloaded(peer_id, downloaded) {
-                        Some(dag_point) => break dag_point,
-                        None => continue
-                    },
-                Some((peer_id, validated)) = self.validating.next() =>
-                     match self.match_validated(&peer_id, validated) {
+                    // de-schedule current task if point is verified and wait for validation
+                     match self.match_downloaded(peer_id, downloaded).await {
                         Some(dag_point) => break dag_point,
                         None => continue
                     },
@@ -266,7 +256,7 @@ impl DownloadTask {
         );
     }
 
-    fn match_downloaded(
+    async fn match_downloaded(
         &mut self,
         peer_id: PeerId,
         resolved: anyhow::Result<PointByIdResponse>,
@@ -329,22 +319,33 @@ impl DownloadTask {
                 self.undone_peers.remove(&peer_id);
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
                     Ok(()) => {
-                        // count peer as done only after validation
-                        self.validating.push(
-                            Verifier::validate(
-                                point,
-                                self.point_dag_round.clone(),
-                                self.parent.clone(),
-                                self.effects.span().clone(),
-                            )
-                            .map(move |dag_point| (peer_id, dag_point))
-                            .boxed(),
-                        );
                         tracing::trace!(
                             parent: self.effects.span(),
                             peer = display(peer_id.alt()),
                             "downloaded, now validating",
                         );
+                        let dag_point = Verifier::validate(
+                            point,
+                            self.point_dag_round.clone(),
+                            self.parent.clone(),
+                            self.effects.span().clone(),
+                        )
+                        // this is the only `await` in the task, that resolves the download
+                        .await;
+                        let level = if dag_point.trusted().is_some() {
+                            tracing::Level::DEBUG
+                        } else if dag_point.valid().is_some() {
+                            tracing::Level::WARN
+                        } else {
+                            tracing::Level::ERROR
+                        };
+                        dyn_event!(
+                            parent: self.effects.span(),
+                            level,
+                            result = display(dag_point.alt()),
+                            "validated",
+                        );
+                        return Some(dag_point);
                     }
                     Err(dag_point) => {
                         // reliable peer won't return unverifiable point
@@ -366,32 +367,6 @@ impl DownloadTask {
         self.maybe_not_downloaded()
     }
 
-    fn match_validated(&mut self, peer_id: &PeerId, dag_point: DagPoint) -> Option<DagPoint> {
-        // peer is already removed from undone
-        self.done_peers += 1;
-        let level = if dag_point.trusted().is_some() {
-            tracing::Level::DEBUG
-        } else if dag_point.valid().is_some() {
-            tracing::Level::WARN
-        } else {
-            tracing::Level::ERROR
-        };
-        dyn_event!(
-            parent: self.effects.span(),
-            level,
-            result = display(dag_point.alt()),
-            peer = display(peer_id.alt()),
-            "validated",
-        );
-        match dag_point {
-            DagPoint::NotExists(_) => {
-                // peer not reliable, it's a ban - in case Verifier prevents too deep recursion
-                self.maybe_not_downloaded()
-            }
-            dag_point => Some(dag_point),
-        }
-    }
-
     fn maybe_not_downloaded(&mut self) -> Option<DagPoint> {
         if self.done_peers >= self.node_count.majority() as i16 {
             // the only normal case to resolve into `NotExists`
@@ -401,7 +376,7 @@ impl DownloadTask {
             );
             Some(DagPoint::NotExists(Arc::new(self.point_id.clone())))
         } else {
-            if self.downloading.is_empty() && self.validating.is_empty() {
+            if self.downloading.is_empty() {
                 self.download_random(true);
                 self.skip_next_attempt = true;
             }
