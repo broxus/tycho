@@ -572,7 +572,7 @@ impl CollatorStdImpl {
                     .checked_sub(next_chain_time)
                     .unwrap_or_default();
                 metrics::histogram!("tycho_do_collate_block_diff_time", labels)
-                    .record(diff_time as f64);
+                    .record((diff_time / 1000) as f64);
                 diff_time
             });
 
