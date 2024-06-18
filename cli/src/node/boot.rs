@@ -8,8 +8,9 @@ use tokio::sync::mpsc;
 use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockProofStuff;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockHandle, BriefBlockInfo, KEY_BLOCK_UTIME_STEP};
+use tycho_storage::{BlockHandle, BriefBlockInfo, KeyBlocksDirection, KEY_BLOCK_UTIME_STEP};
 use tycho_util::futures::JoinTask;
+use tycho_util::time::now_sec;
 
 use crate::node::Node;
 
@@ -29,7 +30,17 @@ pub async fn cold_boot(
     // Ensure that all key blocks until now (with some offset) are downloaded
     download_key_blocks(node, prev_key_block).await?;
 
-    todo!()
+    // Choose the latest key block with persistent state
+    let last_key_block = choose_key_block(node)?;
+
+    if last_key_block.id().seqno != 0 {
+        // If the last suitable key block is not zerostate, we must download all blocks
+        // with their states from shards for that
+        // TODO
+    };
+
+    tracing::info!("finished cold boot");
+    Ok(*last_key_block.id())
 }
 
 async fn prepare_prev_key_block(
@@ -249,6 +260,60 @@ async fn download_key_blocks(
     Ok(())
 }
 
+/// Select the latest suitable key block with persistent state
+fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
+    let block_handle_storage = node.storage.block_handle_storage();
+
+    let mut key_blocks = block_handle_storage
+        .key_blocks_iterator(KeyBlocksDirection::Backward)
+        .map(|block_id| {
+            block_handle_storage
+                .load_handle(&block_id)
+                .context("Key block handle not found")
+        })
+        .peekable();
+
+    // Iterate all key blocks in reverse order (from the latest to the oldest)
+    while let Some(handle) = key_blocks.next().transpose()? {
+        let handle_utime = handle.meta().gen_utime();
+        let prev_utime = match key_blocks.peek() {
+            Some(Ok(prev_block)) => prev_block.meta().gen_utime(),
+            Some(Err(e)) => {
+                tracing::warn!("failed to load previous key block: {e:?}");
+                return Err(BootError::FailedToLoadKeyBlock.into());
+            }
+            None => 0,
+        };
+
+        let is_persistent = prev_utime == 0
+            || tycho_block_util::state::is_persistent_state(handle_utime, prev_utime);
+
+        tracing::debug!(
+            seq_no = handle.id().seqno,
+            is_persistent,
+            "new key block candidate",
+        );
+
+        // Skip not persistent
+        if !is_persistent {
+            tracing::debug!("ignoring state: not persistent");
+            continue;
+        }
+
+        // Skip too new key blocks
+        if handle_utime + INTITAL_SYNC_TIME_SECONDS > now_sec() {
+            tracing::debug!("ignoring state: too new");
+            continue;
+        }
+
+        // Use first suitable key block
+        tracing::info!(block_id = %handle.id(), "found best key block handle");
+        return Ok(handle);
+    }
+
+    Err(BootError::PersistentShardStateNotFound.into())
+}
+
 #[derive(Clone)]
 enum PrevKeyBlock {
     ZeroState {
@@ -297,4 +362,14 @@ impl PrevKeyBlock {
         }
         .map(move |_| res)
     }
+}
+
+const INTITAL_SYNC_TIME_SECONDS: u32 = 300;
+
+#[derive(thiserror::Error, Debug)]
+enum BootError {
+    #[error("Failed to load key block")]
+    FailedToLoadKeyBlock,
+    #[error("Persistent shard state not found")]
+    PersistentShardStateNotFound,
 }
