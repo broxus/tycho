@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use anyhow::anyhow;
-use everscale_types::models::BlockId;
+use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_storage::Storage;
 use tycho_util::serde_helpers;
@@ -162,6 +163,7 @@ impl BlockchainBlockProvider {
     }
 
     async fn check_proof(&self, block: &BlockStuff, proof: &BlockProofStuff) -> anyhow::Result<()> {
+        let started_at = Instant::now();
         anyhow::ensure!(
             block.id() == &proof.proof().proof_for,
             "proof_for and block id mismatch: proof_for={}, block_id={}",
@@ -169,22 +171,39 @@ impl BlockchainBlockProvider {
             block.id(),
         );
 
+        if !block.id().is_masterchain() {
+            proof.pre_check_block_proof()?;
+            metrics::histogram!("tycho_core_check_shard_block_proof_time")
+                .record(started_at.elapsed());
+            return Ok(());
+        }
+
         let block_info = match block.load_info() {
             Ok(block_info) => block_info,
             Err(e) => anyhow::bail!("failed to parse block info: {e}"),
         };
 
-        let previous_key_block = self
+        let previous_block = block_info.load_prev_ref()?;
+        let prev_block_seqno = match previous_block {
+            PrevBlockRef::Single(block_ref) => block_ref.seqno,
+            _ => {
+                anyhow::bail!(
+                    "Master block can't have more than 1 prev ref. Block: {:?}",
+                    block.id()
+                );
+            }
+        };
+
+        let previous_master_block = self
             .storage
             .block_handle_storage()
-            .load_key_block_handle(block_info.prev_key_block_seqno);
+            .load_key_block_handle(prev_block_seqno);
 
-        // TODO: Use latest master state
-        if let Some(key_block_handle) = previous_key_block {
+        if let Some(previous_master_block_handle) = previous_master_block {
             let shard_state_stuff = match self
                 .storage
                 .shard_state_storage()
-                .load_state(key_block_handle.id())
+                .load_state(previous_master_block_handle.id())
                 .await
             {
                 Ok(shard_state_stuff) => shard_state_stuff,
@@ -205,6 +224,9 @@ impl BlockchainBlockProvider {
                 return Err(anyhow!("Request block is invalid"));
             }
         }
+
+        metrics::histogram!("tycho_core_check_master_block_proof_time")
+            .record(started_at.elapsed());
 
         Ok(())
     }

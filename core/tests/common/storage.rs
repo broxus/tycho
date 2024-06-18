@@ -62,7 +62,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
             };
 
             let block_proof = BlockProofStuff::deserialize(
-                block_id,
+                &block_id,
                 everscale_types::boc::BocRepr::encode(&proof.data)?.as_slice(),
                 false,
             )?;
