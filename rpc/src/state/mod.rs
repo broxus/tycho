@@ -169,13 +169,12 @@ impl RpcState {
         &self,
         account: &StdAddr,
         last_lt: Option<u64>,
-        limit: u8,
     ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt, limit)
+            .get_transactions(account, last_lt)
             .map_err(RpcStateError::Internal)
     }
 

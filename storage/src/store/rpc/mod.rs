@@ -84,7 +84,6 @@ impl RpcStorage {
         &self,
         account: &StdAddr,
         last_lt: Option<u64>,
-        limit: u8,
     ) -> Result<TransactionsIterBuilder<'_>> {
         let mut key = [0u8; tables::Transactions::KEY_LEN];
         key[0] = account.workchain as u8;
@@ -106,7 +105,7 @@ impl RpcStorage {
         let mut iter = rocksdb.raw_iterator_cf_opt(&transactions_cf, readopts);
         iter.seek_for_prev(key);
 
-        Ok(TransactionsIterBuilder { inner: iter, limit })
+        Ok(TransactionsIterBuilder { inner: iter })
     }
 
     pub fn get_transaction(
@@ -844,7 +843,6 @@ impl Iterator for CodeHashesIter<'_> {
 
 pub struct TransactionsIterBuilder<'a> {
     inner: rocksdb::DBRawIterator<'a>,
-    limit: u8,
 }
 
 impl<'a> TransactionsIterBuilder<'a> {
@@ -854,8 +852,6 @@ impl<'a> TransactionsIterBuilder<'a> {
     {
         TransactionsIter {
             inner: self.inner,
-            traversed: 0,
-            limit: self.limit,
             map,
         }
     }
@@ -863,8 +859,6 @@ impl<'a> TransactionsIterBuilder<'a> {
 
 pub struct TransactionsIter<'a, F> {
     inner: rocksdb::DBRawIterator<'a>,
-    traversed: u8,
-    limit: u8,
     map: F,
 }
 
@@ -875,14 +869,9 @@ where
     type Item = R;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.traversed >= self.limit {
-            return None;
-        }
-
         let value = self.inner.value()?;
         let result = Some((self.map)(value));
         self.inner.prev();
-        self.traversed += 1;
         result
     }
 }

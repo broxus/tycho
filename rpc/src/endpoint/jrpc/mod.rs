@@ -151,6 +151,8 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             metrics::counter!(METRIC_IN_REQ_GET_ACCOUNTS_BY_CODE_HASH_TOTAL).increment(1);
             if p.limit == 0 {
                 return JrpcOkResponse::new(req.id, [(); 0]).into_response();
+            } else if p.limit > GetAccountsByCodeHashResponse::MAX_LIMIT {
+                return too_large_limit_response(req.id);
             }
             match state.get_accounts_by_code_hash(&p.code_hash, p.continuation.as_ref()) {
                 Ok(list) => ok_to_response(req.id, GetAccountsByCodeHashResponse {
@@ -162,9 +164,15 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
         }
         MethodParams::GetTransactionsList(p) => {
             metrics::counter!(METRIC_IN_REQ_GET_TRANSACTIONS_LIST_TOTAL).increment(1);
-            match state.get_transactions(&p.account, p.last_transaction_lt, p.limit) {
+            if p.limit == 0 {
+                return JrpcOkResponse::new(req.id, [(); 0]).into_response();
+            } else if p.limit > GetTransactionsListResponse::MAX_LIMIT {
+                return too_large_limit_response(req.id);
+            }
+            match state.get_transactions(&p.account, p.last_transaction_lt) {
                 Ok(list) => ok_to_response(req.id, GetTransactionsListResponse {
                     list: RefCell::new(Some(list)),
+                    limit: p.limit,
                 }),
                 Err(e) => error_to_response(req.id, e),
             }
@@ -329,6 +337,10 @@ struct GetAccountsByCodeHashResponse<'a> {
     limit: u8,
 }
 
+impl GetAccountsByCodeHashResponse<'_> {
+    const MAX_LIMIT: u8 = 100;
+}
+
 impl Serialize for GetAccountsByCodeHashResponse<'_> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -350,6 +362,11 @@ impl Serialize for GetAccountsByCodeHashResponse<'_> {
 
 struct GetTransactionsListResponse<'a> {
     list: RefCell<Option<TransactionsIterBuilder<'a>>>,
+    limit: u8,
+}
+
+impl GetTransactionsListResponse<'_> {
+    const MAX_LIMIT: u8 = 100;
 }
 
 impl Serialize for GetTransactionsListResponse<'_> {
@@ -373,6 +390,7 @@ impl Serialize for GetTransactionsListResponse<'_> {
             buffer.clear();
             res
         })
+        .take(self.limit as _)
         .collect::<Result<(), _>>()?;
 
         seq.end()
@@ -402,9 +420,19 @@ fn error_to_response(id: i64, e: RpcStateError) -> Response {
     .into_response()
 }
 
+fn too_large_limit_response(id: i64) -> Response {
+    JrpcErrorResponse {
+        id: Some(id),
+        code: TOO_LARGE_LIMIT_CODE,
+        message: Cow::Borrowed("limit is too large"),
+    }
+    .into_response()
+}
+
 // === Error codes ===
 
 const INTERNAL_ERROR_CODE: i32 = -32000;
 const NOT_READY_CODE: i32 = -32001;
 const NOT_SUPPORTED_CODE: i32 = -32002;
 const INVALID_BOC_CODE: i32 = -32003;
+const TOO_LARGE_LIMIT_CODE: i32 = -32004;
