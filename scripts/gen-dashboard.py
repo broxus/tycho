@@ -517,8 +517,8 @@ def collator_do_collate() -> RowPanel:
 def collator_execution_manager() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_message_execution_time",
-            "Message execution time",
+            "tycho_collator_execute_ordinary_time",
+            "Execute ordinary time",
             yaxis(UNITS.SECONDS),
         ),
     ]

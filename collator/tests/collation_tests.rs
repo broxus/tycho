@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::{BlockId, GlobalCapability, ShardIdent};
+use everscale_types::models::{BlockId, ShardIdent};
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;

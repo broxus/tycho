@@ -1302,8 +1302,6 @@ where
         block_id: BlockId,
         validation_result: OnValidatedBlockEvent,
     ) -> Result<()> {
-        let short_id = block_id.as_short_id();
-
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             is_valid = validation_result.is_valid(),
@@ -1634,7 +1632,7 @@ where
             blocks_to_send.push(mc_block_subgraph.mc_block);
 
             // spawn async task to send all shard and master blocks
-            let join_handle = tokio::spawn({
+            let _join_handle = tokio::spawn({
                 let dispatcher = (*self.dispatcher).clone();
                 let mq_adapter = self.mq_adapter.clone();
                 let state_node_adapter = self.state_node_adapter.clone();
@@ -1649,7 +1647,7 @@ where
                 }
             });
             // TODO: make proper panic and error processing without waiting for spawned task
-            join_handle.await??;
+            // join_handle.await??;
 
             sync_elapsed = timer.elapsed();
         } else {
