@@ -7,7 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::HashBytes;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_util::metrics::HistogramGuardWithLabels;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, CollatorStats, McData, PrevData, WorkingState};
@@ -383,7 +383,7 @@ impl CollatorStdImpl {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
         let _histogram =
-            HistogramGuardWithLabels::begin("tycho_collator_update_mc_data_time", &labels);
+            HistogramGuard::begin_with_labels("tycho_collator_update_mc_data_time", &labels);
 
         let mc_state_block_id_short = mc_state.block_id().as_short_id();
 
@@ -482,7 +482,7 @@ impl CollatorStdImpl {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
         let _histogram =
-            HistogramGuardWithLabels::begin("tycho_collator_import_next_anchor_time", &labels);
+            HistogramGuard::begin_with_labels("tycho_collator_import_next_anchor_time", &labels);
 
         let timer = std::time::Instant::now();
 
@@ -631,7 +631,7 @@ impl CollatorStdImpl {
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        let _histogram = HistogramGuardWithLabels::begin(
+        let _histogram = HistogramGuard::begin_with_labels(
             "tycho_collator_try_collate_next_master_block_time",
             &labels,
         );
@@ -684,7 +684,7 @@ impl CollatorStdImpl {
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        let collation_prepare_histogram = HistogramGuardWithLabels::begin(
+        let collation_prepare_histogram = HistogramGuard::begin_with_labels(
             "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
             &labels,
         );

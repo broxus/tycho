@@ -33,6 +33,9 @@ pub(super) struct ExecutionManager {
     group_limit: usize,
     /// group vertical size
     group_vert_size: usize,
+    /// max exec threads
+    max_exec_threads: usize,
+    /// accounts cache
     accounts_cache: AccountsCache,
 }
 
@@ -47,6 +50,7 @@ impl ExecutionManager {
         params: Arc<ExecuteParams>,
         group_limit: usize,
         group_vert_size: usize,
+        max_exec_threads: usize,
         shard_accounts: ShardAccounts,
     ) -> Self {
         Self {
@@ -55,6 +59,7 @@ impl ExecutionManager {
             params,
             group_limit,
             group_vert_size,
+            max_exec_threads,
             message_groups: FastHashMap::default(),
             accounts_cache: AccountsCache {
                 shard_accounts,
@@ -117,42 +122,44 @@ impl ExecutionManager {
 
         // TODO check externals is not exist accounts needed ?
         let mut futures = FuturesUnordered::new();
-        for (account_id, msgs) in group {
-            let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
-            futures.push(self.execute_messages(shard_account_stuff, msgs));
+        let prepared_group = self.prepare_group_for_rayon_thread(group)?;
+        for msgs in prepared_group {
+            futures.push(self.execute_messages(msgs));
         }
 
         let mut items = Vec::with_capacity(group_len);
 
         while let Some(executed_msgs_result) = futures.next().await {
-            let executed = executed_msgs_result?;
-            for tx in executed.transactions {
-                if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
-                    if let Err(e) = &tx.result {
-                        tracing::error!(
-                            target: tracing_targets::EXEC_MANAGER,
-                            account_addr = %executed.account_state.account_addr,
-                            message_hash = %tx.in_message.cell.repr_hash(),
-                            "failed to execute external message: {e:?}",
-                        );
-                        continue;
+            let executed_transaction = executed_msgs_result?;
+            for executed in executed_transaction {
+                for tx in executed.transactions {
+                    if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
+                        if let Err(e) = &tx.result {
+                            tracing::error!(
+                                target: tracing_targets::EXEC_MANAGER,
+                                account_addr = %executed.account_state.account_addr,
+                                message_hash = %tx.in_message.cell.repr_hash(),
+                                "failed to execute external message: {e:?}",
+                            );
+                            continue;
+                        }
                     }
+
+                    let executor_output = tx.result?;
+
+                    self.min_next_lt =
+                        cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
+
+                    items.push(ExecutedTickItem {
+                        account_addr: executed.account_state.account_addr,
+                        in_message: tx.in_message,
+                        executor_output,
+                    });
                 }
 
-                let executor_output = tx.result?;
-
-                self.min_next_lt =
-                    cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
-
-                items.push(ExecutedTickItem {
-                    account_addr: executed.account_state.account_addr,
-                    in_message: tx.in_message,
-                    executor_output,
-                });
+                self.accounts_cache
+                    .add_account_stuff(executed.account_state);
             }
-
-            self.accounts_cache
-                .add_account_stuff(executed.account_state);
         }
 
         Ok(ExecutedTick {
@@ -164,30 +171,32 @@ impl ExecutionManager {
 
     fn execute_messages(
         &self,
-        mut account_state: Box<ShardAccountStuff>,
-        msgs: Vec<Box<ParsedMessage>>,
-    ) -> impl Future<Output = Result<ExecutedTransactions>> + Send + 'static {
+        msgs: Vec<(Box<ShardAccountStuff>, Vec<Box<ParsedMessage>>)>,
+    ) -> impl Future<Output = Result<Vec<ExecutedTransactions>>> + Send + 'static {
         let min_next_lt = self.min_next_lt;
         let config = self.config.clone();
         let params = self.params.clone();
 
         rayon_run(move || {
-            let mut transactions = Vec::with_capacity(msgs.len());
-
-            for msg in msgs {
-                transactions.push(execute_ordinary_transaction_impl(
-                    &mut account_state,
-                    msg,
-                    min_next_lt,
-                    &config,
-                    &params,
-                )?);
+            let mut res = Vec::with_capacity(msgs.len());
+            for (mut account_state, msgs) in msgs {
+                let mut transactions = Vec::with_capacity(msgs.len());
+                for msg in msgs {
+                    transactions.push(execute_ordinary_transaction_impl(
+                        &mut account_state,
+                        msg,
+                        min_next_lt,
+                        &config,
+                        &params,
+                    )?);
+                }
+                res.push(ExecutedTransactions {
+                    account_state,
+                    transactions,
+                });
             }
 
-            Ok(ExecutedTransactions {
-                account_state,
-                transactions,
-            })
+            Ok(res)
         })
     }
 
@@ -249,6 +258,42 @@ impl ExecutionManager {
         self.min_next_lt = cmp::max(min_next_lt, executed.account_last_trans_lt);
         self.accounts_cache.add_account_stuff(account_stuff);
         Ok(executed)
+    }
+
+    /// prepare group for rayon thread
+    pub fn prepare_group_for_rayon_thread(
+        &mut self,
+        group: MessageGroup,
+    ) -> Result<Vec<Vec<(Box<ShardAccountStuff>, Vec<Box<ParsedMessage>>)>>> {
+        let capacity = self.max_exec_threads;
+        let mut res: Vec<Vec<(Box<ShardAccountStuff>, Vec<Box<ParsedMessage>>)>> =
+            Vec::with_capacity(capacity);
+
+        for (account_id, msgs) in group {
+            let mut i = 0;
+            let mut min_sized = i;
+            if res.len() == i {
+                res.push(vec![]);
+            }
+            let mut min_len = res[i].iter().fold(0, |acc, (_, x)| acc + x.len());
+            i += 1;
+            while i < capacity {
+                if res.len() == i {
+                    res.push(vec![]);
+                }
+                let thread_len = res[i].iter().fold(0, |acc, (_, x)| acc + x.len());
+
+                if thread_len < min_len {
+                    min_len = thread_len;
+                    min_sized = i;
+                }
+                i += 1;
+            }
+            let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
+            res[min_sized].push((shard_account_stuff, msgs));
+        }
+
+        Ok(res)
     }
 }
 

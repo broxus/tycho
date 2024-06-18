@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use metrics::{Label, SharedString};
+
 #[must_use = "The guard is used to update the histogram when it is dropped"]
 pub struct HistogramGuard {
     name: Option<&'static str>,
@@ -14,12 +16,13 @@ impl HistogramGuard {
         }
     }
 
-    pub fn begin_with_labels<'a, T>(
+    pub fn begin_with_labels<'a, const N: usize, K, V>(
         name: &'static str,
-        labels: &'a T,
-    ) -> HistogramGuardWithLabels<'a, T>
+        labels: &'a [(K, V); N],
+    ) -> HistogramGuardWithLabels<'a, N, K, V>
     where
-        &'a T: metrics::IntoLabels,
+        K: Into<SharedString> + Clone,
+        V: Into<SharedString> + Clone,
     {
         HistogramGuardWithLabels::begin(name, labels)
     }
@@ -42,20 +45,23 @@ impl Drop for HistogramGuard {
 }
 
 #[must_use = "The guard is used to update the histogram when it is dropped"]
-pub struct HistogramGuardWithLabels<'a, T: 'static>
+
+pub struct HistogramGuardWithLabels<'a, const N: usize, K, V>
 where
-    &'a T: metrics::IntoLabels,
+    K: Into<SharedString> + Clone,
+    V: Into<SharedString> + Clone,
 {
     name: Option<&'static str>,
     started_at: Instant,
-    labels: &'a T,
+    labels: &'a [(K, V); N],
 }
 
-impl<'a, T> HistogramGuardWithLabels<'a, T>
+impl<'a, const N: usize, K, V> HistogramGuardWithLabels<'a, N, K, V>
 where
-    &'a T: metrics::IntoLabels,
+    K: Into<SharedString> + Clone,
+    V: Into<SharedString> + Clone,
 {
-    pub fn begin(name: &'static str, labels: &'a T) -> Self {
+    pub fn begin(name: &'static str, labels: &'a [(K, V); N]) -> Self {
         Self {
             name: Some(name),
             started_at: Instant::now(),
@@ -72,9 +78,10 @@ where
     }
 }
 
-impl<'a, T> Drop for HistogramGuardWithLabels<'a, T>
+impl<'a, const N: usize, K, V> Drop for HistogramGuardWithLabels<'a, N, K, V>
 where
-    &'a T: metrics::IntoLabels,
+    K: Into<SharedString> + Clone,
+    V: Into<SharedString> + Clone,
 {
     fn drop(&mut self) {
         if let Some(name) = self.name.take() {

@@ -118,8 +118,13 @@ impl CollatorStdImpl {
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // prepare to read and execute internals and externals
-        let (max_messages_per_set, min_externals_per_set, group_limit, group_vert_size) =
-            self.get_msgs_execution_params();
+        let (
+            max_messages_per_set,
+            min_externals_per_set,
+            group_limit,
+            group_vert_size,
+            max_exec_threads,
+        ) = self.get_msgs_execution_params();
 
         // init execution manager
         let mut exec_manager = ExecutionManager::new(
@@ -141,6 +146,7 @@ impl CollatorStdImpl {
             }),
             group_limit,
             group_vert_size,
+            max_exec_threads,
             prev_shard_data.observable_accounts().clone(),
         );
 
@@ -632,7 +638,7 @@ impl CollatorStdImpl {
     ///                           when there are a lot of internals and externals
     /// * `group_limit` - max num of accounts to be processed in one tick
     /// * `group_vert_size` - max num of messages per account in group
-    fn get_msgs_execution_params(&self) -> (usize, usize, usize, usize) {
+    fn get_msgs_execution_params(&self) -> (usize, usize, usize, usize, usize) {
         // TODO: should get this from BlockchainConfig
         let params = &self.config.msgs_exec_params;
         (
@@ -640,6 +646,7 @@ impl CollatorStdImpl {
             params.min_externals_per_set as _,
             params.group_limit as _,
             params.group_vert_size as _,
+            params.max_exec_threads as _,
         )
     }
 
