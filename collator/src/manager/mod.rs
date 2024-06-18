@@ -6,13 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::boc::Boc;
-use everscale_types::cell::{HashBytes, UsageTree};
-use everscale_types::models::{
-    Block, BlockId, BlockIdShort, BlockInfo, BlockProof, BlockSignature, ShardIdent, Signature,
-    ValidatorBaseInfo,
-};
-use everscale_types::prelude::{CellBuilder, Dict, UsageTreeMode};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::metrics::HistogramGuard;
@@ -24,12 +18,11 @@ use self::types::{
 };
 use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
-use crate::manager::types::BlockCandidateEntry;
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
-    BlockCandidate, BlockCollationResult, BlockSignatures, CollationConfig, CollationSessionId,
+    BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
     CollationSessionInfo, OnValidatedBlockEvent, ProofFunds, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{

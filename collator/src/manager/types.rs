@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::models::{Block, BlockId, BlockIdShort, BlockProof, ShardIdent, Signature};
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
 use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
 
@@ -99,11 +99,6 @@ impl BlockCandidateContainer {
         self.is_valid
     }
 
-    /// Indicates if container does not contain block candidate
-    pub fn is_empty(&self) -> bool {
-        self.entry.is_none()
-    }
-
     /// Add signatures to containing block candidate entry
     /// or mark that it was already synced
     /// and update `is_valid` flag
@@ -180,22 +175,6 @@ impl BlockCandidateContainer {
             .as_ref()
             .ok_or_else(|| anyhow!("`entry` was extracted"))?;
         Ok(&entry.candidate.block)
-    }
-
-    pub fn get_block_boc(&self) -> Result<&[u8]> {
-        let entry = self
-            .entry
-            .as_ref()
-            .ok_or_else(|| anyhow!("`entry` was extracted"))?;
-        Ok(entry.candidate.data.as_slice())
-    }
-
-    pub fn get_block_signatures(&self) -> Result<&FastHashMap<HashBytes, Signature>> {
-        let entry = self
-            .entry
-            .as_ref()
-            .ok_or_else(|| anyhow!("`entry` was extracted"))?;
-        Ok(&entry.signatures)
     }
 }
 

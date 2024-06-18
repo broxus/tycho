@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,11 @@ pub struct StorageConfig {
     ///
     /// Default: calculated based on the available memory.
     pub cells_cache_size: ByteSize,
+
+    /// Archives storage config.
+    ///
+    /// Archives are disabled if this field is `None`.
+    pub archives: Option<ArchivesConfig>,
 }
 
 impl StorageConfig {
@@ -35,6 +41,7 @@ impl StorageConfig {
             rocksdb_lru_capacity: ByteSize::kb(1024),
             cells_cache_size: ByteSize::kb(1024),
             rocksdb_enable_metrics: false,
+            archives: Some(ArchivesConfig::default()),
         }
     }
 }
@@ -83,6 +90,33 @@ impl Default for StorageConfig {
             cells_cache_size,
             rocksdb_lru_capacity,
             rocksdb_enable_metrics: true,
+            archives: Some(ArchivesConfig::default()),
+        }
+    }
+}
+
+#[derive(Default, Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivesConfig {
+    pub gc_interval: ArchivesGcInterval,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
+pub enum ArchivesGcInterval {
+    /// Do not perform archives GC
+    Manual,
+    /// Archives GC triggers on each persistent state
+    PersistentStates {
+        /// Remove archives after this interval after the new persistent state
+        offset: Duration,
+    },
+}
+
+impl Default for ArchivesGcInterval {
+    fn default() -> Self {
+        Self::PersistentStates {
+            offset: Duration::from_secs(300),
         }
     }
 }

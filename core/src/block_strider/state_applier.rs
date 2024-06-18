@@ -47,8 +47,6 @@ where
         tracing::info!(id = ?cx.block.id(), "preparing block");
 
         let state_storage = self.inner.storage.shard_state_storage();
-        let handle_storage = self.inner.storage.block_handle_storage();
-        let block_storage = self.inner.storage.block_storage();
 
         // Load handle
         let handle = self
@@ -150,8 +148,8 @@ where
             .block_handle_storage()
             .store_block_applied(&prepared.handle);
 
-        if applied && self.inner.storage.archive_config().is_some() {
-            tracing::trace!("Moving block {:?} to archive", &prepared.handle.id());
+        if applied && self.inner.storage.config().archives.is_some() {
+            tracing::trace!(block_id = %prepared.handle.id(), "saving block into archive");
             self.inner
                 .storage
                 .block_storage()

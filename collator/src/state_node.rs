@@ -3,13 +3,9 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use everscale_types::models::{
-    Block, BlockId, BlockIdShort, BlockProof, BlockSignature, ShardIdent, Signature,
-    ValidatorBaseInfo,
-};
-use everscale_types::prelude::{
-    Boc, Cell, CellBuilder, CellFamily, Dict, HashBytes, Store, UsageTree, UsageTreeMode,
-};
+use everscale_types::boc::BocRepr;
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use tokio::sync::broadcast;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
@@ -261,16 +257,11 @@ impl StateNodeAdapterStdImpl {
                 let block_info = block.block_stuff_aug.block().info.load()?;
                 match Self::prepare_block_proof(&block.block_id, bytes, &block.signatures) {
                     Ok(proof) => {
-                        let block_proof_stuff =
-                            BlockProofStuff::new(proof.clone(), !proof.proof_for.is_masterchain())?;
+                        let is_link = !proof.proof_for.is_masterchain();
+                        let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
 
-                        let mut builder = CellBuilder::new();
-                        proof.store_into(&mut builder, &mut Cell::empty_context())?;
-                        let cell = builder.build()?;
-
-                        let proof_boc = Boc::encode(cell);
-                        let archive_data =
-                            block_proof_stuff.with_archive_data(proof_boc.as_slice());
+                        let proof_boc = BocRepr::encode(block_proof_stuff.as_ref())?;
+                        let archive_data = block_proof_stuff.with_archive_data(proof_boc);
 
                         let result = self
                             .storage
@@ -308,7 +299,7 @@ impl StateNodeAdapterStdImpl {
         block_id: &BlockId,
         block_boc: &[u8],
         signatures: &FastHashMap<HashBytes, Signature>,
-    ) -> Result<BlockProof> {
+    ) -> Result<Box<BlockProof>> {
         let mut usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess).with_subtrees();
         let cell = Boc::decode(block_boc)?;
         let tracked_cell = usage_tree.track(&cell);
@@ -337,11 +328,11 @@ impl StateNodeAdapterStdImpl {
             signatures,
         )?;
 
-        Ok(BlockProof {
+        Ok(Box::new(BlockProof {
             proof_for: *block_id,
             root: cell,
             signatures: Some(signatures),
-        })
+        }))
     }
 
     fn process_signatures(

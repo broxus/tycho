@@ -324,12 +324,10 @@ impl BlockStorage {
         let has_proof = handle.has_proof_or_link(&mut is_link);
 
         let block_data = if has_data {
-            tracing::info!("Has data executed {}", handle.id());
             let lock = handle.block_data_lock().write().await;
 
             let entry_id = ArchiveEntryId::Block(block_id);
             let data = self.make_archive_segment(&entry_id)?;
-            tracing::info!("Made block segment {}", handle.id());
 
             Some((lock, data))
         } else {
@@ -337,7 +335,6 @@ impl BlockStorage {
         };
 
         let block_proof_data = if has_proof {
-            tracing::info!("Has proof data executed {}", handle.id());
             let lock = handle.proof_data_lock().write().await;
 
             let entry_id = if is_link {
@@ -346,7 +343,6 @@ impl BlockStorage {
                 ArchiveEntryId::Proof(block_id)
             };
             let data = self.make_archive_segment(&entry_id)?;
-            tracing::info!("Made proof segment {}", handle.id());
 
             Some((lock, data))
         } else {
@@ -381,7 +377,8 @@ impl BlockStorage {
         }
         // 5. Execute transaction
         self.db.rocksdb().write(batch)?;
-        tracing::info!("Write archive to rocks {}", handle.id());
+
+        tracing::trace!(block_id = %handle.id(), "saved block into archive");
 
         // Block will be removed after blocks gc
 

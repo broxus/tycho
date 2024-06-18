@@ -5,9 +5,7 @@ use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::{
-    BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ValidatorSubsetInfo,
-};
+use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 use tycho_storage::Storage;
 use tycho_util::serde_helpers;
 

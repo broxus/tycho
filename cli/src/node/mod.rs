@@ -40,7 +40,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{ArchiveConfig, BlockMetaData, Storage};
+use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -335,7 +335,6 @@ impl Node {
         // Setup storage
         let storage = Storage::builder()
             .with_config(node_config.storage)
-            .with_archive_config(node_config.archive)
             .with_rpc_storage(node_config.rpc.is_some())
             .build()
             .wrap_err("failed to create storage")?;

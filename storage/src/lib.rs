@@ -5,13 +5,11 @@ use anyhow::Result;
 use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
 
-pub use self::archive_config::*;
 pub use self::config::*;
 pub use self::db::*;
 pub use self::models::*;
 pub use self::store::*;
 
-mod archive_config;
 mod config;
 mod db;
 mod models;
@@ -37,7 +35,6 @@ const FILES_SUBDIR: &str = "files";
 
 pub struct StorageBuilder {
     config: StorageConfig,
-    archive_config: Option<ArchiveConfig>,
     init_rpc_storage: bool,
 }
 
@@ -146,6 +143,7 @@ impl StorageBuilder {
         let inner = Arc::new(Inner {
             root,
             base_db,
+            config: self.config,
             block_handle_storage,
             block_storage,
             shard_state_storage,
@@ -155,7 +153,6 @@ impl StorageBuilder {
             runtime_storage,
             rpc_state,
             internal_queue_storage,
-            archive_config: self.archive_config,
         });
 
         spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
@@ -170,11 +167,6 @@ impl StorageBuilder {
 
     pub fn with_config(mut self, config: StorageConfig) -> Self {
         self.config = config;
-        self
-    }
-
-    pub fn with_archive_config(mut self, achive_config: Option<ArchiveConfig>) -> Self {
-        self.archive_config = achive_config;
         self
     }
 
@@ -194,7 +186,6 @@ impl Storage {
     pub fn builder() -> StorageBuilder {
         StorageBuilder {
             config: StorageConfig::default(),
-            archive_config: None,
             init_rpc_storage: false,
         }
     }
@@ -218,6 +209,10 @@ impl Storage {
 
     pub fn base_db(&self) -> &BaseDb {
         &self.inner.base_db
+    }
+
+    pub fn config(&self) -> &StorageConfig {
+        &self.inner.config
     }
 
     pub fn runtime_storage(&self) -> &RuntimeStorage {
@@ -252,10 +247,6 @@ impl Storage {
         self.inner.rpc_state.as_ref()
     }
 
-    pub fn archive_config(&self) -> Option<&ArchiveConfig> {
-        self.inner.archive_config.as_ref()
-    }
-
     pub fn internal_queue_storage(&self) -> &InternalQueueStorage {
         &self.inner.internal_queue_storage
     }
@@ -264,6 +255,7 @@ impl Storage {
 struct Inner {
     root: FileDb,
     base_db: BaseDb,
+    config: StorageConfig,
 
     runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,
@@ -274,6 +266,4 @@ struct Inner {
     persistent_state_storage: PersistentStateStorage,
     rpc_state: Option<RpcStorage>,
     internal_queue_storage: InternalQueueStorage,
-
-    archive_config: Option<ArchiveConfig>,
 }
