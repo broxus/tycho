@@ -35,15 +35,13 @@ impl RpcStateBuilder {
         let (storage, blockchain_rpc_client) = self.mandatory_fields;
 
         let gc_notify = Arc::new(Notify::new());
-        let gc_handle = if let Some(config) = &self.config.transactions_gc {
-            Some(tokio::spawn(transactions_gc(
+        let gc_handle = self.config.transactions_gc.as_ref().map(|config| {
+            tokio::spawn(transactions_gc(
                 config.clone(),
                 storage.clone(),
                 gc_notify.clone(),
-            )))
-        } else {
-            None
-        };
+            ))
+        });
 
         RpcState {
             inner: Arc::new(Inner {
@@ -171,12 +169,13 @@ impl RpcState {
         &self,
         account: &StdAddr,
         last_lt: Option<u64>,
+        limit: u8,
     ) -> Result<TransactionsIterBuilder<'_>, RpcStateError> {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
         storage
-            .get_transactions(account, last_lt)
+            .get_transactions(account, last_lt, limit)
             .map_err(RpcStateError::Internal)
     }
 

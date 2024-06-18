@@ -162,7 +162,7 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
         }
         MethodParams::GetTransactionsList(p) => {
             metrics::counter!(METRIC_IN_REQ_GET_TRANSACTIONS_LIST_TOTAL).increment(1);
-            match state.get_transactions(&p.account, p.last_transaction_lt) {
+            match state.get_transactions(&p.account, p.last_transaction_lt, p.limit) {
                 Ok(list) => ok_to_response(req.id, GetTransactionsListResponse {
                     list: RefCell::new(Some(list)),
                 }),
