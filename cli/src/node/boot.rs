@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use everscale_types::models::BlockId;
+use everscale_types::boc::Boc;
+use everscale_types::cell::CellBuilder;
+use everscale_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::WithArchiveData;
@@ -16,7 +18,7 @@ use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
-use crate::node::{load_zerostate, make_shard_state, Node};
+use crate::node::Node;
 use crate::util::error::ResultExt;
 
 /// Boot type when the node has not yet started syncing
@@ -45,6 +47,7 @@ pub async fn cold_boot(
     };
 
     tracing::info!("finished cold boot");
+
     Ok(*last_key_block.id())
 }
 
@@ -640,6 +643,60 @@ async fn download_block_with_state(
     }
 
     Ok((handle, block))
+}
+
+fn load_zerostate(
+    tracker: &MinRefMcStateTracker,
+    path: &PathBuf,
+) -> anyhow::Result<ShardStateStuff> {
+    let data = std::fs::read(path).wrap_err("failed to read file")?;
+    let file_hash = Boc::file_hash(&data);
+
+    let root = Boc::decode(data).wrap_err("failed to decode BOC")?;
+    let root_hash = *root.repr_hash();
+
+    let state = root
+        .parse::<ShardStateUnsplit>()
+        .wrap_err("failed to parse state")?;
+
+    anyhow::ensure!(state.seqno == 0, "not a zerostate");
+
+    let block_id = BlockId {
+        shard: state.shard_ident,
+        seqno: state.seqno,
+        root_hash,
+        file_hash,
+    };
+
+    ShardStateStuff::from_root(&block_id, root, tracker)
+}
+
+fn make_shard_state(
+    tracker: &MinRefMcStateTracker,
+    global_id: i32,
+    shard_ident: ShardIdent,
+    now: u32,
+) -> anyhow::Result<ShardStateStuff> {
+    let state = ShardStateUnsplit {
+        global_id,
+        shard_ident,
+        gen_utime: now,
+        min_ref_mc_seqno: u32::MAX,
+        ..Default::default()
+    };
+
+    let root = CellBuilder::build_from(&state)?;
+    let root_hash = *root.repr_hash();
+    let file_hash = Boc::file_hash(Boc::encode(&root));
+
+    let block_id = BlockId {
+        shard: state.shard_ident,
+        seqno: state.seqno,
+        root_hash,
+        file_hash,
+    };
+
+    ShardStateStuff::from_root(&block_id, root, tracker)
 }
 
 #[derive(Clone)]

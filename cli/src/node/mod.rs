@@ -3,12 +3,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
-use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
@@ -40,8 +39,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{BlockHandle, BlockMetaData, Storage};
-use tycho_util::FastHashMap;
+use tycho_storage::Storage;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::node::boot::cold_boot;
@@ -436,7 +434,7 @@ impl Node {
             None => {
                 tracing::info!("cold init");
 
-                let last_mc_block_id = cold_boot(self, zerostates).await?;
+                let last_mc_block_id = boot::cold_boot(self, zerostates).await?;
 
                 node_state.store_init_mc_block_id(&last_mc_block_id);
                 node_state.store_last_mc_block_id(&last_mc_block_id);
@@ -662,55 +660,4 @@ fn get_validator_peer_ids(mc_state: &ShardStateStuff) -> Result<Vec<PeerId>> {
         .into_iter()
         .map(|x| PeerId(x.public_key.0))
         .collect::<Vec<_>>())
-}
-
-fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<ShardStateStuff> {
-    let data = std::fs::read(path).wrap_err("failed to read file")?;
-    let file_hash = Boc::file_hash(&data);
-
-    let root = Boc::decode(data).wrap_err("failed to decode BOC")?;
-    let root_hash = *root.repr_hash();
-
-    let state = root
-        .parse::<ShardStateUnsplit>()
-        .wrap_err("failed to parse state")?;
-
-    anyhow::ensure!(state.seqno == 0, "not a zerostate");
-
-    let block_id = BlockId {
-        shard: state.shard_ident,
-        seqno: state.seqno,
-        root_hash,
-        file_hash,
-    };
-
-    ShardStateStuff::from_root(&block_id, root, tracker)
-}
-
-fn make_shard_state(
-    tracker: &MinRefMcStateTracker,
-    global_id: i32,
-    shard_ident: ShardIdent,
-    now: u32,
-) -> Result<ShardStateStuff> {
-    let state = ShardStateUnsplit {
-        global_id,
-        shard_ident,
-        gen_utime: now,
-        min_ref_mc_seqno: u32::MAX,
-        ..Default::default()
-    };
-
-    let root = CellBuilder::build_from(&state)?;
-    let root_hash = *root.repr_hash();
-    let file_hash = Boc::file_hash(Boc::encode(&root));
-
-    let block_id = BlockId {
-        shard: state.shard_ident,
-        seqno: state.seqno,
-        root_hash,
-        file_hash,
-    };
-
-    ShardStateStuff::from_root(&block_id, root, tracker)
 }
