@@ -26,6 +26,7 @@ fn main() -> ExitCode {
 
     rayon::ThreadPoolBuilder::new()
         .stack_size(8 * 1024 * 1024)
+        .thread_name(|i| format!("rayon-{}", i))
         .build_global()
         .unwrap();
 
