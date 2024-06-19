@@ -428,10 +428,10 @@ impl Node {
     async fn try_init(self: &Arc<Self>, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
-        match node_state.load_last_mc_block_id() {
+        let last_key_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => {
                 tracing::info!("warm init");
-                Ok(block_id)
+                block_id
             }
             None => {
                 tracing::info!("cold init");
@@ -442,9 +442,11 @@ impl Node {
                 // node_state.store_init_mc_block_id(&zerostate_id);
                 // node_state.store_last_mc_block_id(&zerostate_id);
 
-                todo!()
+                last_mc_block_id
             }
-        }
+        };
+
+        Ok(last_key_block_id)
     }
 
     async fn import_zerostates(
