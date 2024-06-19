@@ -4,8 +4,8 @@ use std::time::Duration;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{
-    Block, BlockId, BlockInfo, CurrencyCollection, GlobalCapabilities, GlobalCapability, IntAddr,
-    ShardIdent, Signature, ValueFlow,
+    Block, BlockId, BlockInfo, BlockLimits, BlockParamLimits, CurrencyCollection,
+    GlobalCapabilities, GlobalCapability, IntAddr, ShardIdent, Signature, ValueFlow,
 };
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
@@ -25,7 +25,7 @@ pub struct CollationConfig {
     pub max_uncommitted_chain_length: u32,
     pub uncommitted_chain_to_import_next_anchor: u32,
 
-    pub block_txs_limit: u32,
+    pub block_limits: BlockLimits,
 
     pub msgs_exec_params: MsgsExecutionParams,
 }
@@ -42,7 +42,23 @@ impl Default for CollationConfig {
             max_uncommitted_chain_length: 31,
             uncommitted_chain_to_import_next_anchor: 4,
 
-            block_txs_limit: 10000,
+            block_limits: BlockLimits {
+                bytes: BlockParamLimits {
+                    underload: 131072,
+                    soft_limit: 524288,
+                    hard_limit: 1048576,
+                },
+                gas: BlockParamLimits {
+                    underload: 900000,
+                    soft_limit: 1200000,
+                    hard_limit: 2000000,
+                },
+                lt_delta: BlockParamLimits {
+                    underload: 1000,
+                    soft_limit: 5000,
+                    hard_limit: 10000,
+                },
+            },
 
             msgs_exec_params: MsgsExecutionParams::default(),
         }
