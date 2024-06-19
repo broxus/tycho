@@ -26,6 +26,7 @@ futures-util = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+metrics = { workspace = true, optional = true }
 parking_lot = { workspace = true }
 public-ip = { workspace = true }
 rand = { workspace = true }
@@ -40,6 +41,7 @@ tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ], optional = true }
+tikv-jemalloc-ctl = { version = "0.5", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -63,7 +65,7 @@ rustc_version = { workspace = true }
 
 [features]
 default = ["jemalloc"]
-jemalloc = ["dep:tikv-jemallocator"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:metrics"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
 
 [lints]

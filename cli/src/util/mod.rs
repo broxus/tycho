@@ -5,6 +5,8 @@ use everscale_types::models::{Account, StorageUsed};
 use everscale_types::num::VarUint56;
 use everscale_types::prelude::*;
 
+#[cfg(feature = "jemalloc")]
+pub mod alloc;
 pub mod error;
 pub mod logger;
 pub mod signal;

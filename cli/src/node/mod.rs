@@ -44,6 +44,8 @@ use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
+#[cfg(feature = "jemalloc")]
+use crate::util::alloc::spawn_allocator_metrics_loop;
 use crate::util::error::ResultExt;
 use crate::util::logger::{is_systemd_child, LoggerConfig};
 use crate::util::signal;
@@ -237,11 +239,17 @@ fn init_metrics(config: &MetricsConfig) -> Result<()> {
         0.000001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
         60.0, 120.0, 300.0, 600.0, 3600.0,
     ];
+
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(Matcher::Suffix("_time".to_string()), EXPONENTIAL_SECONDS)?
         .with_http_listener(config.listen_addr)
         .install()
-        .wrap_err("failed to initialize a metrics exporter")
+        .wrap_err("failed to initialize a metrics exporter")?;
+
+    #[cfg(feature = "jemalloc")]
+    spawn_allocator_metrics_loop();
+
+    Ok(())
 }
 
 async fn resolve_public_ip(ip: Option<IpAddr>) -> Result<IpAddr> {
