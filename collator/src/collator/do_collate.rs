@@ -13,7 +13,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
-use super::types::{CachedMempoolAnchor, SpecialOrigin};
+use super::types::{BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin};
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
@@ -73,6 +73,7 @@ impl CollatorStdImpl {
         collation_data.gen_utime_ms = (next_chain_time % 1000) as u16;
         collation_data.start_lt = Self::calc_start_lt(mc_data, prev_shard_data, &collation_data)?;
         collation_data.next_lt = collation_data.start_lt + 1;
+        collation_data.stats.lt_start = collation_data.start_lt;
 
         collation_data.processed_upto = prev_shard_data.processed_upto().clone();
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
@@ -339,7 +340,7 @@ impl CollatorStdImpl {
             fill_msgs_total_elapsed += timer.elapsed();
 
             // execute msgs processing by groups
-            while !msgs_set_full_processed {
+            'execute_groups: while !msgs_set_full_processed {
                 // Exec messages
                 exec_ticks_count += 1;
                 timer = std::time::Instant::now();
@@ -388,6 +389,7 @@ impl CollatorStdImpl {
                     }
 
                     collation_data.next_lt = exec_manager.min_next_lt();
+                    collation_data.stats.lt_current = collation_data.next_lt;
                 }
 
                 msgs_set_offset = tick.new_offset;
@@ -409,21 +411,24 @@ impl CollatorStdImpl {
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
+
+                if let BlockLimitsLevel::Hard = collation_data
+                    .stats
+                    .current_level(&self.config.block_limits)
+                {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "STUB: block limit reached: {:?}/{:?}",
+                        collation_data.stats, self.config.block_limits,
+                    );
+                    block_limits_reached = true;
+                    break 'execute_groups;
+                }
             }
 
             metrics::gauge!("tycho_do_collate_exec_ticks_per_msgs_set", labels)
                 .set(exec_ticks_count as f64);
 
             timer = std::time::Instant::now();
-
-            // HACK: temporary always full process msgs set and check block limits after
-            if collation_data.tx_count >= self.config.block_txs_limit as u64 {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "STUB: block limit reached: {}/{}",
-                    collation_data.tx_count, self.config.block_txs_limit,
-                );
-                block_limits_reached = true;
-            }
 
             // commit messages to iterator only if set was fully processed
             if msgs_set_full_processed {
@@ -1338,6 +1343,24 @@ fn new_transaction(
     );
 
     collation_data.execute_count_all += 1;
+    let transaction = executor_output.transaction.load()?;
+    let gas_used = 'gas: {
+        match transaction.load_info()? {
+            TxInfo::Ordinary(info) => {
+                if let ComputePhase::Executed(phase) = &info.compute_phase {
+                    break 'gas phase.gas_used.into_inner();
+                }
+            }
+            TxInfo::TickTock(info) => {
+                if let ComputePhase::Executed(phase) = &info.compute_phase {
+                    break 'gas phase.gas_used.into_inner();
+                }
+            }
+        };
+        0
+    };
+    collation_data.stats.gas_used += gas_used as u32;
+    collation_data.stats.add_cell(&*in_msg.cell)?;
 
     let import_fees;
     let in_msg_hash = *in_msg.cell.repr_hash();
@@ -1472,6 +1495,7 @@ fn new_transaction(
 
     for out_msg_cell in executor_output.out_msgs.values() {
         let out_msg_cell = out_msg_cell?;
+        collation_data.stats.add_cell(&*out_msg_cell)?;
         let out_msg_hash = *out_msg_cell.repr_hash();
         let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
 
@@ -1481,7 +1505,6 @@ fn new_transaction(
             info = ?out_msg_info,
             "adding out message to out_msgs",
         );
-
         match &out_msg_info {
             MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
                 collation_data.int_enqueue_count += 1;

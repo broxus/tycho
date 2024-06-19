@@ -1,16 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
-    Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockRef, BlockchainConfig,
-    CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr, McStateExtra, MsgInfo,
-    OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts,
-    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib,
-    SpecialFlags, StateInit, Transaction, ValueFlow,
+    Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
+    BlockRef, BlockchainConfig, CurrencyCollection, HashUpdate, ImportFees, InMsg, Lazy, LibDescr,
+    McStateExtra, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
+use everscale_types::prelude::DynCell;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
@@ -322,6 +323,8 @@ pub(super) struct BlockCollationData {
 
     pub tx_count: u64,
 
+    pub stats: BlockStats,
+
     pub total_execute_msgs_time_mc: u128,
 
     pub execute_count_all: u64,
@@ -375,6 +378,86 @@ pub(super) struct BlockCollationData {
 
     // TODO: set from anchor
     pub created_by: HashBytes,
+}
+#[derive(Debug, Default)]
+pub struct BlockStats {
+    pub gas_used: u32,
+    pub lt_current: u64,
+    pub lt_start: u64,
+    pub cells_seen: HashSet<HashBytes>,
+    pub cells_bits: u32,
+}
+
+impl BlockStats {
+    pub fn add_cell(&mut self, cell: &DynCell) -> Result<()> {
+        if !self.cells_seen.insert(*cell.repr_hash()) {
+            return Ok(());
+        } else {
+            let bits = cell.bit_len() as u32;
+            self.cells_bits += bits;
+        }
+        for i in 0..cell.reference_count() {
+            self.add_cell(cell.reference(i).ok_or(anyhow::anyhow!("wrong cell"))?)?
+        }
+        Ok(())
+    }
+    pub fn current_level(&self, block_limits: &BlockLimits) -> BlockLimitsLevel {
+        let mut result = BlockLimitsLevel::Underload;
+        let BlockLimits {
+            bytes,
+            gas,
+            lt_delta,
+        } = block_limits;
+
+        let BlockParamLimits {
+            soft_limit,
+            hard_limit,
+            ..
+        } = bytes;
+
+        let cells_bytes = self.cells_bits / 8;
+        if cells_bytes >= *hard_limit {
+            return BlockLimitsLevel::Hard;
+        }
+        if cells_bytes >= *soft_limit {
+            result = BlockLimitsLevel::Soft
+        }
+
+        let BlockParamLimits {
+            soft_limit,
+            hard_limit,
+            ..
+        } = gas;
+
+        if self.gas_used >= *hard_limit {
+            return BlockLimitsLevel::Hard;
+        }
+        if self.gas_used >= *soft_limit {
+            result = BlockLimitsLevel::Soft
+        }
+
+        let BlockParamLimits {
+            soft_limit,
+            hard_limit,
+            ..
+        } = lt_delta;
+
+        let delta_lt = (self.lt_current - self.lt_start) as u32;
+        if delta_lt >= *hard_limit {
+            return BlockLimitsLevel::Hard;
+        }
+        if delta_lt >= *soft_limit {
+            result = BlockLimitsLevel::Soft
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BlockLimitsLevel {
+    Underload,
+    Soft,
+    Hard,
 }
 
 #[derive(Debug)]
