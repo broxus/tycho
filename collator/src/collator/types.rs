@@ -328,9 +328,12 @@ pub(super) struct BlockCollationData {
     pub execute_count_ext: u32,
     pub execute_count_int: u32,
     pub execute_count_new_int: u32,
-    pub enqueue_count: u32,
-    pub dequeue_count: u32,
 
+    pub int_enqueue_count: u32,
+    pub int_dequeue_count: u32,
+
+    pub read_ext_msgs: u32,
+    pub read_int_msgs_from_iterator: u32,
     pub new_msgs_created: u32,
     pub inserted_new_msgs_to_iterator: u32,
     pub read_new_msgs_from_iterator: u32,

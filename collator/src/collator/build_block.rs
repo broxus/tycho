@@ -25,7 +25,9 @@ impl CollatorStdImpl {
     ) -> Result<(Box<BlockCandidate>, ShardStateStuff)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
-        let histogram = HistogramGuard::begin("tycho_collator_finalize_block_time");
+        let labels = &[("workchain", self.shard_id.workchain().to_string())];
+        let histogram =
+            HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
 
         let mc_data = &self.working_state().mc_data;
         let prev_shard_data = &self.working_state().prev_shard_data;
@@ -39,8 +41,10 @@ impl CollatorStdImpl {
 
         let build_account_blocks_elapsed;
         let (account_blocks, shard_accounts) = {
-            let histogram =
-                HistogramGuard::begin("tycho_collator_finalize_build_account_blocks_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_account_blocks_time",
+                labels,
+            );
 
             let mut account_blocks = RelaxedAugDict::new();
             let mut shard_accounts =
@@ -106,7 +110,10 @@ impl CollatorStdImpl {
 
         let build_in_msgs_elapsed;
         let in_msgs = {
-            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_in_msgs_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_in_msgs_time",
+                labels,
+            );
 
             let mut in_msgs = RelaxedAugDict::new();
             // TODO: use more effective algorithm than iter and set
@@ -121,7 +128,10 @@ impl CollatorStdImpl {
 
         let build_out_msgs_elapsed;
         let out_msgs = {
-            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_out_msgs_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_out_msgs_time",
+                labels,
+            );
 
             let mut out_msgs = RelaxedAugDict::new();
             // TODO: use more effective algorithm than iter and set
@@ -151,8 +161,10 @@ impl CollatorStdImpl {
         // collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
         let build_mc_state_extra_elapsed;
         let (mc_state_extra, master_ref) = if is_masterchain {
-            let histogram =
-                HistogramGuard::begin("tycho_collator_finish_build_mc_state_extra_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finish_build_mc_state_extra_time",
+                labels,
+            );
 
             let (extra, min_ref_mc_seqno) = self.create_mc_state_extra(
                 collation_data,
@@ -206,8 +218,10 @@ impl CollatorStdImpl {
 
         let build_state_update_elapsed;
         let state_update = {
-            let histogram =
-                HistogramGuard::begin("tycho_collator_finalize_build_state_update_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_state_update_time",
+                labels,
+            );
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
@@ -263,7 +277,10 @@ impl CollatorStdImpl {
         let new_block_id;
         let new_block_boc;
         let new_block = {
-            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_block_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_block_time",
+                labels,
+            );
 
             // calc block extra
             let mut new_block_extra = BlockExtra {
@@ -348,7 +365,10 @@ impl CollatorStdImpl {
 
         let build_new_state_elapsed;
         let new_state_stuff = {
-            let histogram = HistogramGuard::begin("tycho_collator_finalize_build_new_state_time");
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_finalize_build_new_state_time",
+                labels,
+            );
 
             let pure_prev_state_root = prev_shard_data.pure_state_root();
             let new_state_root = state_update.apply(pure_prev_state_root)?;

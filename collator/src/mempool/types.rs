@@ -64,6 +64,13 @@ impl MempoolAnchor {
         self.externals.len()
     }
 
+    pub fn externals_count_for(&self, shard_id: &ShardIdent) -> usize {
+        self.externals
+            .iter()
+            .filter(|ext| shard_id.contains_address(&ext.info().dst))
+            .count()
+    }
+
     pub fn check_has_externals_for(&self, shard_id: &ShardIdent) -> bool {
         self.externals
             .iter()

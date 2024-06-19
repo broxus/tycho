@@ -507,10 +507,14 @@ impl CollatorStdImpl {
             }
         };
 
-        let has_externals = next_anchor.check_has_externals_for(&self.shard_id);
+        let externals_count = next_anchor.externals_count_for(&self.shard_id);
+        let has_externals = externals_count > 0;
         if has_externals {
             self.has_pending_externals = true;
         }
+
+        metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
+            .increment(externals_count as _);
 
         let chain_time_elapsed =
             next_anchor.chain_time() - self.last_imported_anchor_chain_time.unwrap_or_default();
