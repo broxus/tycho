@@ -73,7 +73,13 @@ impl CollatorStdImpl {
         collation_data.gen_utime_ms = (next_chain_time % 1000) as u16;
         collation_data.start_lt = Self::calc_start_lt(mc_data, prev_shard_data, &collation_data)?;
         collation_data.next_lt = collation_data.start_lt + 1;
-        collation_data.stats.lt_start = collation_data.start_lt;
+        collation_data.block_limit.lt_start = collation_data.start_lt;
+        collation_data.block_limit.lt_current = collation_data.start_lt;
+        collation_data.block_limit.load_block_limits(
+            mc_data
+                .config()
+                .get_block_limits(self.shard_id.is_masterchain())?,
+        );
 
         collation_data.processed_upto = prev_shard_data.processed_upto().clone();
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
@@ -205,13 +211,21 @@ impl CollatorStdImpl {
         loop {
             let mut timer = Instant::now();
 
+            let soft_level_reached = collation_data.block_limit.reached(BlockLimitsLevel::Soft);
+            if soft_level_reached {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "STUB: soft block limit reached: {:?}",
+                    collation_data.block_limit,
+                );
+            }
             let mut executed_internal_messages = vec![];
             let mut internal_messages_sources = FastHashMap::default();
             // build messages set
             let mut msgs_set: Vec<Box<ParsedMessage>> = vec![];
 
             // 1. First try to read min externals amount
-            let mut ext_msgs = if self.has_pending_externals {
+
+            let mut ext_msgs = if !soft_level_reached && self.has_pending_externals {
                 self.read_next_externals(min_externals_per_set, &mut collation_data)?
             } else {
                 vec![]
@@ -261,7 +275,7 @@ impl CollatorStdImpl {
             //    If not enough existing internals to fill the set then try read more externals
             msgs_set.append(&mut ext_msgs);
             remaining_capacity = max_messages_per_set - msgs_set.len();
-            if remaining_capacity > 0 && self.has_pending_externals {
+            if remaining_capacity > 0 && self.has_pending_externals && !soft_level_reached {
                 ext_msgs = self.read_next_externals(remaining_capacity, &mut collation_data)?;
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     ext_count = ext_msgs.len(),
@@ -340,7 +354,7 @@ impl CollatorStdImpl {
             fill_msgs_total_elapsed += timer.elapsed();
 
             // execute msgs processing by groups
-            'execute_groups: while !msgs_set_full_processed {
+            while !msgs_set_full_processed {
                 // Exec messages
                 exec_ticks_count += 1;
                 timer = std::time::Instant::now();
@@ -389,7 +403,7 @@ impl CollatorStdImpl {
                     }
 
                     collation_data.next_lt = exec_manager.min_next_lt();
-                    collation_data.stats.lt_current = collation_data.next_lt;
+                    collation_data.block_limit.lt_current = collation_data.next_lt;
                 }
 
                 msgs_set_offset = tick.new_offset;
@@ -412,16 +426,13 @@ impl CollatorStdImpl {
                     msgs_set_full_processed = true;
                 }
 
-                if let BlockLimitsLevel::Hard = collation_data
-                    .stats
-                    .current_level(&self.config.block_limits)
-                {
+                if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        "STUB: block limit reached: {:?}/{:?}",
-                        collation_data.stats, self.config.block_limits,
+                        "STUB: block limit reached: {:?}",
+                        collation_data.block_limit,
                     );
                     block_limits_reached = true;
-                    break 'execute_groups;
+                    break;
                 }
             }
 
@@ -1343,24 +1354,8 @@ fn new_transaction(
     );
 
     collation_data.execute_count_all += 1;
-    let transaction = executor_output.transaction.load()?;
-    let gas_used = 'gas: {
-        match transaction.load_info()? {
-            TxInfo::Ordinary(info) => {
-                if let ComputePhase::Executed(phase) = &info.compute_phase {
-                    break 'gas phase.gas_used.into_inner();
-                }
-            }
-            TxInfo::TickTock(info) => {
-                if let ComputePhase::Executed(phase) = &info.compute_phase {
-                    break 'gas phase.gas_used.into_inner();
-                }
-            }
-        };
-        0
-    };
-    collation_data.stats.gas_used += gas_used as u32;
-    collation_data.stats.add_cell(&*in_msg.cell)?;
+    collation_data.block_limit.gas_used += executor_output.gas_used as u32;
+    collation_data.block_limit.add_cell(&*in_msg.cell)?;
 
     let import_fees;
     let in_msg_hash = *in_msg.cell.repr_hash();
@@ -1495,7 +1490,7 @@ fn new_transaction(
 
     for out_msg_cell in executor_output.out_msgs.values() {
         let out_msg_cell = out_msg_cell?;
-        collation_data.stats.add_cell(&*out_msg_cell)?;
+        collation_data.block_limit.add_cell(&*out_msg_cell)?;
         let out_msg_hash = *out_msg_cell.repr_hash();
         let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
 

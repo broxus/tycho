@@ -323,7 +323,7 @@ pub(super) struct BlockCollationData {
 
     pub tx_count: u64,
 
-    pub stats: BlockStats,
+    pub block_limit: BlockLimitStats,
 
     pub total_execute_msgs_time_mc: u128,
 
@@ -380,15 +380,20 @@ pub(super) struct BlockCollationData {
     pub created_by: HashBytes,
 }
 #[derive(Debug, Default)]
-pub struct BlockStats {
+pub struct BlockLimitStats {
     pub gas_used: u32,
     pub lt_current: u64,
     pub lt_start: u64,
     pub cells_seen: HashSet<HashBytes>,
     pub cells_bits: u32,
+    pub block_limits: Option<BlockLimits>,
 }
 
-impl BlockStats {
+impl BlockLimitStats {
+    pub fn load_block_limits(&mut self, block_limits: BlockLimits) {
+        self.block_limits = Some(block_limits);
+    }
+
     pub fn add_cell(&mut self, cell: &DynCell) -> Result<()> {
         if !self.cells_seen.insert(*cell.repr_hash()) {
             return Ok(());
@@ -401,13 +406,15 @@ impl BlockStats {
         }
         Ok(())
     }
-    pub fn current_level(&self, block_limits: &BlockLimits) -> BlockLimitsLevel {
-        let mut result = BlockLimitsLevel::Underload;
-        let BlockLimits {
+    pub fn reached(&self, level: BlockLimitsLevel) -> bool {
+        let Some(BlockLimits {
             bytes,
             gas,
             lt_delta,
-        } = block_limits;
+        }) = &self.block_limits
+        else {
+            return false;
+        };
 
         let BlockParamLimits {
             soft_limit,
@@ -417,10 +424,10 @@ impl BlockStats {
 
         let cells_bytes = self.cells_bits / 8;
         if cells_bytes >= *hard_limit {
-            return BlockLimitsLevel::Hard;
+            return true;
         }
-        if cells_bytes >= *soft_limit {
-            result = BlockLimitsLevel::Soft
+        if cells_bytes >= *soft_limit && level == BlockLimitsLevel::Soft {
+            return true;
         }
 
         let BlockParamLimits {
@@ -430,10 +437,10 @@ impl BlockStats {
         } = gas;
 
         if self.gas_used >= *hard_limit {
-            return BlockLimitsLevel::Hard;
+            return true;
         }
-        if self.gas_used >= *soft_limit {
-            result = BlockLimitsLevel::Soft
+        if self.gas_used >= *soft_limit && level == BlockLimitsLevel::Soft {
+            return true;
         }
 
         let BlockParamLimits {
@@ -444,12 +451,12 @@ impl BlockStats {
 
         let delta_lt = (self.lt_current - self.lt_start) as u32;
         if delta_lt >= *hard_limit {
-            return BlockLimitsLevel::Hard;
+            return true;
         }
-        if delta_lt >= *soft_limit {
-            result = BlockLimitsLevel::Soft
+        if delta_lt >= *soft_limit && level == BlockLimitsLevel::Soft {
+            return true;
         }
-        result
+        false
     }
 }
 
