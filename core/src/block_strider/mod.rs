@@ -302,6 +302,9 @@ where
                     Err(e) => {
                         tracing::error!(?prev_block_id, "error while fetching master block: {e:?}");
                         // TODO: backoff
+
+                        // NOTE: Give some time to breathe to tokio
+                        tokio::task::yield_now().await;
                     }
                 }
             }
@@ -314,6 +317,7 @@ where
                 Some(Ok(block)) => break Ok(block),
                 Some(Err(e)) => {
                     tracing::error!("error while fetching block: {e:?}");
+                    tokio::task::yield_now().await;
                     // TODO: backoff
                 }
                 None => {

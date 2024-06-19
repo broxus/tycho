@@ -226,8 +226,7 @@ impl StateNodeAdapterStdImpl {
                     match self.save_block_proof(block).await {
                         Ok(_) => return Some(Ok(block.block_stuff_aug.clone())),
                         Err(e) => {
-                            tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Failed to save block proof: {e}");
-                            return Some(Err(anyhow!("Failed to save block proof")));
+                            return Some(Err(anyhow!("failed to save block proof: {e:?}")));
                         }
                     }
                 }
@@ -259,13 +258,8 @@ impl StateNodeAdapterStdImpl {
         };
 
         let block_info = block.block_stuff_aug.block().info.load()?;
-        let proof = match Self::prepare_block_proof(&block.block_id, bytes, &block.signatures) {
-            Ok(proof) => proof,
-            Err(e) => {
-                tracing::error!(target: tracing_targets::STATE_NODE_ADAPTER, "Failed to prepare block proof: {e}");
-                anyhow::bail!("Failed to prepare block proof");
-            }
-        };
+        let proof = Self::prepare_block_proof(&block.block_id, bytes, &block.signatures)
+            .context("failed to prepare block proof")?;
 
         let is_link = !proof.proof_for.is_masterchain();
         let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
@@ -296,6 +290,7 @@ impl StateNodeAdapterStdImpl {
         Ok(())
     }
 
+    // TODO: This should possibly panic on error?
     pub fn prepare_block_proof(
         block_id: &BlockId,
         block_boc: &[u8],
@@ -303,7 +298,7 @@ impl StateNodeAdapterStdImpl {
     ) -> Result<Box<BlockProof>> {
         let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
 
-        let mut usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess).with_subtrees();
+        let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
         let cell = Boc::decode(block_boc)?;
         let tracked_cell = usage_tree.track(&cell);
         let block = tracked_cell.parse::<Block>()?;
