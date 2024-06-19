@@ -436,11 +436,12 @@ impl Node {
             None => {
                 tracing::info!("cold init");
 
-                cold_boot(self, zerostates).await?
+                let last_mc_block_id = cold_boot(self, zerostates).await?;
 
-                // TODO: failed when sync?
-                // node_state.store_init_mc_block_id(&zerostate_id);
-                // node_state.store_last_mc_block_id(&zerostate_id);
+                node_state.store_init_mc_block_id(&last_mc_block_id);
+                node_state.store_last_mc_block_id(&last_mc_block_id);
+
+                last_mc_block_id
             }
         };
 
