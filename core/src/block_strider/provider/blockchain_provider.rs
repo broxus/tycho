@@ -1,12 +1,16 @@
 use std::time::Duration;
 
-use anyhow::anyhow;
-use everscale_types::models::{BlockId, PrevBlockRef};
+use anyhow::Context;
+use arc_swap::ArcSwapAny;
+use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::time::Instant;
-use tycho_block_util::block::{BlockProofStuff, BlockStuff};
+use tycho_block_util::block::{
+    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockStuff,
+};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::Storage;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
 use crate::block_strider::provider::OptionalBlockStuff;
@@ -46,6 +50,8 @@ pub struct BlockchainBlockProvider {
     client: BlockchainRpcClient,
     storage: Storage,
     config: BlockchainBlockProviderConfig,
+    cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
+    cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
 }
 
 impl BlockchainBlockProvider {
@@ -58,6 +64,8 @@ impl BlockchainBlockProvider {
             client,
             storage,
             config,
+            cached_zerostate: Default::default(),
+            cached_prev_key_block_proof: Default::default(),
         }
     }
 
@@ -163,7 +171,9 @@ impl BlockchainBlockProvider {
     }
 
     async fn check_proof(&self, block: &BlockStuff, proof: &BlockProofStuff) -> anyhow::Result<()> {
-        let started_at = Instant::now();
+        // TODO: Add labels with shard?
+        let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
+
         anyhow::ensure!(
             block.id() == &proof.proof().proof_for,
             "proof_for and block id mismatch: proof_for={}, block_id={}",
@@ -171,64 +181,68 @@ impl BlockchainBlockProvider {
             block.id(),
         );
 
-        if !block.id().is_masterchain() {
-            proof.pre_check_block_proof()?;
-            metrics::histogram!("tycho_core_check_shard_block_proof_time")
-                .record(started_at.elapsed());
+        let is_masterchain = block.id().is_masterchain();
+        anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
+
+        let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
+        if !is_masterchain {
             return Ok(());
         }
 
-        let block_info = match block.load_info() {
-            Ok(block_info) => block_info,
-            Err(e) => anyhow::bail!("failed to parse block info: {e}"),
+        let handle = {
+            let block_handles = self.storage.block_handle_storage();
+            block_handles
+                .load_key_block_handle(virt_block_info.prev_key_block_seqno)
+                .context("failed to load prev key block handle")?
         };
 
-        let previous_block = block_info.load_prev_ref()?;
-        let prev_block_seqno = match previous_block {
-            PrevBlockRef::Single(block_ref) => block_ref.seqno,
-            _ => {
-                anyhow::bail!(
-                    "Master block can't have more than 1 prev ref. Block: {:?}",
-                    block.id()
-                );
-            }
-        };
-
-        let previous_master_block = self
-            .storage
-            .block_handle_storage()
-            .load_key_block_handle(prev_block_seqno);
-
-        if let Some(previous_master_block_handle) = previous_master_block {
-            let shard_state_stuff = match self
-                .storage
-                .shard_state_storage()
-                .load_state(previous_master_block_handle.id())
-                .await
-            {
-                Ok(shard_state_stuff) => shard_state_stuff,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to load shard state for block {} info: {e}",
-                        block.id()
-                    );
-                    return Err(anyhow!("Request block is invalid"));
+        if handle.id().seqno == 0 {
+            let zerostate = 'zerostate: {
+                if let Some(zerostate) = self.cached_zerostate.load_full() {
+                    break 'zerostate zerostate;
                 }
+
+                let shard_states = self.storage.shard_state_storage();
+                let zerostate = shard_states
+                    .load_state(handle.id())
+                    .await
+                    .context("failed to load mc zerostate")?;
+
+                self.cached_zerostate.store(Some(zerostate.clone()));
+
+                zerostate
             };
 
-            if let Err(e) = proof.check_with_master_state(&shard_state_stuff) {
-                tracing::error!(
-                    "Failed to check proof for block {} with master state: {e}",
-                    block.id()
-                );
-                return Err(anyhow!("Request block is invalid"));
-            }
+            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)
+        } else {
+            let prev_key_block_proof = 'prev_proof: {
+                if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
+                    if &prev_proof.as_ref().proof_for == handle.id() {
+                        break 'prev_proof prev_proof;
+                    }
+                }
+
+                let blocks = self.storage.block_storage();
+                let prev_key_block_proof = blocks
+                    .load_block_proof(&handle, false)
+                    .await
+                    .context("failed to load prev key block proof")?;
+
+                // NOTE: Assume that there is only one masterchain block using this cache.
+                // Otherwise, it will be overwritten every time. Maybe use `rcu`.
+                self.cached_prev_key_block_proof
+                    .store(Some(prev_key_block_proof.clone()));
+
+                prev_key_block_proof
+            };
+
+            check_with_prev_key_block_proof(
+                proof,
+                &prev_key_block_proof,
+                &virt_block,
+                &virt_block_info,
+            )
         }
-
-        metrics::histogram!("tycho_core_check_master_block_proof_time")
-            .record(started_at.elapsed());
-
-        Ok(())
     }
 }
 

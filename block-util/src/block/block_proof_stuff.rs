@@ -346,7 +346,26 @@ impl AsRef<BlockProof> for BlockProofStuff {
     }
 }
 
-struct Inner {
+unsafe impl arc_swap::RefCnt for BlockProofStuff {
+    type Base = Inner;
+
+    fn into_ptr(me: Self) -> *mut Self::Base {
+        arc_swap::RefCnt::into_ptr(me.inner)
+    }
+
+    fn as_ptr(me: &Self) -> *mut Self::Base {
+        arc_swap::RefCnt::as_ptr(&me.inner)
+    }
+
+    unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
+        Self {
+            inner: arc_swap::RefCnt::from_ptr(ptr),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct Inner {
     proof: Box<BlockProof>,
     is_link: bool,
 }

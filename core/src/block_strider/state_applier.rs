@@ -154,7 +154,7 @@ where
                 .storage
                 .block_storage()
                 .move_into_archive(&prepared.handle)
-                .await?
+                .await?;
         }
 
         // Done
