@@ -533,6 +533,22 @@ def collator_execution_manager() -> RowPanel:
     return create_row("Collator Execution Manager", metrics)
 
 
+def allocator_stats() -> RowPanel:
+    metrics = [
+        create_gauge_panel("jemalloc_allocated_bytes", "Allocated Bytes", UNITS.BYTES),
+        create_gauge_panel("jemalloc_active_bytes", "Active Bytes", UNITS.BYTES),
+        create_gauge_panel("jemalloc_metadata_bytes", "Metadata Bytes", UNITS.BYTES),
+        create_gauge_panel("jemalloc_resident_bytes", "Resident Bytes", UNITS.BYTES),
+        create_gauge_panel("jemalloc_mapped_bytes", "Mapped Bytes", UNITS.BYTES),
+        create_gauge_panel("jemalloc_retained_bytes", "Retained Bytes", UNITS.BYTES),
+        create_gauge_panel("jemalloc_dirty_bytes", "Dirty Bytes", UNITS.BYTES),
+        create_gauge_panel(
+            "jemalloc_fragmentation_bytes", "Fragmentation Bytes", UNITS.BYTES
+        ),
+    ]
+    return create_row("Allocator Stats", metrics)
+
+
 def templates() -> Templating:
     return Templating(
         list=[
@@ -579,6 +595,7 @@ dashboard = Dashboard(
         net_request_handler(),
         net_peer(),
         net_dht(),
+        allocator_stats(),
         jrpc(),
     ],
     annotations=Annotations(),
