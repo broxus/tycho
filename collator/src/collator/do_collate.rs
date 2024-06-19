@@ -530,7 +530,7 @@ impl CollatorStdImpl {
             .increment(collation_data.int_enqueue_count as _);
         metrics::counter!("tycho_do_collate_int_dequeue_count")
             .increment(collation_data.int_dequeue_count as _);
-        metrics::gauge!("tycho_do_collate_int_msgs_queue_calc", labels).increment(
+        metrics::gauge!("tycho_do_collate_int_msgs_queue_calc").increment(
             (collation_data.int_enqueue_count as i64 - collation_data.int_dequeue_count as i64)
                 as f64,
         );
