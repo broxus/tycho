@@ -10,6 +10,7 @@ use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
 use super::types::{CachedMempoolAnchor, SpecialOrigin};
@@ -565,16 +566,12 @@ impl CollatorStdImpl {
             .record(collation_mngmnt_overhead);
 
         // block time diff from now
-        let block_time_diff = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |now_unix| {
-                let diff_time = (now_unix.as_millis() as u64)
-                    .checked_sub(next_chain_time)
-                    .unwrap_or_default();
-                metrics::histogram!("tycho_do_collate_block_diff_time", labels)
-                    .record((diff_time / 1000) as f64);
-                diff_time
-            });
+        let block_time_diff = {
+            let diff_time = now_millis() as i64 - next_chain_time as i64;
+            metrics::histogram!("tycho_do_collate_block_diff_time", labels)
+                .record(diff_time as f64 / 1000.0);
+            diff_time
+        };
 
         tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 

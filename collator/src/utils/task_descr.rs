@@ -1,6 +1,7 @@
 use std::future::Future;
 
 use tokio::sync::oneshot;
+use tycho_util::time::now_millis;
 
 pub struct TaskDesc<F: ?Sized, R> {
     id: u64,
@@ -13,12 +14,8 @@ pub struct TaskDesc<F: ?Sized, R> {
 impl<F: ?Sized, R> TaskDesc<F, R> {
     pub fn create(descr: &str, closure: Box<F>) -> Self {
         // TODO: better to use global atomic counter
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
         Self {
-            id,
+            id: now_millis(),
             descr: descr.into(),
             closure,
             _creation_time: std::time::SystemTime::now(),
@@ -27,12 +24,8 @@ impl<F: ?Sized, R> TaskDesc<F, R> {
     }
     pub fn create_with_responder(descr: &str, closure: Box<F>) -> (Self, oneshot::Receiver<R>) {
         let (sender, receiver) = oneshot::channel::<R>();
-        let id = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
         let task = Self {
-            id,
+            id: now_millis(),
             descr: descr.into(),
             closure,
             _creation_time: std::time::SystemTime::now(),
