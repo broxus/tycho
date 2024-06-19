@@ -143,6 +143,7 @@ impl StorageBuilder {
         let inner = Arc::new(Inner {
             root,
             base_db,
+            config: self.config,
             block_handle_storage,
             block_storage,
             shard_state_storage,
@@ -210,6 +211,10 @@ impl Storage {
         &self.inner.base_db
     }
 
+    pub fn config(&self) -> &StorageConfig {
+        &self.inner.config
+    }
+
     pub fn runtime_storage(&self) -> &RuntimeStorage {
         &self.inner.runtime_storage
     }
@@ -250,6 +255,7 @@ impl Storage {
 struct Inner {
     root: FileDb,
     base_db: BaseDb,
+    config: StorageConfig,
 
     runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,

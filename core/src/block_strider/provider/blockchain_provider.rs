@@ -1,10 +1,16 @@
 use std::time::Duration;
 
-use everscale_types::models::BlockId;
+use anyhow::Context;
+use arc_swap::ArcSwapAny;
+use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::block::{
+    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockStuff,
+};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::Storage;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
 use crate::block_strider::provider::OptionalBlockStuff;
@@ -44,6 +50,8 @@ pub struct BlockchainBlockProvider {
     client: BlockchainRpcClient,
     storage: Storage,
     config: BlockchainBlockProviderConfig,
+    cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
+    cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
 }
 
 impl BlockchainBlockProvider {
@@ -56,46 +64,55 @@ impl BlockchainBlockProvider {
             client,
             storage,
             config,
+            cached_zerostate: Default::default(),
+            cached_prev_key_block_proof: Default::default(),
         }
     }
 
-    // TODO: Validate block with proof.
     async fn get_next_block_impl(&self, prev_block_id: &BlockId) -> OptionalBlockStuff {
         let mut interval = tokio::time::interval(self.config.get_next_block_polling_interval);
 
         loop {
             let res = self.client.get_next_block_full(prev_block_id).await;
-            let block = match res {
-                Ok(res) => match res.data() {
-                    BlockFull::Found {
-                        block_id,
-                        block: block_data,
-                        ..
-                    } => match BlockStuff::deserialize_checked(*block_id, block_data) {
-                        Ok(block) => {
-                            let block_data = block_data.clone();
-                            res.accept();
-                            Some(Ok(BlockStuffAug::new(block, block_data)))
+            'res: {
+                let (handle, data) = match res {
+                    Ok(res) => res.split(),
+                    Err(e) => {
+                        tracing::error!("failed to get next block: {e}");
+                        break 'res;
+                    }
+                };
+
+                let BlockFull::Found {
+                    block_id,
+                    block: block_data,
+                    proof: proof_data,
+                    is_link,
+                } = data
+                else {
+                    handle.accept();
+                    break 'res;
+                };
+
+                match (
+                    BlockStuff::deserialize_checked(&block_id, &block_data),
+                    BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
+                ) {
+                    (Ok(block), Ok(proof)) => {
+                        if let Err(e) = self.check_proof(&block, &proof).await {
+                            handle.reject();
+                            tracing::error!("got invalid mc block proof: {e}");
+                            break 'res;
                         }
-                        Err(e) => {
-                            res.reject();
-                            tracing::error!("failed to deserialize block: {e}");
-                            None
-                        }
-                    },
-                    BlockFull::Empty => None,
-                },
-                Err(e) => {
-                    tracing::error!("failed to get next block: {e}");
-                    None
+
+                        handle.accept();
+                        return Some(Ok(block.with_archive_data(block_data)));
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        handle.reject();
+                        tracing::error!("failed to deserialize mc block or block proof: {e}");
+                    }
                 }
-            };
-
-            // TODO: Use storage to get the previous key block
-            _ = &self.storage;
-
-            if block.is_some() {
-                break block;
             }
 
             interval.tick().await;
@@ -105,38 +122,126 @@ impl BlockchainBlockProvider {
     async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
         loop {
-            let res = match self.client.get_block_full(block_id).await {
-                Ok(res) => res,
-                Err(e) => {
-                    tracing::error!("failed to get block: {:?}", e);
-                    interval.tick().await;
-                    continue;
-                }
-            };
-
             // TODO: refactor
 
-            let block = match res.data() {
-                BlockFull::Found {
-                    block_id,
-                    block: data,
-                    ..
-                } => match BlockStuff::deserialize_checked(*block_id, data) {
-                    Ok(block) => Some(Ok(BlockStuffAug::new(block, data.clone()))),
+            let res = self.client.get_block_full(block_id).await;
+            'res: {
+                let (handle, data) = match res {
+                    Ok(res) => res.split(),
                     Err(e) => {
-                        res.accept();
-                        tracing::error!("failed to deserialize block: {:?}", e);
-                        interval.tick().await;
-                        continue;
+                        tracing::error!("failed to get block: {e}");
+                        break 'res;
                     }
-                },
-                BlockFull::Empty => {
-                    interval.tick().await;
-                    continue;
+                };
+
+                let BlockFull::Found {
+                    block_id,
+                    block: block_data,
+                    proof: proof_data,
+                    is_link,
+                } = data
+                else {
+                    handle.accept();
+                    break 'res;
+                };
+
+                match (
+                    BlockStuff::deserialize_checked(&block_id, &block_data),
+                    BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
+                ) {
+                    (Ok(block), Ok(proof)) => {
+                        if let Err(e) = self.check_proof(&block, &proof).await {
+                            handle.reject();
+                            tracing::error!("got invalid shard block proof: {e}");
+                            break 'res;
+                        }
+
+                        handle.accept();
+                        return Some(Ok(block.with_archive_data(block_data)));
+                    }
+                    (Err(e), _) | (_, Err(e)) => {
+                        handle.reject();
+                        tracing::error!("failed to deserialize shard block or block proof: {e}");
+                    }
                 }
+            }
+
+            interval.tick().await;
+        }
+    }
+
+    async fn check_proof(&self, block: &BlockStuff, proof: &BlockProofStuff) -> anyhow::Result<()> {
+        // TODO: Add labels with shard?
+        let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
+
+        anyhow::ensure!(
+            block.id() == &proof.proof().proof_for,
+            "proof_for and block id mismatch: proof_for={}, block_id={}",
+            proof.proof().proof_for,
+            block.id(),
+        );
+
+        let is_masterchain = block.id().is_masterchain();
+        anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
+
+        let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
+        if !is_masterchain {
+            return Ok(());
+        }
+
+        let handle = {
+            let block_handles = self.storage.block_handle_storage();
+            block_handles
+                .load_key_block_handle(virt_block_info.prev_key_block_seqno)
+                .context("failed to load prev key block handle")?
+        };
+
+        if handle.id().seqno == 0 {
+            let zerostate = 'zerostate: {
+                if let Some(zerostate) = self.cached_zerostate.load_full() {
+                    break 'zerostate zerostate;
+                }
+
+                let shard_states = self.storage.shard_state_storage();
+                let zerostate = shard_states
+                    .load_state(handle.id())
+                    .await
+                    .context("failed to load mc zerostate")?;
+
+                self.cached_zerostate.store(Some(zerostate.clone()));
+
+                zerostate
             };
 
-            break block;
+            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)
+        } else {
+            let prev_key_block_proof = 'prev_proof: {
+                if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
+                    if &prev_proof.as_ref().proof_for == handle.id() {
+                        break 'prev_proof prev_proof;
+                    }
+                }
+
+                let blocks = self.storage.block_storage();
+                let prev_key_block_proof = blocks
+                    .load_block_proof(&handle, false)
+                    .await
+                    .context("failed to load prev key block proof")?;
+
+                // NOTE: Assume that there is only one masterchain block using this cache.
+                // Otherwise, it will be overwritten every time. Maybe use `rcu`.
+                self.cached_prev_key_block_proof
+                    .store(Some(prev_key_block_proof.clone()));
+
+                prev_key_block_proof
+            };
+
+            check_with_prev_key_block_proof(
+                proof,
+                &prev_key_block_proof,
+                &virt_block,
+                &virt_block_info,
+            )
         }
     }
 }

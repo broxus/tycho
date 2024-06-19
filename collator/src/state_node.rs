@@ -1,15 +1,19 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use everscale_types::boc::BocRepr;
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use tokio::sync::broadcast;
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tokio::time::Instant;
+use tycho_block_util::archive::ArchiveData;
+use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockHandle, Storage};
+use tycho_storage::{BlockHandle, BlockMetaData, BlockProofHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::FastDashMap;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
 use crate::types::BlockStuffForSync;
@@ -219,7 +223,12 @@ impl StateNodeAdapterStdImpl {
         loop {
             if let Some(shard_blocks) = self.blocks.get(&block_id.shard()) {
                 if let Some(block) = shard_blocks.get(&block_id.seqno()) {
-                    return Some(Ok(block.block_stuff_aug.clone()));
+                    match self.save_block_proof(block).await {
+                        Ok(_) => return Some(Ok(block.block_stuff_aug.clone())),
+                        Err(e) => {
+                            return Some(Err(anyhow!("failed to save block proof: {e:?}")));
+                        }
+                    }
                 }
             }
 
@@ -240,6 +249,116 @@ impl StateNodeAdapterStdImpl {
                 }
             }
         }
+    }
+
+    async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_collator_save_block_proof_time");
+        let ArchiveData::New(bytes) = &block.block_stuff_aug.archive_data else {
+            return Ok(());
+        };
+
+        let block_info = block.block_stuff_aug.block().info.load()?;
+        let proof = Self::prepare_block_proof(&block.block_id, bytes, &block.signatures)
+            .context("failed to prepare block proof")?;
+
+        let is_link = !proof.proof_for.is_masterchain();
+        let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
+
+        let proof_boc = BocRepr::encode(block_proof_stuff.as_ref())?;
+        let archive_data = block_proof_stuff.with_archive_data(proof_boc);
+
+        let result = self
+            .storage
+            .block_storage()
+            .store_block_proof(
+                &archive_data,
+                BlockProofHandle::New(BlockMetaData {
+                    is_key_block: block_info.key_block,
+                    gen_utime: block_info.gen_utime,
+                    mc_ref_seqno: block_info.min_ref_mc_seqno,
+                }),
+            )
+            .await?;
+
+        tracing::info!(
+            "Proof saved {:?}. New: {}, Updated: {}",
+            result.handle.id(),
+            result.new,
+            result.updated
+        );
+
+        Ok(())
+    }
+
+    // TODO: This should possibly panic on error?
+    pub fn prepare_block_proof(
+        block_id: &BlockId,
+        block_boc: &[u8],
+        signatures: &FastHashMap<HashBytes, Signature>,
+    ) -> Result<Box<BlockProof>> {
+        let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
+
+        let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
+        let cell = Boc::decode(block_boc)?;
+        let tracked_cell = usage_tree.track(&cell);
+        let block = tracked_cell.parse::<Block>()?;
+        let subtree = block.value_flow.inner().as_ref();
+        usage_tree.add_subtree(subtree);
+
+        let info = block.load_info()?;
+
+        info.load_prev_ref()?;
+        info.prev_vert_ref.map(|x| x.load());
+        info.master_ref.map(|x| x.load());
+        let extra = block.load_extra().unwrap();
+
+        let _state_update = block.load_state_update();
+        extra.load_custom()?;
+
+        let merkle_proof =
+            everscale_types::merkle::MerkleProof::create(cell.as_ref(), usage_tree).build()?;
+
+        let cell = CellBuilder::build_from(merkle_proof)?;
+
+        let signatures = Self::process_signatures(
+            info.gen_validator_list_hash_short,
+            info.gen_catchain_seqno,
+            signatures,
+        )?;
+
+        Ok(Box::new(BlockProof {
+            proof_for: *block_id,
+            root: cell,
+            signatures: Some(signatures),
+        }))
+    }
+
+    fn process_signatures(
+        gen_validator_list_hash_short: u32,
+        gen_catchain_seqno: u32,
+        block_signatures: &FastHashMap<HashBytes, Signature>,
+    ) -> Result<everscale_types::models::block::BlockSignatures> {
+        let mut signatures: Dict<u16, BlockSignature> = Dict::new();
+        for (index, (key, value)) in block_signatures.iter().enumerate() {
+            let block_signature = BlockSignature {
+                node_id_short: *key,
+                signature: *value,
+            };
+
+            signatures.add(index as u16, block_signature)?;
+        }
+
+        let sig_count = block_signatures.len() as u32;
+
+        Ok(everscale_types::models::block::BlockSignatures {
+            validator_info: ValidatorBaseInfo {
+                validator_list_hash_short: gen_validator_list_hash_short,
+                catchain_seqno: gen_catchain_seqno,
+            },
+            signature_count: sig_count,
+            total_weight: sig_count as u64,
+            signatures,
+        })
     }
 }
 

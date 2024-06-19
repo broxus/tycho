@@ -1416,6 +1416,7 @@ where
                 OnValidatedBlockEvent::Valid(bs) => (true, false, bs.signatures),
                 OnValidatedBlockEvent::Invalid => (false, false, Default::default()),
             };
+
             block_container.set_validation_result(is_valid, already_synced, signatures);
 
             Ok(block_container)

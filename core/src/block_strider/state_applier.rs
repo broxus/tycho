@@ -142,10 +142,20 @@ where
         metrics::histogram!("tycho_core_subscriber_handle_state_time").record(started_at.elapsed());
 
         // Mark block as applied
-        self.inner
+        let applied = self
+            .inner
             .storage
             .block_handle_storage()
             .store_block_applied(&prepared.handle);
+
+        if applied && self.inner.storage.config().archives.is_some() {
+            tracing::trace!(block_id = %prepared.handle.id(), "saving block into archive");
+            self.inner
+                .storage
+                .block_storage()
+                .move_into_archive(&prepared.handle)
+                .await?;
+        }
 
         // Done
         Ok(())

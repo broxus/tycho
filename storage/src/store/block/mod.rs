@@ -16,6 +16,7 @@ use tycho_block_util::archive::{
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
 };
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
 
@@ -173,7 +174,7 @@ impl BlockStorage {
 
     pub async fn load_block_data(&self, handle: &BlockHandle) -> Result<BlockStuff> {
         let raw_block = self.load_block_data_raw_ref(handle).await?;
-        BlockStuff::deserialize(*handle.id(), raw_block.as_ref())
+        BlockStuff::deserialize(handle.id(), raw_block.as_ref())
     }
 
     pub async fn load_block_data_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
@@ -256,7 +257,7 @@ impl BlockStorage {
         is_link: bool,
     ) -> Result<BlockProofStuff> {
         let raw_proof = self.load_block_proof_raw_ref(handle, is_link).await?;
-        BlockProofStuff::deserialize(*handle.id(), raw_proof.as_ref(), is_link)
+        BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref(), is_link)
     }
 
     pub async fn load_block_proof_raw(
@@ -309,6 +310,8 @@ impl BlockStorage {
 
     /// Loads data and proof for the block and appends them to the corresponding archive.
     pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_storage_move_into_archive_time");
+
         if handle.meta().is_archived() {
             return Ok(());
         }
@@ -378,6 +381,7 @@ impl BlockStorage {
         // 5. Execute transaction
         self.db.rocksdb().write(batch)?;
 
+        tracing::trace!(block_id = %handle.id(), "saved block into archive");
         // Block will be removed after blocks gc
 
         // Done

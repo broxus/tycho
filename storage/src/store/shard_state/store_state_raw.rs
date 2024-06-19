@@ -612,6 +612,7 @@ mod test {
                 rocksdb_enable_metrics: false,
                 rocksdb_lru_capacity: ByteSize::mb(256),
                 cells_cache_size: ByteSize::mb(256),
+                ..Default::default()
             })
             .build()?;
         let base_db = storage.base_db();

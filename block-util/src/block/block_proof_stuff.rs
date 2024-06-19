@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use everscale_types::merkle::*;
 use everscale_types::models::*;
@@ -10,17 +12,28 @@ pub type BlockProofStuffAug = WithArchiveData<BlockProofStuff>;
 
 /// Deserialized block proof.
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct BlockProofStuff {
-    proof: BlockProof,
-    is_link: bool,
+    inner: Arc<Inner>,
 }
 
 impl BlockProofStuff {
-    pub fn deserialize(block_id: BlockId, data: &[u8], is_link: bool) -> Result<Self> {
-        let proof = BocRepr::decode::<BlockProof, _>(data)?;
+    pub fn from_proof(proof: Box<BlockProof>, is_link: bool) -> Result<Self> {
+        anyhow::ensure!(
+            proof.proof_for.is_masterchain() || is_link,
+            "non-masterchain blocks cannot have full proofs",
+        );
+
+        Ok(Self {
+            inner: Arc::new(Inner { proof, is_link }),
+        })
+    }
+
+    pub fn deserialize(block_id: &BlockId, data: &[u8], is_link: bool) -> Result<Self> {
+        let proof = BocRepr::decode::<Box<BlockProof>, _>(data)?;
 
         anyhow::ensure!(
-            proof.proof_for == block_id,
+            &proof.proof_for == block_id,
             "proof block id mismatch (found: {})",
             proof.proof_for,
         );
@@ -30,34 +43,36 @@ impl BlockProofStuff {
             "non-masterchain blocks cannot have full proofs",
         );
 
-        Ok(Self { proof, is_link })
+        Ok(Self {
+            inner: Arc::new(Inner { proof, is_link }),
+        })
     }
 
-    pub fn with_archive_data(self, data: &[u8]) -> WithArchiveData<Self> {
-        WithArchiveData::new(self, data.to_vec())
+    pub fn with_archive_data(self, data: Vec<u8>) -> WithArchiveData<Self> {
+        WithArchiveData::new(self, data)
     }
 
     pub fn id(&self) -> &BlockId {
-        &self.proof.proof_for
+        &self.inner.proof.proof_for
     }
 
     pub fn proof(&self) -> &BlockProof {
-        &self.proof
+        &self.inner.proof
     }
 
     pub fn is_link(&self) -> bool {
-        self.is_link
+        self.inner.is_link
     }
 
     pub fn virtualize_block_root(&self) -> Result<&DynCell> {
-        let merkle_proof = self.proof.root.parse::<MerkleProofRef<'_>>()?;
+        let merkle_proof = self.inner.proof.root.parse::<MerkleProofRef<'_>>()?;
         let block_virt_root = merkle_proof.cell.virtualize();
 
         anyhow::ensure!(
-            &self.proof.proof_for.root_hash == block_virt_root.repr_hash(),
+            &self.inner.proof.proof_for.root_hash == block_virt_root.repr_hash(),
             "merkle proof has invalid virtual hash (found: {}, expected: {})",
             block_virt_root.repr_hash(),
-            self.proof.proof_for
+            self.inner.proof.proof_for
         );
 
         Ok(block_virt_root)
@@ -79,7 +94,10 @@ impl BlockProofStuff {
     }
 
     pub fn check_with_master_state(&self, master_state: &ShardStateStuff) -> Result<()> {
-        anyhow::ensure!(!self.is_link, "cannot check proof link using master state");
+        anyhow::ensure!(
+            !self.inner.is_link,
+            "cannot check proof link using master state"
+        );
 
         let (virt_block, virt_block_info) = self.pre_check_block_proof()?;
         check_with_master_state(self, master_state, &virt_block, &virt_block_info)?;
@@ -87,7 +105,7 @@ impl BlockProofStuff {
     }
 
     pub fn check_proof_link(&self) -> Result<()> {
-        anyhow::ensure!(self.is_link, "cannot check full proof as link");
+        anyhow::ensure!(self.inner.is_link, "cannot check full proof as link");
 
         self.pre_check_block_proof()?;
         Ok(())
@@ -96,7 +114,7 @@ impl BlockProofStuff {
     pub fn pre_check_block_proof(&self) -> Result<(Block, BlockInfo)> {
         let block_id = self.id();
         anyhow::ensure!(
-            block_id.is_masterchain() || self.proof.signatures.is_none(),
+            block_id.is_masterchain() || self.inner.proof.signatures.is_none(),
             "proof for non-masterchain block must not contain signatures",
         );
 
@@ -167,7 +185,7 @@ impl BlockProofStuff {
 
     fn check_signatures(&self, subset: &ValidatorSubsetInfo) -> Result<()> {
         // Prepare
-        let Some(signatures) = self.proof.signatures.as_ref() else {
+        let Some(signatures) = self.inner.proof.signatures.as_ref() else {
             anyhow::bail!("proof doesn't have signatures to check");
         };
 
@@ -310,6 +328,7 @@ impl BlockProofStuff {
         catchain_config: &CatchainConfig,
     ) -> Result<ValidatorSubsetInfo> {
         let cc_seqno = self
+            .inner
             .proof
             .signatures
             .as_ref()
@@ -318,6 +337,37 @@ impl BlockProofStuff {
 
         ValidatorSubsetInfo::compute_standard(validator_set, self.id(), catchain_config, cc_seqno)
     }
+}
+
+impl AsRef<BlockProof> for BlockProofStuff {
+    #[inline]
+    fn as_ref(&self) -> &BlockProof {
+        &self.inner.proof
+    }
+}
+
+unsafe impl arc_swap::RefCnt for BlockProofStuff {
+    type Base = Inner;
+
+    fn into_ptr(me: Self) -> *mut Self::Base {
+        arc_swap::RefCnt::into_ptr(me.inner)
+    }
+
+    fn as_ptr(me: &Self) -> *mut Self::Base {
+        arc_swap::RefCnt::as_ptr(&me.inner)
+    }
+
+    unsafe fn from_ptr(ptr: *const Self::Base) -> Self {
+        Self {
+            inner: arc_swap::RefCnt::from_ptr(ptr),
+        }
+    }
+}
+
+#[doc(hidden)]
+pub struct Inner {
+    proof: Box<BlockProof>,
+    is_link: bool,
 }
 
 pub fn check_with_prev_key_block_proof(
