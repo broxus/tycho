@@ -1,4 +1,5 @@
 import sys
+from typing import Union, List
 
 from grafanalib import formatunits as UNITS, _gen
 from grafanalib.core import (
@@ -30,24 +31,54 @@ def heatmap_color_warm() -> HeatmapColor:
 
 
 def create_gauge_panel(
-    expr, title, unit_format=UNITS.NUMBER_FORMAT, labels=[]
+    expr: Union[str, List[Union[str, Expr]]],
+    title: str,
+    unit_format=UNITS.NUMBER_FORMAT,
+    labels=[],
 ) -> Panel:
     if isinstance(expr, str):
-        expr = Expr(metric=expr)
+        expr = [Expr(metric=expr)]
+    elif isinstance(expr, list):
+        expr = [Expr(metric=e) if isinstance(e, str) else e for e in expr]
+    else:
+        raise TypeError(
+            "expr must be a string, a list of strings, or a list of Expr objects."
+        )
+
+    targets = [target(e, legend_format="{{instance}}") for e in expr]
 
     return timeseries_panel(
         title=title,
-        targets=[target(expr, legend_format="{{instance}}")],
+        targets=targets,
         unit=unit_format,
     )
 
 
 def create_counter_panel(
-    expr, title, unit_format=UNITS.NUMBER_FORMAT, labels=[]
+    expr: Union[str, List[Union[str, Expr]]],
+    title: str,
+    unit_format: str = UNITS.NUMBER_FORMAT,
+    labels: List[str] = [],
 ) -> Panel:
+    if isinstance(expr, str):
+        targets = [target(expr_sum_rate(expr), legend_format="{{instance}}")]
+    elif isinstance(expr, list):
+        if all(isinstance(e, str) for e in expr):
+            targets = [
+                target(expr_sum_rate(e), legend_format="{{instance}}") for e in expr
+            ]
+        elif all(isinstance(e, Expr) for e in expr):
+            targets = [target(e, legend_format="{{instance}}") for e in expr]
+        else:
+            raise ValueError("List elements must be all strings or all Expr objects.")
+    else:
+        raise TypeError(
+            "expr must be a string, a list of strings, or a list of Expr objects."
+        )
+
     return timeseries_panel(
         title=title,
-        targets=[target(expr_sum_rate(expr), legend_format="{{instance}}")],
+        targets=targets,
         unit=unit_format,
     )
 
