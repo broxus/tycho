@@ -7,6 +7,7 @@ pub use verifier::*;
 mod anchor_stage;
 mod dag;
 mod dag_location;
+mod dag_point_future;
 mod dag_round;
 mod producer;
 mod verifier;

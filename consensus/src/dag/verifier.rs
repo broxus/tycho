@@ -6,7 +6,8 @@ use tracing::{Instrument, Span};
 use tycho_util::sync::rayon_run;
 
 use crate::dag::anchor_stage::AnchorStage;
-use crate::dag::{DagPointFuture, DagRound, WeakDagRound};
+use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::{DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
