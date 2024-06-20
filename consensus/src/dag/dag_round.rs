@@ -3,18 +3,17 @@ use std::sync::{Arc, Weak};
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-use tokio::sync::mpsc;
 use tracing::Span;
 use tycho_network::PeerId;
-use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
-use crate::dag::{DagLocation, DagPointFuture, InclusionState, Verifier};
+use crate::dag::dag_point_future::DagPointFuture;
+use crate::dag::{DagLocation, InclusionState};
 use crate::effects::{CurrentRoundContext, Effects, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Location, NodeCount, Point, PointId, Round, ValidPoint};
+use crate::models::{DagPoint, Digest, NodeCount, Point, Round, ValidPoint};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -149,6 +148,7 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
+    /// Point already verified
     pub fn add_broadcast_exact(
         &self,
         point: &Point,
@@ -163,23 +163,17 @@ impl DagRound {
         );
         let digest = point.digest();
         self.edit(&point.body().location.author, |loc| {
-            let downloader = downloader.clone();
-            let span = effects.span().clone();
-            let state = loc.state().clone();
-            let point_dag_round = self.downgrade();
-            let point = point.clone();
-            loc.init(digest, |state| {
+            let result_state = loc.state().clone();
+            loc.init_or_modify(
+                digest,
                 // FIXME: prior Responder refactor: could not sign during validation,
                 //   because current DAG round could advance concurrently;
                 //   now current dag round changes consistently,
                 //   maybe its possible to reduce locking in 'inclusion state'
-                let state = state.clone();
-                DagPointFuture::Broadcast(Shared::new(JoinTask::new(
-                    Verifier::validate(point, point_dag_round, downloader, span)
-                        .inspect(move |dag_point| state.init(dag_point)),
-                )))
-            })
-            .map(|first| first.clone().map(|_| state).boxed())
+                |state| DagPointFuture::new_broadcast(self, point, state, downloader, effects),
+                |existing| existing.resolve_download(point),
+            )
+            .map(|first| first.clone().map(|_| result_state).boxed())
         })
     }
 
@@ -195,26 +189,7 @@ impl DagRound {
     ) -> DagPointFuture {
         let future = self.edit(author, |loc| {
             loc.get_or_init(digest, |state| {
-                let downloader = downloader.clone();
-                let effects = effects.clone();
-                let state = state.clone();
-                let point_dag_round = self.clone();
-                let (tx, rx) = mpsc::unbounded_channel();
-                let point_id = PointId {
-                    location: Location {
-                        author: *author,
-                        round: self.round(),
-                    },
-                    digest: digest.clone(),
-                };
-                DagPointFuture::Download {
-                    task: Shared::new(JoinTask::new(
-                        downloader
-                            .run(point_id, point_dag_round, rx, effects)
-                            .inspect(move |dag_point| state.init(dag_point)),
-                    )),
-                    dependents: tx,
-                }
+                DagPointFuture::new_download(self, author, digest, state, downloader, effects)
             })
             .clone()
         });
@@ -263,10 +238,11 @@ impl DagRound {
             "Coding error: dag round mismatches point round on insert"
         );
         self.edit(sender, |loc| {
-            let _existing = loc.init(dag_point.digest(), |state| {
-                state.init(dag_point);
-                DagPointFuture::Local(futures_util::future::ready(dag_point.clone()))
-            });
+            let _ready = loc.init_or_modify(
+                dag_point.digest(),
+                |state| DagPointFuture::new_local(dag_point, state),
+                |_fut| {},
+            );
             loc.state().clone()
         })
     }

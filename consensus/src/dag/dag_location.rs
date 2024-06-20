@@ -1,16 +1,10 @@
 use std::collections::{btree_map, BTreeMap};
-use std::future::Future;
 use std::ops::RangeInclusive;
-use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-use std::task::{Context, Poll};
 
 use everscale_crypto::ed25519::KeyPair;
-use futures_util::FutureExt;
-use tokio::sync::mpsc;
-use tycho_network::PeerId;
-use tycho_util::futures::{JoinTask, Shared};
 
+use crate::dag::dag_point_future::DagPointFuture;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
 
 /// If DAG location exists, it must have non-empty `versions` map;
@@ -37,40 +31,6 @@ pub struct DagLocation {
     versions: BTreeMap<Digest, DagPointFuture>,
 }
 
-#[derive(Clone)]
-pub enum DagPointFuture {
-    Broadcast(Shared<JoinTask<DagPoint>>),
-    Download {
-        task: Shared<JoinTask<DagPoint>>,
-        dependents: mpsc::UnboundedSender<PeerId>,
-    },
-    Local(futures_util::future::Ready<DagPoint>),
-}
-
-impl DagPointFuture {
-    pub fn add_depender(&self, dependent: &PeerId) {
-        if let Self::Download { dependents, .. } = self {
-            // receiver is dropped upon completion
-            _ = dependents.send(*dependent);
-        }
-    }
-}
-
-impl Future for DagPointFuture {
-    type Output = DagPoint;
-
-    #[inline]
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match &mut *self {
-            Self::Broadcast(task) | Self::Download { task, .. } => match task.poll_unpin(cx) {
-                Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
-                Poll::Pending => Poll::Pending,
-            },
-            Self::Local(ready) => ready.poll_unpin(cx),
-        }
-    }
-}
-
 impl DagLocation {
     // point that is validated depends on other equivocated points futures (if any)
     // in the same location, so need to keep order of futures' completion;
@@ -84,12 +44,21 @@ impl DagLocation {
             .entry(digest.clone())
             .or_insert_with(|| init(&self.state))
     }
-    pub fn init<F>(&mut self, digest: &Digest, init: F) -> Option<&DagPointFuture>
+    pub fn init_or_modify<F, U>(
+        &mut self,
+        digest: &Digest,
+        init: F,
+        modify: U,
+    ) -> Option<&DagPointFuture>
     where
         F: FnOnce(&InclusionState) -> DagPointFuture,
+        U: FnOnce(&DagPointFuture),
     {
         match self.versions.entry(digest.clone()) {
-            btree_map::Entry::Occupied(_) => None,
+            btree_map::Entry::Occupied(entry) => {
+                modify(entry.get());
+                None
+            }
             btree_map::Entry::Vacant(entry) => Some(entry.insert(init(&self.state))),
         }
     }
