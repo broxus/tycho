@@ -463,9 +463,60 @@ def collator_finalize_block() -> RowPanel:
 
 def collator_do_collate() -> RowPanel:
     metrics = [
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_set_size",
+            "Params: msgs set size",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_min_exts_per_set",
+            "Params: min externals per set",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_group_limit",
+            "Params: group limit",
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_msgs_exec_params_group_vert_size",
+            "Params: group vertical size limit",
+        ),
         create_counter_panel(
             "tycho_do_collate_tx_total",
             "Number of transactions over time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_blocks_with_limits_reached_count",
+            "Number of blocks with limits reached",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_exec_msgs_sets_per_block",
+            "Number of msgs sets per block",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_exec_ticks_per_msgs_set",
+            "Number of exec ticks per set",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_one_tick_group_size",
+            "One exec tick group size",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_one_tick_group_max_vert_size",
+            "One exec tick MAX group vertical size",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_one_tick_account_msgs_exec_mean_time",
+            "MEAN exec time in group",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_one_tick_account_msgs_exec_max_time",
+            "MAX exec time in group",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
@@ -486,6 +537,11 @@ def collator_do_collate() -> RowPanel:
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_ext",
             "Executed Ext msgs count",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_msgs_error_count_ext",
+            "Ext msgs error count",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
@@ -524,7 +580,8 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_int_msgs_queue_calc", "Calculated Internal queue len"
+            "tycho_do_collate_int_msgs_queue_calc",
+            "Calculated Internal queue len",
         ),
         create_counter_panel(
             "tycho_do_collate_int_enqueue_count",
@@ -571,16 +628,6 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_execute_tick_time",
-            "Execute Tick special transactions",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_do_collate_execute_tock_time",
-            "Execute Tock special transactions",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
             "tycho_do_collate_fill_msgs_total_time",
             "Fill messages time",
             labels=['workchain=~"$workchain"'],
@@ -603,6 +650,16 @@ def collator_do_collate() -> RowPanel:
         create_heatmap_panel(
             "tycho_do_collate_handle_block_candidate_time",
             "Handle block candidate",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_execute_tick_time",
+            "Execute Tick special transactions",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_execute_tock_time",
+            "Execute Tock special transactions",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(

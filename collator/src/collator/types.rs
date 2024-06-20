@@ -320,23 +320,25 @@ pub(super) struct BlockCollationData {
     pub gen_utime: u32,
     pub gen_utime_ms: u16,
 
-    pub tx_count: u32,
+    pub tx_count: u64,
 
     pub total_execute_msgs_time_mc: u128,
 
-    pub execute_count_all: u32,
-    pub execute_count_ext: u32,
-    pub execute_count_int: u32,
-    pub execute_count_new_int: u32,
+    pub execute_count_all: u64,
+    pub execute_count_ext: u64,
+    pub execute_count_int: u64,
+    pub execute_count_new_int: u64,
 
-    pub int_enqueue_count: u32,
-    pub int_dequeue_count: u32,
+    pub ext_msgs_error_count: u64,
 
-    pub read_ext_msgs: u32,
-    pub read_int_msgs_from_iterator: u32,
-    pub new_msgs_created: u32,
-    pub inserted_new_msgs_to_iterator: u32,
-    pub read_new_msgs_from_iterator: u32,
+    pub int_enqueue_count: u64,
+    pub int_dequeue_count: u64,
+
+    pub read_ext_msgs: u64,
+    pub read_int_msgs_from_iterator: u64,
+    pub new_msgs_created: u64,
+    pub inserted_new_msgs_to_iterator: u64,
+    pub read_new_msgs_from_iterator: u64,
 
     pub start_lt: u64,
     // Should be updated on each tx finalization from ExecutionManager.max_lt
@@ -457,11 +459,11 @@ pub(super) struct CollatorStats {
     pub total_execute_msgs_time_mc: u128,
     pub avg_exec_msgs_per_1000_ms: u128,
 
-    pub total_execute_count_all: u32,
-    pub total_execute_count_ext: u32,
-    pub total_execute_count_int: u32,
-    pub total_execute_count_new_int: u32,
-    pub int_queue_length: u32,
+    pub total_execute_count_all: u64,
+    pub total_execute_count_ext: u64,
+    pub total_execute_count_int: u64,
+    pub total_execute_count_new_int: u64,
+    pub int_queue_length: u64,
 }
 
 pub(super) struct CachedMempoolAnchor {

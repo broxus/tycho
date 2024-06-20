@@ -1,12 +1,14 @@
 use std::cmp;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
+use humantime::format_duration;
 use ton_executor::{
     ExecuteParams, ExecutorOutput, OrdinaryTransactionExecutor, PreloadedBlockchainConfig,
     TickTockTransactionExecutor, TransactionExecutor,
@@ -21,6 +23,7 @@ use crate::tracing_targets;
 
 /// Execution manager
 pub(super) struct ExecutionManager {
+    shard_id: ShardIdent,
     // this time is used if account's lt is smaller
     min_next_lt: u64,
     /// blockchain config
@@ -42,6 +45,7 @@ type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
 impl ExecutionManager {
     /// constructor
     pub fn new(
+        shard_id: ShardIdent,
         min_next_lt: u64,
         config: Arc<PreloadedBlockchainConfig>,
         params: Arc<ExecuteParams>,
@@ -50,6 +54,7 @@ impl ExecutionManager {
         shard_accounts: ShardAccounts,
     ) -> Self {
         Self {
+            shard_id,
             min_next_lt,
             config,
             params,
@@ -106,35 +111,47 @@ impl ExecutionManager {
     pub async fn tick(&mut self, offset: u32) -> Result<ExecutedTick> {
         tracing::trace!(target: tracing_targets::EXEC_MANAGER, offset, "messages set execution tick");
 
+        let labels = &[("workchain", self.shard_id.workchain().to_string())];
+
         let (new_offset, group) = match self.message_groups.remove(&offset) {
             Some(group) => (offset + 1, group),
             None => return Ok(ExecutedTick::new_finished(offset)),
         };
         let finished = !self.message_groups.contains_key(&new_offset);
 
-        let group_len = group.len();
-        tracing::debug!(target: tracing_targets::EXEC_MANAGER, offset, group_len);
+        let group_size = group.len();
+        let mut group_max_vert_size = 0;
 
         // TODO check externals is not exist accounts needed ?
         let mut futures = FuturesUnordered::new();
         for (account_id, msgs) in group {
+            group_max_vert_size = cmp::max(group_max_vert_size, msgs.len());
             let shard_account_stuff = self.accounts_cache.create_account_stuff(&account_id)?;
             futures.push(self.execute_messages(shard_account_stuff, msgs));
         }
 
-        let mut items = Vec::with_capacity(group_len);
+        let mut items = Vec::with_capacity(group_size);
+        let mut ext_msgs_error_count = 0;
+
+        let mut max_account_msgs_exec_time = Duration::ZERO;
+        let mut total_exec_time = Duration::ZERO;
 
         while let Some(executed_msgs_result) = futures.next().await {
             let executed = executed_msgs_result?;
+
+            max_account_msgs_exec_time = max_account_msgs_exec_time.max(executed.exec_time);
+            total_exec_time += executed.exec_time;
+
             for tx in executed.transactions {
                 if matches!(&tx.in_message.info, MsgInfo::ExtIn(_)) {
                     if let Err(e) = &tx.result {
-                        tracing::error!(
+                        tracing::warn!(
                             target: tracing_targets::EXEC_MANAGER,
                             account_addr = %executed.account_state.account_addr,
                             message_hash = %tx.in_message.cell.repr_hash(),
                             "failed to execute external message: {e:?}",
                         );
+                        ext_msgs_error_count += 1;
                         continue;
                     }
                 }
@@ -155,10 +172,36 @@ impl ExecutionManager {
                 .add_account_stuff(executed.account_state);
         }
 
+        let mean_account_msgs_exec_time = total_exec_time
+            .checked_div(group_size as u32)
+            .unwrap_or_default();
+
+        tracing::info!(target: tracing_targets::EXEC_MANAGER,
+            offset, group_size, group_max_vert_size,
+            total_exec_time = %format_duration(total_exec_time),
+            mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
+            max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
+        );
+
+        metrics::gauge!("tycho_do_collate_one_tick_group_size", labels).set(group_size as f64);
+        metrics::gauge!("tycho_do_collate_one_tick_group_max_vert_size", labels)
+            .set(group_max_vert_size as f64);
+        metrics::histogram!(
+            "tycho_do_collate_one_tick_account_msgs_exec_mean_time",
+            labels
+        )
+        .record(mean_account_msgs_exec_time);
+        metrics::histogram!(
+            "tycho_do_collate_one_tick_account_msgs_exec_max_time",
+            labels
+        )
+        .record(max_account_msgs_exec_time);
+
         Ok(ExecutedTick {
             new_offset,
             finished,
             items,
+            ext_msgs_error_count,
         })
     }
 
@@ -172,6 +215,8 @@ impl ExecutionManager {
         let params = self.params.clone();
 
         rayon_run_fifo(move || {
+            let timer = std::time::Instant::now();
+
             let mut transactions = Vec::with_capacity(msgs.len());
 
             for msg in msgs {
@@ -187,6 +232,7 @@ impl ExecutionManager {
             Ok(ExecutedTransactions {
                 account_state,
                 transactions,
+                exec_time: timer.elapsed(),
             })
         })
     }
@@ -313,6 +359,7 @@ pub struct ExecutedTick {
     pub new_offset: u32,
     pub finished: bool,
     pub items: Vec<ExecutedTickItem>,
+    pub ext_msgs_error_count: u64,
 }
 
 impl ExecutedTick {
@@ -321,6 +368,7 @@ impl ExecutedTick {
             new_offset,
             finished: true,
             items: Vec::new(),
+            ext_msgs_error_count: 0,
         }
     }
 }
@@ -334,6 +382,7 @@ pub struct ExecutedTickItem {
 pub struct ExecutedTransactions {
     pub account_state: Box<ShardAccountStuff>,
     pub transactions: Vec<ExecutedOrdinaryTransaction>,
+    pub exec_time: Duration,
 }
 
 pub struct ExecutedOrdinaryTransaction {
