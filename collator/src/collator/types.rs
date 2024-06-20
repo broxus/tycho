@@ -315,6 +315,135 @@ impl PrevData {
 }
 
 #[derive(Debug)]
+pub(super) struct BlockCollationDataBuilder {
+    pub block_id_short: BlockIdShort,
+    pub gen_utime: u32,
+    pub gen_utime_ms: u16,
+    pub processed_upto: ProcessedUptoInfo,
+    shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
+    pub shards_max_end_lt: u64,
+    pub shard_fees: ShardFees,
+    pub value_flow: ValueFlow,
+    pub min_ref_mc_seqno: u32,
+    pub rand_seed: HashBytes,
+    pub block_create_count: FastHashMap<HashBytes, u64>,
+    pub created_by: HashBytes,
+    pub top_shard_blocks_ids: Vec<BlockId>,
+}
+
+impl BlockCollationDataBuilder {
+    pub fn new(
+        block_id_short: BlockIdShort,
+        rand_seed: HashBytes,
+        min_ref_mc_seqno: u32,
+        next_chain_time: u64,
+        processed_upto: ProcessedUptoInfo,
+        created_by: HashBytes,
+    ) -> Self {
+        let gen_utime = (next_chain_time / 1000) as u32;
+        let gen_utime_ms = (next_chain_time % 1000) as u16;
+        Self {
+            block_id_short,
+            gen_utime,
+            gen_utime_ms,
+            processed_upto,
+            shards_max_end_lt: 0,
+            shard_fees: Default::default(),
+            value_flow: Default::default(),
+            min_ref_mc_seqno,
+            rand_seed,
+            block_create_count: Default::default(),
+            created_by,
+            shards: None,
+            top_shard_blocks_ids: vec![],
+        }
+    }
+    pub fn set_shards(&mut self, shards: FastHashMap<ShardIdent, Box<ShardDescription>>) {
+        self.shards = Some(shards);
+    }
+
+    pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards
+            .as_mut()
+            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
+    }
+
+    pub fn update_shards_max_end_lt(&mut self, val: u64) {
+        if val > self.shards_max_end_lt {
+            self.shards_max_end_lt = val;
+        }
+    }
+
+    pub fn store_shard_fees(
+        &mut self,
+        shard_id: ShardIdent,
+        proof_funds: ProofFunds,
+    ) -> Result<()> {
+        let shard_fee_created = ShardFeeCreated {
+            fees: proof_funds.fees_collected.clone(),
+            create: proof_funds.funds_created.clone(),
+        };
+        self.shard_fees.set(
+            ShardIdentFull::from(shard_id),
+            shard_fee_created.clone(),
+            shard_fee_created,
+        )?;
+        Ok(())
+    }
+
+    pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
+        for creator in creators {
+            self.block_create_count
+                .entry(creator)
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+        }
+        Ok(())
+    }
+
+    pub fn build(self, start_lt: u64, block_limits: BlockLimits) -> BlockCollationData {
+        let block_limit = BlockLimitStats::new(block_limits, start_lt);
+        BlockCollationData {
+            block_id_short: self.block_id_short,
+            gen_utime: self.gen_utime,
+            gen_utime_ms: self.gen_utime_ms,
+            processed_upto: self.processed_upto,
+            min_ref_mc_seqno: self.min_ref_mc_seqno,
+            rand_seed: self.rand_seed,
+            created_by: self.created_by,
+            shards: self.shards,
+            top_shard_blocks_ids: self.top_shard_blocks_ids,
+            shard_fees: self.shard_fees,
+            block_create_count: self.block_create_count,
+            value_flow: self.value_flow,
+            block_limit,
+            start_lt,
+            next_lt: start_lt + 1,
+            tx_count: 0,
+            total_execute_msgs_time_mc: 0,
+            execute_count_all: 0,
+            execute_count_ext: 0,
+            execute_count_int: 0,
+            execute_count_new_int: 0,
+            int_enqueue_count: 0,
+            int_dequeue_count: 0,
+            read_ext_msgs: 0,
+            ext_msgs_error_count: 0,
+            read_int_msgs_from_iterator: 0,
+            new_msgs_created: 0,
+            inserted_new_msgs_to_iterator: 0,
+            read_new_msgs_from_iterator: 0,
+            in_msgs: Default::default(),
+            out_msgs: Default::default(),
+            externals_reading_started: false,
+            _internals_reading_started: false,
+            mint_msg: None,
+            recover_create_msg: None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct BlockCollationData {
     // block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
@@ -360,7 +489,6 @@ pub(super) struct BlockCollationData {
     pub top_shard_blocks_ids: Vec<BlockId>,
 
     shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
-    shards_max_end_lt: u64,
 
     // TODO: setup update logic when ShardFees would be implemented
     pub shard_fees: ShardFees,
@@ -485,111 +613,21 @@ pub struct PreparedOutMsg {
 }
 
 impl BlockCollationData {
-    pub fn new(
-        block_id_short: BlockIdShort,
-        rand_seed: HashBytes,
-        min_ref_mc_seqno: u32,
-        next_chain_time: u64,
-        start_lt: u64,
-        block_limits: BlockLimits,
-        processed_upto: ProcessedUptoInfo,
-        created_by: HashBytes,
-    ) -> Self {
-        let gen_utime = (next_chain_time / 1000) as u32;
-        let gen_utime_ms = (next_chain_time % 1000) as u16;
-        let block_limit = BlockLimitStats::new(block_limits, start_lt);
-        Self {
-            block_id_short,
-            gen_utime,
-            gen_utime_ms,
-            block_limit,
-            start_lt,
-            next_lt: start_lt + 1,
-            processed_upto,
-            tx_count: 0,
-            total_execute_msgs_time_mc: 0,
-            execute_count_all: 0,
-            execute_count_ext: 0,
-            execute_count_int: 0,
-            execute_count_new_int: 0,
-            int_enqueue_count: 0,
-            int_dequeue_count: 0,
-            read_ext_msgs: 0,
-            read_int_msgs_from_iterator: 0,
-            new_msgs_created: 0,
-            inserted_new_msgs_to_iterator: 0,
-            read_new_msgs_from_iterator: 0,
-            in_msgs: Default::default(),
-            out_msgs: Default::default(),
-            externals_reading_started: false,
-            _internals_reading_started: false,
-            top_shard_blocks_ids: vec![],
-            shards: None,
-            shards_max_end_lt: 0,
-            shard_fees: Default::default(),
-            mint_msg: None,
-            recover_create_msg: None,
-            value_flow: Default::default(),
-            min_ref_mc_seqno,
-            rand_seed,
-            block_create_count: Default::default(),
-            created_by: Default::default(),
-        }
-    }
-
     pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_ref()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
     }
-    pub fn set_shards(&mut self, shards: FastHashMap<ShardIdent, Box<ShardDescription>>) {
-        self.shards = Some(shards);
-    }
+
     pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_mut()
             .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
     }
 
-    pub fn shards_max_end_lt(&self) -> u64 {
-        self.shards_max_end_lt
-    }
-    pub fn update_shards_max_end_lt(&mut self, val: u64) {
-        if val > self.shards_max_end_lt {
-            self.shards_max_end_lt = val;
-        }
-    }
-
     pub fn update_ref_min_mc_seqno(&mut self, mc_seqno: u32) -> u32 {
         self.min_ref_mc_seqno = std::cmp::min(self.min_ref_mc_seqno, mc_seqno);
         self.min_ref_mc_seqno
-    }
-
-    pub fn store_shard_fees(
-        &mut self,
-        shard_id: ShardIdent,
-        proof_funds: ProofFunds,
-    ) -> Result<()> {
-        let shard_fee_created = ShardFeeCreated {
-            fees: proof_funds.fees_collected.clone(),
-            create: proof_funds.funds_created.clone(),
-        };
-        self.shard_fees.set(
-            ShardIdentFull::from(shard_id),
-            shard_fee_created.clone(),
-            shard_fee_created,
-        )?;
-        Ok(())
-    }
-
-    pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
-        for creator in creators {
-            self.block_create_count
-                .entry(creator)
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-        }
-        Ok(())
     }
 }
 
