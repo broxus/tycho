@@ -59,29 +59,30 @@ impl CollatorStdImpl {
         let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
+        let is_masterchain = self.shard_id.is_masterchain();
         // prepare block collation data
         // STUB: consider split/merge in future for taking prev_block_id
         let prev_block_id = prev_shard_data.blocks_ids()[0];
-        let mut collation_data = Box::new(BlockCollationData::default());
-        collation_data.block_id_short = BlockIdShort {
+        let block_id_short = BlockIdShort {
             shard: prev_block_id.shard,
             seqno: prev_block_id.seqno + 1,
         };
-        collation_data.rand_seed = rand_seed;
-        collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
-        collation_data.gen_utime = (next_chain_time / 1000) as u32;
-        collation_data.gen_utime_ms = (next_chain_time % 1000) as u16;
-        collation_data.start_lt = Self::calc_start_lt(mc_data, prev_shard_data, &collation_data)?;
-        collation_data.next_lt = collation_data.start_lt + 1;
-        collation_data.block_limit.lt_start = collation_data.start_lt;
-        collation_data.block_limit.lt_current = collation_data.start_lt;
-        collation_data.block_limit.load_block_limits(
-            mc_data
-                .config()
-                .get_block_limits(self.shard_id.is_masterchain())?,
-        );
+        let start_lt = Self::calc_start_lt(mc_data, prev_shard_data, is_masterchain)?;
+        let block_limits = mc_data.config().get_block_limits(is_masterchain)?;
+        // TODO: get from anchor
+        let created_by = HashBytes::default();
 
-        collation_data.processed_upto = prev_shard_data.processed_upto().clone();
+        let mut collation_data = Box::new(BlockCollationData::new(
+            block_id_short,
+            rand_seed,
+            mc_data.mc_state_stuff().state().seqno,
+            next_chain_time,
+            start_lt,
+            block_limits,
+            prev_shard_data.processed_upto().clone(),
+            created_by,
+        ));
+
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
             collation_data.processed_upto.externals,
         );
@@ -100,7 +101,7 @@ impl CollatorStdImpl {
             });
 
         // init ShardHashes descriptions for master
-        if self.shard_id.is_masterchain() {
+        if is_masterchain {
             let shards = prev_shard_data.observable_states()[0]
                 .shards()?
                 .iter()
@@ -174,7 +175,7 @@ impl CollatorStdImpl {
 
         // execute tick transaction and special transactions (mint, recover)
         let execute_tick_elapsed;
-        if self.shard_id.is_masterchain() {
+        if is_masterchain {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", labels);
 
@@ -485,7 +486,7 @@ impl CollatorStdImpl {
 
         // execute tock transaction
         let execute_tock_elapsed;
-        if self.shard_id.is_masterchain() {
+        if is_masterchain {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", labels);
             self.create_ticktock_transactions(
@@ -934,20 +935,17 @@ impl CollatorStdImpl {
     fn calc_start_lt(
         mc_data: &McData,
         prev_shard_data: &PrevData,
-        collation_data: &BlockCollationData,
+        is_masterchain: bool,
     ) -> Result<u64> {
         tracing::trace!(target: tracing_targets::COLLATOR, "calc_start_lt()");
 
-        let mut start_lt = if !collation_data.block_id_short.shard.is_masterchain() {
+        let mut start_lt = if !is_masterchain {
             std::cmp::max(
                 mc_data.mc_state_stuff().state().gen_lt,
                 prev_shard_data.gen_lt(),
             )
         } else {
-            std::cmp::max(
-                mc_data.mc_state_stuff().state().gen_lt,
-                collation_data.shards_max_end_lt(),
-            )
+            mc_data.mc_state_stuff().state().gen_lt
         };
 
         let align = mc_data.get_lt_align();
