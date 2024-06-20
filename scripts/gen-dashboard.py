@@ -387,15 +387,18 @@ def jrpc() -> RowPanel:
 def collator_finalize_block() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_finalize_block_time", "Total time to finalize block",
+            "tycho_collator_finalize_block_time",
+            "Total time to finalize block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_account_blocks_time", "Build account blocks",
+            "tycho_collator_finalize_build_account_blocks_time",
+            "Build account blocks",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_in_msgs_time", "Build InMsgDescr",
+            "tycho_collator_finalize_build_in_msgs_time",
+            "Build InMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -404,19 +407,23 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finish_build_mc_state_extra_time", "Build McStateExtra",
+            "tycho_collator_finish_build_mc_state_extra_time",
+            "Build McStateExtra",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_state_update_time", "Compute MerkleUpdate",
+            "tycho_collator_finalize_build_state_update_time",
+            "Compute MerkleUpdate",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_block_time", "Build Block",
+            "tycho_collator_finalize_build_block_time",
+            "Build Block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_finalize_build_new_state_time", "Build State",
+            "tycho_collator_finalize_build_new_state_time",
+            "Build State",
             labels=['workchain=~"$workchain"'],
         ),
     ]
@@ -431,32 +438,35 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_all", "All executed msgs count",
-            labels=['workchain=~"$workchain"'],
-        ),
-
-        create_counter_panel(
-            "tycho_collator_ext_msgs_imported_count", "Imported Ext msgs count from mempool",
+            "tycho_do_collate_msgs_exec_count_all",
+            "All executed msgs count",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_read_count_ext", "Read Ext msgs count",
+            "tycho_collator_ext_msgs_imported_count",
+            "Imported Ext msgs count from mempool",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_ext", "Executed Ext msgs count",
-            labels=['workchain=~"$workchain"'],
-        ),
-
-        create_counter_panel(
-            "tycho_do_collate_msgs_read_count_int", "Read Int msgs count",
+            "tycho_do_collate_msgs_read_count_ext",
+            "Read Ext msgs count",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_int", "Executed Int msgs count",
+            "tycho_do_collate_msgs_exec_count_ext",
+            "Executed Ext msgs count",
             labels=['workchain=~"$workchain"'],
         ),
-
+        create_counter_panel(
+            "tycho_do_collate_msgs_read_count_int",
+            "Read Int msgs count",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_msgs_exec_count_int",
+            "Executed Int msgs count",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_counter_panel(
             "tycho_do_collate_new_msgs_created_count",
             "Created NewInt msgs count",
@@ -468,70 +478,85 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_read_count_new_int", "Read NewInt msgs count",
+            "tycho_do_collate_msgs_read_count_new_int",
+            "Read NewInt msgs count",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
-            "tycho_do_collate_msgs_exec_count_new_int", "Executed NewInt msgs count",
+            "tycho_do_collate_msgs_exec_count_new_int",
+            "Executed NewInt msgs count",
             labels=['workchain=~"$workchain"'],
         ),
-
         create_gauge_panel(
-            "tycho_session_iterator_messages_all", "Number of internals in the iterator",
+            "tycho_session_iterator_messages_all",
+            "Number of internals in the iterator",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_int_msgs_queue_calc", "Calculated Internal queue len"
         ),
         create_counter_panel(
-            "tycho_do_collate_int_enqueue_count", "Enqueued int msgs count",
+            "tycho_do_collate_int_enqueue_count",
+            "Enqueued int msgs count",
         ),
         create_counter_panel(
-            "tycho_do_collate_int_dequeue_count", "Dequeued int msgs count",
+            "tycho_do_collate_int_dequeue_count",
+            "Dequeued int msgs count",
         ),
-
-        create_heatmap_panel(
-            "tycho_do_collate_block_diff_time", "Block time diff",
+        create_gauge_panel(
+            "tycho_do_collate_block_time_diff",
+            "Block time diff",
+            UNITS.SECONDS,
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_from_prev_block_time", "Time elapsed from prev block",
+            "tycho_do_collate_from_prev_block_time",
+            "Time elapsed from prev block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_overhead_time", "Collation flow overhead",
+            "tycho_do_collate_overhead_time",
+            "Collation flow overhead",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_total_time", "Total collation time",
+            "tycho_do_collate_total_time",
+            "Total collation time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_prepare_time", "Collation prepare time",
+            "tycho_do_collate_prepare_time",
+            "Collation prepare time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_init_iterator_time", "Init iterator time",
+            "tycho_do_collate_init_iterator_time",
+            "Init iterator time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_execute_time", "Execution time",
+            "tycho_do_collate_execute_time",
+            "Execution time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_execute_tick_time", "Execute Tick special transactions",
+            "tycho_do_collate_execute_tick_time",
+            "Execute Tick special transactions",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_execute_tock_time", "Execute Tock special transactions",
+            "tycho_do_collate_execute_tock_time",
+            "Execute Tock special transactions",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_fill_msgs_total_time", "Fill messages time",
+            "tycho_do_collate_fill_msgs_total_time",
+            "Fill messages time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_exec_msgs_total_time", "Execute messages time",
+            "tycho_do_collate_exec_msgs_total_time",
+            "Execute messages time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -540,19 +565,23 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_apply_queue_diff_time", "Apply message queue diff",
+            "tycho_do_collate_apply_queue_diff_time",
+            "Apply message queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_handle_block_candidate_time", "Handle block candidate",
+            "tycho_do_collate_handle_block_candidate_time",
+            "Handle block candidate",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_update_mc_data_time", "update mc data",
+            "tycho_collator_update_mc_data_time",
+            "update mc data",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_collator_import_next_anchor_time", "import next anchor time",
+            "tycho_collator_import_next_anchor_time",
+            "import next anchor time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(

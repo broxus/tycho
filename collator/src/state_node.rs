@@ -7,7 +7,6 @@ use everscale_types::boc::BocRepr;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tokio::sync::broadcast;
-use tokio::time::Instant;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
