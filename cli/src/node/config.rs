@@ -65,6 +65,8 @@ pub struct NodeConfig {
     pub rpc: Option<RpcConfig>,
 
     pub metrics: Option<MetricsConfig>,
+
+    pub threads: ThreadPoolConfig,
 }
 
 impl Default for NodeConfig {
@@ -84,6 +86,7 @@ impl Default for NodeConfig {
             collator: CollationConfig::default(),
             rpc: Some(RpcConfig::default()),
             metrics: Some(MetricsConfig::default()),
+            threads: ThreadPoolConfig::default(),
         }
     }
 }
@@ -113,6 +116,25 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10000),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThreadPoolConfig {
+    pub rayon_threads: usize,
+    pub tokio_workers: usize,
+}
+
+impl Default for ThreadPoolConfig {
+    fn default() -> Self {
+        let total_threads = std::thread::available_parallelism()
+            .expect("failed to get total threads")
+            .get();
+        Self {
+            rayon_threads: total_threads,
+            tokio_workers: total_threads,
         }
     }
 }
