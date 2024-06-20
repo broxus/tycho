@@ -575,8 +575,8 @@ impl CollatorStdImpl {
         // block time diff from now
         let block_time_diff = {
             let diff_time = now_millis() as i64 - next_chain_time as i64;
-            metrics::histogram!("tycho_do_collate_block_diff_time", labels)
-                .record(diff_time as f64 / 1000.0);
+            metrics::gauge!("tycho_do_collate_block_time_diff", labels)
+                .set(diff_time as f64 / 1000.0);
             diff_time
         };
 
