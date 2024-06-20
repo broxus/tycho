@@ -69,6 +69,11 @@ impl CollatorStdImpl {
         };
         let start_lt = Self::calc_start_lt(mc_data, prev_shard_data, is_masterchain)?;
         let block_limits = mc_data.config().get_block_limits(is_masterchain)?;
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "Block limits: {:?}",
+            block_limits
+        );
+
         // TODO: get from anchor
         let created_by = HashBytes::default();
 
