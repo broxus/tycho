@@ -285,7 +285,7 @@ impl ZerostateConfig {
                 );
                 self.accounts.insert(
                     minter_address,
-                    build_minter_account(&public_key, &minter_address)?.into(),
+                    build_minter_account(public_key, &minter_address)?.into(),
                 );
             }
             (None, Some(_)) => anyhow::bail!("minter_public_key is required"),
@@ -652,7 +652,7 @@ fn update_config_account(accounts: &mut ShardAccounts, config: &BlockchainConfig
         anyhow::bail!("cannot set empty config account");
     };
 
-    let Some((depth_balance, mut shard_account)) = accounts.get(&config.address)? else {
+    let Some((depth_balance, mut shard_account)) = accounts.get(config.address)? else {
         anyhow::bail!("config account not found");
     };
 
@@ -682,7 +682,7 @@ fn update_config_account(accounts: &mut ShardAccounts, config: &BlockchainConfig
     shard_account.account = Lazy::new(&OptionalAccount(Some(account)))?;
 
     // Update the account entry in the dict
-    accounts.set(&config.address, depth_balance, shard_account)?;
+    accounts.set(config.address, depth_balance, shard_account)?;
 
     // Done
     Ok(())

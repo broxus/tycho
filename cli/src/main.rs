@@ -24,12 +24,6 @@ fn main() -> ExitCode {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
 
-    rayon::ThreadPoolBuilder::new()
-        .stack_size(8 * 1024 * 1024)
-        .thread_name(|_| "rayon_worker".to_string())
-        .build_global()
-        .unwrap();
-
     match App::parse().run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

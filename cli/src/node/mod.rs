@@ -92,11 +92,28 @@ pub struct CmdRun {
 
 impl CmdRun {
     pub fn run(self) -> Result<()> {
+        if let Some(init_config_path) = self.init_config {
+            return NodeConfig::default()
+                .save_to_file(init_config_path)
+                .wrap_err("failed to save node config");
+        }
+
+        let node_config = NodeConfig::from_file(self.config.as_ref().unwrap())
+            .wrap_err("failed to load node config")?;
+
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(8 * 1024 * 1024)
+            .thread_name(|_| "rayon_worker".to_string())
+            .num_threads(node_config.threads.rayon_threads)
+            .build_global()
+            .unwrap();
+
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
+            .worker_threads(node_config.threads.tokio_workers)
             .build()?
             .block_on(async move {
-                let run_fut = tokio::spawn(self.run_impl());
+                let run_fut = tokio::spawn(self.run_impl(node_config));
                 let stop_fut = signal::any_signal(signal::TERMINATION_SIGNALS);
                 tokio::select! {
                     res = run_fut => res.unwrap(),
@@ -111,19 +128,10 @@ impl CmdRun {
             })
     }
 
-    async fn run_impl(self) -> Result<()> {
-        if let Some(init_config_path) = self.init_config {
-            return NodeConfig::default()
-                .save_to_file(init_config_path)
-                .wrap_err("failed to save node config");
-        }
-
+    async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
         init_logger(self.logger_config)?;
 
         let node = {
-            let node_config = NodeConfig::from_file(self.config.unwrap())
-                .wrap_err("failed to load node config")?;
-
             if let Some(metrics_config) = &node_config.metrics {
                 init_metrics(metrics_config)?;
             }
@@ -131,11 +139,11 @@ impl CmdRun {
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
                 .wrap_err("failed to load global config")?;
 
-            let keys = config::NodeKeys::from_file(&self.keys.unwrap())
-                .wrap_err("failed to load node keys")?;
+            let keys =
+                NodeKeys::from_file(self.keys.unwrap()).wrap_err("failed to load node keys")?;
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
-            let socket_addr = SocketAddr::new(public_ip.into(), node_config.port);
+            let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
             Node::new(socket_addr, keys, node_config, global_config)?
         };
@@ -790,5 +798,5 @@ fn make_shard_state(
         file_hash,
     };
 
-    ShardStateStuff::from_root(&block_id, root, &tracker)
+    ShardStateStuff::from_root(&block_id, root, tracker)
 }
