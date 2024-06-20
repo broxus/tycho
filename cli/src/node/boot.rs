@@ -176,10 +176,10 @@ async fn download_key_blocks(
                             Ok(res) => {
                                 let (handle, data) = res.split();
 
-                                match BlockProofStuff::deserialize(block_id, &data.data, false) {
+                                match BlockProofStuff::deserialize(&block_id, &data.data, false) {
                                     Ok(proof) => {
                                         handle.accept();
-                                        return proof.with_archive_data(&data.data);
+                                        return proof.with_archive_data(data.data.into());
                                     },
                                     Err(e) => {
                                         tracing::error!(%block_id, "failed to deserialize block proof: {e}");
@@ -562,7 +562,7 @@ async fn download_block_with_state(
                                 is_link,
                             } => {
                                 let block = match BlockStuff::deserialize_checked(
-                                    block_id,
+                                    &block_id,
                                     &block_data,
                                 ) {
                                     Ok(block) => WithArchiveData::new(block, block_data),
@@ -574,7 +574,7 @@ async fn download_block_with_state(
                                 };
 
                                 let proof = match BlockProofStuff::deserialize(
-                                    block_id,
+                                    &block_id,
                                     &proof_data,
                                     is_link,
                                 ) {
