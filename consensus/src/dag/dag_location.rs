@@ -7,11 +7,13 @@ use std::task::{Context, Poll};
 
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::FutureExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
+use tycho_util::sync::OnceTake;
 
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
+use crate::Point;
 
 /// If DAG location exists, it must have non-empty `versions` map;
 ///
@@ -43,6 +45,7 @@ pub enum DagPointFuture {
     Download {
         task: Shared<JoinTask<DagPoint>>,
         dependents: mpsc::UnboundedSender<PeerId>,
+        verified: Arc<OnceTake<oneshot::Sender<Point>>>,
     },
     Local(futures_util::future::Ready<DagPoint>),
 }
@@ -52,6 +55,14 @@ impl DagPointFuture {
         if let Self::Download { dependents, .. } = self {
             // receiver is dropped upon completion
             _ = dependents.send(*dependent);
+        }
+    }
+    pub fn resolve_download(&self, broadcast: &Point) {
+        if let Self::Download { verified, .. } = self {
+            if let Some(oneshot) = verified.take() {
+                // receiver is dropped upon completion
+                _ = oneshot.send(broadcast.clone());
+            }
         }
     }
 }
@@ -84,12 +95,21 @@ impl DagLocation {
             .entry(digest.clone())
             .or_insert_with(|| init(&self.state))
     }
-    pub fn init<F>(&mut self, digest: &Digest, init: F) -> Option<&DagPointFuture>
+    pub fn init_or_modify<F, U>(
+        &mut self,
+        digest: &Digest,
+        init: F,
+        modify: U,
+    ) -> Option<&DagPointFuture>
     where
         F: FnOnce(&InclusionState) -> DagPointFuture,
+        U: FnOnce(&DagPointFuture),
     {
         match self.versions.entry(digest.clone()) {
-            btree_map::Entry::Occupied(_) => None,
+            btree_map::Entry::Occupied(entry) => {
+                modify(entry.get());
+                None
+            }
             btree_map::Entry::Vacant(entry) => Some(entry.insert(init(&self.state))),
         }
     }
