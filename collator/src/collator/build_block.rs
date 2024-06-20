@@ -194,7 +194,7 @@ impl CollatorStdImpl {
             end_lt: collation_data.next_lt,
             gen_validator_list_hash_short: self.collation_session.collators().short_hash,
             gen_catchain_seqno: self.collation_session.seqno(),
-            min_ref_mc_seqno: collation_data.min_ref_mc_seqno()?,
+            min_ref_mc_seqno: collation_data.min_ref_mc_seqno,
             prev_key_block_seqno: mc_data.prev_key_block_seqno(),
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
             ..Default::default()

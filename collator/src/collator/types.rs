@@ -314,7 +314,7 @@ impl PrevData {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct BlockCollationData {
     // block_descr: Arc<String>,
     pub block_id_short: BlockIdShort,
@@ -370,7 +370,7 @@ pub(super) struct BlockCollationData {
 
     pub value_flow: ValueFlow,
 
-    min_ref_mc_seqno: Option<u32>,
+    pub min_ref_mc_seqno: u32,
 
     pub rand_seed: HashBytes,
 
@@ -379,19 +379,26 @@ pub(super) struct BlockCollationData {
     // TODO: set from anchor
     pub created_by: HashBytes,
 }
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BlockLimitStats {
     pub gas_used: u32,
     pub lt_current: u64,
     pub lt_start: u64,
     pub cells_seen: HashSet<HashBytes>,
     pub cells_bits: u32,
-    pub block_limits: Option<BlockLimits>,
+    pub block_limits: BlockLimits,
 }
 
 impl BlockLimitStats {
-    pub fn load_block_limits(&mut self, block_limits: BlockLimits) {
-        self.block_limits = Some(block_limits);
+    pub fn new(block_limits: BlockLimits, lt_start: u64) -> Self {
+        Self {
+            gas_used: 0,
+            lt_current: lt_start,
+            lt_start,
+            cells_seen: Default::default(),
+            cells_bits: 0,
+            block_limits,
+        }
     }
 
     pub fn add_cell(&mut self, cell: &DynCell) -> Result<()> {
@@ -407,14 +414,11 @@ impl BlockLimitStats {
         Ok(())
     }
     pub fn reached(&self, level: BlockLimitsLevel) -> bool {
-        let Some(BlockLimits {
+        let BlockLimits {
             bytes,
             gas,
             lt_delta,
-        }) = &self.block_limits
-        else {
-            return false;
-        };
+        } = &self.block_limits;
 
         let BlockParamLimits {
             soft_limit,
@@ -481,6 +485,58 @@ pub struct PreparedOutMsg {
 }
 
 impl BlockCollationData {
+    pub fn new(
+        block_id_short: BlockIdShort,
+        rand_seed: HashBytes,
+        min_ref_mc_seqno: u32,
+        next_chain_time: u64,
+        start_lt: u64,
+        block_limits: BlockLimits,
+        processed_upto: ProcessedUptoInfo,
+        created_by: HashBytes,
+    ) -> Self {
+        let gen_utime = (next_chain_time / 1000) as u32;
+        let gen_utime_ms = (next_chain_time % 1000) as u16;
+        let block_limit = BlockLimitStats::new(block_limits, start_lt);
+        Self {
+            block_id_short,
+            gen_utime,
+            gen_utime_ms,
+            block_limit,
+            start_lt,
+            next_lt: start_lt + 1,
+            processed_upto,
+            tx_count: 0,
+            total_execute_msgs_time_mc: 0,
+            execute_count_all: 0,
+            execute_count_ext: 0,
+            execute_count_int: 0,
+            execute_count_new_int: 0,
+            int_enqueue_count: 0,
+            int_dequeue_count: 0,
+            read_ext_msgs: 0,
+            read_int_msgs_from_iterator: 0,
+            new_msgs_created: 0,
+            inserted_new_msgs_to_iterator: 0,
+            read_new_msgs_from_iterator: 0,
+            in_msgs: Default::default(),
+            out_msgs: Default::default(),
+            externals_reading_started: false,
+            _internals_reading_started: false,
+            top_shard_blocks_ids: vec![],
+            shards: None,
+            shards_max_end_lt: 0,
+            shard_fees: Default::default(),
+            mint_msg: None,
+            recover_create_msg: None,
+            value_flow: Default::default(),
+            min_ref_mc_seqno,
+            rand_seed,
+            block_create_count: Default::default(),
+            created_by: Default::default(),
+        }
+    }
+
     pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
         self.shards
             .as_ref()
@@ -505,15 +561,8 @@ impl BlockCollationData {
     }
 
     pub fn update_ref_min_mc_seqno(&mut self, mc_seqno: u32) -> u32 {
-        let min_ref_mc_seqno =
-            std::cmp::min(self.min_ref_mc_seqno.unwrap_or(std::u32::MAX), mc_seqno);
-        self.min_ref_mc_seqno = Some(min_ref_mc_seqno);
-        min_ref_mc_seqno
-    }
-
-    pub fn min_ref_mc_seqno(&self) -> Result<u32> {
+        self.min_ref_mc_seqno = std::cmp::min(self.min_ref_mc_seqno, mc_seqno);
         self.min_ref_mc_seqno
-            .ok_or_else(|| anyhow!("`min_ref_mc_seqno` is not initialized yet"))
     }
 
     pub fn store_shard_fees(
