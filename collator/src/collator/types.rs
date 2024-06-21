@@ -94,6 +94,7 @@ use crate::types::ProofFunds;
 pub(super) struct WorkingState {
     pub mc_data: McData,
     pub prev_shard_data: PrevData,
+    pub prev_states_loaded_from_storage: bool,
     pub usage_tree: UsageTree,
     pub has_pending_internals: Option<bool>,
 }

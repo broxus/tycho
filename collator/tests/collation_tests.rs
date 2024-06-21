@@ -136,6 +136,8 @@ async fn test_collation_process_on_stubs() {
     let queue = queue_factory.create();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
+    let state_tracker = MinRefMcStateTracker::default();
+
     let manager = CollationManager::start(
         node_1_keypair.clone(),
         config,
@@ -147,6 +149,7 @@ async fn test_collation_process_on_stubs() {
             config: validator_config,
         },
         CollatorStdImplFactory,
+        state_tracker.clone(),
         #[cfg(feature = "test")]
         vec![
             node_1_keypair,
@@ -164,11 +167,7 @@ async fn test_collation_process_on_stubs() {
             zerostate_id,
             storage.clone(),
         ))
-        .with_state_subscriber(
-            MinRefMcStateTracker::default(),
-            storage.clone(),
-            state_node_adapter,
-        )
+        .with_state_subscriber(state_tracker.clone(), storage.clone(), state_node_adapter)
         .build();
 
     let strider_handle = block_strider.run();

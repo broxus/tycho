@@ -301,7 +301,7 @@ impl CollatorStdImpl {
         let (mc_state, prev_states) = Self::load_init_states(
             self.state_node_adapter.clone(),
             self.shard_id,
-            prev_blocks_ids,
+            &prev_blocks_ids,
             mc_state,
         )
         .await?;
@@ -333,32 +333,28 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Update working state from new block and state after block collation
-    fn update_working_state(&mut self, new_state_stuff: ShardStateStuff) -> Result<()> {
-        self.next_block_id_short = BlockIdShort {
-            shard: new_state_stuff.block_id().shard,
-            seqno: new_state_stuff.block_id().seqno + 1,
-        };
-
+    /// Update working state
+    fn update_working_state(
+        &mut self,
+        mc_state: Option<ShardStateStuff>,
+        prev_states: Vec<ShardStateStuff>,
+        prev_states_loaded_from_storage: bool,
+    ) -> Result<()> {
         let working_state_mut = self
             .working_state
             .as_mut()
             .expect("should `init` collator before calling `update_working_state`");
 
-        if new_state_stuff.block_id().shard.is_masterchain() {
-            let new_mc_data = McData::build(new_state_stuff.clone())?;
+        if let Some(new_mc_state) = mc_state {
+            let new_mc_data = McData::build(new_mc_state)?;
             working_state_mut.mc_data = new_mc_data;
         }
 
-        let prev_states = vec![new_state_stuff];
         Self::check_prev_states_and_master(&working_state_mut.mc_data, &prev_states)?;
         let (new_prev_shard_data, usage_tree) = PrevData::build(prev_states, &self.state_tracker)?;
         working_state_mut.prev_shard_data = new_prev_shard_data;
+        working_state_mut.prev_states_loaded_from_storage = prev_states_loaded_from_storage;
         working_state_mut.usage_tree = usage_tree;
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "working state updated from just collated block",
-        );
 
         Ok(())
     }
@@ -377,39 +373,56 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Update McData in working state
-    #[tracing::instrument(skip_all, fields(block_id = %self.next_block_id_short))]
-    fn update_mc_data(&mut self, mc_state: ShardStateStuff) -> Result<()> {
+    /// Update McData and reload prev state from storage to reduce prev state runtime size
+    #[tracing::instrument(skip_all, fields(
+        block_id = %self.next_block_id_short,
+        mc_block_id = %new_mc_state.block_id().as_short_id(),
+    ))]
+    async fn update_mc_data(&mut self, new_mc_state: ShardStateStuff) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
-
         let _histogram =
             HistogramGuardWithLabels::begin("tycho_collator_update_mc_data_time", &labels);
 
-        let mc_state_block_id_short = mc_state.block_id().as_short_id();
+        let prev_states_loaded_from_storage = self.working_state().prev_states_loaded_from_storage;
 
-        let new_mc_data = McData::build(mc_state)?;
+        if prev_states_loaded_from_storage {
+            let working_state_mut = self
+                .working_state
+                .as_mut()
+                .expect("should `init` collator before calling `update_mc_data`");
 
-        let working_state_mut = self
-            .working_state
-            .as_mut()
-            .expect("should `init` collator before calling `update_mc_data`");
+            working_state_mut.mc_data = McData::build(new_mc_state)?;
 
-        working_state_mut.mc_data = new_mc_data;
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "only McData updated in working state from new master state",
+            );
+        } else {
+            let prev_blocks_ids = self.working_state().prev_shard_data.blocks_ids();
+            let (mc_state, prev_states) = Self::load_init_states(
+                self.state_node_adapter.clone(),
+                self.shard_id,
+                prev_blocks_ids,
+                new_mc_state,
+            )
+            .await?;
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "McData updated in working state from new master state (block_id={})",
-            mc_state_block_id_short,
-        );
+            self.update_working_state(Some(mc_state), prev_states, true)?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "McData updated in working state from new master state and \
+                shard prev state reloaded from storage",
+            );
+        }
 
         Ok(())
     }
 
-    /// Load required initial states:
-    /// master state + list of previous shard states
+    /// Load required previous shard states (for shardchain)
+    /// or just return master state (for masterchain)
     async fn load_init_states(
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         shard_id: ShardIdent,
-        prev_blocks_ids: Vec<BlockId>,
+        prev_blocks_ids: &[BlockId],
         mc_state: ShardStateStuff,
     ) -> Result<(ShardStateStuff, Vec<ShardStateStuff>)> {
         // if current shard is a masterchain then can take current master state
@@ -421,10 +434,10 @@ impl CollatorStdImpl {
         let mut prev_states = vec![];
         for prev_block_id in prev_blocks_ids {
             // request state for prev block and wait for response
-            let state = state_node_adapter.load_state(&prev_block_id).await?;
+            let state = state_node_adapter.load_state(prev_block_id).await?;
             tracing::info!(
                 target: tracing_targets::COLLATOR,
-                "To init working state loaded prev shard state for prev_block_id {}",
+                "Prev shard state loaded for prev_block_id {}",
                 prev_block_id.as_short_id(),
             );
             prev_states.push(state);
@@ -444,8 +457,6 @@ impl CollatorStdImpl {
         prev_states: Vec<ShardStateStuff>,
         state_tracker: &MinRefMcStateTracker,
     ) -> Result<WorkingState> {
-        // TODO: make real implementation
-
         let mc_data = McData::build(mc_state)?;
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, state_tracker)?;
@@ -453,6 +464,7 @@ impl CollatorStdImpl {
         let working_state = WorkingState {
             mc_data,
             prev_shard_data,
+            prev_states_loaded_from_storage: true,
             usage_tree,
             has_pending_internals: None,
         };
@@ -606,7 +618,7 @@ impl CollatorStdImpl {
     }
 
     async fn update_mc_data_and_try_collate(&mut self, mc_state: ShardStateStuff) -> Result<()> {
-        self.update_mc_data(mc_state)?;
+        self.update_mc_data(mc_state).await?;
         self.update_working_state_pending_internals(None)?;
         self.try_collate_next_shard_block_impl().await
     }

@@ -547,9 +547,19 @@ impl CollatorStdImpl {
                 })
                 .await?;
 
-            // update PrevData in working state
-            self.update_working_state(new_state_stuff)?;
+            // update PrevData [and McData] in working state
+            let new_mc_state_stuff_opt = if self.shard_id.is_masterchain() {
+                Some(new_state_stuff.clone())
+            } else {
+                None
+            };
+            self.next_block_id_short.seqno += 1;
+            self.update_working_state(new_mc_state_stuff_opt, vec![new_state_stuff], false)?;
             self.update_working_state_pending_internals(Some(has_pending_internals))?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "working state updated from just collated block",
+            );
 
             handle_block_candidate_elapsed = histogram.finish();
         }

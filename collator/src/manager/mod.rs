@@ -7,10 +7,12 @@ use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use humantime::format_duration;
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
+use types::BlockCandidateEntry;
 
 use self::types::{
     BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache,
@@ -219,6 +221,7 @@ where
         mpool_adapter_factory: MPF,
         validator_factory: VF,
         collator_factory: CF,
+        state_tracker: MinRefMcStateTracker,
         #[cfg(any(test, feature = "test"))] test_validators_keypairs: Vec<Arc<KeyPair>>,
     ) -> RunningCollationManager<CF, V>
     where
@@ -258,7 +261,7 @@ where
             mq_adapter: mq_adapter.clone(),
             collator_factory,
             validator,
-            state_tracker: MinRefMcStateTracker::default(),
+            state_tracker,
             active_collation_sessions: FastHashMap::default(),
             collation_sessions_to_finish: FastHashMap::default(),
             active_collators: FastHashMap::default(),
@@ -878,8 +881,14 @@ where
             "Start processing block candidate",
         );
 
-        let _histogram =
-            HistogramGuard::begin("tycho_collator_process_collated_block_candidate_time");
+        let candidate_chain_time = collation_result.candidate.chain_time;
+        let candidate_id = collation_result.candidate.block_id;
+
+        let labels = &[("workchain", candidate_id.shard.workchain().to_string())];
+        let _histogram = HistogramGuard::begin_with_labels(
+            "tycho_collator_process_collated_block_candidate_time",
+            labels,
+        );
 
         // find session related to this block by shard
         let session_info = self
@@ -890,8 +899,39 @@ where
             ))?
             .clone();
 
-        let candidate_chain_time = collation_result.candidate.chain_time;
-        let candidate_id = collation_result.candidate.block_id;
+        // pre-accept shard block to store new shard state
+        if !candidate_id.shard.is_masterchain() {
+            let histogram = HistogramGuard::begin_with_labels(
+                "tycho_collator_process_collated_block_candidate_pre_accept_total_time",
+                labels,
+            );
+
+            let histogram_build_block_stuff = HistogramGuard::begin_with_labels(
+                "tycho_collator_process_collated_block_candidate_pre_accept_build_block_stuff_time",
+                labels,
+            );
+            let block_for_pre_accept = build_block_stuff_for_sync(&BlockCandidateEntry {
+                key: candidate_id.as_short_id(),
+                candidate: collation_result.candidate.clone(),
+                signatures: Default::default(),
+            })?;
+            let build_block_stuff_elapsed = histogram_build_block_stuff.finish();
+
+            let histogram_build_block_stuff = HistogramGuard::begin_with_labels(
+                "tycho_collator_process_collated_block_candidate_pre_accept_time",
+                labels,
+            );
+            self.state_node_adapter
+                .pre_accept_block(block_for_pre_accept, &collation_result.new_state_stuff)
+                .await?;
+
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                total_time = %format_duration(histogram.finish()),
+                build_block_stuff_time = %format_duration(build_block_stuff_elapsed),
+                pre_accept_time = %format_duration(histogram_build_block_stuff.finish()),
+                "Block pre-accepted",
+            );
+        }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Saving block candidate to cache...",

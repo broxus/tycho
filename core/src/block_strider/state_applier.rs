@@ -49,9 +49,14 @@ where
         let state_storage = self.inner.storage.shard_state_storage();
 
         // Load handle
-        let handle = self
-            .get_block_handle(&cx.mc_block_id, &cx.block, &cx.archive_data)
+        let (handle, new_or_updated) = self
+            .get_block_handle(cx.mc_block_id.seqno, &cx.block, &cx.archive_data)
             .await?;
+
+        // Do not need to store new state if block was not updated
+        if !new_or_updated {
+            // TODO: build ShardApplierPrepared from existing data from storage and return
+        }
 
         // Load previous states
         let (prev_root_cell, handles) = {
@@ -163,10 +168,10 @@ where
 
     async fn get_block_handle(
         &self,
-        mc_block_id: &BlockId,
+        mc_ref_seqno: u32,
         block: &BlockStuff,
         archive_data: &ArchiveData,
-    ) -> Result<BlockHandle> {
+    ) -> Result<(BlockHandle, bool)> {
         let block_storage = self.inner.storage.block_storage();
 
         let info = block.load_info()?;
@@ -174,11 +179,11 @@ where
             .store_block_data(block, archive_data, BlockMetaData {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: mc_block_id.seqno,
+                mc_ref_seqno,
             })
             .await?;
 
-        Ok(res.handle)
+        Ok((res.handle, res.new || res.updated))
     }
 
     async fn compute_and_store_state_update(

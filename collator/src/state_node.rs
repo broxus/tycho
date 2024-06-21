@@ -55,6 +55,14 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block handle by it's id from node local state
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>>;
+
+    /// Just store updated state
+    async fn pre_accept_block(
+        &self,
+        block: BlockStuffForSync,
+        new_state: &ShardStateStuff,
+    ) -> Result<()>;
+
     /// Accept block:
     /// 1. (TODO) Broadcast block to blockchain network
     /// 2. Provide block to the block strider
@@ -123,6 +131,40 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>> {
         tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block handle: {}", block_id.as_short_id());
         Ok(self.storage.block_handle_storage().load_handle(block_id))
+    }
+
+    async fn pre_accept_block(
+        &self,
+        block: BlockStuffForSync,
+        new_state: &ShardStateStuff,
+    ) -> Result<()> {
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Pre-accepting block {}", block.block_id.as_short_id());
+
+        // Store block and load handle
+        let block_storage = self.storage.block_storage();
+        let block_stuff = &block.block_stuff_aug.data;
+        let archive_data = &block.block_stuff_aug.archive_data;
+        let info = block_stuff.load_info()?;
+        let mc_ref_seqno = info.min_ref_mc_seqno + 1;
+        let store_res = block_storage
+            .store_block_data(block_stuff, archive_data, BlockMetaData {
+                is_key_block: info.key_block,
+                gen_utime: info.gen_utime,
+                mc_ref_seqno,
+            })
+            .await?;
+        let handle = store_res.handle;
+
+        // Save state
+        let state_storage = self.storage.shard_state_storage();
+        state_storage
+            .store_state(&handle, new_state)
+            .await
+            .context("Failed to store new state")?;
+
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block pre-accepted {}", block.block_id.as_short_id());
+
+        Ok(())
     }
 
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {

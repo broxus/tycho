@@ -748,6 +748,22 @@ def collator_do_collate() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_process_collated_block_candidate_time",
             "process collated block candidate",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_process_collated_block_candidate_pre_accept_total_time",
+            "incl. pre-accept shard candidate: total",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_process_collated_block_candidate_pre_accept_build_block_stuff_time",
+            "incl. pre-accept shard candidate: build block stuff for sync",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_process_collated_block_candidate_pre_accept_time",
+            "incl. pre-accept shard candidate: store",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_collator_update_last_collated_chain_time_and_check_should_collate_mc_block_time",

@@ -629,6 +629,7 @@ impl Node {
                 },
             },
             CollatorStdImplFactory,
+            self.state_tracker.clone(),
             #[cfg(test)]
             vec![],
         );
