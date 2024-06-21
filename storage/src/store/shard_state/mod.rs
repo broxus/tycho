@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::{Cell, HashBytes};
 use tycho_block_util::block::*;
 use tycho_block_util::state::*;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
 
@@ -112,6 +113,7 @@ impl ShardStateStorage {
             let mut batch = rocksdb::WriteBatch::default();
 
             let new_cell_count = cell_storage.store_cell(&mut batch, root_cell)?;
+            metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
             let mut value = [0; 32 * 3];
             value[..32].copy_from_slice(root_hash.as_slice());
@@ -128,7 +130,9 @@ impl ShardStateStorage {
                 value,
             );
 
+            let hist = HistogramGuard::begin("tycho_storage_state_update_time");
             raw_db.write(batch)?;
+            hist.finish();
 
             let updated = handle.meta().set_has_state();
             if updated {
