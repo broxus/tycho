@@ -443,6 +443,10 @@ impl Node {
             }
         };
 
+        if !self.is_synced()? {
+            // start normal sync
+        }
+
         Ok(last_key_block_id)
     }
 
@@ -595,6 +599,10 @@ impl Node {
         tracing::info!("block strider finished");
 
         Ok(())
+    }
+
+    pub fn is_synced(&self) -> Result<bool> {
+        todo!()
     }
 }
 

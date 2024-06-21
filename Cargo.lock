@@ -3279,11 +3279,13 @@ dependencies = [
  "bytes",
  "everscale-types",
  "hex",
+ "libc",
  "parking_lot",
  "rand",
  "sha2",
  "smallvec",
  "thiserror",
+ "tracing",
  "tycho-util",
 ]
 
