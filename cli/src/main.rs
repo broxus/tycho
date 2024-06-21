@@ -9,6 +9,7 @@ mod tools {
     pub mod gen_dht;
     pub mod gen_key;
     pub mod gen_zerostate;
+    pub mod storage_cli;
 }
 
 mod node;
