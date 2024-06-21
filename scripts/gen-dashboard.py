@@ -343,6 +343,15 @@ def core_block_strider() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_get_cell_from_rocksdb_time", "Time to load cell from RocksDB"
         ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_store_block_data_size", "Block data size", UNITS.BYTES
+        ),
+        create_heatmap_quantile_panel(
+            "tycho_storage_cell_count", "Number of new cells from merkle update"
+        ),
+        create_heatmap_panel(
+            "tycho_storage_state_update_time", "Time to write state update to rocksdb"
+        ),
     ]
     return create_row("Core Block Strider", metrics)
 

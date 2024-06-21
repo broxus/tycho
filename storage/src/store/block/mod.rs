@@ -151,6 +151,7 @@ impl BlockStorage {
         let mut updated = false;
         if !handle.meta().has_data() {
             let data = archive_data.as_new_archive_data()?;
+            metrics::histogram!("tycho_storage_store_block_data_size").record(data.len() as f64);
 
             let _lock = handle.block_data_lock().write().await;
             if !handle.meta().has_data() {
