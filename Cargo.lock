@@ -842,7 +842,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#d4508bcf013df4da3a68dd79306a9b9a93116842"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#1a88545a9a627e3a4f50f39699c12615442d874d"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -862,7 +862,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#d4508bcf013df4da3a68dd79306a9b9a93116842"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#1a88545a9a627e3a4f50f39699c12615442d874d"
 dependencies = [
  "proc-macro2",
  "quote",
