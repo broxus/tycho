@@ -480,6 +480,16 @@ def collator_do_collate() -> RowPanel:
             "Params: group vertical size limit",
         ),
         create_counter_panel(
+            "tycho_do_collate_blocks_count",
+            "Blocks rate",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_block_seqno",
+            "Block seqno",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
             "tycho_do_collate_tx_total",
             "Number of transactions over time",
             labels=['workchain=~"$workchain"'],

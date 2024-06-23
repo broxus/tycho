@@ -513,6 +513,9 @@ impl CollatorStdImpl {
             tokio::task::block_in_place(|| self.finalize_block(&mut collation_data, exec_manager))?;
         tokio::task::yield_now().await;
 
+        metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
+        metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
+
         let apply_queue_diff_elapsed;
         {
             let histogram =
