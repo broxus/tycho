@@ -117,8 +117,7 @@ impl SessionState for SessionStateStdImpl {
 
         let labels = [("workchain", for_shard_id.workchain().to_string())];
 
-        metrics::histogram!("tycho_session_iterator_messages_all", &labels)
-            .record(total_messages as f64);
+        metrics::gauge!("tycho_session_iterator_messages_all", &labels).set(total_messages as f64);
 
         Box::new(SessionStateIterator::new(
             flat_shards,
