@@ -579,7 +579,7 @@ def collator_do_collate() -> RowPanel:
             "Number of internals in the iterator",
             labels=['workchain=~"$workchain"'],
         ),
-        create_gauge_panel(
+        create_counter_panel(
             "tycho_do_collate_int_msgs_queue_calc",
             "Calculated Internal queue len",
         ),
