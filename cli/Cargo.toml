@@ -56,7 +56,7 @@ tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
-tycho-collator = { workspace = true, features = ["test"] }
+tycho-collator = { workspace = true, features = ["test", "pre-accept-blocks"] }
 tycho-storage = { workspace = true, features = ["test"] }
 
 [build-dependencies]

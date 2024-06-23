@@ -383,9 +383,18 @@ impl CollatorStdImpl {
         let _histogram =
             HistogramGuardWithLabels::begin("tycho_collator_update_mc_data_time", &labels);
 
-        let prev_states_loaded_from_storage = self.working_state().prev_states_loaded_from_storage;
+        #[cfg(feature = "pre-accept-blocks")]
+        let new_mc_state = self
+            .state_node_adapter
+            .load_state(new_mc_state.block_id())
+            .await?;
 
-        if prev_states_loaded_from_storage {
+        #[cfg(feature = "pre-accept-blocks")]
+        let load_prev_states_from_storage = !self.working_state().prev_states_loaded_from_storage;
+        #[cfg(not(feature = "pre-accept-blocks"))]
+        let load_prev_states_from_storage = false;
+
+        if !load_prev_states_from_storage {
             let working_state_mut = self
                 .working_state
                 .as_mut()

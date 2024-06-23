@@ -57,6 +57,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>>;
 
     /// Just store updated state
+    #[cfg(feature = "pre-accept-blocks")]
     async fn pre_accept_block(
         &self,
         block: BlockStuffForSync,
@@ -133,6 +134,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         Ok(self.storage.block_handle_storage().load_handle(block_id))
     }
 
+    #[cfg(feature = "pre-accept-blocks")]
     async fn pre_accept_block(
         &self,
         block: BlockStuffForSync,
@@ -145,7 +147,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let block_stuff = &block.block_stuff_aug.data;
         let archive_data = &block.block_stuff_aug.archive_data;
         let info = block_stuff.load_info()?;
-        let mc_ref_seqno = info.min_ref_mc_seqno + 1;
+        let mc_ref_seqno = if block.block_id.shard.is_masterchain() {
+            block.block_id.seqno
+        } else {
+            info.min_ref_mc_seqno + 1
+        };
         let store_res = block_storage
             .store_block_data(block_stuff, archive_data, BlockMetaData {
                 is_key_block: info.key_block,

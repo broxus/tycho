@@ -900,7 +900,8 @@ where
             .clone();
 
         // pre-accept shard block to store new shard state
-        if !candidate_id.shard.is_masterchain() {
+        #[cfg(feature = "pre-accept-blocks")]
+        {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_process_collated_block_candidate_pre_accept_total_time",
                 labels,
