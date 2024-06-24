@@ -529,18 +529,6 @@ impl BlockLimitStats {
         }
     }
 
-    pub fn add_cell(&mut self, cell: &DynCell) -> Result<()> {
-        if !self.cells_seen.insert(*cell.repr_hash()) {
-            return Ok(());
-        } else {
-            let bits = cell.bit_len() as u32;
-            self.cells_bits += bits;
-        }
-        for i in 0..cell.reference_count() {
-            self.add_cell(cell.reference(i).ok_or(anyhow::anyhow!("wrong cell"))?)?
-        }
-        Ok(())
-    }
     pub fn reached(&self, level: BlockLimitsLevel) -> bool {
         let BlockLimits {
             bytes,

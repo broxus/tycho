@@ -1371,7 +1371,6 @@ fn new_transaction(
 
     collation_data.execute_count_all += 1;
     collation_data.block_limit.gas_used += executor_output.gas_used as u32;
-    collation_data.block_limit.add_cell(&*in_msg.cell)?;
 
     let import_fees;
     let in_msg_hash = *in_msg.cell.repr_hash();
@@ -1506,7 +1505,6 @@ fn new_transaction(
 
     for out_msg_cell in executor_output.out_msgs.values() {
         let out_msg_cell = out_msg_cell?;
-        collation_data.block_limit.add_cell(&*out_msg_cell)?;
         let out_msg_hash = *out_msg_cell.repr_hash();
         let out_msg_info = out_msg_cell.parse::<MsgInfo>()?;
 
