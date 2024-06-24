@@ -1,7 +1,7 @@
 #![allow(clippy::disallowed_types)]
 use std::fs::File;
 use std::io::{IoSlice, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -103,6 +103,31 @@ impl Write for ArchiveWriter {
         match &mut self.state {
             ArchiveWriterState::InMemory(_) => Ok(()),
             ArchiveWriterState::File { file, .. } => file.flush(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ArchiveWritersPool {
+    state: Arc<ArchiveWritersPoolState>,
+}
+
+impl ArchiveWritersPool {
+    pub fn new(base_path: impl AsRef<Path>, save_to_disk_threshold: usize) -> Self {
+        Self {
+            state: Arc::new(ArchiveWritersPoolState {
+                save_to_disk_threshold,
+                acquired_memory: Default::default(),
+                temp_file_index: Default::default(),
+                base_path: base_path.as_ref().to_path_buf(),
+            }),
+        }
+    }
+
+    pub fn acquire(&self) -> ArchiveWriter {
+        ArchiveWriter {
+            pool_state: self.state.clone(),
+            state: ArchiveWriterState::InMemory(Vec::new()),
         }
     }
 }

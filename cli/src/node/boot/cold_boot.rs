@@ -24,10 +24,7 @@ use crate::util::error::ResultExt;
 /// Boot type when the node has not yet started syncing
 ///
 /// Returns last masterchain key block id
-pub async fn cold_boot(
-    node: &Arc<Node>,
-    zerostates: Option<Vec<PathBuf>>,
-) -> anyhow::Result<BlockId> {
+pub async fn run(node: &Arc<Node>, zerostates: Option<Vec<PathBuf>>) -> anyhow::Result<BlockId> {
     tracing::info!("starting cold boot");
 
     // Find the last known key block (or zerostate)
@@ -288,7 +285,7 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
             Some(Ok(prev_block)) => prev_block.meta().gen_utime(),
             Some(Err(e)) => {
                 tracing::warn!("failed to load previous key block: {e:?}");
-                return Err(BootError::FailedToLoadKeyBlock.into());
+                return Err(ColdBootError::FailedToLoadKeyBlock.into());
             }
             None => 0,
         };
@@ -319,7 +316,7 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
         return Ok(handle);
     }
 
-    Err(BootError::PersistentShardStateNotFound.into())
+    Err(ColdBootError::PersistentShardStateNotFound.into())
 }
 
 async fn import_zerostates(
@@ -638,7 +635,7 @@ async fn download_block_with_state(
 
         let state_hash = *shard_state.root_cell().repr_hash();
         if state_update.new_hash != state_hash {
-            return Err(BootError::ShardStateHashMismatch.into());
+            return Err(ColdBootError::ShardStateHashMismatch.into());
         }
     }
 
@@ -752,7 +749,7 @@ impl PrevKeyBlock {
 const INTITAL_SYNC_TIME_SECONDS: u32 = 300;
 
 #[derive(thiserror::Error, Debug)]
-enum BootError {
+enum ColdBootError {
     #[error("Failed to load key block")]
     FailedToLoadKeyBlock,
     #[error("Persistent shard state not found")]

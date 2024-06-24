@@ -52,6 +52,7 @@ use crate::util::signal;
 
 mod boot;
 mod config;
+mod sync;
 
 const SERVICE_NAME: &str = "tycho-node";
 
@@ -299,7 +300,7 @@ pub struct Node {
     rpc_config: Option<RpcConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
-    pub collation_config: CollationConfig,
+    collation_config: CollationConfig,
 }
 
 impl Node {
@@ -429,14 +430,12 @@ impl Node {
         let last_key_block_id = match node_state.load_last_mc_block_id() {
             Some(block_id) => {
                 tracing::info!("warm init");
-                block_id
+                boot::warm_boot::run(self, block_id).await?
             }
             None => {
                 tracing::info!("cold init");
 
-                let last_mc_block_id = boot::cold_boot(self, zerostates).await?;
-
-                node_state.store_init_mc_block_id(&last_mc_block_id);
+                let last_mc_block_id = boot::cold_boot::run(self, zerostates).await?;
                 node_state.store_last_mc_block_id(&last_mc_block_id);
 
                 last_mc_block_id
@@ -444,8 +443,9 @@ impl Node {
         };
 
         if !self.is_synced()? {
-            // start normal sync
+            sync::normal::run(self).await?;
         }
+        tracing::info!("node synced");
 
         Ok(last_key_block_id)
     }

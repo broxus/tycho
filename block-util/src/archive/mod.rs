@@ -5,6 +5,7 @@ use everscale_types::models::{Block, BlockId, BlockProof};
 
 pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
+pub use self::writer::ArchiveWritersPool;
 use crate::block::{BlockProofStuff, BlockStuff};
 
 mod entry_id;
