@@ -14,7 +14,7 @@ use crate::effects::{AltFormat, CurrentRoundContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Location, PeerCount, Point, PointId, Round};
+use crate::models::{ConsensusRound, DagPoint, Digest, Location, PeerCount, Point, PointId, Round};
 
 #[derive(Clone)]
 pub struct BroadcastFilter {
@@ -25,6 +25,7 @@ impl BroadcastFilter {
     pub fn new(
         peer_schedule: Arc<PeerSchedule>,
         output: mpsc::UnboundedSender<ConsensusEvent>,
+        consensus_round: ConsensusRound,
     ) -> Self {
         Self {
             inner: Arc::new(BroadcastFilterInner {
@@ -32,6 +33,7 @@ impl BroadcastFilter {
                 by_round: Default::default(),
                 peer_schedule,
                 output,
+                consensus_round,
             }),
         }
     }
@@ -96,6 +98,7 @@ struct BroadcastFilterInner {
     by_round: FastDashMap<Round, (PeerCount, SimpleDagLocations)>,
     peer_schedule: Arc<PeerSchedule>,
     output: mpsc::UnboundedSender<ConsensusEvent>,
+    consensus_round: ConsensusRound,
 }
 
 impl BroadcastFilterInner {
@@ -226,6 +229,7 @@ impl BroadcastFilterInner {
             self.output
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
+            self.consensus_round.set_max(round);
         } else {
             tracing::trace!(
                 parent: effects.span(),

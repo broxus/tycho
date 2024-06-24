@@ -27,7 +27,7 @@ pub enum CollectorSignal {
 pub struct Collector {
     from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
     next_round: Round,
-    next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
+    next_includes: Option<FuturesUnordered<BoxFuture<'static, InclusionState>>>,
 }
 
 impl Collector {
@@ -35,24 +35,27 @@ impl Collector {
         Self {
             from_bcast_filter,
             next_round: Round::BOTTOM,
-            next_includes: FuturesUnordered::new(),
+            next_includes: None,
         }
     }
 
     pub fn init(&mut self, next_round: Round, next_includes: impl Iterator<Item = InclusionState>) {
         self.next_round = next_round;
-        self.next_includes
-            .extend(next_includes.map(|a| futures_util::future::ready(a).boxed()));
+        self.next_includes = Some(
+            next_includes
+                .map(|a| futures_util::future::ready(a).boxed())
+                .collect::<FuturesUnordered<_>>(),
+        );
     }
 
     pub async fn run(
-        mut self,
+        &mut self,
         round_effects: Effects<CurrentRoundContext>,
         next_dag_round: DagRound, // r+1
         own_point_state: oneshot::Receiver<InclusionState>,
         collector_signal: mpsc::UnboundedSender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
-    ) -> Self {
+    ) -> Round {
         let effects = Effects::<CollectorContext>::new(&round_effects);
         let span_guard = effects.span().clone().entered();
 
@@ -60,7 +63,23 @@ impl Collector {
             .prev()
             .upgrade()
             .expect("current DAG round must be linked into DAG chain");
-        let includes = mem::take(&mut self.next_includes);
+
+        let includes = match current_dag_round.round().cmp(&self.next_round) {
+            cmp::Ordering::Less => panic!(
+                "attempt to run at {:?}, expected at least {:?}",
+                current_dag_round.round(),
+                self.next_round
+            ),
+            cmp::Ordering::Equal => {
+                // just ok, no jump by engine happened (but includes may be removed by last run)
+                mem::take(&mut self.next_includes).unwrap_or_default()
+            }
+            cmp::Ordering::Greater => {
+                // engine jumped to a future round, driven by broadcasts; includes are outdated
+                self.next_includes = None;
+                FuturesUnordered::new()
+            }
+        };
         includes.push(
             (async move {
                 match own_point_state.await {
@@ -74,13 +93,6 @@ impl Collector {
             .boxed(),
         );
 
-        assert_eq!(
-            current_dag_round.round(),
-            self.next_round,
-            "attempt to run at {:?}, expected {:?}",
-            current_dag_round.round(),
-            self.next_round
-        );
         self.next_round = next_dag_round.round();
         let includes_ready = FastHashSet::with_capacity(current_dag_round.peer_count().full());
         let task = CollectorTask {
@@ -97,15 +109,17 @@ impl Collector {
         };
 
         drop(span_guard);
-        let result = task.run(&mut self.from_bcast_filter, bcaster_signal).await;
-        match result {
-            Ok(includes) => self.next_includes = includes,
-            Err(round) => self.next_round = round,
+        match task.run(&mut self.from_bcast_filter, bcaster_signal).await {
+            Ok(includes) => {
+                // no jump by task - prepare for Engine will not jump too
+                self.next_includes = Some(includes);
+                // self.next_round is up-to-date
+            }
+            Err(round) => {
+                // self.next_includes are already cleared
+                self.next_round = round;
+            }
         }
-        self
-    }
-
-    pub fn next_round(&self) -> Round {
         self.next_round
     }
 }

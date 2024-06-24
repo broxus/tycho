@@ -16,7 +16,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
     PeerSchedule, PeerScheduleUpdater, Responder,
 };
-use crate::models::{Link, Point, Round};
+use crate::models::{ConsensusRound, Link, Point, Round};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -27,6 +27,8 @@ pub struct Engine {
     downloader: Downloader,
     broadcaster: Broadcaster,
     broadcast_filter: BroadcastFilter,
+    consensus_round: ConsensusRound,
+    effects: Effects<ChainedRoundsContext>,
     collector: Collector,
     committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     input_buffer: InputBuffer,
@@ -42,10 +44,13 @@ impl Engine {
     ) -> Self {
         let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
 
+        let consensus_round = ConsensusRound::new();
+        let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
 
         let collector = Collector::new(bcast_rx);
-        let broadcast_filter = BroadcastFilter::new(peer_schedule.clone(), bcast_tx);
+        let broadcast_filter =
+            BroadcastFilter::new(peer_schedule.clone(), bcast_tx, consensus_round.clone());
 
         let responder = Responder::default();
 
@@ -77,6 +82,8 @@ impl Engine {
             downloader,
             broadcaster,
             broadcast_filter,
+            consensus_round,
+            effects,
             collector,
             committed,
             input_buffer,
@@ -85,8 +92,7 @@ impl Engine {
 
     pub async fn init_with_genesis(&mut self, next_peers: &[PeerId]) {
         let genesis = crate::test_utils::genesis();
-        let span = tracing::error_span!("init engine with genesis");
-        let _guard = span.enter();
+        let entered_span = tracing::error_span!("init engine with genesis").entered();
         // check only genesis round as it is widely used in point validation.
         // if some nodes use distinct genesis data, their first points will be rejected
         assert_eq!(
@@ -115,32 +121,55 @@ impl Engine {
         self.peer_schedule.rotate();
 
         let current_dag_round = DagRound::genesis(&genesis, &self.peer_schedule);
-        self.dag.init(current_dag_round.clone());
+        let next_dag_round = current_dag_round.next(&self.peer_schedule);
 
         let genesis_state =
-            current_dag_round.insert_exact_sign(&genesis, &self.peer_schedule, &span);
-        self.collector
-            .init(current_dag_round.round().next(), iter::once(genesis_state));
+            current_dag_round.insert_exact_sign(&genesis, &self.peer_schedule, &entered_span);
+        let next_round = next_dag_round.round();
+
+        self.dag.init(current_dag_round, next_dag_round);
+
+        self.collector.init(next_round, iter::once(genesis_state));
+
+        self.consensus_round.set_max(next_round);
+
+        drop(entered_span);
+        self.effects = Effects::<ChainedRoundsContext>::new(next_round);
     }
 
     pub async fn run(mut self) -> ! {
-        let mut chained_rounds = Effects::<ChainedRoundsContext>::new(self.collector.next_round());
         // contains all collected signatures, even if they are insufficient to produce valid point;
         // may reference own point older than from a last round, as its payload may be not resend
         let mut last_own_point: Option<Arc<LastOwnPoint>> = None;
-        let mut enough_includes = true;
         loop {
-            if !enough_includes {
-                chained_rounds = Effects::<ChainedRoundsContext>::new(self.collector.next_round());
+            let (prev_round_ok, current_dag_round, round_effects) = {
+                // treat atomic as lock - do not leak its value or repeat the `get()`
+                let consensus_round = self.consensus_round.get();
+                let top_dag_round = self.dag.top();
+                assert!(
+                    consensus_round >= top_dag_round.round(),
+                    "consensus round {} cannot be less than top dag round {}",
+                    consensus_round.0,
+                    top_dag_round.round().0,
+                );
+                // `true` if we collected enough dependencies and (optionally) signatures,
+                // so `next_dag_round` from the previous loop is the current now
+                let prev_round_ok = consensus_round == top_dag_round.round();
+                if prev_round_ok {
+                    let round_effects =
+                        Effects::<CurrentRoundContext>::new(&self.effects, consensus_round);
+                    (prev_round_ok, top_dag_round, round_effects)
+                } else {
+                    self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
+                    let round_effects =
+                        Effects::<CurrentRoundContext>::new(&self.effects, consensus_round);
+                    let current_dag_round =
+                        self.dag
+                            .fill_to_top(consensus_round, &self.peer_schedule, &round_effects);
+                    (prev_round_ok, current_dag_round, round_effects)
+                }
             };
-            let round_effects =
-                Effects::<CurrentRoundContext>::new(&chained_rounds, self.collector.next_round());
 
-            let current_dag_round = self.dag.fill_to_top(
-                self.collector.next_round(),
-                &self.peer_schedule,
-                &round_effects,
-            );
             let next_dag_round = self.dag.fill_to_top(
                 current_dag_round.round().next(),
                 &self.peer_schedule,
@@ -152,7 +181,7 @@ impl Engine {
             let (collector_signal_tx, mut collector_signal_rx) = mpsc::unbounded_channel();
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
 
-            let own_point_fut = if enough_includes {
+            let own_point_fut = if prev_round_ok {
                 let round_effects = round_effects.clone();
                 let current_dag_round = current_dag_round.clone();
                 let peer_schedule = self.peer_schedule.clone();
@@ -219,13 +248,23 @@ impl Engine {
                 }
             });
 
-            let collector_run = tokio::spawn(self.collector.run(
-                round_effects.clone(),
-                next_dag_round.clone(),
-                own_point_state_rx,
-                collector_signal_tx,
-                bcaster_ready_rx,
-            ));
+            let collector_run = tokio::spawn({
+                let mut collector = self.collector;
+                let round_effects = round_effects.clone();
+                let next_dag_round = next_dag_round.clone();
+                async move {
+                    let next_round = collector
+                        .run(
+                            round_effects,
+                            next_dag_round,
+                            own_point_state_rx,
+                            collector_signal_tx,
+                            bcaster_ready_rx,
+                        )
+                        .await;
+                    (collector, next_round)
+                }
+            });
 
             self.responder.update(
                 &self.broadcast_filter,
@@ -235,15 +274,15 @@ impl Engine {
             );
 
             match tokio::join!(collector_run, bcaster_run, commit_run) {
-                (Ok(collector_upd), Ok((bcaster, new_last_own_point)), Ok(dag)) => {
+                (Ok((collector, next_round)), Ok((bcaster, new_last_own_point)), Ok(dag)) => {
                     self.broadcaster = bcaster;
                     // do not reset to None, Producer decides whether to use old value or not
                     if let Some(new_last_own_point) = new_last_own_point {
                         // value is returned from the task without Arc for the sake of code clarity
                         last_own_point = Some(Arc::new(new_last_own_point));
                     }
-                    enough_includes = next_dag_round.round() == collector_upd.next_round();
-                    self.collector = collector_upd;
+                    self.consensus_round.set_max(next_round);
+                    self.collector = collector;
                     self.dag = dag;
                 }
                 (collector, bcaster, commit) => {

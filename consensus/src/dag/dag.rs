@@ -28,9 +28,26 @@ impl Dag {
         }
     }
 
-    pub fn init(&mut self, dag_round: DagRound) {
+    pub fn init(&mut self, dag_round: DagRound, next_dag_round: DagRound) {
+        assert_eq!(
+            Some(dag_round.round()),
+            next_dag_round
+                .prev()
+                .upgrade()
+                .map(|dag_round| dag_round.round()),
+            "incorrect rounds to init DAG"
+        );
         assert!(self.rounds.is_empty(), "DAG already initialized");
         self.rounds.insert(dag_round.round(), dag_round);
+        self.rounds.insert(next_dag_round.round(), next_dag_round);
+    }
+
+    /// the next after current engine round
+    pub fn top(&self) -> DagRound {
+        match self.rounds.last_key_value() {
+            None => unreachable!("DAG cannot be empty if properly initialized"),
+            Some((_, top)) => top.clone(),
+        }
     }
 
     pub fn fill_to_top(
