@@ -25,7 +25,7 @@ mod util {
     mod stored_value;
 }
 
-pub use store::internal_queue::model::InternalMessageKey;
+pub use store::internal_queue::model::StorageInternalMessageKey;
 // TODO move to weedb
 pub use util::owned_iterator;
 

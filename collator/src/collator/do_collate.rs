@@ -656,7 +656,7 @@ impl CollatorStdImpl {
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={}",
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_pending_internals={}",
             block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
@@ -665,7 +665,7 @@ impl CollatorStdImpl {
             collation_data.new_msgs_created, diff.messages.len(),
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator,
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals,
         );
 
         assert_eq!(

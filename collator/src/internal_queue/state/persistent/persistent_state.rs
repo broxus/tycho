@@ -1,12 +1,15 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tycho_storage::Storage;
+use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::persistent::persistent_state_iterator::PersistentStateIterator;
-use crate::internal_queue::state::state_iterator::StateIterator;
+use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator};
 use crate::internal_queue::types::EnqueuedMessage;
+use crate::types::IntAdrExt;
 
 // CONFIG
 
@@ -56,20 +59,22 @@ pub trait PersistentStateFactory {
 
 #[trait_variant::make(PersistentState: Send)]
 pub trait LocalPersistentState {
-    async fn add_messages(
+    fn add_messages(
         &self,
         block_id_short: BlockIdShort,
         messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()>;
 
-    fn iterator(&self, receiver: ShardIdent) -> Box<dyn StateIterator>;
-
-    async fn delete_messages(
+    fn iterator(
         &self,
-        source_shards: Vec<ShardIdent>,
         receiver: ShardIdent,
-        lt_from: u64,
-        lt_to: u64,
+        ranges: &FastHashMap<ShardIdent, ShardRange>,
+    ) -> Box<dyn StateIterator>;
+
+    fn delete_messages(
+        &self,
+        shard: ShardIdent,
+        delete_until: BTreeMap<ShardIdent, (u64, HashBytes)>,
     ) -> anyhow::Result<()>;
 }
 
@@ -86,14 +91,21 @@ impl PersistentStateStdImpl {
 }
 
 impl PersistentState for PersistentStateStdImpl {
-    async fn add_messages(
+    fn add_messages(
         &self,
         block_id_short: BlockIdShort,
         messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()> {
-        let messages: Vec<(u64, HashBytes, Cell)> = messages
+        let messages: Vec<(u64, HashBytes, HashBytes, Cell)> = messages
             .iter()
-            .map(|m| (m.info.created_lt, m.hash, m.cell.clone()))
+            .map(|m| {
+                (
+                    m.info.created_lt,
+                    m.hash,
+                    m.info.dst.get_address(),
+                    m.cell.clone(),
+                )
+            })
             .collect();
         self.storage
             .internal_queue_storage()
@@ -101,7 +113,11 @@ impl PersistentState for PersistentStateStdImpl {
         Ok(())
     }
 
-    fn iterator(&self, receiver: ShardIdent) -> Box<dyn StateIterator> {
+    fn iterator(
+        &self,
+        receiver: ShardIdent,
+        ranges: &FastHashMap<ShardIdent, ShardRange>,
+    ) -> Box<dyn StateIterator> {
         let snapshot = self.storage.internal_queue_storage().snapshot();
 
         let iter = self
@@ -109,20 +125,20 @@ impl PersistentState for PersistentStateStdImpl {
             .internal_queue_storage()
             .build_iterator(&snapshot);
 
-        Box::new(PersistentStateIterator::new(iter, receiver))
+        Box::new(PersistentStateIterator::new(iter, receiver, ranges.clone()))
     }
 
-    async fn delete_messages(
+    fn delete_messages(
         &self,
-        source_shards: Vec<ShardIdent>,
         receiver: ShardIdent,
-        lt_from: u64,
-        lt_to: u64,
+        delete_until: BTreeMap<ShardIdent, (u64, HashBytes)>,
     ) -> anyhow::Result<()> {
-        for shard in source_shards {
-            self.storage
-                .internal_queue_storage()
-                .delete_messages(shard, receiver, lt_from, lt_to)?;
+        for (shard, delete_until) in delete_until.iter() {
+            self.storage.internal_queue_storage().delete_messages(
+                *shard,
+                *delete_until,
+                receiver,
+            )?;
         }
         Ok(())
     }
