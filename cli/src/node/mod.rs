@@ -40,7 +40,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{BlockMetaData, Storage};
+use tycho_storage::{start_archives_gc, BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -362,6 +362,10 @@ impl Node {
             root_dir = %storage.root().path().display(),
             "initialized storage"
         );
+
+        tokio::spawn(async move {
+            start_archives_gc(storage.clone())?;
+        });
 
         // Setup block strider
         let state_tracker = MinRefMcStateTracker::default();

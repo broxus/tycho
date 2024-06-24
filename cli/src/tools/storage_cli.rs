@@ -126,7 +126,7 @@ impl BlockCmd {
                 }
                 _ => {
                     println!("Found block empty {}\n", &self.block_id)
-                },
+                }
             };
             Ok::<(), anyhow::Error>(())
         };
@@ -150,9 +150,7 @@ impl BlockCmd {
                 Some(handle) if handle.meta().has_next1() => block_connection_storage
                     .load_connection(&self.block_id, BlockConnection::Next1)
                     .context("connection not found")?,
-                _ => {
-                    return Ok(())
-                },
+                _ => return Ok(()),
             };
 
             let mut is_link = false;
@@ -170,7 +168,7 @@ impl BlockCmd {
                 }
                 _ => {
                     println!("Found block empty {}\n", &self.block_id)
-                },
+                }
             };
             Ok::<(), anyhow::Error>(())
         };

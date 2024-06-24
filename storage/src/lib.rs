@@ -1,7 +1,10 @@
+use std::ops::Add;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use tokio::sync::Notify;
 use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
 
@@ -25,6 +28,7 @@ mod util {
     mod stored_value;
 }
 
+use tycho_util::time::duration_between_unix_and_instant;
 // TODO move to weedb
 pub use util::owned_iterator;
 
@@ -248,6 +252,86 @@ impl Storage {
 
     pub fn internal_queue_storage(&self) -> &InternalQueueStorage {
         &self.inner.internal_queue_storage
+    }
+}
+
+pub fn start_archives_gc(storage: Storage) -> Result<()> {
+    let options = match &storage.inner.config.archives {
+        Some(options) => options,
+        None => return Ok(()),
+    };
+
+    struct LowerBound {
+        archive_id: AtomicU32,
+        changed: Notify,
+    }
+
+    #[allow(unused_mut)]
+    let mut lower_bound = None::<Arc<LowerBound>>;
+
+    match options.gc_interval {
+        ArchivesGcInterval::Manual => Ok(()),
+        ArchivesGcInterval::PersistentStates { offset } => {
+            // let engine = self.clone();
+            tokio::spawn(async move {
+                let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
+
+                loop {
+                    tokio::pin!(let new_state_found = persistent_state_keeper.new_state_found(););
+
+                    let (until_id, untile_time) = match persistent_state_keeper.current() {
+                        Some(state) => {
+                            let untile_time =
+                                (state.meta().gen_utime() as u64).add(offset.as_secs());
+                            (state.id().seqno, untile_time)
+                        }
+                        None => {
+                            new_state_found.await;
+                            continue;
+                        }
+                    };
+
+                    if let Some(interval) =
+                        duration_between_unix_and_instant(untile_time, Instant::now())
+                    {
+                        tokio::select!(
+                            _ = tokio::time::sleep(interval) => {},
+                            _ = &mut new_state_found => continue,
+                        );
+                    }
+
+                    if let Some(lower_bound) = &lower_bound {
+                        loop {
+                            tokio::pin!(let lower_bound_changed = lower_bound.changed.notified(););
+
+                            let lower_bound = lower_bound.archive_id.load(Ordering::Acquire);
+                            if until_id < lower_bound {
+                                break;
+                            }
+
+                            tracing::info!(
+                                until_id,
+                                lower_bound,
+                                "waiting for the archives barrier"
+                            );
+                            lower_bound_changed.await;
+                        }
+                    }
+
+                    if let Err(e) = storage
+                        .block_storage()
+                        .remove_outdated_archives(until_id)
+                        .await
+                    {
+                        tracing::error!("failed to remove outdated archives: {e:?}");
+                    }
+
+                    new_state_found.await;
+                }
+            });
+
+            Ok(())
+        }
     }
 }
 
