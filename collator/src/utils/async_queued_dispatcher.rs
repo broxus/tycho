@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::task_descr::{TaskDesc, TaskResponder};
 use crate::tracing_targets;
 
-pub const STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE: usize = 10;
+pub const STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE: usize = 100;
 
 type AsyncTaskDesc<W, R> = TaskDesc<
     dyn FnOnce(W) -> Pin<Box<dyn Future<Output = (W, Result<R>)> + Send>> + Send,
