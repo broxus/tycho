@@ -35,7 +35,7 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
     async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>>;
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>>;
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
@@ -98,6 +98,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
+        tracing::error!(target: "debug", "create iterator");
         let states_iterators = self.queue.iterator(&ranges, for_shard_id).await;
 
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
@@ -123,14 +124,14 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     }
 
     #[instrument(skip(self), fields(%diff_id))]
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>> {
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>> {
         tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,
             "Committing diff to the queue"
         );
-        // HACK: do not commit diff to avoid incorrect msgs set reading for collation
+
         let diff = self.queue.commit_diff(diff_id).await?;
-        // let diff = None;
+
         Ok(diff)
     }
 

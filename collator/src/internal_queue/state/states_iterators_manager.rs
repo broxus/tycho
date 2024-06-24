@@ -30,7 +30,7 @@ impl StatesIteratorsManager {
     }
 
     /// peek the next message without moving the cursor
-    pub fn peek(&self) -> Result<Option<Arc<MessageWithSource>>> {
+    pub fn peek(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
         let mut current_snapshot = self.current_snapshot;
         while current_snapshot < self.iterators.len() {
             if let Some(message) = self.iterators[current_snapshot].peek()? {

@@ -9,7 +9,6 @@ use crate::internal_queue::shard::Shard;
 use crate::internal_queue::state::session::session_state_iterator::SessionStateIterator;
 use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator};
 use crate::internal_queue::types::QueueDiff;
-use crate::tracing_targets;
 
 // FACTORY
 
@@ -70,10 +69,7 @@ pub trait LocalSessionState {
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError>;
     async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
-    async fn remove_diff(
-        &self,
-        diff_id: &BlockIdShort,
-    ) -> Result<Option<Arc<QueueDiff>>, QueueError>;
+    async fn remove_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>, QueueError>;
 }
 
 // IMPLEMENTATION
@@ -99,31 +95,25 @@ impl SessionState for SessionStateStdImpl {
         for_shard_id: ShardIdent,
     ) -> Box<dyn StateIterator> {
         let shards_flat_read = self.shards_flat.read().await;
+
         let mut total_messages = 0;
 
         let mut flat_shards = FastHashMap::default();
         for (shard_ident, shard_lock) in shards_flat_read.iter() {
             let shard = shard_lock.read().await;
-            flat_shards.insert(*shard_ident, shard.clone());
+
+            flat_shards.insert(*shard_ident, Arc::new(shard.clone()));
+
             total_messages += shard.outgoing_messages.len();
         }
-
-        tracing::info!(
-            target: tracing_targets::MQ,
-            "Creating iterator for shard {} with {} messages",
-            for_shard_id,
-            total_messages
-        );
 
         let labels = [("workchain", for_shard_id.workchain().to_string())];
 
         metrics::gauge!("tycho_session_iterator_messages_all", &labels).set(total_messages as f64);
 
-        Box::new(SessionStateIterator::new(
-            flat_shards,
-            ranges,
-            &for_shard_id,
-        ))
+        let iterator = SessionStateIterator::new(flat_shards, ranges.clone(), for_shard_id);
+
+        Box::new(iterator)
     }
 
     async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
@@ -236,34 +226,16 @@ impl SessionState for SessionStateStdImpl {
         Ok(())
     }
 
-    async fn remove_diff(
-        &self,
-        diff_id: &BlockIdShort,
-    ) -> Result<Option<Arc<QueueDiff>>, QueueError> {
-        let shard_arc = {
-            let lock = self.shards_flat.read().await;
-            lock.get(&diff_id.shard)
-                .ok_or(QueueError::ShardNotFound(diff_id.shard))?
-                .clone()
-        };
-
-        // TODO clean session queue instead cleaning persistent queue
-        let diff = shard_arc.write().await.diffs.get(diff_id).cloned();
-        let processed_uptos = diff.as_ref().map(|d| &d.processed_upto);
-
-        if let Some(processed_uptos) = processed_uptos {
-            let diff_shard = diff_id.shard;
-            let flat_shards = self.shards_flat.write().await;
-
-            for processed_upto in processed_uptos {
-                let shard = flat_shards
-                    .get(processed_upto.0)
-                    .ok_or(QueueError::ShardNotFound(*processed_upto.0))?;
-
-                let mut shard_guard = shard.write().await;
-                shard_guard.clear_processed_messages(diff_shard, processed_upto.1)?;
-            }
-        }
+    async fn remove_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>, QueueError> {
+        let lock = self.shards_flat.read().await;
+        let diff = lock
+            .get(&diff_id.shard)
+            .ok_or(QueueError::ShardNotFound(diff_id.shard))?
+            .clone()
+            .write()
+            .await
+            .remove_diff(diff_id)
+            .ok_or(anyhow::anyhow!("Diff not found"))?;
 
         Ok(diff)
     }

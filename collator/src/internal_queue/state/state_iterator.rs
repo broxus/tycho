@@ -6,7 +6,6 @@ use everscale_types::models::ShardIdent;
 
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 
-
 #[derive(Debug, Clone, Eq)]
 pub struct MessageWithSource {
     pub shard_id: ShardIdent,
@@ -51,6 +50,7 @@ pub struct ShardRange {
 }
 
 pub trait StateIterator: Send {
+    fn seek(&mut self, range_start: Option<(&ShardIdent, InternalMessageKey)>);
     fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
-    fn peek(&self) -> Result<Option<Arc<MessageWithSource>>>;
+    fn peek(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
 }
