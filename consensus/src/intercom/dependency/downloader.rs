@@ -76,7 +76,7 @@ impl Downloader {
         );
         // request point from its signers (any depender is among them as point is already verified)
         let mut undone_peers = peer_schedule
-            .peers_for(point_dag_round_strong.round().next())
+            .peers_for(point_id.location.round.next())
             .iter()
             .map(|(peer_id, state)| {
                 (*peer_id, PeerStatus {
@@ -194,7 +194,9 @@ impl DownloadTask {
         let mut verified_broadcast = std::pin::pin!(verified_broadcast);
         loop {
             tokio::select! {
+                biased; // mandatory priority
                 Ok(point) = &mut verified_broadcast => break Some(point),
+                Some(depender) = self.dependers.recv() => self.add_depender(&depender),
                 Some((peer_id, downloaded)) = self.downloading.next() =>
                     match self.verify(&peer_id, downloaded) {
                         Some(point) => break Some(point),
@@ -204,9 +206,8 @@ impl DownloadTask {
                             break None;
                         }
                     },
-                Some(depender) = self.dependers.recv() => self.add_depender(&depender),
-                _ = interval.tick() => self.download_random(false),
                 update = self.updates.recv() => self.match_peer_updates(update),
+                _ = interval.tick() => self.download_random(false),
             }
         }
         // on exit futures are dropped and receivers are cleaned,
