@@ -653,8 +653,18 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_do_collate_create_queue_diff_time",
+            "Create message queue diff",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_do_collate_apply_queue_diff_time",
             "Apply message queue diff",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_collator_finalize_block_time",
+            "Finalize block",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(

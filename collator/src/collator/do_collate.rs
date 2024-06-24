@@ -165,9 +165,6 @@ impl CollatorStdImpl {
             init_iterator_elapsed = histogram.finish();
         }
 
-        let execute_histogram =
-            HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", labels);
-
         // execute tick transaction and special transactions (mint, recover)
         let execute_tick_elapsed;
         if self.shard_id.is_masterchain() {
@@ -188,6 +185,9 @@ impl CollatorStdImpl {
         } else {
             execute_tick_elapsed = Duration::ZERO;
         }
+
+        let execute_histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", labels);
 
         let mut all_existing_internals_finished = false;
         let mut all_new_internals_finished = false;
@@ -484,6 +484,8 @@ impl CollatorStdImpl {
         }
 
         let execute_elapsed = execute_histogram.finish();
+        let histogram_create_queue_diff =
+            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
 
         let diff = Arc::new(internal_messages_iterator.take_diff());
 
@@ -505,13 +507,16 @@ impl CollatorStdImpl {
             );
         }
 
-        // build block candidate and new state
+        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
 
+        // build block candidate and new state
+        let finalize_block_timer = std::time::Instant::now();
         // TODO: Move into rayon
         tokio::task::yield_now().await;
         let (candidate, new_state_stuff) =
             tokio::task::block_in_place(|| self.finalize_block(&mut collation_data, exec_manager))?;
         tokio::task::yield_now().await;
+        let finalize_block_elapsed = finalize_block_timer.elapsed();
 
         metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
@@ -647,15 +652,17 @@ impl CollatorStdImpl {
             total = %format_duration(total_elapsed),
             prepare = %format_duration(prepare_elapsed),
             init_iterator = %format_duration(init_iterator_elapsed),
-            execute_total = %format_duration(execute_elapsed),
             execute_tick = %format_duration(execute_tick_elapsed),
             execute_tock = %format_duration(execute_tock_elapsed),
+            execute_total = %format_duration(execute_elapsed),
 
             fill_msgs_total = %format_duration(fill_msgs_total_elapsed),
             exec_msgs_total = %format_duration(execute_msgs_total_elapsed),
             process_txs_total = %format_duration(process_txs_total_elapsed),
 
+            create_queue_diff = %format_duration(create_queue_diff_elapsed),
             apply_queue_diff = %format_duration(apply_queue_diff_elapsed),
+            finalize_block = %format_duration(finalize_block_elapsed),
             handle_block_candidate = %format_duration(handle_block_candidate_elapsed),
             "timings"
         );
