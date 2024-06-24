@@ -11,7 +11,7 @@ pub fn build_block_stuff_for_sync(
     block_candidate: &BlockCandidateEntry,
 ) -> Result<BlockStuffForSync> {
     let block_data = block_candidate.candidate.data.clone();
-    let block = BocRepr::decode(&block_data)?;
+    let block = block_candidate.candidate.block.clone();
     let block_stuff = BlockStuff::with_block(block_candidate.candidate.block_id, block);
 
     let block_stuff_aug = BlockStuffAug::new(block_stuff, block_data);
