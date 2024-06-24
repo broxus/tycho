@@ -66,6 +66,13 @@ impl Dag {
                 lag = next_round.0 - (top.round().0 + MempoolConfig::COMMIT_DEPTH as u32),
                 "far behind consensus"
             );
+        }
+        if (top.round().0 + MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32) < next_round.0 {
+            tracing::warn!(
+                parent: effects.span(),
+                lag = next_round.0 - (top.round().0 + MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32),
+                "need sync"
+            );
             unimplemented!("sync")
         }
         for _ in top.round().next().0..=next_round.0 {

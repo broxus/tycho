@@ -156,6 +156,15 @@ impl Engine {
                 // so `next_dag_round` from the previous loop is the current now
                 let prev_round_ok = consensus_round == top_dag_round.round();
                 if prev_round_ok {
+                    // Round was not advanced by `BroadcastFilter`, and `Collector` gathered enough
+                    // broadcasts during previous round. So if `Broadcaster` was run at previous
+                    // round (controlled by `Collector`), then it gathered enough signatures.
+                    // If our newly created current round repeats such success, then we've moved
+                    // consensus with other 2F nodes during previous round
+                    // (at this moment we are not sure to be free from network lag).
+                    // Then any reliable point received _up to this moment_ should belong to a round
+                    // not greater than new `next_dag_round`, and any future round cannot exist.
+
                     let round_effects =
                         Effects::<CurrentRoundContext>::new(&self.effects, consensus_round);
                     (prev_round_ok, top_dag_round, round_effects)

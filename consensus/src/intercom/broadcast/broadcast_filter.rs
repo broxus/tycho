@@ -293,10 +293,9 @@ impl BroadcastFilterInner {
             "advance round"
         );
 
-        // TODO there must be some config value - when node needs to sync;
-        //   values too far in the future are some garbage, must ban authors
         self.by_round.retain(|round, _| {
-            top_round < *round && round.0 <= top_round.0 + MempoolConfig::COMMIT_DEPTH as u32
+            top_round < *round
+                && round.0 <= top_round.0 + MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32
         });
     }
 

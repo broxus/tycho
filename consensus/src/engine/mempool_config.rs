@@ -40,6 +40,11 @@ impl MempoolConfig {
     // == Configs below affects performance and may differ across nodes,
     // == though misconfiguration may make the node unusable or banned
 
+    /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
+    /// and allows [`Dag`](crate::dag::Dag) to grow in one time to catch up the lag behind consensus
+    /// without explicit sync
+    pub const ROUNDS_LAG_BEFORE_SYNC: u8 = 20;
+
     /// see [`LogFlavor`]
     pub const LOG_FLAVOR: LogFlavor = LogFlavor::Truncated;
 
@@ -67,6 +72,11 @@ impl MempoolConfig {
     /// validated successfully, or return `None`.
     pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(30);
 }
+
+const _: () = assert!(
+    MempoolConfig::ROUNDS_LAG_BEFORE_SYNC >= MempoolConfig::COMMIT_DEPTH,
+    "invalid config: no need to sync when data is present in DAG"
+);
 
 const _: () = assert!(
     MempoolConfig::PAYLOAD_BUFFER_BYTES >= MempoolConfig::PAYLOAD_BATCH_BYTES,
