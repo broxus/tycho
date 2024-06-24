@@ -438,20 +438,18 @@ impl CollatorStdImpl {
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
-            }
-            metrics::gauge!("tycho_do_collate_exec_ticks_per_msgs_set", labels)
-                .set(exec_ticks_count as f64);
 
-            timer = std::time::Instant::now();
-
-            if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
-                tracing::debug!(target: tracing_targets::COLLATOR,
+                if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
                     "STUB: block limit reached: {:?}",
                     collation_data.block_limit,
                 );
-                block_limits_reached = true;
-                break;
+                    block_limits_reached = true;
+                    break;
+                }
             }
+            metrics::gauge!("tycho_do_collate_exec_ticks_per_msgs_set", labels)
+                .set(exec_ticks_count as f64);
 
             timer = std::time::Instant::now();
 
