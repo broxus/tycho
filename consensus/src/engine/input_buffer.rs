@@ -95,12 +95,16 @@ impl InputBufferData {
             let to_drop = self
                 .data
                 .iter()
-                .take_while(|evicted| {
-                    self.data_bytes = self
-                        .data_bytes
-                        .checked_sub(evicted.len())
-                        .expect("decrease buffered data size on eviction");
-                    self.data_bytes > max_data_bytes
+                .take_while(|front| {
+                    // last call must not change `self`
+                    let take_more = self.data_bytes > max_data_bytes;
+                    if take_more {
+                        self.data_bytes = self
+                            .data_bytes
+                            .checked_sub(front.len())
+                            .expect("decrease buffered data size on eviction");
+                    }
+                    take_more
                 })
                 .count();
 
