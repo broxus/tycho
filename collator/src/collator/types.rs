@@ -11,7 +11,6 @@ use everscale_types::models::{
     ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
     SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
-use everscale_types::prelude::DynCell;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
@@ -423,6 +422,7 @@ impl BlockCollationDataBuilder {
             total_execute_msgs_time_mc: 0,
             execute_count_all: 0,
             execute_count_ext: 0,
+            ext_msgs_error_count: 0,
             execute_count_int: 0,
             execute_count_new_int: 0,
             int_enqueue_count: 0,

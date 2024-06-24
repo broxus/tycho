@@ -1,6 +1,5 @@
 use anyhow::Result;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
-use everscale_types::boc::BocRepr;
 use everscale_types::models::ValidatorDescription;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 
