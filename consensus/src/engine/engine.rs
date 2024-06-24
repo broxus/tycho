@@ -8,7 +8,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tracing::Span;
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
-use crate::dag::{Dag, DagRound, InclusionState, Producer, Verifier, WeakDagRound};
+use crate::dag::{Dag, DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::MempoolConfig;
@@ -16,7 +16,7 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
     PeerSchedule, PeerScheduleUpdater, Responder,
 };
-use crate::models::{Link, Point, PrevPoint, Round};
+use crate::models::{Link, Point, Round};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -125,10 +125,12 @@ impl Engine {
 
     pub async fn run(mut self) -> ! {
         let mut chained_rounds = Effects::<ChainedRoundsContext>::new(self.collector.next_round());
-        let mut prev_point: Option<Arc<PrevPoint>> = None;
-        let mut prev_round_success = true;
+        // contains all collected signatures, even if they are insufficient to produce valid point;
+        // may reference own point older than from a last round, as its payload may be not resend
+        let mut last_own_point: Option<Arc<LastOwnPoint>> = None;
+        let mut enough_includes = true;
         loop {
-            if !prev_round_success {
+            if !enough_includes {
                 chained_rounds = Effects::<ChainedRoundsContext>::new(self.collector.next_round());
             };
             let round_effects =
@@ -150,16 +152,17 @@ impl Engine {
             let (collector_signal_tx, mut collector_signal_rx) = mpsc::unbounded_channel();
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
 
-            let own_point_fut = if prev_round_success {
+            let own_point_fut = if enough_includes {
                 let round_effects = round_effects.clone();
                 let current_dag_round = current_dag_round.clone();
                 let peer_schedule = self.peer_schedule.clone();
                 let input_buffer = self.input_buffer.clone();
+                let last_own_point = last_own_point.clone();
                 futures_util::future::Either::Right(tokio::task::spawn_blocking(move || {
                     Self::produce(
                         round_effects,
                         current_dag_round,
-                        prev_point,
+                        last_own_point,
                         peer_schedule,
                         own_point_state_tx,
                         input_buffer,
@@ -185,7 +188,7 @@ impl Engine {
                             downloader,
                             round_effects.span().clone(),
                         );
-                        let evidence = broadcaster
+                        let new_last_own_point = broadcaster
                             .run(
                                 &round_effects,
                                 &own_point,
@@ -196,11 +199,7 @@ impl Engine {
                             .await;
                         // join the check, just not to miss it; it must have completed already
                         paranoid.await.expect("verify own produced point");
-                        let prev_point = PrevPoint {
-                            digest: own_point.digest().clone(),
-                            evidence: evidence.into_iter().collect(),
-                        };
-                        (broadcaster, Some(Arc::new(prev_point)))
+                        (broadcaster, Some(new_last_own_point))
                     } else {
                         collector_signal_rx.close();
                         bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
@@ -236,10 +235,14 @@ impl Engine {
             );
 
             match tokio::join!(collector_run, bcaster_run, commit_run) {
-                (Ok(collector_upd), Ok((bcaster, new_prev_point)), Ok(dag)) => {
+                (Ok(collector_upd), Ok((bcaster, new_last_own_point)), Ok(dag)) => {
                     self.broadcaster = bcaster;
-                    prev_point = new_prev_point;
-                    prev_round_success = next_dag_round.round() == collector_upd.next_round();
+                    // do not reset to None, Producer decides whether to use old value or not
+                    if let Some(new_last_own_point) = new_last_own_point {
+                        // value is returned from the task without Arc for the sake of code clarity
+                        last_own_point = Some(Arc::new(new_last_own_point));
+                    }
+                    enough_includes = next_dag_round.round() == collector_upd.next_round();
                     self.collector = collector_upd;
                     self.dag = dag;
                 }
@@ -259,13 +262,13 @@ impl Engine {
     fn produce(
         round_effects: Effects<CurrentRoundContext>,
         current_dag_round: DagRound,
-        prev_point: Option<Arc<PrevPoint>>,
+        last_own_point: Option<Arc<LastOwnPoint>>,
         peer_schedule: Arc<PeerSchedule>,
         own_point_state: oneshot::Sender<InclusionState>,
         input_buffer: InputBuffer,
     ) -> Option<Point> {
         if let Some(own_point) =
-            Producer::new_point(&current_dag_round, prev_point.as_deref(), &input_buffer)
+            Producer::new_point(&current_dag_round, last_own_point.as_deref(), &input_buffer)
         {
             tracing::info!(
                 parent: round_effects.span(),
@@ -314,7 +317,7 @@ impl Engine {
                 panic!(
                     "Failed to verify own point: {} {:?}",
                     dag_point.alt(),
-                    point.id()
+                    point.id().alt()
                 )
             }
             let dag_point =

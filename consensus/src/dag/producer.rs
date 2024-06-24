@@ -5,21 +5,47 @@ use tycho_network::PeerId;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::models::{
-    Link, LinkField, Location, Point, PointBody, PrevPoint, Round, Through, UnixTime,
+    Digest, Link, LinkField, Location, PeerCount, Point, PointBody, PrevPoint, Round, Signature,
+    Through, UnixTime,
 };
-use crate::InputBuffer;
+use crate::{InputBuffer, MempoolConfig};
+
+pub struct LastOwnPoint {
+    pub digest: Digest,
+    pub evidence: BTreeMap<PeerId, Signature>,
+    pub round: Round,
+    pub signers: PeerCount,
+}
 
 pub struct Producer;
 
 impl Producer {
     pub fn new_point(
         current_round: &DagRound,
-        prev_point: Option<&PrevPoint>,
+        last_own_point: Option<&LastOwnPoint>,
         input_buffer: &InputBuffer,
     ) -> Option<Point> {
         let finished_round = current_round.prev().upgrade()?;
         let key_pair = current_round.key_pair()?;
-        let payload = input_buffer.fetch(prev_point.is_some());
+
+        let payload = input_buffer.fetch(last_own_point.as_ref().map_or(false, |last| {
+            // it's not necessary to resend external messages from previous round
+            // if at least 1F+1 peers (one reliable) signed previous point;
+            // also notice that payload elems are deduplicated in mempool adapter
+            current_round.round().0 - last.round.0 < MempoolConfig::COMMIT_DEPTH as u32
+                && last.evidence.len() >= last.signers.reliable_minority()
+        }));
+        let prev_point = last_own_point
+            // previous round's point needs 2F signatures from peers scheduled for current round
+            .filter(|prev| {
+                // Note: prev point is used only once until weak links are implemented
+                current_round.round().prev() == prev.round
+                    && prev.evidence.len() >= prev.signers.majority_of_others()
+            })
+            .map(|last| PrevPoint {
+                digest: last.digest.clone(),
+                evidence: last.evidence.clone(),
+            });
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
             Some(AnchorStage::Proof { leader, .. } | AnchorStage::Trigger { leader, .. })
@@ -49,7 +75,8 @@ impl Producer {
             LinkField::Proof,
         );
 
-        let (time, anchor_time) = Self::get_time(&anchor_proof, prev_point, &includes, &witness);
+        let (time, anchor_time) =
+            Self::get_time(&anchor_proof, prev_point.as_ref(), &includes, &witness);
 
         let includes = includes
             .into_iter()
@@ -57,14 +84,9 @@ impl Producer {
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
-            prev_point.map(|prev| &prev.digest),
+            prev_point.as_ref().map(|prev| &prev.digest),
             includes.get(&local_id),
             "must include own point if it exists and vice versa"
-        );
-        assert!(
-            prev_point.map_or(true, |prev| prev.evidence.len()
-                >= current_round.peer_count().majority_of_others()),
-            "Collected not enough evidence, check Broadcaster logic"
         );
 
         let witness = witness
@@ -79,7 +101,7 @@ impl Producer {
             },
             time,
             payload,
-            proof: prev_point.cloned(),
+            proof: prev_point,
             includes,
             witness,
             anchor_trigger,

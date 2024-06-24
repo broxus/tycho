@@ -9,6 +9,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
+use crate::dag::LastOwnPoint;
 use crate::dyn_event;
 use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
@@ -44,7 +45,7 @@ impl Broadcaster {
         peer_schedule: &PeerSchedule,
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
-    ) -> FastHashMap<PeerId, Signature> {
+    ) -> LastOwnPoint {
         let signers = peer_schedule
             .peers_for(point.body().location.round.next())
             .iter()
@@ -82,7 +83,12 @@ impl Broadcaster {
         task.run(bcast_peers).await;
         // preserve only broadcasts from the last round and drop older ones as hung up
         self.bcast_outdated = Some(task.bcast_current);
-        task.signatures
+        LastOwnPoint {
+            digest: point.digest().clone(),
+            evidence: task.signatures.into_iter().collect(),
+            round: point.body().location.round,
+            signers: signers_count,
+        }
     }
 }
 
