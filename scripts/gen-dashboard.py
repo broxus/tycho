@@ -30,6 +30,23 @@ def heatmap_color_warm() -> HeatmapColor:
     return HeatmapColor()
 
 
+def generate_legend_format(labels: List[str]) -> str:
+    """
+    Generate a legend format string based on the provided labels.
+
+    Args:
+    labels (List[str]): A list of label strings.
+
+    Returns:
+    str: A legend format string including instance and provided labels with keys.
+    """
+    legend_format = "{{instance}}"
+    for label in labels:
+        key = label.split("=")[0]  # Extract the key part before '='
+        legend_format += f" {key}:{{{{{key}}}}}"
+    return legend_format
+
+
 def create_gauge_panel(
     expr: Union[str, List[Union[str, Expr]]],
     title: str,
@@ -37,15 +54,19 @@ def create_gauge_panel(
     labels=[],
 ) -> Panel:
     if isinstance(expr, str):
-        expr = [Expr(metric=expr)]
+        expr = [Expr(metric=expr, label_selectors=labels)]
     elif isinstance(expr, list):
-        expr = [Expr(metric=e) if isinstance(e, str) else e for e in expr]
+        expr = [
+            Expr(metric=e, label_selectors=labels) if isinstance(e, str) else e
+            for e in expr
+        ]
     else:
         raise TypeError(
             "expr must be a string, a list of strings, or a list of Expr objects."
         )
 
-    targets = [target(e, legend_format="{{instance}}") for e in expr]
+    legend_format = generate_legend_format(labels)
+    targets = [target(e, legend_format=legend_format) for e in expr]
 
     return timeseries_panel(
         title=title,
@@ -60,15 +81,26 @@ def create_counter_panel(
     unit_format: str = UNITS.NUMBER_FORMAT,
     labels: List[str] = [],
 ) -> Panel:
+    legend_format = generate_legend_format(labels)
+
     if isinstance(expr, str):
-        targets = [target(expr_sum_rate(expr), legend_format="{{instance}}")]
+        targets = [
+            target(
+                expr_sum_rate(expr, label_selectors=labels),
+                legend_format=legend_format,
+            )
+        ]
     elif isinstance(expr, list):
         if all(isinstance(e, str) for e in expr):
             targets = [
-                target(expr_sum_rate(e), legend_format="{{instance}}") for e in expr
+                target(
+                    expr_sum_rate(e, label_selectors=labels),
+                    legend_format=legend_format,
+                )
+                for e in expr
             ]
         elif all(isinstance(e, Expr) for e in expr):
-            targets = [target(e, legend_format="{{instance}}") for e in expr]
+            targets = [target(e, legend_format=legend_format) for e in expr]
         else:
             raise ValueError("List elements must be all strings or all Expr objects.")
     else:
@@ -808,7 +840,7 @@ def templates() -> Templating:
             ),
             template(
                 name="workchain",
-                query="label_values(tycho_do_collate_block_diff_time_bucket,workchain)",
+                query="label_values(tycho_do_collate_block_diff,workchain)",
                 data_source="${source}",
                 hide=0,
                 regex=None,
