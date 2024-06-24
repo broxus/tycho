@@ -1,5 +1,3 @@
-#![allow(dead_code)] // temporarily suppress warns
-
 pub use engine::*;
 pub use models::Point;
 

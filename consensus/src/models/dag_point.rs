@@ -66,13 +66,6 @@ impl DagPoint {
         }
     }
 
-    pub fn id(&self) -> PointId {
-        PointId {
-            location: *self.location(),
-            digest: self.digest().clone(),
-        }
-    }
-
     pub fn location(&self) -> &'_ Location {
         #[allow(clippy::match_same_arms)]
         match self {

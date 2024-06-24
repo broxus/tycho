@@ -27,7 +27,7 @@ impl MempoolConfig {
         now - Self::MAX_OUTDATED..=now + Self::CLOCK_SKEW
     }
 
-    /// the least amount of [Round]s that are kept in DAG until they are discarded
+    /// the least amount of [Round]s that are kept in [`Dag`](crate::dag::Dag)
     pub const COMMIT_DEPTH: u8 = 20;
 
     pub const GENESIS_ROUND: Round = Round(1);
@@ -67,3 +67,13 @@ impl MempoolConfig {
     /// validated successfully, or return `None`.
     pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(30);
 }
+
+const _: () = assert!(
+    MempoolConfig::PAYLOAD_BUFFER_BYTES >= MempoolConfig::PAYLOAD_BATCH_BYTES,
+    "invalid config: no need to evict cached externals if can send them in one message"
+);
+
+const _: () = assert!(
+    MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
+    "invalid config: genesis round is too low and will make code panic"
+);

@@ -1,5 +1,5 @@
 pub use dag::*;
-pub use dag_location::*;
+pub use dag_location::InclusionState;
 pub use dag_round::*;
 pub use producer::*;
 pub use verifier::*;

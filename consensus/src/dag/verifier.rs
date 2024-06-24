@@ -11,7 +11,7 @@ use crate::dag::{DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Link, LinkField, Location, NodeCount, Point, ValidPoint};
+use crate::models::{DagPoint, Link, LinkField, Location, PeerCount, Point, ValidPoint};
 
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
@@ -383,16 +383,24 @@ impl Verifier {
                 point.body().location.round.prev(),
                 point.body().location.round,
             ]);
-        for (peer_id, _) in point.body().witness.iter() {
+        for peer_id in point.body().witness.keys() {
             if !witness_peers.contains_key(peer_id) {
                 return false;
             }
         }
-        let node_count = NodeCount::new(includes_peers.len());
-        if point.body().includes.len() < node_count.majority() {
+        let peer_count = if point.body().location.round.prev() == MempoolConfig::GENESIS_ROUND {
+            PeerCount::GENESIS
+        } else {
+            match PeerCount::try_from(proof_peers.len()) {
+                Ok(peer_count) => peer_count,
+                // reject the point in case we don't know validators for its round
+                Err(_) => return false,
+            }
+        };
+        if point.body().includes.len() < peer_count.majority() {
             return false;
         };
-        for (peer_id, _) in point.body().includes.iter() {
+        for peer_id in point.body().includes.keys() {
             if !includes_peers.contains_key(peer_id) {
                 return false;
             }
@@ -400,18 +408,13 @@ impl Verifier {
         let Some(proven /* @ r-1 */) = &point.body().proof else {
             return true;
         };
-        // Every point producer @ r-1 must prove its delivery to 2/3+1 producers @ r+0
+        // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
 
-        // If author was in validator set @ r-1 and is not in validator set @ r+0,
-        // its point @ r-1 won't become a vertex because its proof point @ r+0 cannot be valid.
-        // That means: payloads from the last round of validation epoch are never collated.
-
-        // reject point in case this node is not ready to accept: the point is from far future
-        let Ok(node_count) = NodeCount::try_from(proof_peers.len()) else {
+        let Ok(peer_count) = PeerCount::try_from(proof_peers.len()) else {
             return false;
         };
-        if proven.evidence.len() < node_count.majority_of_others() {
+        if proven.evidence.len() < peer_count.majority_of_others() {
             return false;
         }
         for (peer_id, _) in proven.evidence.iter() {

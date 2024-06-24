@@ -63,7 +63,7 @@ impl Producer {
         );
         assert!(
             prev_point.map_or(true, |prev| prev.evidence.len()
-                >= current_round.node_count().majority_of_others()),
+                >= current_round.peer_count().majority_of_others()),
             "Collected not enough evidence, check Broadcaster logic"
         );
 
@@ -102,7 +102,7 @@ impl Producer {
             })
             .collect::<Vec<_>>();
         assert!(
-            includes.len() >= finished_round.node_count().majority(),
+            includes.len() >= finished_round.peer_count().majority(),
             "Coding error: producing point with not enough includes, check Collector logic"
         );
         includes

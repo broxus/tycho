@@ -5,6 +5,7 @@
 
 use std::io::IsTerminal;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -137,7 +138,10 @@ impl CmdRun {
             &dht_client,
             &overlay,
             committed_tx,
-            InputBufferStub::new(100, 5),
+            InputBufferStub::new(
+                NonZeroUsize::new(100).unwrap(),
+                NonZeroUsize::new(5).unwrap(),
+            ),
         );
         engine.init_with_genesis(all_peers.as_slice()).await;
         let mut anchor_consumer = AnchorConsumer::default();

@@ -1,10 +1,9 @@
 use std::collections::BTreeMap;
 use std::convert::identity;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::{array, mem};
 
 use futures_util::FutureExt;
-use parking_lot::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 use tycho_network::PeerId;
 
@@ -15,36 +14,44 @@ use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::{Digest, LinkField, Location, Point, PointId, Round, ValidPoint};
 
-#[derive(Clone)]
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
-    rounds: Arc<Mutex<BTreeMap<Round, DagRound>>>,
+    rounds: BTreeMap<Round, DagRound>,
 }
 
 impl Dag {
     pub fn new() -> Self {
         Self {
-            rounds: Arc::new(Mutex::new(BTreeMap::new())),
+            rounds: BTreeMap::new(),
         }
     }
 
-    pub fn init(&self, dag_round: DagRound) {
-        let mut rounds = self.rounds.lock();
-        assert!(rounds.is_empty(), "DAG already initialized");
-        rounds.insert(dag_round.round(), dag_round);
+    pub fn init(&mut self, dag_round: DagRound) {
+        assert!(self.rounds.is_empty(), "DAG already initialized");
+        self.rounds.insert(dag_round.round(), dag_round);
     }
 
-    pub fn top(&self, round: Round, peer_schedule: &PeerSchedule) -> DagRound {
-        let mut rounds = self.rounds.lock();
-        let mut top = match rounds.last_key_value() {
-            None => unreachable!("DAG cannot be empty if properly initialized?"),
+    pub fn fill_to_top(
+        &mut self,
+        next_round: Round,
+        peer_schedule: &PeerSchedule,
+        effects: &Effects<CurrentRoundContext>,
+    ) -> DagRound {
+        let mut top = match self.rounds.last_key_value() {
+            None => unreachable!("DAG cannot be empty if properly initialized"),
             Some((_, top)) => top.clone(),
         };
-        if (top.round().0 + MempoolConfig::COMMIT_DEPTH as u32) < round.0 {
+        if (top.round().0 + MempoolConfig::COMMIT_DEPTH as u32) < next_round.0 {
+            tracing::warn!(
+                parent: effects.span(),
+                lag = next_round.0 - (top.round().0 + MempoolConfig::COMMIT_DEPTH as u32),
+                "far behind consensus"
+            );
             unimplemented!("sync")
         }
-        for _ in top.round().next().0..=round.0 {
-            top = rounds
+        for _ in top.round().next().0..=next_round.0 {
+            top = self
+                .rounds
                 .entry(top.round().next())
                 .or_insert(top.next(peer_schedule))
                 .clone();
@@ -52,11 +59,15 @@ impl Dag {
         top
     }
 
-    // Note: cannot be non-async, as we cannot use only InclusionState:
-    //   some committed point may be DagPoint::Suspicious thus not the first validated locally
+    fn drop_tail(&mut self, anchor_at: Round) {
+        if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
+            self.rounds.retain(|k, _| k.0 >= tail);
+        };
+    }
+
     /// result is in historical order
     pub fn commit(
-        self,
+        &mut self,
         next_dag_round: DagRound,
         committed: UnboundedSender<(Point, Vec<Point>)>,
         effects: Effects<CurrentRoundContext>,
@@ -176,7 +187,7 @@ impl Dag {
             let Some(anchor_round) = proof_round.prev().upgrade() else {
                 break;
             };
-            if is_used.load(Ordering::Relaxed) {
+            if is_used.swap(true, Ordering::Relaxed) {
                 break;
             };
             let anchor_digest = match &proof.point.body().proof {
@@ -195,7 +206,6 @@ impl Dag {
                     dag_point.into_valid().expect("anchor point must be valid")
                 })
                 .expect("leader location not found in dag round for anchor");
-            is_used.store(true, Ordering::Relaxed);
 
             let next_proof_id = anchor.point.anchor_id(LinkField::Proof);
             anchor_stack.push((anchor, anchor_round));
@@ -213,13 +223,6 @@ impl Dag {
         anchor_stack
     }
 
-    fn drop_tail(&self, anchor_at: Round) {
-        if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
-            let mut rounds = self.rounds.lock();
-            rounds.retain(|k, _| k.0 >= tail);
-        };
-    }
-
     /// returns historically ordered vertices
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
@@ -227,6 +230,15 @@ impl Dag {
         anchor: &Point,          // @ r+1
         anchor_round: &DagRound, // r+1
     ) -> Vec<Point> {
+        fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
+            if to.is_empty() {
+                *to = from.clone();
+            } else {
+                for (peer, digest) in from {
+                    to.insert(*peer, digest.clone());
+                }
+            }
+        }
         assert_eq!(
             anchor_round.round(),
             anchor.body().location.round,
@@ -236,13 +248,9 @@ impl Dag {
             .prev()
             .upgrade()
             .expect("previous round for anchor point round must stay in DAG");
-        let mut r = [
-            anchor.body().includes.clone(), // points @ r+0
-            anchor.body().witness.clone(),  // points @ r-1
-            BTreeMap::new(),                // points @ r-2
-            BTreeMap::new(),                // points @ r-3
-        ];
-        _ = anchor; // anchor payload will be committed the next time
+        let mut r = array::from_fn::<_, 4, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2, r-3]
+        extend(&mut r[0], &anchor.body().includes); // points @ r+0
+        extend(&mut r[1], &anchor.body().witness); // points @ r-1
 
         let mut uncommitted = Vec::new();
 
@@ -251,18 +259,19 @@ impl Dag {
             .upgrade()
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
-            // take points @ r+0, and select their vertices @ r-1 for commit
-            // the order is of NodeId (public key)
+            // shuffle deterministically with anchor digest as a seed
+            let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
             // TODO shuffle deterministically, eg with anchor digest as a seed
-            while let Some((node, digest)) = &r[0].pop_first() {
+            // take points @ r+0, and select their vertices @ r-1 for commit
+            while let Some((node, digest)) = &sorted.pop() {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
                 // Any valid point among equivocated will do, as they include the same vertex.
                 let proof = // point @ r+0
                     Self::ready_valid_point(&proof_round, node, digest);
                 let author = &proof.point.body().location.author;
-                r[1].extend(proof.point.body().includes.clone()); // points @ r-1
-                r[2].extend(proof.point.body().witness.clone()); // points @ r-2
+                extend(&mut r[1], &proof.point.body().includes); // points @ r-1
+                extend(&mut r[2], &proof.point.body().witness); // points @ r-2
                 let Some(digest) = proof.point.body().proof.as_ref().map(|a| &a.digest) else {
                     continue;
                 };
@@ -270,14 +279,10 @@ impl Dag {
                     Self::ready_valid_point(&vertex_round, author, digest);
                 // select uncommitted ones, marking them as committed
                 // to exclude from the next commit
-                if vertex
-                    .is_committed
-                    .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
-                    .is_ok()
-                {
+                if !vertex.is_committed.swap(true, Ordering::Relaxed) {
                     // vertex will be skipped in r_1 as committed
-                    r[2].extend(vertex.point.body().includes.clone()); // points @ r-2
-                    r[3].extend(vertex.point.body().witness.clone()); // points @ r-3
+                    extend(&mut r[2], &vertex.point.body().includes); // points @ r-2
+                    extend(&mut r[3], &vertex.point.body().witness); // points @ r-3
                     uncommitted.push(vertex.point);
                 }
             }

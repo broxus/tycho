@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -148,18 +149,18 @@ impl InputBufferData {
 }
 
 pub struct InputBufferStub {
-    fetch_count: usize,
-    steps_until_full: usize,
-    points_in_step: usize,
+    fetch_count: NonZeroUsize,
+    steps_until_full: NonZeroUsize,
+    points_in_step: NonZeroUsize,
 }
 
 impl InputBufferStub {
     /// External message is limited by 64 KiB
     const EXTERNAL_MSG_MAX_BYTES: usize = 64 * 1024;
 
-    pub fn new(points_in_step: usize, steps_until_full: usize) -> InputBuffer {
+    pub fn new(points_in_step: NonZeroUsize, steps_until_full: NonZeroUsize) -> InputBuffer {
         InputBuffer(Arc::new(Mutex::new(Self {
-            fetch_count: 0,
+            fetch_count: NonZeroUsize::MIN,
             steps_until_full,
             points_in_step,
         })))
@@ -168,8 +169,8 @@ impl InputBufferStub {
 
 impl InputBufferInner for InputBufferStub {
     fn fetch_inner(&mut self, _: bool) -> Vec<Bytes> {
-        self.fetch_count += 1;
-        let step = (self.fetch_count / self.points_in_step).min(self.steps_until_full);
+        let step =
+            (self.fetch_count.get() / self.points_in_step.get()).min(self.steps_until_full.get());
         let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
             / self.steps_until_full
             / Self::EXTERNAL_MSG_MAX_BYTES;
@@ -179,6 +180,7 @@ impl InputBufferInner for InputBufferStub {
             thread_rng().fill_bytes(data.as_mut_slice());
             result.push(Bytes::from(data));
         }
+        self.fetch_count = self.fetch_count.saturating_add(1);
         result
     }
 }

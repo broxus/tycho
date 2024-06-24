@@ -22,8 +22,10 @@ impl AnchorStage {
         let [leader_peers, current_peers] =
             peer_schedule.peers_for_array([Round(anchor_candidate_round), round]);
         // reproducible global coin
-        let leader_index = rand_pcg::Pcg32::seed_from_u64(anchor_candidate_round as u64)
-            .gen_range(0..leader_peers.len());
+        let leader_index = rand_pcg::Pcg32::seed_from_u64(
+            ((anchor_candidate_round as u64) << 32) + anchor_candidate_round as u64,
+        )
+        .gen_range(0..leader_peers.len());
         let leader = leader_peers
             .iter()
             .nth(leader_index)

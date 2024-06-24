@@ -15,7 +15,7 @@ use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::broadcast::utils::QueryResponses;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{Digest, NodeCount, Point, Round, Signature};
+use crate::models::{Digest, PeerCount, Point, Signature};
 
 #[derive(Copy, Clone, Debug)]
 pub enum BroadcasterSignal {
@@ -50,7 +50,8 @@ impl Broadcaster {
             .iter()
             .map(|(peer_id, _)| *peer_id)
             .collect::<FastHashSet<_>>();
-        let signers_count = NodeCount::new(signers.len());
+        let signers_count =
+            PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
 
         let bcast_outdated = mem::take(&mut self.bcast_outdated).expect("cannot be unset");
         let mut bcast_peers = peer_schedule.all_resolved();
@@ -59,7 +60,6 @@ impl Broadcaster {
         let mut task = BroadcasterTask {
             effects: Effects::<BroadcasterContext>::new(round_effects, point.digest()),
             dispatcher: self.dispatcher.clone(),
-            current_round: point.body().location.round,
             point_digest: point.digest().clone(),
             bcaster_signal: Some(bcaster_signal),
             collector_signal,
@@ -89,7 +89,6 @@ impl Broadcaster {
 struct BroadcasterTask {
     effects: Effects<BroadcasterContext>,
     dispatcher: Dispatcher,
-    current_round: Round,
     point_digest: Digest,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
@@ -99,7 +98,7 @@ struct BroadcasterTask {
     removed_peers: FastHashSet<PeerId>,
     // every connected peer should receive broadcast, but only signer's signatures are accountable
     signers: FastHashSet<PeerId>,
-    signers_count: NodeCount,
+    signers_count: PeerCount,
     // results
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,

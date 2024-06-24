@@ -1,6 +1,5 @@
 use std::array;
 use std::collections::BTreeMap;
-use std::ops::Range;
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
@@ -122,25 +121,6 @@ impl PeerSchedule {
         })
     }
 
-    /// does not return empty maps;
-    /// local peer id is always shown as not resolved, if it is found
-    pub fn peers_for_range(&self, rounds: &Range<Round>) -> Vec<Arc<BTreeMap<PeerId, PeerState>>> {
-        if rounds.end <= rounds.start {
-            return vec![];
-        }
-        let inner = self.inner.lock();
-        let mut first = inner.index_plus_one(rounds.start);
-        let last = inner.index_plus_one(rounds.end.prev());
-        if 0 == first && first < last {
-            first += 1; // exclude inner.empty
-        }
-        (first..=last)
-            .map(|i| inner.peers_for_index_plus_one(i))
-            .filter(|m| !m.is_empty())
-            .cloned()
-            .collect()
-    }
-
     /// on epoch change
     pub fn rotate(&self) {
         // make next from previous
@@ -161,6 +141,7 @@ impl PeerSchedule {
     /// after successful sync to current epoch
     /// and validating all points from previous peer set
     /// free some memory and ignore overlay updates
+    #[allow(dead_code)]
     pub fn forget_previous(&self) {
         let mut inner = self.inner.lock();
         if !inner.peers_resolved[0].is_empty() {

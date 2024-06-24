@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::cmp;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use crate::effects::{AltFormat, CurrentRoundContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Location, NodeCount, Point, PointId, Round};
+use crate::models::{DagPoint, Digest, Location, PeerCount, Point, PointId, Round};
 
 #[derive(Clone)]
 pub struct BroadcastFilter {
@@ -93,7 +93,7 @@ struct BroadcastFilterInner {
     last_by_peer: FastDashMap<PeerId, (Round, usize)>,
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
-    by_round: FastDashMap<Round, (NodeCount, SimpleDagLocations)>,
+    by_round: FastDashMap<Round, (PeerCount, SimpleDagLocations)>,
     peer_schedule: Arc<PeerSchedule>,
     output: mpsc::UnboundedSender<ConsensusEvent>,
 }
@@ -163,9 +163,9 @@ impl BroadcastFilterInner {
             .entry(author)
             .and_modify(|(last_by_peer, duplcates)| {
                 match round.cmp(last_by_peer) {
-                    Ordering::Less => {} // do nothing, blame later
-                    Ordering::Equal => *duplcates += 1,
-                    Ordering::Greater => {
+                    cmp::Ordering::Less => {} // do nothing, blame later
+                    cmp::Ordering::Equal => *duplcates += 1,
+                    cmp::Ordering::Greater => {
                         *last_by_peer = round;
                         *duplcates = 0;
                     }
@@ -203,14 +203,14 @@ impl BroadcastFilterInner {
             // note: lock guard inside result
             let try_by_round_entry = self.by_round.entry(round).or_try_insert_with(|| {
                 // how many nodes should send broadcasts
-                NodeCount::try_from(self.peer_schedule.peers_for(round).len())
-                    .map(|node_count| (node_count, Default::default()))
+                PeerCount::try_from(self.peer_schedule.peers_for(round).len())
+                    .map(|peer_count| (peer_count, Default::default()))
             });
             // Err: will not accept broadcasts from not yet initialized validator set
             match try_by_round_entry {
-                Err(_node_count_err) => false,
+                Err(_peer_count_err) => false,
                 Ok(mut entry) => {
-                    let (node_count, same_round) = entry.value_mut();
+                    let (peer_count, same_round) = entry.value_mut();
                     // ban the author, if we detect equivocation now; we won't be able to prove it
                     //   if some signatures are invalid (it's another reason for a local ban)
                     same_round
@@ -218,7 +218,7 @@ impl BroadcastFilterInner {
                         .or_default()
                         .insert(digest.clone(), point.clone());
                     // send `Forward` signal inside `add` just once per round, not for every point
-                    same_round.len() == node_count.reliable_minority()
+                    same_round.len() == peer_count.reliable_minority()
                 }
             }
         };
@@ -254,7 +254,7 @@ impl BroadcastFilterInner {
             .map(|el| *el.key())
             .filter(|key| *key <= top_round)
             .collect::<Vec<_>>();
-        rounds.sort();
+        rounds.sort_unstable();
         if rounds.is_empty() {
             return;
         }

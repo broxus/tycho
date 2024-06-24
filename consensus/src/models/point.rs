@@ -160,14 +160,14 @@ pub struct PrevPoint {
     // any node may proof its vertex@r-1 with its point@r+0 only
     // pub round: Round,
     pub digest: Digest,
-    /// `>= 2F` neighbours, order does not matter;
+    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter;
     /// point author is excluded: everyone must use the proven point to validate its proof
     // Note: bincode may be non-stable on (de)serializing HashMap due to different local order
     pub evidence: BTreeMap<PeerId, Signature>,
 }
 impl PrevPoint {
     pub fn signatures_match(&self) -> bool {
-        for (peer, sig) in self.evidence.iter() {
+        for (peer, sig) in &self.evidence {
             if !sig.verifies(peer, &self.digest) {
                 return false;
             }
@@ -537,7 +537,7 @@ mod tests {
         let (digest, data) = sig_data();
 
         let timer = Instant::now();
-        for (peer_id, sig) in data.iter() {
+        for (peer_id, sig) in &data {
             assert!(sig.verifies(peer_id, &digest), "invalid signature");
         }
         let elapsed = timer.elapsed();
@@ -554,7 +554,7 @@ mod tests {
 
         let timer = Instant::now();
         let fut = rayon_run(move || {
-            for (peer_id, sig) in data.iter() {
+            for (peer_id, sig) in &data {
                 assert!(sig.verifies(peer_id, &digest), "invalid signature");
             }
         });

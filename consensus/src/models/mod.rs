@@ -1,7 +1,7 @@
 pub use dag_point::*;
-pub use node_count::*;
+pub use peer_count::*;
 pub use point::*;
 
 mod dag_point;
-mod node_count;
+mod peer_count;
 mod point;

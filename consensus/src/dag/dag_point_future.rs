@@ -9,7 +9,8 @@ use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::sync::OnceTake;
 
-use crate::dag::{DagRound, InclusionState, Verifier};
+use crate::dag::dag_location::InclusionState;
+use crate::dag::{DagRound, Verifier};
 use crate::effects::{CurrentRoundContext, Effects, ValidateContext};
 use crate::intercom::Downloader;
 use crate::models::{DagPoint, Digest, Location, PointId};

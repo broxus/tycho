@@ -126,7 +126,10 @@ impl AnchorConsumer {
             tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
             tracing::debug!("Refs hashmap ken: {}", self.history.len());
             if !common_anchors.is_empty() {
-                tracing::info!("all nodes commited anchors for rounds {:?}", common_anchors);
+                tracing::info!(
+                    "all nodes committed anchors for rounds {:?}",
+                    common_anchors
+                );
             }
         }
     }

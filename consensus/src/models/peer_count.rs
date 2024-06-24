@@ -1,42 +1,33 @@
 #[derive(Clone, Copy)]
-pub struct NodeCount(u8);
+pub struct PeerCount(u8);
 
-impl std::fmt::Debug for NodeCount {
+impl std::fmt::Debug for PeerCount {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("NodeCount").field(&self.full()).finish()
+        f.debug_tuple("PeerCount").field(&self.full()).finish()
     }
 }
 
-impl TryFrom<usize> for NodeCount {
+impl TryFrom<usize> for PeerCount {
     type Error = &'static str;
     fn try_from(total_peers: usize) -> Result<Self, Self::Error> {
         // may occur if peer_schedule is empty
         if total_peers < 3 {
             Err("not enough nodes to run consensus")
         } else {
-            Ok(NodeCount::new(total_peers))
+            // ceil up to 3F+1 and scale down to 1F,
+            // assuming the least possible amount of nodes is not in validator set
+            let one_f = (total_peers + 1) / 3;
+            assert!(
+                u8::try_from(one_f * 3 + 1).is_ok(),
+                "node count 3F+1={one_f} overflows u8 after ceiling {total_peers}"
+            );
+            Ok(PeerCount(one_f as u8))
         }
     }
 }
 
-impl NodeCount {
+impl PeerCount {
     pub const GENESIS: Self = Self(0);
-
-    pub fn new(total_peers: usize) -> Self {
-        // 1 matches the genesis
-        assert!(
-            total_peers != 0 && total_peers != 2,
-            "invalid node count: {total_peers}"
-        );
-        // ceil up to 3F+1 and scale down to 1F,
-        // assuming the least possible amount of nodes is not in validator set
-        let one_f = (total_peers + 1) / 3;
-        assert!(
-            u8::try_from(one_f * 3 + 1).is_ok(),
-            "node count 3F+1={one_f} overflows u8 after ceiling {total_peers}"
-        );
-        NodeCount(one_f as u8)
-    }
 
     pub fn full(&self) -> usize {
         self.0 as usize * 3 + 1

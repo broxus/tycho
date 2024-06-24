@@ -1,4 +1,5 @@
 use std::net::Ipv4Addr;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,41 +23,50 @@ fn main() -> anyhow::Result<()> {
 
 /// Tycho network node.
 #[derive(Parser)]
-#[command(version, about, long_about = None)]
 struct Cli {
     /// total nodes populated as separate tokio runtimes
-    #[arg(short, long, default_value_t = 4)]
-    nodes: usize,
+    #[arg(short, long, default_value_t = NonZeroUsize::new(4).unwrap())]
+    nodes: NonZeroUsize,
     /// tokio worker threads per node
-    #[arg(short, long, default_value_t = 2)]
-    workers_per_node: usize,
+    #[arg(short, long, default_value_t = NonZeroUsize::new(2).unwrap())]
+    workers_per_node: NonZeroUsize,
     /// step is an amount of points produced by every node independently
-    #[arg(short, long, default_value_t = 33)]
-    points_in_step: usize,
+    #[arg(short, long, default_value_t = NonZeroUsize::new(33).unwrap())]
+    points_in_step: NonZeroUsize,
     /// number of steps in which payload will increase from 0
     /// to [PAYLOAD_BATCH_BYTES](tycho_consensus::MempoolConfig::PAYLOAD_BATCH_BYTES)
-    #[arg(short, long, default_value_t = 3)]
-    steps_until_full: usize,
+    #[arg(short, long, default_value_t = NonZeroUsize::new(3).unwrap())]
+    steps_until_full: NonZeroUsize,
     /// generate data for span-aware flame graph (changes log format);
     /// follows https://github.com/tokio-rs/tracing/tree/master/tracing-flame#generating-the-image,
-    /// but results are in git-ignored `./.temp` dir
+    /// but results are in git-ignored `./.temp` dir, so don't forget to `$ cd ./.temp` after run
     #[arg(short, long, default_value_t = false)]
     flame: bool,
+    /// shutdown after duration elapsed;
+    /// format https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+    #[arg(short, long)]
+    #[clap(value_parser = humantime::parse_duration)]
+    duration: Option<Duration>,
 }
 
 impl Cli {
     fn run(self) -> anyhow::Result<()> {
-        let fun = if self.flame {
-            logger::flame
+        if self.flame {
+            logger::flame("engine with --flame");
         } else {
-            logger::spans
+            logger::spans("engine", "info,tycho_consensus=info,tycho_network=info")
         };
-        fun(
-            "engine_works",
-            "info,tycho_consensus=info,tycho_network=info",
-        );
+        match std::env::var("RUST_BACKTRACE") {
+            Ok(value) => {
+                tracing::info!("`RUST_BACKTRACE={value}` found in environment")
+            }
+            Err(_) => {
+                std::env::set_var("RUST_BACKTRACE", "1");
+                tracing::info!("`RUST_BACKTRACE` is not found in environment, set to `1`")
+            }
+        }
         check_parking_lot();
-        heart_beat();
+        heart_beat(self.duration);
         let handles = make_network(self);
         for handle in handles {
             handle.join().unwrap();
@@ -66,7 +76,7 @@ impl Cli {
 }
 
 fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
-    let keys = (0..cli.nodes)
+    let keys = (0..cli.nodes.get())
         .map(|_| SecretKey::generate(&mut rand::thread_rng()))
         .map(|secret| (secret, Arc::new(KeyPair::from(&secret))))
         .collect::<Vec<_>>();
@@ -110,7 +120,7 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
             .spawn(move || {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .worker_threads(cli.workers_per_node)
+                    .worker_threads(cli.workers_per_node.get())
                     // .thread_name(format!("tokio-{}", peer_id.alt()))
                     .thread_name_fn(move || {
                         static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
@@ -171,8 +181,9 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
 }
 
 fn check_parking_lot() {
+    // Create a background thread which checks for deadlocks every 3s
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(3));
         let deadlocks = deadlock::check_deadlock();
         if deadlocks.is_empty() {
             continue;
@@ -189,10 +200,24 @@ fn check_parking_lot() {
     });
 }
 
-fn heart_beat() {
-    // Create a background thread which checks for deadlocks every 10s
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_secs(1));
-        tracing::info!("heart beat");
+fn heart_beat(duration: Option<Duration>) {
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            tracing::info!("heart beat");
+            if let Some(duration) = duration {
+                if start.elapsed().as_secs() >= duration.as_secs() {
+                    tracing::info!(
+                        "test stopped after {}",
+                        humantime::format_duration(start.elapsed())
+                    );
+                    use std::io::Write;
+                    std::io::stderr().flush().ok();
+                    std::io::stdout().flush().ok();
+                    std::process::exit(0);
+                }
+            }
+        }
     });
 }

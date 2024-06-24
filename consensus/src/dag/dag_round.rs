@@ -8,12 +8,12 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
+use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
-use crate::dag::{DagLocation, InclusionState};
 use crate::effects::{CurrentRoundContext, Effects, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, NodeCount, Point, Round, ValidPoint};
+use crate::models::{DagPoint, Digest, PeerCount, Point, Round, ValidPoint};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -28,7 +28,7 @@ pub struct DagRound(Arc<DagRoundInner>);
 
 struct DagRoundInner {
     round: Round,          // immutable
-    node_count: NodeCount, // immutable
+    peer_count: PeerCount, // immutable
     /// if `key_pair` is not empty, then the node may produce block at this round,
     /// and also sign broadcasts during previous round
     key_pair: Option<Arc<KeyPair>>, // immutable
@@ -45,39 +45,13 @@ impl WeakDagRound {
 }
 
 impl DagRound {
-    /// stub that must remain unlinked into DAG chain and only to be replaced
-    pub fn unusable() -> Self {
-        Self(Arc::new(DagRoundInner {
-            round: Round::BOTTOM,
-            node_count: NodeCount::GENESIS,
-            key_pair: None,
-            anchor_stage: None,
-            locations: FastDashMap::default(),
-            prev: WeakDagRound::BOTTOM,
-        }))
-    }
-
-    pub fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
-        let peers = peer_schedule.peers_for(round);
-        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
-        Self(Arc::new(DagRoundInner {
-            round,
-            node_count: NodeCount::try_from(peers.len())
-                .unwrap_or_else(|e| panic!("{e} for {round:?}")),
-            key_pair: peer_schedule.local_keys(round),
-            anchor_stage: AnchorStage::of(round, peer_schedule),
-            locations,
-            prev,
-        }))
-    }
-
     pub fn next(&self, peer_schedule: &PeerSchedule) -> Self {
         let next_round = self.round().next();
         let peers = peer_schedule.peers_for(next_round);
         let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
         Self(Arc::new(DagRoundInner {
             round: next_round,
-            node_count: NodeCount::try_from(peers.len())
+            peer_count: PeerCount::try_from(peers.len())
                 .unwrap_or_else(|e| panic!("{e} for {next_round:?}")),
             key_pair: peer_schedule.local_keys(next_round),
             anchor_stage: AnchorStage::of(next_round, peer_schedule),
@@ -91,7 +65,7 @@ impl DagRound {
         let round = genesis.body().location.round;
         Self(Arc::new(DagRoundInner {
             round,
-            node_count: NodeCount::GENESIS,
+            peer_count: PeerCount::GENESIS,
             key_pair: None,
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
@@ -103,8 +77,8 @@ impl DagRound {
         self.0.round
     }
 
-    pub fn node_count(&self) -> NodeCount {
-        self.0.node_count
+    pub fn peer_count(&self) -> PeerCount {
+        self.0.peer_count
     }
 
     pub fn key_pair(&self) -> Option<&'_ KeyPair> {

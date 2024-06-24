@@ -1,5 +1,6 @@
-use std::mem;
+use std::{cmp, mem};
 
+use ahash::HashSetExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
@@ -12,8 +13,7 @@ use crate::dyn_event;
 use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::broadcast::dto::ConsensusEvent;
-use crate::intercom::dto::SignatureResponse;
-use crate::intercom::{BroadcasterSignal, Downloader};
+use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
 
 /// collector may run without broadcaster, as if broadcaster signalled Ok
@@ -24,22 +24,15 @@ pub enum CollectorSignal {
     Retry,
 }
 
-type SignatureRequest = (PeerId, Round, oneshot::Sender<SignatureResponse>);
-
 pub struct Collector {
-    downloader: Downloader,
     from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
     next_round: Round,
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
 }
 
 impl Collector {
-    pub fn new(
-        downloader: &Downloader,
-        from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>,
-    ) -> Self {
+    pub fn new(from_bcast_filter: mpsc::UnboundedReceiver<ConsensusEvent>) -> Self {
         Self {
-            downloader: downloader.clone(),
             from_bcast_filter,
             next_round: Round::BOTTOM,
             next_includes: FuturesUnordered::new(),
@@ -89,13 +82,9 @@ impl Collector {
             self.next_round
         );
         self.next_round = next_dag_round.round();
-        let includes_ready = FastHashSet::with_capacity_and_hasher(
-            current_dag_round.node_count().full(),
-            Default::default(),
-        );
+        let includes_ready = FastHashSet::with_capacity(current_dag_round.peer_count().full());
         let task = CollectorTask {
             effects,
-            downloader: self.downloader.clone(),
             current_round: current_dag_round.clone(),
             next_dag_round,
             includes,
@@ -123,7 +112,6 @@ impl Collector {
 struct CollectorTask {
     // for node running @ r+0:
     effects: Effects<CollectorContext>,
-    downloader: Downloader,
     current_round: DagRound,  // = r+0
     next_dag_round: DagRound, /* = r+1 is always in DAG; contains the keypair to produce point @ r+1 */
 
@@ -207,7 +195,7 @@ impl CollectorTask {
             result = result,
             bcaster_signal = debug(signal),
             includes = self.includes_ready.len(),
-            majority = self.current_round.node_count().majority(),
+            majority = self.current_round.peer_count().majority(),
             "should fail?",
         );
         result
@@ -216,7 +204,7 @@ impl CollectorTask {
     fn is_ready(&mut self) -> bool {
         // point @ r+1 has to include 2F+1 broadcasts @ r+0 (we are @ r+0)
         self.is_includes_ready |=
-            self.includes_ready.len() >= self.current_round.node_count().majority();
+            self.includes_ready.len() >= self.current_round.peer_count().majority();
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         if result {
             _ = self.collector_signal.send(CollectorSignal::Finish);
@@ -225,7 +213,7 @@ impl CollectorTask {
             parent: self.effects.span(),
             result = result,
             includes = self.includes_ready.len(),
-            majority = self.current_round.node_count().majority(),
+            majority = self.current_round.peer_count().majority(),
             "ready?",
         );
         result
@@ -239,11 +227,11 @@ impl CollectorTask {
             .push(futures_util::future::ready(state).boxed());
         self.is_includes_ready = true;
         let result = match point_round.cmp(&self.next_dag_round.round()) {
-            std::cmp::Ordering::Less => {
+            cmp::Ordering::Less => {
                 let _guard = self.effects.span().enter();
                 panic!("Coding error: next includes futures contain current or previous round")
             }
-            std::cmp::Ordering::Greater => {
+            cmp::Ordering::Greater => {
                 tracing::error!(
                     parent: self.effects.span(),
                     "Collector was left behind while broadcast filter advanced ?"
@@ -251,7 +239,7 @@ impl CollectorTask {
                 _ = self.collector_signal.send(CollectorSignal::Err);
                 Some(Err(point_round))
             }
-            std::cmp::Ordering::Equal => {
+            cmp::Ordering::Equal => {
                 if self.is_ready() {
                     Some(Ok(()))
                 } else {
@@ -276,11 +264,11 @@ impl CollectorTask {
                 #[allow(clippy::match_same_arms)]
                 let should_fail = match consensus_round.cmp(&self.next_dag_round.round()) {
                     // we're too late, consensus moved forward
-                    std::cmp::Ordering::Greater => true,
+                    cmp::Ordering::Greater => true,
                     // we still have a chance to finish current round
-                    std::cmp::Ordering::Equal => false,
+                    cmp::Ordering::Equal => false,
                     // we are among the fastest nodes of consensus
-                    std::cmp::Ordering::Less => false,
+                    cmp::Ordering::Less => false,
                 };
                 let level = if should_fail {
                     tracing::Level::INFO

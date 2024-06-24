@@ -88,29 +88,6 @@ impl InclusionState {
             }
         });
     }
-    fn insert_own_point(&self, my_point: &DagPoint) {
-        let signed = OnceLock::new();
-        match my_point.trusted() {
-            None => panic!("Coding error: own point is not trusted"),
-            Some(valid) => {
-                _ = signed.set(Ok(Signed {
-                    at: valid.point.body().location.round,
-                    with: valid.point.signature().clone(),
-                }));
-            }
-        };
-        let result = self.0.set(Signable {
-            first_completed: my_point.clone(),
-            signed,
-        });
-        assert!(
-            result.is_ok(),
-            "Coding error: own point initialized for inclusion twice"
-        );
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.get().is_none()
-    }
     pub fn signable(&self) -> Option<&'_ Signable> {
         self.0.get().filter(|signable| !signable.is_completed())
     }

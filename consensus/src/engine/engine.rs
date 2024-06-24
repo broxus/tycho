@@ -4,7 +4,7 @@ use std::sync::Arc;
 use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::{JoinError, JoinHandle, JoinSet};
+use tokio::task::{JoinError, JoinHandle};
 use tracing::Span;
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
@@ -23,13 +23,11 @@ pub struct Engine {
     dag: Dag,
     peer_schedule: Arc<PeerSchedule>,
     peer_schedule_updater: PeerScheduleUpdater,
-    dispatcher: Dispatcher,
     responder: Responder,
     downloader: Downloader,
     broadcaster: Broadcaster,
     broadcast_filter: BroadcastFilter,
     collector: Collector,
-    tasks: JoinSet<()>, // should be JoinSet<!>
     committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     input_buffer: InputBuffer,
 }
@@ -46,6 +44,7 @@ impl Engine {
 
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
 
+        let collector = Collector::new(bcast_rx);
         let broadcast_filter = BroadcastFilter::new(peer_schedule.clone(), bcast_tx);
 
         let responder = Responder::default();
@@ -55,14 +54,13 @@ impl Engine {
 
         let peer_schedule_updater = PeerScheduleUpdater::new(overlay, peer_schedule.clone());
 
-        let mut tasks = JoinSet::new();
-        tasks.spawn({
+        tokio::spawn({
             let peer_schedule_updater = peer_schedule_updater.clone();
             async move {
                 peer_schedule_updater.run().await;
             }
         });
-        tasks.spawn({
+        tokio::spawn({
             let broadcast_filter = broadcast_filter.clone();
             async move {
                 broadcast_filter.clear_cache().await;
@@ -71,19 +69,15 @@ impl Engine {
 
         let downloader = Downloader::new(&dispatcher, &peer_schedule);
 
-        let collector = Collector::new(&downloader, bcast_rx);
-
         Self {
             dag: Dag::new(),
             peer_schedule,
             peer_schedule_updater,
-            dispatcher,
             responder,
             downloader,
             broadcaster,
             broadcast_filter,
             collector,
-            tasks,
             committed,
             input_buffer,
         }
@@ -140,12 +134,16 @@ impl Engine {
             let round_effects =
                 Effects::<CurrentRoundContext>::new(&chained_rounds, self.collector.next_round());
 
-            let current_dag_round = self
-                .dag
-                .top(self.collector.next_round(), &self.peer_schedule);
-            let next_dag_round = self
-                .dag
-                .top(current_dag_round.round().next(), &self.peer_schedule);
+            let current_dag_round = self.dag.fill_to_top(
+                self.collector.next_round(),
+                &self.peer_schedule,
+                &round_effects,
+            );
+            let next_dag_round = self.dag.fill_to_top(
+                current_dag_round.round().next(),
+                &self.peer_schedule,
+                &round_effects,
+            );
 
             let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
             // let this channel unbounded - there won't be many items, but every of them is essential
@@ -212,11 +210,14 @@ impl Engine {
             });
 
             let commit_run = tokio::task::spawn_blocking({
-                let dag = self.dag.clone();
+                let mut dag = self.dag;
                 let next_dag_round = next_dag_round.clone();
                 let committed = self.committed.clone();
                 let round_effects = round_effects.clone();
-                move || dag.commit(next_dag_round, committed, round_effects)
+                move || {
+                    dag.commit(next_dag_round, committed, round_effects);
+                    dag
+                }
             });
 
             let collector_run = tokio::spawn(self.collector.run(
@@ -235,11 +236,12 @@ impl Engine {
             );
 
             match tokio::join!(collector_run, bcaster_run, commit_run) {
-                (Ok(collector_upd), Ok((bcaster, new_prev_point)), Ok(())) => {
+                (Ok(collector_upd), Ok((bcaster, new_prev_point)), Ok(dag)) => {
                     self.broadcaster = bcaster;
                     prev_point = new_prev_point;
                     prev_round_success = next_dag_round.round() == collector_upd.next_round();
                     self.collector = collector_upd;
+                    self.dag = dag;
                 }
                 (collector, bcaster, commit) => {
                     let msg = Self::join_err_msg(&[

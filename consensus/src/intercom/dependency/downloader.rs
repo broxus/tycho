@@ -16,7 +16,7 @@ use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule};
-use crate::models::{DagPoint, NodeCount, PointId};
+use crate::models::{DagPoint, PeerCount, PointId};
 use crate::{dyn_event, Point};
 
 #[derive(Clone)]
@@ -87,7 +87,7 @@ impl Downloader {
                 })
             })
             .collect::<FastHashMap<_, _>>();
-        let node_count = NodeCount::try_from(undone_peers.len())
+        let peer_count = PeerCount::try_from(undone_peers.len())
             .expect("validator set is unknown, must keep prev epoch's set for DAG_DEPTH rounds");
         // query author no matter if it is in the next round, but that can't affect 3F+1
         let done_peers = match undone_peers.entry(point_id.location.author) {
@@ -111,7 +111,7 @@ impl Downloader {
 
         let downloaded = DownloadTask {
             parent: self.clone(),
-            node_count,
+            peer_count,
             request: Dispatcher::point_by_id_request(&point_id),
             point_id: point_id.clone(),
             undone_peers,
@@ -164,7 +164,7 @@ impl Downloader {
 struct DownloadTask {
     parent: Downloader,
 
-    node_count: NodeCount,
+    peer_count: PeerCount,
 
     request: tycho_network::Request,
     point_id: PointId,
@@ -261,7 +261,7 @@ impl DownloadTask {
                 )
             })
             .collect::<Vec<_>>();
-        filtered.sort_unstable_by_key(|kv| kv.1);
+        filtered.sort_unstable_by(|(_, ord_l), (_, ord_r)| ord_l.cmp(ord_r));
 
         for (peer_id, _) in filtered.iter().take(count) {
             self.download_one(peer_id);
@@ -364,7 +364,7 @@ impl DownloadTask {
     }
 
     fn shall_continue(&mut self) -> bool {
-        if self.done_peers >= self.node_count.majority() as i16 {
+        if self.done_peers >= self.peer_count.majority() as i16 {
             // the only normal case to resolve into `NotExists`
             tracing::warn!("not downloaded from majority");
             false
