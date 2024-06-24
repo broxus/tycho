@@ -92,7 +92,7 @@ impl Dag {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
             self.drop_tail(anchor.point.body().location.round);
-            let committed = Self::gather_uncommitted(&anchor.point, &anchor_round);
+            let committed = Self::gather_uncommitted(&anchor.point, anchor_round);
             ordered.push((anchor.point, committed));
         }
 
@@ -227,8 +227,8 @@ impl Dag {
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
     fn gather_uncommitted(
-        anchor: &Point,          // @ r+1
-        anchor_round: &DagRound, // r+1
+        anchor: &Point,              // @ r+1
+        mut current_round: DagRound, // r+1
     ) -> Vec<Point> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
             if to.is_empty() {
@@ -240,54 +240,41 @@ impl Dag {
             }
         }
         assert_eq!(
-            anchor_round.round(),
+            current_round.round(),
             anchor.body().location.round,
             "passed anchor round does not match anchor point's round"
         );
-        let mut proof_round /* r+0 */ = anchor_round
-            .prev()
-            .upgrade()
-            .expect("previous round for anchor point round must stay in DAG");
-        let mut r = array::from_fn::<_, 4, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2, r-3]
+        let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], &anchor.body().includes); // points @ r+0
         extend(&mut r[1], &anchor.body().witness); // points @ r-1
 
         let mut uncommitted = Vec::new();
 
-        while let Some(vertex_round /* r-1 */) = proof_round
+        while let Some(point_round /* r+0 */) = current_round
             .prev()
             .upgrade()
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
-            // shuffle deterministically with anchor digest as a seed
-            let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
+            // take points @ r+0, shuffle deterministically with anchor digest as a seed
+            let sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
             // TODO shuffle deterministically, eg with anchor digest as a seed
-            // take points @ r+0, and select their vertices @ r-1 for commit
-            while let Some((node, digest)) = &sorted.pop() {
+            for (node, digest) in &sorted {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
-                // Any valid point among equivocated will do, as they include the same vertex.
-                let proof = // point @ r+0
-                    Self::ready_valid_point(&proof_round, node, digest);
-                let author = &proof.point.body().location.author;
-                extend(&mut r[1], &proof.point.body().includes); // points @ r-1
-                extend(&mut r[2], &proof.point.body().witness); // points @ r-2
-                let Some(digest) = proof.point.body().proof.as_ref().map(|a| &a.digest) else {
-                    continue;
-                };
-                let vertex = // point @ r-1
-                    Self::ready_valid_point(&vertex_round, author, digest);
+                // Any equivocated point (except anchor) is ok, as they are globally available
+                // because of anchor, and their payload is deduplicated after mempool anyway.
+                let global =  // point @ r+0
+                    Self::ready_valid_point(&point_round, node, digest);
                 // select uncommitted ones, marking them as committed
                 // to exclude from the next commit
-                if !vertex.is_committed.swap(true, Ordering::Relaxed) {
-                    // vertex will be skipped in r_1 as committed
-                    extend(&mut r[2], &vertex.point.body().includes); // points @ r-2
-                    extend(&mut r[3], &vertex.point.body().witness); // points @ r-3
-                    uncommitted.push(vertex.point);
+                if !global.is_committed.swap(true, Ordering::Relaxed) {
+                    extend(&mut r[1], &global.point.body().includes); // points @ r-1
+                    extend(&mut r[2], &global.point.body().witness); // points @ r-2
+                    uncommitted.push(global.point);
                 }
             }
-            proof_round = vertex_round; // next r+0
-            r.rotate_left(1);
+            current_round = point_round; // r+0 is a new r+1
+            r.rotate_left(1); // [empty r_0, r-1, r-2] => [r-1 as r+0, r-2 as r-1, empty as r-2]
         }
         uncommitted.reverse();
         uncommitted
