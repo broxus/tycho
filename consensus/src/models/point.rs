@@ -39,6 +39,9 @@ impl Digest {
         hasher.update(body.as_slice());
         Self(hasher.finalize().into())
     }
+    pub fn inner(&self) -> &'_ [u8; 32] {
+        &self.0
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]

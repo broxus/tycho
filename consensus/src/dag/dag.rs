@@ -4,6 +4,8 @@ use std::sync::atomic::Ordering;
 use std::{array, mem};
 
 use futures_util::FutureExt;
+use rand::prelude::SliceRandom;
+use rand::SeedableRng;
 use tokio::sync::mpsc::UnboundedSender;
 use tycho_network::PeerId;
 
@@ -248,6 +250,7 @@ impl Dag {
         extend(&mut r[0], &anchor.body().includes); // points @ r+0
         extend(&mut r[1], &anchor.body().witness); // points @ r-1
 
+        let mut rng = rand_pcg::Pcg64::from_seed(*anchor.digest().inner());
         let mut uncommitted = Vec::new();
 
         while let Some(point_round /* r+0 */) = current_round
@@ -256,8 +259,8 @@ impl Dag {
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
         {
             // take points @ r+0, shuffle deterministically with anchor digest as a seed
-            let sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
-            // TODO shuffle deterministically, eg with anchor digest as a seed
+            let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
+            sorted.shuffle(&mut rng);
             for (node, digest) in &sorted {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
