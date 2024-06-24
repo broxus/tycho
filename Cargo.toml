@@ -14,6 +14,7 @@ members = [
     "collator",
     "consensus",
     "core",
+    "explorer-models",
     "network",
     "rpc",
     "simulator",
