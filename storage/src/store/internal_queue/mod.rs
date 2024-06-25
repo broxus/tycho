@@ -47,8 +47,10 @@ impl InternalQueueStorage {
         shard_ident: ShardIdent,
         messages: &[(u64, HashBytes, HashBytes, Cell)],
     ) -> Result<()> {
+        let batch_size = 20000;
         let mut batch_internal_messages = WriteBatch::default();
         let mut batch_shards_internal_messages = WriteBatch::default();
+        let mut count = 0;
 
         for (lt, hash, dest, cell) in messages {
             let internal_message_key = StorageInternalMessageKey {
@@ -57,38 +59,114 @@ impl InternalQueueStorage {
                 shard_ident,
             };
 
-            batch_internal_messages.put_cf(
-                &self.db.internal_messages.cf(),
-                internal_message_key.to_vec().as_slice(),
-                Boc::encode(cell.clone()),
-            );
-
             let shard_internal_message_key = ShardsInternalMessagesKey {
                 shard_ident,
                 lt: *lt,
                 hash: *hash,
             };
 
+            // Add operations to the batches
+            batch_internal_messages.put_cf(
+                &self.db.internal_messages.cf(),
+                internal_message_key.to_vec().as_slice(),
+                Boc::encode(cell.clone()),
+            );
+
             batch_shards_internal_messages.put_cf(
                 &self.db.shards_internal_messages.cf(),
                 shard_internal_message_key.to_vec().as_slice(),
                 dest.as_slice(),
             );
+
+            count += 1;
+
+            // If the batch size is reached, write the batch to the database
+            if count >= batch_size {
+                self.db.rocksdb().write(batch_internal_messages)?;
+                self.db.rocksdb().write(batch_shards_internal_messages)?;
+                batch_internal_messages = WriteBatch::default();
+                batch_shards_internal_messages = WriteBatch::default();
+                count = 0;
+            }
         }
 
-        self.db.rocksdb().write(batch_internal_messages)?;
-        self.db.rocksdb().write(batch_shards_internal_messages)?;
+        // Write any remaining operations in the batches to the database
+        if count > 0 {
+            self.db.rocksdb().write(batch_internal_messages)?;
+            self.db.rocksdb().write(batch_shards_internal_messages)?;
+        }
 
-        let bound = Option::<[u8; 0]>::None;
-        self.db
-            .rocksdb()
-            .compact_range_cf(&self.db.internal_messages.cf(), bound, bound);
-        self.db
-            .rocksdb()
-            .compact_range_cf(&self.db.shards_internal_messages.cf(), bound, bound);
+        // Optional: Compact the ranges (remove this if you don't want automatic compaction)
+        // let bound = Option::<[u8; 0]>::None;
+        // self.db
+        //     .rocksdb()
+        //     .compact_range_cf(&self.db.internal_messages.cf(), bound, bound);
+        // self.db
+        //     .rocksdb()
+        //     .compact_range_cf(&self.db.shards_internal_messages.cf(), bound, bound);
 
         Ok(())
     }
+
+    // pub fn insert_messages(
+    //     &self,
+    //     shard_ident: ShardIdent,
+    //     messages: &[(u64, HashBytes, HashBytes, Cell)],
+    // ) -> Result<()> {
+    //     let mut batch_internal_messages = WriteBatch::default();
+    //     let mut batch_shards_internal_messages = WriteBatch::default();
+    //
+    //     for (lt, hash, dest, cell) in messages {
+    //         let internal_message_key = StorageInternalMessageKey {
+    //             lt: *lt,
+    //             hash: *hash,
+    //             shard_ident,
+    //         };
+    //
+    //
+    //
+    //         let shard_internal_message_key = ShardsInternalMessagesKey {
+    //             shard_ident,
+    //             lt: *lt,
+    //             hash: *hash,
+    //         };
+    //
+    //         self.db.internal_messages.insert(
+    //             &internal_message_key.to_vec(),
+    //             Boc::encode(cell.clone()),
+    //         )?;
+    //
+    //         self.db.shards_internal_messages.insert(
+    //             &shard_internal_message_key.to_vec(),
+    //             dest.as_slice(),
+    //         )?;
+    //
+    //         // batch_internal_messages.put_cf(
+    //         //     &self.db.internal_messages.cf(),
+    //         //     internal_message_key.to_vec().as_slice(),
+    //         //     Boc::encode(cell.clone()),
+    //         // );
+    //         //
+    //         // batch_shards_internal_messages.put_cf(
+    //         //     &self.db.shards_internal_messages.cf(),
+    //         //     shard_internal_message_key.to_vec().as_slice(),
+    //         //     dest.as_slice(),
+    //         // );
+    //     }
+    //
+    //     // self.db.rocksdb().write(batch_internal_messages)?;
+    //     // self.db.rocksdb().write(batch_shards_internal_messages)?;
+    //
+    //     // let bound = Option::<[u8; 0]>::None;
+    //     // self.db
+    //     //     .rocksdb()
+    //     //     .compact_range_cf(&self.db.internal_messages.cf(), bound, bound);
+    //     // self.db
+    //     //     .rocksdb()
+    //     //     .compact_range_cf(&self.db.shards_internal_messages.cf(), bound, bound);
+    //
+    //     Ok(())
+    // }
 
     pub fn delete_messages(
         &self,
@@ -160,17 +238,19 @@ impl InternalQueueStorage {
             };
 
             // total_deleted += 1;
-
+            //
             batch.delete_cf(
                 &internal_messages_cf,
                 &internal_message_key_to_remove.to_vec(),
             );
             batch.delete_cf(&shards_internal_messages_cf, &current_position.to_vec());
+            // self.db.internal_messages.remove(&internal_message_key_to_remove.to_vec())?;
+            // self.db.shards_internal_messages.remove(&current_position.to_vec())?;
             iter.next();
         }
 
         self.db.rocksdb().write(batch)?;
-
+        //
         let bound = Option::<[u8; 0]>::None;
         self.db
             .rocksdb()
