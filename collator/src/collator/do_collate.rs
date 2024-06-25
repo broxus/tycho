@@ -245,6 +245,7 @@ impl CollatorStdImpl {
             };
             collation_data.read_ext_msgs += ext_msgs.len() as u64;
 
+            let read_timer = std::time::Instant::now();
             // 2. Then iterate through existing internals and try to fill the set
             let mut remaining_capacity = max_messages_per_set - ext_msgs.len();
             while remaining_capacity > 0 && !all_existing_internals_finished {
@@ -279,10 +280,10 @@ impl CollatorStdImpl {
                 }
             }
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
+            tracing::info!(target: tracing_targets::COLLATOR,
                 ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
-                "read externals and internals",
-            );
+                elapsed = ?read_timer.elapsed(),
+                "read externals and internals");
 
             // 3. Join existing internals and externals
             //    If not enough existing internals to fill the set then try read more externals
@@ -452,7 +453,7 @@ impl CollatorStdImpl {
             metrics::gauge!("tycho_do_collate_exec_ticks_per_msgs_set", labels)
                 .set(exec_ticks_count as f64);
 
-            timer = std::time::Instant::now();
+            let timer = std::time::Instant::now();
 
             // commit messages to iterator only if set was fully processed
             if msgs_set_full_processed {

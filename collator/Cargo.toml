@@ -19,6 +19,7 @@ bytesize = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
+im = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
@@ -37,7 +38,6 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 rayon = { workspace = true }
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
-
 # local deps
 #tycho-consensus = { workspace = true }
 tycho-block-util = { workspace = true }
