@@ -113,24 +113,30 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     }
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
-        tracing::trace!(
-            target: tracing_targets::MQ_ADAPTER,
-            id = ?block_id_short,
-            new_messages_len = diff.messages.len(),
-            "Applying diff to the queue"
-        );
+        let time = std::time::Instant::now();
         self.queue.apply_diff(diff, block_id_short).await?;
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+                        id = ?block_id_short,
+                        new_messages_len = diff.messages.len(),
+                        elapsed = ?time.elapsed(),
+
+            "Diff applied",
+        );
         Ok(())
     }
 
     #[instrument(skip(self), fields(%diff_id))]
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>> {
-        tracing::trace!(
-            target: tracing_targets::MQ_ADAPTER,
-            "Committing diff to the queue"
-        );
+        let time = std::time::Instant::now();
 
         let diff = self.queue.commit_diff(diff_id).await?;
+        tracing::debug!(
+            target: tracing_targets::MQ_ADAPTER,
+            id = ?diff_id,
+            elapsed = ?time.elapsed(),
+            "Diff commited",
+        );
 
         Ok(diff)
     }

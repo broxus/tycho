@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use everscale_types::models::BlockIdShort;
+use im::OrdMap;
 
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 
 #[derive(Clone, Default)]
 pub struct Shard {
-    pub outgoing_messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+    pub outgoing_messages: OrdMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     pub diffs: BTreeMap<BlockIdShort, Arc<QueueDiff>>,
 }
 
@@ -22,13 +23,9 @@ impl Shard {
     }
 
     pub fn remove_diff(&mut self, diff_id: &BlockIdShort) -> Option<Arc<QueueDiff>> {
-        // let mut remove_counter = 0;
         if let Some(diff) = self.diffs.remove(diff_id) {
             for message in &diff.messages {
-                let _res = self.outgoing_messages.remove(&message.key());
-                // if res.is_some() {
-                //     remove_counter += 1;
-                // }
+                self.outgoing_messages.remove(&message.key());
             }
             return Some(diff);
         } else {
