@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, Load};
 use everscale_types::models::{IntMsgInfo, Message, MsgInfo, ShardIdent};
+use everscale_types::prelude::HashBytes;
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_storage::StorageInternalMessageKey;
 use tycho_util::FastHashMap;
@@ -73,20 +74,32 @@ impl PersistentStateIterator {
 
 impl StateIterator for PersistentStateIterator {
     fn seek(&mut self, range_start: Option<(&ShardIdent, InternalMessageKey)>) {
+        let time_start = std::time::Instant::now();
         match range_start {
             Some((shard_ident, key)) => {
                 let start = StorageInternalMessageKey {
                     shard_ident: *shard_ident,
+                    dest_address: HashBytes::default(),
                     lt: key.lt,
                     hash: key.hash,
+                    dest_workchain: i8::MIN,
                 };
                 self.iter.seek(start);
             }
             None => self.iter.seek_to_first(),
         };
+        tracing::trace!(
+            target: "debug",
+            elapsed = %humantime::format_duration(time_start.elapsed()),
+            "Seeked to the start of the range"
+        );
     }
 
     fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
+        let mut skip_count = 0;
+        let mut skip_count_not_for_us = 0;
+        let mut skip_count_processed = 0;
+
         while let (Some(key), Some(value)) = (self.iter.key(), self.iter.value()) {
             let key = StorageInternalMessageKey::from(key);
 
@@ -99,6 +112,8 @@ impl StateIterator for PersistentStateIterator {
                 };
                 if range.from.clone().unwrap_or_default() >= int_key {
                     self.iter.next();
+                    // skip_count += 1;
+                    skip_count_processed += 1;
                     continue;
                 }
 
@@ -107,27 +122,41 @@ impl StateIterator for PersistentStateIterator {
                 }
             } else {
                 self.iter.next();
+                skip_count += 1;
                 continue;
             }
 
-            let (info, cell) = Self::load_message_from_value(value)?;
-
-            if self.receiver.contains_account(&info.dst.get_address())
-                && self.receiver.workchain() == info.dst.workchain()
+            if self.receiver.contains_account(&key.dest_address)
+                && self.receiver.workchain() == key.dest_workchain as i32
             {
+                let (info, cell) = Self::load_message_from_value(value)?;
                 let message_with_source =
                     Self::create_message_with_source(info, cell, key.shard_ident);
+
+                if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
+                    tracing::info!(target: "debug", "Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+                }
+
                 self.iter.next();
                 return Ok(Some(message_with_source));
             } else {
                 self.iter.next();
+                skip_count_not_for_us += 1;
             }
         }
+
+        if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
+            tracing::info!(target: "debug444", "Total Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+        }
+
         Ok(None)
     }
 
     fn peek(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
         let saved_position = self.save_position();
+        let mut skip_count = 0;
+        let mut skip_count_not_for_us = 0;
+        let mut skip_count_processed = 0;
 
         while let (Some(key), Some(value)) = (self.iter.key(), self.iter.value()) {
             let key = StorageInternalMessageKey::from(key);
@@ -141,6 +170,7 @@ impl StateIterator for PersistentStateIterator {
                 };
                 if range.from.clone().unwrap_or_default() >= int_key {
                     self.iter.next();
+                    skip_count_processed += 1;
                     continue;
                 }
 
@@ -149,6 +179,7 @@ impl StateIterator for PersistentStateIterator {
                 }
             } else {
                 self.iter.next();
+                skip_count += 1;
                 continue;
             }
 
@@ -161,13 +192,23 @@ impl StateIterator for PersistentStateIterator {
                     Self::create_message_with_source(info, cell, key.shard_ident);
 
                 self.restore_position(saved_position);
+
+                if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
+                    tracing::info!(target: "debug", "Peek Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+                }
+
                 return Ok(Some(message_with_source));
             } else {
                 self.iter.next();
+                skip_count_not_for_us += 1;
             }
         }
 
         self.restore_position(saved_position);
+
+        if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
+            tracing::info!(target: "debug", "Total peek Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+        }
 
         Ok(None)
     }

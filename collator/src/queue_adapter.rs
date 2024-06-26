@@ -114,11 +114,12 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
 
     async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
         let time = std::time::Instant::now();
+        let len = diff.messages.len();
         self.queue.apply_diff(diff, block_id_short).await?;
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
                         id = ?block_id_short,
-                        new_messages_len = diff.messages.len(),
+                        new_messages_len = len,
                         elapsed = ?time.elapsed(),
 
             "Diff applied",

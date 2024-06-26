@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 
@@ -96,14 +96,24 @@ impl PersistentState for PersistentStateStdImpl {
         block_id_short: BlockIdShort,
         messages: Vec<Arc<EnqueuedMessage>>,
     ) -> anyhow::Result<()> {
-        let messages: Vec<(u64, HashBytes, HashBytes, Cell)> = messages
+        let messages: Vec<(u64, HashBytes, HashBytes, Cell, HashBytes, i8)> = messages
             .iter()
             .map(|m| {
+                let dest_address = &m.info.dst;
+                let (address, workchain) = match dest_address {
+                    IntAddr::Std(std) => (std.address, std.workchain),
+                    IntAddr::Var(_) => {
+                        panic!("Var address not supported")
+                    }
+                };
+
                 (
                     m.info.created_lt,
                     m.hash,
                     m.info.dst.get_address(),
                     m.cell.clone(),
+                    address,
+                    workchain,
                 )
             })
             .collect();
