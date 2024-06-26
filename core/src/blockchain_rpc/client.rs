@@ -454,7 +454,11 @@ impl BlockchainRpcClient {
                     }
                 }
                 Err(e) => {
-                    tracing::error!(archive_id, offset, "Failed to download archive: {e:?}",);
+                    tracing::error!(
+                        archive_id,
+                        offset,
+                        "Failed to download archive slice: {e:?}",
+                    );
                 }
             }
         }

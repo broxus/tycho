@@ -15,7 +15,7 @@ pub struct ArchivesDownloader {
 impl ArchivesDownloader {
     pub fn new(node: &Arc<Node>) -> Self {
         // TODO: add to config
-        let save_to_disk_threshold = Default::default();
+        let save_to_disk_threshold = 1024 * 1024 * 1024;
 
         Self {
             node: node.clone(),

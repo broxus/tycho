@@ -442,9 +442,24 @@ impl Node {
             }
         };
 
+        let shards_mc_block_id = match node_state.load_shards_mc_block_id() {
+            Some(block_id) => block_id,
+            None => {
+                node_state.store_shards_mc_block_id(&last_key_block_id);
+                last_key_block_id
+            }
+        };
+
+        tracing::info!(
+            %last_key_block_id,
+            %shards_mc_block_id,
+            "boot finished"
+        );
+
         if !self.is_synced()? {
             sync::normal::run(self).await?;
         }
+
         tracing::info!("node synced");
 
         Ok(last_key_block_id)
