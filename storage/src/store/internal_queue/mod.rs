@@ -45,24 +45,29 @@ impl InternalQueueStorage {
     pub fn insert_messages(
         &self,
         shard_ident: ShardIdent,
-        messages: &[(u64, HashBytes, HashBytes, Cell)],
+        messages: &[(u64, HashBytes, HashBytes, Cell, HashBytes, i8)],
     ) -> Result<()> {
         let batch_size = 20000;
         let mut batch_internal_messages = WriteBatch::default();
         let mut batch_shards_internal_messages = WriteBatch::default();
         let mut count = 0;
 
-        for (lt, hash, dest, cell) in messages {
+        for (lt, hash, dest, cell, dest_address, workchain) in messages {
             let internal_message_key = StorageInternalMessageKey {
                 lt: *lt,
                 hash: *hash,
                 shard_ident,
+                dest_address: *dest_address,
+                dest_workchain: *workchain,
             };
 
             let shard_internal_message_key = ShardsInternalMessagesKey {
                 shard_ident,
                 lt: *lt,
                 hash: *hash,
+
+                dest_address: *dest_address,
+                dest_workchain: *workchain,
             };
 
             // Add operations to the batches
@@ -186,12 +191,16 @@ impl InternalQueueStorage {
             shard_ident: shard,
             lt: 0,
             hash: HashBytes::ZERO,
+            dest_address: Default::default(),
+            dest_workchain: i8::MIN,
         };
 
         let end_key = ShardsInternalMessagesKey {
             shard_ident: shard,
             lt: delete_until.0,
             hash: delete_until.1,
+            dest_address: HashBytes([255; 32]),
+            dest_workchain: i8::MAX,
         };
 
         let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
@@ -235,6 +244,8 @@ impl InternalQueueStorage {
                 lt: current_position.lt,
                 hash: current_position.hash,
                 shard_ident: shard,
+                dest_address: current_position.dest_address,
+                dest_workchain: current_position.dest_workchain,
             };
 
             // total_deleted += 1;
