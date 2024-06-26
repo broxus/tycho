@@ -98,7 +98,6 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
-        tracing::error!(target: "debug", "create iterator");
         let states_iterators = self.queue.iterator(&ranges, for_shard_id).await;
 
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);

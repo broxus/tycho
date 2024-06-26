@@ -285,6 +285,11 @@ impl CollatorStdImpl {
                 elapsed = ?read_timer.elapsed(),
                 "read externals and internals");
 
+            tracing::info!(target: "local_debug",
+                ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
+                elapsed = ?read_timer.elapsed(),
+                "read externals and internals");
+
             // 3. Join existing internals and externals
             //    If not enough existing internals to fill the set then try read more externals
             msgs_set.append(&mut ext_msgs);
@@ -518,6 +523,10 @@ impl CollatorStdImpl {
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
 
         let diff = Arc::new(internal_messages_iterator.take_diff());
+
+        if diff.messages.len() == 0 {
+            tracing::info!(target: "local_debug", "empty diff {:?} {:?}", diff.processed_upto, collation_data.block_id_short);
+        }
 
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {

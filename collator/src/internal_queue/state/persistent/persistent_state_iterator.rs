@@ -89,7 +89,7 @@ impl StateIterator for PersistentStateIterator {
             None => self.iter.seek_to_first(),
         };
         tracing::trace!(
-            target: "debug",
+            target: "local_debug",
             elapsed = %humantime::format_duration(time_start.elapsed()),
             "Seeked to the start of the range"
         );
@@ -126,27 +126,26 @@ impl StateIterator for PersistentStateIterator {
                 continue;
             }
 
-            if self.receiver.contains_account(&key.dest_address)
-                && self.receiver.workchain() == key.dest_workchain as i32
-            {
-                let (info, cell) = Self::load_message_from_value(value)?;
-                let message_with_source =
-                    Self::create_message_with_source(info, cell, key.shard_ident);
+            // if self.receiver.contains_account(&key.dest_address)
+            //     && self.receiver.workchain() == key.dest_workchain as i32
+            // {
+            let (info, cell) = Self::load_message_from_value(value)?;
+            let message_with_source = Self::create_message_with_source(info, cell, key.shard_ident);
 
-                if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
-                    tracing::info!(target: "debug", "Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
-                }
-
-                self.iter.next();
-                return Ok(Some(message_with_source));
-            } else {
-                self.iter.next();
-                skip_count_not_for_us += 1;
+            if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
+                tracing::info!(target: "local_debug", "Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
             }
+
+            self.iter.next();
+            return Ok(Some(message_with_source));
+            // } else {
+            //     self.iter.next();
+            //     skip_count_not_for_us += 1;
+            // }
         }
 
         if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
-            tracing::info!(target: "debug444", "Total Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+            tracing::info!(target: "local_debug", "Total Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
         }
 
         Ok(None)
@@ -194,7 +193,7 @@ impl StateIterator for PersistentStateIterator {
                 self.restore_position(saved_position);
 
                 if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
-                    tracing::info!(target: "debug", "Peek Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+                    tracing::info!(target: "local_debug", "Peek Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
                 }
 
                 return Ok(Some(message_with_source));
@@ -207,7 +206,7 @@ impl StateIterator for PersistentStateIterator {
         self.restore_position(saved_position);
 
         if skip_count_not_for_us > 0 || skip_count_processed > 0 || skip_count > 0 {
-            tracing::info!(target: "debug", "Total peek Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
+            tracing::info!(target: "local_debug", "Total peek Skipped items before finding a valid message. skip_count_not_for_us {skip_count_not_for_us:?}. skip_count_processed {skip_count_processed:?}. not in range {skip_count:?}. ranges {:?} receiver {:?}", self.ranges, self.receiver);
         }
 
         Ok(None)
