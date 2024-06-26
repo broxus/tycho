@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
 use everscale_types::prelude::*;
-use tycho_util::FastHashMap;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::types::BlockCandidate;
 
@@ -11,9 +11,16 @@ pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
 
 #[derive(Default)]
+pub(super) struct ChainTimesSyncState {
+    /// latest known chain time for master block: last imported or next to be collated
+    pub mc_block_latest_chain_time: u64,
+    pub last_collated_chain_times_by_shards: FastHashMap<ShardIdent, Vec<(u64, bool)>>,
+}
+
+#[derive(Default)]
 pub(super) struct BlocksCache {
-    pub master: BTreeMap<BlockCacheKey, BlockCandidateContainer>,
-    pub shards: FastHashMap<ShardIdent, BTreeMap<BlockSeqno, BlockCandidateContainer>>,
+    pub master: FastDashMap<BlockCacheKey, BlockCandidateContainer>,
+    pub shards: FastDashMap<ShardIdent, BTreeMap<BlockSeqno, BlockCandidateContainer>>,
 }
 
 pub struct BlockCandidateEntry {

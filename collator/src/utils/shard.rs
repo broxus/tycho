@@ -22,7 +22,7 @@ enum CalcSplitMergeStep<'a> {
 /// Calculate the list of split/merge actions that are needed
 /// to move from the current shards set to a new
 pub fn calc_split_merge_actions(
-    from_current_shards: Vec<&ShardIdent>,
+    from_current_shards: &[ShardIdent],
     to_new_shards: Vec<&ShardIdent>,
 ) -> Result<Vec<SplitMergeAction>> {
     // TODO: not the best code, possibly needs refactoring
@@ -35,7 +35,7 @@ pub fn calc_split_merge_actions(
         planned_actions.extend(
             from_current_shards
                 .iter()
-                .map(|&sh| CalcSplitMergeStep::CheckAction(*sh, None, None)),
+                .map(|&sh| CalcSplitMergeStep::CheckAction(sh, None, None)),
         );
     }
 
@@ -137,26 +137,28 @@ mod tests {
         println!("shard split 2 {}", shard_a0);
         println!("shard split 2 {}", shard_e0);
 
-        let shards_1 = vec![&shard_80];
-        let actions = calc_split_merge_actions(vec![], shards_1.clone()).unwrap();
+        let shards_1_r = vec![&shard_80];
+        let shards_1_l = &[shard_80];
+        let actions = calc_split_merge_actions(&[], shards_1_r.clone()).unwrap();
         println!("split/merge actions from [] to [1]: {:?}", actions);
 
-        let shards_4 = vec![&shard_20, &shard_60, &shard_a0, &shard_e0];
-        let actions = calc_split_merge_actions(vec![], shards_4.clone()).unwrap();
+        let shards_4_r = vec![&shard_20, &shard_60, &shard_a0, &shard_e0];
+        let actions = calc_split_merge_actions(&[], shards_4_r.clone()).unwrap();
         println!("split/merge actions from [] to [4]: {:?}", actions);
 
-        let actions = calc_split_merge_actions(shards_1.clone(), shards_4.clone()).unwrap();
+        let actions = calc_split_merge_actions(shards_1_l, shards_4_r.clone()).unwrap();
         println!("split/merge actions from [1] to [4]: {:?}", actions);
 
-        let shards_2 = vec![&shard_40, &shard_c0];
-        let actions = calc_split_merge_actions(shards_2.clone(), shards_4.clone()).unwrap();
+        let shards_2_l = &[shard_40, shard_c0];
+        let actions = calc_split_merge_actions(shards_2_l, shards_4_r.clone()).unwrap();
         println!("split/merge actions from [2] to [4]: {:?}", actions);
 
-        let shards_3 = vec![&shard_40, &shard_a0, &shard_e0];
-        let actions = calc_split_merge_actions(shards_2.clone(), shards_3.clone()).unwrap();
+        let shards_3_r = vec![&shard_40, &shard_a0, &shard_e0];
+        let shards_3_l = &[shard_40, shard_a0, shard_e0];
+        let actions = calc_split_merge_actions(shards_2_l, shards_3_r.clone()).unwrap();
         println!("split/merge actions from [2] to [3]: {:?}", actions);
 
-        let actions = calc_split_merge_actions(shards_3.clone(), shards_4.clone()).unwrap();
+        let actions = calc_split_merge_actions(shards_3_l, shards_4_r.clone()).unwrap();
         println!("split/merge actions from [3] to [4]: {:?}", actions);
     }
 }
