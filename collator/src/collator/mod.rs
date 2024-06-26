@@ -599,7 +599,9 @@ impl CollatorStdImpl {
         });
 
         // for current shard read until last message
-        ranges_to.insert(self.shard_id, InternalMessageKey::MAX);
+        if !self.shard_id.is_masterchain() {
+            ranges_to.insert(self.shard_id, InternalMessageKey::MAX);
+        }
 
         let internal_messages_iterator = self
             .mq_adapter

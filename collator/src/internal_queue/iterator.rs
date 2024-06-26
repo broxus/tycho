@@ -3,7 +3,7 @@ use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use everscale_types::models::ShardIdent;
+use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
@@ -71,11 +71,36 @@ fn update_shard_range(
 
 impl QueueIterator for QueueIteratorImpl {
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>> {
-        if let Some(next_message) = self.snapshot_manager.next()? {
-            return Ok(Some(IterItem {
-                message_with_source: next_message.clone(),
-                is_new: false,
-            }));
+        loop {
+            if let Some(next_message) = self.snapshot_manager.next()? {
+                let dst = match &next_message.message.info.dst {
+                    IntAddr::Std(dst) => dst,
+                    IntAddr::Var(_) => {
+                        panic!("invalid destination address")
+                    }
+                };
+
+                if self.for_shard.contains_account(&dst.address)
+                    && self.for_shard.workchain() == dst.workchain as i32
+                {
+                    return Ok(Some(IterItem {
+                        message_with_source: next_message.clone(),
+                        is_new: false,
+                    }));
+                } else {
+                    self.commited_current_position
+                        .entry(next_message.shard_id)
+                        .and_modify(|e| {
+                            if next_message.message.key() > *e {
+                                *e = next_message.message.key().clone();
+                            }
+                        })
+                        .or_insert(next_message.message.key().clone());
+                    continue;
+                }
+            } else {
+                break;
+            }
         }
 
         if with_new {

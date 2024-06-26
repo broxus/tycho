@@ -114,13 +114,13 @@ impl SessionStateIterator {
         for iter in self.current_iterators.values_mut() {
             if let Some((_key, message)) = iter.next_message() {
                 all_iterators_empty = false;
-                if let Ok((workchain, account_hash)) = message.message.destination() {
-                    if self.shard_id.contains_account(&account_hash)
-                        && self.shard_id.workchain() == workchain as i32
-                    {
-                        self.message_queue.push(Reverse(message));
-                    }
-                }
+                // if let Ok((workchain, account_hash)) = message.message.destination() {
+                //     if self.shard_id.contains_account(&account_hash)
+                //         && self.shard_id.workchain() == workchain as i32
+                //     {
+                self.message_queue.push(Reverse(message));
+                // }
+                // }
             }
         }
 
