@@ -8,6 +8,7 @@ pub struct NodeStateStorage {
     db: BaseDb,
     last_mc_block_id: BlockIdCache,
     init_mc_block_id: BlockIdCache,
+    shards_client_mc_block_id: BlockIdCache,
 }
 
 impl NodeStateStorage {
@@ -16,6 +17,7 @@ impl NodeStateStorage {
             db,
             last_mc_block_id: (Default::default(), LAST_MC_BLOCK_ID),
             init_mc_block_id: (Default::default(), INIT_MC_BLOCK_ID),
+            shards_client_mc_block_id: (Default::default(), SHARDS_CLIENT_MC_BLOCK_ID)
         }
     }
 
@@ -34,6 +36,15 @@ impl NodeStateStorage {
     pub fn load_init_mc_block_id(&self) -> Option<BlockId> {
         self.load_block_id(&self.init_mc_block_id)
     }
+
+    pub fn store_shards_client_mc_block_id(&self, id: &BlockId)  {
+        self.store_block_id(&self.shards_client_mc_block_id, id)
+    }
+
+    pub fn load_shards_client_mc_block_id(&self) -> Option<BlockId> {
+        self.load_block_id(&self.shards_client_mc_block_id)
+    }
+
 
     #[inline(always)]
     fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
@@ -60,3 +71,5 @@ type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);
 
 const LAST_MC_BLOCK_ID: &[u8] = b"last_mc_block";
 const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
+const SHARDS_CLIENT_MC_BLOCK_ID: &[u8] = b"shards_client_mc_block";
+

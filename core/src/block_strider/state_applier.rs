@@ -245,6 +245,7 @@ where
 
     type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+    type AfterBlockHandleFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         Box::pin(self.prepare_block_impl(cx))
@@ -256,6 +257,10 @@ where
         prepared: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
         Box::pin(self.handle_block_impl(cx, prepared))
+    }
+
+    fn after_block_handle<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::AfterBlockHandleFut<'a> {
+        Box::pin(futures_util::future::ready(Ok(())))
     }
 }
 

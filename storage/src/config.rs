@@ -2,8 +2,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytesize::ByteSize;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
+
+use crate::BlocksGcKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -32,6 +35,18 @@ pub struct StorageConfig {
     ///
     /// Archives are disabled if this field is `None`.
     pub archives: Option<ArchivesConfig>,
+
+    /// States GC config.
+    ///
+    /// States GC is disabled if this field is `None`.
+    pub states_gc_options: Option<StateGcOptions>,
+
+    /// Blocks GC config.
+    ///
+    /// Blocks GC is disabled if this field is `None`.
+    pub blocks_gc_config: Option<BlocksGcOptions>,
+
+
 }
 
 impl StorageConfig {
@@ -43,6 +58,8 @@ impl StorageConfig {
             cells_cache_size: ByteSize::kb(1024),
             rocksdb_enable_metrics: false,
             archives: Some(ArchivesConfig::default()),
+            states_gc_options: Some(StateGcOptions::default()),
+            blocks_gc_config: Some(BlocksGcOptions::default())
         }
     }
 }
@@ -92,6 +109,8 @@ impl Default for StorageConfig {
             rocksdb_lru_capacity,
             rocksdb_enable_metrics: true,
             archives: Some(ArchivesConfig::default()),
+            states_gc_options: Some(StateGcOptions::default()),
+            blocks_gc_config: Some(BlocksGcOptions::default())
         }
     }
 }
@@ -119,6 +138,50 @@ impl Default for ArchivesGcInterval {
     fn default() -> Self {
         Self::PersistentStates {
             offset: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StateGcOptions {
+    /// Default: rand[0,900)
+    pub offset_sec: u64,
+    /// Default: 900
+    pub interval_sec: u64,
+}
+
+impl Default for StateGcOptions {
+    fn default() -> Self {
+        Self {
+            offset_sec: rand::thread_rng().gen_range(0..60),
+            interval_sec: 60,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BlocksGcOptions {
+    /// Blocks GC type
+    /// - `before_previous_key_block` - on each new key block delete all blocks before the previous one
+    /// - `before_previous_persistent_state` - on each new key block delete all blocks before the
+    ///   previous key block with persistent state
+    pub kind: BlocksGcKind,
+
+    /// Whether to enable blocks GC during sync. Default: true
+    pub enable_for_sync: bool,
+
+    /// Max `WriteBatch` entries before apply
+    pub max_blocks_per_batch: Option<usize>,
+}
+
+impl Default for BlocksGcOptions {
+    fn default() -> Self {
+        Self {
+            kind: BlocksGcKind::BeforePreviousPersistentState,
+            enable_for_sync: true,
+            max_blocks_per_batch: Some(100_000),
         }
     }
 }

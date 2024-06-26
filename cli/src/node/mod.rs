@@ -10,6 +10,7 @@ use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
+use tracing::instrument::WithSubscriber;
 use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
@@ -40,7 +41,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{start_archives_gc, BlockMetaData, Storage};
+use tycho_storage::{start_archives_gc, BlockMetaData, Storage, prepare_blocks_gc};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -363,10 +364,6 @@ impl Node {
             "initialized storage"
         );
 
-        tokio::spawn(async move {
-            start_archives_gc(storage.clone())?;
-        });
-
         // Setup block strider
         let state_tracker = MinRefMcStateTracker::default();
 
@@ -669,6 +666,8 @@ impl Node {
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
+        let gc_subscriber = GcSubscriber::new(self.storage.clone());
+
         let block_strider = BlockStrider::builder()
             .with_provider((
                 (blockchain_block_provider, storage_block_provider),
@@ -684,6 +683,12 @@ impl Node {
                 MetricsSubscriber,
             ))
             .build();
+
+        tokio::spawn(async move {
+            start_archives_gc(self.storage.clone())?;
+        });
+
+        prepare_blocks_gc(self.storage.clone()).await?;
 
         // Run block strider
         tracing::info!("block strider started");

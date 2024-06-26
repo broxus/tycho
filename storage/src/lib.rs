@@ -1,5 +1,5 @@
 use std::ops::Add;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -143,6 +143,13 @@ impl StorageBuilder {
 
         // TODO: preload archive ids
 
+        let gc_enabled_for_sync = AtomicBool::new(
+            self.config
+                .blocks_gc_config
+                .map(|x| x.enable_for_sync)
+                .unwrap_or(false),
+        );
+
         let inner = Arc::new(Inner {
             root,
             base_db,
@@ -156,6 +163,9 @@ impl StorageBuilder {
             runtime_storage,
             rpc_state,
             internal_queue_storage,
+            blocks_gc_state: BlockGcState {
+                enabled_for_sync: gc_enabled_for_sync,
+            },
         });
 
         spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
@@ -253,6 +263,44 @@ impl Storage {
     pub fn internal_queue_storage(&self) -> &InternalQueueStorage {
         &self.inner.internal_queue_storage
     }
+
+    pub fn gc_enable_for_sync(&self) -> &AtomicBool {
+        &self.inner.blocks_gc_state.enabled_for_sync
+    }
+}
+
+pub async fn prepare_blocks_gc(storage: Storage) -> Result<()> {
+    let blocks_gc_config = match &storage.inner.config.blocks_gc_config {
+        Some(state) => state,
+        None => return Ok(()),
+    };
+
+    storage
+        .inner
+        .blocks_gc_state
+        .enabled_for_sync
+        .store(true, Ordering::Release);
+
+    let Some(key_block) = storage.block_handle_storage().find_last_key_block() else {
+        return Ok(())
+    };
+
+    let Some(block) = storage.node_state().load_shards_client_mc_block_id() else {
+        return Ok(())
+    };
+    // Blocks GC will be called later when the shards client will reach the key block
+    if block.seqno < key_block.id().seqno {
+        return Ok(());
+    }
+
+    storage
+        .block_storage()
+        .remove_outdated_blocks(
+            key_block.id(),
+            blocks_gc_config.max_blocks_per_batch,
+            blocks_gc_config.kind,
+        )
+        .await
 }
 
 pub fn start_archives_gc(storage: Storage) -> Result<()> {
@@ -291,14 +339,10 @@ pub fn start_archives_gc(storage: Storage) -> Result<()> {
                         }
                     };
 
-                    if let Some(interval) =
-                        duration_between_unix_and_instant(untile_time, Instant::now())
-                    {
-                        tokio::select!(
-                            _ = tokio::time::sleep(interval) => {},
-                            _ = &mut new_state_found => continue,
-                        );
-                    }
+                    tokio::select!(
+                        _ = tokio::time::sleep(duration_between_unix_and_instant(untile_time, Instant::now())) => {},
+                        _ = &mut new_state_found => continue,
+                    );
 
                     if let Some(lower_bound) = &lower_bound {
                         loop {
@@ -340,6 +384,8 @@ struct Inner {
     base_db: BaseDb,
     config: StorageConfig,
 
+    blocks_gc_state: BlockGcState,
+
     runtime_storage: Arc<RuntimeStorage>,
     block_handle_storage: Arc<BlockHandleStorage>,
     block_connection_storage: Arc<BlockConnectionStorage>,
@@ -349,4 +395,8 @@ struct Inner {
     persistent_state_storage: PersistentStateStorage,
     rpc_state: Option<RpcStorage>,
     internal_queue_storage: InternalQueueStorage,
+}
+
+struct BlockGcState {
+    enabled_for_sync: AtomicBool,
 }
