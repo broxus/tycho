@@ -236,7 +236,8 @@ impl CollatorStdImpl {
                 processed_upto: Lazy::new(&collation_data.processed_upto)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&shard_accounts)?,
-                overload_history: 0,
+                overload_history: prev_shard_data.gas_used()
+                    + collation_data.block_limit.gas_used as u64,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: prev_shard_data.total_validator_fees().clone(),
