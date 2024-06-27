@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser};
+use clap::{Args, Parser, Subcommand};
 use everscale_types::models::BlockId;
 use serde::{Deserialize, Deserializer};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage, StorageConfig};
@@ -15,8 +15,20 @@ fn init_storage(path: Option<&PathBuf>) -> Result<Storage> {
         //.with_rpc_storage(node_config.rpc.is_some())
         .build()
 }
-pub struct Cmd {}
+#[derive(clap::Parser)]
+pub struct Cmd {
+    #[clap(subcommand)]
+    cmd: SubCmd,
+}
 
+impl Cmd {
+    pub async fn run(self) -> Result<()> {
+        self.cmd.run().await
+    }
+}
+
+
+#[derive(Subcommand)]
 enum SubCmd {
     GetNextKeyblockIds(GetNextKeyBlockIdsCmd),
     GetBlockFull(BlockCmd),
@@ -41,6 +53,7 @@ impl SubCmd {
 }
 
 #[derive(Deserialize)]
+#[derive(Parser)]
 pub struct GetNextKeyBlockIdsCmd {
     pub block_id: BlockId,
     pub limit: usize,
@@ -99,6 +112,7 @@ impl GetNextKeyBlockIdsCmd {
 }
 
 #[derive(Deserialize)]
+#[derive(Parser)]
 pub struct BlockCmd {
     pub block_id: BlockId,
     pub storage_path: Option<PathBuf>,
@@ -196,6 +210,7 @@ impl BlockCmd {
 }
 
 #[derive(Deserialize)]
+#[derive(Parser)]
 pub struct GetArchiveInfoCmd {
     pub mc_seqno: u32,
     pub storage_path: Option<PathBuf>,
@@ -230,6 +245,7 @@ impl GetArchiveInfoCmd {
 }
 
 #[derive(Deserialize)]
+#[derive(Parser)]
 pub struct GetArchiveSliceCmd {
     pub archive_id: u64,
     pub limit: u32,

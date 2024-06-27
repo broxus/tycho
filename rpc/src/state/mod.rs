@@ -216,6 +216,7 @@ impl BlockSubscriber for RpcState {
 
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+    type AfterBlockHandleFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         futures_util::future::ready(Ok(()))
@@ -227,6 +228,10 @@ impl BlockSubscriber for RpcState {
         _: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
         Box::pin(self.inner.update(&cx.block, None))
+    }
+
+    fn after_block_handle<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::AfterBlockHandleFut<'a> {
+        futures_util::future::ready(Ok(()))
     }
 }
 

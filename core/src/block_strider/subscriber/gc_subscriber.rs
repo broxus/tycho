@@ -45,11 +45,14 @@ impl BlockSubscriber for GcSubscriber {
         &'a self,
         cx: &'a BlockSubscriberContext,
     ) -> Self::AfterBlockHandleFut<'a> {
-        let block_info = cx.block.block().load_info()?;
+        let Ok(block_info) = cx.block.block().load_info() else {
+            return Box::pin(futures_util::future::ready(Ok(())))
+        };
+
         self.inner
             .storage
             .node_state()
-            .store_shards_client_mc_block_id(&cx.mc_block_id)?;
+            .store_shards_client_mc_block_id(&cx.mc_block_id);
 
         let enabled = self
             .inner

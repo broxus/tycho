@@ -303,6 +303,95 @@ pub async fn prepare_blocks_gc(storage: Storage) -> Result<()> {
         .await
 }
 
+// fn start_states_gc(storage: Storage) {
+//     let options = match storage.inner.config.states_gc_options {
+//         Some(options) => options,
+//         None => return,
+//     };
+//
+//     //let engine = Arc::downgrade(self);
+//
+//     // if let Some(ttl) = self.shard_states_cache.ttl() {
+//     //     let engine = engine.clone();
+//     //     tokio::spawn(async move {
+//     //         loop {
+//     //             tokio::time::sleep(ttl).await;
+//     //             match engine.upgrade() {
+//     //                 Some(engine) => engine.shard_states_cache.clear(),
+//     //                 None => break,
+//     //             }
+//     //         }
+//     //     });
+//     // }
+//
+//     // Compute gc timestamp aligned to `interval_sec` with an offset `offset_sec`
+//     let mut gc_at = Instant::now();
+//     gc_at = (gc_at - gc_at % options.interval_sec) + options.offset_sec;
+//
+//     tokio::spawn(async move {
+//         'gc: loop {
+//             // Shift gc timestamp one iteration further
+//             gc_at += options.interval_sec;
+//             // Check if there is some time left before the GC
+//             if let Some(interval) = gc_at.checked_sub(broxus_util::now_sec_u64()) {
+//                 tokio::time::sleep(Duration::from_secs(interval)).await;
+//             }
+//
+//             // let engine = match engine.upgrade() {
+//             //     Some(engine) => engine,
+//             //     None => return,
+//             // };
+//
+//             let subscriber = engine.subscriber.as_ref();
+//
+//             let start = Instant::now();
+//             let mut shards_gc_lock = storage
+//                 .runtime_storage()
+//                 .persistent_state_keeper()
+//                 .shards_gc_lock()
+//                 .subscribe();
+//             metrics::histogram!("shard_states_gc_lock_time").record(start.elapsed());
+//
+//             let block_id = loop {
+//                 // Load the latest block id
+//                 let block_id = match engine.load_shards_client_mc_block_id() {
+//                     Ok(block_id) => block_id,
+//                     Err(e) => {
+//                         tracing::error!("failed to load last shards client block: {e:?}");
+//                         continue 'gc;
+//                     }
+//                 };
+//
+//                 if *shards_gc_lock.borrow_and_update() {
+//                     if shards_gc_lock.changed().await.is_err() {
+//                         tracing::warn!("stopping shard states GC");
+//                         return;
+//                     }
+//                     continue;
+//                 }
+//
+//                 break block_id;
+//             };
+//
+//             subscriber.on_before_states_gc(&block_id).await;
+//
+//             let shard_state_storage = storage.shard_state_storage();
+//             let top_blocks = match shard_state_storage
+//                 .remove_outdated_states(block_id.seq_no)
+//                 .await
+//             {
+//                 Ok(top_blocks) => Some(top_blocks),
+//                 Err(e) => {
+//                     tracing::error!("Failed to GC state: {e:?}");
+//                     None
+//                 }
+//             };
+//
+//             subscriber.on_after_states_gc(&block_id, &top_blocks).await;
+//         }
+//     });
+// }
+
 pub fn start_archives_gc(storage: Storage) -> Result<()> {
     let options = match &storage.inner.config.archives {
         Some(options) => options,

@@ -684,8 +684,11 @@ impl Node {
             ))
             .build();
 
+        let st = self.storage.clone();
         tokio::spawn(async move {
-            start_archives_gc(self.storage.clone())?;
+            if let Err(e) = start_archives_gc(st) {
+                tracing::error!("Failed to execute archives gc. {e:?}");
+            };
         });
 
         prepare_blocks_gc(self.storage.clone()).await?;
