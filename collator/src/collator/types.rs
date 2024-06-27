@@ -192,8 +192,8 @@ pub(super) struct PrevData {
     gen_chain_time: u32,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
+    gas_used_from_last_anchor: u64,
     // TODO: remove if we do not need this
-    _overload_history: u64,
     _underload_history: u64,
 
     processed_upto: ProcessedUptoInfo,
@@ -225,7 +225,7 @@ impl PrevData {
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
-        let overload_history = observable_states[0].state().overload_history;
+        let gas_used_from_last_anchor = observable_states[0].state().overload_history;
         let underload_history = observable_states[0].state().underload_history;
         let processed_upto = pure_prev_states[0].state().processed_upto.load()?;
 
@@ -241,7 +241,7 @@ impl PrevData {
             gen_chain_time: gen_utime,
             gen_lt,
             total_validator_fees,
-            _overload_history: overload_history,
+            gas_used_from_last_anchor,
             _underload_history: underload_history,
 
             processed_upto,
@@ -302,6 +302,14 @@ impl PrevData {
 
     pub fn gen_lt(&self) -> u64 {
         self.gen_lt
+    }
+
+    pub fn gas_used_from_last_anchor(&self) -> u64 {
+        self.gas_used_from_last_anchor
+    }
+
+    pub fn clear_gas_used(&mut self) {
+        self.gas_used_from_last_anchor = 0;
     }
 
     pub fn total_validator_fees(&self) -> &CurrencyCollection {
