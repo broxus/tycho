@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::task_descr::{TaskDesc, TaskResponder};
 use crate::tracing_targets;
 
-pub const STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE: usize = 100;
+pub const STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE: usize = 100;
 
 type AsyncTaskDesc<W, R> = TaskDesc<
     dyn FnOnce(W) -> Pin<Box<dyn Future<Output = (W, Result<R>)> + Send>> + Send,
@@ -190,7 +190,7 @@ where
 }
 
 #[macro_export]
-macro_rules! method_to_async_task_closure {
+macro_rules! method_to_queued_async_closure {
     ($method:ident, $($arg:expr),*) => {
         (stringify!($method),
         #[allow(unused_mut)]
@@ -206,7 +206,7 @@ macro_rules! method_to_async_task_closure {
 #[cfg(test)]
 #[tokio::test]
 async fn test() {
-    use crate::method_to_async_task_closure;
+    use crate::method_to_queued_async_closure;
 
     struct Worker {}
     impl Worker {
@@ -221,7 +221,7 @@ async fn test() {
 
     // use marco to just call a worker method
     let _ = dispatcher
-        .enqueue_task(method_to_async_task_closure!(action, "test1"))
+        .enqueue_task(method_to_queued_async_closure!(action, "test1"))
         .await;
 
     // or build a closure by yourself

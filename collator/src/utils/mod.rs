@@ -1,4 +1,5 @@
 mod async_action;
+pub mod async_dispatcher;
 pub mod async_queued_dispatcher;
 mod enum_try_into;
 pub mod shard;
