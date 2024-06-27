@@ -26,13 +26,11 @@ use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
     CollationSessionInfo, McData, ProofFunds, TopBlockDescription,
 };
-use crate::utils::async_queued_dispatcher::{
-    AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
-};
+use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
 use crate::validator::{AddSession, ValidationStatus, Validator};
-use crate::{method_to_async_task_closure, tracing_targets};
+use crate::{method_to_async_closure, tracing_targets};
 
 mod types;
 mod utils;
@@ -41,14 +39,14 @@ pub struct RunningCollationManager<CF, V>
 where
     CF: CollatorFactory,
 {
-    dispatcher: AsyncQueuedDispatcher<CollationManager<CF, V>>,
+    dispatcher: AsyncDispatcher<CollationManager<CF, V>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     mq_adapter: Arc<dyn MessageQueueAdapter>,
 }
 
 impl<CF: CollatorFactory, V> RunningCollationManager<CF, V> {
-    pub fn dispatcher(&self) -> &AsyncQueuedDispatcher<CollationManager<CF, V>> {
+    pub fn dispatcher(&self) -> &AsyncDispatcher<CollationManager<CF, V>> {
         &self.dispatcher
     }
 
@@ -72,7 +70,7 @@ where
     keypair: Arc<KeyPair>,
     config: Arc<CollationConfig>,
 
-    dispatcher: Arc<AsyncQueuedDispatcher<Self>>,
+    dispatcher: Arc<AsyncDispatcher<Self>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     mq_adapter: Arc<dyn MessageQueueAdapter>,
@@ -98,13 +96,13 @@ where
 }
 
 #[async_trait]
-impl<CF, V> MempoolEventListener for AsyncQueuedDispatcher<CollationManager<CF, V>>
+impl<CF, V> MempoolEventListener for AsyncDispatcher<CollationManager<CF, V>>
 where
     CF: CollatorFactory,
     V: Validator,
 {
     async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
+        self.spawn_task(method_to_async_closure!(
             process_new_anchor_from_mempool,
             anchor
         ))
@@ -124,7 +122,7 @@ where
 }
 
 #[async_trait]
-impl<CF, V> StateNodeEventListener for AsyncQueuedDispatcher<CollationManager<CF, V>>
+impl<CF, V> StateNodeEventListener for AsyncDispatcher<CollationManager<CF, V>>
 where
     CF: CollatorFactory,
     V: Validator,
@@ -142,12 +140,8 @@ where
         //      same root hash and file hash
         if state.block_id().is_masterchain() {
             let mc_data = McData::load_from_state(state)?;
-
-            self.enqueue_task(method_to_async_task_closure!(
-                process_mc_block_from_bc,
-                mc_data
-            ))
-            .await
+            self.spawn_task(method_to_async_closure!(process_mc_block_from_bc, mc_data))
+                .await
         } else {
             Ok(())
         }
@@ -181,7 +175,7 @@ where
 }
 
 #[async_trait]
-impl<CF, V> CollatorEventListener for AsyncQueuedDispatcher<CollationManager<CF, V>>
+impl<CF, V> CollatorEventListener for AsyncDispatcher<CollationManager<CF, V>>
 where
     CF: CollatorFactory,
     V: Validator,
@@ -192,7 +186,7 @@ where
         anchor: Arc<MempoolAnchor>,
         force_mc_block: bool,
     ) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
+        self.spawn_task(method_to_async_closure!(
             process_skipped_anchor,
             next_block_id_short,
             anchor,
@@ -202,7 +196,7 @@ where
     }
 
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
+        self.spawn_task(method_to_async_closure!(
             process_collated_block_candidate,
             collation_result
         ))
@@ -210,11 +204,8 @@ where
     }
 
     async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
-            process_collator_stopped,
-            stop_key
-        ))
-        .await
+        self.spawn_task(method_to_async_closure!(process_collator_stopped, stop_key))
+            .await
     }
 }
 
@@ -266,9 +257,11 @@ where
     {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
-        // create dispatcher for own async tasks queue
-        let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
+        // create dispatcher for own tasks
+        let (dispatcher, spawn_receiver) = AsyncDispatcher::new(
+            "collation_manager_async_dispatcher",
+            STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE,
+        );
         let arc_dispatcher = Arc::new(dispatcher.clone());
 
         // create state node adapter
@@ -304,8 +297,8 @@ where
             #[cfg(any(test, feature = "test"))]
             test_validators_keypairs,
         };
-        AsyncQueuedDispatcher::run(processor, receiver);
-        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks queue dispatcher started");
+        arc_dispatcher.run(Arc::new(processor), spawn_receiver);
+        tracing::trace!(target: tracing_targets::COLLATION_MANAGER, "Tasks dispatchers started");
 
         // start other async processes
 
@@ -317,9 +310,7 @@ where
             tokio::time::Duration::from_secs(10),
             || async move {
                 arc_dispatcher
-                    .enqueue_task(method_to_async_task_closure!(
-                        check_refresh_collation_sessions,
-                    ))
+                    .spawn_task(method_to_async_closure!(check_refresh_collation_sessions,))
                     .await
             },
             "CollationProcessor::check_refresh_collation_sessions()".into(),
@@ -385,17 +376,17 @@ where
 
         // when state received execute master block processing routines
         let mpool_adapter = self.mpool_adapter.clone();
-        let dispatcher = self.dispatcher.clone();
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
             "Processing requested mc state for block ({})...",
             mc_data.block_id.as_short_id()
         );
+
         Self::notify_mempool_about_mc_block(mpool_adapter, &mc_data.block_id).await?;
 
-        dispatcher
-            .enqueue_task(method_to_async_task_closure!(
+        self.dispatcher
+            .spawn_task(method_to_async_closure!(
                 refresh_collation_sessions,
                 mc_data
             ))
@@ -840,7 +831,7 @@ where
             self.collation_sessions_to_finish
                 .insert(finish_key, session_info.clone());
             self.dispatcher
-                .enqueue_task(method_to_async_task_closure!(
+                .spawn_task(method_to_async_closure!(
                     finish_collation_session,
                     session_info,
                     finish_key
@@ -950,7 +941,7 @@ where
             let status = validator.validate(session_seqno, &block_id).await.unwrap();
 
             _ = dispatcher
-                .enqueue_task(method_to_async_task_closure!(
+                .spawn_task(method_to_async_closure!(
                     process_validated_block,
                     block_id,
                     status
@@ -991,7 +982,7 @@ where
                 Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &block_id).await?;
 
                 self.dispatcher
-                    .enqueue_task(method_to_async_task_closure!(
+                    .spawn_task(method_to_async_closure!(
                         refresh_collation_sessions,
                         mc_data
                     ))
@@ -1708,7 +1699,6 @@ where
 
             // send all shard and master blocks
             self.send_blocks_to_sync(
-                (*self.dispatcher).clone(),
                 self.mq_adapter.clone(),
                 self.state_node_adapter.clone(),
                 blocks_to_send,
@@ -1770,7 +1760,6 @@ where
     /// 5. Return `Error` if it seems to be unrecoverable
     async fn send_blocks_to_sync(
         &self,
-        dispatcher: AsyncQueuedDispatcher<Self>,
         mq_adapter: Arc<dyn MessageQueueAdapter>,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mut blocks_to_send: Vec<BlockCandidateToSend>,
