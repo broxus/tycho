@@ -156,6 +156,14 @@ impl CollectorTask {
         let mut bcaster_signal = std::pin::pin!(bcaster_signal);
         loop {
             tokio::select! {
+                biased; // mandatory priority: signals lifecycle, updates, data lifecycle
+                // jump is rare and must not be postponed
+                Some(state) = self.next_includes.next(), if ! self.is_includes_ready => {
+                    if let Some(result) = self.jump_up(state) {
+                        return result.map(|_ | self.next_includes)
+                    }
+                },
+                // broadcaster signal is rare and must not be postponed
                 Ok(bcaster_signal) = &mut bcaster_signal, if !self.is_bcaster_ready_ok => {
                     if self.should_fail(bcaster_signal) {
                         // has to jump over one round
@@ -167,6 +175,7 @@ impl CollectorTask {
                         return Ok(self.next_includes)
                     }
                 },
+                // tick is more frequent than bcaster signal, leads to completion too
                 _ = retry_interval.tick() => {
                     if self.is_ready() {
                         return Ok(self.next_includes)
@@ -174,6 +183,7 @@ impl CollectorTask {
                         _ = self.collector_signal.send(CollectorSignal::Retry);
                     }
                 },
+                // very frequent event that may seldom cause completion
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
                         if let Err(round) = self.match_filtered(consensus_event) {
@@ -183,13 +193,9 @@ impl CollectorTask {
                     },
                     None => panic!("channel from Broadcast Filter closed"),
                 },
+                // frequent event that does not cause completion by itself
                 Some(state) = self.includes.next() => {
                     self.on_inclusion_validated(&state);
-                },
-                Some(state) = self.next_includes.next(), if ! self.is_includes_ready => {
-                    if let Some(result) = self.jump_up(state) {
-                        return result.map(|_ | self.next_includes)
-                    }
                 },
                 else => panic!("unhandled match arm in Collector tokio::select"),
             }

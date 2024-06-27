@@ -148,23 +148,29 @@ impl BroadcasterTask {
         }
         loop {
             tokio::select! {
-                Some((peer, _)) = self.bcast_outdated.next() => {
-                    self.broadcast(&peer);
-                }
-                Some((peer_id, result)) = self.bcast_current.next() => {
-                    self.match_broadcast_result(&peer_id, result);
-                },
-                Some((peer_id, result)) = self.sig_current.next() =>  {
-                    self.match_signature_result(&peer_id, result);
-                },
+                biased; // mandatory priority: signals lifecycle, updates, data lifecycle
+                // rare event that may cause immediate completion
                 Some(collector_signal) = self.collector_signal.recv() => {
                     if self.should_finish(collector_signal) {
                         break;
                     }
                 }
+                // rare event essential for up-to-date retries
                 update = self.peer_updates.recv() => {
                     self.match_peer_updates(update);
                 }
+                // outdated unfinished broadcasts are small and postpone current broadcasts
+                Some((peer, _)) = self.bcast_outdated.next() => {
+                    self.broadcast(&peer);
+                }
+                // either request signature immediately or postpone until retry
+                Some((peer_id, result)) = self.bcast_current.next() => {
+                    self.match_broadcast_result(&peer_id, result);
+                },
+                // most frequent arm that provides data to decide if retry or fail or finish
+                Some((peer_id, result)) = self.sig_current.next() => {
+                    self.match_signature_result(&peer_id, result);
+                },
                 else => {
                     let _guard = self.effects.span().enter();
                     panic!("unhandled match arm in Broadcaster tokio::select");

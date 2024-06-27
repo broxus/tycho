@@ -194,9 +194,10 @@ impl DownloadTask {
         let mut verified_broadcast = std::pin::pin!(verified_broadcast);
         loop {
             tokio::select! {
-                biased; // mandatory priority
+                biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 Ok(point) = &mut verified_broadcast => break Some(point),
                 Some(depender) = self.dependers.recv() => self.add_depender(&depender),
+                update = self.updates.recv() => self.match_peer_updates(update),
                 Some((peer_id, downloaded)) = self.downloading.next() =>
                     match self.verify(&peer_id, downloaded) {
                         Some(point) => break Some(point),
@@ -206,7 +207,7 @@ impl DownloadTask {
                             break None;
                         }
                     },
-                update = self.updates.recv() => self.match_peer_updates(update),
+                // most rare arm to make progress despite slow responding peers
                 _ = interval.tick() => self.download_random(false),
             }
         }
