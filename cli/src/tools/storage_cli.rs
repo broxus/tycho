@@ -15,21 +15,10 @@ fn init_storage(path: Option<&PathBuf>) -> Result<Storage> {
         //.with_rpc_storage(node_config.rpc.is_some())
         .build()
 }
-#[derive(clap::Parser)]
-pub struct Cmd {
-    #[clap(subcommand)]
-    cmd: SubCmd,
-}
-
-impl Cmd {
-    pub async fn run(self) -> Result<()> {
-        self.cmd.run().await
-    }
-}
 
 
 #[derive(Subcommand)]
-enum SubCmd {
+pub enum StorageCmd {
     GetNextKeyblockIds(GetNextKeyBlockIdsCmd),
     GetBlockFull(BlockCmd),
     GetNextBlockFull(BlockCmd),
@@ -38,8 +27,8 @@ enum SubCmd {
     GetPersistentStateInfo(BlockCmd),
     GetPersistentStatePart,
 }
-impl SubCmd {
-    async fn run(self) -> Result<()> {
+impl StorageCmd {
+    pub(crate) async fn run(self) -> Result<()> {
         match self {
             Self::GetNextKeyblockIds(cmd) => cmd.run(),
             Self::GetBlockFull(cmd) => cmd.run().await,

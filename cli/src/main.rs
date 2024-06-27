@@ -3,6 +3,7 @@ use std::sync::OnceLock;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use crate::tools::storage_cli::StorageCmd;
 
 mod tools {
     pub mod gen_account;
@@ -19,13 +20,14 @@ mod util;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     if std::env::var("RUST_BACKTRACE").is_err() {
         // Enable backtraces on panics by default.
         std::env::set_var("RUST_BACKTRACE", "1");
     }
 
-    match App::parse().run() {
+    match App::parse().run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("Error: {err}");
@@ -45,8 +47,8 @@ struct App {
 }
 
 impl App {
-    fn run(self) -> Result<()> {
-        self.cmd.run()
+    async fn run(self) -> Result<()> {
+        self.cmd.run().await
     }
 }
 
@@ -57,13 +59,17 @@ enum Cmd {
 
     #[clap(subcommand)]
     Tool(ToolCmd),
+    #[clap(subcommand)]
+    Storage(StorageCmd),
+
 }
 
 impl Cmd {
-    fn run(self) -> Result<()> {
+    async fn run(self) -> Result<()> {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
+            Cmd::Storage(cmd) => cmd.run().await
         }
     }
 }
