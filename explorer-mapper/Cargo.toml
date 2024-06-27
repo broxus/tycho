@@ -1,0 +1,17 @@
+[package]
+name = "explorer-mapper"
+edition = "2021"
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+explorer-models = { path = "../explorer-models" }
+everscale-types = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

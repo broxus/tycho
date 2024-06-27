@@ -1117,6 +1117,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "explorer-mapper"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "everscale-types",
+ "explorer-models",
+ "serde_json",
+]
+
+[[package]]
 name = "explorer-models"
 version = "0.1.0"
 dependencies = [
