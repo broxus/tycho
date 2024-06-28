@@ -72,8 +72,10 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
     use tokio::signal::unix;
 
     if std::env::var("MALLOC_CONF").is_err() {
-        tracing::warn!("MALLOC_CONF is not set, memory profiler is disabled");
-        tracing::warn!("set MALLOC_CONF=prof:true to enable");
+        tracing::warn!(
+            "MALLOC_CONF is not set, memory profiler is disabled. \
+            set MALLOC_CONF=prof:true to enable"
+        );
         return;
     }
 
@@ -82,7 +84,7 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
 
     if let Err(e) = std::fs::create_dir_all(&profiling_dir) {
         tracing::error!(
-            path=%profiling_dir.display(),
+            path = %profiling_dir.display(),
             "failed to create profiling directory: {e:?}"
         );
         return;
@@ -93,18 +95,20 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
         tracing::info!("memory profiler signal received");
         if !is_active {
             tracing::info!("activating memory profiler");
-            if let Err(e) = start() {
+            if let Err(e) = profiler_start() {
                 tracing::error!("failed to activate memory profiler: {e:?}");
+                continue;
             }
         } else {
             let invocation_time = chrono::Local::now();
             let filename = format!("{}.dump", invocation_time.format("%Y-%m-%d_%H-%M-%S"));
             let path = profiling_dir.join(filename);
-            if let Err(e) = dump(&path) {
-                tracing::error!("failed to dump prof: {e:?}");
+            if let Err(e) = profiler_dump(&path) {
+                tracing::error!(path = %path.display(), "failed to dump prof: {e:?}");
             }
-            if let Err(e) = stop() {
+            if let Err(e) = profiler_stop() {
                 tracing::error!("failed to deactivate memory profiler: {e:?}");
+                continue;
             }
         }
 
@@ -112,50 +116,34 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
     }
 }
 
-const PROF_ACTIVE: &[u8] = b"prof.active\0";
-const PROF_DUMP: &[u8] = b"prof.dump\0";
-
-pub fn start() -> Result<(), Error> {
-    tracing::info!("starting profiler");
+fn profiler_start() -> Result<(), Error> {
+    tracing::info!("starting jemalloc profiler");
     unsafe { tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, true)? };
     Ok(())
 }
 
-pub fn stop() -> Result<(), Error> {
-    tracing::info!("stopping profiler");
+fn profiler_stop() -> Result<(), Error> {
+    tracing::info!("stopping jemalloc profiler");
     unsafe { tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, false)? };
     Ok(())
 }
 
 /// Dump the profile to the `path`.
-pub fn dump<P>(path: P) -> Result<(), DumpError>
+fn profiler_dump<P>(path: P) -> Result<(), Error>
 where
     P: AsRef<Path>,
 {
     let path = path.as_ref();
-    let mut bytes = CString::new(path.as_os_str().as_bytes())?.into_bytes_with_nul();
+    let mut bytes = CString::new(path.as_os_str().as_bytes())
+        .unwrap()
+        .into_bytes_with_nul();
 
     let ptr = bytes.as_mut_ptr().cast::<c_char>();
-    let res = unsafe { tikv_jemalloc_ctl::raw::write(PROF_DUMP, ptr) };
-    match res {
-        Ok(_) => {
-            tracing::info!("saved the profiling dump to {}", path.display());
-            Ok(())
-        }
-        Err(e) => {
-            tracing::error!(
-                "failed to dump the profiling info to {}: {e:?}",
-                path.display()
-            );
-            Err(DumpError::JemallocError(e.to_string()))
-        }
-    }
+    unsafe { tikv_jemalloc_ctl::raw::write(PROF_DUMP, ptr)? };
+
+    tracing::info!(path = %path.display(), "saved the jemalloc profiling dump");
+    Ok(())
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum DumpError {
-    #[error("failed to dump the profiling info: {0}")]
-    JemallocError(String),
-    #[error("failed to convert path to CString: {0}")]
-    NullError(#[from] std::ffi::NulError),
-}
+const PROF_ACTIVE: &[u8] = b"prof.active\0";
+const PROF_DUMP: &[u8] = b"prof.dump\0";
