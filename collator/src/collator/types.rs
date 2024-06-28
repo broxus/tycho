@@ -831,7 +831,7 @@ impl ShardAccountStuff {
             );
 
             anyhow::ensure!(
-                old_lib_descr.publishers.get(&self.account_addr)?.is_none(),
+                old_lib_descr.publishers.get(self.account_addr)?.is_none(),
                 "cannot add public library {key} of account {} because this public library's \
                 LibDescr record already lists this account as a publisher",
                 self.account_addr,
