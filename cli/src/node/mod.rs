@@ -44,6 +44,7 @@ use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
+use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
 use crate::util::error::ResultExt;
@@ -135,6 +136,9 @@ impl CmdRun {
             if let Some(metrics_config) = &node_config.metrics {
                 init_metrics(metrics_config)?;
             }
+
+            #[cfg(feature = "jemalloc")]
+            tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
 
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
                 .wrap_err("failed to load global config")?;
