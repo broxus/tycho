@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::HashBytes;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuardWithLabels;
 use tycho_util::FastHashMap;
 
@@ -180,6 +181,7 @@ pub struct CollatorStdImpl {
 
     last_imported_anchor_id: Option<MempoolAnchorId>,
     last_imported_anchor_chain_time: Option<u64>,
+    last_imported_anchor_author: Option<PeerId>,
 
     /// TRUE - when exist imported anchors in cache,
     /// when they have externals for current shard of collator,
@@ -237,6 +239,7 @@ impl CollatorStdImpl {
             anchors_cache: VecDeque::new(),
             last_imported_anchor_id: None,
             last_imported_anchor_chain_time: None,
+            last_imported_anchor_author: None,
 
             has_pending_externals: false,
 
@@ -521,6 +524,7 @@ impl CollatorStdImpl {
 
         self.last_imported_anchor_id = Some(next_anchor.id());
         self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
+        self.last_imported_anchor_author = Some(next_anchor.author());
         self.anchors_cache
             .push_back((next_anchor.id(), CachedMempoolAnchor {
                 anchor: next_anchor.clone(),

@@ -219,6 +219,7 @@ pub async fn handle_anchors(
             anchor_id,
             anchor.body().time.as_u64(),
             messages,
+            anchor.body().location.author,
         ));
 
         adapter.add_anchor(anchor);

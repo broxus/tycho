@@ -15,6 +15,7 @@ use everscale_types::models::{MsgInfo, OwnedMessage};
 use parking_lot::RwLock;
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_network::PeerId;
 
 use super::mempool_adapter_stub::{stub_get_anchor_by_id, stub_get_next_anchor};
 use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
@@ -151,10 +152,20 @@ pub fn create_anchor_with_externals_from_file(
         externals.push(Arc::new(msg));
     }
 
-    Arc::new(MempoolAnchor::new(anchor_id, timestamp, externals))
+    Arc::new(MempoolAnchor::new(
+        anchor_id,
+        timestamp,
+        externals,
+        PeerId(Default::default()),
+    ))
 }
 
 pub fn create_empty_anchor(anchor_id: MempoolAnchorId, last_chain_time: u64) -> Arc<MempoolAnchor> {
     let next_chain_time = last_chain_time + 600;
-    Arc::new(MempoolAnchor::new(anchor_id, next_chain_time, vec![]))
+    Arc::new(MempoolAnchor::new(
+        anchor_id,
+        next_chain_time,
+        vec![],
+        PeerId(Default::default()),
+    ))
 }

@@ -8,6 +8,7 @@ use everscale_types::models::{ExtInMsgInfo, IntAddr, StdAddr};
 use parking_lot::RwLock;
 use rand::Rng;
 use tycho_block_util::state::ShardStateStuff;
+use tycho_network::PeerId;
 
 use super::types::{ExternalMessage, MempoolAnchor, MempoolAnchorId};
 use crate::mempool::mempool_adapter::{MempoolAdapter, MempoolEventListener};
@@ -221,5 +222,10 @@ pub fn _stub_create_random_anchor_with_stub_externals(
         externals.push(Arc::new(msg));
     }
 
-    Arc::new(MempoolAnchor::new(anchor_id, chain_time, externals))
+    Arc::new(MempoolAnchor::new(
+        anchor_id,
+        chain_time,
+        externals,
+        PeerId(Default::default()),
+    ))
 }

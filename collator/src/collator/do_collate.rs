@@ -39,7 +39,8 @@ impl CollatorStdImpl {
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
-        let histogram = HistogramGuard::begin_with_labels("tycho_do_collate_total_time", labels);
+        let total_collation_histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_total_time", labels);
 
         let prepare_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", labels);
@@ -75,8 +76,10 @@ impl CollatorStdImpl {
             block_limits
         );
 
-        // TODO: get from anchor
-        let created_by = HashBytes::default();
+        let created_by = self
+            .last_imported_anchor_author
+            .map(|a| HashBytes(a.0))
+            .unwrap_or_default();
         let mut collation_data_builder = BlockCollationDataBuilder::new(
             block_id_short,
             rand_seed,
@@ -626,7 +629,7 @@ impl CollatorStdImpl {
         collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
         self.update_stats(&collation_data);
 
-        let total_elapsed = histogram.finish();
+        let total_elapsed = total_collation_histogram.finish();
 
         // time elapsed from prev block
         let elapsed_from_prev_block = self.timer.elapsed();
