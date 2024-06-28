@@ -80,6 +80,8 @@ impl Downloader {
             let author_state = guard.data.peer_state(&point_id.location.author);
             (undone_peers.clone(), author_state, guard.updates())
         };
+        let peer_count = PeerCount::try_from(undone_peers.len())
+            .expect("validator set is unknown, must keep prev epoch's set for DAG_DEPTH rounds");
         let mut undone_peers = undone_peers
             .iter()
             .map(|(peer_id, state)| {
@@ -91,20 +93,17 @@ impl Downloader {
                 })
             })
             .collect::<FastHashMap<_, _>>();
-        let peer_count = PeerCount::try_from(undone_peers.len())
-            .expect("validator set is unknown, must keep prev epoch's set for DAG_DEPTH rounds");
-        // query author no matter if it is in the next round, but that can't affect 3F+1
-        let done_peers = match undone_peers.entry(point_id.location.author) {
-            Entry::Occupied(_) => 0,
-            Entry::Vacant(vacant) => {
+        // query author no matter if it is in the next round, but that won't affect 2F "NotFound"
+        match undone_peers.entry(point_id.location.author) {
+            Entry::Vacant(vacant) if author_state == PeerState::Resolved => {
                 vacant.insert(PeerStatus {
                     state: author_state,
                     failed_attempts: 0,
-                    is_depender: true,
+                    is_depender: true, // as author is a depender, its 'NotFound' is not reliable
                     is_in_flight: false,
                 });
-                -1
             }
+            _ => {}
         };
         let point_dag_round = point_dag_round_strong.downgrade();
         // do not leak span and strong round ref across await
@@ -113,14 +112,15 @@ impl Downloader {
 
         let downloaded = DownloadTask {
             parent: self.clone(),
-            peer_count,
             request: Dispatcher::point_by_id_request(&point_id),
             point_id: point_id.clone(),
-            undone_peers,
-            done_peers,
-            downloading: FuturesUnordered::new(),
+            peer_count,
+            reliably_not_found: 0, // this node is +1 to 2F
+            unreliable_peers: 0,   // should not reach 1F+1
             dependers,
             updates,
+            undone_peers,
+            downloading: FuturesUnordered::new(),
             attempt: 0,
             skip_next_attempt: false,
         }
@@ -166,18 +166,19 @@ impl Downloader {
 struct DownloadTask {
     parent: Downloader,
 
-    peer_count: PeerCount,
-
     request: tycho_network::Request,
     point_id: PointId,
 
-    undone_peers: FastHashMap<PeerId, PeerStatus>,
-    done_peers: i16,
-    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse>)>>,
+    peer_count: PeerCount,
+    reliably_not_found: u8, // count only responses considered reliable
+    unreliable_peers: u8,   // count only responses considered unreliable
 
     /// populated by waiting validation tasks
     dependers: mpsc::UnboundedReceiver<PeerId>,
     updates: broadcast::Receiver<(PeerId, PeerState)>,
+
+    undone_peers: FastHashMap<PeerId, PeerStatus>,
+    downloading: FuturesUnordered<BoxFuture<'static, (PeerId, anyhow::Result<PointByIdResponse>)>>,
 
     attempt: u8,
     /// skip time-driven attempt if an attempt was init by empty task queue
@@ -188,9 +189,6 @@ impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
     pub async fn run(&mut self, verified_broadcast: oneshot::Receiver<Point>) -> Option<Point> {
-        // always ask the author
-        let author = self.point_id.location.author;
-        self.add_depender(&author);
         self.download_random(true);
         let mut interval = tokio::time::interval(MempoolConfig::DOWNLOAD_INTERVAL);
         let mut verified_broadcast = std::pin::pin!(verified_broadcast);
@@ -299,7 +297,8 @@ impl DownloadTask {
         peer_id: &PeerId,
         resolved: anyhow::Result<PointByIdResponse>,
     ) -> Option<Point> {
-        match resolved {
+        let response = match resolved {
+            Ok(response) => response,
             Err(network_err) => {
                 let status = self
                     .undone_peers
@@ -312,30 +311,37 @@ impl DownloadTask {
                     error = display(network_err),
                     "network error",
                 );
+                return None;
+            }
+        };
+
+        let Some(status) = self.undone_peers.remove(peer_id) else {
+            panic!("peer {} was removed, concurrent download?", peer_id.alt());
+        };
+        assert!(
+            status.is_in_flight,
+            "peer {} is not in-flight",
+            peer_id.alt(),
+        );
+
+        match response {
+            PointByIdResponse(None) => {
+                if status.is_depender {
+                    // if points are persisted in storage - it's a ban;
+                    // else - peer evicted this point from its cache, as the point
+                    // is at least DAG_DEPTH rounds older than current consensus round
+                    self.unreliable_peers += 1;
+                    self.reliably_not_found += 1; // FIXME remove this line when storage is ready
+                    tracing::warn!(peer = display(peer_id.alt()), "must have returned");
+                } else {
+                    self.reliably_not_found += 1;
+                    tracing::debug!(peer = display(peer_id.alt()), "didn't return");
+                }
                 None
             }
-            Ok(PointByIdResponse(None)) => {
-                self.done_peers += 1;
-                match self.undone_peers.remove(peer_id) {
-                    Some(state) if state.is_depender => {
-                        // if points are persisted in storage - it's a ban;
-                        // else - peer evicted this point from its cache, as the point
-                        // is at least DAG_DEPTH rounds older than current consensus round
-                        tracing::warn!(peer = display(peer_id.alt()), "must have returned");
-                    }
-                    Some(_) => {
-                        tracing::debug!(peer = display(peer_id.alt()), "didn't return");
-                    }
-                    None => {
-                        panic!("already removed peer {}", peer_id.alt())
-                    }
-                };
-                None
-            }
-            Ok(PointByIdResponse(Some(point))) if point.id() != self.point_id => {
-                self.done_peers += 1;
-                self.undone_peers.remove(peer_id);
+            PointByIdResponse(Some(point)) if point.id() != self.point_id => {
                 // it's a ban
+                self.unreliable_peers += 1;
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
                     author = display(point.body().location.author.alt()),
@@ -345,11 +351,11 @@ impl DownloadTask {
                 );
                 None
             }
-            Ok(PointByIdResponse(Some(point))) => {
+            PointByIdResponse(Some(point)) => {
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
                     Err(dag_point) => {
                         // reliable peer won't return unverifiable point
-                        self.done_peers += 1;
+                        self.unreliable_peers += 1;
                         assert!(
                             dag_point.valid().is_none(),
                             "Coding error: verify() cannot result into a valid point"
@@ -361,16 +367,22 @@ impl DownloadTask {
                         );
                         None
                     }
-                    Ok(()) => Some(point),
+                    Ok(()) => Some(point), // breaks loop
                 }
             }
         }
     }
 
     fn shall_continue(&mut self) -> bool {
-        if self.done_peers >= self.peer_count.majority() as i16 {
+        // if self.unreliable_peers as usize >= self.peer_count.reliable_minority() {
+        //     panic!("too many unreliable peers: {}", self.unreliable_peers)
+        // } else
+        if self.reliably_not_found as usize >= self.peer_count.majority_of_others() {
             // the only normal case to resolve into `NotExists`
-            tracing::warn!("not downloaded from majority");
+            tracing::warn!(
+                unreliable = self.unreliable_peers,
+                "not downloaded from majority",
+            );
             false
         } else {
             if self.downloading.is_empty() {
