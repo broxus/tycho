@@ -1,6 +1,4 @@
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-
 use anyhow::Result;
 use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::stream::{FuturesUnordered, StreamExt};
