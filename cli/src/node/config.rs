@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use everscale_crypto::ed25519;
@@ -67,6 +67,8 @@ pub struct NodeConfig {
     pub metrics: Option<MetricsConfig>,
 
     pub threads: ThreadPoolConfig,
+
+    pub profiling: MemoryProfilingConfig,
 }
 
 impl Default for NodeConfig {
@@ -87,6 +89,7 @@ impl Default for NodeConfig {
             rpc: Some(RpcConfig::default()),
             metrics: Some(MetricsConfig::default()),
             threads: ThreadPoolConfig::default(),
+            profiling: Default::default(),
         }
     }
 }
@@ -137,4 +140,9 @@ impl Default for ThreadPoolConfig {
             tokio_workers: total_threads,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MemoryProfilingConfig {
+    pub profiling_dir: PathBuf,
 }
