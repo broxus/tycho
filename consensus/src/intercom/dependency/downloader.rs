@@ -68,15 +68,19 @@ impl Downloader {
     ) -> DagPoint {
         let effects = Effects::<DownloadContext>::new(&parent_effects, &point_id);
         let span_guard = effects.span().enter();
-        let peer_schedule = &self.inner.peer_schedule;
         assert_eq!(
             point_id.location.round,
             point_dag_round_strong.round(),
             "point and DAG round mismatch"
         );
         // request point from its signers (any depender is among them as point is already verified)
-        let mut undone_peers = peer_schedule
-            .peers_for(point_id.location.round.next())
+        let (undone_peers, author_state, updates) = {
+            let guard = self.inner.peer_schedule.read();
+            let undone_peers = guard.data.peers_state_for(point_id.location.round.next());
+            let author_state = guard.data.peer_state(&point_id.location.author);
+            (undone_peers.clone(), author_state, guard.updates())
+        };
+        let mut undone_peers = undone_peers
             .iter()
             .map(|(peer_id, state)| {
                 (*peer_id, PeerStatus {
@@ -94,9 +98,7 @@ impl Downloader {
             Entry::Occupied(_) => 0,
             Entry::Vacant(vacant) => {
                 vacant.insert(PeerStatus {
-                    state: peer_schedule
-                        .peer_state(&point_id.location.author)
-                        .unwrap_or(PeerState::Unknown),
+                    state: author_state,
                     failed_attempts: 0,
                     is_depender: true,
                     is_in_flight: false,
@@ -118,7 +120,7 @@ impl Downloader {
             done_peers,
             downloading: FuturesUnordered::new(),
             dependers,
-            updates: peer_schedule.updates(),
+            updates,
             attempt: 0,
             skip_next_attempt: false,
         }

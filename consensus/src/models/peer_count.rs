@@ -17,9 +17,10 @@ impl TryFrom<usize> for PeerCount {
             // ceil up to 3F+1 and scale down to 1F,
             // assuming the least possible amount of nodes is not in validator set
             let one_f = (total_peers + 1) / 3;
+            let full = one_f * 3 + 1;
             assert!(
-                u8::try_from(one_f * 3 + 1).is_ok(),
-                "node count 3F+1={one_f} overflows u8 after ceiling {total_peers}"
+                u8::try_from(full).is_ok(),
+                "node count 3F+1={full} overflows u8 after ceiling {total_peers}"
             );
             Ok(PeerCount(one_f as u8))
         }
@@ -28,6 +29,7 @@ impl TryFrom<usize> for PeerCount {
 
 impl PeerCount {
     pub const GENESIS: Self = Self(0);
+    pub const MAX: Self = Self((u8::MAX - 1) / 3);
 
     pub fn full(&self) -> usize {
         self.0 as usize * 3 + 1

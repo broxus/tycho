@@ -1,4 +1,6 @@
+use std::collections::BTreeSet;
 use std::mem;
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures_util::future::BoxFuture;
@@ -46,16 +48,20 @@ impl Broadcaster {
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
         collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
     ) -> LastOwnPoint {
-        let signers = peer_schedule
-            .peers_for(point.body().location.round.next())
-            .iter()
-            .map(|(peer_id, _)| *peer_id)
-            .collect::<FastHashSet<_>>();
+        let (signers, mut bcast_peers, peer_updates) = {
+            let guard = peer_schedule.read();
+            // `atomic` can be updated only under write lock, so view under read lock is consistent
+            let signers = peer_schedule
+                .atomic()
+                .peers_for(point.body().location.round.next())
+                .clone();
+            let bcast_peers = guard.data.broadcast_receivers().clone();
+            (signers, bcast_peers, guard.updates())
+        };
         let signers_count =
             PeerCount::try_from(signers.len()).expect("validator set for current round is unknown");
 
         let bcast_outdated = mem::take(&mut self.bcast_outdated).expect("cannot be unset");
-        let mut bcast_peers = peer_schedule.all_resolved();
         bcast_peers.retain(|peer| !bcast_outdated.contains(peer));
 
         let mut task = BroadcasterTask {
@@ -65,7 +71,7 @@ impl Broadcaster {
             bcaster_signal: Some(bcaster_signal),
             collector_signal,
 
-            peer_updates: peer_schedule.updates(),
+            peer_updates,
             signers,
             signers_count,
             removed_peers: Default::default(),
@@ -103,7 +109,7 @@ struct BroadcasterTask {
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
     // every connected peer should receive broadcast, but only signer's signatures are accountable
-    signers: FastHashSet<PeerId>,
+    signers: Arc<BTreeSet<PeerId>>,
     signers_count: PeerCount,
     // results
     rejections: FastHashSet<PeerId>,

@@ -19,8 +19,9 @@ impl AnchorStage {
         const WAVE_SIZE: u32 = 4;
         let anchor_candidate_round = (round.0 / WAVE_SIZE) * WAVE_SIZE + 1;
 
-        let [leader_peers, current_peers] =
-            peer_schedule.peers_for_array([Round(anchor_candidate_round), round]);
+        let [leader_peers, current_peers] = peer_schedule
+            .atomic()
+            .peers_for_array([Round(anchor_candidate_round), round]);
         // reproducible global coin
         let leader_index = rand_pcg::Pcg32::seed_from_u64(
             ((anchor_candidate_round as u64) << 32) + anchor_candidate_round as u64,
@@ -29,11 +30,10 @@ impl AnchorStage {
         let leader = leader_peers
             .iter()
             .nth(leader_index)
-            .map(|(peer_id, _)| peer_id)
             .expect("selecting a leader from an empty validator set");
         // the leader cannot produce three points in a row, so we have an undefined leader,
         // rather than an intentional leaderless support round - all represented by `None`
-        if !current_peers.contains_key(leader) {
+        if !current_peers.contains(leader) {
             return None;
         };
         match round.0 % WAVE_SIZE {

@@ -47,13 +47,17 @@ impl WeakDagRound {
 impl DagRound {
     pub fn next(&self, peer_schedule: &PeerSchedule) -> Self {
         let next_round = self.round().next();
-        let peers = peer_schedule.peers_for(next_round);
-        let locations = FastDashMap::with_capacity_and_hasher(peers.len(), Default::default());
+        let (peers_len, key_pair) = {
+            let guard = peer_schedule.atomic();
+            let peers_len = guard.peers_for(next_round).len();
+            (peers_len, guard.local_keys(next_round))
+        };
+        let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
         Self(Arc::new(DagRoundInner {
             round: next_round,
-            peer_count: PeerCount::try_from(peers.len())
+            peer_count: PeerCount::try_from(peers_len)
                 .unwrap_or_else(|e| panic!("{e} for {next_round:?}")),
-            key_pair: peer_schedule.local_keys(next_round),
+            key_pair,
             anchor_stage: AnchorStage::of(next_round, peer_schedule),
             locations,
             prev: self.downgrade(),
@@ -183,9 +187,10 @@ impl DagRound {
             &DagPoint::Trusted(ValidPoint::new(point.clone())),
         );
         if let Some(signable) = state.signable() {
+            let key_pair = peer_schedule.atomic().local_keys(self.round().next());
             signable.sign(
                 self.round(),
-                peer_schedule.local_keys(self.round().next()).as_deref(),
+                key_pair.as_deref(),
                 MempoolConfig::sign_time_range(),
             );
         }

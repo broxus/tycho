@@ -378,13 +378,13 @@ impl Verifier {
             witness_peers/* @ r-2 */ ,
             includes_peers /* @ r-1 */ ,
             proof_peers /* @ r+0 */
-        ] = peer_schedule.peers_for_array([
+        ] = peer_schedule.atomic().peers_for_array([
                 point.body().location.round.prev().prev(),
                 point.body().location.round.prev(),
                 point.body().location.round,
             ]);
         for peer_id in point.body().witness.keys() {
-            if !witness_peers.contains_key(peer_id) {
+            if !witness_peers.contains(peer_id) {
                 return false;
             }
         }
@@ -401,7 +401,7 @@ impl Verifier {
             return false;
         };
         for peer_id in point.body().includes.keys() {
-            if !includes_peers.contains_key(peer_id) {
+            if !includes_peers.contains(peer_id) {
                 return false;
             }
         }
@@ -418,7 +418,7 @@ impl Verifier {
             return false;
         }
         for (peer_id, _) in proven.evidence.iter() {
-            if !proof_peers.contains_key(peer_id) {
+            if !proof_peers.contains(peer_id) {
                 return false;
             }
         }

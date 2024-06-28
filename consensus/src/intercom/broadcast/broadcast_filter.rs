@@ -23,7 +23,7 @@ pub struct BroadcastFilter {
 
 impl BroadcastFilter {
     pub fn new(
-        peer_schedule: Arc<PeerSchedule>,
+        peer_schedule: PeerSchedule,
         output: mpsc::UnboundedSender<ConsensusEvent>,
         consensus_round: ConsensusRound,
     ) -> Self {
@@ -60,28 +60,25 @@ impl BroadcastFilter {
             .advance_round(top_dag_round, downloader, round_effects);
     }
 
+    /// must be run before broadcaster is set into responder
+    /// because of lock on `self.inner.peer_schedule`
     pub async fn clear_cache(self) -> ! {
-        let mut rx = self.inner.peer_schedule.updates();
+        let mut rx = self.inner.peer_schedule.read().updates();
+        let name = "clear cached points for unresolved peers";
         loop {
             match rx.recv().await {
-                Ok((peer_id, state)) => {
+                Ok((peer_id, PeerState::Unknown)) => {
                     // assume peers aren't removed from DHT immediately
-                    let remove = state == PeerState::Unknown;
-                    tracing::info!(
-                        ignore = !remove,
-                        peer = display(peer_id.alt()),
-                        new_state = debug(state),
-                        "peer state update",
-                    );
-                    if remove {
-                        self.inner.last_by_peer.remove(&peer_id);
-                    }
+                    let round = self.inner.consensus_round.get();
+                    tracing::info!(round = round.0, peer = display(peer_id.alt()), name);
+                    self.inner.last_by_peer.remove(&peer_id);
                 }
+                Ok((_peer_id, PeerState::Resolved)) => {} // skip
                 Err(err @ RecvError::Lagged(_)) => {
-                    tracing::error!(error = display(err), "peer state update",);
+                    tracing::error!(error = display(err), name);
                 }
                 Err(err @ RecvError::Closed) => {
-                    panic!("peer state update {err}");
+                    panic!("{name} {err}");
                 }
             }
         }
@@ -96,7 +93,7 @@ struct BroadcastFilterInner {
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
     by_round: FastDashMap<Round, (PeerCount, SimpleDagLocations)>,
-    peer_schedule: Arc<PeerSchedule>,
+    peer_schedule: PeerSchedule,
     output: mpsc::UnboundedSender<ConsensusEvent>,
     consensus_round: ConsensusRound,
 }
@@ -206,7 +203,7 @@ impl BroadcastFilterInner {
             // note: lock guard inside result
             let try_by_round_entry = self.by_round.entry(round).or_try_insert_with(|| {
                 // how many nodes should send broadcasts
-                PeerCount::try_from(self.peer_schedule.peers_for(round).len())
+                PeerCount::try_from(self.peer_schedule.atomic().peers_for(round).len())
                     .map(|peer_count| (peer_count, Default::default()))
             });
             // Err: will not accept broadcasts from not yet initialized validator set
