@@ -13,7 +13,9 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
-use super::types::{CachedMempoolAnchor, SpecialOrigin};
+use super::types::{
+    BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin,
+};
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
 use crate::collator::types::{
@@ -37,7 +39,8 @@ impl CollatorStdImpl {
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
-        let histogram = HistogramGuard::begin_with_labels("tycho_do_collate_total_time", labels);
+        let total_collation_histogram =
+            HistogramGuard::begin_with_labels("tycho_do_collate_total_time", labels);
 
         let prepare_histogram =
             HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", labels);
@@ -59,22 +62,65 @@ impl CollatorStdImpl {
         let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
+        let is_masterchain = self.shard_id.is_masterchain();
         // prepare block collation data
         // STUB: consider split/merge in future for taking prev_block_id
         let prev_block_id = prev_shard_data.blocks_ids()[0];
-        let mut collation_data = Box::new(BlockCollationData::default());
-        collation_data.block_id_short = BlockIdShort {
+        let block_id_short = BlockIdShort {
             shard: prev_block_id.shard,
             seqno: prev_block_id.seqno + 1,
         };
-        collation_data.rand_seed = rand_seed;
-        collation_data.update_ref_min_mc_seqno(mc_data.mc_state_stuff().state().seqno);
-        collation_data.gen_utime = (next_chain_time / 1000) as u32;
-        collation_data.gen_utime_ms = (next_chain_time % 1000) as u16;
-        collation_data.start_lt = Self::calc_start_lt(mc_data, prev_shard_data, &collation_data)?;
-        collation_data.next_lt = collation_data.start_lt + 1;
+        let block_limits = mc_data.config().get_block_limits(is_masterchain)?;
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "Block limits: {:?}",
+            block_limits
+        );
 
-        collation_data.processed_upto = prev_shard_data.processed_upto().clone();
+        let created_by = self
+            .last_imported_anchor_author
+            .map(|a| HashBytes(a.0))
+            .unwrap_or_default();
+        let mut collation_data_builder = BlockCollationDataBuilder::new(
+            block_id_short,
+            rand_seed,
+            mc_data.mc_state_stuff().state().seqno,
+            next_chain_time,
+            prev_shard_data.processed_upto().clone(),
+            created_by,
+        );
+
+        // init ShardHashes descriptions for master
+        if is_masterchain {
+            let shards = prev_shard_data.observable_states()[0]
+                .shards()?
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .ok()
+                        .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
+                })
+                .collect::<FastHashMap<_, _>>();
+
+            collation_data_builder.set_shards(shards);
+
+            if let Some(top_shard_blocks_info) = top_shard_blocks_info {
+                self.import_new_shard_top_blocks_for_masterchain(
+                    mc_data.config(),
+                    &mut collation_data_builder,
+                    top_shard_blocks_info,
+                )?;
+            }
+        }
+
+        let start_lt = Self::calc_start_lt(
+            mc_data,
+            prev_shard_data,
+            is_masterchain,
+            collation_data_builder.shards_max_end_lt,
+        )?;
+
+        let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
+
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
             collation_data.processed_upto.externals,
         );
@@ -91,29 +137,6 @@ impl CollatorStdImpl {
                     shard_ident, processed_upto,
                 );
             });
-
-        // init ShardHashes descriptions for master
-        if self.shard_id.is_masterchain() {
-            let shards = prev_shard_data.observable_states()[0]
-                .shards()?
-                .iter()
-                .filter_map(|entry| {
-                    entry
-                        .ok()
-                        .map(|(shard_id, shard_descr)| (shard_id, Box::new(shard_descr)))
-                })
-                .collect::<FastHashMap<_, _>>();
-
-            collation_data.set_shards(shards);
-
-            if let Some(top_shard_blocks_info) = top_shard_blocks_info {
-                self.import_new_shard_top_blocks_for_masterchain(
-                    mc_data.config(),
-                    &mut collation_data,
-                    top_shard_blocks_info,
-                )?;
-            }
-        }
 
         // compute created / minted / recovered / from_prev_block
         self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
@@ -167,7 +190,7 @@ impl CollatorStdImpl {
 
         // execute tick transaction and special transactions (mint, recover)
         let execute_tick_elapsed;
-        if self.shard_id.is_masterchain() {
+        if is_masterchain {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", labels);
 
@@ -204,13 +227,21 @@ impl CollatorStdImpl {
         loop {
             let mut timer = Instant::now();
 
+            let soft_level_reached = collation_data.block_limit.reached(BlockLimitsLevel::Soft);
+            if soft_level_reached {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "STUB: soft block limit reached: {:?}",
+                    collation_data.block_limit,
+                );
+            }
             let mut executed_internal_messages = vec![];
             let mut internal_messages_sources = FastHashMap::default();
             // build messages set
             let mut msgs_set: Vec<Box<ParsedMessage>> = vec![];
 
             // 1. First try to read min externals amount
-            let mut ext_msgs = if self.has_pending_externals {
+
+            let mut ext_msgs = if !soft_level_reached && self.has_pending_externals {
                 self.read_next_externals(min_externals_per_set, &mut collation_data)?
             } else {
                 vec![]
@@ -260,7 +291,7 @@ impl CollatorStdImpl {
             //    If not enough existing internals to fill the set then try read more externals
             msgs_set.append(&mut ext_msgs);
             remaining_capacity = max_messages_per_set - msgs_set.len();
-            if remaining_capacity > 0 && self.has_pending_externals {
+            if remaining_capacity > 0 && self.has_pending_externals && !soft_level_reached {
                 ext_msgs = self.read_next_externals(remaining_capacity, &mut collation_data)?;
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     ext_count = ext_msgs.len(),
@@ -388,6 +419,7 @@ impl CollatorStdImpl {
                     }
 
                     collation_data.next_lt = exec_manager.min_next_lt();
+                    collation_data.block_limit.lt_current = collation_data.next_lt;
                 }
 
                 msgs_set_offset = tick.new_offset;
@@ -409,21 +441,21 @@ impl CollatorStdImpl {
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
+
+                if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "STUB: block limit reached: {:?}",
+                        collation_data.block_limit,
+                    );
+                    block_limits_reached = true;
+                    break;
+                }
             }
 
             metrics::gauge!("tycho_do_collate_exec_ticks_per_msgs_set", labels)
                 .set(exec_ticks_count as f64);
 
             timer = std::time::Instant::now();
-
-            // HACK: temporary always full process msgs set and check block limits after
-            if collation_data.tx_count >= self.config.block_txs_limit as u64 {
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    "STUB: block limit reached: {}/{}",
-                    collation_data.tx_count, self.config.block_txs_limit,
-                );
-                block_limits_reached = true;
-            }
 
             // commit messages to iterator only if set was fully processed
             if msgs_set_full_processed {
@@ -469,7 +501,7 @@ impl CollatorStdImpl {
 
         // execute tock transaction
         let execute_tock_elapsed;
-        if self.shard_id.is_masterchain() {
+        if is_masterchain {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", labels);
             self.create_ticktock_transactions(
@@ -597,7 +629,7 @@ impl CollatorStdImpl {
         collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
         self.update_stats(&collation_data);
 
-        let total_elapsed = histogram.finish();
+        let total_elapsed = total_collation_histogram.finish();
 
         // time elapsed from prev block
         let elapsed_from_prev_block = self.timer.elapsed();
@@ -918,20 +950,18 @@ impl CollatorStdImpl {
     fn calc_start_lt(
         mc_data: &McData,
         prev_shard_data: &PrevData,
-        collation_data: &BlockCollationData,
+        is_masterchain: bool,
+        shards_max_end_lt: u64,
     ) -> Result<u64> {
         tracing::trace!(target: tracing_targets::COLLATOR, "calc_start_lt()");
 
-        let mut start_lt = if !collation_data.block_id_short.shard.is_masterchain() {
+        let mut start_lt = if !is_masterchain {
             std::cmp::max(
                 mc_data.mc_state_stuff().state().gen_lt,
                 prev_shard_data.gen_lt(),
             )
         } else {
-            std::cmp::max(
-                mc_data.mc_state_stuff().state().gen_lt,
-                collation_data.shards_max_end_lt(),
-            )
+            std::cmp::max(mc_data.mc_state_stuff().state().gen_lt, shards_max_end_lt)
         };
 
         let align = mc_data.get_lt_align();
@@ -1227,14 +1257,14 @@ impl CollatorStdImpl {
     fn import_new_shard_top_blocks_for_masterchain(
         &self,
         config: &BlockchainConfig,
-        collation_data: &mut BlockCollationData,
+        collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR,
             "import_new_shard_top_blocks_for_masterchain()",
         );
 
-        let gen_utime = collation_data.gen_utime;
+        let gen_utime = collation_data_builder.gen_utime;
         for TopBlockDescription {
             block_id,
             block_info,
@@ -1248,13 +1278,13 @@ impl CollatorStdImpl {
                 &block_info,
                 &value_flow,
             ));
-            shard_descr.reg_mc_seqno = collation_data.block_id_short.seqno;
+            shard_descr.reg_mc_seqno = collation_data_builder.block_id_short.seqno;
 
-            collation_data.update_shards_max_end_lt(shard_descr.end_lt);
+            collation_data_builder.update_shards_max_end_lt(shard_descr.end_lt);
 
             let shard_id = block_id.shard;
 
-            collation_data.top_shard_blocks_ids.push(block_id);
+            collation_data_builder.top_shard_blocks_ids.push(block_id);
 
             if shard_descr.gen_utime > gen_utime {
                 tracing::debug!(target: tracing_targets::COLLATOR,
@@ -1275,19 +1305,23 @@ impl CollatorStdImpl {
             // TODO: Check may update shard block info
             // TODO: Implement merge algorithm in future
 
-            self.update_shard_block_info(collation_data.shards_mut()?, shard_id, shard_descr)?;
+            self.update_shard_block_info(
+                collation_data_builder.shards_mut()?,
+                shard_id,
+                shard_descr,
+            )?;
 
-            collation_data.store_shard_fees(shard_id, proof_funds)?;
-            collation_data.register_shard_block_creators(creators)?;
+            collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
+            collation_data_builder.register_shard_block_creators(creators)?;
         }
 
-        let shard_fees = collation_data.shard_fees.root_extra().clone();
+        let shard_fees = collation_data_builder.shard_fees.root_extra().clone();
 
-        collation_data
+        collation_data_builder
             .value_flow
             .fees_collected
             .checked_add(&shard_fees.fees)?;
-        collation_data.value_flow.fees_imported = shard_fees.fees;
+        collation_data_builder.value_flow.fees_imported = shard_fees.fees;
 
         Ok(())
     }
@@ -1338,6 +1372,7 @@ fn new_transaction(
     );
 
     collation_data.execute_count_all += 1;
+    collation_data.block_limit.gas_used += executor_output.gas_used as u32;
 
     let import_fees;
     let in_msg_hash = *in_msg.cell.repr_hash();
@@ -1481,7 +1516,6 @@ fn new_transaction(
             info = ?out_msg_info,
             "adding out message to out_msgs",
         );
-
         match &out_msg_info {
             MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
                 collation_data.int_enqueue_count += 1;

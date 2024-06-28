@@ -7,6 +7,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::HashBytes;
 use futures_util::future::{BoxFuture, Future};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuardWithLabels;
 use tycho_util::FastHashMap;
 
@@ -180,6 +181,7 @@ pub struct CollatorStdImpl {
 
     last_imported_anchor_id: Option<MempoolAnchorId>,
     last_imported_anchor_chain_time: Option<u64>,
+    last_imported_anchor_author: Option<PeerId>,
 
     /// TRUE - when exist imported anchors in cache,
     /// when they have externals for current shard of collator,
@@ -237,6 +239,7 @@ impl CollatorStdImpl {
             anchors_cache: VecDeque::new(),
             last_imported_anchor_id: None,
             last_imported_anchor_chain_time: None,
+            last_imported_anchor_author: None,
 
             has_pending_externals: false,
 
@@ -275,6 +278,12 @@ impl CollatorStdImpl {
     fn working_state(&self) -> &WorkingState {
         self.working_state
             .as_ref()
+            .expect("should `init` collator before calling `working_state`")
+    }
+
+    fn working_state_mut(&mut self) -> &mut WorkingState {
+        self.working_state
+            .as_mut()
             .expect("should `init` collator before calling `working_state`")
     }
 
@@ -367,10 +376,7 @@ impl CollatorStdImpl {
         &mut self,
         has_pending_externals: Option<bool>,
     ) -> Result<()> {
-        // TODO: just create `working_state_mut()` func
-        let working_state_mut = self.working_state.as_mut().expect(
-            "should `init` collator before calling `update_working_state_pending_internals`",
-        );
+        let working_state_mut = self.working_state_mut();
 
         working_state_mut.has_pending_internals = has_pending_externals;
 
@@ -389,10 +395,7 @@ impl CollatorStdImpl {
 
         let new_mc_data = McData::build(mc_state)?;
 
-        let working_state_mut = self
-            .working_state
-            .as_mut()
-            .expect("should `init` collator before calling `update_mc_data`");
+        let working_state_mut = self.working_state_mut();
 
         working_state_mut.mc_data = new_mc_data;
 
@@ -521,6 +524,7 @@ impl CollatorStdImpl {
 
         self.last_imported_anchor_id = Some(next_anchor.id());
         self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
+        self.last_imported_anchor_author = Some(next_anchor.author());
         self.anchors_cache
             .push_back((next_anchor.id(), CachedMempoolAnchor {
                 anchor: next_anchor.clone(),
@@ -730,18 +734,20 @@ impl CollatorStdImpl {
         let force_mc_block_by_uncommitted_chain =
             uncommitted_chain_length >= self.config.max_uncommitted_chain_length;
 
-        // should import anchor every fixed interval in uncommitted blocks chain
-        let force_import_anchor_by_uncommitted_chain = uncommitted_chain_length
-            / self.config.uncommitted_chain_to_import_next_anchor
-            > 0
-            && uncommitted_chain_length % self.config.uncommitted_chain_to_import_next_anchor == 0;
+        // should import anchor after fixed gas used by shard blocks in uncommitted blocks chain
+        let gas_used_from_last_anchor = self
+            .working_state()
+            .prev_shard_data
+            .gas_used_from_last_anchor();
+        let force_import_anchor_by_used_gas = uncommitted_chain_length > 0
+            && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
         // check if has pending internals or externals
         let no_pending_msgs = !has_internals && !has_externals;
 
         // import next anchor if meet one of above conditions
         let next_anchor_info_opt = if no_pending_msgs
-            || force_import_anchor_by_uncommitted_chain
+            || force_import_anchor_by_used_gas
             || force_mc_block_by_uncommitted_chain
         {
             if no_pending_msgs {
@@ -753,10 +759,10 @@ impl CollatorStdImpl {
                     "max_uncommitted_chain_length {} reached, will import next anchor",
                     self.config.max_uncommitted_chain_length,
                 );
-            } else if force_import_anchor_by_uncommitted_chain {
+            } else if force_import_anchor_by_used_gas {
                 tracing::info!(target: tracing_targets::COLLATOR,
-                    "uncommitted chain interval to import anchor {} reached on length {}, will import next anchor",
-                    self.config.uncommitted_chain_to_import_next_anchor, uncommitted_chain_length,
+                    "gas used from last anchor {} reached limit {} on length {}, will import next anchor",
+                    gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
             let (next_anchor, next_anchor_has_externals) = self.import_next_anchor().await?;
@@ -766,6 +772,7 @@ impl CollatorStdImpl {
                     "just imported anchor has externals, will collate next block",
                 );
             }
+            self.working_state_mut().prev_shard_data.clear_gas_used();
             Some((next_anchor, next_anchor_has_externals))
         } else {
             None

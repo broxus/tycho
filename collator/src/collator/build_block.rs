@@ -194,7 +194,7 @@ impl CollatorStdImpl {
             end_lt: collation_data.next_lt,
             gen_validator_list_hash_short: self.collation_session.collators().short_hash,
             gen_catchain_seqno: self.collation_session.seqno(),
-            min_ref_mc_seqno: collation_data.min_ref_mc_seqno()?,
+            min_ref_mc_seqno: collation_data.min_ref_mc_seqno,
             prev_key_block_seqno: mc_data.prev_key_block_seqno(),
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
             ..Default::default()
@@ -236,7 +236,8 @@ impl CollatorStdImpl {
                 processed_upto: Lazy::new(&collation_data.processed_upto)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&shard_accounts)?,
-                overload_history: 0,
+                overload_history: prev_shard_data.gas_used_from_last_anchor()
+                    + collation_data.block_limit.gas_used as u64,
                 underload_history: 0,
                 total_balance: value_flow.to_next_block.clone(),
                 total_validator_fees: prev_shard_data.total_validator_fees().clone(),

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use everscale_types::models::{ExtInMsgInfo, ShardIdent};
 use everscale_types::prelude::{Cell, HashBytes};
+use tycho_network::PeerId;
 
 use crate::types::ShardIdentExt;
 
@@ -39,16 +40,23 @@ impl ExternalMessage {
 #[derive(Debug)]
 pub struct MempoolAnchor {
     id: MempoolAnchorId,
+    author: PeerId,
     chain_time: u64,
     externals: Vec<Arc<ExternalMessage>>,
 }
 
 impl MempoolAnchor {
-    pub fn new(id: MempoolAnchorId, chain_time: u64, externals: Vec<Arc<ExternalMessage>>) -> Self {
+    pub fn new(
+        id: MempoolAnchorId,
+        chain_time: u64,
+        externals: Vec<Arc<ExternalMessage>>,
+        author: PeerId,
+    ) -> Self {
         Self {
             id,
             chain_time,
             externals,
+            author,
         }
     }
 
@@ -62,6 +70,9 @@ impl MempoolAnchor {
 
     pub fn externals_count(&self) -> usize {
         self.externals.len()
+    }
+    pub fn author(&self) -> PeerId {
+        self.author
     }
 
     pub fn externals_count_for(&self, shard_id: &ShardIdent) -> usize {
