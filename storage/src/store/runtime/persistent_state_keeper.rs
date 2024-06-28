@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use arc_swap::ArcSwapAny;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tycho_block_util::state::*;
 
 use crate::models::{BlockHandle, BriefBlockMeta};
@@ -15,16 +15,22 @@ pub struct PersistentStateKeeper {
     persistent_state_changed: Notify,
     current_persistent_state: ArcSwapAny<Option<BlockHandle>>,
     last_utime: AtomicU32,
+    lock_gc_on_states: AtomicBool,
+    shards_gc_lock: watch::Sender<bool>,
 }
 
 impl PersistentStateKeeper {
     pub fn new(block_handle_storage: Arc<BlockHandleStorage>) -> Self {
+        let (shards_gc_lock, _) = watch::channel(true);
+
         Self {
             block_handle_storage,
             initialized: Default::default(),
             persistent_state_changed: Default::default(),
             current_persistent_state: Default::default(),
             last_utime: Default::default(),
+            lock_gc_on_states: AtomicBool::new(true),
+            shards_gc_lock,
         }
     }
 
@@ -58,6 +64,10 @@ impl PersistentStateKeeper {
         }
 
         if is_persistent_state(block_utime, prev_utime) {
+            if self.lock_gc_on_states.load(Ordering::Acquire) {
+                self.shards_gc_lock.send_replace(true);
+            }
+
             self.last_utime.store(block_utime, Ordering::Release);
             self.current_persistent_state
                 .store(Some(block_handle.clone()));
@@ -84,5 +94,20 @@ impl PersistentStateKeeper {
 
     pub fn new_state_found(&self) -> tokio::sync::futures::Notified<'_> {
         self.persistent_state_changed.notified()
+    }
+
+    pub fn set_shards_gc_lock_enabled(&self, enabled: bool) {
+        self.lock_gc_on_states.store(enabled, Ordering::Release);
+        if !enabled {
+            self.unlock_states_gc();
+        }
+    }
+
+    pub fn unlock_states_gc(&self) {
+        self.shards_gc_lock.send_replace(false);
+    }
+
+    pub fn shards_gc_lock(&self) -> &watch::Sender<bool> {
+        &self.shards_gc_lock
     }
 }
