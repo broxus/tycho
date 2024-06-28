@@ -24,7 +24,7 @@ impl GcSubscriber {
     fn handle<'a>(
         &'a self,
         block: &'a BlockStuff,
-        mc_block_id: &'a BlockId
+        mc_block_id: &'a BlockId,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         if !block.id().is_masterchain() {
             return Box::pin(futures_util::future::ready(Ok(())));

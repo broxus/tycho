@@ -144,7 +144,6 @@ impl StorageBuilder {
 
         // TODO: preload archive ids
 
-
         let inner = Arc::new(Inner {
             root,
             base_db,
@@ -257,8 +256,7 @@ impl Storage {
     }
 
     pub fn gc_enable_for_sync(&self) -> bool {
-        self
-            .inner
+        self.inner
             .config
             .blocks_gc_config
             .map(|x| x.enable_for_sync)

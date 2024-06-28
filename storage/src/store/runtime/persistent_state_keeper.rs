@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use arc_swap::ArcSwapAny;
-use tokio::sync::{Notify, watch};
+use tokio::sync::{watch, Notify};
 use tycho_block_util::state::*;
 
 use crate::models::{BlockHandle, BriefBlockMeta};

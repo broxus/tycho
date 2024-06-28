@@ -45,8 +45,6 @@ pub struct StorageConfig {
     ///
     /// Blocks GC is disabled if this field is `None`.
     pub blocks_gc_config: Option<BlocksGcOptions>,
-
-
 }
 
 impl StorageConfig {
@@ -59,7 +57,7 @@ impl StorageConfig {
             rocksdb_enable_metrics: false,
             archives: Some(ArchivesConfig::default()),
             states_gc_options: Some(StateGcOptions::default()),
-            blocks_gc_config: Some(BlocksGcOptions::default())
+            blocks_gc_config: Some(BlocksGcOptions::default()),
         }
     }
 }
@@ -110,7 +108,7 @@ impl Default for StorageConfig {
             rocksdb_enable_metrics: true,
             archives: Some(ArchivesConfig::default()),
             states_gc_options: Some(StateGcOptions::default()),
-            blocks_gc_config: Some(BlocksGcOptions::default())
+            blocks_gc_config: Some(BlocksGcOptions::default()),
         }
     }
 }

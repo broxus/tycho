@@ -8,11 +8,11 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 
-pub use self::metrics_subscriber::MetricsSubscriber;
 pub use self::gc_subscriber::GcSubscriber;
+pub use self::metrics_subscriber::MetricsSubscriber;
 
-mod metrics_subscriber;
 mod gc_subscriber;
+mod metrics_subscriber;
 
 // === trait BlockSubscriber ===
 
@@ -322,7 +322,6 @@ pub mod test {
             );
             future::ready(Ok(()))
         }
-
     }
 
     impl StateSubscriber for PrintSubscriber {

@@ -35,7 +35,6 @@ impl NodeStateStorage {
         self.load_block_id(&self.init_mc_block_id)
     }
 
-
     #[inline(always)]
     fn store_block_id(&self, (cache, key): &BlockIdCache, block_id: &BlockId) {
         let node_states = &self.db.state;
@@ -61,4 +60,3 @@ type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);
 
 const LAST_MC_BLOCK_ID: &[u8] = b"last_mc_block";
 const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
-
