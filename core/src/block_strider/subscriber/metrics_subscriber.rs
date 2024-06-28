@@ -15,7 +15,6 @@ impl BlockSubscriber for MetricsSubscriber {
 
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
     type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
-    type AfterBlockHandleFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         futures_util::future::ready(Ok(()))
@@ -29,10 +28,6 @@ impl BlockSubscriber for MetricsSubscriber {
         if let Err(e) = handle_block(&cx.block) {
             tracing::error!("failed to handle block: {e:?}");
         }
-        futures_util::future::ready(Ok(()))
-    }
-
-    fn after_block_handle<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::AfterBlockHandleFut<'a> {
         futures_util::future::ready(Ok(()))
     }
 }

@@ -286,7 +286,7 @@ pub async fn prepare_blocks_gc(storage: Storage) -> Result<()> {
         return Ok(());
     };
 
-    let Some(block) = storage.node_state().load_shards_client_mc_block_id() else {
+    let Some(block) = storage.node_state().load_init_mc_block_id() else {
         return Ok(());
     };
     // Blocks GC will be called later when the shards client will reach the key block
@@ -334,7 +334,7 @@ pub fn start_states_gc(storage: Storage) {
 
             let block_id = loop {
                 // Load the latest block id
-                let block_id = match storage.node_state().load_shards_client_mc_block_id() {
+                let block_id = match storage.node_state().load_last_mc_block_id() {
                     Some(block_id) => block_id,
                     None => {
                         tracing::error!(target: "storage", "Failed to load last shards client block. Block not found");

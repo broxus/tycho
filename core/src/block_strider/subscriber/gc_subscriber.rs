@@ -4,7 +4,9 @@ use std::sync::Arc;
 use futures_util::future::BoxFuture;
 use tycho_storage::Storage;
 
-use crate::block_strider::{BlockSubscriber, BlockSubscriberContext};
+use crate::block_strider::{
+    BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
+};
 
 #[repr(transparent)]
 pub struct GcSubscriber {
@@ -23,36 +25,24 @@ struct Inner {
     storage: Storage,
 }
 
-impl BlockSubscriber for GcSubscriber {
-    type Prepared = ();
-    type PrepareBlockFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
-    type HandleBlockFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
-    type AfterBlockHandleFut<'a> = BoxFuture<'a, anyhow::Result<()>>;
+impl StateSubscriber for GcSubscriber {
+    type HandleStateFut<'a> = BoxFuture<'a, anyhow::Result<()>>;
 
-    fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
-        futures_util::future::ready(Ok(()))
-    }
-
-    fn handle_block<'a>(
-        &'a self,
-        _cx: &'a BlockSubscriberContext,
-        _prepared: Self::Prepared,
-    ) -> Self::HandleBlockFut<'a> {
-        futures_util::future::ready(Ok(()))
-    }
-
-    fn after_block_handle<'a>(
-        &'a self,
-        cx: &'a BlockSubscriberContext,
-    ) -> Self::AfterBlockHandleFut<'a> {
+    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         let Ok(block_info) = cx.block.block().load_info() else {
-            return Box::pin(futures_util::future::ready(Ok(())))
+            return Box::pin(futures_util::future::ready(Ok(())));
         };
 
-        self.inner
-            .storage
-            .node_state()
-            .store_shards_client_mc_block_id(&cx.mc_block_id);
+        if !block_info.shard.is_masterchain() {
+            return Box::pin(futures_util::future::ready(Ok(())));
+        }
+
+        // TODO: STORE here mc block?
+
+        // self.inner
+        //     .storage
+        //     .node_state()
+        //     .store_last_mc_block_id(&cx.mc_block_id);
 
         let enabled = self
             .inner
@@ -74,5 +64,23 @@ impl BlockSubscriber for GcSubscriber {
             }
             _ => Box::pin(futures_util::future::ready(Ok(()))),
         }
+    }
+}
+
+impl BlockSubscriber for GcSubscriber {
+    type Prepared = ();
+    type PrepareBlockFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
+    type HandleBlockFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
+
+    fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        futures_util::future::ready(Ok(()))
+    }
+
+    fn handle_block<'a>(
+        &'a self,
+        _cx: &'a BlockSubscriberContext,
+        _prepared: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        futures_util::future::ready(Ok(()))
     }
 }

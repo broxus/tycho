@@ -10,7 +10,6 @@ use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
-use tracing::instrument::WithSubscriber;
 use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
@@ -41,7 +40,9 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{start_archives_gc, BlockMetaData, Storage, prepare_blocks_gc, start_states_gc};
+use tycho_storage::{
+    prepare_blocks_gc, start_archives_gc, start_states_gc, BlockMetaData, Storage,
+};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -680,10 +681,9 @@ impl Node {
                     self.storage.clone(),
                     (collator_state_subscriber, rpc_state),
                 ),
-                MetricsSubscriber,
+                (MetricsSubscriber, gc_subscriber),
             ))
             .build();
-
 
         if let Err(e) = start_archives_gc(self.storage.clone()) {
             tracing::error!("Failed to execute archives gc. {e:?}");

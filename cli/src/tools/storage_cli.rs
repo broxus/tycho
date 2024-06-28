@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use everscale_types::models::BlockId;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage, StorageConfig};
 
 fn init_storage(path: Option<&PathBuf>) -> Result<Storage> {
