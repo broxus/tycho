@@ -14,15 +14,14 @@ use crate::engine::input_buffer::InputBuffer;
 use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
-    PeerSchedule, PeerScheduleUpdater, Responder,
+    PeerSchedule, Responder,
 };
 use crate::models::{ConsensusRound, Link, Point, Round};
 use crate::LogFlavor;
 
 pub struct Engine {
     dag: Dag,
-    peer_schedule: Arc<PeerSchedule>,
-    peer_schedule_updater: PeerScheduleUpdater,
+    peer_schedule: PeerSchedule,
     responder: Responder,
     downloader: Downloader,
     broadcaster: Broadcaster,
@@ -42,7 +41,10 @@ impl Engine {
         committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
         input_buffer: InputBuffer,
     ) -> Self {
-        let peer_schedule = Arc::new(PeerSchedule::new(key_pair));
+        let responder = Responder::default();
+        let (dispatcher, overlay) = Dispatcher::new(dht_client, overlay_service, responder.clone());
+
+        let peer_schedule = PeerSchedule::new(key_pair, overlay);
 
         let consensus_round = ConsensusRound::new();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
@@ -52,17 +54,12 @@ impl Engine {
         let broadcast_filter =
             BroadcastFilter::new(peer_schedule.clone(), bcast_tx, consensus_round.clone());
 
-        let responder = Responder::default();
-
-        let (dispatcher, overlay) = Dispatcher::new(dht_client, overlay_service, responder.clone());
         let broadcaster = Broadcaster::new(&dispatcher);
 
-        let peer_schedule_updater = PeerScheduleUpdater::new(overlay, peer_schedule.clone());
-
         tokio::spawn({
-            let peer_schedule_updater = peer_schedule_updater.clone();
+            let peer_schedule = peer_schedule.clone();
             async move {
-                peer_schedule_updater.run().await;
+                peer_schedule.run_updater().await;
             }
         });
         tokio::spawn({
@@ -77,7 +74,6 @@ impl Engine {
         Self {
             dag: Dag::new(),
             peer_schedule,
-            peer_schedule_updater,
             responder,
             downloader,
             broadcaster,
@@ -106,19 +102,22 @@ impl Engine {
         );
         assert!(genesis.is_well_formed(), "genesis point is not well formed");
         // finished epoch
-        self.peer_schedule
-            .set_next_start(MempoolConfig::GENESIS_ROUND);
-        self.peer_schedule_updater.set_next_peers(
-            &[crate::test_utils::genesis_point_id().location.author],
-            false,
-        );
-        self.peer_schedule.rotate();
-        // current epoch
-        self.peer_schedule
-            .set_next_start(genesis.body().location.round.next());
-        // start updater only after peers are populated into schedule
-        self.peer_schedule_updater.set_next_peers(next_peers, true);
-        self.peer_schedule.rotate();
+        {
+            let mut guard = self.peer_schedule.write();
+            let peer_schedule = self.peer_schedule.clone();
+            guard.set_next_start(MempoolConfig::GENESIS_ROUND, &peer_schedule);
+            guard.set_next_peers(
+                &[crate::test_utils::genesis_point_id().location.author],
+                &peer_schedule,
+                false,
+            );
+            guard.rotate(&peer_schedule);
+            // current epoch
+            guard.set_next_start(genesis.body().location.round.next(), &peer_schedule);
+            // start updater only after peers are populated into schedule
+            guard.set_next_peers(next_peers, &peer_schedule, true);
+            guard.rotate(&peer_schedule);
+        }
 
         let current_dag_round = DagRound::genesis(&genesis, &self.peer_schedule);
         let next_dag_round = current_dag_round.next(&self.peer_schedule);
@@ -311,7 +310,7 @@ impl Engine {
         round_effects: Effects<CurrentRoundContext>,
         current_dag_round: DagRound,
         last_own_point: Option<Arc<LastOwnPoint>>,
-        peer_schedule: Arc<PeerSchedule>,
+        peer_schedule: PeerSchedule,
         own_point_state: oneshot::Sender<InclusionState>,
         input_buffer: InputBuffer,
     ) -> Option<Point> {
@@ -355,7 +354,7 @@ impl Engine {
     fn expect_own_trusted_point(
         point_round: WeakDagRound,
         point: Point,
-        peer_schedule: Arc<PeerSchedule>,
+        peer_schedule: PeerSchedule,
         downloader: Downloader,
         span: Span,
     ) -> JoinHandle<()> {

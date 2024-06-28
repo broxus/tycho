@@ -64,7 +64,7 @@ impl MempoolConfig {
     /// [`Downloader`](crate::intercom::Downloader) makes responses in groups after previous
     /// group completed or this interval elapsed (in order to not wait for some slow responding peer)
     ///
-    /// 2F+1 "point not found" responses lead to invalidation of all referencing points;
+    /// 2F "point not found" responses lead to invalidation of all referencing points;
     /// failed network queries are retried after all peers were queried the same amount of times,
     /// and only successful responses that point is not found are taken into account.
     ///
