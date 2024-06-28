@@ -498,7 +498,6 @@ impl BlockLimitStats {
 
 #[derive(Debug, Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BlockLimitsLevel {
-    Underload,
     Soft,
     Hard,
 }
