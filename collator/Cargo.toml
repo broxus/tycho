@@ -16,27 +16,27 @@ backon = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
+everscale-crypto = { workspace = true }
+everscale-types = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
-sha2 = { workspace = true }
-tl-proto = { workspace = true }
-tempfile = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "signal"] }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-ton_executor = { workspace = true }
-trait-variant = { workspace = true }
-weedb = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
-rayon = { workspace = true }
-everscale-types = { workspace = true }
-everscale-crypto = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tl-proto = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "signal"] }
+tokio-util = { workspace = true }
+ton_executor = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+trait-variant = { workspace = true }
+weedb = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
