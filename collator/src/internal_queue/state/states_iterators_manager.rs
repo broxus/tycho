@@ -1,12 +1,16 @@
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use everscale_types::models::ShardIdent;
 
 use crate::internal_queue::state::state_iterator::{MessageWithSource, StateIterator};
+use crate::internal_queue::types::InternalMessageKey;
 
 pub struct StatesIteratorsManager {
     iterators: Vec<Box<dyn StateIterator>>,
     current_snapshot: usize,
+    seen_keys: HashSet<InternalMessageKey>, // Add this line to keep track of seen keys
 }
 
 impl StatesIteratorsManager {
@@ -14,6 +18,7 @@ impl StatesIteratorsManager {
         StatesIteratorsManager {
             iterators,
             current_snapshot: 0,
+            seen_keys: HashSet::new(), // Initialize the seen_keys set
         }
     }
 
@@ -24,20 +29,27 @@ impl StatesIteratorsManager {
             if let Some(message) = self.iterators[self.current_snapshot].next()? {
                 return Ok(Some(message));
             }
+            tracing::error!(target: "local_debug", "No messages in snapshot {}", self.current_snapshot);
             self.current_snapshot += 1;
         }
         Ok(None)
     }
 
-    /// peek the next message without moving the cursor
-    pub fn peek(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
-        let mut current_snapshot = self.current_snapshot;
-        while current_snapshot < self.iterators.len() {
-            if let Some(message) = self.iterators[current_snapshot].peek()? {
-                return Ok(Some(message));
+    /// Load read upto from all iterators
+    pub fn get_iter_upto(&self) -> BTreeMap<ShardIdent, InternalMessageKey> {
+        let mut processed_upto = BTreeMap::default();
+        for (index, iterator) in self.iterators.iter().enumerate() {
+            for read_upto in iterator.get_iter_upto() {
+                if let Some(read_upto_value) = processed_upto.get(&read_upto.0) {
+                    if read_upto_value < &read_upto.1 {
+                        processed_upto.insert(read_upto.0, read_upto.1);
+                    }
+                } else {
+                    processed_upto.insert(read_upto.0, read_upto.1);
+                }
             }
-            current_snapshot += 1;
         }
-        Ok(None)
+
+        processed_upto
     }
 }

@@ -14,8 +14,8 @@ use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::persistent::persistent_state::PersistentStateImplFactory;
-use tycho_collator::internal_queue::state::session::session_state::SessionStateImplFactory;
+use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
+use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
@@ -589,8 +589,7 @@ impl Node {
         // Create collator
         tracing::info!("starting collator");
 
-        let shards = vec![];
-        let session_state_factory = SessionStateImplFactory::new(shards);
+        let session_state_factory = SessionStateImplFactory::new(self.storage.clone());
         let persistent_state_factory = PersistentStateImplFactory::new(self.storage.clone());
 
         let queue_factory = QueueFactoryStdImpl {

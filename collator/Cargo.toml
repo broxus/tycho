@@ -19,7 +19,6 @@ bytesize = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
 indexmap = { workspace = true }
-im = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
