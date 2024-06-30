@@ -1,25 +1,29 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::Mutex;
-use tycho_util::FastHashMap;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::state::persistent::persistent_state::{
+use crate::internal_queue::state::persistent_state::{
     PersistentState, PersistentStateConfig, PersistentStateFactory, PersistentStateImplFactory,
     PersistentStateStdImpl,
 };
-use crate::internal_queue::state::session::session_state::{
-    SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
+use crate::internal_queue::state::session_state::{
+    SessionState, SessionStateConfig, SessionStateFactory, SessionStateImplFactory,
+    SessionStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator};
 use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
+
 // FACTORY
 
 pub struct QueueConfig {
     pub persistent_state_config: PersistentStateConfig,
+    pub session_state_config: SessionStateConfig,
 }
 
 pub trait QueueFactory {
@@ -78,10 +82,11 @@ impl QueueFactory for QueueFactoryStdImpl {
         let session_state = self.session_state_factory.create();
         let persistent_state = self.persistent_state_factory.create();
         QueueImpl {
-            session_state: Arc::new(Mutex::new(session_state)),
+            session_state: Arc::new(session_state),
             persistent_state: Arc::new(persistent_state),
-            persistent_state_lock: Arc::new(Mutex::new(())),
+            state_lock: Arc::new(Default::default()),
             processed_uptos: Default::default(),
+            diffs: Default::default(),
         }
     }
 }
@@ -91,15 +96,16 @@ where
     S: SessionState,
     P: PersistentState,
 {
-    session_state: Arc<Mutex<S>>,
+    session_state: Arc<S>,
     persistent_state: Arc<P>,
-    persistent_state_lock: Arc<Mutex<()>>,
-    processed_uptos: Mutex<BTreeMap<ShardIdent, FastHashMap<ShardIdent, InternalMessageKey>>>,
+    state_lock: Arc<Mutex<()>>,
+    processed_uptos: Mutex<BTreeMap<ShardIdent, BTreeMap<ShardIdent, InternalMessageKey>>>,
+    diffs: FastDashMap<BlockIdShort, Arc<QueueDiff>>,
 }
 
 impl<S, P> Queue for QueueImpl<S, P>
 where
-    S: SessionState + Send,
+    S: SessionState + Send + Sync,
     P: PersistentState + Send + Sync + 'static,
 {
     async fn iterator(
@@ -107,46 +113,27 @@ where
         ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>> {
-        // Lock session state and get the session iterator
-        let session_iter = {
-            let session_state_lock = self.session_state.lock().await;
-            let session_iter = session_state_lock.iterator(ranges, for_shard_id).await;
-            session_iter
-        };
+        let _state_lock = self.state_lock.lock().await;
 
-        let mut persistent_iter = {
-            let _ = self.persistent_state_lock.lock().await;
-            let persistent_iter = self.persistent_state.iterator(for_shard_id, ranges);
-            persistent_iter
-        };
-
-        let range_start = ranges
-            .iter()
-            .map(|(shard, range)| {
-                let range_start = range.from.clone().unwrap_or_default();
-                (shard, range_start)
-            })
-            .min_by_key(|(_, range_start)| range_start.clone());
-
-        persistent_iter.seek(range_start);
+        let snapshot = self.persistent_state.snapshot();
+        let persistent_iter = self
+            .persistent_state
+            .iterator(&snapshot, for_shard_id, ranges);
+        let session_iter = self.session_state.iterator(&snapshot, for_shard_id, ranges);
 
         vec![persistent_iter, session_iter]
     }
 
-    async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock.split_shard(shard_id).await
+    async fn split_shard(&self, _shard_id: &ShardIdent) -> Result<(), QueueError> {
+        Ok(())
     }
 
     async fn merge_shards(
         &self,
-        shard_1_id: &ShardIdent,
-        shard_2_id: &ShardIdent,
+        _shard_1_id: &ShardIdent,
+        _shard_2_id: &ShardIdent,
     ) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock
-            .merge_shards(shard_1_id, shard_2_id)
-            .await
+        Ok(())
     }
 
     async fn apply_diff(
@@ -154,28 +141,72 @@ where
         diff: Arc<QueueDiff>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock.apply_diff(diff, block_id_short).await
+        // let _session_lock = self.state_lock.lock().await;
+        // if block_id_short.shard.is_masterchain() {
+        //     for message in diff.messages.values() {
+        //         tracing::error!(
+        //             target: "local_debug",
+        //             "apply_diff: block_id_short = {:?}, message = {:?}",
+        //             block_id_short,
+        //             message
+        //         );
+        //     }
+        // }
+        self.session_state
+            .add_messages(block_id_short.shard, &diff.messages)?;
+        self.diffs.insert(block_id_short, diff);
+
+        Ok(())
     }
 
-    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock.add_shard(shard_id).await
+    async fn add_shard(&self, _shard_id: &ShardIdent) -> Result<(), QueueError> {
+        Ok(())
     }
 
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>, QueueError> {
-        // let diff = {
-        let _ = self.persistent_state_lock.lock().await;
-        let session_state_lock = self.session_state.lock().await;
+        let _session_lock = self.state_lock.lock().await;
 
-        let diff = session_state_lock.remove_diff(diff_id).await?;
-        // diff
-        // };
+        let diff = self
+            .diffs
+            .remove(diff_id)
+            .ok_or(anyhow!("diff not found"))?
+            .1;
 
         let for_shard = diff_id.shard;
 
-        self.persistent_state
-            .add_messages(*diff_id, diff.messages.clone())?;
+        let first_key = diff.messages.keys().next();
+        let last_key = diff.messages.keys().next_back();
+
+        // if for_shard.is_masterchain() {
+        //     for message in diff.messages.values() {
+        //         tracing::error!(
+        //             target: "local_debug",
+        //             "Commit diff : block_id_short = {:?}, message = {:?}",
+        //             for_shard,
+        //             message
+        //         );
+        //     }
+        // }
+
+        if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
+            if first_key.lt > last_key.lt {
+                panic!("first_key.lt > last_key.lt");
+            }
+
+            let snapshot = self.persistent_state.snapshot();
+
+            let _len = diff.messages.len();
+            let messages = self.session_state.retrieve_messages(
+                &snapshot,
+                for_shard,
+                (&first_key, &last_key),
+            )?;
+
+            // let len2= diff.messages.len();
+            let _count = self.persistent_state.add_messages(for_shard, messages)?;
+            // assert_eq!(len2 as usize, len);
+            // assert_eq!(count as usize, len);
+        }
 
         {
             let mut processed_uptos_lock = self.processed_uptos.lock().await;

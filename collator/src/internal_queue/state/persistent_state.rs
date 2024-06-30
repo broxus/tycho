@@ -1,15 +1,12 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent};
+use everscale_types::cell::HashBytes;
+use everscale_types::models::ShardIdent;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
+use weedb::OwnedSnapshot;
 
-use crate::internal_queue::state::persistent::persistent_state_iterator::PersistentStateIterator;
-use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator};
-use crate::internal_queue::types::EnqueuedMessage;
-use crate::types::IntAdrExt;
+use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator, StateIteratorImpl};
 
 // CONFIG
 
@@ -59,14 +56,17 @@ pub trait PersistentStateFactory {
 
 #[trait_variant::make(PersistentState: Send)]
 pub trait LocalPersistentState {
+    fn snapshot(&self) -> OwnedSnapshot;
+    fn state(&self);
     fn add_messages(
         &self,
-        block_id_short: BlockIdShort,
-        messages: Vec<Arc<EnqueuedMessage>>,
-    ) -> anyhow::Result<()>;
+        shard: ShardIdent,
+        messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
+    ) -> anyhow::Result<i32>;
 
     fn iterator(
         &self,
+        snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
         ranges: &FastHashMap<ShardIdent, ShardRange>,
     ) -> Box<dyn StateIterator>;
@@ -91,51 +91,42 @@ impl PersistentStateStdImpl {
 }
 
 impl PersistentState for PersistentStateStdImpl {
-    fn add_messages(
-        &self,
-        block_id_short: BlockIdShort,
-        messages: Vec<Arc<EnqueuedMessage>>,
-    ) -> anyhow::Result<()> {
-        let messages: Vec<(u64, HashBytes, HashBytes, Cell, HashBytes, i8)> = messages
-            .iter()
-            .map(|m| {
-                let dest_address = &m.info.dst;
-                let (address, workchain) = match dest_address {
-                    IntAddr::Std(std) => (std.address, std.workchain),
-                    IntAddr::Var(_) => {
-                        panic!("Var address not supported")
-                    }
-                };
+    fn snapshot(&self) -> OwnedSnapshot {
+        self.storage.internal_queue_storage().snapshot()
+    }
 
-                (
-                    m.info.created_lt,
-                    m.hash,
-                    m.info.dst.get_address(),
-                    m.cell.clone(),
-                    address,
-                    workchain,
-                )
-            })
-            .collect();
+    fn state(&self) {
         self.storage
             .internal_queue_storage()
-            .insert_messages(block_id_short.shard, &messages)?;
-        Ok(())
+            .print_cf_sizes()
+            .unwrap();
+    }
+
+    fn add_messages(
+        &self,
+        shard: ShardIdent,
+        messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
+    ) -> anyhow::Result<i32> {
+        let total_inserted = self
+            .storage
+            .internal_queue_storage()
+            .insert_messages_persistent(shard, messages)?;
+        Ok(total_inserted)
     }
 
     fn iterator(
         &self,
+        snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
         ranges: &FastHashMap<ShardIdent, ShardRange>,
     ) -> Box<dyn StateIterator> {
-        let snapshot = self.storage.internal_queue_storage().snapshot();
-
+        let shards = ranges.keys().cloned().collect::<Vec<_>>();
         let iter = self
             .storage
             .internal_queue_storage()
-            .build_iterator(&snapshot);
+            .build_iterator(&snapshot, shards);
 
-        Box::new(PersistentStateIterator::new(iter, receiver, ranges.clone()))
+        Box::new(StateIteratorImpl::new(iter, receiver, ranges.clone()))
     }
 
     fn delete_messages(
