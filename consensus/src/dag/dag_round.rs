@@ -10,7 +10,7 @@ use tycho_util::FastDashMap;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
-use crate::effects::{CurrentRoundContext, Effects, ValidateContext};
+use crate::effects::{Effects, EngineContext, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, PeerCount, Point, Round, ValidPoint};
@@ -131,7 +131,7 @@ impl DagRound {
         &self,
         point: &Point,
         downloader: &Downloader,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) -> Option<BoxFuture<'static, InclusionState>> {
         let _guard = effects.span().enter();
         assert_eq!(

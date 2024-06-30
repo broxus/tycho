@@ -151,7 +151,7 @@ def create_heatmap_quantile_panel(
 def create_row(name, metrics) -> RowPanel:
     layout = Layout(name)
     for i in range(0, len(metrics), 2):
-        chunk = metrics[i : i + 2]
+        chunk = metrics[i: i + 2]
         layout.row(chunk)
     return layout.row_panel
 
@@ -793,6 +793,176 @@ def collator_do_collate() -> RowPanel:
     return create_row("Collator Do Collate", metrics)
 
 
+def mempool() -> RowPanel:
+    metrics = [
+        create_gauge_panel(
+            "tycho_mempool_last_anchor_round",
+            "Adapter: last anchor round",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_engine_current_round",
+            "Engine: current round",
+        ),
+        # == Mempool adapter == #
+        create_counter_panel(
+            "tycho_mempool_externals_count_total",
+            "Adapter: unique externals count",
+        ),
+        create_counter_panel(
+            "tycho_mempool_externals_bytes_total",
+            "Adapter: unique externals size",
+            unit_format=UNITS.BYTES,
+        ),
+        create_counter_panel(
+            "tycho_mempool_duplicates_count_total",
+            "Adapter: removed duplicate externals count",
+        ),
+        create_counter_panel(
+            "tycho_mempool_duplicates_bytes_total",
+            "Adapter: removed duplicate externals size",
+            unit_format=UNITS.BYTES,
+        ),
+        # == Engine own point == #
+        create_counter_panel(
+            "tycho_mempool_point_payload_count",
+            "Engine: points payload count",
+        ),
+        create_counter_panel(
+            "tycho_mempool_point_payload_bytes",
+            "Engine: points payload size",
+            unit_format=UNITS.BYTES,
+        ),
+        create_counter_panel(
+            "tycho_mempool_points_produced",
+            "Engine: produced points (total)",
+        ),
+        create_counter_panel(
+            "tycho_mempool_points_no_proof_produced",
+            "Engine: produced points without proof",
+        ),
+        # == Engine == #
+        create_counter_panel(
+            "tycho_mempool_engine_rounds_skipped",
+            "Engine: skipped rounds",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_engine_round_duration",
+            "Engine: round duration",
+        ),
+        create_counter_panel(
+            "tycho_mempool_engine_produce_skipped",
+            "Engine: produce point skipped",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_engine_produce_duration",
+            "Engine: produce point task duration",
+        ),
+        # == Engine commit == #
+        create_counter_panel(
+            "tycho_mempool_commit_anchors",
+            "Engine: committed anchors",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_engine_commit_duration",
+            "Engine: commit duration",
+        ),
+        # FIXME next one needs max value over collection period, but no `gauge.set_max()`
+        create_gauge_panel(
+            "tycho_mempool_commit_latency_rounds",
+            "Engine: committed anchor rounds latency (max over batch) #fixme",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_commit_anchor_time_latency",
+            "Engine: committed anchor time latency (min over batch)",
+        )
+    ]
+    return create_row("Mempool", metrics)
+
+
+def mempool_components() -> RowPanel:
+    metrics = [
+        # == Verifier == #
+        create_counter_panel(
+            "tycho_mempool_verifier_verify",
+            "Verifier: verify() errors",
+            labels=['kind=~"kind"'],
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_verify_duration",
+            "Verifier: verify() point structure and author's sig",
+        ),
+        create_counter_panel(
+            "tycho_mempool_verifier_validate",
+            "Verifier: validate() errors and warnings",
+            labels=['kind=~"kind"'],
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_validate_duration",
+            "Verifier: validate() point dependencies in DAG and all-1 sigs"
+        ),
+        # == Download tasks - multiple per round == #
+        create_counter_panel(
+            "tycho_mempool_download_task_count",
+            "Downloader: tasks (unique point id)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_download_task_duration",
+            "Downloader: tasks duration"
+        ),
+        # FIXME next one needs max value over collection period, but no `gauge.set_max()`
+        create_gauge_panel(
+            "tycho_mempool_download_depth_rounds",
+            "Downloader: point depth (max rounds from current) #fixme"
+        ),
+        create_counter_panel(
+            "tycho_mempool_download_not_found_responses",
+            "Downloader: received None in response"
+        ),
+        create_counter_panel(
+            "tycho_mempool_download_aborted_on_exit_count",
+            "Downloader: queries aborted (on task completion)",
+        ),
+        create_counter_panel(
+            "tycho_mempool_download_query_failed_count",
+            "Downloader: queries network error"
+        ),
+        # == Network tasks - multiple per round == #
+        create_heatmap_panel(
+            "tycho_mempool_broadcast_query_dispatcher_duration",
+            "Dispatcher: Broadcast send"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_broadcast_query_responder_duration",
+            "Responder: Broadcast accept"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_signature_query_dispatcher_duration",
+            "Dispatcher: Signature request"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_download_query_dispatcher_duration",
+            "Dispatcher: Download request"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_signature_query_responder_data_duration",
+            "Responder: Signature send: send ready or sign or reject"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_signature_query_responder_pong_duration",
+            "Responder: Signature send: no point or try later"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_download_query_responder_some_duration",
+            "Responder: Download send: Some(point)"
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_download_query_responder_none_duration",
+            "Responder: Download send: None"
+        ),
+    ]
+    return create_row("Mempool components", metrics)
+
+
 def collator_execution_manager() -> RowPanel:
     metrics = [
         create_heatmap_panel(
@@ -862,6 +1032,8 @@ dashboard = Dashboard(
         collator_do_collate(),
         collator_finalize_block(),
         collator_execution_manager(),
+        mempool(),
+        mempool_components(),
         net_conn_manager(),
         net_request_handler(),
         net_peer(),

@@ -9,13 +9,14 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::Instrument;
 use tycho_network::PeerId;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use crate::dag::{DagRound, Verifier};
-use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
+use crate::effects::{AltFormat, DownloadContext, Effects, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
-use crate::intercom::{Dispatcher, PeerSchedule};
+use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
 use crate::models::{DagPoint, PeerCount, PointId};
 use crate::{dyn_event, Point};
 
@@ -32,7 +33,7 @@ struct DownloaderInner {
 #[derive(Debug)]
 struct PeerStatus {
     state: PeerState,
-    failed_attempts: usize,
+    failed_queries: usize,
     /// `true` for peers that depend on current point, i.e. included it directly;
     /// requests are made without waiting for next attempt;
     /// entries are never deleted, because they may be not resolved at the moment of insertion
@@ -64,9 +65,10 @@ impl Downloader {
         point_dag_round_strong: DagRound,
         dependers: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
-        parent_effects: Effects<ValidateContext>,
+        effects: Effects<DownloadContext>,
     ) -> DagPoint {
-        let effects = Effects::<DownloadContext>::new(&parent_effects, &point_id);
+        let _task_duration = HistogramGuard::begin(DownloadContext::TASK_DURATION);
+        metrics::counter!(DownloadContext::TASK_COUNT).increment(1);
         let span_guard = effects.span().enter();
         assert_eq!(
             point_id.location.round,
@@ -87,7 +89,7 @@ impl Downloader {
             .map(|(peer_id, state)| {
                 (*peer_id, PeerStatus {
                     state: *state,
-                    failed_attempts: 0,
+                    failed_queries: 0,
                     is_depender: peer_id == point_id.location.author,
                     is_in_flight: false,
                 })
@@ -98,7 +100,7 @@ impl Downloader {
             Entry::Vacant(vacant) if author_state == PeerState::Resolved => {
                 vacant.insert(PeerStatus {
                     state: author_state,
-                    failed_attempts: 0,
+                    failed_queries: 0,
                     is_depender: true, // as author is a depender, its 'NotFound' is not reliable
                     is_in_flight: false,
                 });
@@ -110,7 +112,7 @@ impl Downloader {
         drop(point_dag_round_strong);
         drop(span_guard);
 
-        let downloaded = DownloadTask {
+        let mut task = DownloadTask {
             parent: self.clone(),
             request: Dispatcher::point_by_id_request(&point_id),
             point_id: point_id.clone(),
@@ -123,10 +125,13 @@ impl Downloader {
             downloading: FuturesUnordered::new(),
             attempt: 0,
             skip_next_attempt: false,
-        }
-        .run(verified_broadcast)
-        .instrument(effects.span().clone())
-        .await;
+        };
+        let downloaded = task
+            .run(verified_broadcast)
+            .instrument(effects.span().clone())
+            .await;
+
+        effects.meter(&task);
 
         match downloaded {
             None => DagPoint::NotExists(Arc::new(point_id)),
@@ -140,7 +145,7 @@ impl Downloader {
                     point.clone(),
                     point_dag_round,
                     self.clone(),
-                    effects.span().clone(),
+                    Effects::<ValidateContext>::new(&effects, &point),
                 )
                 // this is the only `await` in the task, that resolves the download
                 .await;
@@ -166,7 +171,7 @@ impl Downloader {
 struct DownloadTask {
     parent: Downloader,
 
-    request: tycho_network::Request,
+    request: QueryKind,
     point_id: PointId,
 
     peer_count: PeerCount,
@@ -222,7 +227,7 @@ impl DownloadTask {
                 !state.is_in_flight
                     && state.state == PeerState::Resolved
                     // do not re-download immediately if already requested
-                    && state.failed_attempts == 0
+                    && state.failed_queries == 0
             }
             _ => false, // either already marked or requested and removed, no panic
         };
@@ -254,7 +259,7 @@ impl DownloadTask {
                     *peer_id,
                     (
                         // try every peer, until all are tried the same amount of times
-                        status.failed_attempts,
+                        status.failed_queries,
                         // try mandatory peers before others each loop
                         u8::from(!status.is_depender),
                         // randomise within group
@@ -305,7 +310,8 @@ impl DownloadTask {
                     .get_mut(peer_id)
                     .unwrap_or_else(|| panic!("Coding error: peer not in map {}", peer_id.alt()));
                 status.is_in_flight = false;
-                status.failed_attempts += 1;
+                status.failed_queries = status.failed_queries.saturating_add(1);
+                metrics::counter!(DownloadContext::FAILED_QUERY).increment(1);
                 tracing::warn!(
                     peer = display(peer_id.alt()),
                     error = display(network_err),
@@ -330,18 +336,19 @@ impl DownloadTask {
                     // if points are persisted in storage - it's a ban;
                     // else - peer evicted this point from its cache, as the point
                     // is at least DAG_DEPTH rounds older than current consensus round
-                    self.unreliable_peers += 1;
-                    self.reliably_not_found += 1; // FIXME remove this line when storage is ready
+                    self.unreliable_peers = self.unreliable_peers.saturating_add(1);
+                    // FIXME remove next line when storage is ready
+                    self.reliably_not_found = self.reliably_not_found.saturating_add(1);
                     tracing::warn!(peer = display(peer_id.alt()), "must have returned");
                 } else {
-                    self.reliably_not_found += 1;
+                    self.reliably_not_found = self.reliably_not_found.saturating_add(1);
                     tracing::debug!(peer = display(peer_id.alt()), "didn't return");
                 }
                 None
             }
             PointByIdResponse(Some(point)) if point.id() != self.point_id => {
                 // it's a ban
-                self.unreliable_peers += 1;
+                self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
                     author = display(point.body().location.author.alt()),
@@ -355,7 +362,7 @@ impl DownloadTask {
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
                     Err(dag_point) => {
                         // reliable peer won't return unverifiable point
-                        self.unreliable_peers += 1;
+                        self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                         assert!(
                             dag_point.valid().is_none(),
                             "Coding error: verify() cannot result into a valid point"
@@ -400,7 +407,7 @@ impl DownloadTask {
                 self.undone_peers.entry(peer_id).and_modify(|status| {
                     is_suitable = !status.is_in_flight
                         && status.is_depender
-                        && status.failed_attempts == 0
+                        && status.failed_queries == 0
                         && status.state == PeerState::Unknown
                         && new == PeerState::Resolved;
                     status.state = new;
@@ -418,17 +425,21 @@ impl DownloadTask {
         }
     }
 }
-struct DownloadContext;
-impl EffectsContext for DownloadContext {}
+impl DownloadContext {
+    const TASK_COUNT: &'static str = "tycho_mempool_download_task_count";
+    const TASK_DURATION: &'static str = "tycho_mempool_download_task_duration";
+    const FAILED_QUERY: &'static str = "tycho_mempool_download_query_failed_count";
+}
 impl Effects<DownloadContext> {
-    fn new(parent: &Effects<ValidateContext>, point_id: &PointId) -> Self {
-        Self::new_child(parent.span(), || {
-            tracing::error_span!(
-                "download",
-                author = display(point_id.location.author.alt()),
-                round = point_id.location.round.0,
-                digest = display(point_id.digest.alt()),
-            )
-        })
+    fn meter(&self, task: &DownloadTask) {
+        metrics::gauge!("tycho_mempool_download_depth_rounds")
+            .set(self.download_max_depth(task.point_id.location.round));
+        metrics::counter!("tycho_mempool_download_not_found_responses")
+            .increment(task.reliably_not_found as _);
+
+        metrics::counter!("tycho_mempool_download_aborted_on_exit_count")
+            .increment(task.downloading.len() as _);
+        // metrics::histogram!("tycho_mempool_download_unreliable_responses")
+        //     .set(task.unreliable_peers);
     }
 }

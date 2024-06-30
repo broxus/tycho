@@ -10,7 +10,7 @@ use tycho_util::FastHashSet;
 
 use crate::dag::{DagRound, InclusionState};
 use crate::dyn_event;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
+use crate::effects::{AltFormat, CollectorContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::broadcast::dto::ConsensusEvent;
 use crate::intercom::BroadcasterSignal;
@@ -50,13 +50,12 @@ impl Collector {
 
     pub async fn run(
         &mut self,
-        round_effects: Effects<CurrentRoundContext>,
+        effects: Effects<CollectorContext>,
         next_dag_round: DagRound, // r+1
         own_point_state: oneshot::Receiver<InclusionState>,
         collector_signal: mpsc::UnboundedSender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Round {
-        let effects = Effects::<CollectorContext>::new(&round_effects);
         let span_guard = effects.span().clone().entered();
 
         let current_dag_round = next_dag_round
@@ -373,14 +372,5 @@ impl CollectorTask {
             includes = self.includes_ready.len(),
             "inclusion validated"
         );
-    }
-}
-
-struct CollectorContext;
-impl EffectsContext for CollectorContext {}
-
-impl Effects<CollectorContext> {
-    fn new(parent: &Effects<CurrentRoundContext>) -> Self {
-        Self::new_child(parent.span(), || tracing::error_span!("collector"))
     }
 }

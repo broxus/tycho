@@ -6,12 +6,11 @@ use std::{array, mem};
 use futures_util::FutureExt;
 use rand::prelude::SliceRandom;
 use rand::SeedableRng;
-use tokio::sync::mpsc::UnboundedSender;
 use tycho_network::PeerId;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects};
+use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::{Digest, LinkField, Location, Point, PointId, Round, ValidPoint};
@@ -54,7 +53,7 @@ impl Dag {
         &mut self,
         next_round: Round,
         peer_schedule: &PeerSchedule,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) -> DagRound {
         let mut top = match self.rounds.last_key_value() {
             None => unreachable!("DAG cannot be empty if properly initialized"),
@@ -92,17 +91,12 @@ impl Dag {
     }
 
     /// result is in historical order
-    pub fn commit(
-        &mut self,
-        next_dag_round: DagRound,
-        committed: UnboundedSender<(Point, Vec<Point>)>,
-        effects: Effects<CurrentRoundContext>,
-    ) {
+    pub fn commit(&mut self, next_dag_round: DagRound) -> Vec<(Point, Vec<Point>)> {
         // finding the latest trigger must not take long, better try later
         // than wait long for some DagPoint::NotFound, slowing down whole Engine
-        let _parent_guard = effects.span().enter();
+        let mut ordered = Vec::new();
         let Some(latest_trigger) = Self::latest_trigger(&next_dag_round) else {
-            return;
+            return ordered;
         };
         let _span = tracing::error_span!(
             "commit trigger",
@@ -113,7 +107,6 @@ impl Dag {
         .entered();
         // when we have a valid trigger, its every point of it's subdag is validated successfully
         let mut anchor_stack = Self::anchor_stack(&latest_trigger, next_dag_round.clone());
-        let mut ordered = Vec::new();
         while let Some((anchor, anchor_round)) = anchor_stack.pop() {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
@@ -121,14 +114,7 @@ impl Dag {
             let committed = Self::gather_uncommitted(&anchor.point, anchor_round);
             ordered.push((anchor.point, committed));
         }
-
-        effects.log_committed(&ordered);
-
-        for points in ordered {
-            committed
-                .send(points) // not recoverable
-                .expect("Failed to send anchor commit message tp mpsc channel");
-        }
+        ordered
     }
 
     fn latest_trigger(next_dag_round: &DagRound) -> Option<ValidPoint> {

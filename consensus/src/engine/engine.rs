@@ -1,22 +1,26 @@
 use std::iter;
+use std::ops::Neg;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
-use tracing::Span;
 use tycho_network::{DhtClient, OverlayService, PeerId};
+use tycho_util::metrics::HistogramGuard;
 
 use crate::dag::{Dag, DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
-use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
+use crate::effects::{
+    AltFormat, ChainedRoundsContext, CollectorContext, Effects, EngineContext, ValidateContext,
+};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
     PeerSchedule, Responder,
 };
-use crate::models::{ConsensusRound, Link, Point, Round};
+use crate::models::{ConsensusRound, Link, Point, UnixTime};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -141,6 +145,7 @@ impl Engine {
         // may reference own point older than from a last round, as its payload may be not resend
         let mut last_own_point: Option<Arc<LastOwnPoint>> = None;
         loop {
+            let _round_duration = HistogramGuard::begin(EngineContext::ROUND_DURATION);
             let (prev_round_ok, current_dag_round, round_effects) = {
                 // treat atomic as lock - do not leak its value or repeat the `get()`
                 let consensus_round = self.consensus_round.get();
@@ -151,6 +156,9 @@ impl Engine {
                     consensus_round.0,
                     top_dag_round.round().0,
                 );
+                metrics::counter!(EngineContext::ROUNDS_SKIP)
+                    .increment((consensus_round.0 - top_dag_round.round().0) as _); // safe
+
                 // `true` if we collected enough dependencies and (optionally) signatures,
                 // so `next_dag_round` from the previous loop is the current now
                 let prev_round_ok = consensus_round == top_dag_round.round();
@@ -165,18 +173,19 @@ impl Engine {
                     // not greater than new `next_dag_round`, and any future round cannot exist.
 
                     let round_effects =
-                        Effects::<CurrentRoundContext>::new(&self.effects, consensus_round);
+                        Effects::<EngineContext>::new(&self.effects, consensus_round);
                     (prev_round_ok, top_dag_round, round_effects)
                 } else {
                     self.effects = Effects::<ChainedRoundsContext>::new(consensus_round);
                     let round_effects =
-                        Effects::<CurrentRoundContext>::new(&self.effects, consensus_round);
+                        Effects::<EngineContext>::new(&self.effects, consensus_round);
                     let current_dag_round =
                         self.dag
                             .fill_to_top(consensus_round, &self.peer_schedule, &round_effects);
                     (prev_round_ok, current_dag_round, round_effects)
                 }
             };
+            metrics::gauge!(EngineContext::CURRENT_ROUND).set(current_dag_round.round().0);
 
             let next_dag_round = self.dag.fill_to_top(
                 current_dag_round.round().next(),
@@ -218,12 +227,13 @@ impl Engine {
                 let downloader = self.downloader.clone();
                 async move {
                     if let Some(own_point) = own_point_fut.await.expect("new point producer") {
+                        EngineContext::own_point_metrics(&own_point);
                         let paranoid = Self::expect_own_trusted_point(
                             own_point_round,
                             own_point.clone(),
                             peer_schedule.clone(),
                             downloader,
-                            round_effects.span().clone(),
+                            round_effects.clone(),
                         );
                         let new_last_own_point = broadcaster
                             .run(
@@ -238,6 +248,7 @@ impl Engine {
                         paranoid.await.expect("verify own produced point");
                         (broadcaster, Some(new_last_own_point))
                     } else {
+                        metrics::counter!(EngineContext::PRODUCE_POINT_SKIP).increment(1);
                         collector_signal_rx.close();
                         bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                         (broadcaster, None)
@@ -248,22 +259,38 @@ impl Engine {
             let commit_run = tokio::task::spawn_blocking({
                 let mut dag = self.dag;
                 let next_dag_round = next_dag_round.clone();
-                let committed = self.committed.clone();
+                let committed_tx = self.committed.clone();
                 let round_effects = round_effects.clone();
                 move || {
-                    dag.commit(next_dag_round, committed, round_effects);
+                    let task_start = Instant::now();
+                    let _guard = round_effects.span().enter();
+
+                    let committed = dag.commit(next_dag_round);
+
+                    round_effects.commit_metrics(&committed);
+                    round_effects.log_committed(&committed);
+
+                    if !committed.is_empty() {
+                        for points in committed {
+                            committed_tx
+                                .send(points) // not recoverable
+                                .expect("Failed to send anchor commit message tp mpsc channel");
+                        }
+                        metrics::histogram!(EngineContext::COMMIT_DURATION)
+                            .record(task_start.elapsed());
+                    }
                     dag
                 }
             });
 
             let collector_run = tokio::spawn({
                 let mut collector = self.collector;
-                let round_effects = round_effects.clone();
+                let effects = Effects::<CollectorContext>::new(&round_effects);
                 let next_dag_round = next_dag_round.clone();
                 async move {
                     let next_round = collector
                         .run(
-                            round_effects,
+                            effects,
                             next_dag_round,
                             own_point_state_rx,
                             collector_signal_tx,
@@ -307,13 +334,14 @@ impl Engine {
     }
 
     fn produce(
-        round_effects: Effects<CurrentRoundContext>,
+        round_effects: Effects<EngineContext>,
         current_dag_round: DagRound,
         last_own_point: Option<Arc<LastOwnPoint>>,
         peer_schedule: PeerSchedule,
         own_point_state: oneshot::Sender<InclusionState>,
         input_buffer: InputBuffer,
     ) -> Option<Point> {
+        let task_start_time = Instant::now();
         if let Some(own_point) =
             Producer::new_point(&current_dag_round, last_own_point.as_deref(), &input_buffer)
         {
@@ -333,6 +361,8 @@ impl Engine {
                 round_effects.span(),
             );
             own_point_state.send(state).ok();
+            metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
+                .record(task_start_time.elapsed());
             Some(own_point)
         } else {
             tracing::info!(parent: round_effects.span(), "will not produce point");
@@ -356,21 +386,26 @@ impl Engine {
         point: Point,
         peer_schedule: PeerSchedule,
         downloader: Downloader,
-        span: Span,
+        effects: Effects<EngineContext>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             if let Err(dag_point) = Verifier::verify(&point, &peer_schedule) {
-                let _guard = span.enter();
+                let _guard = effects.span().enter();
                 panic!(
                     "Failed to verify own point: {} {:?}",
                     dag_point.alt(),
                     point.id().alt()
                 )
             }
-            let dag_point =
-                Verifier::validate(point.clone(), point_round, downloader, span.clone()).await;
+            let dag_point = Verifier::validate(
+                point.clone(),
+                point_round,
+                downloader,
+                Effects::<ValidateContext>::new(&effects, &point),
+            )
+            .await;
             if dag_point.trusted().is_none() {
-                let _guard = span.enter();
+                let _guard = effects.span().enter();
                 panic!(
                     "Failed to validate own point: {} {:?}",
                     dag_point.alt(),
@@ -381,23 +416,72 @@ impl Engine {
     }
 }
 
-struct ChainedRoundsContext;
-impl EffectsContext for ChainedRoundsContext {}
-impl Effects<ChainedRoundsContext> {
-    fn new(since: Round) -> Self {
-        Self::new_root(tracing::error_span!("rounds", "since" = since.0))
+impl EngineContext {
+    const CURRENT_ROUND: &'static str = "tycho_mempool_engine_current_round";
+    const ROUNDS_SKIP: &'static str = "tycho_mempool_engine_rounds_skipped";
+    const ROUND_DURATION: &'static str = "tycho_mempool_engine_round_duration";
+    const PRODUCE_POINT_SKIP: &'static str = "tycho_mempool_engine_produce_skipped";
+    const PRODUCE_POINT_DURATION: &'static str = "tycho_mempool_engine_produce_duration";
+    const COMMIT_DURATION: &'static str = "tycho_mempool_engine_commit_duration";
+
+    fn own_point_metrics(own_point: &Point) {
+        // FIXME all commented metrics needs `gauge.set_max()` or `gauge.set_min()`,
+        //  or (better) should be accumulated per round as standalone values
+        metrics::counter!("tycho_mempool_points_produced").increment(1);
+
+        if let Some(_proof) = &own_point.body().proof {
+            // metrics::gauge!("tycho_mempool_point_evidence_count_min").set_min(proof.evidence.len() as f64);
+            // metrics::gauge!("tycho_mempool_point_evidence_count_max").set_max(proof.evidence.len() as f64);
+        } else {
+            metrics::counter!("tycho_mempool_points_no_proof_produced").increment(1);
+        }
+
+        // metrics::gauge!("tycho_mempool_point_includes_count_min")
+        //     .set_min(own_point.body().includes.len() as f64);
+        // metrics::gauge!("tycho_mempool_point_includes_count_max")
+        //     .set_max(own_point.body().includes.len() as f64);
+        // metrics::gauge!("tycho_mempool_point_witness_count_max")
+        //     .set_max(own_point.body().witness.len() as f64);
+        //
+        // metrics::gauge!("tycho_mempool_point_last_anchor_proof_rounds_ago")
+        //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Proof).0);
+        // metrics::gauge!("tycho_mempool_point_last_anchor_trigger_rounds_ago")
+        //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Trigger).0);
+
+        metrics::counter!("tycho_mempool_point_payload_count")
+            .increment(own_point.body().payload.len() as _);
+        metrics::counter!("tycho_mempool_point_payload_bytes").increment(
+            own_point
+                .body()
+                .payload
+                .iter()
+                .fold(0, |acc, bytes| acc + bytes.len()) as _,
+        );
     }
 }
 
-impl EffectsContext for CurrentRoundContext {}
-impl Effects<CurrentRoundContext> {
-    fn new(parent: &Effects<ChainedRoundsContext>, current: Round) -> Self {
-        Self::new_child(parent.span(), || {
-            tracing::error_span!("round", "current" = current.0)
-        })
+impl Effects<EngineContext> {
+    fn commit_metrics(&self, committed: &[(Point, Vec<Point>)]) {
+        if !committed.is_empty() {
+            metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
+        }
+        if let Some((first_anchor, _)) = committed.first() {
+            metrics::gauge!("tycho_mempool_commit_latency_rounds")
+                .set(self.depth(first_anchor.body().location.round));
+        }
+        if let Some((last_anchor, _)) = committed.last() {
+            let now = UnixTime::now().as_u64();
+            let anchor_time = last_anchor.body().time.as_u64();
+            let latency = if now >= anchor_time {
+                Duration::from_millis(now - anchor_time).as_secs_f64()
+            } else {
+                Duration::from_millis(anchor_time - now).as_secs_f64().neg()
+            };
+            metrics::histogram!("tycho_mempool_commit_anchor_time_latency").record(latency);
+        }
     }
 
-    pub(crate) fn log_committed(&self, committed: &[(Point, Vec<Point>)]) {
+    fn log_committed(&self, committed: &[(Point, Vec<Point>)]) {
         if !committed.is_empty()
             && MempoolConfig::LOG_FLAVOR == LogFlavor::Truncated
             && tracing::enabled!(tracing::Level::DEBUG)

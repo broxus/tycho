@@ -10,7 +10,7 @@ use tycho_util::FastDashMap;
 use super::dto::ConsensusEvent;
 use crate::dag::{DagRound, Verifier};
 use crate::dyn_event;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects};
+use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -44,7 +44,7 @@ impl BroadcastFilter {
         point: &Point,
         top_dag_round: &DagRound,
         downloader: &Downloader,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) {
         self.inner
             .add(sender, point, top_dag_round, downloader, effects);
@@ -54,7 +54,7 @@ impl BroadcastFilter {
         &self,
         top_dag_round: &DagRound,
         downloader: &Downloader,
-        round_effects: &Effects<CurrentRoundContext>,
+        round_effects: &Effects<EngineContext>,
     ) {
         self.inner
             .advance_round(top_dag_round, downloader, round_effects);
@@ -114,7 +114,7 @@ impl BroadcastFilterInner {
         point: &Point,
         top_dag_round: &DagRound,
         downloader: &Downloader,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) {
         // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=2
 
@@ -243,7 +243,7 @@ impl BroadcastFilterInner {
         &self,
         top_dag_round: &DagRound,
         downloader: &Downloader,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) {
         // concurrent callers may break historical order of messages in channel
         // until new_round is channeled, and Collector can cope with it;
@@ -301,7 +301,7 @@ impl BroadcastFilterInner {
         point_round: &DagRound,
         point: &Point,
         downloader: &Downloader,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) {
         // this may be not the first insert into DAG - in case some node received it earlier,
         // and we've already received its point that references current broadcast

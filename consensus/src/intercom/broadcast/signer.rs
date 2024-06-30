@@ -1,7 +1,7 @@
 use tycho_network::PeerId;
 
 use crate::dag::DagRound;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects};
+use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::intercom::dto::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
 use crate::{dyn_event, MempoolConfig};
@@ -12,7 +12,7 @@ impl Signer {
         round: Round,
         author: &PeerId,
         next_dag_round: &DagRound,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) -> SignatureResponse {
         let response = Self::make_signature_response(round, author, next_dag_round);
         let level = match response {

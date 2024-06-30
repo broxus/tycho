@@ -11,7 +11,7 @@ use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
-use crate::effects::{CurrentRoundContext, Effects, ValidateContext};
+use crate::effects::{DownloadContext, Effects, EngineContext, ValidateContext};
 use crate::intercom::Downloader;
 use crate::models::{DagPoint, Digest, Location, PointId};
 use crate::Point;
@@ -60,15 +60,15 @@ impl DagPointFuture {
         point: &Point,
         state: &InclusionState,
         downloader: &Downloader,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) -> Self {
         let downloader = downloader.clone();
-        let span = effects.span().clone();
+        let effects = Effects::<ValidateContext>::new(effects, point);
         let point_dag_round = point_dag_round.downgrade();
         let point = point.clone();
         let state = state.clone();
         DagPointFuture(DagPointFutureType::Broadcast(Shared::new(JoinTask::new(
-            Verifier::validate(point, point_dag_round, downloader, span)
+            Verifier::validate(point, point_dag_round, downloader, effects)
                 .inspect(move |dag_point| state.init(dag_point)),
         ))))
     }
@@ -82,7 +82,6 @@ impl DagPointFuture {
         effects: &Effects<ValidateContext>,
     ) -> Self {
         let downloader = downloader.clone();
-        let effects = effects.clone();
         let state = state.clone();
         let point_dag_round = point_dag_round.clone();
         let (dependents_tx, dependents_rx) = mpsc::unbounded_channel();
@@ -94,6 +93,7 @@ impl DagPointFuture {
             },
             digest: digest.clone(),
         };
+        let effects = Effects::<DownloadContext>::new(effects, &point_id);
         DagPointFuture(DagPointFutureType::Download {
             task: Shared::new(JoinTask::new(
                 downloader
