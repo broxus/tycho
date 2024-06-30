@@ -299,9 +299,7 @@ impl ColumnFamilyOptions<Caches> for InternalMessages {
     }
 }
 
-/// Stores connections data
-/// - Key: `[u8; 32]` (block root hash)
-/// - Value: `BlockId (LE)`
+/// Stores persistent internal messages
 pub struct ShardsInternalMessages;
 impl ColumnFamily for ShardsInternalMessages {
     const NAME: &'static str = "shards_internal_messages";
@@ -312,6 +310,21 @@ impl ColumnFamily for ShardsInternalMessages {
 }
 
 impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+    }
+}
+/// Stores connections data
+pub struct ShardsInternalMessagesSession;
+impl ColumnFamily for ShardsInternalMessagesSession {
+    const NAME: &'static str = "shards_internal_messages_session";
+
+    fn read_options(opts: &mut ReadOptions) {
+        opts.set_verify_checksums(true);
+    }
+}
+
+impl ColumnFamilyOptions<Caches> for ShardsInternalMessagesSession {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
     }

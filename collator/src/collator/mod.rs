@@ -549,7 +549,7 @@ impl CollatorStdImpl {
 
     async fn load_has_internals(&mut self) -> Result<()> {
         let mut iterator = self.init_internal_mq_iterator().await?;
-        let has_internals = iterator.peek(true)?.is_some();
+        let has_internals = iterator.next(true)?.is_some();
         self.update_working_state_pending_internals(Some(has_internals))?;
         Ok(())
     }
@@ -593,10 +593,7 @@ impl CollatorStdImpl {
             });
         }
 
-        ranges_to.insert(ShardIdent::new_full(-1), InternalMessageKey {
-            lt: self.working_state().mc_data.mc_state_stuff().state().gen_lt,
-            hash: HashBytes([255; 32]),
-        });
+        ranges_to.insert(ShardIdent::new_full(-1), InternalMessageKey::MAX);
 
         // for current shard read until last message
         if !self.shard_id.is_masterchain() {

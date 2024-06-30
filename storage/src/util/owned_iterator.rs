@@ -32,10 +32,6 @@ impl OwnedIterator {
         self.inner.seek(key.to_vec().as_slice());
     }
 
-    pub fn seek_by_u8(&mut self, key: &[u8]) {
-        self.inner.seek(key);
-    }
-
     pub fn key(&self) -> Option<&[u8]> {
         self.inner.key()
     }

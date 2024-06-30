@@ -218,7 +218,7 @@ impl CollatorStdImpl {
         let mut block_limits_reached = false;
 
         // indicate that there are still unprocessed internals when collation loop finished
-        let mut has_pending_internals = false;
+        let has_pending_internals;
 
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
@@ -283,12 +283,7 @@ impl CollatorStdImpl {
                 }
             }
 
-            tracing::info!(target: tracing_targets::COLLATOR,
-                ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
-                elapsed = ?read_timer.elapsed(),
-                "read externals and internals");
-
-            tracing::info!(target: "local_debug",
+            tracing::debug!(target: tracing_targets::COLLATOR,
                 ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
                 elapsed = ?read_timer.elapsed(),
                 "read externals and internals");
@@ -461,7 +456,7 @@ impl CollatorStdImpl {
             metrics::gauge!("tycho_do_collate_exec_ticks_per_msgs_set", labels)
                 .set(exec_ticks_count as f64);
 
-            let timer = std::time::Instant::now();
+            timer = std::time::Instant::now();
 
             // commit messages to iterator only if set was fully processed
             if msgs_set_full_processed {
@@ -482,8 +477,6 @@ impl CollatorStdImpl {
                 collation_data.processed_upto.externals,
                 collation_data.processed_upto.processed_offset,
             );
-
-            has_pending_internals = internal_messages_iterator.peek(true)?.is_some();
 
             process_txs_total_elapsed += timer.elapsed();
 
@@ -525,11 +518,11 @@ impl CollatorStdImpl {
         let histogram_create_queue_diff =
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
 
+        internal_messages_iterator.fill_processed_upto();
+
         let diff = Arc::new(internal_messages_iterator.take_diff());
 
-        if diff.messages.len() == 0 {
-            tracing::info!(target: "local_debug", "empty diff {:?} {:?}", diff.processed_upto, collation_data.block_id_short);
-        }
+        has_pending_internals = internal_messages_iterator.next(true)?.is_some();
 
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {

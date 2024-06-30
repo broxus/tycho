@@ -9,8 +9,8 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
-use crate::internal_queue::state::persistent::persistent_state::PersistentStateStdImpl;
-use crate::internal_queue::state::session::session_state::SessionStateStdImpl;
+use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
+use crate::internal_queue::state::session_state::SessionStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::tracing_targets;
@@ -103,9 +103,11 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
 
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
-        tracing::trace!(
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
+            range = ?ranges,
             elapsed = %humantime::format_duration(time_start.elapsed()),
+            for_shard_id = %for_shard_id,
             "Iterator created"
         );
         Ok(Box::new(iterator))
@@ -115,6 +117,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         self.queue.apply_diff(diff, block_id_short).await?;
+
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
                         id = ?block_id_short,
@@ -131,7 +134,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let time = std::time::Instant::now();
 
         let diff = self.queue.commit_diff(diff_id).await?;
-        tracing::debug!(
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             id = ?diff_id,
             elapsed = ?time.elapsed(),
