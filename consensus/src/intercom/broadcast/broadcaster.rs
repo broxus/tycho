@@ -13,11 +13,11 @@ use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::dag::LastOwnPoint;
 use crate::dyn_event;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects, EffectsContext};
+use crate::effects::{AltFormat, BroadcasterContext, Effects, EngineContext};
 use crate::intercom::broadcast::collector::CollectorSignal;
 use crate::intercom::broadcast::utils::QueryResponses;
 use crate::intercom::dto::{BroadcastResponse, PeerState, SignatureResponse};
-use crate::intercom::{Dispatcher, PeerSchedule};
+use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
 use crate::models::{Digest, PeerCount, Point, Signature};
 
 #[derive(Copy, Clone, Debug)]
@@ -42,7 +42,7 @@ impl Broadcaster {
     }
     pub async fn run(
         &mut self,
-        round_effects: &Effects<CurrentRoundContext>,
+        round_effects: &Effects<EngineContext>,
         point: &Point,
         peer_schedule: &PeerSchedule,
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
@@ -115,11 +115,11 @@ struct BroadcasterTask {
     rejections: FastHashSet<PeerId>,
     signatures: FastHashMap<PeerId, Signature>,
 
-    bcast_request: tycho_network::Request,
+    bcast_request: QueryKind,
     bcast_current: QueryResponses<BroadcastResponse>,
     bcast_outdated: QueryResponses<BroadcastResponse>,
 
-    sig_request: tycho_network::Request,
+    sig_request: QueryKind,
     sig_peers: FastHashSet<PeerId>,
     sig_current: FuturesUnordered<BoxFuture<'static, (PeerId, Result<SignatureResponse>)>>,
 }
@@ -357,16 +357,5 @@ impl BroadcasterTask {
                 panic!("peer state update {err}");
             }
         }
-    }
-}
-
-struct BroadcasterContext;
-impl EffectsContext for BroadcasterContext {}
-
-impl Effects<BroadcasterContext> {
-    fn new(parent: &Effects<CurrentRoundContext>, digest: &Digest) -> Self {
-        Self::new_child(parent.span(), || {
-            tracing::error_span!("broadcaster", digest = display(digest.alt()))
-        })
     }
 }

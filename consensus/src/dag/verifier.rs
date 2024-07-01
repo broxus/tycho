@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tracing::{Instrument, Span};
+use tracing::Instrument;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
-use crate::effects::{AltFormat, Effects, EffectsContext, ValidateContext};
+use crate::effects::{Effects, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Link, LinkField, Location, PeerCount, Point, ValidPoint};
@@ -33,14 +34,17 @@ pub struct Verifier;
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
     pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), DagPoint> {
-        if !point.is_integrity_ok() {
+        let _task_duration = HistogramGuard::begin(ValidateContext::VERIFY_DURATION);
+        let result = if !point.is_integrity_ok() {
             Err(DagPoint::NotExists(Arc::new(point.id()))) // cannot use point body
         } else if !(point.is_well_formed() && Self::is_list_of_signers_ok(point, peer_schedule)) {
             // point links, etc. will not be used
             Err(DagPoint::Invalid(point.clone()))
         } else {
             Ok(())
-        }
+        };
+        ValidateContext::verified(&result);
+        result
     }
 
     /// must be called iff [`Self::verify`] succeeded
@@ -48,9 +52,9 @@ impl Verifier {
         point: Point,      // @ r+0
         r_0: WeakDagRound, // r+0
         downloader: Downloader,
-        parent_span: Span,
+        effects: Effects<ValidateContext>,
     ) -> DagPoint {
-        let effects = Effects::<ValidateContext>::new(&parent_span, &point);
+        let _task_duration = HistogramGuard::begin(ValidateContext::VALIDATE_DURATION);
         let span_guard = effects.span().enter();
 
         // for genesis point it's sufficient to be well-formed and pass integrity check,
@@ -62,7 +66,8 @@ impl Verifier {
         );
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot (in)validate point, no round in local DAG");
-            return DagPoint::Suspicious(ValidPoint::new(point.clone()));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new(point.clone()));
+            return ValidateContext::validated(dag_point);
         };
         assert_eq!(
             point.body().location.round,
@@ -90,12 +95,13 @@ impl Verifier {
                 &dependencies,
             ))
         {
-            return DagPoint::Invalid(point.clone());
+            return ValidateContext::validated(DagPoint::Invalid(point.clone()));
         }
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot (in)validate point's 'includes', no round in local DAG");
-            return DagPoint::Suspicious(ValidPoint::new(point.clone()));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new(point.clone()));
+            return ValidateContext::validated(dag_point);
         };
         Self::gather_deps(&point, &r_1, &downloader, &effects, &dependencies);
 
@@ -120,7 +126,7 @@ impl Verifier {
 
         let mut sig_checked = false;
         let mut deps_checked = None;
-        loop {
+        let dag_point = loop {
             tokio::select! {
                 is_sig_ok = &mut signatures_fut, if !sig_checked => if is_sig_ok {
                     match deps_checked {
@@ -140,7 +146,8 @@ impl Verifier {
                     }
                 }
             }
-        }
+        };
+        ValidateContext::validated(dag_point)
     }
 
     fn is_self_links_ok(
@@ -462,17 +469,35 @@ impl Verifier {
         true
     }
 }
-impl EffectsContext for ValidateContext {}
 
-impl Effects<ValidateContext> {
-    fn new(parent_span: &Span, point: &Point) -> Self {
-        Self::new_child(parent_span, || {
-            tracing::error_span!(
-                "validate",
-                author = display(point.body().location.author.alt()),
-                round = point.body().location.round.0,
-                digest = display(point.digest().alt()),
-            )
-        })
+impl ValidateContext {
+    const VERIFY_DURATION: &'static str = "tycho_mempool_verifier_verify_time";
+    const VALIDATE_DURATION: &'static str = "tycho_mempool_verifier_validate_time";
+
+    const ALL_LABELS: [(&'static str, &'static str); 3] = [
+        ("kind", "not_exists"),
+        ("kind", "invalid"),
+        ("kind", "suspicious"),
+    ];
+
+    fn verified(result: &Result<(), DagPoint>) {
+        let (labels, count) = match result {
+            Err(DagPoint::NotExists(_)) => (&Self::ALL_LABELS[0..=0], 1),
+            Err(DagPoint::Invalid(_)) => (&Self::ALL_LABELS[1..=1], 1),
+            Ok(_) => (&Self::ALL_LABELS[0..=1], 0),
+            _ => unreachable!("unexpected"),
+        };
+        metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
+    }
+
+    fn validated(result: DagPoint) -> DagPoint {
+        let (labels, count) = match result {
+            DagPoint::NotExists(_) => (&Self::ALL_LABELS[0..=0], 1),
+            DagPoint::Invalid(_) => (&Self::ALL_LABELS[1..=1], 1),
+            DagPoint::Suspicious(_) => (&Self::ALL_LABELS[2..=2], 1),
+            DagPoint::Trusted(_) => (&Self::ALL_LABELS[..], 0),
+        };
+        metrics::counter!("tycho_mempool_verifier_validate", labels).increment(count);
+        result
     }
 }

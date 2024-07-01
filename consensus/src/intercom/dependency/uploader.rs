@@ -3,7 +3,7 @@ use tycho_network::PeerId;
 
 use crate::dag::DagRound;
 use crate::dyn_event;
-use crate::effects::{AltFormat, CurrentRoundContext, Effects};
+use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::intercom::dto::PointByIdResponse;
 use crate::models::PointId;
 
@@ -14,7 +14,7 @@ impl Uploader {
         peer_id: &PeerId,
         point_id: &PointId,
         top_dag_round: &DagRound,
-        effects: &Effects<CurrentRoundContext>,
+        effects: &Effects<EngineContext>,
     ) -> PointByIdResponse {
         let dag_round = if point_id.location.round > top_dag_round.round() {
             None

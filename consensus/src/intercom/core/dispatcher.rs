@@ -2,6 +2,7 @@ use anyhow::Result;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tycho_network::{DhtClient, Network, OverlayId, OverlayService, PeerId, PrivateOverlay};
+use tycho_util::metrics::HistogramGuard;
 
 use crate::intercom::core::dto::{MPQuery, MPResponse};
 use crate::intercom::core::responder::Responder;
@@ -38,31 +39,33 @@ impl Dispatcher {
         (this, private_overlay)
     }
 
-    pub fn point_by_id_request(id: &PointId) -> tycho_network::Request {
-        (&MPQuery::PointById(id.clone())).into()
+    pub fn broadcast_request(point: &Point) -> QueryKind {
+        QueryKind::Broadcast((&MPQuery::Broadcast(point.clone())).into())
     }
 
-    pub fn signature_request(round: Round) -> tycho_network::Request {
-        (&MPQuery::Signature(round)).into()
+    pub fn signature_request(round: Round) -> QueryKind {
+        QueryKind::Signature((&MPQuery::Signature(round)).into())
     }
 
-    pub fn broadcast_request(point: &Point) -> tycho_network::Request {
-        (&MPQuery::Broadcast(point.clone())).into()
+    pub fn point_by_id_request(id: &PointId) -> QueryKind {
+        QueryKind::PointById((&MPQuery::PointById(id.clone())).into())
     }
 
     pub fn query<T>(
         &self,
         peer_id: &PeerId,
-        request: &tycho_network::Request,
+        request: &QueryKind,
     ) -> BoxFuture<'static, (PeerId, Result<T>)>
     where
         T: TryFrom<MPResponse, Error = anyhow::Error>,
     {
         let peer_id = *peer_id;
-        let request = request.clone();
+        let metric_name = request.metric_name();
+        let request = request.data().clone();
         let overlay = self.overlay.clone();
         let network = self.network.clone();
         async move {
+            let _task_duration = HistogramGuard::begin(metric_name);
             overlay
                 .query(&network, &peer_id, request)
                 .map(move |response| {
@@ -74,5 +77,28 @@ impl Dispatcher {
                 .await
         }
         .boxed()
+    }
+}
+
+pub enum QueryKind {
+    Broadcast(tycho_network::Request),
+    Signature(tycho_network::Request),
+    PointById(tycho_network::Request),
+}
+
+impl QueryKind {
+    fn data(&self) -> &tycho_network::Request {
+        match self {
+            QueryKind::Broadcast(data)
+            | QueryKind::Signature(data)
+            | QueryKind::PointById(data) => data,
+        }
+    }
+    fn metric_name(&self) -> &'static str {
+        match self {
+            QueryKind::Broadcast(_) => "tycho_mempool_broadcast_query_dispatcher_time",
+            QueryKind::Signature(_) => "tycho_mempool_signature_query_dispatcher_time",
+            QueryKind::PointById(_) => "tycho_mempool_download_query_dispatcher_time",
+        }
     }
 }
