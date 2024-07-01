@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tokio::sync::Mutex;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -141,17 +140,7 @@ where
         diff: Arc<QueueDiff>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
-        // let _session_lock = self.state_lock.lock().await;
-        // if block_id_short.shard.is_masterchain() {
-        //     for message in diff.messages.values() {
-        //         tracing::error!(
-        //             target: "local_debug",
-        //             "apply_diff: block_id_short = {:?}, message = {:?}",
-        //             block_id_short,
-        //             message
-        //         );
-        //     }
-        // }
+        let _session_lock = self.state_lock.lock().await;
         self.session_state
             .add_messages(block_id_short.shard, &diff.messages)?;
         self.diffs.insert(block_id_short, diff);
@@ -177,17 +166,6 @@ where
         let first_key = diff.messages.keys().next();
         let last_key = diff.messages.keys().next_back();
 
-        // if for_shard.is_masterchain() {
-        //     for message in diff.messages.values() {
-        //         tracing::error!(
-        //             target: "local_debug",
-        //             "Commit diff : block_id_short = {:?}, message = {:?}",
-        //             for_shard,
-        //             message
-        //         );
-        //     }
-        // }
-
         if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
             if first_key.lt > last_key.lt {
                 panic!("first_key.lt > last_key.lt");
@@ -195,42 +173,65 @@ where
 
             let snapshot = self.persistent_state.snapshot();
 
-            let _len = diff.messages.len();
+            let len = diff.messages.len();
             let messages = self.session_state.retrieve_messages(
                 &snapshot,
                 for_shard,
                 (&first_key, &last_key),
             )?;
 
-            // let len2= diff.messages.len();
-            let _count = self.persistent_state.add_messages(for_shard, messages)?;
-            // assert_eq!(len2 as usize, len);
-            // assert_eq!(count as usize, len);
+            let len2 = diff.messages.len();
+            let count = self.persistent_state.add_messages(for_shard, messages)?;
+            assert_eq!(len2 as usize, len);
+            assert_eq!(count as usize, len);
         }
 
-        {
-            let mut processed_uptos_lock = self.processed_uptos.lock().await;
-            processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
+        // for (shard, processed_upto) in diff.processed_upto.iter() {
+        //     // let mut processed_uptos_lock = self.processed_uptos.lock().await;
+        //     // processed_uptos_lock.insert(shard.clone(), range.clone());
+        //     let persistent_state = self.persistent_state.clone();
+        //
+        //     tracing::error!(
+        //         target: "local_debug",
+        //         "delete messages diff : reader = {:?}, in shard = {:?}, processed_upto = {:?}",
+        //         for_shard,
+        //         shard,
+        //         processed_upto
+        //     );
+        //
+        //     let mut delete_until = BTreeMap::new();
+        //     delete_until.insert(shard.clone(), (processed_upto.lt, processed_upto.hash));
+        //
+        //     tokio::spawn(async move {
+        //         persistent_state
+        //             .delete_messages(for_shard.clone(), delete_until)
+        //             .unwrap();
+        //     });
+        // }
 
-            if for_shard.is_masterchain() {
-                let processed_uptos = processed_uptos_lock.clone();
-                for processed_upto in processed_uptos {
-                    let persistent_state = self.persistent_state.clone();
-                    let delete_until: BTreeMap<ShardIdent, (u64, HashBytes)> = processed_upto
-                        .1
-                        .iter()
-                        .map(|(shard, range)| (shard.clone(), (range.lt, range.hash)))
-                        .collect();
-                    let for_shard = processed_upto.0;
-                    tokio::spawn(async move {
-                        persistent_state
-                            .delete_messages(for_shard, delete_until)
-                            .unwrap();
-                    });
-                }
-                processed_uptos_lock.clear();
-            }
-        }
+        // {
+        //     let mut processed_uptos_lock = self.processed_uptos.lock().await;
+        //     processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
+        //
+        //     if for_shard.is_masterchain() {
+        //         let processed_uptos = processed_uptos_lock.clone();
+        //         for processed_upto in processed_uptos {
+        //             let persistent_state = self.persistent_state.clone();
+        //             let delete_until: BTreeMap<ShardIdent, (u64, HashBytes)> = processed_upto
+        //                 .1
+        //                 .iter()
+        //                 .map(|(shard, range)| (shard.clone(), (range.lt, range.hash)))
+        //                 .collect();
+        //             let for_shard = processed_upto.0;
+        //             tokio::spawn(async move {
+        //                 persistent_state
+        //                     .delete_messages(for_shard, delete_until)
+        //                     .unwrap();
+        //             });
+        //         }
+        //         processed_uptos_lock.clear();
+        //     }
+        // }
 
         Ok(diff)
     }

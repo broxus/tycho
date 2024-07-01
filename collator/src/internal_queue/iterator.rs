@@ -10,6 +10,7 @@ use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
+use crate::tracing_targets;
 
 pub trait QueueIterator: Send {
     /// Get next message
@@ -147,7 +148,8 @@ impl QueueIterator for QueueIteratorImpl {
 
         let mut inserted_new_messages = 0;
 
-        tracing::debug!(target: crate::tracing_targets::MQ, "Current shard processed upto: {:?}",current_shard_processed_upto);
+        tracing::debug!(target: "local_debug", "Current shard processed upto: {:?}",current_shard_processed_upto);
+        tracing::debug!(target: "local_debug", "Commited position: {:?} {:?}", self.commited_current_position, self.for_shard);
 
         for message in self.new_messages.values() {
             let (dest_workchain, dest_account) = message.destination().unwrap();
@@ -176,8 +178,8 @@ impl QueueIterator for QueueIteratorImpl {
     }
 
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
-        tracing::debug!(
-            target: crate::tracing_targets::MQ,
+        tracing::info!(
+            target: tracing_targets::MQ,
             "Committing messages to the iterator. Messages count: {}",
             messages.len());
 
@@ -207,13 +209,13 @@ impl QueueIterator for QueueIteratorImpl {
     }
 
     fn fill_processed_upto(&mut self) {
-        let read_uptos = self.snapshot_manager.get_iter_upto();
-        for read_upto in read_uptos.iter() {
-            if let None = self.commited_current_position.get_mut(read_upto.0) {
-                self.commited_current_position
-                    .insert(*read_upto.0, read_upto.1.clone());
-            }
-        }
+        // let read_uptos = self.snapshot_manager.get_iter_upto();
+        // for read_upto in read_uptos.iter() {
+        //     if let None = self.commited_current_position.get_mut(read_upto.0) {
+        //         self.commited_current_position
+        //             .insert(*read_upto.0, read_upto.1.clone());
+        //     }
+        // }
     }
 }
 
