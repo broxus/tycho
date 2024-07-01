@@ -78,6 +78,7 @@ impl CollatorStdImpl {
             block_limits
         );
 
+        // TODO: get from anchor
         let created_by = self
             .last_imported_anchor_author
             .map(|a| HashBytes(a.0))
@@ -520,11 +521,9 @@ impl CollatorStdImpl {
         let histogram_create_queue_diff =
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
 
-        internal_messages_iterator.fill_processed_upto();
+        // internal_messages_iterator.fill_processed_upto();
 
         let diff = Arc::new(internal_messages_iterator.take_diff());
-
-        has_pending_internals = internal_messages_iterator.next(true)?.is_some();
 
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {
@@ -545,6 +544,8 @@ impl CollatorStdImpl {
         }
 
         let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+
+        has_pending_internals = internal_messages_iterator.next(true)?.is_some();
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();

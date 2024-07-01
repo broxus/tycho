@@ -338,7 +338,7 @@ impl InternalQueueStorage {
 
             let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
 
-            if current_position > end_key {
+            if current_position >= end_key {
                 break;
             }
 
