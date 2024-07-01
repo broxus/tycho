@@ -40,9 +40,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{
-    prepare_blocks_gc, BlockMetaData, Storage,
-};
+use tycho_storage::{prepare_blocks_gc, BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};

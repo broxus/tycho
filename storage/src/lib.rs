@@ -1,8 +1,8 @@
 use std::sync::Arc;
-use std::time::{Duration};
+use std::time::Duration;
 
 use anyhow::Result;
-use tycho_util::metrics::{spawn_metrics_loop};
+use tycho_util::metrics::spawn_metrics_loop;
 use weedb::rocksdb;
 
 pub use self::config::*;

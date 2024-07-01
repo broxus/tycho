@@ -1,6 +1,6 @@
 use std::ops::Add;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use everscale_types::models::BlockId;
@@ -27,7 +27,6 @@ impl GcSubscriber {
             tokio::sync::watch::channel::<Option<BlockStuff>>(None);
         let (state_sender, mut state_receiver) =
             tokio::sync::watch::channel::<Option<BlockStuff>>(None);
-
 
         tokio::spawn(Self::handle_block_gc(block_receiver, storage.clone()));
         tokio::spawn(Self::handle_state_gc(state_receiver, storage.clone()));
@@ -64,9 +63,7 @@ impl GcSubscriber {
         }
     }
 
-    async fn handle_archives_gc(
-        storage: Storage,
-    ) {
+    async fn handle_archives_gc(storage: Storage) {
         let options = match &storage.config().archives {
             Some(options) => options,
             None => return,
@@ -83,9 +80,9 @@ impl GcSubscriber {
         match options.gc_interval {
             ArchivesGcInterval::Manual => return,
             ArchivesGcInterval::PersistentStates { offset } => {
-
                 tokio::spawn(async move {
-                    let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
+                    let persistent_state_keeper =
+                        storage.runtime_storage().persistent_state_keeper();
 
                     loop {
                         tokio::pin!(let new_state_found = persistent_state_keeper.new_state_found(););
@@ -103,9 +100,9 @@ impl GcSubscriber {
                         };
 
                         tokio::select!(
-                        _ = tokio::time::sleep(duration_between_unix_and_instant(untile_time, Instant::now())) => {},
-                        _ = &mut new_state_found => continue,
-                    );
+                            _ = tokio::time::sleep(duration_between_unix_and_instant(untile_time, Instant::now())) => {},
+                            _ = &mut new_state_found => continue,
+                        );
 
                         if let Some(lower_bound) = &lower_bound {
                             loop {
@@ -117,10 +114,10 @@ impl GcSubscriber {
                                 }
 
                                 tracing::info!(
-                                until_id,
-                                lower_bound,
-                                "waiting for the archives barrier"
-                            );
+                                    until_id,
+                                    lower_bound,
+                                    "waiting for the archives barrier"
+                                );
                                 lower_bound_changed.await;
                             }
                         }
@@ -166,7 +163,8 @@ impl GcSubscriber {
                                 config.max_blocks_per_batch,
                                 config.kind,
                             )
-                            .await {
+                            .await
+                        {
                             tracing::error!("Failed to remove_outdated_blocks. {e:?}")
                         }
                     }
@@ -180,7 +178,6 @@ impl GcSubscriber {
         mut state_receiver: tokio::sync::watch::Receiver<Option<BlockStuff>>,
         storage: Storage,
     ) {
-
         loop {
             if let Err(e) = state_receiver.changed().await {
                 tracing::error!("Failed to receive block from block_receiver. {e:?}");
