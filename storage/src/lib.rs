@@ -254,8 +254,7 @@ impl Storage {
         self.inner
             .config
             .blocks_gc_config
-            .map(|x| x.enable_for_sync)
-            .unwrap_or(false)
+            .is_some_and(|x| x.enable_for_sync)
     }
 }
 

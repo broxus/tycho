@@ -1,3 +1,4 @@
+use std::arch::x86_64::_mm256_insert_epi16;
 use std::ops::Add;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -6,6 +7,7 @@ use std::time::Instant;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tokio::sync::Notify;
+use tokio::task::{AbortHandle, JoinHandle};
 use tycho_block_util::block::BlockStuff;
 use tycho_storage::{ArchivesGcInterval, Storage};
 use tycho_util::futures::JoinTask;
@@ -28,16 +30,26 @@ impl GcSubscriber {
         let (state_sender, mut state_receiver) =
             tokio::sync::watch::channel::<Option<BlockStuff>>(None);
 
-        tokio::spawn(Self::handle_block_gc(block_receiver, storage.clone()));
-        tokio::spawn(Self::handle_state_gc(state_receiver, storage.clone()));
-        tokio::spawn(Self::handle_archives_gc(storage.clone()));
+        let mut inner = Inner {
+            storage: storage.clone(),
+            block_sender,
+            state_sender,
+            handle_block_task: None,
+            handle_state_task: None,
+            archives_handle: None,
+        };
+
+        let hb_handle = Self::handle_block_gc(block_receiver, storage.clone()).abort_handle();
+        let hs_handle = Self::handle_state_gc(state_receiver, storage.clone()).abort_handle();
+        let archives_handle =
+            tokio::spawn(Self::handle_archives_gc(storage.clone())).abort_handle();
+
+        inner.handle_block_task = Some(hb_handle);
+        inner.handle_state_task = Some(hs_handle);
+        inner.archives_handle = Some(archives_handle);
 
         Self {
-            inner: Arc::new(Inner {
-                storage,
-                block_sender,
-                state_sender,
-            }),
+            inner: Arc::new(inner),
         }
     }
 
@@ -137,11 +149,11 @@ impl GcSubscriber {
         }
     }
 
-    async fn handle_block_gc(
+    fn handle_block_gc(
         mut block_receiver: tokio::sync::watch::Receiver<Option<BlockStuff>>,
         storage: Storage,
-    ) {
-        let _ = JoinTask::new(async move {
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
             loop {
                 if let Err(e) = block_receiver.changed().await {
                     tracing::error!("Failed to receive block from block_receiver. {e:?}");
@@ -150,56 +162,53 @@ impl GcSubscriber {
 
                 let block = block_receiver.borrow_and_update().clone();
 
-                match (
-                    block,
-                    storage.config().blocks_gc_config,
-                    storage.gc_enable_for_sync(),
-                ) {
-                    (Some(block_stuff), Some(config), true) => {
-                        if let Err(e) = storage
-                            .block_storage()
-                            .remove_outdated_blocks(
-                                &block_stuff.id(),
-                                config.max_blocks_per_batch,
-                                config.kind,
-                            )
-                            .await
-                        {
-                            tracing::error!("Failed to remove_outdated_blocks. {e:?}")
-                        }
-                    }
-                    _ => continue,
+                if !storage.gc_enable_for_sync() {
+                    continue;
+                }
+
+                let (Some(bs), Some(config)) = (block, storage.config().blocks_gc_config) else {
+                    continue;
+                };
+
+                if let Err(e) = storage
+                    .block_storage()
+                    .remove_outdated_blocks(&bs.id(), config.max_blocks_per_batch, config.kind)
+                    .await
+                {
+                    tracing::error!("Failed to remove_outdated_blocks. {e:?}")
                 }
             }
-        });
+        })
     }
 
-    async fn handle_state_gc(
+    fn handle_state_gc(
         mut state_receiver: tokio::sync::watch::Receiver<Option<BlockStuff>>,
         storage: Storage,
-    ) {
-        loop {
-            if let Err(e) = state_receiver.changed().await {
-                tracing::error!("Failed to receive block from block_receiver. {e:?}");
-                continue;
-            }
-
-            let Some(block) = state_receiver.borrow_and_update().clone() else {
-                continue;
-            };
-
-            let shard_state_storage = storage.shard_state_storage();
-
-            match shard_state_storage
-                .remove_outdated_states(block.id().seqno)
-                .await
-            {
-                Ok(_) => (),
-                Err(e) => {
-                    tracing::error!(target: "storage", "Failed to GC state: {e:?}");
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = state_receiver.changed().await {
+                    tracing::error!("Failed to receive block from block_receiver. {e:?}");
+                    continue;
                 }
-            };
-        }
+
+                let Some(block) = state_receiver.borrow_and_update().clone() else {
+                    continue;
+                };
+
+                let shard_state_storage = storage.shard_state_storage();
+
+                match shard_state_storage
+                    .remove_outdated_states(block.id().seqno)
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(e) => {
+                        tracing::error!(target: "storage", "Failed to GC state: {e:?}");
+                    }
+                };
+            }
+        })
     }
 }
 
@@ -207,6 +216,26 @@ struct Inner {
     storage: Storage,
     block_sender: tokio::sync::watch::Sender<Option<BlockStuff>>,
     state_sender: tokio::sync::watch::Sender<Option<BlockStuff>>,
+
+    handle_block_task: Option<AbortHandle>,
+    handle_state_task: Option<AbortHandle>,
+    archives_handle: Option<AbortHandle>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle_block_task.take() {
+            handle.abort();
+        }
+
+        if let Some(handle) = self.handle_state_task.take() {
+            handle.abort();
+        }
+
+        if let Some(handle) = self.archives_handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl StateSubscriber for GcSubscriber {

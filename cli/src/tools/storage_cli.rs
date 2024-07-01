@@ -86,7 +86,7 @@ impl GetNextKeyBlockIdsCmd {
                     );
                 }
                 for i in ids.iter() {
-                    println!("Found block {i}")
+                    println!("Found block {i}");
                 }
                 Ok(())
             }
@@ -125,7 +125,7 @@ impl BlockCmd {
                     println!("Block proof {}\n", hex::encode(&proof));
                 }
                 _ => {
-                    println!("Found block empty {}\n", &self.block_id)
+                    println!("Found block empty {}\n", &self.block_id);
                 }
             };
             Ok::<(), anyhow::Error>(())
