@@ -9,6 +9,8 @@ use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
+use tycho_storage::BlockMetaData;
+use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
@@ -545,13 +547,28 @@ impl CollatorStdImpl {
         let finalize_block_timer = std::time::Instant::now();
         // TODO: Move into rayon
         tokio::task::yield_now().await;
-        let (candidate, new_state_stuff) =
+        let (candidate, new_state_root) =
             tokio::task::block_in_place(|| self.finalize_block(&mut collation_data, exec_manager))?;
         tokio::task::yield_now().await;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
         metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
+
+        let new_state_stuff = JoinTask::new({
+            let block_id = candidate.block_id;
+            let meta = BlockMetaData {
+                is_key_block: false, // TODO: set from collation data
+                gen_utime: collation_data.gen_utime,
+                mc_ref_seqno: None,
+            };
+            let adapter = self.state_node_adapter.clone();
+            async move {
+                adapter
+                    .store_state_root(&block_id, meta, new_state_root)
+                    .await
+            }
+        });
 
         let apply_queue_diff_elapsed;
         {
@@ -569,6 +586,8 @@ impl CollatorStdImpl {
                 "tycho_do_collate_handle_block_candidate_time",
                 labels,
             );
+
+            let new_state_stuff = new_state_stuff.await?;
 
             // return collation result
             self.listener

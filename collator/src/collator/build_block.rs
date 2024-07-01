@@ -8,7 +8,6 @@ use humantime::format_duration;
 use tokio::time::Instant;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
-use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::ExecutionManager;
@@ -22,7 +21,7 @@ impl CollatorStdImpl {
         &mut self,
         collation_data: &mut BlockCollationData,
         exec_manager: ExecutionManager,
-    ) -> Result<(Box<BlockCandidate>, ShardStateStuff)> {
+    ) -> Result<(Box<BlockCandidate>, Cell)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
@@ -217,6 +216,7 @@ impl CollatorStdImpl {
         }
 
         let build_state_update_elapsed;
+        let new_state_root;
         let state_update = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
@@ -261,7 +261,7 @@ impl CollatorStdImpl {
 
             // TODO: update smc on hard fork
 
-            let new_state_root = CellBuilder::build_from(&new_observable_state)?;
+            new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
             // calc merkle update
             let merkle_update = create_merkle_update(
@@ -364,22 +364,6 @@ impl CollatorStdImpl {
         // build new shard state using merkle update
         // to get updated state without UsageTree
 
-        let build_new_state_elapsed;
-        let new_state_stuff = {
-            let histogram = HistogramGuard::begin_with_labels(
-                "tycho_collator_finalize_build_new_state_time",
-                labels,
-            );
-
-            let pure_prev_state_root = prev_shard_data.pure_state_root();
-            let new_state_root = state_update.apply(pure_prev_state_root)?;
-            let new_state_stuff =
-                ShardStateStuff::from_root(&new_block_id, new_state_root, &self.state_tracker)?;
-
-            build_new_state_elapsed = histogram.finish();
-            new_state_stuff
-        };
-
         let total_elapsed = histogram.finish();
 
         tracing::debug!(
@@ -391,11 +375,10 @@ impl CollatorStdImpl {
             build_mc_state_extra = %format_duration(build_mc_state_extra_elapsed),
             build_state_update = %format_duration(build_state_update_elapsed),
             build_block = %format_duration(build_block_elapsed),
-            build_new_state = %format_duration(build_new_state_elapsed),
             "finalize block timings"
         );
 
-        Ok((block_candidate, new_state_stuff))
+        Ok((block_candidate, new_state_root))
     }
 
     fn create_mc_state_extra(

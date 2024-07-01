@@ -696,7 +696,7 @@ impl BlockStorage {
     }
 
     fn compute_archive_id(&self, handle: &BlockHandle) -> u32 {
-        let mc_seqno = handle.masterchain_ref_seqno();
+        let mc_seqno = handle.mc_ref_seqno();
 
         if handle.meta().is_key_block() {
             self.archive_ids.write().insert(mc_seqno);

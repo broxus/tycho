@@ -213,7 +213,7 @@ impl PrevData {
         let pure_prev_state_root = prev_states[0].root_cell();
         let pure_prev_states = prev_states.clone();
 
-        let usage_tree = UsageTree::new(UsageTreeMode::OnDataAccess);
+        let usage_tree = UsageTree::new(UsageTreeMode::OnLoad);
         let observable_root = usage_tree.track(pure_prev_state_root);
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),

@@ -92,15 +92,23 @@ impl ShardStateStorage {
             return Err(ShardStateStorageError::BlockHandleIdMismatch.into());
         }
 
+        self.store_state_root(handle, state.root_cell().clone())
+            .await
+    }
+
+    pub async fn store_state_root(&self, handle: &BlockHandle, root_cell: Cell) -> Result<bool> {
+        if handle.meta().has_state() {
+            return Ok(false);
+        }
+
+        let _gc_lock = self.gc_lock.lock().await;
+
+        // Double check if the state is already stored
         if handle.meta().has_state() {
             return Ok(false);
         }
 
         let block_id = *handle.id();
-        let root_cell = state.root_cell().clone();
-
-        let _gc_lock = self.gc_lock.lock().await;
-
         let raw_db = self.db.rocksdb().clone();
         let cf = self.db.shard_states.get_unbounded_cf();
         let cell_storage = self.cell_storage.clone();

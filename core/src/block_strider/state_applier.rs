@@ -53,50 +53,62 @@ where
             .get_block_handle(&cx.mc_block_id, &cx.block, &cx.archive_data)
             .await?;
 
-        // Load previous states
-        let (prev_root_cell, handles) = {
-            let (prev_id, prev_id_alt) = cx
-                .block
-                .construct_prev_id()
-                .context("failed to construct prev id")?;
-
-            let prev_state = state_storage
-                .load_state(&prev_id)
+        let (state, handles) = if handle.meta().has_state() {
+            // Fast path when state is already applied
+            let state = state_storage
+                .load_state(handle.id())
                 .await
-                .context("failed to load prev shard state")?;
+                .context("failed to load applied shard state")?;
 
-            match &prev_id_alt {
-                Some(prev_id) => {
-                    let prev_state_alt = state_storage
-                        .load_state(prev_id)
-                        .await
-                        .context("failed to load alt prev shard state")?;
+            (state, RefMcStateHandles::Skip)
+        } else {
+            // Load previous states
+            let (prev_root_cell, handles) = {
+                let (prev_id, prev_id_alt) = cx
+                    .block
+                    .construct_prev_id()
+                    .context("failed to construct prev id")?;
 
-                    let cell = ShardStateStuff::construct_split_root(
-                        prev_state.root_cell().clone(),
-                        prev_state_alt.root_cell().clone(),
-                    )?;
-                    let left_handle = prev_state.ref_mc_state_handle().clone();
-                    let right_handle = prev_state_alt.ref_mc_state_handle().clone();
-                    (cell, RefMcStateHandles::Split(left_handle, right_handle))
+                let prev_state = state_storage
+                    .load_state(&prev_id)
+                    .await
+                    .context("failed to load prev shard state")?;
+
+                match &prev_id_alt {
+                    Some(prev_id) => {
+                        let prev_state_alt = state_storage
+                            .load_state(prev_id)
+                            .await
+                            .context("failed to load alt prev shard state")?;
+
+                        let cell = ShardStateStuff::construct_split_root(
+                            prev_state.root_cell().clone(),
+                            prev_state_alt.root_cell().clone(),
+                        )?;
+                        let left_handle = prev_state.ref_mc_state_handle().clone();
+                        let right_handle = prev_state_alt.ref_mc_state_handle().clone();
+                        (cell, RefMcStateHandles::Split(left_handle, right_handle))
+                    }
+                    None => {
+                        let cell = prev_state.root_cell().clone();
+                        let handle = prev_state.ref_mc_state_handle().clone();
+                        (cell, RefMcStateHandles::Single(handle))
+                    }
                 }
-                None => {
-                    let cell = prev_state.root_cell().clone();
-                    let handle = prev_state.ref_mc_state_handle().clone();
-                    (cell, RefMcStateHandles::Single(handle))
-                }
-            }
+            };
+
+            // Apply state
+            let state = self
+                .compute_and_store_state_update(
+                    &cx.block,
+                    &self.inner.mc_state_tracker,
+                    &handle,
+                    prev_root_cell,
+                )
+                .await?;
+
+            (state, handles)
         };
-
-        // Apply state
-        let state = self
-            .compute_and_store_state_update(
-                &cx.block,
-                &self.inner.mc_state_tracker,
-                &handle,
-                prev_root_cell,
-            )
-            .await?;
 
         Ok(ShardApplierPrepared {
             handle,
@@ -174,9 +186,14 @@ where
             .store_block_data(block, archive_data, BlockMetaData {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: mc_block_id.seqno,
+                mc_ref_seqno: Some(mc_block_id.seqno),
             })
             .await?;
+
+        self.inner
+            .storage
+            .block_handle_storage()
+            .assign_mc_ref_seq_no(&res.handle, mc_block_id.seqno);
 
         Ok(res.handle)
     }
@@ -249,6 +266,7 @@ pub struct ShardApplierPrepared {
 }
 
 enum RefMcStateHandles {
+    Skip,
     Split(
         #[allow(unused)] RefMcStateHandle,
         #[allow(unused)] RefMcStateHandle,
