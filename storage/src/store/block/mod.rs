@@ -738,7 +738,8 @@ impl BlockStorage {
             }
         }
 
-        if mc_seqno.saturating_sub(archive_id) >= ARCHIVE_PACKAGE_SIZE {
+        let is_first_archive = archive_id == 0 && prev_id.is_none();
+        if is_first_archive || mc_seqno.saturating_sub(archive_id) >= ARCHIVE_PACKAGE_SIZE {
             self.archive_ids.write().insert(mc_seqno);
             archive_id = mc_seqno;
         }

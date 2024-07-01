@@ -6,7 +6,7 @@ use everscale_types::models::{Block, BlockId, BlockProof};
 pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
 pub use self::writer::ArchiveWritersPool;
-use crate::block::{BlockProofStuff, BlockStuff};
+use crate::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 
 mod entry_id;
 mod reader;
@@ -17,7 +17,7 @@ pub const ARCHIVE_ENTRY_PREFIX: [u8; 2] = u16::to_le_bytes(0x1e8b);
 pub const ARCHIVE_ENTRY_HEADER_LEN: usize = ARCHIVE_ENTRY_PREFIX.len() + 2 + 4; // magic + filename len + data len
 
 pub struct Archive {
-    pub mc_block_ids: BTreeMap<u32, BlockId>,
+    pub block_ids: BTreeMap<u32, BlockId>,
     pub blocks: BTreeMap<BlockId, ArchiveDataEntry>,
 }
 
@@ -26,7 +26,7 @@ impl Archive {
         let reader = ArchiveReader::new(data)?;
 
         let mut res = Archive {
-            mc_block_ids: Default::default(),
+            block_ids: Default::default(),
             blocks: Default::default(),
         };
 
@@ -36,26 +36,27 @@ impl Archive {
                 ArchiveEntryId::Block(id) => {
                     let block = BlockStuff::deserialize_checked(&id, entry.data)?.into_block();
 
+                    res.block_ids.insert(id.seqno, id);
+
                     res.blocks.entry(id).or_default().block =
                         Some(WithArchiveData::new(block, entry.data.to_vec()));
-
-                    if id.shard.is_masterchain() {
-                        res.mc_block_ids.insert(id.seqno, id);
-                    }
                 }
                 ArchiveEntryId::Proof(id) if id.shard.workchain() == -1 => {
                     let proof = BlockProofStuff::deserialize(&id, entry.data, false)?
                         .proof()
                         .clone();
 
+                    res.block_ids.insert(id.seqno, id);
+
                     res.blocks.entry(id).or_default().proof =
                         Some(WithArchiveData::new(proof, entry.data.to_vec()));
-                    res.mc_block_ids.insert(id.seqno, id);
                 }
                 ArchiveEntryId::ProofLink(id) if id.shard.workchain() != -1 => {
                     let proof = BlockProofStuff::deserialize(&id, entry.data, true)?
                         .proof()
                         .clone();
+
+                    res.block_ids.insert(id.seqno, id);
 
                     res.blocks.entry(id).or_default().proof =
                         Some(WithArchiveData::new(proof, entry.data.to_vec()));
@@ -67,18 +68,25 @@ impl Archive {
         Ok(res)
     }
 
-    pub fn lowest_mc_id(&self) -> Option<&BlockId> {
-        self.mc_block_ids.values().next()
-    }
-
-    pub fn highest_mc_id(&self) -> Option<&BlockId> {
-        self.mc_block_ids.values().next_back()
-    }
-
-    pub fn get_block_by_id(&self, id: &BlockId) -> Option<Block> {
+    pub fn get_block_by_id(&self, id: &BlockId) -> Option<BlockStuffAug> {
         self.blocks
             .get(id)
             .and_then(|entry| entry.block.as_ref().map(|x| x.data.clone()))
+            .map(|b| {
+                BlockStuffAug::new(
+                    BlockStuff::with_block(*id, b.clone()),
+                    everscale_types::boc::BocRepr::encode(b).unwrap(),
+                )
+            })
+    }
+
+    pub fn get_block_by_seqno(&self, seqno: u32) -> Option<BlockStuffAug> {
+        let id = match self.block_ids.get(&seqno) {
+            Some(id) => id,
+            None => return None,
+        };
+
+        self.get_block_by_id(id)
     }
 }
 

@@ -278,6 +278,8 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
         })
         .peekable();
 
+    let mut last_known_key_block = None;
+
     // Iterate all key blocks in reverse order (from the latest to the oldest)
     while let Some(handle) = key_blocks.next().transpose()? {
         let handle_utime = handle.meta().gen_utime();
@@ -307,6 +309,8 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
 
         // Skip too new key blocks
         if handle_utime + INTITAL_SYNC_TIME_SECONDS > now_sec() {
+            last_known_key_block = Some(handle);
+
             tracing::debug!("ignoring state: too new");
             continue;
         }
@@ -316,7 +320,14 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
         return Ok(handle);
     }
 
-    Err(ColdBootError::PersistentShardStateNotFound.into())
+    let key_block = last_known_key_block.ok_or(ColdBootError::PersistentShardStateNotFound)?;
+
+    tracing::warn!(
+        seq_no = key_block.id().seqno,
+        "starting from too new key block"
+    );
+
+    Ok(key_block)
 }
 
 async fn import_zerostates(
@@ -488,7 +499,7 @@ async fn load_or_download_state(
 
             let (handle, _) = storage.block_handle_storage().create_or_load_handle(
                 block_id,
-                BlockMetaData::zero_state(state.state().gen_utime, true),
+                BlockMetaData::zero_state(state.state().gen_utime, block_id.is_masterchain()),
             );
 
             storage

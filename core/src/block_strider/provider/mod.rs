@@ -7,16 +7,13 @@ use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
 use tycho_block_util::block::BlockStuffAug;
 
-#[cfg(any(test, feature = "test"))]
 pub use self::archive_provider::ArchiveBlockProvider;
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::storage_provider::StorageBlockProvider;
 
+mod archive_provider;
 mod blockchain_provider;
 mod storage_provider;
-
-#[cfg(any(test, feature = "test"))]
-mod archive_provider;
 
 pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
 
