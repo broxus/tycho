@@ -60,4 +60,3 @@ type BlockIdCache = (Mutex<Option<BlockId>>, &'static [u8]);
 
 const LAST_MC_BLOCK_ID: &[u8] = b"last_mc_block";
 const INIT_MC_BLOCK_ID: &[u8] = b"init_mc_block";
-const SHARDS_MC_BLOCK_ID: &[u8] = b"shards_mc_block";
