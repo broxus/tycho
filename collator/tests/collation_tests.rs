@@ -87,8 +87,6 @@ async fn test_collation_process_on_stubs() {
         mc_block_min_interval: Duration::from_secs(1),
         max_mc_block_delta_from_bc_to_await_own: 2,
         max_uncommitted_chain_length: 31,
-        uncommitted_chain_to_import_next_anchor: 8,
-        block_txs_limit: 14,
         msgs_exec_params: MsgsExecutionParams {
             set_size: 9,
             min_externals_per_set: 3,
@@ -96,6 +94,7 @@ async fn test_collation_process_on_stubs() {
             group_vert_size: 2,
             ..Default::default()
         },
+        ..Default::default()
     };
 
     tracing::info!("Trying to start CollationManager");

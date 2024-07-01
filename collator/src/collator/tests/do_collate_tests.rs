@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
-use everscale_types::models::{ExternalsProcessedUpto, ShardIdent};
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 
-use crate::collator::types::{BlockCollationData, CachedMempoolAnchor};
+use crate::collator::types::{BlockCollationDataBuilder, CachedMempoolAnchor};
 use crate::collator::CollatorStdImpl;
 use crate::mempool::_stub_create_random_anchor_with_stub_externals;
 use crate::test_utils::try_init_test_tracing;
@@ -40,7 +41,18 @@ fn test_read_next_externals() {
         }));
     }
 
-    let mut collation_data = BlockCollationData::default();
+    let mut collation_data = BlockCollationDataBuilder::new(
+        BlockIdShort {
+            shard: shard_id,
+            seqno: 1,
+        },
+        HashBytes::ZERO,
+        1,
+        0,
+        Default::default(),
+        HashBytes::ZERO,
+    )
+    .build(0, DEFAULT_BLOCK_LIMITS);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -145,3 +157,21 @@ fn test_read_next_externals() {
     let kv = anchors_cache.front();
     assert!(kv.is_none());
 }
+
+const DEFAULT_BLOCK_LIMITS: BlockLimits = BlockLimits {
+    bytes: BlockParamLimits {
+        underload: 131072,
+        soft_limit: 524288,
+        hard_limit: 1048576,
+    },
+    gas: BlockParamLimits {
+        underload: 900000,
+        soft_limit: 1200000,
+        hard_limit: 2000000,
+    },
+    lt_delta: BlockParamLimits {
+        underload: 1000,
+        soft_limit: 5000,
+        hard_limit: 10000,
+    },
+};
