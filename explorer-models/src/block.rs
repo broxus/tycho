@@ -105,9 +105,19 @@ impl NumBinds for KeyBlockConfig {
 }
 
 #[cfg(not(feature = "csv"))]
-type JsonValue = serde_json::Value;
+pub type JsonValue = serde_json::Value;
 #[cfg(feature = "csv")]
-type JsonValue = String;
+pub type JsonValue = String;
+
+#[cfg(feature = "csv")]
+pub fn to_json_value<T: Serialize>(value: &T) -> JsonValue {
+    serde_json::to_string(value).unwrap()
+}
+
+#[cfg(not(feature = "csv"))]
+pub fn to_json_value<T: Serialize>(value: &T) -> JsonValue {
+    serde_json::to_value(value).unwrap()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
