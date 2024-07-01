@@ -41,7 +41,7 @@ use tycho_network::{
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::{
-    prepare_blocks_gc, start_archives_gc, start_states_gc, BlockMetaData, Storage,
+    prepare_blocks_gc, BlockMetaData, Storage,
 };
 use tycho_util::FastHashMap;
 
@@ -685,10 +685,6 @@ impl Node {
             ))
             .build();
 
-        if let Err(e) = start_archives_gc(self.storage.clone()) {
-            tracing::error!("Failed to execute archives gc. {e:?}");
-        };
-        start_states_gc(self.storage.clone());
         prepare_blocks_gc(self.storage.clone()).await?;
 
         // Run block strider

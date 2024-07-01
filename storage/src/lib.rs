@@ -1,12 +1,8 @@
-use std::ops::Add;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 
 use anyhow::Result;
-use tokio::sync::Notify;
-use tycho_util::metrics::{spawn_metrics_loop, HistogramGuard};
-use tycho_util::time::now_sec;
+use tycho_util::metrics::{spawn_metrics_loop};
 use weedb::rocksdb;
 
 pub use self::config::*;
@@ -29,7 +25,6 @@ mod util {
     mod stored_value;
 }
 
-use tycho_util::time::duration_between_unix_and_instant;
 // TODO move to weedb
 pub use util::owned_iterator;
 
@@ -290,151 +285,6 @@ pub async fn prepare_blocks_gc(storage: Storage) -> Result<()> {
             blocks_gc_config.kind,
         )
         .await
-}
-
-pub fn start_states_gc(storage: Storage) {
-    let options = match storage.inner.config.states_gc_options {
-        Some(options) => options,
-        None => return,
-    };
-
-    // Compute gc timestamp aligned to `interval_sec` with an offset `offset_sec`
-    let mut gc_at = now_sec() as u64;
-    gc_at = (gc_at - gc_at % options.interval_sec) + options.offset_sec;
-
-    tokio::spawn(async move {
-        'gc: loop {
-            // Shift gc timestamp one iteration further
-            gc_at += options.interval_sec;
-
-            // Check if there is some time left before the GC
-            if let Some(interval) = gc_at.checked_sub(now_sec() as u64) {
-                tokio::time::sleep(Duration::from_secs(interval)).await;
-            }
-
-            let start = Instant::now();
-            let mut shards_gc_lock = storage
-                .runtime_storage()
-                .persistent_state_keeper()
-                .shards_gc_lock()
-                .subscribe();
-            metrics::histogram!("tycho_storage_shard_states_gc_lock_time").record(start.elapsed());
-
-            let block_id = loop {
-                // Load the latest block id
-                let block_id = match storage.node_state().load_last_mc_block_id() {
-                    Some(block_id) => block_id,
-                    None => {
-                        tracing::error!(target: "storage", "Failed to load last shards client block. Block not found");
-                        continue 'gc;
-                    }
-                };
-
-                if *shards_gc_lock.borrow_and_update() {
-                    if shards_gc_lock.changed().await.is_err() {
-                        tracing::warn!(target: "storage", "Stopping shard states GC");
-                        return;
-                    }
-                    continue;
-                }
-
-                break block_id;
-            };
-
-            // subscriber.on_before_states_gc(&block_id).await;
-
-            let _histogram = HistogramGuard::begin("tycho_storage_remove_outdated_states_time");
-            let shard_state_storage = storage.shard_state_storage();
-            let _ = match shard_state_storage
-                .remove_outdated_states(block_id.seqno)
-                .await
-            {
-                Ok(top_blocks) => Some(top_blocks),
-                Err(e) => {
-                    tracing::error!(target: "storage", "Failed to GC state: {e:?}");
-                    None
-                }
-            };
-
-            // subscriber.on_after_states_gc(&block_id, &top_blocks).await;
-        }
-    });
-}
-
-pub fn start_archives_gc(storage: Storage) -> Result<()> {
-    let options = match &storage.inner.config.archives {
-        Some(options) => options,
-        None => return Ok(()),
-    };
-
-    struct LowerBound {
-        archive_id: AtomicU32,
-        changed: Notify,
-    }
-
-    #[allow(unused_mut)]
-    let mut lower_bound = None::<Arc<LowerBound>>;
-
-    match options.gc_interval {
-        ArchivesGcInterval::Manual => Ok(()),
-        ArchivesGcInterval::PersistentStates { offset } => {
-            // let engine = self.clone();
-            tokio::spawn(async move {
-                let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
-
-                loop {
-                    tokio::pin!(let new_state_found = persistent_state_keeper.new_state_found(););
-
-                    let (until_id, untile_time) = match persistent_state_keeper.current() {
-                        Some(state) => {
-                            let untile_time =
-                                (state.meta().gen_utime() as u64).add(offset.as_secs());
-                            (state.id().seqno, untile_time)
-                        }
-                        None => {
-                            new_state_found.await;
-                            continue;
-                        }
-                    };
-
-                    tokio::select!(
-                        _ = tokio::time::sleep(duration_between_unix_and_instant(untile_time, Instant::now())) => {},
-                        _ = &mut new_state_found => continue,
-                    );
-
-                    if let Some(lower_bound) = &lower_bound {
-                        loop {
-                            tokio::pin!(let lower_bound_changed = lower_bound.changed.notified(););
-
-                            let lower_bound = lower_bound.archive_id.load(Ordering::Acquire);
-                            if until_id < lower_bound {
-                                break;
-                            }
-
-                            tracing::info!(
-                                until_id,
-                                lower_bound,
-                                "waiting for the archives barrier"
-                            );
-                            lower_bound_changed.await;
-                        }
-                    }
-
-                    if let Err(e) = storage
-                        .block_storage()
-                        .remove_outdated_archives(until_id)
-                        .await
-                    {
-                        tracing::error!("failed to remove outdated archives: {e:?}");
-                    }
-
-                    new_state_found.await;
-                }
-            });
-
-            Ok(())
-        }
-    }
 }
 
 struct Inner {
