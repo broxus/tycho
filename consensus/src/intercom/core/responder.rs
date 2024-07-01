@@ -117,18 +117,18 @@ impl Responder {
 impl EngineContext {
     fn response_metrics(mp_response: &MPResponse, elapsed: Duration) {
         let metric_name = match mp_response {
-            MPResponse::Broadcast => "tycho_mempool_broadcast_query_responder_duration",
+            MPResponse::Broadcast => "tycho_mempool_broadcast_query_responder_time",
             MPResponse::Signature(SignatureResponse::NoPoint | SignatureResponse::TryLater) => {
-                "tycho_mempool_signature_query_responder_pong_duration"
+                "tycho_mempool_signature_query_responder_pong_time"
             }
             MPResponse::Signature(
                 SignatureResponse::Signature(_) | SignatureResponse::Rejected(_),
-            ) => "tycho_mempool_signature_query_responder_data_duration",
+            ) => "tycho_mempool_signature_query_responder_data_time",
             MPResponse::PointById(PointByIdResponse(Some(_))) => {
-                "tycho_mempool_download_query_responder_some_duration"
+                "tycho_mempool_download_query_responder_some_time"
             }
             MPResponse::PointById(PointByIdResponse(None)) => {
-                "tycho_mempool_download_query_responder_none_duration"
+                "tycho_mempool_download_query_responder_none_time"
             }
         };
         metrics::histogram!(metric_name).record(elapsed);

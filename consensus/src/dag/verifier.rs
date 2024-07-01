@@ -471,32 +471,33 @@ impl Verifier {
 }
 
 impl ValidateContext {
-    const VERIFY_DURATION: &'static str = "tycho_mempool_verifier_verify_duration";
-    const VALIDATE_DURATION: &'static str = "tycho_mempool_verifier_validate_duration";
+    const VERIFY_DURATION: &'static str = "tycho_mempool_verifier_verify_time";
+    const VALIDATE_DURATION: &'static str = "tycho_mempool_verifier_validate_time";
+
+    const ALL_LABELS: [(&'static str, &'static str); 3] = [
+        ("kind", "not_exists"),
+        ("kind", "invalid"),
+        ("kind", "suspicious"),
+    ];
 
     fn verified(result: &Result<(), DagPoint>) {
-        if let Err(dag_point) = result {
-            Self::meter(dag_point, "tycho_mempool_verifier_verify");
+        let (labels, count) = match result {
+            Err(DagPoint::NotExists(_)) => (&Self::ALL_LABELS[0..=0], 1),
+            Err(DagPoint::Invalid(_)) => (&Self::ALL_LABELS[1..=1], 1),
+            Ok(_) => (&Self::ALL_LABELS[0..=1], 0),
+            _ => unreachable!("unexpected"),
         };
+        metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
     }
 
     fn validated(result: DagPoint) -> DagPoint {
-        Self::meter(&result, "tycho_mempool_verifier_validate");
-        result
-    }
-
-    fn meter(dag_point: &DagPoint, metric_name: &'static str) {
-        match dag_point {
-            DagPoint::Trusted(_) => {}
-            DagPoint::Suspicious(_) => {
-                metrics::counter!(metric_name, &[("kind", "suspicious")]).increment(1);
-            }
-            DagPoint::Invalid(_) => {
-                metrics::counter!(metric_name, &[("kind", "invalid")]).increment(1);
-            }
-            DagPoint::NotExists(_) => {
-                metrics::counter!(metric_name, &[("kind", "not_exists")]).increment(1);
-            }
+        let (labels, count) = match result {
+            DagPoint::NotExists(_) => (&Self::ALL_LABELS[0..=0], 1),
+            DagPoint::Invalid(_) => (&Self::ALL_LABELS[1..=1], 1),
+            DagPoint::Suspicious(_) => (&Self::ALL_LABELS[2..=2], 1),
+            DagPoint::Trusted(_) => (&Self::ALL_LABELS[..], 0),
         };
+        metrics::counter!("tycho_mempool_verifier_validate", labels).increment(count);
+        result
     }
 }

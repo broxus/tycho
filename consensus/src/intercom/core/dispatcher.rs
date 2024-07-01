@@ -96,9 +96,9 @@ impl QueryKind {
     }
     fn metric_name(&self) -> &'static str {
         match self {
-            QueryKind::Broadcast(_) => "tycho_mempool_broadcast_query_dispatcher_duration",
-            QueryKind::Signature(_) => "tycho_mempool_signature_query_dispatcher_duration",
-            QueryKind::PointById(_) => "tycho_mempool_download_query_dispatcher_duration",
+            QueryKind::Broadcast(_) => "tycho_mempool_broadcast_query_dispatcher_time",
+            QueryKind::Signature(_) => "tycho_mempool_signature_query_dispatcher_time",
+            QueryKind::PointById(_) => "tycho_mempool_download_query_dispatcher_time",
         }
     }
 }

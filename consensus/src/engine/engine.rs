@@ -226,8 +226,10 @@ impl Engine {
                 let mut broadcaster = self.broadcaster;
                 let downloader = self.downloader.clone();
                 async move {
-                    if let Some(own_point) = own_point_fut.await.expect("new point producer") {
-                        EngineContext::own_point_metrics(&own_point);
+                    let own_point = own_point_fut.await.expect("new point producer");
+                    EngineContext::own_point_metrics(own_point.as_ref());
+
+                    if let Some(own_point) = own_point {
                         let paranoid = Self::expect_own_trusted_point(
                             own_point_round,
                             own_point.clone(),
@@ -248,7 +250,6 @@ impl Engine {
                         paranoid.await.expect("verify own produced point");
                         (broadcaster, Some(new_last_own_point))
                     } else {
-                        metrics::counter!(EngineContext::PRODUCE_POINT_SKIP).increment(1);
                         collector_signal_rx.close();
                         bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                         (broadcaster, None)
@@ -419,22 +420,44 @@ impl Engine {
 impl EngineContext {
     const CURRENT_ROUND: &'static str = "tycho_mempool_engine_current_round";
     const ROUNDS_SKIP: &'static str = "tycho_mempool_engine_rounds_skipped";
-    const ROUND_DURATION: &'static str = "tycho_mempool_engine_round_duration";
-    const PRODUCE_POINT_SKIP: &'static str = "tycho_mempool_engine_produce_skipped";
-    const PRODUCE_POINT_DURATION: &'static str = "tycho_mempool_engine_produce_duration";
-    const COMMIT_DURATION: &'static str = "tycho_mempool_engine_commit_duration";
+    const ROUND_DURATION: &'static str = "tycho_mempool_engine_round_time";
+    const PRODUCE_POINT_DURATION: &'static str = "tycho_mempool_engine_produce_time";
+    const COMMIT_DURATION: &'static str = "tycho_mempool_engine_commit_time";
 
-    fn own_point_metrics(own_point: &Point) {
+    fn own_point_metrics(own_point: Option<&Point>) {
+        // refresh counters with zeros every round
+        metrics::counter!("tycho_mempool_engine_produce_skipped")
+            .increment(own_point.is_none() as _);
+        metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_some() as _);
+
+        let proof = own_point.and_then(|point| point.body().proof.as_ref());
+        metrics::counter!("tycho_mempool_points_no_proof_produced").increment(proof.is_none() as _);
+
+        metrics::counter!("tycho_mempool_point_payload_count")
+            .increment(own_point.map_or(0, |point| point.body().payload.len() as _));
+        let payload_bytes = own_point.map(|point| {
+            point
+                .body()
+                .payload
+                .iter()
+                .fold(0, |acc, bytes| acc + bytes.len()) as _
+        });
+        metrics::counter!("tycho_mempool_point_payload_bytes")
+            .increment(payload_bytes.unwrap_or_default());
+
         // FIXME all commented metrics needs `gauge.set_max()` or `gauge.set_min()`,
         //  or (better) should be accumulated per round as standalone values
-        metrics::counter!("tycho_mempool_points_produced").increment(1);
 
-        if let Some(_proof) = &own_point.body().proof {
-            // metrics::gauge!("tycho_mempool_point_evidence_count_min").set_min(proof.evidence.len() as f64);
-            // metrics::gauge!("tycho_mempool_point_evidence_count_max").set_max(proof.evidence.len() as f64);
-        } else {
-            metrics::counter!("tycho_mempool_points_no_proof_produced").increment(1);
-        }
+        // let Some(own_point) = own_point else {
+        //     return;
+        // };
+
+        // if let Some(_proof) = &own_point.body().proof {
+        //     metrics::gauge!("tycho_mempool_point_evidence_count_min")
+        //         .set_min(proof.evidence.len() as f64);
+        //     metrics::gauge!("tycho_mempool_point_evidence_count_max")
+        //         .set_max(proof.evidence.len() as f64);
+        // }
 
         // metrics::gauge!("tycho_mempool_point_includes_count_min")
         //     .set_min(own_point.body().includes.len() as f64);
@@ -447,24 +470,13 @@ impl EngineContext {
         //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Proof).0);
         // metrics::gauge!("tycho_mempool_point_last_anchor_trigger_rounds_ago")
         //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Trigger).0);
-
-        metrics::counter!("tycho_mempool_point_payload_count")
-            .increment(own_point.body().payload.len() as _);
-        metrics::counter!("tycho_mempool_point_payload_bytes").increment(
-            own_point
-                .body()
-                .payload
-                .iter()
-                .fold(0, |acc, bytes| acc + bytes.len()) as _,
-        );
     }
 }
 
 impl Effects<EngineContext> {
     fn commit_metrics(&self, committed: &[(Point, Vec<Point>)]) {
-        if !committed.is_empty() {
-            metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
-        }
+        metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
+
         if let Some((first_anchor, _)) = committed.first() {
             metrics::gauge!("tycho_mempool_commit_latency_rounds")
                 .set(self.depth(first_anchor.body().location.round));
@@ -477,7 +489,7 @@ impl Effects<EngineContext> {
             } else {
                 Duration::from_millis(anchor_time - now).as_secs_f64().neg()
             };
-            metrics::histogram!("tycho_mempool_commit_anchor_time_latency").record(latency);
+            metrics::histogram!("tycho_mempool_commit_anchor_latency_time").record(latency);
         }
     }
 

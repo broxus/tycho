@@ -68,7 +68,7 @@ impl Downloader {
         effects: Effects<DownloadContext>,
     ) -> DagPoint {
         let _task_duration = HistogramGuard::begin(DownloadContext::TASK_DURATION);
-        metrics::counter!(DownloadContext::TASK_COUNT).increment(1);
+        effects.meter_start(&point_id);
         let span_guard = effects.span().enter();
         assert_eq!(
             point_id.location.round,
@@ -131,7 +131,7 @@ impl Downloader {
             .instrument(effects.span().clone())
             .await;
 
-        effects.meter(&task);
+        DownloadContext::meter_task(&task);
 
         match downloaded {
             None => DagPoint::NotExists(Arc::new(point_id)),
@@ -426,20 +426,26 @@ impl DownloadTask {
     }
 }
 impl DownloadContext {
-    const TASK_COUNT: &'static str = "tycho_mempool_download_task_count";
-    const TASK_DURATION: &'static str = "tycho_mempool_download_task_duration";
+    const TASK_DURATION: &'static str = "tycho_mempool_download_task_time";
     const FAILED_QUERY: &'static str = "tycho_mempool_download_query_failed_count";
-}
-impl Effects<DownloadContext> {
-    fn meter(&self, task: &DownloadTask) {
-        metrics::gauge!("tycho_mempool_download_depth_rounds")
-            .set(self.download_max_depth(task.point_id.location.round));
+
+    fn meter_task(task: &DownloadTask) {
         metrics::counter!("tycho_mempool_download_not_found_responses")
             .increment(task.reliably_not_found as _);
-
         metrics::counter!("tycho_mempool_download_aborted_on_exit_count")
             .increment(task.downloading.len() as _);
         // metrics::histogram!("tycho_mempool_download_unreliable_responses")
         //     .set(task.unreliable_peers);
+    }
+}
+impl Effects<DownloadContext> {
+    fn meter_start(&self, point_id: &PointId) {
+        metrics::counter!("tycho_mempool_download_task_count").increment(1);
+
+        metrics::counter!(DownloadContext::FAILED_QUERY).increment(0); // refresh
+
+        // FIXME not guaranteed to show the latest value as rounds advance, but better than nothing
+        metrics::gauge!("tycho_mempool_download_depth_rounds")
+            .set(self.download_max_depth(point_id.location.round));
     }
 }
