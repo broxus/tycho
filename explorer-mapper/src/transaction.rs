@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use everscale_types::boc::{Boc, BocRepr};
+use everscale_types::boc::Boc;
 use everscale_types::cell::CellBuilder;
 use everscale_types::models::{
     AccountStatus, BlockId, ComputePhase, Message, MsgInfo, OrdinaryTxInfo, Transaction, TxInfo,
@@ -40,15 +40,16 @@ pub fn process_transaction(
     }
 
     let (tx_type, aborted, exit_code, result_code) = match &description {
-        TxInfo::Ordinary(tx) => {
-            let exit_code = match &tx.compute_phase {
+        TxInfo::Ordinary(info) => {
+            let exit_code = match &info.compute_phase {
                 ComputePhase::Skipped(_) => None,
                 ComputePhase::Executed(res) => Some(res.exit_code),
             };
-            let result_code = tx.action_phase.as_ref().map(|phase| phase.result_code);
+            let result_code = info.action_phase.as_ref().map(|phase| phase.result_code);
+            balance_change -= compute_total_transaction_fees(tx, info) as i128;
             (
                 TransactionType::Ordinary,
-                tx.aborted,
+                info.aborted,
                 exit_code,
                 result_code,
             )

@@ -61,7 +61,7 @@ pub struct Block {
     // Brief meta
     #[cfg_attr(feature = "csv", serde(with = "serde_csv_bool"))]
     pub is_key_block: bool,
-    pub transaction_count: u16,
+    pub transaction_count: u16, // todo: is u16 ok?
     pub gen_utime: u32,
     pub gen_software_version: u32,
 
@@ -209,11 +209,11 @@ pub struct ValueFlow {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountBlockInfo {
-    wc: i32,
-    address: Hash,
-    old_hash: Hash,
-    new_hash: Hash,
-    transaction_count: u16,
+    pub wc: i32,
+    pub address: Hash,
+    pub old_hash: Hash,
+    pub new_hash: Hash,
+    pub transaction_count: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -263,8 +263,6 @@ pub struct ShardDescrInfo {
     pub fees_collected: u64,
     #[serde(with = "serde_string")]
     pub funds_created: u64,
-    #[cfg(feature = "venom")]
-    pub collators_info: Option<ShardCollators>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
