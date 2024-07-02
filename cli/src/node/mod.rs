@@ -42,7 +42,6 @@ use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
-use crate::node::boot::cold_boot;
 use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
@@ -300,6 +299,7 @@ pub struct Node {
     state_tracker: MinRefMcStateTracker,
 
     rpc_config: Option<RpcConfig>,
+    archive_block_provider_config: ArchiveBlockProviderConfig,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     collation_config: CollationConfig,
@@ -420,6 +420,7 @@ impl Node {
             blockchain_rpc_client,
             state_tracker,
             rpc_config: node_config.rpc,
+            archive_block_provider_config: node_config.archive_block_provider,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
         })
@@ -579,7 +580,8 @@ impl Node {
         // TODO: add to block_strider later
         let _archive_block_provider = ArchiveBlockProvider::new(
             self.blockchain_rpc_client.clone(),
-            self.storage.root().path(),
+            self.storage.clone(),
+            self.archive_block_provider_config.clone(),
         );
 
         let block_strider = BlockStrider::builder()

@@ -3,11 +3,19 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use anyhow::Context;
+use arc_swap::ArcSwapAny;
 use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
-use tycho_block_util::block::BlockStuffAug;
+use tycho_block_util::block::{
+    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockStuff,
+    BlockStuffAug,
+};
+use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::Storage;
+use tycho_util::metrics::HistogramGuard;
 
-pub use self::archive_provider::ArchiveBlockProvider;
+pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::storage_provider::StorageBlockProvider;
 
@@ -155,6 +163,101 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for (T1, T2) {
                 },
             }
         })
+    }
+}
+
+pub struct ProofChecker {
+    storage: Storage,
+    cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
+    cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
+}
+
+impl ProofChecker {
+    pub fn new(storage: Storage) -> Self {
+        Self {
+            storage,
+            cached_zerostate: Default::default(),
+            cached_prev_key_block_proof: Default::default(),
+        }
+    }
+
+    pub async fn check_proof(
+        &self,
+        block: &BlockStuff,
+        proof: &BlockProofStuff,
+    ) -> anyhow::Result<()> {
+        // TODO: Add labels with shard?
+        let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
+
+        anyhow::ensure!(
+            block.id() == &proof.proof().proof_for,
+            "proof_for and block id mismatch: proof_for={}, block_id={}",
+            proof.proof().proof_for,
+            block.id(),
+        );
+
+        let is_masterchain = block.id().is_masterchain();
+        anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
+
+        let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
+        if !is_masterchain {
+            return Ok(());
+        }
+
+        let handle = {
+            let block_handles = self.storage.block_handle_storage();
+            block_handles
+                .load_key_block_handle(virt_block_info.prev_key_block_seqno)
+                .context("failed to load prev key block handle")?
+        };
+
+        if handle.id().seqno == 0 {
+            let zerostate = 'zerostate: {
+                if let Some(zerostate) = self.cached_zerostate.load_full() {
+                    break 'zerostate zerostate;
+                }
+
+                let shard_states = self.storage.shard_state_storage();
+                let zerostate = shard_states
+                    .load_state(handle.id())
+                    .await
+                    .context("failed to load mc zerostate")?;
+
+                self.cached_zerostate.store(Some(zerostate.clone()));
+
+                zerostate
+            };
+
+            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)
+        } else {
+            let prev_key_block_proof = 'prev_proof: {
+                if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
+                    if &prev_proof.as_ref().proof_for == handle.id() {
+                        break 'prev_proof prev_proof;
+                    }
+                }
+
+                let blocks = self.storage.block_storage();
+                let prev_key_block_proof = blocks
+                    .load_block_proof(&handle, false)
+                    .await
+                    .context("failed to load prev key block proof")?;
+
+                // NOTE: Assume that there is only one masterchain block using this cache.
+                // Otherwise, it will be overwritten every time. Maybe use `rcu`.
+                self.cached_prev_key_block_proof
+                    .store(Some(prev_key_block_proof.clone()));
+
+                prev_key_block_proof
+            };
+
+            check_with_prev_key_block_proof(
+                proof,
+                &prev_key_block_proof,
+                &virt_block,
+                &virt_block_info,
+            )
+        }
     }
 }
 

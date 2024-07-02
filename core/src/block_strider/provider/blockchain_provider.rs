@@ -1,19 +1,13 @@
 use std::time::Duration;
 
-use anyhow::Context;
-use arc_swap::ArcSwapAny;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tycho_block_util::block::{
-    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockStuff,
-};
-use tycho_block_util::state::ShardStateStuff;
+use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_storage::Storage;
-use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
-use crate::block_strider::provider::OptionalBlockStuff;
+use crate::block_strider::provider::{OptionalBlockStuff, ProofChecker};
 use crate::block_strider::BlockProvider;
 use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::proto::blockchain::BlockFull;
@@ -48,10 +42,8 @@ impl Default for BlockchainBlockProviderConfig {
 
 pub struct BlockchainBlockProvider {
     client: BlockchainRpcClient,
-    storage: Storage,
     config: BlockchainBlockProviderConfig,
-    cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
-    cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
+    proof_checker: ProofChecker,
 }
 
 impl BlockchainBlockProvider {
@@ -60,12 +52,12 @@ impl BlockchainBlockProvider {
         storage: Storage,
         config: BlockchainBlockProviderConfig,
     ) -> Self {
+        let proof_checker = ProofChecker::new(storage);
+
         Self {
             client,
-            storage,
             config,
-            cached_zerostate: Default::default(),
-            cached_prev_key_block_proof: Default::default(),
+            proof_checker,
         }
     }
 
@@ -99,7 +91,7 @@ impl BlockchainBlockProvider {
                     BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
-                        if let Err(e) = self.check_proof(&block, &proof).await {
+                        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
                             handle.reject();
                             tracing::error!("got invalid mc block proof: {e}");
                             break 'res;
@@ -150,7 +142,7 @@ impl BlockchainBlockProvider {
                     BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
-                        if let Err(e) = self.check_proof(&block, &proof).await {
+                        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
                             handle.reject();
                             tracing::error!("got invalid shard block proof: {e}");
                             break 'res;
@@ -167,81 +159,6 @@ impl BlockchainBlockProvider {
             }
 
             interval.tick().await;
-        }
-    }
-
-    async fn check_proof(&self, block: &BlockStuff, proof: &BlockProofStuff) -> anyhow::Result<()> {
-        // TODO: Add labels with shard?
-        let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
-
-        anyhow::ensure!(
-            block.id() == &proof.proof().proof_for,
-            "proof_for and block id mismatch: proof_for={}, block_id={}",
-            proof.proof().proof_for,
-            block.id(),
-        );
-
-        let is_masterchain = block.id().is_masterchain();
-        anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
-
-        let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
-        if !is_masterchain {
-            return Ok(());
-        }
-
-        let handle = {
-            let block_handles = self.storage.block_handle_storage();
-            block_handles
-                .load_key_block_handle(virt_block_info.prev_key_block_seqno)
-                .context("failed to load prev key block handle")?
-        };
-
-        if handle.id().seqno == 0 {
-            let zerostate = 'zerostate: {
-                if let Some(zerostate) = self.cached_zerostate.load_full() {
-                    break 'zerostate zerostate;
-                }
-
-                let shard_states = self.storage.shard_state_storage();
-                let zerostate = shard_states
-                    .load_state(handle.id())
-                    .await
-                    .context("failed to load mc zerostate")?;
-
-                self.cached_zerostate.store(Some(zerostate.clone()));
-
-                zerostate
-            };
-
-            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)
-        } else {
-            let prev_key_block_proof = 'prev_proof: {
-                if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
-                    if &prev_proof.as_ref().proof_for == handle.id() {
-                        break 'prev_proof prev_proof;
-                    }
-                }
-
-                let blocks = self.storage.block_storage();
-                let prev_key_block_proof = blocks
-                    .load_block_proof(&handle, false)
-                    .await
-                    .context("failed to load prev key block proof")?;
-
-                // NOTE: Assume that there is only one masterchain block using this cache.
-                // Otherwise, it will be overwritten every time. Maybe use `rcu`.
-                self.cached_prev_key_block_proof
-                    .store(Some(prev_key_block_proof.clone()));
-
-                prev_key_block_proof
-            };
-
-            check_with_prev_key_block_proof(
-                proof,
-                &prev_key_block_proof,
-                &virt_block,
-                &virt_block_info,
-            )
         }
     }
 }

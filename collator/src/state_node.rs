@@ -377,7 +377,9 @@ impl StateNodeAdapterStdImpl {
                 .enumerate()
                 .map(|(i, (key, value))| {
                     (i as u16, BlockSignature {
-                        node_id_short: *key,
+                        node_id_short: tl_proto::hash(everscale_crypto::tl::PublicKey::Ed25519 {
+                            key: &key.as_array(),
+                        }),
                         signature: *value,
                     })
                 }),

@@ -68,25 +68,63 @@ impl Archive {
         Ok(res)
     }
 
-    pub fn get_block_by_id(&self, id: &BlockId) -> Option<BlockStuffAug> {
-        self.blocks
-            .get(id)
-            .and_then(|entry| entry.block.as_ref().map(|x| x.data.clone()))
-            .map(|b| {
-                BlockStuffAug::new(
-                    BlockStuff::with_block(*id, b.clone()),
-                    everscale_types::boc::BocRepr::encode(b).unwrap(),
-                )
-            })
+    pub fn get_block_with_archive(&self, id: &BlockId) -> anyhow::Result<BlockStuffAug> {
+        let archive_data = self.blocks.get(id).ok_or(ArchiveError::WrongArchive)?;
+
+        let block = archive_data
+            .block
+            .as_ref()
+            .ok_or(ArchiveError::BlockNotFound)?;
+
+        let data = everscale_types::boc::BocRepr::encode(block.data.clone())?;
+
+        Ok(BlockStuffAug::new(
+            BlockStuff::with_block(*id, block.data.clone()),
+            data,
+        ))
     }
 
-    pub fn get_block_by_seqno(&self, seqno: u32) -> Option<BlockStuffAug> {
-        let id = match self.block_ids.get(&seqno) {
-            Some(id) => id,
-            None => return None,
-        };
+    pub fn get_block_by_id(&self, id: &BlockId) -> anyhow::Result<BlockStuff> {
+        let archive_data = self.blocks.get(id).ok_or(ArchiveError::WrongArchive)?;
+
+        let block = archive_data
+            .block
+            .as_ref()
+            .ok_or(ArchiveError::BlockNotFound)?;
+
+        Ok(BlockStuff::with_block(*id, block.data.clone()))
+    }
+
+    pub fn get_proof_by_id(&self, id: &BlockId) -> anyhow::Result<BlockProofStuff> {
+        let archive_data = self.blocks.get(id).ok_or(ArchiveError::WrongArchive)?;
+
+        let proof = archive_data
+            .proof
+            .as_ref()
+            .ok_or(ArchiveError::ProofNotFound)?;
+
+        let is_link = !proof.proof_for.is_masterchain();
+        let proof = BlockProofStuff::from_proof(Box::new(proof.data.clone()), is_link)?;
+
+        Ok(proof)
+    }
+
+    pub fn get_block_by_seqno(&self, seqno: u32) -> anyhow::Result<BlockStuff> {
+        let id = self
+            .block_ids
+            .get(&seqno)
+            .ok_or(ArchiveError::BlockNotFound)?;
 
         self.get_block_by_id(id)
+    }
+
+    pub fn get_proof_by_seqno(&self, seqno: u32) -> anyhow::Result<BlockProofStuff> {
+        let id = self
+            .block_ids
+            .get(&seqno)
+            .ok_or(ArchiveError::BlockNotFound)?;
+
+        self.get_proof_by_id(id)
     }
 }
 
@@ -175,6 +213,16 @@ pub fn make_archive_entry(filename: &str, data: &[u8]) -> Vec<u8> {
     vec.extend_from_slice(filename.as_bytes());
     vec.extend_from_slice(data);
     vec
+}
+
+#[derive(thiserror::Error, Debug)]
+enum ArchiveError {
+    #[error("Block not found in archive")]
+    WrongArchive,
+    #[error("Block not found")]
+    BlockNotFound,
+    #[error("Proof not found")]
+    ProofNotFound,
 }
 
 #[cfg(test)]
