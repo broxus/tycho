@@ -521,7 +521,7 @@ impl CollatorStdImpl {
 
         // internal_messages_iterator.fill_processed_upto();
 
-        let diff = Arc::new(internal_messages_iterator.take_diff());
+        let diff = internal_messages_iterator.take_diff();
 
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {
@@ -557,12 +557,13 @@ impl CollatorStdImpl {
         metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
 
+        let diff_messages_len = diff.messages.len();
         let apply_queue_diff_elapsed;
         {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_apply_queue_diff_time", labels);
             self.mq_adapter
-                .apply_diff(diff.clone(), candidate.block_id.as_short_id())
+                .apply_diff(diff, candidate.block_id.as_short_id())
                 .await?;
             apply_queue_diff_elapsed = histogram.finish();
         }
@@ -663,16 +664,16 @@ impl CollatorStdImpl {
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_pending_internals={}",
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_pending_internals={}. block = {:?}",
             block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created, diff.messages.len(),
+            collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals,
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals, collation_data.block_id_short,
         );
 
         assert_eq!(

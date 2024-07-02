@@ -11,10 +11,10 @@ pub struct ShardIterator {
     pub(crate) shard_ident: ShardIdent,
     shard_range: ShardRange,
     receiver: ShardIdent,
-    current_key: Option<InternalMessageKey>,
+    // current_key: Option<InternalMessageKey>,
     pub(crate) iterator: OwnedIterator,
-    saved_position: Option<Vec<u8>>,
-    pub(crate) read_until: Option<InternalMessageKey>,
+    // saved_position: Option<Vec<u8>>,
+    // pub(crate) read_until: Option<InternalMessageKey>,
 }
 
 impl ShardIterator {
@@ -39,10 +39,10 @@ impl ShardIterator {
             shard_ident,
             shard_range: shard_range.clone(),
             receiver,
-            current_key: shard_range.from.clone(),
+            // current_key: shard_range.from.clone(),
             iterator,
-            saved_position: None,
-            read_until: None,
+            // saved_position: None,
+            // read_until: None,
         }
     }
 
@@ -67,8 +67,8 @@ impl ShardIterator {
 
         let _receiver = self.receiver.clone();
         while let Some((key, value)) = self.load_next_message() {
-            let _dest_workchain = value[0] as i8;
-            let _dest_address = HashBytes::from_slice(&value[1..33]);
+            // let _dest_workchain = value[0] as i8;
+            // let _dest_address = HashBytes::from_slice(&value[1..33]);
 
             if key <= from {
                 self.iterator.next();
@@ -108,29 +108,8 @@ impl ShardIterator {
                 return None;
             }
 
-            self.current_key = Some(InternalMessageKey {
-                lt: key.lt,
-                hash: key.hash,
-            });
-
             return Some((key, value));
         }
         None
-    }
-
-    pub(crate) fn save_position(&mut self) {
-        self.saved_position = self.iterator.key().map(|k| k.to_vec());
-    }
-
-    pub(crate) fn restore_position(&mut self) {
-        if let Some(position) = self.saved_position.clone() {
-            let shard_internal_message_key = ShardsInternalMessagesKey::from(position.as_slice());
-            self.current_key = Some(InternalMessageKey {
-                lt: shard_internal_message_key.lt,
-                hash: shard_internal_message_key.hash,
-            });
-            self.iterator.seek(shard_internal_message_key);
-            self.saved_position = None;
-        }
     }
 }

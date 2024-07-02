@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use everscale_types::models::{IntAddr, ShardIdent};
+use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
@@ -11,10 +11,13 @@ use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource,
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::tracing_targets;
+use crate::types::ShardIdentExt;
 
 pub trait QueueIterator: Send {
     /// Get next message
-    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
+    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>; // Function to update the committed position
+    fn update_committed_position(&mut self, next_message: &Arc<MessageWithSource>); // Function to process the new messages
+    fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
     /// Take diff from iterator
     /// Move current position to commited position
     /// Create new transaction
@@ -24,13 +27,10 @@ pub trait QueueIterator: Send {
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
     /// Add new message to iterator
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
-    /// Fill processed upto from iterator
-    fn fill_processed_upto(&mut self);
 }
 
 pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
-    current_position: BTreeMap<ShardIdent, InternalMessageKey>,
     commited_current_position: BTreeMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     new_messages: FastHashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
@@ -47,7 +47,6 @@ impl QueueIteratorImpl {
         Ok(Self {
             for_shard,
             messages_for_current_shard,
-            current_position: Default::default(),
             new_messages: Default::default(),
             commited_current_position: Default::default(),
             snapshot_manager,
@@ -73,56 +72,58 @@ fn update_shard_range(
 
 impl QueueIterator for QueueIteratorImpl {
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>> {
-        loop {
-            if let Some(next_message) = self.snapshot_manager.next()? {
-                let dst = match &next_message.message.info.dst {
-                    IntAddr::Std(dst) => dst,
-                    IntAddr::Var(_) => {
-                        panic!("invalid destination address")
-                    }
-                };
-
-                if self.for_shard.contains_account(&dst.address)
-                    && self.for_shard.workchain() == dst.workchain as i32
-                {
-                    return Ok(Some(IterItem {
-                        message_with_source: next_message.clone(),
-                        is_new: false,
-                    }));
-                } else {
-                    self.commited_current_position
-                        .entry(next_message.shard_id)
-                        .and_modify(|e| {
-                            if next_message.message.key() > *e {
-                                *e = next_message.message.key().clone();
-                            }
-                        })
-                        .or_insert(next_message.message.key().clone());
-                    continue;
-                }
+        // Process the next message from the snapshot manager
+        while let Some(next_message) = self.snapshot_manager.next()? {
+            if self
+                .for_shard
+                .contains_address(&next_message.message.info.dst)
+            {
+                return Ok(Some(IterItem {
+                    message_with_source: next_message.clone(),
+                    is_new: false,
+                }));
             } else {
-                break;
+                self.update_committed_position(&next_message);
             }
         }
 
+        // Process the new messages if required
         if with_new {
-            if let Some(next_message) = self.messages_for_current_shard.pop() {
-                let message_key = next_message.0.message.key();
-
-                if self.new_messages.contains_key(&message_key) {
-                    return Ok(Some(IterItem {
-                        message_with_source: next_message.0.clone(),
-                        is_new: true,
-                    }));
-                } else {
-                    bail!(
-                        "Message is not in new messages but in current shard messages: {:?}",
-                        message_key
-                    );
-                }
-            }
+            return self.process_new_messages();
         }
 
+        Ok(None)
+    }
+
+    // Function to update the committed position
+    fn update_committed_position(&mut self, next_message: &Arc<MessageWithSource>) {
+        self.commited_current_position
+            .entry(next_message.shard_id)
+            .and_modify(|e| {
+                if next_message.message.key() > *e {
+                    *e = next_message.message.key().clone();
+                }
+            })
+            .or_insert(next_message.message.key().clone());
+    }
+
+    // Function to process the new messages
+    fn process_new_messages(&mut self) -> Result<Option<IterItem>> {
+        if let Some(next_message) = self.messages_for_current_shard.pop() {
+            let message_key = next_message.0.message.key();
+
+            if self.new_messages.contains_key(&message_key) {
+                return Ok(Some(IterItem {
+                    message_with_source: next_message.0.clone(),
+                    is_new: true,
+                }));
+            } else {
+                bail!(
+                    "Message is not in new messages but in current shard messages: {:?}",
+                    message_key
+                );
+            }
+        }
         Ok(None)
     }
 
@@ -147,15 +148,11 @@ impl QueueIterator for QueueIteratorImpl {
         let amount_before = self.new_messages.len();
 
         let mut inserted_new_messages = 0;
-
-        tracing::debug!(target: "local_debug", "Current shard processed upto: {:?}",current_shard_processed_upto);
-        tracing::debug!(target: "local_debug", "Commited position: {:?} {:?}", self.commited_current_position, self.for_shard);
+        // tracing::debug!(target: "local_debug", "Current shard processed upto: {:?}",current_shard_processed_upto);
+        // tracing::debug!(target: "local_debug", "Commited position: {:?} {:?}", self.commited_current_position, self.for_shard);
 
         for message in self.new_messages.values() {
-            let (dest_workchain, dest_account) = message.destination().unwrap();
-            if self.for_shard.contains_account(&dest_account)
-                && self.for_shard.workchain() == dest_workchain as i32
-            {
+            if self.for_shard.contains_address(&message.info.dst) {
                 if message.key() > current_shard_processed_upto {
                     diff.messages.insert(message.key(), message.clone());
                     inserted_new_messages += 1;
@@ -172,8 +169,6 @@ impl QueueIterator for QueueIteratorImpl {
             inserted_new_messages,
             amount_before);
 
-        self.current_position
-            .clone_from(&self.commited_current_position);
         diff
     }
 
@@ -197,25 +192,12 @@ impl QueueIterator for QueueIteratorImpl {
 
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
         self.new_messages.insert(message.key(), message.clone());
-        let (dest_workchain, dest_account) = message.destination()?;
-        if self.for_shard.contains_account(&dest_account)
-            && self.for_shard.workchain() == dest_workchain as i32
-        {
+        if self.for_shard.contains_address(&message.info.dst) {
             let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));
         };
         Ok(())
-    }
-
-    fn fill_processed_upto(&mut self) {
-        // let read_uptos = self.snapshot_manager.get_iter_upto();
-        // for read_upto in read_uptos.iter() {
-        //     if let None = self.commited_current_position.get_mut(read_upto.0) {
-        //         self.commited_current_position
-        //             .insert(*read_upto.0, read_upto.1.clone());
-        //     }
-        // }
     }
 }
 

@@ -32,10 +32,10 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
         shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
+    async fn apply_diff(&self, diff: QueueDiff, block_id_short: BlockIdShort) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>>;
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<()>;
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
@@ -64,24 +64,24 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updating shards in message queue");
         for sma in split_merge_actions {
             match sma {
-                SplitMergeAction::Split(shard_id) => {
-                    self.queue.split_shard(&shard_id).await?;
-                    let (shard_l_id, shard_r_id) = shard_id
-                        .split()
-                        .expect("all split/merge actions should be valid there");
-                    tracing::info!(
-                        target: tracing_targets::MQ_ADAPTER,
-                        "Shard {} splitted on {} and {} in message queue",
-                        shard_id,
-                        shard_l_id,
-                        shard_r_id,
-                    );
+                SplitMergeAction::Split(_shard_id) => {
+                    // self.queue.split_shard(&shard_id).await?;
+                    // let (shard_l_id, shard_r_id) = shard_id
+                    //     .split()
+                    //     .expect("all split/merge actions should be valid there");
+                    // tracing::info!(
+                    //     target: tracing_targets::MQ_ADAPTER,
+                    //     "Shard {} splitted on {} and {} in message queue",
+                    //     shard_id,
+                    //     shard_l_id,
+                    //     shard_r_id,
+                    // );
                 }
-                SplitMergeAction::Merge(shard_id_1, shard_id_2) => {
-                    self.queue.merge_shards(&shard_id_1, &shard_id_2).await?;
+                SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
+                    // self.queue.merge_shards(&shard_id_1, &shard_id_2).await?;
                 }
-                SplitMergeAction::Add(new_shard) => {
-                    self.queue.add_shard(&new_shard).await?;
+                SplitMergeAction::Add(_new_shard) => {
+                    // self.queue.add_shard(&new_shard).await?;
                 }
             }
         }
@@ -113,7 +113,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(Box::new(iterator))
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
+    async fn apply_diff(&self, diff: QueueDiff, block_id_short: BlockIdShort) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         self.queue.apply_diff(diff, block_id_short).await?;
@@ -130,10 +130,10 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
     }
 
     #[instrument(skip(self), fields(%diff_id))]
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>> {
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<()> {
         let time = std::time::Instant::now();
 
-        let diff = self.queue.commit_diff(diff_id).await?;
+        self.queue.commit_diff(diff_id).await?;
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             id = ?diff_id,
@@ -141,7 +141,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
             "Diff commited",
         );
 
-        Ok(diff)
+        Ok(())
     }
 
     fn add_message_to_iterator(
