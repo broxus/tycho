@@ -108,10 +108,10 @@ impl InternalQueueStorage {
     #[allow(clippy::type_complexity)]
     pub fn retrieve_and_delete_messages(
         &self,
-        snapshot: &OwnedSnapshot,
         shard_ident: ShardIdent,
         range: ((u64, HashBytes), (u64, HashBytes)),
     ) -> Result<Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>> {
+        let snapshot = self.snapshot();
         let from = ShardsInternalMessagesKey {
             shard_ident,
             lt: range.0 .0,
@@ -126,7 +126,7 @@ impl InternalQueueStorage {
         let mut messages = Vec::new();
         let mut batch = WriteBatch::default();
         let mut readopts = self.db.shards_internal_messages_session.new_read_config();
-        readopts.set_snapshot(snapshot);
+        readopts.set_snapshot(&snapshot);
 
         let cf = self.db.shards_internal_messages_session.cf();
         let mut iter = self.db.rocksdb().raw_iterator_cf_opt(&cf, readopts);
@@ -296,12 +296,7 @@ impl InternalQueueStorage {
 
         Ok(())
     }
-    pub fn delete_messages(
-        &self,
-        shard: ShardIdent,
-        delete_until: (u64, HashBytes),
-        receiver: ShardIdent,
-    ) -> Result<()> {
+    pub fn delete_messages(&self, shard: ShardIdent, key: (u64, HashBytes)) -> Result<()> {
         let snapshot = self.snapshot();
 
         let mut readopts = self.db.shards_internal_messages.new_read_config();
@@ -315,8 +310,8 @@ impl InternalQueueStorage {
 
         let end_key = ShardsInternalMessagesKey {
             shard_ident: shard,
-            lt: delete_until.0,
-            hash: delete_until.1,
+            lt: key.0,
+            hash: key.1,
         };
 
         let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
@@ -338,16 +333,8 @@ impl InternalQueueStorage {
 
             let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
 
-            if current_position >= end_key {
+            if current_position > end_key {
                 break;
-            }
-
-            let workchain = value[0] as i8;
-            let address = HashBytes::from_slice(&value[1..33]);
-
-            if !(receiver.workchain() == workchain as i32 && receiver.contains_account(&address)) {
-                iter.next();
-                continue;
             }
             batch.delete_cf(&shards_internal_messages_cf, &current_position.to_vec());
             iter.next();
@@ -384,16 +371,19 @@ impl InternalQueueStorage {
     }
 
     pub fn print_cf_sizes(&self) -> Result<()> {
-        // let _snapshot = self.snapshot();
-        // let cfs = ["shards_internal_messages", "shards_internal_messages_session"];
-        // for cf in cfs {
-        //     match self.count_rows_iteratively(&_snapshot, cf) {
-        //         Ok(size) => {
-        //             tracing::error!(target: "local_debug", "Column family '{}' size: {} rows", cf, size)
-        //         }
-        //         Err(err) => println!("Failed to get size for column family '{}': {:?}", cf, err),
-        //     }
-        // }
+        let _snapshot = self.snapshot();
+        let cfs = [
+            "shards_internal_messages",
+            "shards_internal_messages_session",
+        ];
+        for cf in cfs {
+            match self.count_rows_iteratively(&_snapshot, cf) {
+                Ok(size) => {
+                    tracing::error!(target: "local_debug", "Column family '{}' size: {} rows", cf, size)
+                }
+                Err(err) => println!("Failed to get size for column family '{}': {:?}", cf, err),
+            }
+        }
         Ok(())
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -57,19 +57,12 @@ pub trait LocalQueue {
         ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>>;
-    async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
-    async fn merge_shards(
-        &self,
-        shard_1_id: &ShardIdent,
-        shard_2_id: &ShardIdent,
-    ) -> Result<(), QueueError>;
     async fn apply_diff(
         &self,
-        diff: Arc<QueueDiff>,
+        diff: QueueDiff,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError>;
-    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>, QueueError>;
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError>;
 }
 
 // IMPLEMENTATION
@@ -99,7 +92,7 @@ where
     persistent_state: Arc<P>,
     state_lock: Arc<Mutex<()>>,
     processed_uptos: Mutex<BTreeMap<ShardIdent, BTreeMap<ShardIdent, InternalMessageKey>>>,
-    diffs: FastDashMap<BlockIdShort, Arc<QueueDiff>>,
+    diffs: FastDashMap<BlockIdShort, QueueDiff>,
 }
 
 impl<S, P> Queue for QueueImpl<S, P>
@@ -113,46 +106,29 @@ where
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>> {
         let _state_lock = self.state_lock.lock().await;
-
         let snapshot = self.persistent_state.snapshot();
         let persistent_iter = self
             .persistent_state
             .iterator(&snapshot, for_shard_id, ranges);
         let session_iter = self.session_state.iterator(&snapshot, for_shard_id, ranges);
-
         vec![persistent_iter, session_iter]
-    }
-
-    async fn split_shard(&self, _shard_id: &ShardIdent) -> Result<(), QueueError> {
-        Ok(())
-    }
-
-    async fn merge_shards(
-        &self,
-        _shard_1_id: &ShardIdent,
-        _shard_2_id: &ShardIdent,
-    ) -> Result<(), QueueError> {
-        Ok(())
     }
 
     async fn apply_diff(
         &self,
-        diff: Arc<QueueDiff>,
+        mut diff: QueueDiff,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
         let _session_lock = self.state_lock.lock().await;
         self.session_state
             .add_messages(block_id_short.shard, &diff.messages)?;
+
+        diff.save_keys();
         self.diffs.insert(block_id_short, diff);
-
         Ok(())
     }
 
-    async fn add_shard(&self, _shard_id: &ShardIdent) -> Result<(), QueueError> {
-        Ok(())
-    }
-
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Arc<QueueDiff>, QueueError> {
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError> {
         let _session_lock = self.state_lock.lock().await;
 
         let diff = self
@@ -163,76 +139,62 @@ where
 
         let for_shard = diff_id.shard;
 
-        let first_key = diff.messages.keys().next();
-        let last_key = diff.messages.keys().next_back();
+        let first_key = diff.keys.first();
+        let last_key = diff.keys.last();
 
         if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
             if first_key.lt > last_key.lt {
                 panic!("first_key.lt > last_key.lt");
             }
+            let messages = self
+                .session_state
+                .retrieve_messages(for_shard, (&first_key, &last_key))?;
 
-            let snapshot = self.persistent_state.snapshot();
-
-            let len = diff.messages.len();
-            let messages = self.session_state.retrieve_messages(
-                &snapshot,
-                for_shard,
-                (&first_key, &last_key),
-            )?;
-
-            let len2 = diff.messages.len();
-            let count = self.persistent_state.add_messages(for_shard, messages)?;
-            assert_eq!(len2 as usize, len);
-            assert_eq!(count as usize, len);
+            let _ = self.persistent_state.add_messages(for_shard, messages)?;
         }
 
-        // for (shard, processed_upto) in diff.processed_upto.iter() {
-        //     // let mut processed_uptos_lock = self.processed_uptos.lock().await;
-        //     // processed_uptos_lock.insert(shard.clone(), range.clone());
-        //     let persistent_state = self.persistent_state.clone();
-        //
-        //     tracing::error!(
-        //         target: "local_debug",
-        //         "delete messages diff : reader = {:?}, in shard = {:?}, processed_upto = {:?}",
-        //         for_shard,
-        //         shard,
-        //         processed_upto
-        //     );
-        //
-        //     let mut delete_until = BTreeMap::new();
-        //     delete_until.insert(shard.clone(), (processed_upto.lt, processed_upto.hash));
-        //
-        //     tokio::spawn(async move {
-        //         persistent_state
-        //             .delete_messages(for_shard.clone(), delete_until)
-        //             .unwrap();
-        //     });
-        // }
+        // gc
+        {
+            let mut processed_uptos_lock = self.processed_uptos.lock().await;
+            processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
 
-        // {
-        //     let mut processed_uptos_lock = self.processed_uptos.lock().await;
-        //     processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
-        //
-        //     if for_shard.is_masterchain() {
-        //         let processed_uptos = processed_uptos_lock.clone();
-        //         for processed_upto in processed_uptos {
-        //             let persistent_state = self.persistent_state.clone();
-        //             let delete_until: BTreeMap<ShardIdent, (u64, HashBytes)> = processed_upto
-        //                 .1
-        //                 .iter()
-        //                 .map(|(shard, range)| (shard.clone(), (range.lt, range.hash)))
-        //                 .collect();
-        //             let for_shard = processed_upto.0;
-        //             tokio::spawn(async move {
-        //                 persistent_state
-        //                     .delete_messages(for_shard, delete_until)
-        //                     .unwrap();
-        //             });
-        //         }
-        //         processed_uptos_lock.clear();
-        //     }
-        // }
+            let mut min_uptos: HashMap<ShardIdent, InternalMessageKey> = HashMap::default();
+            let mut shard_count: HashMap<ShardIdent, usize> = HashMap::default();
 
-        Ok(diff)
+            if for_shard.is_masterchain() {
+                let total_shards = processed_uptos_lock.len();
+
+                for (_, processed_upto) in processed_uptos_lock.iter() {
+                    for (processed_in_shard, key) in processed_upto.iter() {
+                        if let Some(min_key) = min_uptos.get_mut(processed_in_shard) {
+                            if key < min_key {
+                                *min_key = key.clone();
+                            }
+                        } else {
+                            min_uptos.insert(processed_in_shard.clone(), key.clone());
+                        }
+                        *shard_count.entry(processed_in_shard.clone()).or_insert(0) += 1;
+                    }
+                }
+
+                for (shard, key) in min_uptos.iter() {
+                    if let Some(count) = shard_count.get(shard) {
+                        if *count == total_shards {
+                            let persistent_state = self.persistent_state.clone();
+                            let shard_clone = shard.clone();
+                            let key_clone = key.clone();
+                            tokio::spawn(async move {
+                                persistent_state
+                                    .delete_messages(shard_clone, key_clone)
+                                    .unwrap();
+                            });
+                        }
+                    }
+                }
+
+                processed_uptos_lock.clear();
+            }
+            Ok(())
+        }
     }
 }

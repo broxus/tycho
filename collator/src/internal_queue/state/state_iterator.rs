@@ -55,9 +55,7 @@ pub struct ShardRange {
 }
 
 pub trait StateIterator: Send {
-    fn get_iter_upto(&self) -> FastHashMap<ShardIdent, InternalMessageKey>;
     fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
-    fn peek(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
 }
 
 pub struct StateIteratorImpl {
@@ -66,8 +64,6 @@ pub struct StateIteratorImpl {
     ranges: FastHashMap<ShardIdent, ShardRange>,
     message_queue: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     in_queue: HashSet<ShardIdent>,
-    saved_queue: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
-    saved_in_queue: HashSet<ShardIdent>,
 }
 
 impl StateIteratorImpl {
@@ -91,8 +87,6 @@ impl StateIteratorImpl {
             ranges,
             message_queue: BinaryHeap::new(),
             in_queue: HashSet::new(),
-            saved_queue: Default::default(),
-            saved_in_queue: Default::default(),
         }
     }
 
@@ -141,61 +135,14 @@ impl StateIteratorImpl {
 }
 
 impl StateIterator for StateIteratorImpl {
-    fn get_iter_upto(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
-        let mut processed_upto = FastHashMap::default();
-        for (shard_ident, iter) in self.iters.iter() {
-            if let Some(key) = iter.read_until.clone() {
-                processed_upto.insert(shard_ident.clone(), key);
-            }
-        }
-        processed_upto
-    }
-
     fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
-        self.refill_queue_if_needed(); // Refill the queue only if needed
+        self.refill_queue_if_needed();
 
         if let Some(Reverse(message)) = self.message_queue.pop() {
-            // self.iters.get_mut(&message.shard_id).unwrap().read_until = Some(message.message.key());
             self.in_queue.remove(&message.shard_id);
             return Ok(Some(message));
         }
 
         Ok(None)
-    }
-
-    fn peek(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
-        // Save the current state before refilling the queue
-        for iter in self.iters.values_mut() {
-            iter.save_position();
-        }
-
-        // Save the current queue state
-        self.saved_queue = self.message_queue.clone();
-        self.saved_in_queue = self.in_queue.clone();
-
-        // Temporarily refill the queue if needed
-        self.refill_queue_if_needed();
-
-        // Peek the next message without popping it from the queue
-        let result = if let Some(Reverse(message)) = self.message_queue.peek().cloned() {
-            Ok(Some(message))
-        } else {
-            Ok(None)
-        };
-
-        // Restore the iterator positions to the saved state
-        for iter in self.iters.values_mut() {
-            iter.restore_position();
-        }
-
-        // Restore the queue state
-        self.message_queue = self.saved_queue.clone();
-        self.in_queue = self.saved_in_queue.clone();
-
-        // Clear the temporary saved state
-        self.saved_queue.clear();
-        self.saved_in_queue.clear();
-
-        result
     }
 }

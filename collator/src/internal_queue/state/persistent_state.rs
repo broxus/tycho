@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_storage::Storage;
@@ -7,6 +5,7 @@ use tycho_util::FastHashMap;
 use weedb::OwnedSnapshot;
 
 use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator, StateIteratorImpl};
+use crate::internal_queue::types::InternalMessageKey;
 
 // CONFIG
 
@@ -71,11 +70,7 @@ pub trait LocalPersistentState {
         ranges: &FastHashMap<ShardIdent, ShardRange>,
     ) -> Box<dyn StateIterator>;
 
-    fn delete_messages(
-        &self,
-        shard: ShardIdent,
-        delete_until: BTreeMap<ShardIdent, (u64, HashBytes)>,
-    ) -> anyhow::Result<()>;
+    fn delete_messages(&self, shard: ShardIdent, key: InternalMessageKey) -> anyhow::Result<()>;
 }
 
 // IMPLEMENTATION
@@ -129,18 +124,9 @@ impl PersistentState for PersistentStateStdImpl {
         Box::new(StateIteratorImpl::new(iter, receiver, ranges.clone()))
     }
 
-    fn delete_messages(
-        &self,
-        receiver: ShardIdent,
-        delete_until: BTreeMap<ShardIdent, (u64, HashBytes)>,
-    ) -> anyhow::Result<()> {
-        for (shard, delete_until) in delete_until.iter() {
-            self.storage.internal_queue_storage().delete_messages(
-                *shard,
-                *delete_until,
-                receiver,
-            )?;
-        }
-        Ok(())
+    fn delete_messages(&self, shard: ShardIdent, key: InternalMessageKey) -> anyhow::Result<()> {
+        self.storage
+            .internal_queue_storage()
+            .delete_messages(shard, (key.lt, key.hash))
     }
 }

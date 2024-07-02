@@ -77,7 +77,6 @@ pub trait LocalSessionState {
 
     fn retrieve_messages(
         &self,
-        snapshot: &OwnedSnapshot,
         shard: ShardIdent,
         range: (&InternalMessageKey, &InternalMessageKey),
     ) -> Result<Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>>;
@@ -132,32 +131,6 @@ impl SessionState for SessionStateStdImpl {
 
         Ok(())
     }
-    // fn add_messages(
-    //     &self,
-    //     shard_ident: ShardIdent,
-    //     messages: &BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
-    // ) -> Result<()> {
-    //     tracing::error!(target: "local_debug", "Inserting messages to session from diff {:?} {:?}. messages before insert.", shard_ident, messages.len());
-    //     // self.storage.internal_queue_storage().print_cf_sizes().unwrap();
-    //
-    //     for (k, v) in messages.iter() {
-    //         let (lt, hash, workchain, address, cell) = (
-    //             k.lt,
-    //             k.hash,
-    //             v.info.dst.workchain() as i8,
-    //             v.info.dst.get_address(),
-    //             Boc::encode(&v.cell),
-    //         );
-    //         self.storage
-    //             .internal_queue_storage()
-    //             .insert_message_session(shard_ident, lt, hash, workchain, address, cell)?;
-    //     }
-    //
-    //     tracing::error!(target: "local_debug", "Inserting messages to session from diff {:?} {:?}. messages after insert.", shard_ident, messages.len());
-    //     // self.storage.internal_queue_storage().print_cf_sizes().unwrap();
-    //
-    //     Ok(())
-    // }
 
     fn iterator(
         &self,
@@ -176,13 +149,12 @@ impl SessionState for SessionStateStdImpl {
 
     fn retrieve_messages(
         &self,
-        snapshot: &OwnedSnapshot,
         shard: ShardIdent,
         range: (&InternalMessageKey, &InternalMessageKey),
     ) -> Result<Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>> {
         let range = ((range.0.lt, range.0.hash), (range.1.lt, range.1.hash));
         self.storage
             .internal_queue_storage()
-            .retrieve_and_delete_messages(snapshot, shard, range)
+            .retrieve_and_delete_messages(shard, range)
     }
 }
