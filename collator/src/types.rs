@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::cell::HashBytes;
+use everscale_types::merkle::MerkleUpdate;
 use everscale_types::models::{
-    Block, BlockId, BlockInfo, CurrencyCollection, GlobalCapabilities, GlobalCapability, IntAddr,
-    ShardIdent, Signature, ValueFlow,
+    AccountBlocks, Block, BlockId, BlockInfo, CurrencyCollection, GlobalCapabilities,
+    GlobalCapability, IntAddr, McStateExtra, ShardIdent, Signature, ValueFlow,
 };
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
@@ -270,4 +271,17 @@ pub struct TopBlockDescription {
     pub value_flow: ValueFlow,
     pub proof_funds: ProofFunds,
     pub creators: Vec<HashBytes>,
+}
+
+#[derive(Default)]
+pub struct FinalizeBlockInfo {
+    pub block_info: BlockInfo,
+    pub merkle_update: MerkleUpdate,
+    pub account_blocks: AccountBlocks,
+    pub fees_collected: CurrencyCollection,
+    pub total_balance: CurrencyCollection,
+    pub mc_state_extra: Option<McStateExtra>,
+    pub build_account_blocks_elapsed: Duration,
+    pub build_mc_state_extra_elapsed: Duration,
+    pub build_state_update_elapsed: Duration,
 }

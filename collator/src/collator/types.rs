@@ -411,35 +411,24 @@ impl BlockCollationDataBuilder {
     pub fn build(self, start_lt: u64, block_limits: BlockLimits) -> BlockCollationData {
         let block_limit = BlockLimitStats::new(block_limits, start_lt);
         BlockCollationData {
-            block_id_short: self.block_id_short,
-            gen_utime: self.gen_utime,
-            gen_utime_ms: self.gen_utime_ms,
-            processed_upto: self.processed_upto,
-            min_ref_mc_seqno: self.min_ref_mc_seqno,
-            rand_seed: self.rand_seed,
             created_by: self.created_by,
-            shards: self.shards,
             top_shard_blocks_ids: self.top_shard_blocks_ids,
-            shard_fees: self.shard_fees,
             block_create_count: self.block_create_count,
-            value_flow: self.value_flow,
-            block_limit,
-            start_lt,
-            next_lt: start_lt + 1,
-            tx_count: 0,
-            total_execute_msgs_time_mc: 0,
-            execute_count_all: 0,
-            execute_count_ext: 0,
-            ext_msgs_error_count: 0,
-            execute_count_int: 0,
-            execute_count_new_int: 0,
-            int_enqueue_count: 0,
-            int_dequeue_count: 0,
-            read_ext_msgs: 0,
-            read_int_msgs_from_iterator: 0,
-            new_msgs_created: 0,
-            inserted_new_msgs_to_iterator: 0,
-            read_new_msgs_from_iterator: 0,
+            common: BlockCollationCommon {
+                block_id_short: self.block_id_short,
+                gen_utime: self.gen_utime,
+                gen_utime_ms: self.gen_utime_ms,
+                processed_upto: self.processed_upto,
+                min_ref_mc_seqno: self.min_ref_mc_seqno,
+                rand_seed: self.rand_seed,
+                shards: self.shards,
+                shard_fees: self.shard_fees,
+                value_flow: self.value_flow,
+                block_limit,
+                start_lt,
+                next_lt: start_lt + 1,
+            },
+            counters: BlockCollationCounters::default(),
             in_msgs: Default::default(),
             out_msgs: Default::default(),
             externals_reading_started: false,
@@ -452,14 +441,24 @@ impl BlockCollationDataBuilder {
 
 #[derive(Debug)]
 pub(super) struct BlockCollationData {
-    // block_descr: Arc<String>,
-    pub block_id_short: BlockIdShort,
-    pub gen_utime: u32,
-    pub gen_utime_ms: u16,
+    pub counters: BlockCollationCounters,
+    pub common: BlockCollationCommon,
+    pub in_msgs: BTreeMap<HashBytes, PreparedInMsg>,
+    pub out_msgs: BTreeMap<HashBytes, PreparedOutMsg>,
+    pub externals_reading_started: bool,
+    // TODO: remove if we do not need this
+    pub _internals_reading_started: bool,
+    /// Ids of top blocks from shards that be included in the master block
+    pub top_shard_blocks_ids: Vec<BlockId>,
+    pub mint_msg: Option<InMsg>,
+    pub recover_create_msg: Option<InMsg>,
+    pub block_create_count: FastHashMap<HashBytes, u64>,
+    pub created_by: HashBytes,
+}
 
+#[derive(Debug, Default)]
+pub struct BlockCollationCounters {
     pub tx_count: u64,
-
-    pub block_limit: BlockLimitStats,
 
     pub total_execute_msgs_time_mc: u128,
 
@@ -478,42 +477,43 @@ pub(super) struct BlockCollationData {
     pub new_msgs_created: u64,
     pub inserted_new_msgs_to_iterator: u64,
     pub read_new_msgs_from_iterator: u64,
-
-    pub start_lt: u64,
-    // Should be updated on each tx finalization from ExecutionManager.max_lt
-    // which is updating during tx execution
-    pub next_lt: u64,
-
-    pub in_msgs: BTreeMap<HashBytes, PreparedInMsg>,
-    pub out_msgs: BTreeMap<HashBytes, PreparedOutMsg>,
-
-    pub processed_upto: ProcessedUptoInfo,
-    pub externals_reading_started: bool,
-    // TODO: remove if we do not need this
-    pub _internals_reading_started: bool,
-
-    /// Ids of top blocks from shards that be included in the master block
-    pub top_shard_blocks_ids: Vec<BlockId>,
-
-    shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
-
-    // TODO: setup update logic when ShardFees would be implemented
-    pub shard_fees: ShardFees,
-
-    pub mint_msg: Option<InMsg>,
-    pub recover_create_msg: Option<InMsg>,
-
-    pub value_flow: ValueFlow,
-
-    pub min_ref_mc_seqno: u32,
-
-    pub rand_seed: HashBytes,
-
-    pub block_create_count: FastHashMap<HashBytes, u64>,
-
-    // TODO: set from anchor
-    pub created_by: HashBytes,
 }
+
+#[derive(Debug)]
+pub struct BlockCollationCommon {
+    pub block_id_short: BlockIdShort,
+    pub gen_utime: u32,
+    pub gen_utime_ms: u16,
+    pub block_limit: BlockLimitStats,
+    pub start_lt: u64,
+    pub next_lt: u64,
+    pub processed_upto: ProcessedUptoInfo,
+    pub shards: Option<FastHashMap<ShardIdent, Box<ShardDescription>>>,
+    pub shard_fees: ShardFees,
+    pub value_flow: ValueFlow,
+    pub min_ref_mc_seqno: u32,
+    pub rand_seed: HashBytes,
+}
+
+impl BlockCollationCommon {
+    pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards
+            .as_ref()
+            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
+    }
+
+    pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
+        self.shards
+            .as_mut()
+            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
+    }
+
+    pub fn update_ref_min_mc_seqno(&mut self, mc_seqno: u32) -> u32 {
+        self.min_ref_mc_seqno = std::cmp::min(self.min_ref_mc_seqno, mc_seqno);
+        self.min_ref_mc_seqno
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockLimitStats {
     pub gas_used: u32,
@@ -605,25 +605,6 @@ pub struct PreparedOutMsg {
     pub out_msg: Lazy<OutMsg>,
     pub exported_value: CurrencyCollection,
     pub new_tx: Option<Lazy<Transaction>>,
-}
-
-impl BlockCollationData {
-    pub fn shards(&self) -> Result<&FastHashMap<ShardIdent, Box<ShardDescription>>> {
-        self.shards
-            .as_ref()
-            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
-    }
-
-    pub fn shards_mut(&mut self) -> Result<&mut FastHashMap<ShardIdent, Box<ShardDescription>>> {
-        self.shards
-            .as_mut()
-            .ok_or_else(|| anyhow!("`shards` is not initialized yet"))
-    }
-
-    pub fn update_ref_min_mc_seqno(&mut self, mc_seqno: u32) -> u32 {
-        self.min_ref_mc_seqno = std::cmp::min(self.min_ref_mc_seqno, mc_seqno);
-        self.min_ref_mc_seqno
-    }
 }
 
 #[derive(Debug, Default)]

@@ -14,7 +14,8 @@ use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
 use super::types::{
-    BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin,
+    BlockCollationCommon, BlockCollationCounters, BlockCollationDataBuilder, BlockLimitsLevel,
+    CachedMempoolAnchor, SpecialOrigin,
 };
 use super::CollatorStdImpl;
 use crate::collator::execution_manager::ExecutionManager;
@@ -122,11 +123,12 @@ impl CollatorStdImpl {
         let mut collation_data = Box::new(collation_data_builder.build(start_lt, block_limits));
 
         tracing::debug!(target: tracing_targets::COLLATOR, "initial processed_upto.externals = {:?}",
-            collation_data.processed_upto.externals,
+            collation_data.common.processed_upto.externals,
         );
 
         // show intenals proccessed upto
         collation_data
+            .common
             .processed_upto
             .internals
             .iter()
@@ -139,7 +141,7 @@ impl CollatorStdImpl {
             });
 
         // compute created / minted / recovered / from_prev_block
-        self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
+        self.update_value_flow(mc_data, prev_shard_data, &mut collation_data.common)?;
 
         // prepare to read and execute internals and externals
         let (max_messages_per_set, min_externals_per_set, group_limit, group_vert_size) =
@@ -156,7 +158,7 @@ impl CollatorStdImpl {
         // init execution manager
         let mut exec_manager = ExecutionManager::new(
             self.shard_id,
-            collation_data.next_lt,
+            collation_data.common.next_lt,
             Arc::new(PreloadedBlockchainConfig::with_config(
                 mc_data.config().clone(),
                 mc_data.global_id(),
@@ -164,11 +166,11 @@ impl CollatorStdImpl {
             Arc::new(ExecuteParams {
                 state_libs: mc_data.libraries().clone(),
                 // generated unix time
-                block_unixtime: collation_data.gen_utime,
+                block_unixtime: collation_data.common.gen_utime,
                 // block's start logical time
-                block_lt: collation_data.start_lt,
+                block_lt: collation_data.common.start_lt,
                 // block random seed
-                seed_block: collation_data.rand_seed,
+                seed_block: collation_data.common.rand_seed,
                 block_version: self.config.supported_block_version,
                 ..ExecuteParams::default()
             }),
@@ -227,11 +229,14 @@ impl CollatorStdImpl {
         loop {
             let mut timer = Instant::now();
 
-            let soft_level_reached = collation_data.block_limit.reached(BlockLimitsLevel::Soft);
+            let soft_level_reached = collation_data
+                .common
+                .block_limit
+                .reached(BlockLimitsLevel::Soft);
             if soft_level_reached {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "STUB: soft block limit reached: {:?}",
-                    collation_data.block_limit,
+                    collation_data.common.block_limit,
                 );
             }
             let mut executed_internal_messages = vec![];
@@ -246,7 +251,7 @@ impl CollatorStdImpl {
             } else {
                 vec![]
             };
-            collation_data.read_ext_msgs += ext_msgs.len() as u64;
+            collation_data.counters.read_ext_msgs += ext_msgs.len() as u64;
 
             // 2. Then iterate through existing internals and try to fill the set
             let mut remaining_capacity = max_messages_per_set - ext_msgs.len();
@@ -272,7 +277,7 @@ impl CollatorStdImpl {
                             message_with_source.message.key(),
                             message_with_source.shard_id,
                         );
-                        collation_data.read_int_msgs_from_iterator += 1;
+                        collation_data.counters.read_int_msgs_from_iterator += 1;
 
                         remaining_capacity -= 1;
                     }
@@ -297,7 +302,7 @@ impl CollatorStdImpl {
                     ext_count = ext_msgs.len(),
                     "read additional externals",
                 );
-                collation_data.read_ext_msgs += ext_msgs.len() as u64;
+                collation_data.counters.read_ext_msgs += ext_msgs.len() as u64;
                 msgs_set.append(&mut ext_msgs);
             }
 
@@ -316,7 +321,7 @@ impl CollatorStdImpl {
                             );
 
                             let dequeued = if int_msg.is_new {
-                                collation_data.read_new_msgs_from_iterator += 1;
+                                collation_data.counters.read_new_msgs_from_iterator += 1;
                                 None
                             } else {
                                 Some(Dequeued {
@@ -364,7 +369,7 @@ impl CollatorStdImpl {
             let mut msgs_set_executed_count = 0;
             let mut exec_ticks_count = 0;
             exec_manager.set_msgs_for_execution(msgs_set);
-            let mut msgs_set_offset = collation_data.processed_upto.processed_offset;
+            let mut msgs_set_offset = collation_data.common.processed_upto.processed_offset;
             let mut msgs_set_full_processed = false;
 
             fill_msgs_total_elapsed += timer.elapsed();
@@ -402,14 +407,14 @@ impl CollatorStdImpl {
                         item.in_message,
                     )?;
 
-                    collation_data.new_msgs_created += new_messages.len() as u64;
+                    collation_data.counters.new_msgs_created += new_messages.len() as u64;
 
                     for new_message in &new_messages {
                         let MsgInfo::Int(int_msg_info) = &new_message.info else {
                             continue;
                         };
 
-                        collation_data.inserted_new_msgs_to_iterator += 1;
+                        collation_data.counters.inserted_new_msgs_to_iterator += 1;
 
                         // TODO: Reduce size of parameters
                         self.mq_adapter.add_message_to_iterator(
@@ -418,8 +423,8 @@ impl CollatorStdImpl {
                         )?;
                     }
 
-                    collation_data.next_lt = exec_manager.min_next_lt();
-                    collation_data.block_limit.lt_current = collation_data.next_lt;
+                    collation_data.common.next_lt = exec_manager.min_next_lt();
+                    collation_data.common.block_limit.lt_current = collation_data.common.next_lt;
                 }
 
                 msgs_set_offset = tick.new_offset;
@@ -430,22 +435,26 @@ impl CollatorStdImpl {
                 //      currently we simply check only transactions count
                 //      but needs to make good implementation futher
                 msgs_set_executed_count += one_tick_executed_count;
-                collation_data.tx_count += one_tick_executed_count as u64;
-                collation_data.ext_msgs_error_count += tick.ext_msgs_error_count;
+                collation_data.counters.tx_count += one_tick_executed_count as u64;
+                collation_data.counters.ext_msgs_error_count += tick.ext_msgs_error_count;
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "processed messages from set {}/{}, total {}, offset = {}",
                     msgs_set_executed_count, msgs_set_len,
-                    collation_data.tx_count, msgs_set_offset,
+                    collation_data.counters.tx_count, msgs_set_offset,
                 );
 
                 if msgs_set_offset == msgs_set_len {
                     msgs_set_full_processed = true;
                 }
 
-                if collation_data.block_limit.reached(BlockLimitsLevel::Hard) {
+                if collation_data
+                    .common
+                    .block_limit
+                    .reached(BlockLimitsLevel::Hard)
+                {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "STUB: block limit reached: {:?}",
-                        collation_data.block_limit,
+                        collation_data.common.block_limit,
                     );
                     block_limits_reached = true;
                     break;
@@ -473,8 +482,8 @@ impl CollatorStdImpl {
             );
 
             tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}. offset = {}",
-                collation_data.processed_upto.externals,
-                collation_data.processed_upto.processed_offset,
+                collation_data.common.processed_upto.externals,
+                collation_data.common.processed_upto.processed_offset,
             );
 
             has_pending_internals = internal_messages_iterator.peek(true)?.is_some();
@@ -530,6 +539,7 @@ impl CollatorStdImpl {
 
             let shard_ident_full: ShardIdentFull = (*shard_ident).into();
             collation_data
+                .common
                 .processed_upto
                 .internals
                 .set(shard_ident_full, processed_upto.clone())?;
@@ -543,11 +553,8 @@ impl CollatorStdImpl {
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
-        // TODO: Move into rayon
-        tokio::task::yield_now().await;
         let (candidate, new_state_stuff) =
-            tokio::task::block_in_place(|| self.finalize_block(&mut collation_data, exec_manager))?;
-        tokio::task::yield_now().await;
+            self.finalize_block(&mut collation_data, exec_manager)?;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
         metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
@@ -587,47 +594,48 @@ impl CollatorStdImpl {
         }
 
         // metrics
-        metrics::counter!("tycho_do_collate_tx_total", labels).increment(collation_data.tx_count);
+        metrics::counter!("tycho_do_collate_tx_total", labels)
+            .increment(collation_data.counters.tx_count);
 
         metrics::counter!("tycho_do_collate_int_enqueue_count")
-            .increment(collation_data.int_enqueue_count);
+            .increment(collation_data.counters.int_enqueue_count);
         metrics::counter!("tycho_do_collate_int_dequeue_count")
-            .increment(collation_data.int_dequeue_count);
+            .increment(collation_data.counters.int_dequeue_count);
         metrics::gauge!("tycho_do_collate_int_msgs_queue_calc").increment(
-            (collation_data.int_enqueue_count as i64 - collation_data.int_dequeue_count as i64)
-                as f64,
+            (collation_data.counters.int_enqueue_count as i64
+                - collation_data.counters.int_dequeue_count as i64) as f64,
         );
 
         metrics::counter!("tycho_do_collate_msgs_exec_count_all", labels)
-            .increment(collation_data.execute_count_all);
+            .increment(collation_data.counters.execute_count_all);
 
         metrics::counter!("tycho_do_collate_msgs_read_count_ext", labels)
-            .increment(collation_data.read_ext_msgs);
+            .increment(collation_data.counters.read_ext_msgs);
         metrics::counter!("tycho_do_collate_msgs_exec_count_ext", labels)
-            .increment(collation_data.execute_count_ext);
+            .increment(collation_data.counters.execute_count_ext);
         metrics::counter!("tycho_do_collate_msgs_error_count_ext", labels)
-            .increment(collation_data.ext_msgs_error_count);
+            .increment(collation_data.counters.ext_msgs_error_count);
 
         metrics::counter!("tycho_do_collate_msgs_read_count_int", labels)
-            .increment(collation_data.read_int_msgs_from_iterator);
+            .increment(collation_data.counters.read_int_msgs_from_iterator);
         metrics::counter!("tycho_do_collate_msgs_exec_count_int", labels)
-            .increment(collation_data.execute_count_int);
+            .increment(collation_data.counters.execute_count_int);
 
         // new internals messages
         metrics::counter!("tycho_do_collate_new_msgs_created_count", labels)
-            .increment(collation_data.new_msgs_created);
+            .increment(collation_data.counters.new_msgs_created);
         metrics::counter!(
             "tycho_do_collate_new_msgs_inserted_to_iterator_count",
             labels
         )
-        .increment(collation_data.inserted_new_msgs_to_iterator);
+        .increment(collation_data.counters.inserted_new_msgs_to_iterator);
         metrics::counter!("tycho_do_collate_msgs_read_count_new_int", labels)
-            .increment(collation_data.read_new_msgs_from_iterator);
+            .increment(collation_data.counters.read_new_msgs_from_iterator);
         metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", labels)
-            .increment(collation_data.execute_count_new_int);
+            .increment(collation_data.counters.execute_count_new_int);
 
-        collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
-        self.update_stats(&collation_data);
+        collation_data.counters.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
+        self.update_stats(&collation_data.counters);
 
         let total_elapsed = total_collation_histogram.finish();
 
@@ -662,18 +670,19 @@ impl CollatorStdImpl {
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={}",
             block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
-            collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
-            collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
-            collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created, diff.messages.len(),
+            collation_data.common.start_lt, collation_data.common.next_lt, collation_data.counters.execute_count_all,
+            collation_data.counters.execute_count_ext, collation_data.counters.execute_count_int, collation_data.counters.execute_count_new_int,
+            collation_data.counters.int_enqueue_count, collation_data.counters.int_dequeue_count,
+            collation_data.counters.new_msgs_created, diff.messages.len(),
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
-            collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator,
+            collation_data.counters.read_ext_msgs, collation_data.counters.read_int_msgs_from_iterator,
+            collation_data.counters.read_new_msgs_from_iterator, collation_data.counters.inserted_new_msgs_to_iterator,
         );
 
         assert_eq!(
-            collation_data.int_enqueue_count,
-            collation_data.inserted_new_msgs_to_iterator - collation_data.execute_count_new_int
+            collation_data.counters.int_enqueue_count,
+            collation_data.counters.inserted_new_msgs_to_iterator
+                - collation_data.counters.execute_count_new_int
         );
 
         tracing::info!(
@@ -749,12 +758,14 @@ impl CollatorStdImpl {
         // when we already read externals in this collation then continue from read_to
         let was_read_upto_opt = if collation_data.externals_reading_started {
             collation_data
+                .common
                 .processed_upto
                 .externals
                 .as_ref()
                 .map(|upto| upto.read_to)
         } else {
             collation_data
+                .common
                 .processed_upto
                 .externals
                 .as_ref()
@@ -896,10 +907,10 @@ impl CollatorStdImpl {
 
         // update read up to info
         if let Some(last_read_anchor) = last_read_anchor_opt {
-            if let Some(externals_upto) = collation_data.processed_upto.externals.as_mut() {
+            if let Some(externals_upto) = collation_data.common.processed_upto.externals.as_mut() {
                 externals_upto.read_to = (last_read_anchor, msgs_read_offset_in_last_anchor);
             } else {
-                collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
+                collation_data.common.processed_upto.externals = Some(ExternalsProcessedUpto {
                     processed_to: (read_from_anchor_opt.unwrap(), was_read_upto.1),
                     read_to: (last_read_anchor, msgs_read_offset_in_last_anchor),
                 });
@@ -935,14 +946,14 @@ impl CollatorStdImpl {
     ) {
         if msgs_set_full_processed {
             // externals read window full processed
-            if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+            if let Some(externals) = collation_data.common.processed_upto.externals.as_mut() {
                 externals.processed_to = externals.read_to;
             }
 
-            collation_data.processed_upto.processed_offset = 0;
+            collation_data.common.processed_upto.processed_offset = 0;
         } else {
             // otherwise read windows stay unchanged, only update processed offset
-            collation_data.processed_upto.processed_offset = msgs_set_offset;
+            collation_data.common.processed_upto.processed_offset = msgs_set_offset;
         }
     }
 
@@ -982,7 +993,7 @@ impl CollatorStdImpl {
         &self,
         mc_data: &McData,
         prev_shard_data: &PrevData,
-        collation_data: &mut BlockCollationData,
+        collation_data: &mut BlockCollationCommon,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR, "update_value_flow()");
 
@@ -1101,10 +1112,10 @@ impl CollatorStdImpl {
 
         // TODO: Execute in parallel if addresses are distinct?
 
-        if !collator_data.value_flow.recovered.tokens.is_zero() {
+        if !collator_data.common.value_flow.recovered.tokens.is_zero() {
             self.create_special_transaction(
                 &config.get_fee_collector_address()?,
-                collator_data.value_flow.recovered.clone(),
+                collator_data.common.value_flow.recovered.clone(),
                 SpecialOrigin::Recover,
                 collator_data,
                 exec_manager,
@@ -1115,10 +1126,10 @@ impl CollatorStdImpl {
         // FIXME: Minter only mints extra currencies, so this will not work
         // TODO: Add `is_zero` to `CurrencyCollection` (but it might be heavy,
         // since we must check all dict items)
-        if !collator_data.value_flow.minted.tokens.is_zero() {
+        if !collator_data.common.value_flow.minted.tokens.is_zero() {
             self.create_special_transaction(
                 &config.get_minter_address()?,
-                collator_data.value_flow.minted.clone(),
+                collator_data.common.value_flow.minted.clone(),
                 SpecialOrigin::Mint,
                 collator_data,
                 exec_manager,
@@ -1159,8 +1170,8 @@ impl CollatorStdImpl {
                 value: amount,
                 ihr_fee: Default::default(),
                 fwd_fee: Default::default(),
-                created_lt: collation_data.start_lt,
-                created_at: collation_data.gen_utime,
+                created_lt: collation_data.common.start_lt,
+                created_at: collation_data.common.gen_utime,
             });
             let cell = CellBuilder::build_from(BaseMessage {
                 info: info.clone(),
@@ -1190,7 +1201,7 @@ impl CollatorStdImpl {
             executed.in_message,
         )?;
 
-        collation_data.next_lt = exec_manager.min_next_lt();
+        collation_data.common.next_lt = exec_manager.min_next_lt();
         Ok(())
     }
 
@@ -1249,8 +1260,8 @@ impl CollatorStdImpl {
         // TODO: It does nothing for ticktock, so commented for now
         // new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
 
-        collation_data.execute_count_all += 1;
-        collation_data.next_lt = exec_manager.min_next_lt();
+        collation_data.counters.execute_count_all += 1;
+        collation_data.common.next_lt = exec_manager.min_next_lt();
         Ok(())
     }
 
@@ -1336,7 +1347,7 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    fn update_stats(&mut self, collation_data: &BlockCollationData) {
+    fn update_stats(&mut self, collation_data: &BlockCollationCounters) {
         self.stats.total_execute_count_all += collation_data.execute_count_all;
 
         self.stats.total_execute_msgs_time_mc += collation_data.total_execute_msgs_time_mc;
@@ -1371,8 +1382,8 @@ fn new_transaction(
         "process new transaction from message",
     );
 
-    collation_data.execute_count_all += 1;
-    collation_data.block_limit.gas_used += executor_output.gas_used as u32;
+    collation_data.counters.execute_count_all += 1;
+    collation_data.common.block_limit.gas_used += executor_output.gas_used as u32;
 
     let import_fees;
     let in_msg_hash = *in_msg.cell.repr_hash();
@@ -1395,7 +1406,7 @@ fn new_transaction(
         }
         // External messages are added as is
         (MsgInfo::ExtIn(_), _) => {
-            collation_data.execute_count_ext += 1;
+            collation_data.counters.execute_count_ext += 1;
 
             import_fees = ImportFees::default();
             Lazy::new(&InMsg::External(InMsgExternal {
@@ -1405,7 +1416,7 @@ fn new_transaction(
         }
         // Dequeued messages have a dedicated `InMsg` type
         (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) if in_msg.dequeued.is_some() => {
-            collation_data.execute_count_int += 1;
+            collation_data.counters.execute_count_int += 1;
 
             let same_shard = in_msg.dequeued.map(|d| d.same_shard).unwrap_or_default();
 
@@ -1443,13 +1454,13 @@ fn new_transaction(
                     new_tx: None,
                 });
             }
-            collation_data.int_dequeue_count += 1;
+            collation_data.counters.int_dequeue_count += 1;
 
             in_msg
         }
         // New messages are added as is
         (MsgInfo::Int(IntMsgInfo { fwd_fee, .. }), _) => {
-            collation_data.execute_count_new_int += 1;
+            collation_data.counters.execute_count_new_int += 1;
 
             let msg_envelope = MsgEnvelope {
                 cur_addr: IntermediateAddr::FULL_SRC_SAME_WORKCHAIN,
@@ -1486,7 +1497,7 @@ fn new_transaction(
                 exported_value,
                 new_tx: None,
             });
-            collation_data.int_enqueue_count -= 1;
+            collation_data.counters.int_enqueue_count -= 1;
 
             in_msg
         }
@@ -1518,7 +1529,7 @@ fn new_transaction(
         );
         match &out_msg_info {
             MsgInfo::Int(IntMsgInfo { fwd_fee, dst, .. }) => {
-                collation_data.int_enqueue_count += 1;
+                collation_data.counters.int_enqueue_count += 1;
 
                 let dst_prefix = dst.prefix();
                 let dst_workchain = dst.workchain();
