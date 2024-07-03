@@ -161,7 +161,7 @@ impl ArchiveBlockProvider {
     }
 
     fn is_sync(block: &BlockStuff) -> anyhow::Result<bool> {
-        Ok(block.load_info()?.gen_utime + 30 > now_sec())
+        Ok(block.load_info()?.gen_utime + 600 > now_sec())
     }
 
     fn construct_block(block: BlockStuff) -> anyhow::Result<BlockStuffAug> {
