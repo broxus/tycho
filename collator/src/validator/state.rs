@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature};
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
 use tokio::sync::RwLock;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
@@ -228,7 +228,7 @@ impl SessionInfo {
                     continue;
                 }
 
-                let block_validation_candidate = BlockValidationCandidate::from(entry.0);
+                let block_validation_candidate = Block::build_data_for_sign(&entry.0);
 
                 if let Some(validator) = self.validators.get(validator_id) {
                     to_verify.push((
@@ -245,7 +245,7 @@ impl SessionInfo {
 
         let mut budget = 0;
         for (validator_id, public_key, block_validation_candidate, signature) in to_verify {
-            let valid_signature = public_key.verify(&block_validation_candidate, &signature.0);
+            let valid_signature = public_key.verify_raw(&block_validation_candidate, &signature.0);
 
             // TODO temporary stub. Always consider signature as valid
             // let valid_signature = true;
@@ -257,11 +257,8 @@ impl SessionInfo {
                         entry.1.valid_signatures.insert(validator_id, signature);
                     });
             } else {
-                let root_hash = HashBytes(block_validation_candidate.root_hash);
-                let file_hash = HashBytes(block_validation_candidate.file_hash);
                 tracing::error!(target: tracing_targets::VALIDATOR, validator_id=%validator_id,
-                    root_hash=?root_hash,
-                    file_hash=?file_hash,
+                    data=?block_validation_candidate,
                     block= %block_id_short,
                     "Invalid signature");
                 panic!("Invalid signature");
