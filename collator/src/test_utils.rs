@@ -99,7 +99,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
             .create_or_load_handle(&master_id, BlockMetaData {
                 is_key_block: mc_state_extra.after_key_block,
                 gen_utime: master_state_stuff.state().gen_utime,
-                mc_ref_seqno: 0,
+                mc_ref_seqno: Some(master_id.seqno),
             });
 
     storage
@@ -126,7 +126,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
             .create_or_load_handle(&shard_id, BlockMetaData {
                 is_key_block: false,
                 gen_utime: shard_state_stuff.state().gen_utime,
-                mc_ref_seqno: 0,
+                mc_ref_seqno: Some(master_id.seqno),
             });
 
     storage

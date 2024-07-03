@@ -1,5 +1,6 @@
 use everscale_types::dict::{
-    aug_dict_insert, aug_dict_remove_owned, AugDictExtra, DictKey, SetMode,
+    aug_dict_insert, aug_dict_remove_owned, build_aug_dict_from_sorted_iter, AugDictExtra, DictKey,
+    SetMode,
 };
 use everscale_types::error::Error;
 use everscale_types::models::Lazy;
@@ -44,6 +45,45 @@ where
     K: Store + DictKey,
     for<'a> A: AugDictExtra + Store + Load<'a>,
 {
+    pub fn try_from_sorted_iter_lazy<'a, I>(iter: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = (&'a K, &'a A, &'a Lazy<V>)>,
+        K: Ord + 'a,
+        A: 'a,
+        V: 'a,
+    {
+        Ok(Self {
+            dict_root: build_aug_dict_from_sorted_iter(
+                iter.into_iter().map(|(k, a, v)| {
+                    // SAFETY: We know that this cell is not a library cell.
+                    let value = unsafe { v.inner().as_slice_unchecked() };
+                    (k, a, value)
+                }),
+                K::BITS,
+                A::comp_add,
+                &mut Cell::empty_context(),
+            )?,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    pub fn try_from_sorted_iter_any<'a, I>(iter: I) -> Result<Self, Error>
+    where
+        I: IntoIterator<Item = (&'a K, &'a A, &'a dyn Store)>,
+        K: Ord + 'a,
+        A: 'a,
+    {
+        Ok(Self {
+            dict_root: build_aug_dict_from_sorted_iter(
+                iter,
+                K::BITS,
+                A::comp_add,
+                &mut Cell::empty_context(),
+            )?,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
     pub fn set_as_lazy(&mut self, key: &K, extra: &A, value: &Lazy<V>) -> Result<bool, Error> {
         self.set_any(key, extra, &value.inner().as_slice()?)
     }

@@ -162,7 +162,6 @@ impl ExecutionManager {
                     cmp::max(self.min_next_lt, executor_output.account_last_trans_lt);
 
                 items.push(ExecutedTickItem {
-                    account_addr: executed.account_state.account_addr,
                     in_message: tx.in_message,
                     executor_output,
                 });
@@ -374,7 +373,6 @@ impl ExecutedTick {
 }
 
 pub struct ExecutedTickItem {
-    pub account_addr: AccountId,
     pub in_message: Box<ParsedMessage>,
     pub executor_output: ExecutorOutput,
 }
@@ -416,16 +414,16 @@ fn execute_ordinary_transaction_impl(
         config,
     );
 
-    if let Ok((total_fees, executor_output)) = &result {
-        // TODO replace with batch set
-        let tx_lt = shard_account.last_trans_lt;
-        account_stuff.add_transaction(tx_lt, total_fees, &executor_output.transaction)?;
-    }
+    let result = match result {
+        Ok((total_fees, executor_output)) => {
+            let tx_lt = shard_account.last_trans_lt;
+            account_stuff.add_transaction(tx_lt, total_fees, executor_output.transaction.clone());
+            Ok(executor_output)
+        }
+        Err(e) => Err(e),
+    };
 
-    Ok(ExecutedOrdinaryTransaction {
-        result: result.map(|(_, exec_out)| exec_out),
-        in_message,
-    })
+    Ok(ExecutedOrdinaryTransaction { result, in_message })
 }
 
 fn execute_ticktock_transaction(
@@ -452,7 +450,7 @@ fn execute_ticktock_transaction(
 
     // TODO replace with batch set
     let tx_lt = shard_account.last_trans_lt;
-    account_stuff.add_transaction(tx_lt, &total_fees, &executor_output.transaction)?;
+    account_stuff.add_transaction(tx_lt, total_fees, executor_output.transaction.clone());
 
     Ok(executor_output)
 }

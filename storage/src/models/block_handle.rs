@@ -78,11 +78,19 @@ impl BlockHandle {
         }
     }
 
-    pub fn masterchain_ref_seqno(&self) -> u32 {
+    pub fn mc_ref_seqno(&self) -> u32 {
         if self.inner.id.shard.is_masterchain() {
             self.inner.id.seqno
         } else {
             self.inner.meta.masterchain_ref_seqno()
+        }
+    }
+
+    pub fn set_mc_ref_seqno(&self, mc_seqno: u32) -> bool {
+        match self.meta().set_mc_ref_seqno(mc_seqno) {
+            0 => true,
+            prev_seqno if prev_seqno == mc_seqno => false,
+            _ => panic!("mc ref seqno already set"),
         }
     }
 

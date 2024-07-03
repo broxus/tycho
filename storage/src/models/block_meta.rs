@@ -1,7 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Buf;
-use everscale_types::models::BlockInfo;
 
 use crate::util::{StoredValue, StoredValueBuffer};
 
@@ -9,7 +8,7 @@ use crate::util::{StoredValue, StoredValueBuffer};
 pub struct BlockMetaData {
     pub is_key_block: bool,
     pub gen_utime: u32,
-    pub mc_ref_seqno: u32,
+    pub mc_ref_seqno: Option<u32>,
 }
 
 impl BlockMetaData {
@@ -17,27 +16,11 @@ impl BlockMetaData {
         Self {
             is_key_block,
             gen_utime,
-            mc_ref_seqno: 0,
+            mc_ref_seqno: Some(0),
         }
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct BriefBlockInfo {
-    pub is_key_block: bool,
-    pub gen_utime: u32,
-    pub after_split: bool,
-}
-
-impl From<&BlockInfo> for BriefBlockInfo {
-    fn from(info: &BlockInfo) -> Self {
-        Self {
-            is_key_block: info.key_block,
-            gen_utime: info.gen_utime,
-            after_split: info.after_split,
-        }
-    }
-}
 #[derive(Debug, Default)]
 pub struct BlockMeta {
     flags: AtomicU64,
@@ -52,7 +35,7 @@ impl BlockMeta {
                     BLOCK_META_FLAG_IS_KEY_BLOCK
                 } else {
                     0
-                } | data.mc_ref_seqno as u64,
+                } | data.mc_ref_seqno.unwrap_or_default() as u64,
             ),
             gen_utime: data.gen_utime,
         }
@@ -69,7 +52,7 @@ impl BlockMeta {
         self.flags.load(Ordering::Acquire) as u32
     }
 
-    pub fn set_masterchain_ref_seqno(&self, seqno: u32) -> u32 {
+    pub fn set_mc_ref_seqno(&self, seqno: u32) -> u32 {
         self.flags.fetch_or(seqno as u64, Ordering::Release) as u32
     }
 

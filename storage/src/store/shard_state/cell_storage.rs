@@ -719,6 +719,11 @@ impl StorageCell {
 }
 
 impl CellImpl for StorageCell {
+    #[inline]
+    fn untrack(self: CellInner<Self>) -> Cell {
+        Cell::from(self)
+    }
+
     fn descriptor(&self) -> CellDescriptor {
         self.descriptor
     }

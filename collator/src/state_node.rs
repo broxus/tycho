@@ -51,6 +51,13 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId>;
     /// Return master or shard state on specified block from node local state
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff>;
+    /// Store shard state root in the storage and make a new `ShardStateStuff` from it.
+    async fn store_state_root(
+        &self,
+        block_id: &BlockId,
+        meta: BlockMetaData,
+        state_root: Cell,
+    ) -> Result<ShardStateStuff>;
     /// Return block by it's id from node local state
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>>;
     /// Return block handle by it's id from node local state
@@ -100,6 +107,32 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
+        let state = self
+            .storage
+            .shard_state_storage()
+            .load_state(block_id)
+            .await?;
+        Ok(state)
+    }
+
+    async fn store_state_root(
+        &self,
+        block_id: &BlockId,
+        meta: BlockMetaData,
+        state_root: Cell,
+    ) -> Result<ShardStateStuff> {
+        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
+
+        let (handle, _) = self
+            .storage
+            .block_handle_storage()
+            .create_or_load_handle(block_id, meta);
+
+        self.storage
+            .shard_state_storage()
+            .store_state_root(&handle, state_root)
+            .await?;
+
         let state = self
             .storage
             .shard_state_storage()
@@ -274,7 +307,7 @@ impl StateNodeAdapterStdImpl {
                 BlockProofHandle::New(BlockMetaData {
                     is_key_block: block_info.key_block,
                     gen_utime: block_info.gen_utime,
-                    mc_ref_seqno: block_info.min_ref_mc_seqno,
+                    mc_ref_seqno: None,
                 }),
             )
             .await?;
@@ -337,15 +370,22 @@ impl StateNodeAdapterStdImpl {
         gen_catchain_seqno: u32,
         block_signatures: &FastHashMap<HashBytes, Signature>,
     ) -> Result<everscale_types::models::block::BlockSignatures> {
-        let mut signatures: Dict<u16, BlockSignature> = Dict::new();
-        for (index, (key, value)) in block_signatures.iter().enumerate() {
-            let block_signature = BlockSignature {
-                node_id_short: *key,
-                signature: *value,
-            };
+        use everscale_types::dict;
 
-            signatures.add(index as u16, block_signature)?;
-        }
+        // TODO: Add helper for owned iter
+        let signatures = Dict::from_raw(dict::build_dict_from_sorted_iter(
+            block_signatures
+                .iter()
+                .enumerate()
+                .map(|(i, (key, value))| {
+                    (i as u16, BlockSignature {
+                        node_id_short: *key,
+                        signature: *value,
+                    })
+                }),
+            16,
+            &mut Cell::empty_context(),
+        )?);
 
         let sig_count = block_signatures.len() as u32;
 

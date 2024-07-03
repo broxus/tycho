@@ -26,8 +26,8 @@ use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, StateSubscriber,
-    StateSubscriberContext, StorageBlockProvider,
+    MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier,
+    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BlockchainRpcServiceConfig, BroadcastListener,
@@ -481,12 +481,10 @@ impl Node {
         let state_storage = self.storage.shard_state_storage();
 
         for state in to_import {
-            let (handle, status) =
-                handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
-                    is_key_block: state.block_id().is_masterchain(),
-                    gen_utime,
-                    mc_ref_seqno: 0,
-                });
+            let (handle, status) = handle_storage.create_or_load_handle(
+                state.block_id(),
+                BlockMetaData::zero_state(gen_utime, state.block_id().is_masterchain()),
+            );
 
             let stored = state_storage
                 .store_state(&handle, &state)
@@ -674,11 +672,14 @@ impl Node {
                 collator_block_provider,
             ))
             .with_state(strider_state)
-            .with_state_subscriber(
-                self.state_tracker.clone(),
-                self.storage.clone(),
-                ((collator_state_subscriber, rpc_state), MetricsSubscriber),
-            )
+            .with_block_subscriber((
+                ShardStateApplier::new(
+                    self.state_tracker.clone(),
+                    self.storage.clone(),
+                    (collator_state_subscriber, rpc_state),
+                ),
+                MetricsSubscriber,
+            ))
             .build();
 
         // Run block strider
