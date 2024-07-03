@@ -531,6 +531,28 @@ impl BlockStorage {
         }
     }
 
+    pub async fn remove_boundary_blocks(
+        &self,
+        mc_block_handle: BlockHandle,
+        max_blocks_per_batch: Option<usize>,
+    ) -> Result<()> {
+        tracing::info!(
+            target_block_id = %mc_block_handle.id(),
+            "starting blocks GC",
+        );
+
+        let top_blocks = self
+            .load_block_data(&mc_block_handle)
+            .await
+            .context("Failed to load target key block data")
+            .and_then(|block_data| TopBlocks::from_mc_block(&block_data))
+            .context("Failed to compute top blocks for target block")?;
+
+        self.remove_outdated_block_internal(mc_block_handle.id(), top_blocks, max_blocks_per_batch)
+            .await?;
+        Ok(())
+    }
+
     pub async fn remove_outdated_blocks(
         &self,
         key_block_id: &BlockId,
@@ -562,11 +584,24 @@ impl BlockStorage {
                     .context("Failed to compute top blocks for target block")?
             }
             _ => {
-                tracing::info!(%key_block_id, "blocks GC skipped");
+                tracing::info!(%key_block_id, "Blocks GC skipped");
                 return Ok(());
             }
         };
 
+        self.remove_outdated_block_internal(key_block_id, top_blocks, max_blocks_per_batch)
+            .await?;
+
+        // Done
+        Ok(())
+    }
+
+    async fn remove_outdated_block_internal(
+        &self,
+        target_block_id: &BlockId,
+        top_blocks: TopBlocks,
+        max_blocks_per_batch: Option<usize>,
+    ) -> Result<()> {
         // Remove all expired entries
         let total_cached_handles_removed = self.block_handle_storage.gc_handles_cache(&top_blocks);
 
@@ -578,15 +613,13 @@ impl BlockStorage {
         } = rayon_run(move || remove_blocks(db, max_blocks_per_batch, &top_blocks)).await?;
 
         tracing::info!(
-            %key_block_id,
+            %target_block_id,
             total_cached_handles_removed,
             mc_package_entries_removed,
             total_package_entries_removed,
             total_handles_removed,
             "finished blocks GC"
         );
-
-        // Done
         Ok(())
     }
 

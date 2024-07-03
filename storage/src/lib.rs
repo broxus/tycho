@@ -258,34 +258,6 @@ impl Storage {
     }
 }
 
-pub async fn prepare_blocks_gc(storage: Storage) -> Result<()> {
-    let blocks_gc_config = match &storage.inner.config.blocks_gc_config {
-        Some(state) => state,
-        None => return Ok(()),
-    };
-
-    let Some(key_block) = storage.block_handle_storage().find_last_key_block() else {
-        return Ok(());
-    };
-
-    let Some(block) = storage.node_state().load_init_mc_block_id() else {
-        return Ok(());
-    };
-    // Blocks GC will be called later when the shards client will reach the key block
-    if block.seqno < key_block.id().seqno {
-        return Ok(());
-    }
-
-    storage
-        .block_storage()
-        .remove_outdated_blocks(
-            key_block.id(),
-            blocks_gc_config.max_blocks_per_batch,
-            blocks_gc_config.kind,
-        )
-        .await
-}
-
 struct Inner {
     root: FileDb,
     base_db: BaseDb,

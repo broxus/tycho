@@ -1,32 +1,43 @@
-use std::arch::x86_64::_mm256_insert_epi16;
 use std::ops::Add;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use everscale_types::models::BlockId;
-use futures_util::future::BoxFuture;
 use tokio::sync::Notify;
 use tokio::task::{AbortHandle, JoinHandle};
 use tycho_block_util::block::BlockStuff;
 use tycho_storage::{ArchivesGcInterval, Storage};
-use tycho_util::futures::JoinTask;
-use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::duration_between_unix_and_instant;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 
+const GC_MC_BLOCK_INTERVAL: u32 = 10000;
+
 #[repr(transparent)]
 pub struct GcSubscriber {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
+enum BlockGcTrigger {
+    Common(BlockStuff),
+    Interval(BlockStuff),
+}
+
+impl BlockGcTrigger {
+    fn get_block_seqno(&self) -> u32 {
+        match self {
+            BlockGcTrigger::Common(stuff) | BlockGcTrigger::Interval(stuff) => stuff.id().seqno,
+        }
+    }
+}
+
 impl GcSubscriber {
     pub fn new(storage: Storage) -> Self {
         let (block_sender, mut block_receiver) =
-            tokio::sync::watch::channel::<Option<BlockStuff>>(None);
+            tokio::sync::watch::channel::<Option<BlockGcTrigger>>(None);
         let (state_sender, mut state_receiver) =
             tokio::sync::watch::channel::<Option<BlockStuff>>(None);
 
@@ -55,13 +66,13 @@ impl GcSubscriber {
 
     pub fn handle(&self, block_stuff: BlockStuff) {
         if !block_stuff.id().is_masterchain() {
-            return ();
+            return;
         }
         let block = match block_stuff.load_info() {
             Ok(block) => block,
             Err(e) => {
                 tracing::error!("Failed to load block info: {:?} {e:?}", block_stuff.id());
-                return ();
+                return;
             }
         };
 
@@ -70,8 +81,42 @@ impl GcSubscriber {
         }
 
         if block.key_block {
-            if let Err(e) = self.inner.block_sender.send(Some(block_stuff.clone())) {
+            if let Err(e) = self
+                .inner
+                .block_sender
+                .send(Some(BlockGcTrigger::Common(block_stuff.clone())))
+            {
                 tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
+            }
+            return;
+        }
+
+        let last = self
+            .inner
+            .storage
+            .runtime_storage()
+            .get_last_block_gc_collection();
+        match last {
+            Some(last_mc_seqno) if last_mc_seqno < block.seqno - GC_MC_BLOCK_INTERVAL => {
+                if let Err(e) = self
+                    .inner
+                    .block_sender
+                    .send(Some(BlockGcTrigger::Interval(block_stuff.clone())))
+                {
+                    tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
+                }
+            }
+            None => {
+                if let Err(e) = self
+                    .inner
+                    .block_sender
+                    .send(Some(BlockGcTrigger::Interval(block_stuff.clone())))
+                {
+                    tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
+                }
+            }
+            _ => {
+                tracing::debug!("Skipping boundary GC. Block are too fresh");
             }
         }
     }
@@ -151,7 +196,7 @@ impl GcSubscriber {
     }
 
     fn handle_block_gc(
-        mut block_receiver: tokio::sync::watch::Receiver<Option<BlockStuff>>,
+        mut block_receiver: tokio::sync::watch::Receiver<Option<BlockGcTrigger>>,
         storage: Storage,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -175,20 +220,47 @@ impl GcSubscriber {
                     continue;
                 };
 
-                tracing::debug!(
-                    "Removing outdated blocks with boundary block {}, batch of {:?} and kind {:?}",
-                    bs.id(),
-                    config.max_blocks_per_batch,
-                    config.kind
-                );
+                let cleaning_seqno = bs.get_block_seqno();
 
-                if let Err(e) = storage
-                    .block_storage()
-                    .remove_outdated_blocks(&bs.id(), config.max_blocks_per_batch, config.kind)
-                    .await
-                {
-                    tracing::error!("Failed to remove_outdated_blocks. {e:?}")
+                match bs {
+                    BlockGcTrigger::Common(bs) => {
+                        tracing::debug!(
+                            "Removing outdated blocks for block {}, batch of {:?} and kind {:?}",
+                            bs.id(),
+                            config.max_blocks_per_batch,
+                            config.kind
+                        );
+                        if let Err(e) = storage
+                            .block_storage()
+                            .remove_outdated_blocks(
+                                bs.id(),
+                                config.max_blocks_per_batch,
+                                config.kind,
+                            )
+                            .await
+                        {
+                            tracing::error!("Failed to remove_outdated_blocks. {e:?}");
+                        }
+                    }
+                    BlockGcTrigger::Interval(bs) => {
+                        let Some(handle) = storage.block_handle_storage().load_handle(bs.id())
+                        else {
+                            return;
+                        };
+
+                        if let Err(e) = storage
+                            .block_storage()
+                            .remove_boundary_blocks(handle, config.max_blocks_per_batch)
+                            .await
+                        {
+                            tracing::error!("Failed to remove_boundary_blocks. {e:?}");
+                        }
+                    }
                 }
+
+                storage
+                    .runtime_storage()
+                    .set_last_block_gc_collection(cleaning_seqno);
             }
         })
     }
@@ -230,7 +302,7 @@ impl GcSubscriber {
 
 struct Inner {
     storage: Storage,
-    block_sender: tokio::sync::watch::Sender<Option<BlockStuff>>,
+    block_sender: tokio::sync::watch::Sender<Option<BlockGcTrigger>>,
     state_sender: tokio::sync::watch::Sender<Option<BlockStuff>>,
 
     handle_block_task: Option<AbortHandle>,

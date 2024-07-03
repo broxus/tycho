@@ -40,7 +40,7 @@ use tycho_network::{
     PublicOverlay, Router,
 };
 use tycho_rpc::{RpcConfig, RpcState};
-use tycho_storage::{prepare_blocks_gc, BlockMetaData, Storage};
+use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::FastHashMap;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
@@ -682,8 +682,6 @@ impl Node {
                 (MetricsSubscriber, gc_subscriber),
             ))
             .build();
-
-        prepare_blocks_gc(self.storage.clone()).await?;
 
         // Run block strider
         tracing::info!("block strider started");

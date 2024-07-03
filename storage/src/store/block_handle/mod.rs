@@ -165,6 +165,18 @@ impl BlockHandleStorage {
         self.load_handle(&key_block_id)
     }
 
+    pub fn find_master_block(&self, seqno: u32) -> Option<BlockHandle> {
+        if seqno == 0 {
+            return None;
+        }
+
+        let mut iter = self.db.key_blocks.raw_iterator();
+        iter.seek(seqno.to_be_bytes());
+
+        let mc_block = BlockId::from_slice(iter.value()?);
+        self.load_handle(&mc_block)
+    }
+
     pub fn find_prev_persistent_key_block(&self, seqno: u32) -> Option<BlockHandle> {
         if seqno == 0 {
             return None;
