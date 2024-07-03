@@ -126,8 +126,6 @@ impl BlockHandleStorage {
             .unwrap();
 
         if handle.is_key_block() {
-            tracing::info!(key_block = %handle.id());
-
             self.db
                 .key_blocks
                 .insert(id.seqno.to_be_bytes(), id.to_vec())
