@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -45,7 +46,7 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let mut account_blocks = RelaxedAugDict::new();
+            let mut account_blocks = BTreeMap::new();
             let mut shard_accounts =
                 RelaxedAugDict::from_full(prev_shard_data.observable_accounts());
 
@@ -88,17 +89,21 @@ impl CollatorStdImpl {
                 let account_block = AccountBlock {
                     state_update: updated_account.build_hash_update(), // TODO: fix state update
                     account: updated_account.account_addr,
-                    transactions: updated_account.transactions.build()?,
+                    transactions: AugDict::try_from_btree(&updated_account.transactions)?,
                 };
 
-                account_blocks.set_any(
-                    &updated_account.account_addr,
-                    account_block.transactions.root_extra(),
-                    &account_block,
-                )?;
+                account_blocks.insert(updated_account.account_addr, account_block);
             }
 
             build_account_blocks_elapsed = histogram.finish();
+
+            // TODO: Somehow consume accounts inside an iterator
+            let account_blocks = RelaxedAugDict::try_from_sorted_iter_any(
+                account_blocks
+                    .iter()
+                    .map(|(k, v)| (k, v.transactions.root_extra(), v as &dyn Store)),
+            )?;
+
             (account_blocks.build()?, shard_accounts.build()?)
         };
 
@@ -114,11 +119,12 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let mut in_msgs = RelaxedAugDict::new();
-            // TODO: use more effective algorithm than iter and set
-            for (msg_id, msg) in collation_data.in_msgs.iter() {
-                in_msgs.set_as_lazy(msg_id, &msg.import_fees, &msg.in_msg)?;
-            }
+            let in_msgs = RelaxedAugDict::try_from_sorted_iter_lazy(
+                collation_data
+                    .in_msgs
+                    .iter()
+                    .map(|(msg_id, msg)| (msg_id, &msg.import_fees, &msg.in_msg)),
+            )?;
 
             build_in_msgs_elapsed = histogram.finish();
             in_msgs.build()?
@@ -132,11 +138,12 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let mut out_msgs = RelaxedAugDict::new();
-            // TODO: use more effective algorithm than iter and set
-            for (msg_id, msg) in collation_data.out_msgs.iter() {
-                out_msgs.set_as_lazy(msg_id, &msg.exported_value, &msg.out_msg)?;
-            }
+            let out_msgs = RelaxedAugDict::try_from_sorted_iter_lazy(
+                collation_data
+                    .out_msgs
+                    .iter()
+                    .map(|(msg_id, msg)| (msg_id, &msg.exported_value, &msg.out_msg)),
+            )?;
 
             build_out_msgs_elapsed = histogram.finish();
             out_msgs.build()?

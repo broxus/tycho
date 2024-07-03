@@ -11,7 +11,6 @@ use everscale_types::models::{
     ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
     SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
-use tycho_block_util::dict::RelaxedAugDict;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
@@ -652,7 +651,7 @@ pub(super) struct ShardAccountStuff {
     pub special: SpecialFlags,
     pub initial_state_hash: HashBytes,
     pub libraries: Dict<HashBytes, SimpleLib>,
-    pub transactions: RelaxedAugDict<u64, CurrencyCollection, Lazy<Transaction>>,
+    pub transactions: BTreeMap<u64, (CurrencyCollection, Lazy<Transaction>)>,
 }
 
 impl ShardAccountStuff {
@@ -718,11 +717,10 @@ impl ShardAccountStuff {
     pub fn add_transaction(
         &mut self,
         lt: u64,
-        total_fees: &CurrencyCollection,
-        transaction: &Lazy<Transaction>,
-    ) -> Result<()> {
-        self.transactions.set_any(&lt, total_fees, transaction)?;
-        Ok(())
+        total_fees: CurrencyCollection,
+        transaction: Lazy<Transaction>,
+    ) {
+        self.transactions.insert(lt, (total_fees, transaction));
     }
 
     pub fn update_public_libraries(

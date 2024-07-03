@@ -370,15 +370,22 @@ impl StateNodeAdapterStdImpl {
         gen_catchain_seqno: u32,
         block_signatures: &FastHashMap<HashBytes, Signature>,
     ) -> Result<everscale_types::models::block::BlockSignatures> {
-        let mut signatures: Dict<u16, BlockSignature> = Dict::new();
-        for (index, (key, value)) in block_signatures.iter().enumerate() {
-            let block_signature = BlockSignature {
-                node_id_short: *key,
-                signature: *value,
-            };
+        use everscale_types::dict;
 
-            signatures.add(index as u16, block_signature)?;
-        }
+        // TODO: Add helper for owned iter
+        let signatures = Dict::from_raw(dict::build_dict_from_sorted_iter(
+            block_signatures
+                .iter()
+                .enumerate()
+                .map(|(i, (key, value))| {
+                    (i as u16, BlockSignature {
+                        node_id_short: *key,
+                        signature: *value,
+                    })
+                }),
+            16,
+            &mut Cell::empty_context(),
+        )?);
 
         let sig_count = block_signatures.len() as u32;
 
