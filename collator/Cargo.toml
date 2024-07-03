@@ -34,12 +34,11 @@ trait-variant = { workspace = true }
 weedb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
-
+rayon = { workspace = true }
 everscale-types = { workspace = true }
 everscale-crypto = { workspace = true }
 
 # local deps
-#tycho-consensus = { workspace = true }
 tycho-block-util = { workspace = true }
 tycho-consensus = { workspace = true }
 tycho-network = { workspace = true }

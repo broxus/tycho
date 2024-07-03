@@ -2,15 +2,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::models::{BlockId, ShardIdent};
+use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::persistent::persistent_state::{
+use tycho_collator::internal_queue::state::persistent_state::{
     PersistentStateConfig, PersistentStateImplFactory,
 };
-use tycho_collator::internal_queue::state::session::session_state::SessionStateImplFactory;
+use tycho_collator::internal_queue::state::session_state::{
+    SessionStateConfig, SessionStateImplFactory,
+};
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
@@ -121,10 +123,13 @@ async fn test_collation_process_on_stubs() {
         persistent_state_config: PersistentStateConfig {
             storage: storage.clone(),
         },
+        session_state_config: SessionStateConfig {
+            storage: storage.clone(),
+        },
     };
 
-    let shards = vec![ShardIdent::default()];
-    let session_state_factory = SessionStateImplFactory::new(shards);
+    let session_state_factory =
+        SessionStateImplFactory::new(queue_config.persistent_state_config.storage.clone());
     let persistent_state_factory =
         PersistentStateImplFactory::new(queue_config.persistent_state_config.storage);
 

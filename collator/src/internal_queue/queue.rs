@@ -1,23 +1,28 @@
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use everscale_types::models::{BlockIdShort, ShardIdent};
-use tokio::sync::{Mutex, RwLock};
-use tycho_util::FastHashMap;
+use tokio::sync::Mutex;
+use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::state::persistent::persistent_state::{
+use crate::internal_queue::state::persistent_state::{
     PersistentState, PersistentStateConfig, PersistentStateFactory, PersistentStateImplFactory,
     PersistentStateStdImpl,
 };
-use crate::internal_queue::state::session::session_state::{
-    SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
+use crate::internal_queue::state::session_state::{
+    SessionState, SessionStateConfig, SessionStateFactory, SessionStateImplFactory,
+    SessionStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator};
-use crate::internal_queue::types::QueueDiff;
+use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
+
 // FACTORY
 
 pub struct QueueConfig {
     pub persistent_state_config: PersistentStateConfig,
+    pub session_state_config: SessionStateConfig,
 }
 
 pub trait QueueFactory {
@@ -52,22 +57,12 @@ pub trait LocalQueue {
         ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>>;
-    async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
-    async fn merge_shards(
-        &self,
-        shard_1_id: &ShardIdent,
-        shard_2_id: &ShardIdent,
-    ) -> Result<(), QueueError>;
     async fn apply_diff(
         &self,
-        diff: Arc<QueueDiff>,
+        diff: QueueDiff,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError>;
-    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError>;
-    async fn commit_diff(
-        &self,
-        diff_id: &BlockIdShort,
-    ) -> Result<Option<Arc<QueueDiff>>, QueueError>;
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError>;
 }
 
 // IMPLEMENTATION
@@ -79,8 +74,11 @@ impl QueueFactory for QueueFactoryStdImpl {
         let session_state = self.session_state_factory.create();
         let persistent_state = self.persistent_state_factory.create();
         QueueImpl {
-            session_state: Arc::new(Mutex::new(session_state)),
-            persistent_state: Arc::new(RwLock::new(persistent_state)),
+            session_state: Arc::new(session_state),
+            persistent_state: Arc::new(persistent_state),
+            state_lock: Arc::new(Default::default()),
+            processed_uptos: Default::default(),
+            diffs: Default::default(),
         }
     }
 }
@@ -90,77 +88,113 @@ where
     S: SessionState,
     P: PersistentState,
 {
-    session_state: Arc<Mutex<S>>,
-    persistent_state: Arc<RwLock<P>>,
+    session_state: Arc<S>,
+    persistent_state: Arc<P>,
+    state_lock: Arc<Mutex<()>>,
+    processed_uptos: Mutex<BTreeMap<ShardIdent, BTreeMap<ShardIdent, InternalMessageKey>>>,
+    diffs: FastDashMap<BlockIdShort, QueueDiff>,
 }
 
 impl<S, P> Queue for QueueImpl<S, P>
 where
-    S: SessionState + Send,
-    P: PersistentState + Send + Sync,
+    S: SessionState + Send + Sync,
+    P: PersistentState + Send + Sync + 'static,
 {
     async fn iterator(
         &self,
         ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>> {
-        let session_iter = {
-            let session_state_lock = self.session_state.lock().await;
-            session_state_lock.iterator(ranges, for_shard_id).await
-        };
-
-        // let persistent_state_lock = self.persistent_state.read().await;
-        // let persistent_iter = persistent_state_lock.iterator(for_shard_id);
-
-        // vec![session_iter, persistent_iter]
-        vec![session_iter]
-    }
-
-    async fn split_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock.split_shard(shard_id).await
-    }
-
-    async fn merge_shards(
-        &self,
-        shard_1_id: &ShardIdent,
-        shard_2_id: &ShardIdent,
-    ) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock
-            .merge_shards(shard_1_id, shard_2_id)
-            .await
+        let _state_lock = self.state_lock.lock().await;
+        let snapshot = self.persistent_state.snapshot();
+        let persistent_iter = self
+            .persistent_state
+            .iterator(&snapshot, for_shard_id, ranges);
+        let session_iter = self.session_state.iterator(&snapshot, for_shard_id, ranges);
+        vec![persistent_iter, session_iter]
     }
 
     async fn apply_diff(
         &self,
-        diff: Arc<QueueDiff>,
+        mut diff: QueueDiff,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock.apply_diff(diff, block_id_short).await
+        let _session_lock = self.state_lock.lock().await;
+        self.session_state
+            .add_messages(block_id_short.shard, &diff.messages)?;
+
+        diff.save_keys();
+        self.diffs.insert(block_id_short, diff);
+        Ok(())
     }
 
-    async fn add_shard(&self, shard_id: &ShardIdent) -> Result<(), QueueError> {
-        let session_state_lock = self.session_state.lock().await;
-        session_state_lock.add_shard(shard_id).await
-    }
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError> {
+        let _session_lock = self.state_lock.lock().await;
 
-    async fn commit_diff(
-        &self,
-        diff_id: &BlockIdShort,
-    ) -> Result<Option<Arc<QueueDiff>>, QueueError> {
-        let diff = {
-            let session_state_lock = self.session_state.lock().await;
-            session_state_lock.remove_diff(diff_id).await?
-        };
+        let diff = self
+            .diffs
+            .remove(diff_id)
+            .ok_or(anyhow!("diff not found"))?
+            .1;
 
-        // if let Some(diff) = &diff {
-        //     let persistent_state_lock = self.persistent_state.write().await;
-        //     persistent_state_lock
-        //         .add_messages(*diff_id, diff.messages.clone())
-        //         .await?;
-        // }
-        Ok(diff)
+        let for_shard = diff_id.shard;
+
+        let first_key = diff.keys.first();
+        let last_key = diff.keys.last();
+
+        if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
+            if first_key.lt > last_key.lt {
+                panic!("first_key.lt > last_key.lt");
+            }
+            let messages = self
+                .session_state
+                .retrieve_messages(for_shard, (&first_key, &last_key))?;
+
+            let _ = self.persistent_state.add_messages(for_shard, messages)?;
+        }
+
+        // gc
+        {
+            let mut processed_uptos_lock = self.processed_uptos.lock().await;
+            processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
+
+            let mut min_uptos: HashMap<ShardIdent, InternalMessageKey> = HashMap::default();
+            let mut shard_count: HashMap<ShardIdent, usize> = HashMap::default();
+
+            if for_shard.is_masterchain() {
+                let total_shards = processed_uptos_lock.len();
+
+                for (_, processed_upto) in processed_uptos_lock.iter() {
+                    for (processed_in_shard, key) in processed_upto.iter() {
+                        if let Some(min_key) = min_uptos.get_mut(processed_in_shard) {
+                            if key < min_key {
+                                *min_key = key.clone();
+                            }
+                        } else {
+                            min_uptos.insert(processed_in_shard.clone(), key.clone());
+                        }
+                        *shard_count.entry(processed_in_shard.clone()).or_insert(0) += 1;
+                    }
+                }
+
+                for (shard, key) in min_uptos.iter() {
+                    if let Some(count) = shard_count.get(shard) {
+                        if *count == total_shards {
+                            let persistent_state = self.persistent_state.clone();
+                            let shard_clone = shard.clone();
+                            let key_clone = key.clone();
+                            tokio::spawn(async move {
+                                persistent_state
+                                    .delete_messages(shard_clone, key_clone)
+                                    .unwrap();
+                            });
+                        }
+                    }
+                }
+
+                processed_uptos_lock.clear();
+            }
+            Ok(())
+        }
     }
 }

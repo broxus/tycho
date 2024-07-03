@@ -3,6 +3,8 @@ use std::sync::Arc;
 use weedb::rocksdb;
 use weedb::rocksdb::DBRawIterator;
 
+use crate::util::StoredValue;
+
 pub struct OwnedIterator {
     inner: DBRawIterator<'static>,
     _db: Arc<rocksdb::DB>,
@@ -24,6 +26,10 @@ impl OwnedIterator {
 
     pub fn seek_to_first(&mut self) {
         self.inner.seek_to_first();
+    }
+
+    pub fn seek<T: StoredValue>(&mut self, key: T) {
+        self.inner.seek(key.to_vec().as_slice());
     }
 
     pub fn key(&self) -> Option<&[u8]> {

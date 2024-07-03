@@ -1,19 +1,25 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
 
 use crate::internal_queue::state::state_iterator::{MessageWithSource, StateIterator};
+use crate::internal_queue::types::InternalMessageKey;
 
 pub struct StatesIteratorsManager {
     iterators: Vec<Box<dyn StateIterator>>,
     current_snapshot: usize,
+    seen_keys: HashSet<InternalMessageKey>,
+    message_counts: Vec<usize>, // Add this line to keep track of message counts
 }
 
 impl StatesIteratorsManager {
     pub fn new(iterators: Vec<Box<dyn StateIterator>>) -> Self {
         StatesIteratorsManager {
+            message_counts: vec![0; iterators.len()], // Initialize the message_counts vector
             iterators,
             current_snapshot: 0,
+            seen_keys: HashSet::new(),
         }
     }
 
@@ -22,22 +28,18 @@ impl StatesIteratorsManager {
     pub fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
         while self.current_snapshot < self.iterators.len() {
             if let Some(message) = self.iterators[self.current_snapshot].next()? {
+                self.message_counts[self.current_snapshot] += 1; // Increment message count for the current iterator
                 return Ok(Some(message));
             }
+            tracing::debug!(target: "local_debug", "No messages in snapshot {}", self.current_snapshot);
             self.current_snapshot += 1;
         }
-        Ok(None)
-    }
 
-    /// peek the next message without moving the cursor
-    pub fn peek(&self) -> Result<Option<Arc<MessageWithSource>>> {
-        let mut current_snapshot = self.current_snapshot;
-        while current_snapshot < self.iterators.len() {
-            if let Some(message) = self.iterators[current_snapshot].peek()? {
-                return Ok(Some(message));
-            }
-            current_snapshot += 1;
+        // Print message counts when no more messages are available
+        for (index, count) in self.message_counts.iter().enumerate() {
+            tracing::debug!(target: "local_debug", "Iterator {} read {} messages", index, count);
         }
+
         Ok(None)
     }
 }

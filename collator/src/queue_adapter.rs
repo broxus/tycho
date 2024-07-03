@@ -9,8 +9,8 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
 use crate::internal_queue::queue::{Queue, QueueImpl};
-use crate::internal_queue::state::persistent::persistent_state::PersistentStateStdImpl;
-use crate::internal_queue::state::session::session_state::SessionStateStdImpl;
+use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
+use crate::internal_queue::state::session_state::SessionStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::tracing_targets;
@@ -32,10 +32,10 @@ pub trait MessageQueueAdapter: Send + Sync + 'static {
         shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
     ) -> Result<Box<dyn QueueIterator>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()>;
+    async fn apply_diff(&self, diff: QueueDiff, block_id_short: BlockIdShort) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>>;
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<()>;
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
@@ -64,24 +64,24 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updating shards in message queue");
         for sma in split_merge_actions {
             match sma {
-                SplitMergeAction::Split(shard_id) => {
-                    self.queue.split_shard(&shard_id).await?;
-                    let (shard_l_id, shard_r_id) = shard_id
-                        .split()
-                        .expect("all split/merge actions should be valid there");
-                    tracing::info!(
-                        target: tracing_targets::MQ_ADAPTER,
-                        "Shard {} splitted on {} and {} in message queue",
-                        shard_id,
-                        shard_l_id,
-                        shard_r_id,
-                    );
+                SplitMergeAction::Split(_shard_id) => {
+                    // self.queue.split_shard(&shard_id).await?;
+                    // let (shard_l_id, shard_r_id) = shard_id
+                    //     .split()
+                    //     .expect("all split/merge actions should be valid there");
+                    // tracing::info!(
+                    //     target: tracing_targets::MQ_ADAPTER,
+                    //     "Shard {} splitted on {} and {} in message queue",
+                    //     shard_id,
+                    //     shard_l_id,
+                    //     shard_r_id,
+                    // );
                 }
-                SplitMergeAction::Merge(shard_id_1, shard_id_2) => {
-                    self.queue.merge_shards(&shard_id_1, &shard_id_2).await?;
+                SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
+                    // self.queue.merge_shards(&shard_id_1, &shard_id_2).await?;
                 }
-                SplitMergeAction::Add(new_shard) => {
-                    self.queue.add_shard(&new_shard).await?;
+                SplitMergeAction::Add(_new_shard) => {
+                    // self.queue.add_shard(&new_shard).await?;
                 }
             }
         }
@@ -103,35 +103,45 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         let states_iterators_manager = StatesIteratorsManager::new(states_iterators);
 
         let iterator = QueueIteratorImpl::new(states_iterators_manager, for_shard_id)?;
-        tracing::trace!(
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
+            range = ?ranges,
             elapsed = %humantime::format_duration(time_start.elapsed()),
+            for_shard_id = %for_shard_id,
             "Iterator created"
         );
         Ok(Box::new(iterator))
     }
 
-    async fn apply_diff(&self, diff: Arc<QueueDiff>, block_id_short: BlockIdShort) -> Result<()> {
-        tracing::trace!(
-            target: tracing_targets::MQ_ADAPTER,
-            id = ?block_id_short,
-            new_messages_len = diff.messages.len(),
-            "Applying diff to the queue"
-        );
+    async fn apply_diff(&self, diff: QueueDiff, block_id_short: BlockIdShort) -> Result<()> {
+        let time = std::time::Instant::now();
+        let len = diff.messages.len();
         self.queue.apply_diff(diff, block_id_short).await?;
+
+        tracing::info!(
+            target: tracing_targets::MQ_ADAPTER,
+                        id = ?block_id_short,
+                        new_messages_len = len,
+                        elapsed = ?time.elapsed(),
+
+            "Diff applied",
+        );
         Ok(())
     }
 
     #[instrument(skip(self), fields(%diff_id))]
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<Option<Arc<QueueDiff>>> {
-        tracing::trace!(
+    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<()> {
+        let time = std::time::Instant::now();
+
+        self.queue.commit_diff(diff_id).await?;
+        tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            "Committing diff to the queue"
+            id = ?diff_id,
+            elapsed = ?time.elapsed(),
+            "Diff commited",
         );
-        // HACK: do not commit diff to avoid incorrect msgs set reading for collation
-        let diff = self.queue.commit_diff(diff_id).await?;
-        // let diff = None;
-        Ok(diff)
+
+        Ok(())
     }
 
     fn add_message_to_iterator(

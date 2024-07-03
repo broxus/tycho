@@ -78,6 +78,7 @@ impl CollatorStdImpl {
             block_limits
         );
 
+        // TODO: get from anchor
         let created_by = self
             .last_imported_anchor_author
             .map(|a| HashBytes(a.0))
@@ -220,7 +221,7 @@ impl CollatorStdImpl {
         let mut block_limits_reached = false;
 
         // indicate that there are still unprocessed internals when collation loop finished
-        let mut has_pending_internals = false;
+        let has_pending_internals;
 
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
@@ -250,6 +251,7 @@ impl CollatorStdImpl {
             };
             collation_data.read_ext_msgs += ext_msgs.len() as u64;
 
+            let read_timer = std::time::Instant::now();
             // 2. Then iterate through existing internals and try to fill the set
             let mut remaining_capacity = max_messages_per_set - ext_msgs.len();
             while remaining_capacity > 0 && !all_existing_internals_finished {
@@ -284,9 +286,12 @@ impl CollatorStdImpl {
                 }
             }
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
-                "read externals and internals",
+            tracing::debug!(
+                target: tracing_targets::COLLATOR,
+                ext_count = ext_msgs.len(),
+                int_count = internal_messages_sources.len(),
+                elapsed = ?read_timer.elapsed(),
+                "read externals and internals"
             );
 
             // 3. Join existing internals and externals
@@ -479,8 +484,6 @@ impl CollatorStdImpl {
                 collation_data.processed_upto.processed_offset,
             );
 
-            has_pending_internals = internal_messages_iterator.peek(true)?.is_some();
-
             process_txs_total_elapsed += timer.elapsed();
 
             if block_limits_reached {
@@ -521,7 +524,9 @@ impl CollatorStdImpl {
         let histogram_create_queue_diff =
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
 
-        let diff = Arc::new(internal_messages_iterator.take_diff());
+        // internal_messages_iterator.fill_processed_upto();
+
+        let diff = internal_messages_iterator.take_diff();
 
         // update internal messages processed_upto info in collation_data
         for (shard_ident, message_key) in diff.processed_upto.iter() {
@@ -542,6 +547,8 @@ impl CollatorStdImpl {
         }
 
         let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+
+        has_pending_internals = internal_messages_iterator.next(true)?.is_some();
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
@@ -570,12 +577,13 @@ impl CollatorStdImpl {
             }
         });
 
+        let diff_messages_len = diff.messages.len();
         let apply_queue_diff_elapsed;
         {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_apply_queue_diff_time", labels);
             self.mq_adapter
-                .apply_diff(diff.clone(), candidate.block_id.as_short_id())
+                .apply_diff(diff, candidate.block_id.as_short_id())
                 .await?;
             apply_queue_diff_elapsed = histogram.finish();
         }
@@ -678,16 +686,16 @@ impl CollatorStdImpl {
             new_msgs_created={}, new_msgs_added={}, \
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
-            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={}",
+            read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_pending_internals={}. block = {:?}",
             block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
             collation_data.int_enqueue_count, collation_data.int_dequeue_count,
-            collation_data.new_msgs_created, diff.messages.len(),
+            collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator,
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals, collation_data.block_id_short,
         );
 
         assert_eq!(
