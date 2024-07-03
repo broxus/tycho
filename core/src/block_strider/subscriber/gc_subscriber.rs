@@ -54,7 +54,7 @@ impl GcSubscriber {
     }
 
     pub fn handle(&self, block_stuff: BlockStuff) {
-        if block_stuff.id().is_masterchain() {
+        if !block_stuff.id().is_masterchain() {
             return ();
         }
         let block = match block_stuff.load_info() {
@@ -65,12 +65,13 @@ impl GcSubscriber {
             }
         };
 
+        if let Err(e) = self.inner.state_sender.send(Some(block_stuff.clone())) {
+            tracing::error!("Failed to execute handle_state for state_sender. {e:?} ");
+        }
+
         if block.key_block {
             if let Err(e) = self.inner.block_sender.send(Some(block_stuff.clone())) {
                 tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
-            }
-            if let Err(e) = self.inner.state_sender.send(Some(block_stuff.clone())) {
-                tracing::error!("Failed to execute handle_state for state_sender. {e:?} ");
             }
         }
     }
@@ -160,15 +161,26 @@ impl GcSubscriber {
                     continue;
                 }
 
+                tracing::info!("Block GC executed...");
+
                 let block = block_receiver.borrow_and_update().clone();
 
                 if !storage.gc_enable_for_sync() {
+                    tracing::debug!("Block GC is not enabled for sync.");
                     continue;
                 }
 
                 let (Some(bs), Some(config)) = (block, storage.config().blocks_gc_config) else {
+                    tracing::debug!("Block GC is disabled by config or boundary block not found");
                     continue;
                 };
+
+                tracing::debug!(
+                    "Removing outdated blocks with boundary block {}, batch of {:?} and kind {:?}",
+                    bs.id(),
+                    config.max_blocks_per_batch,
+                    config.kind
+                );
 
                 if let Err(e) = storage
                     .block_storage()
@@ -192,9 +204,13 @@ impl GcSubscriber {
                     continue;
                 }
 
+                tracing::info!("State GC executed...");
+
                 let Some(block) = state_receiver.borrow_and_update().clone() else {
+                    tracing::info!("Boundary GC block is not found");
                     continue;
                 };
+                tracing::info!("GC state is executing for block: {:?}", block.id());
 
                 let shard_state_storage = storage.shard_state_storage();
 
