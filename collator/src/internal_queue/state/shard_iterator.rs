@@ -1,5 +1,4 @@
-use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes};
+use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_storage::ShardsInternalMessagesKey;
@@ -11,10 +10,7 @@ pub struct ShardIterator {
     pub(crate) shard_ident: ShardIdent,
     shard_range: ShardRange,
     receiver: ShardIdent,
-    // current_key: Option<InternalMessageKey>,
     pub(crate) iterator: OwnedIterator,
-    // saved_position: Option<Vec<u8>>,
-    // pub(crate) read_until: Option<InternalMessageKey>,
 }
 
 impl ShardIterator {
@@ -39,14 +35,13 @@ impl ShardIterator {
             shard_ident,
             shard_range: shard_range.clone(),
             receiver,
-            // current_key: shard_range.from.clone(),
             iterator,
-            // saved_position: None,
-            // read_until: None,
         }
     }
 
-    pub(crate) fn next_message(&mut self) -> Option<(ShardsInternalMessagesKey, Cell)> {
+    pub(crate) fn next_message(
+        &mut self,
+    ) -> Option<(ShardsInternalMessagesKey, i8, HashBytes, Vec<u8>)> {
         let from_range = self.shard_range.clone().from.unwrap_or_default();
         let from = ShardsInternalMessagesKey {
             shard_ident: self.shard_ident,
@@ -67,8 +62,8 @@ impl ShardIterator {
 
         let _receiver = self.receiver.clone();
         while let Some((key, value)) = self.load_next_message() {
-            // let _dest_workchain = value[0] as i8;
-            // let _dest_address = HashBytes::from_slice(&value[1..33]);
+            let dest_workchain = value[0] as i8;
+            let dest_address = HashBytes::from_slice(&value[1..33]);
 
             if key <= from {
                 self.iterator.next();
@@ -79,8 +74,10 @@ impl ShardIterator {
                 return None;
             }
 
-            let cell = Boc::decode(&value[33..]).expect("failed to load cell");
-            return Some((key, cell));
+            return Some((key, dest_workchain, dest_address, value[33..].to_vec()));
+
+            // let cell = Boc::decode(&value[33..]).expect("failed to load cell");
+            // return Some((key, cell));
 
             // TODO check receiver here
 

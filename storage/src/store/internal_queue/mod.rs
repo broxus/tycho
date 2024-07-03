@@ -165,6 +165,12 @@ impl InternalQueueStorage {
         }
 
         self.db.rocksdb().write(batch)?;
+        let bound = Option::<[u8; 0]>::None;
+        self.db.rocksdb().compact_range_cf(
+            &self.db.shards_internal_messages_session.cf(),
+            bound,
+            bound,
+        );
 
         Ok(messages)
     }

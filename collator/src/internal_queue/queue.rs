@@ -105,6 +105,7 @@ where
         ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>> {
+        tracing::debug!(target: "local_debug", "Creating iterators for shard {}. ranges {:?}", for_shard_id, ranges);
         let _state_lock = self.state_lock.lock().await;
         let snapshot = self.persistent_state.snapshot();
         let persistent_iter = self

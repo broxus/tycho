@@ -1,11 +1,13 @@
-use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BinaryHeap, HashSet};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashSet};
+use std::hash::Hash;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use everscale_types::cell::{Cell, Load};
-use everscale_types::models::{IntMsgInfo, Message, MsgInfo, ShardIdent};
+use anyhow::Result;
+use everscale_types::cell::HashBytes;
+use everscale_types::models::ShardIdent;
 use tycho_storage::owned_iterator::OwnedIterator;
+use tycho_storage::ShardsInternalMessagesKey;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::ShardIterator;
@@ -55,14 +57,14 @@ pub struct ShardRange {
 }
 
 pub trait StateIterator: Send {
-    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
+    fn next(&mut self) -> Result<Option<(ShardIdent, InternalMessageKey, i8, HashBytes, Vec<u8>)>>;
 }
 
 pub struct StateIteratorImpl {
     iters: BTreeMap<ShardIdent, ShardIterator>,
     receiver: ShardIdent,
     ranges: FastHashMap<ShardIdent, ShardRange>,
-    message_queue: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
+    message_queue: BTreeMap<ShardsInternalMessagesKey, (i8, HashBytes, Vec<u8>)>,
     in_queue: HashSet<ShardIdent>,
 }
 
@@ -85,48 +87,17 @@ impl StateIteratorImpl {
             iters,
             receiver,
             ranges,
-            message_queue: BinaryHeap::new(),
+            message_queue: BTreeMap::new(),
             in_queue: HashSet::new(),
         }
-    }
-
-    fn load_message_from_cell(cell: Cell) -> Result<(IntMsgInfo, Cell)> {
-        let message = Message::load_from(&mut cell.as_slice().context("failed to load message")?)?;
-        match message.info {
-            MsgInfo::Int(info) => Ok((info, cell)),
-            _ => bail!("Expected internal message"),
-        }
-    }
-
-    fn create_message_with_source(
-        info: IntMsgInfo,
-        cell: Cell,
-        shard: ShardIdent,
-    ) -> Arc<MessageWithSource> {
-        let hash = *cell.repr_hash();
-        let enqueued_message = EnqueuedMessage { info, cell, hash };
-        Arc::new(MessageWithSource::new(shard, Arc::new(enqueued_message)))
     }
 
     fn refill_queue_if_needed(&mut self) {
         for (shard_ident, iter) in self.iters.iter_mut() {
             if !self.in_queue.contains(shard_ident) {
-                if let Some((_key, cell)) = iter.next_message() {
-                    if let Ok((info, cell)) = Self::load_message_from_cell(cell) {
-                        let message_with_source =
-                            Self::create_message_with_source(info, cell, iter.shard_ident);
-
-                        for key in self.message_queue.iter() {
-                            if key.0.message.key() == message_with_source.message.key() {
-                                panic!("Duplicate message in the queue");
-                            }
-                        }
-
-                        self.message_queue.push(Reverse(message_with_source));
-                        self.in_queue.insert(shard_ident.clone());
-                    } else {
-                        panic!("Failed to load message from value")
-                    }
+                if let Some((key, dest_workchain, dest_address, cell_bytes)) = iter.next_message() {
+                    self.message_queue
+                        .insert(key, (dest_workchain, dest_address, cell_bytes));
                     iter.iterator.next();
                 }
             }
@@ -135,14 +106,26 @@ impl StateIteratorImpl {
 }
 
 impl StateIterator for StateIteratorImpl {
-    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
+    fn next(&mut self) -> Result<Option<(ShardIdent, InternalMessageKey, i8, HashBytes, Vec<u8>)>> {
         self.refill_queue_if_needed();
 
-        if let Some(Reverse(message)) = self.message_queue.pop() {
-            self.in_queue.remove(&message.shard_id);
-            return Ok(Some(message));
+        if let Some((key, (dest_workchain, dest_address, cell_bytes))) =
+            self.message_queue.pop_first()
+        {
+            self.in_queue.remove(&key.shard_ident);
+            let source = key.shard_ident;
+            let key = InternalMessageKey {
+                lt: key.lt,
+                hash: key.hash,
+            };
+            return Ok(Some((
+                source,
+                key,
+                dest_workchain,
+                dest_address,
+                cell_bytes,
+            )));
         }
-
         Ok(None)
     }
 }

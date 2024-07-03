@@ -2,26 +2,31 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
-use everscale_types::models::ShardIdent;
+use anyhow::{bail, Context, Result};
+use everscale_types::cell::{Cell, Load};
+use everscale_types::models::{IntMsgInfo, Message, MsgInfo, ShardIdent};
+use everscale_types::prelude::Boc;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
-use crate::tracing_targets;
 use crate::types::ShardIdentExt;
 
 pub trait QueueIterator: Send {
     /// Get next message
-    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>; // Function to update the committed position
-    fn update_committed_position(&mut self, next_message: &Arc<MessageWithSource>); // Function to process the new messages
+    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
+    fn update_committed_position(
+        &mut self,
+        source_shard: ShardIdent,
+        message_key: &InternalMessageKey,
+    );
     fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
     /// Take diff from iterator
     /// Move current position to commited position
     /// Create new transaction
-    fn take_diff(&mut self) -> QueueDiff;
+    fn take_diff(&self) -> QueueDiff;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
@@ -31,10 +36,31 @@ pub trait QueueIterator: Send {
 
 pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
-    commited_current_position: BTreeMap<ShardIdent, InternalMessageKey>,
+    read_position: BTreeMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     new_messages: FastHashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     snapshot_manager: StatesIteratorsManager,
+    last_processed_message: FastHashMap<ShardIdent, InternalMessageKey>,
+    last_read_message_for_current_shard: FastHashMap<ShardIdent, InternalMessageKey>,
+    next_count: u32,
+}
+
+fn load_message_from_cell(cell: Cell) -> Result<(IntMsgInfo, Cell)> {
+    let message = Message::load_from(&mut cell.as_slice().context("failed to load message")?)?;
+    match message.info {
+        MsgInfo::Int(info) => Ok((info, cell)),
+        _ => bail!("Expected internal message"),
+    }
+}
+
+fn create_message_with_source(
+    info: IntMsgInfo,
+    cell: Cell,
+    shard: ShardIdent,
+) -> Arc<MessageWithSource> {
+    let hash = *cell.repr_hash();
+    let enqueued_message = EnqueuedMessage { info, cell, hash };
+    Arc::new(MessageWithSource::new(shard, Arc::new(enqueued_message)))
 }
 
 impl QueueIteratorImpl {
@@ -48,8 +74,11 @@ impl QueueIteratorImpl {
             for_shard,
             messages_for_current_shard,
             new_messages: Default::default(),
-            commited_current_position: Default::default(),
+            read_position: Default::default(),
             snapshot_manager,
+            last_processed_message: Default::default(),
+            last_read_message_for_current_shard: Default::default(),
+            next_count: 0,
         })
     }
 }
@@ -74,16 +103,31 @@ impl QueueIterator for QueueIteratorImpl {
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>> {
         // Process the next message from the snapshot manager
         while let Some(next_message) = self.snapshot_manager.next()? {
-            if self
-                .for_shard
-                .contains_address(&next_message.message.info.dst)
+            self.next_count += 1;
+
+            if self.for_shard.workchain() == next_message.2 as i32
+                && self.for_shard.contains_account(&next_message.3)
+            // .contains_address(&next_message.message.info.dst)
             {
-                return Ok(Some(IterItem {
-                    message_with_source: next_message.clone(),
+                let cell = Boc::decode(&next_message.4).context("failed to load cell")?;
+                let message = load_message_from_cell(cell)?;
+                let message_with_source =
+                    create_message_with_source(message.0, message.1, self.for_shard);
+
+                let last_message_for_current_shard = IterItem {
+                    message_with_source,
                     is_new: false,
-                }));
+                };
+
+                self.last_read_message_for_current_shard
+                    .insert(next_message.0, next_message.1.clone());
+
+                self.update_committed_position(next_message.0, &next_message.1);
+
+                return Ok(Some(last_message_for_current_shard));
             } else {
-                self.update_committed_position(&next_message);
+                self.update_committed_position(next_message.0, &next_message.1);
+                continue;
             }
         }
 
@@ -96,15 +140,19 @@ impl QueueIterator for QueueIteratorImpl {
     }
 
     // Function to update the committed position
-    fn update_committed_position(&mut self, next_message: &Arc<MessageWithSource>) {
-        self.commited_current_position
-            .entry(next_message.shard_id)
+    fn update_committed_position(
+        &mut self,
+        source_shard: ShardIdent,
+        message_key: &InternalMessageKey,
+    ) {
+        self.read_position
+            .entry(source_shard)
             .and_modify(|e| {
-                if next_message.message.key() > *e {
-                    *e = next_message.message.key().clone();
+                if message_key > e {
+                    *e = message_key.clone();
                 }
             })
-            .or_insert(next_message.message.key().clone());
+            .or_insert(message_key.clone());
     }
 
     // Function to process the new messages
@@ -127,7 +175,7 @@ impl QueueIterator for QueueIteratorImpl {
         Ok(None)
     }
 
-    fn take_diff(&mut self) -> QueueDiff {
+    fn take_diff(&self) -> QueueDiff {
         tracing::trace!(
             target: crate::tracing_targets::MQ,
             "Taking diff from iterator. New messages count: {}",
@@ -135,57 +183,81 @@ impl QueueIterator for QueueIteratorImpl {
 
         let mut diff = QueueDiff::default();
 
-        for (shard_id, lt) in self.commited_current_position.iter() {
-            diff.processed_upto.insert(*shard_id, lt.clone());
-        }
+        let mut read_position = self.read_position.clone();
 
-        let current_shard_processed_upto = self
-            .commited_current_position
-            .get(&self.for_shard)
-            .cloned()
-            .unwrap_or_default();
-
-        let amount_before = self.new_messages.len();
-
-        let mut inserted_new_messages = 0;
-        // tracing::debug!(target: "local_debug", "Current shard processed upto: {:?}",current_shard_processed_upto);
-        // tracing::debug!(target: "local_debug", "Commited position: {:?} {:?}", self.commited_current_position, self.for_shard);
-
-        for message in self.new_messages.values() {
-            if self.for_shard.contains_address(&message.info.dst) {
-                if message.key() > current_shard_processed_upto {
-                    diff.messages.insert(message.key(), message.clone());
-                    inserted_new_messages += 1;
-                }
-            } else {
-                diff.messages.insert(message.key(), message.clone());
-                inserted_new_messages += 1;
+        for processed_last_message in self.last_processed_message.iter() {
+            if !read_position.contains_key(&processed_last_message.0) {
+                read_position.insert(
+                    processed_last_message.0.clone(),
+                    processed_last_message.1.clone(),
+                );
             }
         }
 
-        tracing::trace!(
-            target: crate::tracing_targets::MQ,
-            "Inserted {} messages out of {} to diff",
-            inserted_new_messages,
-            amount_before);
+        let for_shard = self.for_shard;
+        for (shard_id, last_read_key) in read_position.iter() {
+            let last_read_message_for_current_shard = self
+                .last_read_message_for_current_shard
+                .get(&shard_id)
+                .cloned();
+            let processed_last_message = self.last_processed_message.get(&shard_id).cloned();
 
+            match (last_read_message_for_current_shard, processed_last_message) {
+                (Some(read_last_message), Some(processed_last_message)) => {
+                    if read_last_message == processed_last_message {
+                        diff.processed_upto
+                            .insert(*shard_id, processed_last_message.clone());
+                    } else {
+                        diff.processed_upto
+                            .insert(*shard_id, processed_last_message);
+                    }
+                }
+                (Some(read_last_message), None) => {
+                    diff.processed_upto
+                        .insert(*shard_id, read_last_message.clone());
+                }
+                (None, Some(processed_last_message)) => {
+                    diff.processed_upto
+                        .insert(*shard_id, processed_last_message.clone());
+                }
+                (None, None) => {
+                    if for_shard.is_masterchain() {
+                        tracing::trace!(
+                        target: "local_debug",
+                        "Diff taken.last_read_key = {:?}", last_read_key);
+                    }
+                    diff.processed_upto.insert(*shard_id, last_read_key.clone());
+                }
+            }
+        }
+
+        let mut inserted_new_messages = self.new_messages.len();
+
+        for message in self.new_messages.values() {
+            diff.messages.insert(message.key(), message.clone());
+            inserted_new_messages += 1;
+        }
+
+        if for_shard.is_masterchain() {
+            tracing::trace!(
+            target: "local_debug",
+            "Diff taken. New messages count: {}, Processed upto: {:?}. next_count: {}",
+            inserted_new_messages,
+            diff.processed_upto, self.next_count);
+        }
         diff
     }
 
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
-        tracing::info!(
-            target: tracing_targets::MQ,
-            "Committing messages to the iterator. Messages count: {}",
-            messages.len());
-
-        for message in messages {
-            if let Some(current_key) = self.commited_current_position.get_mut(&message.0) {
-                if message.1 > *current_key {
-                    current_key.clone_from(&message.1);
-                }
-            } else {
-                self.commited_current_position.insert(message.0, message.1);
-            }
+        for (source_shard, message_key) in messages {
+            self.last_processed_message
+                .entry(source_shard)
+                .and_modify(|e| {
+                    if message_key > *e {
+                        *e = message_key.clone();
+                    }
+                })
+                .or_insert(message_key.clone());
         }
         Ok(())
     }
