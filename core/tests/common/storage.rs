@@ -29,7 +29,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
             let meta = BlockMetaData {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
-                mc_ref_seqno: 0, // TODO: set mc ref seqno
+                mc_ref_seqno: None, // TODO: set mc ref seqno
             };
 
             let block_stuff = BlockStuff::with_block(block_id, block.data);

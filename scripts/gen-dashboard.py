@@ -151,7 +151,7 @@ def create_heatmap_quantile_panel(
 def create_row(name, metrics) -> RowPanel:
     layout = Layout(name)
     for i in range(0, len(metrics), 2):
-        chunk = metrics[i: i + 2]
+        chunk = metrics[i : i + 2]
         layout.row(chunk)
     return layout.row_panel
 
@@ -873,7 +873,7 @@ def mempool() -> RowPanel:
         create_heatmap_panel(
             "tycho_mempool_commit_anchor_latency_time",
             "Engine: committed anchor time latency (min over batch)",
-        )
+        ),
     ]
     return create_row("Mempool", metrics)
 
@@ -897,7 +897,7 @@ def mempool_components() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_validate_time",
-            "Verifier: validate() point dependencies in DAG and all-1 sigs"
+            "Verifier: validate() point dependencies in DAG and all-1 sigs",
         ),
         # == Download tasks - multiple per round == #
         create_counter_panel(
@@ -905,17 +905,16 @@ def mempool_components() -> RowPanel:
             "Downloader: tasks (unique point id)",
         ),
         create_heatmap_panel(
-            "tycho_mempool_download_task_time",
-            "Downloader: tasks duration"
+            "tycho_mempool_download_task_time", "Downloader: tasks duration"
         ),
         # FIXME next one needs max value over collection period, but no `gauge.set_max()`
         create_gauge_panel(
             "tycho_mempool_download_depth_rounds",
-            "Downloader: point depth (max rounds from current) #fixme"
+            "Downloader: point depth (max rounds from current) #fixme",
         ),
         create_counter_panel(
             "tycho_mempool_download_not_found_responses",
-            "Downloader: received None in response"
+            "Downloader: received None in response",
         ),
         create_counter_panel(
             "tycho_mempool_download_aborted_on_exit_count",
@@ -923,40 +922,40 @@ def mempool_components() -> RowPanel:
         ),
         create_counter_panel(
             "tycho_mempool_download_query_failed_count",
-            "Downloader: queries network error"
+            "Downloader: queries network error",
         ),
         # == Network tasks - multiple per round == #
         create_heatmap_panel(
             "tycho_mempool_broadcast_query_dispatcher_time",
-            "Dispatcher: Broadcast send"
+            "Dispatcher: Broadcast send",
         ),
         create_heatmap_panel(
             "tycho_mempool_broadcast_query_responder_time",
-            "Responder: Broadcast accept"
+            "Responder: Broadcast accept",
         ),
         create_heatmap_panel(
             "tycho_mempool_signature_query_dispatcher_time",
-            "Dispatcher: Signature request"
+            "Dispatcher: Signature request",
         ),
         create_heatmap_panel(
             "tycho_mempool_download_query_dispatcher_time",
-            "Dispatcher: Download request"
+            "Dispatcher: Download request",
         ),
         create_heatmap_panel(
             "tycho_mempool_signature_query_responder_data_time",
-            "Responder: Signature send: send ready or sign or reject"
+            "Responder: Signature send: send ready or sign or reject",
         ),
         create_heatmap_panel(
             "tycho_mempool_signature_query_responder_pong_time",
-            "Responder: Signature send: no point or try later"
+            "Responder: Signature send: no point or try later",
         ),
         create_heatmap_panel(
             "tycho_mempool_download_query_responder_some_time",
-            "Responder: Download send: Some(point)"
+            "Responder: Download send: Some(point)",
         ),
         create_heatmap_panel(
             "tycho_mempool_download_query_responder_none_time",
-            "Responder: Download send: None"
+            "Responder: Download send: None",
         ),
     ]
     return create_row("Mempool components", metrics)

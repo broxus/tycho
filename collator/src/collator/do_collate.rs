@@ -286,10 +286,13 @@ impl CollatorStdImpl {
                 }
             }
 
-            tracing::debug!(target: tracing_targets::COLLATOR,
-                ext_count = ext_msgs.len(), int_count = internal_messages_sources.len(),
+            tracing::debug!(
+                target: tracing_targets::COLLATOR,
+                ext_count = ext_msgs.len(),
+                int_count = internal_messages_sources.len(),
                 elapsed = ?read_timer.elapsed(),
-                "read externals and internals");
+                "read externals and internals"
+            );
 
             // 3. Join existing internals and externals
             //    If not enough existing internals to fill the set then try read more externals
@@ -574,6 +577,7 @@ impl CollatorStdImpl {
             }
         });
 
+        let diff_messages_len = diff.messages.len();
         let apply_queue_diff_elapsed;
         {
             let histogram =
