@@ -12,7 +12,7 @@ use tycho_block_util::block::{
     BlockStuffAug,
 };
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::Storage;
+use tycho_storage::{BriefBlockInfo, Storage};
 use tycho_util::metrics::HistogramGuard;
 
 pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
@@ -258,6 +258,27 @@ impl ProofChecker {
                 &virt_block_info,
             )
         }
+    }
+
+    async fn store_block_proof(
+        &self,
+        block: &BlockStuff,
+        proof: BlockProofStuff,
+        proof_data: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let block_info = block.load_info()?;
+        let block_meta = BriefBlockInfo::from(&block_info);
+
+        let proof_handle = block_meta
+            .with_mc_seq_no(block_info.min_ref_mc_seqno)
+            .into();
+
+        self.storage
+            .block_storage()
+            .store_block_proof(&proof.with_archive_data(proof_data), proof_handle)
+            .await?;
+
+        Ok(())
     }
 }
 

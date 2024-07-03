@@ -91,7 +91,12 @@ impl BlockchainBlockProvider {
                     BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
-                        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
+                        if let (Err(e), _) | (_, Err(e)) = (
+                            self.proof_checker.check_proof(&block, &proof).await,
+                            self.proof_checker
+                                .store_block_proof(&block, proof, proof_data.into())
+                                .await,
+                        ) {
                             handle.reject();
                             tracing::error!("got invalid mc block proof: {e}");
                             break 'res;
@@ -142,7 +147,12 @@ impl BlockchainBlockProvider {
                     BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
-                        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
+                        if let (Err(e), _) | (_, Err(e)) = (
+                            self.proof_checker.check_proof(&block, &proof).await,
+                            self.proof_checker
+                                .store_block_proof(&block, proof, proof_data.into())
+                                .await,
+                        ) {
                             handle.reject();
                             tracing::error!("got invalid shard block proof: {e}");
                             break 'res;

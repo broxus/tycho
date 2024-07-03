@@ -41,7 +41,7 @@ impl Archive {
                     res.blocks.entry(id).or_default().block =
                         Some(WithArchiveData::new(block, entry.data.to_vec()));
                 }
-                ArchiveEntryId::Proof(id) if id.shard.workchain() == -1 => {
+                ArchiveEntryId::Proof(id) if id.shard.is_masterchain() => {
                     let proof = BlockProofStuff::deserialize(&id, entry.data, false)?
                         .proof()
                         .clone();
@@ -51,7 +51,7 @@ impl Archive {
                     res.blocks.entry(id).or_default().proof =
                         Some(WithArchiveData::new(proof, entry.data.to_vec()));
                 }
-                ArchiveEntryId::ProofLink(id) if id.shard.workchain() != -1 => {
+                ArchiveEntryId::ProofLink(id) if !id.shard.is_masterchain() => {
                     let proof = BlockProofStuff::deserialize(&id, entry.data, true)?
                         .proof()
                         .clone();

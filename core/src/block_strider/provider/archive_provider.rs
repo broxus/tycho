@@ -1,12 +1,10 @@
 #![allow(clippy::map_err_ignore)]
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::{Archive, ArchiveWritersPool};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
@@ -119,7 +117,7 @@ impl ArchiveBlockProvider {
                             self.last_known_archive.store(Some(Arc::new(archive)));
                             (block, proof)
                         }
-                        _ => return Some(Err(ArchiveProviderError::InvalidArchive.into())),
+                        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
                     }
                 }
                 Err(e) => return Some(Err(e)),
