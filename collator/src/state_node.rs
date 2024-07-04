@@ -255,12 +255,10 @@ impl StateNodeAdapterStdImpl {
         loop {
             if let Some(shard_blocks) = self.blocks.get(&block_id.shard()) {
                 if let Some(block) = shard_blocks.get(&block_id.seqno()) {
-                    match self.save_block_proof(block).await {
-                        Ok(_) => return Some(Ok(block.block_stuff_aug.clone())),
-                        Err(e) => {
-                            return Some(Err(anyhow!("failed to save block proof: {e:?}")));
-                        }
-                    }
+                    return match self.save_block_proof(block).await {
+                        Ok(_) => Some(Ok(block.block_stuff_aug.clone())),
+                        Err(e) => Some(Err(anyhow!("failed to save block proof: {e:?}"))),
+                    };
                 }
             }
 

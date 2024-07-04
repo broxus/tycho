@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use everscale_types::models::BlockId;
-use tycho_block_util::block::TopBlocks;
+use tycho_block_util::block::ShardHeights;
 use tycho_block_util::state::is_persistent_state;
 
 use crate::db::*;
@@ -230,7 +230,7 @@ impl BlockHandleStorage {
         }
     }
 
-    pub fn gc_handles_cache(&self, top_blocks: &TopBlocks) -> usize {
+    pub fn gc_handles_cache(&self, mc_seqno: u32, shard_heights: &ShardHeights) -> usize {
         let mut total_removed = 0;
 
         self.cache.retain(|block_id, value| {
@@ -242,9 +242,12 @@ impl BlockHandleStorage {
                 }
             };
 
+            let is_masterchain = block_id.is_masterchain();
+
             if block_id.seqno == 0
-                || block_id.is_masterchain() && value.is_key_block()
-                || top_blocks.contains(block_id)
+                || is_masterchain && (block_id.seqno >= mc_seqno || value.is_key_block())
+                || !is_masterchain
+                    && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
             {
                 // Keep zero state, key blocks and latest blocks
                 true

@@ -97,10 +97,12 @@ impl PersistentStateStorage {
         let root_hash = *root_hash;
         let is_cancelled = Some(self.is_cancelled.clone());
 
+        let span = tracing::Span::current();
         let db = self.db.clone();
         let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
 
         rayon_run(move || {
+            let _span = span.enter();
             let cell_writer = state_writer::StateWriter::new(&db, &states_dir, &block_id);
             match cell_writer.write(&root_hash, is_cancelled.as_deref()) {
                 Ok(()) => tracing::info!(block_id = %block_id, "persistent state saved"),

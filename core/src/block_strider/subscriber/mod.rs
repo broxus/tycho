@@ -8,14 +8,17 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 
+pub use self::gc_subscriber::GcSubscriber;
 pub use self::metrics_subscriber::MetricsSubscriber;
 
+mod gc_subscriber;
 mod metrics_subscriber;
 
 // === trait BlockSubscriber ===
 
 pub struct BlockSubscriberContext {
     pub mc_block_id: BlockId,
+    pub is_key_block: bool,
     pub block: BlockStuff,
     pub archive_data: ArchiveData,
 }
@@ -94,6 +97,7 @@ impl<B: BlockSubscriber> BlockSubscriberExt for B {
 
 pub struct StateSubscriberContext {
     pub mc_block_id: BlockId,
+    pub is_key_block: bool,
     pub block: BlockStuff,
     pub archive_data: ArchiveData,
     pub state: ShardStateStuff,

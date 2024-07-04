@@ -21,6 +21,7 @@ itertools = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }

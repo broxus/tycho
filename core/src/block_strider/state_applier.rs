@@ -146,6 +146,7 @@ where
         let started_at = std::time::Instant::now();
         let cx = StateSubscriberContext {
             mc_block_id: cx.mc_block_id,
+            is_key_block: cx.is_key_block,
             block: cx.block.clone(), // TODO: rewrite without clone
             archive_data: cx.archive_data.clone(), // TODO: rewrite without clone
             state: prepared.state,
@@ -160,7 +161,7 @@ where
             .block_handle_storage()
             .store_block_applied(&prepared.handle);
 
-        if applied && self.inner.storage.config().archives.is_some() {
+        if applied && self.inner.storage.config().archives_gc.is_some() {
             tracing::trace!(block_id = %prepared.handle.id(), "saving block into archive");
             self.inner
                 .storage

@@ -4,11 +4,14 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+use crate::tools::storage_cli::StorageCmd;
+
 mod tools {
     pub mod gen_account;
     pub mod gen_dht;
     pub mod gen_key;
     pub mod gen_zerostate;
+    pub mod storage_cli;
 }
 
 mod node;
@@ -56,6 +59,8 @@ enum Cmd {
 
     #[clap(subcommand)]
     Tool(ToolCmd),
+    #[clap(subcommand)]
+    Storage(StorageCmd),
 }
 
 impl Cmd {
@@ -63,6 +68,7 @@ impl Cmd {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
+            Cmd::Storage(cmd) => cmd.run(),
         }
     }
 }
