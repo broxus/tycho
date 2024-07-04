@@ -9,7 +9,7 @@ use smallvec::SmallVec;
 
 /// Package entry id.
 #[derive(Debug, Hash, Eq, PartialEq)]
-pub enum ArchiveEntryId<I> {
+pub enum ArchiveEntryId<I = BlockId> {
     /// Block data entry.
     Block(I),
     /// Block proof entry.
@@ -37,6 +37,37 @@ impl ArchiveEntryId<BlockId> {
     }
 }
 
+impl<T> ArchiveEntryId<T> {
+    pub fn extract_kind(data: &[u8]) -> Option<ArchiveEntryIdKind> {
+        if data.len() < SERIALIZED_LEN {
+            return None;
+        }
+
+        Some(match data[SERIALIZED_LEN - 1] {
+            0 => ArchiveEntryIdKind::Block,
+            1 => ArchiveEntryIdKind::Proof,
+            2 => ArchiveEntryIdKind::ProofLink,
+            _ => return None,
+        })
+    }
+
+    pub fn kind(&self) -> ArchiveEntryIdKind {
+        match self {
+            Self::Block(_) => ArchiveEntryIdKind::Block,
+            Self::Proof(_) => ArchiveEntryIdKind::Proof,
+            Self::ProofLink(_) => ArchiveEntryIdKind::ProofLink,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ArchiveEntryIdKind {
+    Block = 0,
+    Proof = 1,
+    ProofLink = 2,
+}
+
 impl<I> ArchiveEntryId<I>
 where
     I: Borrow<BlockId>,
@@ -51,13 +82,12 @@ where
     }
 
     /// Constructs on-stack buffer with the serialized object
-    pub fn to_vec(&self) -> SmallVec<[u8; 4 + 8 + 4 + 32 + 1]> {
-        // TODO:
-        let mut result = SmallVec::with_capacity(4 + 8 + 4 + 32 + 1); // TODO:
+    pub fn to_vec(&self) -> SmallVec<[u8; SERIALIZED_LEN]> {
+        let mut result = SmallVec::with_capacity(SERIALIZED_LEN);
         let (block_id, ty) = match self {
-            Self::Block(id) => (id, 0),
-            Self::Proof(id) => (id, 1),
-            Self::ProofLink(id) => (id, 2),
+            Self::Block(id) => (id, ArchiveEntryIdKind::Block as u8),
+            Self::Proof(id) => (id, ArchiveEntryIdKind::Proof as u8),
+            Self::ProofLink(id) => (id, ArchiveEntryIdKind::ProofLink as u8),
         };
         let block_id = block_id.borrow();
 
@@ -70,6 +100,8 @@ where
         result
     }
 }
+
+const SERIALIZED_LEN: usize = 4 + 8 + 4 + 32 + 1;
 
 pub trait GetFileName {
     fn filename(&self) -> String;

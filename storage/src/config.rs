@@ -2,11 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytesize::ByteSize;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
-
-use crate::BlocksGcKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -34,17 +31,17 @@ pub struct StorageConfig {
     /// Archives storage config.
     ///
     /// Archives are disabled if this field is `None`.
-    pub archives: Option<ArchivesConfig>,
+    pub archives_gc: Option<ArchivesGcConfig>,
 
     /// States GC config.
     ///
     /// States GC is disabled if this field is `None`.
-    pub states_gc_options: Option<StateGcOptions>,
+    pub states_gc: Option<StatesGcConfig>,
 
     /// Blocks GC config.
     ///
     /// Blocks GC is disabled if this field is `None`.
-    pub blocks_gc_config: Option<BlocksGcOptions>,
+    pub blocks_gc: Option<BlocksGcConfig>,
 }
 
 impl StorageConfig {
@@ -55,9 +52,9 @@ impl StorageConfig {
             rocksdb_lru_capacity: ByteSize::kb(1024),
             cells_cache_size: ByteSize::kb(1024),
             rocksdb_enable_metrics: false,
-            archives: Some(ArchivesConfig::default()),
-            states_gc_options: Some(StateGcOptions::default()),
-            blocks_gc_config: Some(BlocksGcOptions::default()),
+            archives_gc: None,
+            states_gc: None,
+            blocks_gc: None,
         }
     }
 }
@@ -106,66 +103,59 @@ impl Default for StorageConfig {
             cells_cache_size,
             rocksdb_lru_capacity,
             rocksdb_enable_metrics: true,
-            archives: Some(ArchivesConfig::default()),
-            states_gc_options: Some(StateGcOptions::default()),
-            blocks_gc_config: Some(BlocksGcOptions::default()),
+            archives_gc: Some(ArchivesGcConfig::default()),
+            states_gc: Some(StatesGcConfig::default()),
+            blocks_gc: Some(BlocksGcConfig::default()),
         }
     }
-}
-
-#[derive(Default, Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ArchivesConfig {
-    pub gc_interval: ArchivesGcInterval,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, tag = "type", rename_all = "snake_case")]
-pub enum ArchivesGcInterval {
-    /// Do not perform archives GC
-    Manual,
-    /// Archives GC triggers on each persistent state
-    PersistentStates {
-        /// Remove archives after this interval after the new persistent state
-        #[serde(with = "serde_helpers::humantime")]
-        offset: Duration,
-    },
-}
-
-impl Default for ArchivesGcInterval {
-    fn default() -> Self {
-        Self::PersistentStates {
-            offset: Duration::from_secs(300),
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct StateGcOptions {
-    /// Default: rand[0,900)
-    pub offset_sec: u64,
-    /// Default: 900
-    pub interval_sec: u64,
+pub struct ArchivesGcConfig {
+    /// Remove archives after this interval after the new persistent state
+    #[serde(with = "serde_helpers::humantime")]
+    pub persistent_state_offset: Duration,
 }
 
-impl Default for StateGcOptions {
+impl Default for ArchivesGcConfig {
     fn default() -> Self {
         Self {
-            offset_sec: rand::thread_rng().gen_range(0..60),
-            interval_sec: 60,
+            persistent_state_offset: Duration::from_secs(300),
         }
     }
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct BlocksGcOptions {
+pub struct StatesGcConfig {
+    /// Wether to add random offset to the first interval.
+    ///
+    /// Default: true.
+    pub random_offset: bool,
+    /// Default: 900
+    #[serde(with = "serde_helpers::humantime")]
+    pub interval: Duration,
+}
+
+impl Default for StatesGcConfig {
+    fn default() -> Self {
+        Self {
+            random_offset: true,
+            interval: Duration::from_secs(60),
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlocksGcConfig {
     /// Blocks GC type
     /// - `before_previous_key_block` - on each new key block delete all blocks before the previous one
     /// - `before_previous_persistent_state` - on each new key block delete all blocks before the
     ///   previous key block with persistent state
-    pub kind: BlocksGcKind,
+    #[serde(flatten)]
+    pub ty: BlocksGcType,
 
     /// Whether to enable blocks GC during sync. Default: true
     pub enable_for_sync: bool,
@@ -174,12 +164,34 @@ pub struct BlocksGcOptions {
     pub max_blocks_per_batch: Option<usize>,
 }
 
-impl Default for BlocksGcOptions {
+impl Default for BlocksGcConfig {
     fn default() -> Self {
         Self {
-            kind: BlocksGcKind::BeforePreviousPersistentState,
+            ty: BlocksGcType::BeforeSafeDistance {
+                safe_distance: 1000,
+                min_interval: Duration::from_secs(60),
+            },
             enable_for_sync: true,
             max_blocks_per_batch: Some(100_000),
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum BlocksGcType {
+    /// Remove all blocks before the specified safe distance (of mc blocks).
+    BeforeSafeDistance {
+        /// Number of masterchain blocks to keep.
+        safe_distance: u32,
+        /// Minimum interval between GC runs.
+        ///
+        /// Should be about 1 minute.
+        #[serde(with = "serde_helpers::humantime")]
+        min_interval: Duration,
+    },
+    /// Remove all blocks before the previous key block.
+    BeforePreviousKeyBlock,
+    /// Remove all blocks before the previous persistent state.
+    BeforePreviousPersistentState,
 }

@@ -1,355 +1,309 @@
-use std::ops::Add;
+use std::pin::pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use tokio::sync::Notify;
-use tokio::task::{AbortHandle, JoinHandle};
+use anyhow::Result;
+use everscale_types::models::BlockId;
+use rand::Rng;
+use scopeguard::defer;
+use tokio::sync::watch;
+use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
-use tycho_storage::{ArchivesGcInterval, Storage};
-use tycho_util::time::duration_between_unix_and_instant;
+use tycho_storage::{BlocksGcType, Storage};
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 
-const GC_MC_BLOCK_INTERVAL: u32 = 10000;
-
+#[derive(Clone)]
 #[repr(transparent)]
 pub struct GcSubscriber {
     inner: Arc<Inner>,
 }
 
-#[derive(Clone)]
-enum BlockGcTrigger {
-    Common(BlockStuff),
-    Interval(BlockStuff),
-}
-
-impl BlockGcTrigger {
-    fn get_block_seqno(&self) -> u32 {
-        match self {
-            BlockGcTrigger::Common(stuff) | BlockGcTrigger::Interval(stuff) => stuff.id().seqno,
-        }
-    }
-}
-
 impl GcSubscriber {
     pub fn new(storage: Storage) -> Self {
-        let (block_sender, mut block_receiver) =
-            tokio::sync::watch::channel::<Option<BlockGcTrigger>>(None);
-        let (state_sender, mut state_receiver) =
-            tokio::sync::watch::channel::<Option<BlockStuff>>(None);
+        let last_key_block_seqno = storage
+            .block_handle_storage()
+            .find_last_key_block()
+            .map_or(0, |handle| handle.id().seqno);
 
-        let mut inner = Inner {
-            storage: storage.clone(),
-            block_sender,
-            state_sender,
-            handle_block_task: None,
-            handle_state_task: None,
-            archives_handle: None,
-        };
-
-        let hb_handle = Self::handle_block_gc(block_receiver, storage.clone()).abort_handle();
-        let hs_handle = Self::handle_state_gc(state_receiver, storage.clone()).abort_handle();
-        let archives_handle =
-            tokio::spawn(Self::handle_archives_gc(storage.clone())).abort_handle();
-
-        inner.handle_block_task = Some(hb_handle);
-        inner.handle_state_task = Some(hs_handle);
-        inner.archives_handle = Some(archives_handle);
+        let (trigger_tx, trigger_rx) = watch::channel(None::<Trigger>);
+        let blocks_gc = tokio::spawn(Self::blocks_gc(trigger_rx.clone(), storage.clone()));
+        let states_gc = tokio::spawn(Self::states_gc(trigger_rx, storage.clone()));
+        let archives_gc = tokio::spawn(Self::archives_gc(storage));
 
         Self {
-            inner: Arc::new(inner),
+            inner: Arc::new(Inner {
+                trigger_tx,
+                last_key_block_seqno: AtomicU32::new(last_key_block_seqno),
+                handle_block_task: blocks_gc.abort_handle(),
+                handle_state_task: states_gc.abort_handle(),
+                archives_handle: archives_gc.abort_handle(),
+            }),
         }
     }
 
-    pub fn handle(&self, block_stuff: BlockStuff) {
-        if !block_stuff.id().is_masterchain() {
+    pub fn handle(&self, is_key_block: bool, block: &BlockStuff) {
+        if !block.id().is_masterchain() {
             return;
         }
-        let block = match block_stuff.load_info() {
-            Ok(block) => block,
-            Err(e) => {
-                tracing::error!("Failed to load block info: {:?} {e:?}", block_stuff.id());
-                return;
-            }
-        };
 
-        if let Err(e) = self.inner.state_sender.send(Some(block_stuff.clone())) {
-            tracing::error!("Failed to execute handle_state for state_sender. {e:?} ");
+        if is_key_block {
+            self.inner
+                .last_key_block_seqno
+                .store(block.id().seqno, Ordering::Relaxed);
         }
 
-        if block.key_block {
-            if let Err(e) = self
-                .inner
-                .block_sender
-                .send(Some(BlockGcTrigger::Common(block_stuff.clone())))
+        self.inner.trigger_tx.send_replace(Some(Trigger {
+            last_key_block_seqno: self.inner.last_key_block_seqno.load(Ordering::Relaxed),
+            mc_block_id: *block.id(),
+        }));
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn archives_gc(storage: Storage) {
+        let Some(config) = storage.config().archives_gc else {
+            tracing::warn!("manager disabled");
+            return;
+        };
+        tracing::info!("manager started");
+        defer! {
+            tracing::info!("manager stopped");
+        }
+
+        let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
+
+        loop {
+            let mut new_state_found = pin!(persistent_state_keeper.new_state_found());
+            let Some(pss_handle) = persistent_state_keeper.current() else {
+                new_state_found.await;
+                continue;
+            };
+
+            // Compute the wait duration until the safe time point
+            let time_to_wait = {
+                let gen_utime = pss_handle.meta().gen_utime();
+                let created_at = std::time::UNIX_EPOCH + Duration::from_secs(gen_utime as _);
+                (created_at + config.persistent_state_offset)
+                    .duration_since(std::time::SystemTime::now())
+                    .unwrap_or_default()
+            };
+
+            tokio::select! {
+                _ = tokio::time::sleep(time_to_wait) => {},
+                _ = &mut new_state_found => continue,
+            }
+
+            if let Err(e) = storage
+                .block_storage()
+                .remove_outdated_archives(pss_handle.id().seqno)
+                .await
             {
-                tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
+                tracing::error!("failed to remove outdated archives: {e:?}");
             }
+
+            new_state_found.await;
+        }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn blocks_gc(mut trigger_rx: TriggerRx, storage: Storage) {
+        let Some(config) = storage.config().blocks_gc else {
+            tracing::warn!("manager disabled");
             return;
-        }
-
-        let last = self
-            .inner
-            .storage
-            .runtime_storage()
-            .get_last_block_gc_collection();
-        match last {
-            Some(last_mc_seqno) if last_mc_seqno < block.seqno - GC_MC_BLOCK_INTERVAL => {
-                if let Err(e) = self
-                    .inner
-                    .block_sender
-                    .send(Some(BlockGcTrigger::Interval(block_stuff.clone())))
-                {
-                    tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
-                }
-            }
-            None => {
-                if let Err(e) = self
-                    .inner
-                    .block_sender
-                    .send(Some(BlockGcTrigger::Interval(block_stuff.clone())))
-                {
-                    tracing::error!("Failed to execute handle_state for block_sender. {e:?} ");
-                }
-            }
-            _ => {
-                tracing::debug!("Skipping boundary GC. Block are too fresh");
-            }
-        }
-    }
-
-    async fn handle_archives_gc(storage: Storage) {
-        let options = match &storage.config().archives {
-            Some(options) => options,
-            None => return,
         };
-
-        struct LowerBound {
-            archive_id: AtomicU32,
-            changed: Notify,
+        tracing::info!("manager started");
+        defer! {
+            tracing::info!("manager stopped");
         }
 
-        #[allow(unused_mut)]
-        let mut lower_bound = None::<Arc<LowerBound>>;
+        let block_handles = storage.block_handle_storage();
 
-        match options.gc_interval {
-            ArchivesGcInterval::Manual => return,
-            ArchivesGcInterval::PersistentStates { offset } => {
-                tokio::spawn(async move {
-                    let persistent_state_keeper =
-                        storage.runtime_storage().persistent_state_keeper();
+        let mut last_tiggered_at = None::<Instant>;
+        let mut known_key_block_seqno = 0;
 
-                    loop {
-                        tokio::pin!(let new_state_found = persistent_state_keeper.new_state_found(););
+        while trigger_rx.changed().await.is_ok() {
+            let Some(trigger) = trigger_rx.borrow_and_update().clone() else {
+                continue;
+            };
+            tracing::debug!(?trigger);
 
-                        let (until_id, untile_time) = match persistent_state_keeper.current() {
-                            Some(state) => {
-                                let untile_time =
-                                    (state.meta().gen_utime() as u64).add(offset.as_secs());
-                                (state.id().seqno, untile_time)
-                            }
-                            None => {
-                                new_state_found.await;
-                                continue;
-                            }
-                        };
+            // NOTE: Track the last mc block seqno since we cannot rely on the broadcasted block.
+            // It may be updated faster than the iteration of the GC manager.
+            let has_new_key_block = trigger.last_key_block_seqno > known_key_block_seqno;
+            known_key_block_seqno = trigger.last_key_block_seqno;
 
-                        tokio::select!(
-                            _ = tokio::time::sleep(duration_between_unix_and_instant(untile_time, Instant::now())) => {},
-                            _ = &mut new_state_found => continue,
-                        );
+            let target_seqno = match config.ty {
+                BlocksGcType::BeforeSafeDistance {
+                    safe_distance,
+                    min_interval,
+                } => {
+                    // Compute the target masterchain block seqno
+                    let target_seqno = match trigger.mc_block_id.seqno.checked_sub(safe_distance) {
+                        // Skip GC for the first N blocks
+                        None | Some(0) => continue,
+                        Some(seqno) => seqno,
+                    };
 
-                        if let Some(lower_bound) = &lower_bound {
-                            loop {
-                                tokio::pin!(let lower_bound_changed = lower_bound.changed.notified(););
-
-                                let lower_bound = lower_bound.archive_id.load(Ordering::Acquire);
-                                if until_id < lower_bound {
-                                    break;
-                                }
-
-                                tracing::info!(
-                                    until_id,
-                                    lower_bound,
-                                    "waiting for the archives barrier"
-                                );
-                                lower_bound_changed.await;
-                            }
+                    // Debounce GC
+                    if let Some(last) = last_tiggered_at {
+                        if last.elapsed() < min_interval {
+                            // Sleep until the desired interval
+                            // AND continue to wait for the next trigger
+                            tokio::time::sleep_until((last + min_interval).into()).await;
+                            continue;
                         }
-
-                        if let Err(e) = storage
-                            .block_storage()
-                            .remove_outdated_archives(until_id)
-                            .await
-                        {
-                            tracing::error!("failed to remove outdated archives: {e:?}");
-                        }
-
-                        new_state_found.await;
                     }
-                });
+
+                    // NOTE: You should update this in other branches as well,
+                    // if we want to debounce other types of GC.
+                    last_tiggered_at = Some(Instant::now());
+                    target_seqno
+                }
+                BlocksGcType::BeforePreviousKeyBlock => {
+                    if !has_new_key_block {
+                        continue;
+                    }
+
+                    // Find a key block before the last key block from the trigger
+                    let target_seqno = trigger.last_key_block_seqno;
+                    match block_handles.find_prev_key_block(target_seqno) {
+                        Some(handle) => handle.id().seqno,
+                        None => {
+                            tracing::warn!(target_seqno, "previous key block not found");
+                            continue;
+                        }
+                    }
+                }
+                BlocksGcType::BeforePreviousPersistentState => {
+                    if !has_new_key_block {
+                        continue;
+                    }
+
+                    // Find a persistent block before the last key block from the trigger
+                    let target_seqno = trigger.last_key_block_seqno;
+                    match block_handles.find_prev_persistent_key_block(target_seqno) {
+                        Some(handle) => handle.id().seqno,
+                        None => {
+                            tracing::warn!(target_seqno, "previous persistent block not found");
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            if let Err(e) = storage
+                .block_storage()
+                .remove_outdated_blocks(target_seqno, config.max_blocks_per_batch)
+                .await
+            {
+                tracing::error!("failed to remove outdated blocks: {e:?}");
             }
         }
     }
 
-    fn handle_block_gc(
-        mut block_receiver: tokio::sync::watch::Receiver<Option<BlockGcTrigger>>,
-        storage: Storage,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            loop {
-                if let Err(e) = block_receiver.changed().await {
-                    tracing::error!("Failed to receive block from block_receiver. {e:?}");
-                    continue;
+    #[tracing::instrument(skip_all)]
+    async fn states_gc(mut trigger_rx: TriggerRx, storage: Storage) {
+        let Some(config) = storage.config().states_gc else {
+            tracing::warn!("manager disabled");
+            return;
+        };
+        tracing::info!("manager started");
+        defer! {
+            tracing::info!("manager stopped");
+        }
+
+        let mut last_tiggered_at = None::<Instant>;
+
+        while trigger_rx.changed().await.is_ok() {
+            match last_tiggered_at {
+                // Wait for an offset before the first GC but after the first trigger
+                None => {
+                    let offset = if config.random_offset {
+                        rand::thread_rng().gen_range(Duration::ZERO..config.interval)
+                    } else {
+                        config.interval
+                    };
+                    tokio::time::sleep(offset).await
                 }
-
-                tracing::info!("Block GC executed...");
-
-                let block = block_receiver.borrow_and_update().clone();
-
-                if !storage.gc_enable_for_sync() {
-                    tracing::debug!("Block GC is not enabled for sync.");
-                    continue;
-                }
-
-                let (Some(bs), Some(config)) = (block, storage.config().blocks_gc_config) else {
-                    tracing::debug!("Block GC is disabled by config or boundary block not found");
-                    continue;
-                };
-
-                let cleaning_seqno = bs.get_block_seqno();
-
-                match bs {
-                    BlockGcTrigger::Common(bs) => {
-                        tracing::debug!(
-                            "Removing outdated blocks for block {}, batch of {:?} and kind {:?}",
-                            bs.id(),
-                            config.max_blocks_per_batch,
-                            config.kind
-                        );
-                        if let Err(e) = storage
-                            .block_storage()
-                            .remove_outdated_blocks(
-                                bs.id(),
-                                config.max_blocks_per_batch,
-                                config.kind,
-                            )
-                            .await
-                        {
-                            tracing::error!("Failed to remove_outdated_blocks. {e:?}");
-                        }
-                    }
-                    BlockGcTrigger::Interval(bs) => {
-                        let Some(handle) = storage.block_handle_storage().load_handle(bs.id())
-                        else {
-                            return;
-                        };
-
-                        if let Err(e) = storage
-                            .block_storage()
-                            .remove_boundary_blocks(handle, config.max_blocks_per_batch)
-                            .await
-                        {
-                            tracing::error!("Failed to remove_boundary_blocks. {e:?}");
-                        }
+                // Wait to maintaint the interval between GCs
+                Some(last) => {
+                    if last.elapsed() < config.interval {
+                        tokio::time::sleep_until((last + config.interval).into()).await;
                     }
                 }
-
-                storage
-                    .runtime_storage()
-                    .set_last_block_gc_collection(cleaning_seqno);
             }
-        })
-    }
+            last_tiggered_at = Some(Instant::now());
 
-    fn handle_state_gc(
-        mut state_receiver: tokio::sync::watch::Receiver<Option<BlockStuff>>,
-        storage: Storage,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            loop {
-                if let Err(e) = state_receiver.changed().await {
-                    tracing::error!("Failed to receive block from block_receiver. {e:?}");
-                    continue;
-                }
+            // Get the most recent trigger
+            let Some(trigger) = trigger_rx.borrow_and_update().clone() else {
+                continue;
+            };
+            tracing::debug!(?trigger);
 
-                tracing::info!("State GC executed...");
-
-                let Some(block) = state_receiver.borrow_and_update().clone() else {
-                    tracing::info!("Boundary GC block is not found");
-                    continue;
-                };
-                tracing::info!("GC state is executing for block: {:?}", block.id());
-
-                let shard_state_storage = storage.shard_state_storage();
-
-                match shard_state_storage
-                    .remove_outdated_states(block.id().seqno)
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(e) => {
-                        tracing::error!(target: "storage", "Failed to GC state: {e:?}");
-                    }
-                };
+            if let Err(e) = storage
+                .shard_state_storage()
+                .remove_outdated_states(trigger.mc_block_id.seqno)
+                .await
+            {
+                tracing::error!("failed to remove outdated states: {e:?}");
             }
-        })
+        }
     }
 }
 
 struct Inner {
-    storage: Storage,
-    block_sender: tokio::sync::watch::Sender<Option<BlockGcTrigger>>,
-    state_sender: tokio::sync::watch::Sender<Option<BlockStuff>>,
+    trigger_tx: TriggerTx,
+    last_key_block_seqno: AtomicU32,
 
-    handle_block_task: Option<AbortHandle>,
-    handle_state_task: Option<AbortHandle>,
-    archives_handle: Option<AbortHandle>,
+    handle_block_task: AbortHandle,
+    handle_state_task: AbortHandle,
+    archives_handle: AbortHandle,
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        if let Some(handle) = self.handle_block_task.take() {
-            handle.abort();
-        }
-
-        if let Some(handle) = self.handle_state_task.take() {
-            handle.abort();
-        }
-
-        if let Some(handle) = self.archives_handle.take() {
-            handle.abort();
-        }
+        self.handle_block_task.abort();
+        self.handle_state_task.abort();
+        self.archives_handle.abort();
     }
 }
 
+#[derive(Debug, Clone)]
+struct Trigger {
+    mc_block_id: BlockId,
+    last_key_block_seqno: u32,
+}
+
+type TriggerTx = watch::Sender<Option<Trigger>>;
+type TriggerRx = watch::Receiver<Option<Trigger>>;
+
 impl StateSubscriber for GcSubscriber {
-    type HandleStateFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
+    type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.handle(cx.block.clone());
+        self.handle(cx.is_key_block, &cx.block);
         futures_util::future::ready(Ok(()))
     }
 }
 
 impl BlockSubscriber for GcSubscriber {
     type Prepared = ();
-    type PrepareBlockFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
-    type HandleBlockFut<'a> = futures_util::future::Ready<anyhow::Result<()>>;
+    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+    type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
 
-    fn prepare_block<'a>(&'a self, _cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+    fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         futures_util::future::ready(Ok(()))
     }
 
     fn handle_block<'a>(
         &'a self,
         cx: &'a BlockSubscriberContext,
-        _prepared: Self::Prepared,
+        _: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        self.handle(cx.block.clone());
+        self.handle(cx.is_key_block, &cx.block);
         futures_util::future::ready(Ok(()))
     }
 }

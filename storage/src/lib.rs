@@ -249,13 +249,6 @@ impl Storage {
     pub fn internal_queue_storage(&self) -> &InternalQueueStorage {
         &self.inner.internal_queue_storage
     }
-
-    pub fn gc_enable_for_sync(&self) -> bool {
-        self.inner
-            .config
-            .blocks_gc_config
-            .is_some_and(|x| x.enable_for_sync)
-    }
 }
 
 struct Inner {

@@ -326,8 +326,8 @@ impl InternalQueueStorage {
         let mut batch = WriteBatch::default();
 
         while iter.valid() {
-            let (mut key, value) = match (iter.key(), iter.value()) {
-                (Some(key), Some(value)) => (key, value),
+            let mut key = match iter.key() {
+                Some(key) => key,
                 _ => break,
             };
 

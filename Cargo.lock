@@ -3425,6 +3425,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "rand",
+ "scopeguard",
  "serde",
  "sha2",
  "tempfile",

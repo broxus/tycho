@@ -6,15 +6,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use everscale_types::boc::BocRepr;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::{
-    make_archive_entry, ArchiveData, ArchiveEntryId, ArchiveReaderError, ArchiveVerifier,
-    GetFileName,
+    make_archive_entry, ArchiveData, ArchiveEntryId, ArchiveEntryIdKind, ArchiveReaderError,
+    ArchiveVerifier, GetFileName,
 };
 use tycho_block_util::block::{
-    BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, TopBlocks,
+    BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
 };
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
@@ -195,6 +196,41 @@ impl BlockStorage {
         }
         self.get_data_ref(handle, &ArchiveEntryId::Block(handle.id()))
             .await
+    }
+
+    pub fn find_mc_block_data(&self, mc_seqno: u32) -> Result<Option<Block>> {
+        let package_entries = &self.db.package_entries;
+
+        let mut bound = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: mc_seqno,
+            root_hash: HashBytes::ZERO,
+            file_hash: HashBytes::ZERO,
+        };
+
+        let mut readopts = package_entries.new_read_config();
+        readopts.set_iterate_lower_bound(ArchiveEntryId::Block(bound).to_vec().as_slice());
+        bound.seqno += 1;
+        readopts.set_iterate_upper_bound(ArchiveEntryId::Block(bound).to_vec().as_slice());
+
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&package_entries.cf(), readopts);
+
+        iter.seek_to_first();
+        loop {
+            let Some((key, value)) = iter.item() else {
+                iter.status()?;
+                return Ok(None);
+            };
+
+            let Some(ArchiveEntryIdKind::Block) = ArchiveEntryId::<()>::extract_kind(key) else {
+                continue;
+            };
+
+            return Ok(Some(BocRepr::decode::<Block, _>(value)?));
+        }
     }
 
     pub async fn store_block_proof(
@@ -531,89 +567,47 @@ impl BlockStorage {
         }
     }
 
-    pub async fn remove_boundary_blocks(
-        &self,
-        mc_block_handle: BlockHandle,
-        max_blocks_per_batch: Option<usize>,
-    ) -> Result<()> {
-        tracing::info!(
-            target_block_id = %mc_block_handle.id(),
-            "starting blocks GC",
-        );
-
-        let top_blocks = self
-            .load_block_data(&mc_block_handle)
-            .await
-            .context("Failed to load target key block data")
-            .and_then(|block_data| TopBlocks::from_mc_block(&block_data))
-            .context("Failed to compute top blocks for target block")?;
-
-        self.remove_outdated_block_internal(mc_block_handle.id(), top_blocks, max_blocks_per_batch)
-            .await?;
-        Ok(())
-    }
-
+    #[tracing::instrument(skip_all, fields(mc_seqno))]
     pub async fn remove_outdated_blocks(
         &self,
-        key_block_id: &BlockId,
-        max_blocks_per_batch: Option<usize>,
-        gc_type: BlocksGcKind,
-    ) -> Result<()> {
-        // Find target block
-        let target_block = match gc_type {
-            BlocksGcKind::BeforePreviousKeyBlock => self
-                .block_handle_storage
-                .find_prev_key_block(key_block_id.seqno),
-            BlocksGcKind::BeforePreviousPersistentState => self
-                .block_handle_storage
-                .find_prev_persistent_key_block(key_block_id.seqno),
-        };
-
-        // Load target block data
-        let top_blocks = match target_block {
-            Some(handle) if handle.meta().has_data() => {
-                tracing::info!(
-                    %key_block_id,
-                    target_block_id = %handle.id(),
-                    "starting blocks GC",
-                );
-                self.load_block_data(&handle)
-                    .await
-                    .context("Failed to load target key block data")
-                    .and_then(|block_data| TopBlocks::from_mc_block(&block_data))
-                    .context("Failed to compute top blocks for target block")?
-            }
-            _ => {
-                tracing::info!(%key_block_id, "Blocks GC skipped");
-                return Ok(());
-            }
-        };
-
-        self.remove_outdated_block_internal(key_block_id, top_blocks, max_blocks_per_batch)
-            .await?;
-
-        // Done
-        Ok(())
-    }
-
-    async fn remove_outdated_block_internal(
-        &self,
-        target_block_id: &BlockId,
-        top_blocks: TopBlocks,
+        mc_seqno: u32,
         max_blocks_per_batch: Option<usize>,
     ) -> Result<()> {
+        tracing::info!("started blocks GC");
+
+        let block = self
+            .find_mc_block_data(mc_seqno)
+            .context("failed to load target block data")?
+            .context("target block not found")?;
+
+        let shard_heights = {
+            let extra = block.extra.load()?;
+            let custom = extra.custom.context("mc block extra not found")?.load()?;
+            custom
+                .shards
+                .latest_blocks()
+                .map(|id| id.map(|id| (id.shard, id.seqno)))
+                .collect::<Result<_, everscale_types::error::Error>>()?
+        };
+
         // Remove all expired entries
-        let total_cached_handles_removed = self.block_handle_storage.gc_handles_cache(&top_blocks);
+        let total_cached_handles_removed = self
+            .block_handle_storage
+            .gc_handles_cache(mc_seqno, &shard_heights);
 
+        let span = tracing::Span::current();
         let db = self.db.clone();
         let BlockGcStats {
             mc_package_entries_removed,
             total_package_entries_removed,
             total_handles_removed,
-        } = rayon_run(move || remove_blocks(db, max_blocks_per_batch, &top_blocks)).await?;
+        } = rayon_run(move || {
+            let _span = span.enter();
+            remove_blocks(db, max_blocks_per_batch, mc_seqno, shard_heights)
+        })
+        .await?;
 
         tracing::info!(
-            %target_block_id,
             total_cached_handles_removed,
             mc_package_entries_removed,
             total_package_entries_removed,
@@ -623,7 +617,10 @@ impl BlockStorage {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, fields(until_id))]
     pub async fn remove_outdated_archives(&self, until_id: u32) -> Result<()> {
+        tracing::info!("started archives GC");
+
         let mut archive_ids = self.archive_ids.write();
 
         let retained_ids = match archive_ids.iter().rev().find(|&id| *id < until_id).cloned() {
@@ -631,7 +628,7 @@ impl BlockStorage {
             // `archive_ids` will now contain [..until_id]
             Some(until_id) => archive_ids.split_off(&until_id),
             None => {
-                tracing::info!("archives GC: nothing to remove");
+                tracing::info!("nothing to remove");
                 return Ok(());
             }
         };
@@ -639,26 +636,18 @@ impl BlockStorage {
         let removed_ids = std::mem::replace(&mut *archive_ids, retained_ids);
 
         // Print removed range bounds and compute real `until_id`
-        let until_id = match (removed_ids.first(), removed_ids.last()) {
-            (Some(first), Some(last)) => {
-                let len = removed_ids.len();
-                tracing::info!(
-                    archive_count = len,
-                    first,
-                    last,
-                    "archives GC: removing archives"
-                );
-
-                match archive_ids.first() {
-                    Some(until_id) => *until_id,
-                    None => *last + 1,
-                }
-            }
-            _ => {
-                tracing::info!("archives GC: nothing to remove");
-                return Ok(());
-            }
+        let (Some(first), Some(last)) = (removed_ids.first(), removed_ids.last()) else {
+            tracing::info!("nothing to remove");
+            return Ok(());
         };
+
+        let len = removed_ids.len();
+        let until_id = match archive_ids.first() {
+            Some(until_id) => *until_id,
+            None => *last + 1,
+        };
+
+        drop(archive_ids);
 
         // Remove archives
         let archives_cf = self.db.archives.cf();
@@ -671,7 +660,7 @@ impl BlockStorage {
             write_options,
         )?;
 
-        tracing::info!("archives GC: done");
+        tracing::info!(archive_count = len, first, last, "finished archives GC");
         Ok(())
     }
 
@@ -768,13 +757,6 @@ impl BlockStorage {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BlocksGcKind {
-    BeforePreviousKeyBlock,
-    BeforePreviousPersistentState,
-}
-
 #[derive(Clone)]
 pub enum BlockProofHandle {
     Existing(BlockHandle),
@@ -802,7 +784,8 @@ pub struct StoreBlockResult {
 fn remove_blocks(
     db: BaseDb,
     max_blocks_per_batch: Option<usize>,
-    top_blocks: &TopBlocks,
+    mc_seqno: u32,
+    shard_heights: ShardHeights,
 ) -> Result<BlockGcStats> {
     let mut stats = BlockGcStats::default();
 
@@ -830,16 +813,19 @@ fn remove_blocks(
 
         // Read only prefix with shard ident and seqno
         let BlockIdShort { shard, seqno } = BlockIdShort::from_slice(key);
+        let is_masterchain = shard.is_masterchain();
 
         // Don't gc latest blocks
-        if top_blocks.contains_shard_seqno(&shard, seqno) {
+        if is_masterchain && seqno >= mc_seqno
+            || !is_masterchain && shard_heights.contains_shard_seqno(&shard, seqno)
+        {
             blocks_iter.next();
             continue;
         }
 
         // Additionally check whether this item is a key block
         if seqno == 0
-            || shard.is_masterchain()
+            || is_masterchain
                 && raw
                     .get_pinned_cf_opt(&key_blocks_cf, seqno.to_be_bytes(), &key_blocks_readopts)?
                     .is_some()

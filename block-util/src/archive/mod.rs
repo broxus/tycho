@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-pub use self::entry_id::{ArchiveEntryId, GetFileName};
+pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
 
 mod entry_id;

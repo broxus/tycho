@@ -25,9 +25,10 @@ use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier,
-    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
+    BlockProvider, BlockStrider, BlockSubscriberExt, BlockchainBlockProvider,
+    BlockchainBlockProviderConfig, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
+    PersistentBlockStriderState, ShardStateApplier, StateSubscriber, StateSubscriberContext,
+    StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BlockchainRpcServiceConfig, BroadcastListener,
@@ -665,22 +666,23 @@ impl Node {
         let strider_state =
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
-        let gc_subscriber = GcSubscriber::new(self.storage.clone());
-
         let block_strider = BlockStrider::builder()
             .with_provider((
                 (blockchain_block_provider, storage_block_provider),
                 collator_block_provider,
             ))
             .with_state(strider_state)
-            .with_block_subscriber((
-                ShardStateApplier::new(
-                    self.state_tracker.clone(),
-                    self.storage.clone(),
-                    (collator_state_subscriber, rpc_state),
-                ),
-                (MetricsSubscriber, gc_subscriber),
-            ))
+            .with_block_subscriber(
+                (
+                    ShardStateApplier::new(
+                        self.state_tracker.clone(),
+                        self.storage.clone(),
+                        (collator_state_subscriber, rpc_state),
+                    ),
+                    MetricsSubscriber,
+                )
+                    .chain(GcSubscriber::new(self.storage.clone())),
+            )
             .build();
 
         // Run block strider

@@ -123,20 +123,7 @@ impl ShardStateStorage {
             let new_cell_count = cell_storage.store_cell(&mut batch, root_cell)?;
             metrics::histogram!("tycho_storage_cell_count").record(new_cell_count as f64);
 
-            let mut value = [0; 32 * 3];
-            value[..32].copy_from_slice(root_hash.as_slice());
-            value[32..64].copy_from_slice(block_id.root_hash.as_slice());
-            value[64..96].copy_from_slice(block_id.file_hash.as_slice());
-
-            batch.put_cf(
-                &cf.bound(),
-                BlockIdShort {
-                    shard: block_id.shard,
-                    seqno: block_id.seqno,
-                }
-                .to_vec(),
-                value,
-            );
+            batch.put_cf(&cf.bound(), block_id.to_vec(), root_hash.as_slice());
 
             let hist = HistogramGuard::begin("tycho_storage_state_update_time");
             raw_db.write(batch)?;
@@ -175,24 +162,25 @@ impl ShardStateStorage {
     }
 
     pub async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
-        let cell_id = self.load_state_root(block_id.as_short_id())?;
+        let cell_id = self.load_state_root(block_id)?;
         let cell = self.cell_storage.load_cell(cell_id)?;
 
         ShardStateStuff::from_root(block_id, Cell::from(cell as Arc<_>), &self.min_ref_mc_state)
     }
 
-    pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<TopBlocks> {
+    #[tracing::instrument(skip_all, fields(mc_seqno))]
+    pub async fn remove_outdated_states(&self, mc_seqno: u32) -> Result<()> {
         // Compute recent block ids for the specified masterchain seqno
-        let top_blocks = self
-            .compute_recent_blocks(mc_seqno)
-            .await?
-            .context("Recent blocks edge not found")?;
+        let Some(top_blocks) = self.compute_recent_blocks(mc_seqno).await? else {
+            tracing::warn!("recent blocks edge not found");
+            return Ok(());
+        };
 
         tracing::info!(
-            block_id = %top_blocks.mc_block,
-            "starting shard states GC",
+            target_block_id = %top_blocks.mc_block,
+            "started states GC",
         );
-        let instant = Instant::now();
+        let started_at = Instant::now();
 
         let raw = self.db.rocksdb();
 
@@ -222,7 +210,7 @@ impl ShardStateStorage {
                 },
             };
 
-            let block_id = BlockIdShort::from_slice(key);
+            let block_id = BlockId::from_slice(key);
             let root_hash = HashBytes::wrap(value.try_into().expect("invalid value"));
 
             // Skip blocks from zero state and top blocks
@@ -247,10 +235,7 @@ impl ShardStateStorage {
                 // drop(pending_op);
 
                 removed_cells += total;
-                tracing::debug!(
-                    removed_cells = total,
-                    %block_id,
-                );
+                tracing::debug!(removed_cells = total, %block_id);
             }
 
             removed_states += 1;
@@ -262,10 +247,10 @@ impl ShardStateStorage {
             removed_states,
             removed_cells,
             block_id = %top_blocks.mc_block,
-            elapsed_sec = instant.elapsed().as_secs_f64(),
-            "finished shard states GC",
+            elapsed_sec = started_at.elapsed().as_secs_f64(),
+            "finished states GC",
         );
-        Ok(top_blocks)
+        Ok(())
     }
 
     /// Searches for an edge with the least referenced masterchain block
@@ -279,11 +264,13 @@ impl ShardStateStorage {
             }
         }
 
+        let snapshot = self.db.rocksdb().snapshot();
+
         // 1. Find target block
 
         // Find block id using states table
         let mc_block_id = match self
-            .find_mc_block_id(mc_seqno)
+            .find_mc_block_id(mc_seqno, &snapshot)
             .context("Failed to find block id by seqno")?
         {
             Some(block_id) => block_id,
@@ -307,7 +294,7 @@ impl ShardStateStorage {
 
         // Find full min masterchain reference id
         let min_ref_mc_seqno = block_info.min_ref_mc_seqno;
-        let min_ref_block_id = match self.find_mc_block_id(min_ref_mc_seqno)? {
+        let min_ref_block_id = match self.find_mc_block_id(min_ref_mc_seqno, &snapshot)? {
             Some(block_id) => block_id,
             None => return Ok(None),
         };
@@ -327,41 +314,42 @@ impl ShardStateStorage {
             .map(Some)
     }
 
-    fn load_state_root(&self, block_id_short: BlockIdShort) -> Result<HashBytes> {
+    fn load_state_root(&self, block_id: &BlockId) -> Result<HashBytes> {
         let shard_states = &self.db.shard_states;
-        let shard_state = shard_states.get(block_id_short.to_vec())?;
+        let shard_state = shard_states.get(block_id.to_vec())?;
         match shard_state {
             Some(root) => Ok(HashBytes::from_slice(&root[..32])),
             None => Err(ShardStateStorageError::NotFound.into()),
         }
     }
 
-    fn find_mc_block_id(&self, mc_seqno: u32) -> Result<Option<BlockId>> {
+    fn find_mc_block_id(
+        &self,
+        mc_seqno: u32,
+        snapshot: &rocksdb::Snapshot<'_>,
+    ) -> Result<Option<BlockId>> {
         let shard_states = &self.db.shard_states;
-        Ok(shard_states
-            .get(
-                BlockIdShort {
-                    shard: ShardIdent::MASTERCHAIN,
-                    seqno: mc_seqno,
-                }
-                .to_vec(),
-            )?
-            .and_then(|value| {
-                let value = value.as_ref();
-                if value.len() < 96 {
-                    return None;
-                }
 
-                let root_hash: [u8; 32] = value[32..64].try_into().unwrap();
-                let file_hash: [u8; 32] = value[64..96].try_into().unwrap();
+        let mut bound = BlockId {
+            shard: ShardIdent::MASTERCHAIN,
+            seqno: mc_seqno,
+            root_hash: HashBytes::ZERO,
+            file_hash: HashBytes::ZERO,
+        };
 
-                Some(BlockId {
-                    shard: ShardIdent::MASTERCHAIN,
-                    seqno: mc_seqno,
-                    root_hash: HashBytes(root_hash),
-                    file_hash: HashBytes(file_hash),
-                })
-            }))
+        let mut readopts = shard_states.new_read_config();
+        readopts.set_snapshot(snapshot);
+        readopts.set_iterate_lower_bound(bound.to_vec().as_slice());
+        bound.seqno += 1;
+        readopts.set_iterate_upper_bound(bound.to_vec().as_slice());
+
+        let mut iter = self
+            .db
+            .rocksdb()
+            .raw_iterator_cf_opt(&shard_states.cf(), readopts);
+        iter.seek_to_first();
+
+        Ok(iter.key().map(BlockId::from_slice))
     }
 }
 

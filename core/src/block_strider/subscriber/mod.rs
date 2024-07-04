@@ -18,6 +18,7 @@ mod metrics_subscriber;
 
 pub struct BlockSubscriberContext {
     pub mc_block_id: BlockId,
+    pub is_key_block: bool,
     pub block: BlockStuff,
     pub archive_data: ArchiveData,
 }
@@ -96,6 +97,7 @@ impl<B: BlockSubscriber> BlockSubscriberExt for B {
 
 pub struct StateSubscriberContext {
     pub mc_block_id: BlockId,
+    pub is_key_block: bool,
     pub block: BlockStuff,
     pub archive_data: ArchiveData,
     pub state: ShardStateStuff,

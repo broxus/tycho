@@ -27,16 +27,21 @@ pub enum StorageCmd {
     GetPersistentStatePart,
 }
 impl StorageCmd {
-    pub(crate) async fn run(self) -> Result<()> {
-        match self {
-            Self::GetNextKeyblockIds(cmd) => cmd.run(),
-            Self::GetBlockFull(cmd) => cmd.run().await,
-            Self::GetNextBlockFull(cmd) => cmd.run_next().await,
-            Self::GetArchiveInfo(cmd) => cmd.run(),
-            Self::GetArchiveSlice(cmd) => cmd.run(),
-            Self::GetPersistentStateInfo(cmd) => cmd.get_state_info(),
-            Self::GetPersistentStatePart => Ok(()),
-        }
+    pub(crate) fn run(self) -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            match self {
+                Self::GetNextKeyblockIds(cmd) => cmd.run(),
+                Self::GetBlockFull(cmd) => cmd.run().await,
+                Self::GetNextBlockFull(cmd) => cmd.run_next().await,
+                Self::GetArchiveInfo(cmd) => cmd.run(),
+                Self::GetArchiveSlice(cmd) => cmd.run(),
+                Self::GetPersistentStateInfo(cmd) => cmd.get_state_info(),
+                Self::GetPersistentStatePart => Ok(()),
+            }
+        })
     }
 }
 

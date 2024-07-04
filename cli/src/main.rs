@@ -21,14 +21,13 @@ mod util;
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     if std::env::var("RUST_BACKTRACE").is_err() {
         // Enable backtraces on panics by default.
         std::env::set_var("RUST_BACKTRACE", "1");
     }
 
-    match App::parse().run().await {
+    match App::parse().run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("Error: {err}");
@@ -48,8 +47,8 @@ struct App {
 }
 
 impl App {
-    async fn run(self) -> Result<()> {
-        self.cmd.run().await
+    fn run(self) -> Result<()> {
+        self.cmd.run()
     }
 }
 
@@ -65,11 +64,11 @@ enum Cmd {
 }
 
 impl Cmd {
-    async fn run(self) -> Result<()> {
+    fn run(self) -> Result<()> {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
-            Cmd::Storage(cmd) => cmd.run().await,
+            Cmd::Storage(cmd) => cmd.run(),
         }
     }
 }
