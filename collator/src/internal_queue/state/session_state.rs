@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::boc::Boc;
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
@@ -75,11 +74,11 @@ pub trait LocalSessionState {
         ranges: &FastHashMap<ShardIdent, ShardRange>,
     ) -> Box<dyn StateIterator>;
 
-    fn retrieve_messages(
+    fn commit_messages(
         &self,
         shard: ShardIdent,
         range: (&InternalMessageKey, &InternalMessageKey),
-    ) -> Result<Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>>;
+    ) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -147,14 +146,14 @@ impl SessionState for SessionStateStdImpl {
         Box::new(StateIteratorImpl::new(iter, receiver, ranges.clone()))
     }
 
-    fn retrieve_messages(
+    fn commit_messages(
         &self,
         shard: ShardIdent,
         range: (&InternalMessageKey, &InternalMessageKey),
-    ) -> Result<Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>> {
+    ) -> Result<()> {
         let range = ((range.0.lt, range.0.hash), (range.1.lt, range.1.hash));
         self.storage
             .internal_queue_storage()
-            .retrieve_and_delete_messages(shard, range)
+            .commit_to_persistent(shard, range)
     }
 }

@@ -13,8 +13,6 @@ pub struct ShardIterator {
     receiver: ShardIdent,
     // current_key: Option<InternalMessageKey>,
     pub(crate) iterator: OwnedIterator,
-    // saved_position: Option<Vec<u8>>,
-    // pub(crate) read_until: Option<InternalMessageKey>,
 }
 
 impl ShardIterator {

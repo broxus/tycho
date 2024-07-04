@@ -31,7 +31,7 @@ impl BlockHandleStorage {
 
     pub fn assign_mc_ref_seq_no(&self, handle: &BlockHandle, mc_ref_seq_no: u32) {
         if handle.set_mc_ref_seqno(mc_ref_seq_no) {
-            self.store_handle(handle)
+            self.store_handle(handle);
         }
     }
 

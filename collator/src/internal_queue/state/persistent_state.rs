@@ -1,4 +1,3 @@
-use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
@@ -57,11 +56,11 @@ pub trait PersistentStateFactory {
 pub trait LocalPersistentState {
     fn snapshot(&self) -> OwnedSnapshot;
     fn state(&self);
-    fn add_messages(
-        &self,
-        shard: ShardIdent,
-        messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
-    ) -> anyhow::Result<i32>;
+    // fn add_messages(
+    //     &self,
+    //     shard: ShardIdent,
+    //     messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
+    // ) -> anyhow::Result<i32>;
 
     fn iterator(
         &self,
@@ -97,17 +96,17 @@ impl PersistentState for PersistentStateStdImpl {
             .unwrap();
     }
 
-    fn add_messages(
-        &self,
-        shard: ShardIdent,
-        messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
-    ) -> anyhow::Result<i32> {
-        let total_inserted = self
-            .storage
-            .internal_queue_storage()
-            .insert_messages_persistent(shard, messages)?;
-        Ok(total_inserted)
-    }
+    // fn add_messages(
+    //     &self,
+    //     shard: ShardIdent,
+    //     messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
+    // ) -> anyhow::Result<i32> {
+    //     let total_inserted = self
+    //         .storage
+    //         .internal_queue_storage()
+    //         .insert_messages_persistent(shard, messages)?;
+    //     Ok(total_inserted)
+    // }
 
     fn iterator(
         &self,

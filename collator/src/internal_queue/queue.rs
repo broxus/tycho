@@ -76,7 +76,6 @@ impl QueueFactory for QueueFactoryStdImpl {
         QueueImpl {
             session_state: Arc::new(session_state),
             persistent_state: Arc::new(persistent_state),
-            state_lock: Arc::new(Default::default()),
             processed_uptos: Default::default(),
             diffs: Default::default(),
         }
@@ -90,7 +89,6 @@ where
 {
     session_state: Arc<S>,
     persistent_state: Arc<P>,
-    state_lock: Arc<Mutex<()>>,
     processed_uptos: Mutex<BTreeMap<ShardIdent, BTreeMap<ShardIdent, InternalMessageKey>>>,
     diffs: FastDashMap<BlockIdShort, QueueDiff>,
 }
@@ -105,7 +103,6 @@ where
         ranges: &FastHashMap<ShardIdent, ShardRange>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator>> {
-        let _state_lock = self.state_lock.lock().await;
         let snapshot = self.persistent_state.snapshot();
         let persistent_iter = self
             .persistent_state
@@ -119,7 +116,7 @@ where
         mut diff: QueueDiff,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
-        let _session_lock = self.state_lock.lock().await;
+        // let _session_lock = self.state_lock.lock().await;
         self.session_state
             .add_messages(block_id_short.shard, &diff.messages)?;
 
@@ -129,8 +126,6 @@ where
     }
 
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError> {
-        let _session_lock = self.state_lock.lock().await;
-
         let diff = self
             .diffs
             .remove(diff_id)
@@ -146,11 +141,9 @@ where
             if first_key.lt > last_key.lt {
                 panic!("first_key.lt > last_key.lt");
             }
-            let messages = self
+            let _ = self
                 .session_state
-                .retrieve_messages(for_shard, (&first_key, &last_key))?;
-
-            let _ = self.persistent_state.add_messages(for_shard, messages)?;
+                .commit_messages(for_shard, (&first_key, &last_key))?;
         }
 
         // gc
