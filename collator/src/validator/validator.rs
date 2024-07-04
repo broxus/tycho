@@ -416,26 +416,22 @@ async fn check_and_notify_validated_by_state(
     block_id: &BlockId,
     listeners: &[Arc<dyn ValidatorEventListener>],
 ) -> Result<bool> {
-    if state_node_adapter
-        .load_block_handle(block_id)
-        .await?
-        .is_some()
-    {
-        for listener in listeners.iter() {
-            tokio::spawn({
-                let listener = listener.clone();
-                let block_id = *block_id;
-                async move {
-                    listener
-                        .on_block_validated(block_id, OnValidatedBlockEvent::ValidByState)
-                        .await
-                        .expect("Failed to notify listener");
-                }
-            });
-        }
-        return Ok(true);
+    match state_node_adapter.load_block_handle(block_id).await? {
+        Some(handle) if handle.meta().is_applied() => {}
+        _ => return Ok(false),
     }
-    Ok(false)
+
+    for listener in listeners {
+        let listener = listener.clone();
+        let block_id = *block_id;
+        tokio::spawn(async move {
+            listener
+                .on_block_validated(block_id, OnValidatedBlockEvent::ValidByState)
+                .await
+                .expect("Failed to notify listener");
+        });
+    }
+    return Ok(true);
 }
 
 #[allow(clippy::too_many_arguments)]
