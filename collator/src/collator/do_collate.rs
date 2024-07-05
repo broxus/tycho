@@ -844,11 +844,9 @@ impl CollatorStdImpl {
 
                 let anchor = &entry.1.anchor;
                 let expire_timeout = 60 * 1000; // 1 minute
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .expect("current time since unix epoch")
-                    .as_millis() as u64;
-                if now - anchor.chain_time() > expire_timeout {
+                let next_chain_time =
+                    collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
+                if next_chain_time - anchor.chain_time() > expire_timeout {
                     let iter = anchor.externals_iterator(0);
                     for ext_msg in iter {
                         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
