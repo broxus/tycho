@@ -1321,7 +1321,14 @@ where
             "Saving block validation result to cache...",
         );
         // update block in cache with signatures info
-        self.store_block_validation_result(block_id, validation_result)?;
+        let updated = self.store_block_validation_result(block_id, validation_result);
+        if !updated {
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Block does not exist in cache - skip validation result",
+            );
+            return Ok(());
+        }
 
         // process valid block
         if block_id.shard.is_masterchain() {
@@ -1402,7 +1409,7 @@ where
         &mut self,
         block_id: BlockId,
         validation_result: OnValidatedBlockEvent,
-    ) -> Result<&BlockCandidateContainer> {
+    ) -> bool {
         if let Some(block_container) = if block_id.is_masterchain() {
             self.blocks_cache.master.get_mut(&block_id.as_short_id())
         } else {
@@ -1419,9 +1426,9 @@ where
 
             block_container.set_validation_result(is_valid, already_synced, signatures);
 
-            Ok(block_container)
+            true
         } else {
-            bail!("Block ({}) does not exist in cache!", block_id)
+            false
         }
     }
 
