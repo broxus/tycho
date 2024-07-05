@@ -843,6 +843,28 @@ impl CollatorStdImpl {
                 );
 
                 let anchor = &entry.1.anchor;
+                let expire_timeout = 60 * 1000; // 1 minute
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("current time since unix epoch")
+                    .as_millis() as u64;
+                if now - anchor.chain_time() > expire_timeout {
+                    let iter = anchor.externals_iterator(0);
+                    for ext_msg in iter {
+                        tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info().dst,
+                        );
+                    }
+
+                    // skip and remove fully expired anchor
+                    let _ = anchors_cache.remove(next_idx);
+                    tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                        "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
+                    );
+
+                    // try read next anchor
+                    continue;
+                }
 
                 if key == was_read_upto.0 && anchor.externals_count() == was_read_upto.1 as usize {
                     // skip and remove fully processed anchor
