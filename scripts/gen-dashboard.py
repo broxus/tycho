@@ -596,6 +596,11 @@ def collator_do_collate() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
+            "tycho_do_collate_ext_msgs_expired_count",
+            "Ext msgs expired count",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
             "tycho_do_collate_msgs_read_count_int",
             "Read Int msgs count",
             labels=['workchain=~"$workchain"'],
