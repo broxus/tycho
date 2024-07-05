@@ -848,15 +848,21 @@ impl CollatorStdImpl {
                     collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
                 if next_chain_time - anchor.chain_time() > expire_timeout {
                     let iter = anchor.externals_iterator(0);
+                    let mut expired_msgs_count = 0;
                     for ext_msg in iter {
-                        tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                        tracing::info!(target: tracing_targets::COLLATOR,
                             "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info().dst,
                         );
+                        expired_msgs_count += 1;
                     }
+
+                    let labels = &[("workchain", shard_id.workchain().to_string())];
+                    metrics::counter!("tycho_do_collate_ext_msgs_expired_count", labels)
+                        .increment(expired_msgs_count);
 
                     // skip and remove fully expired anchor
                     let _ = anchors_cache.remove(next_idx);
-                    tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
+                    tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
                     );
 
