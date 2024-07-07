@@ -7,10 +7,12 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
+use tokio::select;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_storage::{BlocksGcType, Storage};
+use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -206,6 +208,7 @@ impl GcSubscriber {
 
     #[tracing::instrument(skip_all)]
     async fn states_gc(mut trigger_rx: TriggerRx, storage: Storage) {
+        use tokio::time;
         let Some(config) = storage.config().states_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -215,34 +218,37 @@ impl GcSubscriber {
             tracing::info!("manager stopped");
         }
 
-        let mut last_tiggered_at = None::<Instant>;
+        let mut interval = time::interval(config.interval);
+        let mut last_triggered_at = None;
 
-        while trigger_rx.changed().await.is_ok() {
-            match last_tiggered_at {
-                // Wait for an offset before the first GC but after the first trigger
-                None => {
-                    let offset = if config.random_offset {
-                        rand::thread_rng().gen_range(Duration::ZERO..config.interval)
-                    } else {
-                        config.interval
-                    };
-                    tokio::time::sleep(offset).await
-                }
-                // Wait to maintaint the interval between GCs
-                Some(last) => {
-                    if last.elapsed() < config.interval {
-                        tokio::time::sleep_until((last + config.interval).into()).await;
-                    }
-                }
+        loop {
+            // either the interval has ticked or a new trigger has arrived
+            select! {
+                _ = interval.tick() => {},
+                Ok(_) = trigger_rx.changed() => {},
+                else => break,
             }
-            last_tiggered_at = Some(Instant::now());
 
-            // Get the most recent trigger
+            let now = Instant::now();
+
+            if let Some(last) = last_triggered_at {
+                let next_gc: Instant = last + config.interval;
+                if next_gc > now {
+                    time::sleep_until(next_gc.into()).await;
+                }
+            } else if config.random_offset {
+                let offset = rand::thread_rng().gen_range(Duration::ZERO..config.interval);
+                time::sleep(offset).await;
+            }
+
+            last_triggered_at = Some(Instant::now());
+
             let Some(trigger) = trigger_rx.borrow_and_update().clone() else {
                 continue;
             };
             tracing::debug!(?trigger);
 
+            let _hist = HistogramGuard::begin("tycho_gc_states_time");
             if let Err(e) = storage
                 .shard_state_storage()
                 .remove_outdated_states(trigger.mc_block_id.seqno)
@@ -250,6 +256,7 @@ impl GcSubscriber {
             {
                 tracing::error!("failed to remove outdated states: {e:?}");
             }
+            metrics::gauge!("tycho_gc_states_seqno").set(trigger.mc_block_id.seqno as f64);
         }
     }
 }
