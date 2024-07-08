@@ -700,6 +700,11 @@ def collator_time_metrics() -> RowPanel:
             "Time elapsed from prev block",
             labels=['workchain=~"$workchain"'],
         ),
+        create_heatmap_panel(
+            "tycho_do_collate_overhead_time",
+            "Collation flow overhead",
+            labels=['workchain=~"$workchain"'],
+        ),
     ]
     return create_row("collator: Time diffs", metrics)
 
@@ -707,8 +712,8 @@ def collator_time_metrics() -> RowPanel:
 def collator_core_operations_metrics() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_do_collate_handle_block_candidate_time",
-            "Handle block candidate",
+            "tycho_do_collate_total_time",
+            "Total collation time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -728,17 +733,17 @@ def collator_core_operations_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_do_collate_fill_msgs_total_time",
-            "Fill messages time",
+            "Execution time: incl Fill messages time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_exec_msgs_total_time",
-            "Execute messages time",
+            "Execution time: incl Execute messages time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_process_txs_total_time",
-            "Process transactions time",
+            "Execution time: incl Process transactions time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -757,10 +762,11 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_total_time",
-            "Total collation time",
+            "tycho_do_collate_handle_block_candidate_time",
+            "Handle block candidate",
             labels=['workchain=~"$workchain"'],
         ),
+
     ]
     return create_row("collator: Core Operations Metrics", metrics)
 
@@ -811,11 +817,6 @@ def collator_misc_operations_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_extract_master_block_subgraph_time",
             "Extract master block subgraph",
-        ),
-        create_heatmap_panel(
-            "tycho_do_collate_overhead_time",
-            "Collation flow overhead",
-            labels=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Misc Operations Metrics", metrics)
