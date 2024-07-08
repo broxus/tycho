@@ -3,19 +3,19 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context, Result};
 use arc_swap::ArcSwapAny;
 use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
 use tycho_block_util::block::{
-    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockStuff,
-    BlockStuffAug,
+    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockProofStuffAug,
+    BlockStuff, BlockStuffAug,
 };
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BriefBlockInfo, Storage};
+use tycho_storage::{BlockMetaData, BlockProofHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
 
-pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
+pub use self::archive_provider::ArchiveBlockProvider;
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::storage_provider::StorageBlockProvider;
 
@@ -184,8 +184,9 @@ impl ProofChecker {
     pub async fn check_proof(
         &self,
         block: &BlockStuff,
-        proof: &BlockProofStuff,
-    ) -> anyhow::Result<()> {
+        proof: &BlockProofStuffAug,
+        store_proof_on_success: bool,
+    ) -> Result<BlockMetaData> {
         // TODO: Add labels with shard?
         let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
 
@@ -200,16 +201,27 @@ impl ProofChecker {
         anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
 
         let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
+        let meta = BlockMetaData {
+            is_key_block: virt_block_info.key_block,
+            gen_utime: virt_block_info.gen_utime,
+            mc_ref_seqno: is_masterchain.then(|| block.id().seqno),
+        };
+
         if !is_masterchain {
-            return Ok(());
+            if store_proof_on_success {
+                // Store proof link
+                self.storage
+                    .block_storage()
+                    .store_block_proof(proof, BlockProofHandle::New(meta))
+                    .await?;
+            }
+            return Ok(meta);
         }
 
-        let handle = {
-            let block_handles = self.storage.block_handle_storage();
-            block_handles
-                .load_key_block_handle(virt_block_info.prev_key_block_seqno)
-                .context("failed to load prev key block handle")?
-        };
+        let block_handles = self.storage.block_handle_storage();
+        let handle = block_handles
+            .load_key_block_handle(virt_block_info.prev_key_block_seqno)
+            .context("failed to load prev key block handle")?;
 
         if handle.id().seqno == 0 {
             let zerostate = 'zerostate: {
@@ -228,7 +240,7 @@ impl ProofChecker {
                 zerostate
             };
 
-            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)
+            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)?;
         } else {
             let prev_key_block_proof = 'prev_proof: {
                 if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
@@ -256,29 +268,17 @@ impl ProofChecker {
                 &prev_key_block_proof,
                 &virt_block,
                 &virt_block_info,
-            )
+            )?;
         }
-    }
 
-    async fn store_block_proof(
-        &self,
-        block: &BlockStuff,
-        proof: BlockProofStuff,
-        proof_data: Vec<u8>,
-    ) -> anyhow::Result<()> {
-        let block_info = block.load_info()?;
-        let block_meta = BriefBlockInfo::from(&block_info);
-
-        let proof_handle = block_meta
-            .with_mc_seq_no(block_info.min_ref_mc_seqno)
-            .into();
-
-        self.storage
-            .block_storage()
-            .store_block_proof(&proof.with_archive_data(proof_data), proof_handle)
-            .await?;
-
-        Ok(())
+        if store_proof_on_success {
+            // Store proof
+            self.storage
+                .block_storage()
+                .store_block_proof(proof, BlockProofHandle::New(meta))
+                .await?;
+        }
+        Ok(meta)
     }
 }
 

@@ -1,178 +1,126 @@
-#![allow(clippy::map_err_ignore)]
-
 use std::sync::Arc;
+use std::time::Duration;
 
+use anyhow::Result;
 use arc_swap::ArcSwapOption;
+use bytes::{BufMut, BytesMut};
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-use serde::{Deserialize, Serialize};
-use tycho_block_util::archive::{Archive, ArchiveWritersPool};
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
-use tycho_storage::Storage;
+use tycho_block_util::archive::Archive;
+use tycho_storage::{BlockMetaData, Storage};
 use tycho_util::time::now_sec;
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::BlockchainRpcClient;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-#[non_exhaustive]
-pub struct ArchiveBlockProviderConfig {
-    /// Default: 1073741824 (1 GB)
-    pub save_to_disk_threshold: usize,
-}
-
-impl Default for ArchiveBlockProviderConfig {
-    fn default() -> Self {
-        Self {
-            save_to_disk_threshold: 1024 * 1024 * 1024,
-        }
-    }
-}
-
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct ArchiveBlockProvider {
-    client: BlockchainRpcClient,
-    writers_pool: ArchiveWritersPool,
-    proof_checker: ProofChecker,
-    last_known_archive: ArcSwapOption<Archive>,
+    inner: Arc<Inner>,
 }
 
 impl ArchiveBlockProvider {
-    pub fn new(
-        client: BlockchainRpcClient,
-        storage: Storage,
-        config: ArchiveBlockProviderConfig,
-    ) -> Self {
-        let writers_pool =
-            ArchiveWritersPool::new(storage.root().path(), config.save_to_disk_threshold);
+    pub fn new(client: BlockchainRpcClient, storage: Storage) -> Self {
         let proof_checker = ProofChecker::new(storage);
 
         Self {
-            client,
-            writers_pool,
-            proof_checker,
-            last_known_archive: Default::default(),
+            inner: Arc::new(Inner {
+                client,
+                proof_checker,
+                last_known_archive: ArcSwapOption::empty(),
+            }),
+        }
+    }
+
+    async fn get_next_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
+        let this = self.inner.as_ref();
+
+        let next_block_seqno = block_id.seqno + 1;
+
+        let block_id;
+        let archive = loop {
+            if let Some(archive) = this.last_known_archive.load_full() {
+                if let Some(mc_block_id) = archive.mc_block_ids.get(&next_block_seqno) {
+                    block_id = *mc_block_id;
+                    break archive;
+                }
+            }
+
+            // TODO: Impl parallel download
+            match self.download_archive(next_block_seqno).await {
+                Ok(archive) => this.last_known_archive.store(Some(Arc::new(archive))),
+                Err(e) => return Some(Err(e)),
+            }
+        };
+
+        let (block, proof) = match (
+            archive.get_block_by_id(&block_id),
+            archive.get_proof_by_id(&block_id),
+        ) {
+            (Ok(block), Ok(proof)) => (block, proof),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+        };
+
+        match this.proof_checker.check_proof(block, proof, true).await {
+            Ok(meta) if is_block_recent(&meta) => Some(Ok(block.clone())),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 
     async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
-        let res = self.last_known_archive.load_full().map(|archive| {
-            (
-                archive.get_block_by_id(block_id),
-                archive.get_proof_by_id(block_id),
-            )
-        });
+        let this = self.inner.as_ref();
 
-        let (block, proof) = match res {
-            Some((Ok(block), Ok(proof))) => (block, proof),
-            _ => match self.download_archive(block_id.seqno).await {
-                Ok(archive) => {
-                    let block = archive.get_block_by_id(block_id);
-                    let proof = archive.get_proof_by_id(block_id);
-
-                    match (block, proof) {
-                        (Ok(block), Ok(proof)) => {
-                            self.last_known_archive.store(Some(Arc::new(archive)));
-                            (block, proof)
-                        }
-                        _ => return Some(Err(ArchiveProviderError::InvalidArchive.into())),
-                    }
-                }
-                Err(e) => return Some(Err(e)),
-            },
+        let Some(archive) = this.last_known_archive.load_full() else {
+            return Some(Err(anyhow::anyhow!("no archive available")));
         };
 
-        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
+        let (block, proof) = match (
+            archive.get_block_by_id(block_id),
+            archive.get_proof_by_id(block_id),
+        ) {
+            (Ok(block), Ok(proof)) => (block, proof),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+        };
+
+        if let Err(e) = this.proof_checker.check_proof(block, proof, true).await {
             return Some(Err(e));
         }
 
-        match Self::is_sync(&block) {
-            Ok(true) => return None,
-            Ok(false) => { /* do nothing */ }
-            Err(e) => return Some(Err(e)),
-        }
-
-        Some(Self::construct_block(block))
+        // NOTE: Always return the block by id even if it's not recent
+        Some(Ok(block.clone()))
     }
 
-    async fn get_next_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
-        let next_block_seqno = block_id.seqno + 1;
-
-        let res = self.last_known_archive.load_full().map(|archive| {
-            (
-                archive.get_block_by_seqno(next_block_seqno),
-                archive.get_proof_by_seqno(next_block_seqno),
-            )
-        });
-
-        let (block, proof) = match res {
-            Some((Ok(block), Ok(proof))) => (block, proof),
-            _ => match self.download_archive(next_block_seqno).await {
-                Ok(archive) => {
-                    let block = archive.get_block_by_seqno(next_block_seqno);
-                    let proof = archive.get_proof_by_seqno(next_block_seqno);
-
-                    match (block, proof) {
-                        (Ok(block), Ok(proof)) => {
-                            self.last_known_archive.store(Some(Arc::new(archive)));
-                            (block, proof)
-                        }
-                        (Err(e), _) | (_, Err(e)) => return Some(Err(e)),
-                    }
-                }
-                Err(e) => return Some(Err(e)),
-            },
-        };
-
-        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
-            return Some(Err(e));
-        }
-
-        match Self::is_sync(&block) {
-            Ok(true) => return None,
-            Ok(false) => { /* do nothing */ }
-            Err(e) => return Some(Err(e)),
-        }
-
-        Some(Self::construct_block(block))
-    }
-
-    async fn download_archive(&self, seqno: u32) -> anyhow::Result<Archive> {
-        let writers_pool = self.writers_pool.clone();
-        let blockchain_rpc_client = self.client.clone();
+    async fn download_archive(&self, seqno: u32) -> Result<Archive> {
+        let client = &self.inner.client;
 
         loop {
-            let mut writer = writers_pool.acquire();
+            let mut archive_data = BytesMut::new().writer();
+            client.download_archive(seqno, &mut archive_data).await?;
+            let archive_data = archive_data.into_inner().freeze();
 
-            blockchain_rpc_client
-                .download_archive(seqno, &mut writer)
-                .await?;
-
-            let archive = match writer.parse_archive() {
-                Ok(archive) => archive,
+            match Archive::new(archive_data) {
+                Ok(archive) => return Ok(archive),
                 Err(e) => {
                     tracing::error!(seqno, "failed to parse downloaded archive: {e}");
+
+                    // TODO: backoff
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
                 }
-            };
-
-            return Ok(archive);
+            }
         }
     }
+}
 
-    fn is_sync(block: &BlockStuff) -> anyhow::Result<bool> {
-        Ok(block.load_info()?.gen_utime + 600 > now_sec())
-    }
+fn is_block_recent(meta: &BlockMetaData) -> bool {
+    meta.gen_utime + 600 > now_sec()
+}
 
-    fn construct_block(block: BlockStuff) -> anyhow::Result<BlockStuffAug> {
-        match everscale_types::boc::BocRepr::encode(block.block().clone()) {
-            Ok(archive_data) => Ok(BlockStuffAug::new(
-                BlockStuff::with_block(*block.id(), block.into_block()),
-                archive_data,
-            )),
-            Err(e) => Err(e.into()),
-        }
-    }
+struct Inner {
+    client: BlockchainRpcClient,
+    proof_checker: ProofChecker,
+    last_known_archive: ArcSwapOption<Archive>,
 }
 
 impl BlockProvider for ArchiveBlockProvider {
@@ -186,10 +134,4 @@ impl BlockProvider for ArchiveBlockProvider {
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id))
     }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub(crate) enum ArchiveProviderError {
-    #[error("Invalid archive")]
-    InvalidArchive,
 }

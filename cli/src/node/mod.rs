@@ -24,7 +24,7 @@ use tycho_collator::validator::client::retry::BackoffConfig;
 use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
-    BlockProvider, BlockStrider, BlockSubscriberExt, BlockchainBlockProvider,
+    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriberExt, BlockchainBlockProvider,
     BlockchainBlockProviderConfig, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
     PersistentBlockStriderState, ShardStateApplier, StateSubscriber, StateSubscriberContext,
     StorageBlockProvider,
@@ -299,7 +299,6 @@ pub struct Node {
     state_tracker: MinRefMcStateTracker,
 
     rpc_config: Option<RpcConfig>,
-    archive_block_provider_config: ArchiveBlockProviderConfig,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     collation_config: CollationConfig,
@@ -420,7 +419,6 @@ impl Node {
             blockchain_rpc_client,
             state_tracker,
             rpc_config: node_config.rpc,
-            archive_block_provider_config: node_config.archive_block_provider,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
         })
@@ -578,11 +576,8 @@ impl Node {
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
         // TODO: add to block_strider later
-        let _archive_block_provider = ArchiveBlockProvider::new(
-            self.blockchain_rpc_client.clone(),
-            self.storage.clone(),
-            self.archive_block_provider_config.clone(),
-        );
+        let _archive_block_provider =
+            ArchiveBlockProvider::new(self.blockchain_rpc_client.clone(), self.storage.clone());
 
         let block_strider = BlockStrider::builder()
             .with_provider((

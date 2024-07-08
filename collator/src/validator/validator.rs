@@ -26,7 +26,7 @@ use crate::validator::state::{
     NotificationStatus, SessionInfo, ValidationState, ValidationStateStdImpl,
 };
 use crate::validator::types::{
-    BlockValidationCandidate, OverlayNumber, StopValidationCommand, ValidationStatus, ValidatorInfo,
+    OverlayNumber, StopValidationCommand, ValidationStatus, ValidatorInfo,
 };
 
 // FACTORY

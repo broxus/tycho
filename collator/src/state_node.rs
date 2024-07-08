@@ -379,7 +379,8 @@ impl StateNodeAdapterStdImpl {
                     (i as u16, BlockSignature {
                         node_id_short: tl_proto::hash(everscale_crypto::tl::PublicKey::Ed25519 {
                             key: &key.as_array(),
-                        }),
+                        })
+                        .into(),
                         signature: *value,
                     })
                 }),

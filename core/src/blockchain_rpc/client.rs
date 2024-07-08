@@ -364,6 +364,7 @@ impl BlockchainRpcClient {
         )))
     }
 
+    // TODO: Split into `find_` and `download_` methods to not spam the network.
     pub async fn download_archive(
         &self,
         mc_seqno: u32,

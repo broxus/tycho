@@ -13,6 +13,11 @@ impl<'a> ArchiveReader<'a> {
         read_package_header(data, &mut offset)?;
         Ok(Self { data, offset })
     }
+
+    #[inline]
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
 }
 
 impl<'a> Iterator for ArchiveReader<'a> {

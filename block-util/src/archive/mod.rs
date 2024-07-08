@@ -1,32 +1,36 @@
 use std::collections::BTreeMap;
 
+use anyhow::Result;
 use bytes::Bytes;
-use everscale_types::models::{Block, BlockId, BlockProof};
+use everscale_types::models::BlockId;
+use tycho_util::FastHashMap;
 
 pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
-pub use self::writer::ArchiveWritersPool;
-use crate::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
+use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 
 mod entry_id;
 mod reader;
-mod writer;
 
 pub const ARCHIVE_PREFIX: [u8; 4] = u32::to_le_bytes(0xae8fdd01);
 pub const ARCHIVE_ENTRY_PREFIX: [u8; 2] = u16::to_le_bytes(0x1e8b);
 pub const ARCHIVE_ENTRY_HEADER_LEN: usize = ARCHIVE_ENTRY_PREFIX.len() + 2 + 4; // magic + filename len + data len
 
 pub struct Archive {
-    pub block_ids: BTreeMap<u32, BlockId>,
-    pub blocks: BTreeMap<BlockId, ArchiveDataEntry>,
+    pub mc_block_ids: BTreeMap<u32, BlockId>,
+    pub blocks: FastHashMap<BlockId, ArchiveDataEntry>,
 }
 
 impl Archive {
-    pub fn new(data: &[u8]) -> anyhow::Result<Self> {
-        let reader = ArchiveReader::new(data)?;
+    pub fn new<T>(data: T) -> Result<Self>
+    where
+        Bytes: From<T>,
+    {
+        let data = Bytes::from(data);
+        let reader = ArchiveReader::new(&data)?;
 
         let mut res = Archive {
-            block_ids: Default::default(),
+            mc_block_ids: Default::default(),
             blocks: Default::default(),
         };
 
@@ -34,93 +38,69 @@ impl Archive {
             let entry = entry_data?;
             match ArchiveEntryId::from_filename(entry.name)? {
                 ArchiveEntryId::Block(id) => {
-                    let block = BlockStuff::deserialize_checked(&id, entry.data)?.into_block();
+                    let block = BlockStuff::deserialize_checked(&id, entry.data)?;
 
-                    res.block_ids.insert(id.seqno, id);
+                    if id.shard.is_masterchain() {
+                        res.mc_block_ids.insert(id.seqno, id);
+                    }
 
-                    res.blocks.entry(id).or_default().block =
-                        Some(WithArchiveData::new(block, entry.data.to_vec()));
+                    let parsed = res.blocks.entry(id).or_default();
+                    anyhow::ensure!(parsed.block.is_none(), "duplicate block data for: {id}");
+                    parsed.block = Some(WithArchiveData::new::<Bytes>(
+                        block,
+                        data.slice_ref(entry.data),
+                    ));
                 }
-                ArchiveEntryId::Proof(id) if id.shard.is_masterchain() => {
-                    let proof = BlockProofStuff::deserialize(&id, entry.data, false)?
-                        .proof()
-                        .clone();
+                ArchiveEntryId::Proof(id) => {
+                    let proof = BlockProofStuff::deserialize(&id, entry.data, false)?;
 
-                    res.block_ids.insert(id.seqno, id);
+                    res.mc_block_ids.insert(id.seqno, id);
 
-                    res.blocks.entry(id).or_default().proof =
-                        Some(WithArchiveData::new(proof, entry.data.to_vec()));
+                    let parsed = res.blocks.entry(id).or_default();
+                    anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
+                    parsed.proof = Some(WithArchiveData::new::<Bytes>(
+                        proof,
+                        data.slice_ref(entry.data),
+                    ));
                 }
-                ArchiveEntryId::ProofLink(id) if !id.shard.is_masterchain() => {
-                    let proof = BlockProofStuff::deserialize(&id, entry.data, true)?
-                        .proof()
-                        .clone();
+                ArchiveEntryId::ProofLink(id) => {
+                    let proof = BlockProofStuff::deserialize(&id, entry.data, true)?;
 
-                    res.block_ids.insert(id.seqno, id);
-
-                    res.blocks.entry(id).or_default().proof =
-                        Some(WithArchiveData::new(proof, entry.data.to_vec()));
+                    let parsed = res.blocks.entry(id).or_default();
+                    anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
+                    parsed.proof = Some(WithArchiveData::new::<Bytes>(
+                        proof,
+                        data.slice_ref(entry.data),
+                    ));
                 }
-                _ => continue,
             }
         }
 
         Ok(res)
     }
 
-    pub fn get_block_with_archive(&self, id: &BlockId) -> anyhow::Result<BlockStuffAug> {
-        let archive_data = self.blocks.get(id).ok_or(ArchiveError::WrongArchive)?;
-
-        let block = archive_data
-            .block
-            .as_ref()
-            .ok_or(ArchiveError::BlockNotFound)?;
-
-        let data = everscale_types::boc::BocRepr::encode(block.data.clone())?;
-
-        Ok(BlockStuffAug::new(
-            BlockStuff::with_block(*id, block.data.clone()),
-            data,
-        ))
+    pub fn get_block_by_id(&self, id: &BlockId) -> Result<&BlockStuffAug, ArchiveError> {
+        let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
+        entry.block.as_ref().ok_or(ArchiveError::BlockNotFound)
     }
 
-    pub fn get_block_by_id(&self, id: &BlockId) -> anyhow::Result<BlockStuff> {
-        let archive_data = self.blocks.get(id).ok_or(ArchiveError::WrongArchive)?;
-
-        let block = archive_data
-            .block
-            .as_ref()
-            .ok_or(ArchiveError::BlockNotFound)?;
-
-        Ok(BlockStuff::with_block(*id, block.data.clone()))
+    pub fn get_proof_by_id(&self, id: &BlockId) -> Result<&BlockProofStuffAug, ArchiveError> {
+        let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
+        entry.proof.as_ref().ok_or(ArchiveError::ProofNotFound)
     }
 
-    pub fn get_proof_by_id(&self, id: &BlockId) -> anyhow::Result<BlockProofStuff> {
-        let archive_data = self.blocks.get(id).ok_or(ArchiveError::WrongArchive)?;
-
-        let proof = archive_data
-            .proof
-            .as_ref()
-            .ok_or(ArchiveError::ProofNotFound)?;
-
-        let is_link = !proof.proof_for.is_masterchain();
-        let proof = BlockProofStuff::from_proof(Box::new(proof.data.clone()), is_link)?;
-
-        Ok(proof)
-    }
-
-    pub fn get_block_by_seqno(&self, seqno: u32) -> anyhow::Result<BlockStuff> {
+    pub fn get_mc_block_by_seqno(&self, seqno: u32) -> Result<&BlockStuffAug, ArchiveError> {
         let id = self
-            .block_ids
+            .mc_block_ids
             .get(&seqno)
             .ok_or(ArchiveError::BlockNotFound)?;
 
         self.get_block_by_id(id)
     }
 
-    pub fn get_proof_by_seqno(&self, seqno: u32) -> anyhow::Result<BlockProofStuff> {
+    pub fn get_mc_proof_by_seqno(&self, seqno: u32) -> Result<&BlockProofStuffAug, ArchiveError> {
         let id = self
-            .block_ids
+            .mc_block_ids
             .get(&seqno)
             .ok_or(ArchiveError::BlockNotFound)?;
 
@@ -130,8 +110,8 @@ impl Archive {
 
 #[derive(Default)]
 pub struct ArchiveDataEntry {
-    pub block: Option<WithArchiveData<Block>>,
-    pub proof: Option<WithArchiveData<BlockProof>>,
+    pub block: Option<BlockStuffAug>,
+    pub proof: Option<BlockProofStuffAug>,
 }
 
 #[derive(Clone)]
@@ -204,6 +184,16 @@ impl<T> std::ops::Deref for WithArchiveData<T> {
 #[error("archive data not loaded")]
 pub struct WithArchiveDataError;
 
+#[derive(thiserror::Error, Debug)]
+pub enum ArchiveError {
+    #[error("mc block seqno out of range")]
+    OutOfRange,
+    #[error("block not found")]
+    BlockNotFound,
+    #[error("proof not found")]
+    ProofNotFound,
+}
+
 /// Encodes archive package segment.
 pub fn make_archive_entry(filename: &str, data: &[u8]) -> Vec<u8> {
     let mut vec = Vec::with_capacity(2 + 2 + 4 + filename.len() + data.len());
@@ -213,16 +203,6 @@ pub fn make_archive_entry(filename: &str, data: &[u8]) -> Vec<u8> {
     vec.extend_from_slice(filename.as_bytes());
     vec.extend_from_slice(data);
     vec
-}
-
-#[derive(thiserror::Error, Debug)]
-enum ArchiveError {
-    #[error("Block not found in archive")]
-    WrongArchive,
-    #[error("Block not found")]
-    BlockNotFound,
-    #[error("Proof not found")]
-    ProofNotFound,
 }
 
 #[cfg(test)]

@@ -1,18 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
-use everscale_types::boc::Boc;
-use everscale_types::cell::CellBuilder;
-use everscale_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
+use anyhow::{Context, Result};
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::{BlockProofStuff, BlockStuff};
+use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::proto::blockchain::BlockFull;
 use tycho_storage::{
-    BlockHandle, BlockMetaData, BriefBlockInfo, KeyBlocksDirection, KEY_BLOCK_UTIME_STEP,
+    BlockHandle, BlockMetaData, BlockProofHandle, KeyBlocksDirection, Storage, KEY_BLOCK_UTIME_STEP,
 };
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
@@ -24,7 +24,7 @@ use crate::util::error::ResultExt;
 /// Boot type when the node has not yet started syncing
 ///
 /// Returns last masterchain key block id
-pub async fn run(node: &Arc<Node>, zerostates: Option<Vec<PathBuf>>) -> anyhow::Result<BlockId> {
+pub async fn run(node: &Arc<Node>, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
     tracing::info!("starting cold boot");
 
     // Find the last known key block (or zerostate)
@@ -51,7 +51,7 @@ pub async fn run(node: &Arc<Node>, zerostates: Option<Vec<PathBuf>>) -> anyhow::
 async fn prepare_prev_key_block(
     node: &Arc<Node>,
     zerostates: Option<Vec<PathBuf>>,
-) -> anyhow::Result<PrevKeyBlock> {
+) -> Result<PrevKeyBlock> {
     let block_id = node
         .storage
         .node_state()
@@ -99,10 +99,7 @@ async fn prepare_prev_key_block(
     Ok(prev_key_block)
 }
 
-async fn download_key_blocks(
-    node: &Arc<Node>,
-    mut prev_key_block: PrevKeyBlock,
-) -> anyhow::Result<()> {
+async fn download_key_blocks(node: &Arc<Node>, mut prev_key_block: PrevKeyBlock) -> Result<()> {
     const BLOCKS_PER_BATCH: u32 = 10;
     const PARALLEL_REQUESTS: usize = 10;
 
@@ -149,47 +146,11 @@ async fn download_key_blocks(
     while let Some(ids) = ids_rx.recv().await {
         let stream = futures_util::stream::iter(ids)
             .map(|block_id| {
-                let storage = node.storage.clone();
-                let blockchain_rpc_client = node.blockchain_rpc_client.clone();
-
-                JoinTask::new(async move {
-                    let block_storage = storage.block_storage();
-                    let block_handle_storage = storage.block_handle_storage();
-
-                    // Check whether block proof is already stored locally
-                    if let Some(handle) = block_handle_storage.load_handle(&block_id) {
-                        if let Ok(proof) = block_storage.load_block_proof(&handle, false).await {
-                            return WithArchiveData::loaded(proof);
-                        }
-                    }
-
-                    // TODO: add retry count to interrupt infinite loop
-                    loop {
-                        let res = blockchain_rpc_client
-                            .get_key_block_proof(&block_id)
-                            .await;
-
-                        match res {
-                            Ok(res) => {
-                                let (handle, data) = res.split();
-
-                                match BlockProofStuff::deserialize(&block_id, &data.data, false) {
-                                    Ok(proof) => {
-                                        handle.accept();
-                                        return proof.with_archive_data(data.data.into());
-                                    },
-                                    Err(e) => {
-                                        tracing::error!(%block_id, "failed to deserialize block proof: {e}");
-                                        handle.reject();
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!(%block_id, "failed to download block proof: {e:?}");
-                            }
-                        }
-                    }
-                })
+                JoinTask::new(download_block_proof_task(
+                    node.storage.clone(),
+                    node.blockchain_rpc_client.clone(),
+                    block_id,
+                ))
             })
             .buffered(PARALLEL_REQUESTS);
 
@@ -203,14 +164,12 @@ async fn download_key_blocks(
         for (index, proof) in proofs.into_iter().enumerate() {
             // Verify block proof
             match prev_key_block.check_next_proof(&proof.data) {
-                Ok(info) => {
+                Ok(meta) => {
                     // Save block proof
-                    let block_id = proof.id();
-
                     let handle = node
                         .storage
                         .block_storage()
-                        .store_block_proof(&proof, info.with_mc_seq_no(block_id.seqno).into())
+                        .store_block_proof(&proof, BlockProofHandle::New(meta))
                         .await?
                         .handle;
 
@@ -265,8 +224,52 @@ async fn download_key_blocks(
     Ok(())
 }
 
+async fn download_block_proof_task(
+    storage: Storage,
+    rpc_client: BlockchainRpcClient,
+    block_id: BlockId,
+) -> BlockProofStuffAug {
+    let block_storage = storage.block_storage();
+    let block_handle_storage = storage.block_handle_storage();
+
+    // Check whether block proof is already stored locally
+    if let Some(handle) = block_handle_storage.load_handle(&block_id) {
+        if let Ok(proof) = block_storage.load_block_proof(&handle, false).await {
+            return WithArchiveData::loaded(proof);
+        }
+    }
+
+    // TODO: add retry count to interrupt infinite loop
+    loop {
+        let res = rpc_client.get_key_block_proof(&block_id).await;
+
+        match res {
+            Ok(res) => {
+                let (handle, data) = res.split();
+
+                match BlockProofStuff::deserialize(&block_id, &data.data, false) {
+                    Ok(proof) => {
+                        handle.accept();
+                        return proof.with_archive_data(data.data.into());
+                    }
+                    Err(e) => {
+                        tracing::error!(%block_id, "failed to deserialize block proof: {e}");
+                        handle.reject();
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(%block_id, "failed to download block proof: {e:?}");
+
+                // TODO: Backoff
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
 /// Select the latest suitable key block with persistent state
-fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
+fn choose_key_block(node: &Node) -> Result<BlockHandle> {
     let block_handle_storage = node.storage.block_handle_storage();
 
     let mut key_blocks = block_handle_storage
@@ -292,8 +295,7 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
             None => 0,
         };
 
-        let is_persistent = prev_utime == 0
-            || tycho_block_util::state::is_persistent_state(handle_utime, prev_utime);
+        let is_persistent = tycho_block_util::state::is_persistent_state(handle_utime, prev_utime);
 
         tracing::debug!(
             seq_no = handle.id().seqno,
@@ -333,7 +335,7 @@ fn choose_key_block(node: &Node) -> anyhow::Result<BlockHandle> {
 async fn import_zerostates(
     node: &Arc<Node>,
     paths: Vec<PathBuf>,
-) -> anyhow::Result<(BlockHandle, ShardStateStuff)> {
+) -> Result<(BlockHandle, ShardStateStuff)> {
     // Use a separate tracker for zerostates
     let tracker = MinRefMcStateTracker::default();
 
@@ -410,7 +412,7 @@ async fn import_zerostates(
             handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
                 is_key_block: state.block_id().is_masterchain(),
                 gen_utime,
-                mc_ref_seqno: 0,
+                mc_ref_seqno: Some(0),
             });
 
         let stored = state_storage
@@ -446,7 +448,7 @@ async fn import_zerostates(
     Ok((handle, state))
 }
 
-async fn download_zerostates(node: &Arc<Node>) -> anyhow::Result<(BlockHandle, ShardStateStuff)> {
+async fn download_zerostates(node: &Arc<Node>) -> Result<(BlockHandle, ShardStateStuff)> {
     let zerostate_id = node.zerostate.as_block_id();
 
     let (handle, state) = load_or_download_state(node, &zerostate_id).await?;
@@ -463,7 +465,7 @@ async fn download_zerostates(node: &Arc<Node>) -> anyhow::Result<(BlockHandle, S
 async fn load_or_download_state(
     node: &Arc<Node>,
     block_id: &BlockId,
-) -> anyhow::Result<(BlockHandle, ShardStateStuff)> {
+) -> Result<(BlockHandle, ShardStateStuff)> {
     let storage = &node.storage;
     let blockchain_rpc_client = &node.blockchain_rpc_client;
 
@@ -514,10 +516,7 @@ async fn load_or_download_state(
     Ok((handle, state))
 }
 
-async fn download_start_blocks_and_states(
-    node: &Arc<Node>,
-    mc_block_id: &BlockId,
-) -> anyhow::Result<()> {
+async fn download_start_blocks_and_states(node: &Arc<Node>, mc_block_id: &BlockId) -> Result<()> {
     // Download and save masterchain block and state
     let (_, init_mc_block) = download_block_with_state(node, *mc_block_id, *mc_block_id).await?;
 
@@ -538,7 +537,7 @@ async fn download_block_with_state(
     node: &Arc<Node>,
     mc_block_id: BlockId,
     block_id: BlockId,
-) -> anyhow::Result<(BlockHandle, BlockStuff)> {
+) -> Result<(BlockHandle, BlockStuff)> {
     let block_storage = node.storage.block_storage();
     let block_handle_storage = node.storage.block_handle_storage();
 
@@ -596,10 +595,11 @@ async fn download_block_with_state(
 
                                 match proof.pre_check_block_proof() {
                                     Ok((_, block_info)) => {
-                                        let meta_data = BriefBlockInfo::from(&block_info)
-                                            .with_mc_seq_no(mc_seqno);
-
-                                        break (block, proof, meta_data);
+                                        break (block, proof, BlockMetaData {
+                                            is_key_block: block_info.key_block,
+                                            gen_utime: block_info.gen_utime,
+                                            mc_ref_seqno: Some(mc_seqno),
+                                        });
                                     }
                                     Err(e) => {
                                         tracing::error!("received invalid block: {e:?}");
@@ -653,10 +653,7 @@ async fn download_block_with_state(
     Ok((handle, block))
 }
 
-fn load_zerostate(
-    tracker: &MinRefMcStateTracker,
-    path: &PathBuf,
-) -> anyhow::Result<ShardStateStuff> {
+fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<ShardStateStuff> {
     let data = std::fs::read(path).wrap_err("failed to read file")?;
     let file_hash = Boc::file_hash(&data);
 
@@ -684,7 +681,7 @@ fn make_shard_state(
     global_id: i32,
     shard_ident: ShardIdent,
     now: u32,
-) -> anyhow::Result<ShardStateStuff> {
+) -> Result<ShardStateStuff> {
     let state = ShardStateUnsplit {
         global_id,
         shard_ident,
@@ -726,12 +723,16 @@ impl PrevKeyBlock {
         }
     }
 
-    fn check_next_proof(&self, next_proof: &BlockProofStuff) -> anyhow::Result<BriefBlockInfo> {
+    fn check_next_proof(&self, next_proof: &BlockProofStuff) -> Result<BlockMetaData> {
         let (virt_block, virt_block_info) = next_proof
             .pre_check_block_proof()
             .context("Failed to pre check block proof")?;
 
-        let res = BriefBlockInfo::from(&virt_block_info);
+        let res = BlockMetaData {
+            is_key_block: virt_block_info.key_block,
+            gen_utime: virt_block_info.gen_utime,
+            mc_ref_seqno: Some(next_proof.proof().proof_for.seqno),
+        };
 
         match self {
             // Check block proof with zero state

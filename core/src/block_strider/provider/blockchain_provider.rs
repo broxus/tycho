@@ -3,6 +3,7 @@ use std::time::Duration;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_storage::Storage;
 use tycho_util::serde_helpers;
@@ -91,19 +92,10 @@ impl BlockchainBlockProvider {
                     BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
-                        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
+                        let proof = WithArchiveData::new(proof, proof_data);
+                        if let Err(e) = self.proof_checker.check_proof(&block, &proof, true).await {
                             handle.reject();
                             tracing::error!("got invalid mc block proof: {e}");
-                            break 'res;
-                        }
-
-                        if let Err(e) = self
-                            .proof_checker
-                            .store_block_proof(&block, proof, proof_data.into())
-                            .await
-                        {
-                            handle.reject();
-                            tracing::error!("failed to store block proof: {e}");
                             break 'res;
                         }
 
@@ -152,19 +144,10 @@ impl BlockchainBlockProvider {
                     BlockProofStuff::deserialize(&block_id, &proof_data, is_link),
                 ) {
                     (Ok(block), Ok(proof)) => {
-                        if let Err(e) = self.proof_checker.check_proof(&block, &proof).await {
+                        let proof = WithArchiveData::new(proof, proof_data);
+                        if let Err(e) = self.proof_checker.check_proof(&block, &proof, true).await {
                             handle.reject();
                             tracing::error!("got invalid shard block proof: {e}");
-                            break 'res;
-                        }
-
-                        if let Err(e) = self
-                            .proof_checker
-                            .store_block_proof(&block, proof, proof_data.into())
-                            .await
-                        {
-                            handle.reject();
-                            tracing::error!("failed to store block proof: {e}");
                             break 'res;
                         }
 

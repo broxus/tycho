@@ -58,6 +58,7 @@ where
             .construct_prev_id()
             .context("failed to construct prev id")?;
 
+        // Update block connections
         {
             let block_handles = self.inner.storage.block_handle_storage();
             let connections = self.inner.storage.block_connection_storage();
@@ -94,9 +95,14 @@ where
             }
         }
 
+        // Load/Apply state
         let (state, handles) = if handle.meta().has_state() {
             // Fast path when state is already applied
-            let state = state_storage.load_state(handle.id());
+            let state = state_storage
+                .load_state(handle.id())
+                .await
+                .context("failed to load applied shard state")?;
+
             (state, RefMcStateHandles::Skip)
         } else {
             // Load previous states

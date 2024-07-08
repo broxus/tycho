@@ -6,7 +6,7 @@ use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
 use serde::{Deserialize, Serialize};
 use tycho_collator::types::CollationConfig;
-use tycho_core::block_strider::{ArchiveBlockProviderConfig, BlockchainBlockProviderConfig};
+use tycho_core::block_strider::BlockchainBlockProviderConfig;
 use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
@@ -58,8 +58,6 @@ pub struct NodeConfig {
 
     pub blockchain_rpc_service: BlockchainRpcServiceConfig,
 
-    pub archive_block_provider: ArchiveBlockProviderConfig,
-
     pub blockchain_block_provider: BlockchainBlockProviderConfig,
 
     pub collator: CollationConfig,
@@ -86,7 +84,6 @@ impl Default for NodeConfig {
             public_overlay_client: PublicOverlayClientConfig::default(),
             storage: StorageConfig::default(),
             blockchain_rpc_service: BlockchainRpcServiceConfig::default(),
-            archive_block_provider: ArchiveBlockProviderConfig::default(),
             blockchain_block_provider: BlockchainBlockProviderConfig::default(),
             collator: CollationConfig::default(),
             rpc: Some(RpcConfig::default()),

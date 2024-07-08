@@ -10,7 +10,7 @@ use crate::tracing_targets;
 use crate::types::{BlockSignatures, OnValidatedBlockEvent};
 use crate::validator::client::retry::RetryClient;
 use crate::validator::client::ValidatorClient;
-use crate::validator::types::{BlockValidationCandidate, ValidationStatus, ValidatorInfo};
+use crate::validator::types::{ValidationStatus, ValidatorInfo};
 use crate::validator::ValidatorEventListener;
 
 #[derive(Eq, PartialEq)]
