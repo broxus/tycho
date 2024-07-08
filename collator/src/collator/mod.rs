@@ -4,16 +4,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::models::*;
-use everscale_types::prelude::HashBytes;
+use execution_manager::ExecutionManager;
 use futures_util::future::{BoxFuture, Future};
+use mq_iterator_adapter::QueueIteratorAdapter;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuardWithLabels;
-use tycho_util::FastHashMap;
 
 use self::types::{CachedMempoolAnchor, CollatorStats, McData, PrevData, WorkingState};
-use crate::internal_queue::iterator::QueueIterator;
-use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
@@ -29,6 +27,7 @@ use crate::{method_to_async_task_closure, tracing_targets};
 mod build_block;
 mod do_collate;
 mod execution_manager;
+mod mq_iterator_adapter;
 mod types;
 
 // FACTORY
@@ -170,6 +169,7 @@ pub struct CollatorStdImpl {
     dispatcher: AsyncQueuedDispatcher<Self>,
     listener: Arc<dyn CollatorEventListener>,
     mq_adapter: Arc<dyn MessageQueueAdapter>,
+    exec_manager: Option<ExecutionManager>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
@@ -224,6 +224,13 @@ impl CollatorStdImpl {
         let (dispatcher, receiver) =
             AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
 
+        let exec_manager = ExecutionManager::new(
+            shard_id,
+            config.msgs_exec_params.buffer_limit as _,
+            config.msgs_exec_params.group_limit as _,
+            config.msgs_exec_params.group_vert_size as _,
+        );
+
         let processor = Self {
             next_block_id_short,
             config,
@@ -231,6 +238,7 @@ impl CollatorStdImpl {
             dispatcher: dispatcher.clone(),
             listener,
             mq_adapter,
+            exec_manager: Some(exec_manager),
             mpool_adapter,
             state_node_adapter,
             shard_id,
@@ -343,7 +351,11 @@ impl CollatorStdImpl {
     }
 
     /// Update working state from new block and state after block collation
-    fn update_working_state(&mut self, new_state_stuff: ShardStateStuff) -> Result<()> {
+    fn update_working_state(
+        &mut self,
+        new_state_stuff: ShardStateStuff,
+        has_pending_internals: bool,
+    ) -> Result<()> {
         self.next_block_id_short = BlockIdShort {
             shard: new_state_stuff.block_id().shard,
             seqno: new_state_stuff.block_id().seqno + 1,
@@ -353,6 +365,8 @@ impl CollatorStdImpl {
             .working_state
             .as_mut()
             .expect("should `init` collator before calling `update_working_state`");
+
+        working_state_mut.has_pending_internals = Some(has_pending_internals);
 
         if new_state_stuff.block_id().shard.is_masterchain() {
             let new_mc_data = McData::build(new_state_stuff.clone())?;
@@ -368,17 +382,6 @@ impl CollatorStdImpl {
         tracing::debug!(target: tracing_targets::COLLATOR,
             "working state updated from just collated block",
         );
-
-        Ok(())
-    }
-
-    fn update_working_state_pending_internals(
-        &mut self,
-        has_pending_externals: Option<bool>,
-    ) -> Result<()> {
-        let working_state_mut = self.working_state_mut();
-
-        working_state_mut.has_pending_internals = has_pending_externals;
 
         Ok(())
     }
@@ -547,70 +550,37 @@ impl CollatorStdImpl {
         self.last_imported_anchor_chain_time.unwrap()
     }
 
-    async fn load_has_internals(&mut self) -> Result<()> {
-        let mut iterator = self.init_internal_mq_iterator().await?;
-        let has_internals = iterator.next(true)?.is_some();
-        self.update_working_state_pending_internals(Some(has_internals))?;
-        Ok(())
-    }
-
-    fn has_internals(&self) -> Option<bool> {
-        self.working_state().has_pending_internals
-    }
-
-    /// Create and return internal message queue iterator
-    async fn init_internal_mq_iterator(&self) -> Result<Box<dyn QueueIterator>> {
-        let mc_data = &self.working_state().mc_data;
-        let processed_upto = self.working_state().prev_shard_data.processed_upto();
-        let mut ranges_from = FastHashMap::default();
-
-        for entry in processed_upto.internals.iter() {
-            let (shard_id_full, processed_upto_info) = entry?;
-            ranges_from.insert(ShardIdent::try_from(shard_id_full)?, InternalMessageKey {
-                lt: processed_upto_info.processed_to_msg.0,
-                hash: processed_upto_info.processed_to_msg.1,
-            });
+    async fn check_has_pending_internals(&mut self) -> Result<bool> {
+        if self.working_state().has_pending_internals.is_none() {
+            let mut mq_iterator_adapter = QueueIteratorAdapter::new(
+                self.shard_id,
+                self.mq_adapter.clone(),
+                Some(
+                    self.exec_manager
+                        .as_ref()
+                        .unwrap()
+                        .get_current_iterator_positions(),
+                ),
+            );
+            let mut current_processed_upto = self
+                .working_state()
+                .prev_shard_data
+                .processed_upto()
+                .clone();
+            mq_iterator_adapter
+                .try_init_next_range_iterator(&mut current_processed_upto, self.working_state())
+                .await?;
+            let has_internals = mq_iterator_adapter.iterator().next(true)?.is_some();
+            self.working_state_mut().has_pending_internals = Some(has_internals);
         }
-
-        if !ranges_from.contains_key(&ShardIdent::new_full(-1)) {
-            ranges_from.insert(ShardIdent::new_full(-1), InternalMessageKey::default());
-        }
-
-        for mc_shard_hash in mc_data.mc_state_extra().shards.iter() {
-            let (shard_id, _) = mc_shard_hash?;
-            if !ranges_from.contains_key(&shard_id) {
-                ranges_from.insert(shard_id, InternalMessageKey::default());
-            }
-        }
-
-        let mut ranges_to = FastHashMap::default();
-
-        for shard in mc_data.mc_state_extra().shards.iter() {
-            let (shard_id, shard_description) = shard?;
-            ranges_to.insert(shard_id, InternalMessageKey {
-                lt: shard_description.end_lt,
-                hash: HashBytes([255; 32]),
-            });
-        }
-
-        ranges_to.insert(ShardIdent::new_full(-1), InternalMessageKey::MAX);
-
-        // for current shard read until last message
-        if !self.shard_id.is_masterchain() {
-            ranges_to.insert(self.shard_id, InternalMessageKey::MAX);
-        }
-
-        let internal_messages_iterator = self
-            .mq_adapter
-            .create_iterator(self.shard_id, ranges_from, ranges_to)
-            .await?;
-
-        Ok(internal_messages_iterator)
+        Ok(self.working_state().has_pending_internals.unwrap())
     }
 
     async fn update_mc_data_and_try_collate(&mut self, mc_state: ShardStateStuff) -> Result<()> {
         self.update_mc_data(mc_state)?;
-        self.update_working_state_pending_internals(None)?;
+        if matches!(self.working_state().has_pending_internals, Some(false)) {
+            self.working_state_mut().has_pending_internals = None;
+        }
         self.try_collate_next_shard_block_impl().await
     }
 
@@ -643,14 +613,8 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        if self.has_internals().is_none() {
-            self.load_has_internals().await?;
-        }
-
-        // check internals
-        let has_internals = self
-            .has_internals()
-            .ok_or(anyhow::anyhow!("has_pending internals doesn't init"))?;
+        // check has pending internals
+        let has_internals = self.check_has_pending_internals().await?;
         if has_internals {
             // collate if has internals
             tracing::info!(target: tracing_targets::COLLATOR,
@@ -696,15 +660,8 @@ impl CollatorStdImpl {
             &labels,
         );
 
-        if self.has_internals().is_none() {
-            self.load_has_internals().await?;
-        }
-
-        // check internals
-        let has_internals = self
-            .has_internals()
-            .ok_or(anyhow::anyhow!("has_pending internals doesn't init"))?;
-
+        // check has pending internals
+        let has_internals = self.check_has_pending_internals().await?;
         if has_internals {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed internals from previous block, will collate next block",
@@ -813,39 +770,3 @@ impl CollatorStdImpl {
         Ok(())
     }
 }
-
-// #[allow(unused)]
-// struct QueueIteratorStubImpl;
-// #[allow(unused)]
-// impl QueueIteratorStubImpl {
-//     pub fn create_stub() -> Self {
-//         Self
-//     }
-// }
-// #[allow(unused)]
-// impl QueueIterator for QueueIteratorStubImpl {
-//     fn add_message(
-//         &mut self,
-//         message: Arc<crate::internal_queue::types::EnqueuedMessage>,
-//     ) -> anyhow::Result<()> {
-//         Ok(())
-//     }
-//     // fn commit(&mut self) {}
-//     fn take_diff(&mut self) -> crate::internal_queue::types::QueueDiff {
-//         crate::internal_queue::types::QueueDiff {
-//             messages: vec![],
-//             processed_upto: HashMap::new(),
-//         }
-//     }
-//     fn next(&mut self, with_new: bool) -> Option<crate::internal_queue::iterator::IterItem> {
-//         None
-//     }
-//
-//     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
-//         todo!()
-//     }
-//
-//     fn peek(&mut self) -> Option<IterItem> {
-//         todo!()
-//     }
-// }

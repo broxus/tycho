@@ -72,6 +72,42 @@ impl InternalMessageKey {
         lt: u64::MAX,
         hash: HashBytes([u8::MAX; 32]),
     };
+
+    pub fn with_lt_and_min_hash(lt: Lt) -> Self {
+        Self {
+            lt,
+            hash: HashBytes::ZERO,
+        }
+    }
+
+    pub fn with_lt_and_max_hash(lt: Lt) -> Self {
+        Self {
+            lt,
+            hash: HashBytes([255; 32]),
+        }
+    }
+
+    pub fn into_tuple(self) -> (Lt, HashBytes) {
+        (self.lt, self.hash)
+    }
+}
+
+pub trait InternalMessageKeyOpt {
+    fn map_into_tuple(self) -> Option<(Lt, HashBytes)>;
+}
+impl InternalMessageKeyOpt for Option<InternalMessageKey> {
+    fn map_into_tuple(self) -> Option<(Lt, HashBytes)> {
+        self.map(|value| (value.lt, value.hash))
+    }
+}
+
+impl From<(Lt, HashBytes)> for InternalMessageKey {
+    fn from(value: (Lt, HashBytes)) -> Self {
+        Self {
+            lt: value.0,
+            hash: value.1,
+        }
+    }
 }
 
 impl EnqueuedMessage {

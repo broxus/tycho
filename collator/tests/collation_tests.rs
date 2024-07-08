@@ -90,8 +90,7 @@ async fn test_collation_process_on_stubs() {
         max_mc_block_delta_from_bc_to_await_own: 2,
         max_uncommitted_chain_length: 31,
         msgs_exec_params: MsgsExecutionParams {
-            set_size: 9,
-            min_externals_per_set: 3,
+            buffer_limit: 9,
             group_limit: 4,
             group_vert_size: 2,
             ..Default::default()

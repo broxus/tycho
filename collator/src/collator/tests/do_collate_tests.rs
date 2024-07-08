@@ -59,6 +59,7 @@ fn test_read_next_externals() {
         &mut anchors_cache,
         3,
         &mut collation_data,
+        false,
     )
     .unwrap();
 
@@ -70,7 +71,6 @@ fn test_read_next_externals() {
     let kv = anchors_cache.front().unwrap();
     assert_eq!(kv.0, 4);
 
-    collation_data.externals_reading_started = false;
     collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
         processed_to: (4, 3),
         read_to: (8, 1),
@@ -81,6 +81,7 @@ fn test_read_next_externals() {
         &mut anchors_cache,
         3,
         &mut collation_data,
+        false,
     )
     .unwrap();
 
@@ -97,6 +98,7 @@ fn test_read_next_externals() {
         &mut anchors_cache,
         10,
         &mut collation_data,
+        true,
     )
     .unwrap();
 
@@ -113,6 +115,7 @@ fn test_read_next_externals() {
         &mut anchors_cache,
         20,
         &mut collation_data,
+        true,
     )
     .unwrap();
 
@@ -129,6 +132,7 @@ fn test_read_next_externals() {
         &mut anchors_cache,
         3,
         &mut collation_data,
+        true,
     )
     .unwrap();
 
@@ -146,6 +150,7 @@ fn test_read_next_externals() {
         &mut anchors_cache,
         3,
         &mut collation_data,
+        true,
     )
     .unwrap();
 

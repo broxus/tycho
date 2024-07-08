@@ -88,7 +88,7 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(())
     }
 
-    #[instrument(skip(self), fields(%for_shard_id, ?shards_from, ?shards_to))]
+    #[instrument(skip_all, fields(%for_shard_id))]
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
