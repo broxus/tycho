@@ -72,21 +72,17 @@ pub fn supported_capabilities() -> GlobalCapabilities {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct MsgsExecutionParams {
-    pub set_size: u32,
-    pub min_externals_per_set: u32,
+    pub buffer_limit: u32,
     pub group_limit: u32,
     pub group_vert_size: u32,
-    pub max_exec_threads: u32,
 }
 
 impl Default for MsgsExecutionParams {
     fn default() -> Self {
         Self {
-            set_size: 1000,
-            min_externals_per_set: 300,
-            group_limit: 1000,
-            group_vert_size: 1000,
-            max_exec_threads: 8,
+            buffer_limit: 10000,
+            group_limit: 100,
+            group_vert_size: 5,
         }
     }
 }

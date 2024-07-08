@@ -21,7 +21,7 @@ impl CollatorStdImpl {
     pub(super) fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,
-        exec_manager: ExecutionManager,
+        exec_manager: &mut ExecutionManager,
     ) -> Result<(Box<BlockCandidate>, Cell)> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -33,7 +33,7 @@ impl CollatorStdImpl {
         let prev_shard_data = &self.working_state().prev_shard_data;
 
         // update shard accounts tree and prepare accounts blocks
-        let mut global_libraries = exec_manager.executor_params().state_libs.clone();
+        let mut global_libraries = exec_manager.executor().executor_params().state_libs.clone();
 
         let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
         let config_address = &self.working_state().mc_data.config().address;
@@ -477,7 +477,7 @@ impl CollatorStdImpl {
 
     fn build_accounts(
         &self,
-        exec_manager: ExecutionManager,
+        exec_manager: &mut ExecutionManager,
         prev_shard_data: &PrevData,
         is_masterchain: bool,
         config_address: &HashBytes,
@@ -487,7 +487,7 @@ impl CollatorStdImpl {
         let mut shard_accounts = RelaxedAugDict::from_full(prev_shard_data.observable_accounts());
         let mut new_config_params = None;
 
-        for updated_account in exec_manager.into_changed_accounts() {
+        for updated_account in exec_manager.extract_changed_accounts() {
             if updated_account.transactions.is_empty() {
                 continue;
             }

@@ -527,17 +527,13 @@ def collator_finalize_block() -> RowPanel:
 def collator_params_metrics() -> RowPanel:
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_msgs_exec_params_set_size", "Params: msgs set size"
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_msgs_exec_params_min_exts_per_set",
-            "Params: min externals per set",
+            "tycho_do_collate_msgs_exec_params_buffer_limit", "Params: msgs buffer limit"
         ),
         create_gauge_panel(
             "tycho_do_collate_msgs_exec_params_group_limit", "Params: group limit"
         ),
         create_gauge_panel(
-            "tycho_do_collate_msgs_exec_params_group_vert_size",
+            "tycho_do_collate_msgs_exec_params_group_vert_size", "Params: group vertical size"
             "Params: group vertical size limit",
         ),
     ]
@@ -551,9 +547,9 @@ def block_metrics() -> RowPanel:
             "Blocks rate",
             labels=['workchain=~"$workchain"'],
         ),
-        create_gauge_panel(
-            "tycho_do_collate_block_seqno",
-            "Block seqno",
+        create_counter_panel(
+            "tycho_do_collate_blocks_with_limits_reached_count",
+            "Number of blocks with limits reached",
             labels=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
@@ -561,9 +557,9 @@ def block_metrics() -> RowPanel:
             "Number of transactions over time",
             labels=['workchain=~"$workchain"'],
         ),
-        create_counter_panel(
-            "tycho_do_collate_blocks_with_limits_reached_count",
-            "Number of blocks with limits reached",
+        create_gauge_panel(
+            "tycho_do_collate_block_seqno",
+            "Block seqno",
             labels=['workchain=~"$workchain"'],
         ),
     ]
@@ -573,18 +569,18 @@ def block_metrics() -> RowPanel:
 def collator_execution_metrics() -> RowPanel:
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_exec_msgs_sets_per_block",
-            "Number of msgs sets per block",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_gauge_panel(
-            "tycho_do_collate_exec_ticks_per_msgs_set",
-            "Number of exec ticks per set",
+            "tycho_do_collate_exec_msgs_groups_per_block",
+            "Number of msgs groups per block",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_one_tick_group_size",
-            "One exec tick group size",
+            "One exec tick group horizontal size",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_one_tick_group_mean_vert_size",
+            "One exec tick MEAN group vertical size",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(

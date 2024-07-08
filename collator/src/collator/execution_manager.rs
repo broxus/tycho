@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::models::*;
-use everscale_types::prelude::*;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use humantime::format_duration;
@@ -17,12 +16,37 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run_fifo;
 use tycho_util::FastHashMap;
 
-use super::types::ParsedMessage;
-use crate::collator::types::{AccountId, ShardAccountStuff};
+use super::mq_iterator_adapter::QueueIteratorAdapter;
+use super::types::{
+    AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, MessageGroup, MessageGroups,
+    ParsedMessage, ShardAccountStuff,
+};
+use super::CollatorStdImpl;
+use crate::internal_queue::types::{InternalMessageKey, InternalMessageKeyOpt};
+use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 
 /// Execution manager
 pub(super) struct ExecutionManager {
+    shard_id: ShardIdent,
+    /// messages groups
+    message_groups: MessageGroups,
+    /// max number of messages that could be loaded into runtime
+    messages_buffer_limit: usize,
+    /// messages executor for current block
+    executor: Option<MessagesExecutor>,
+    /// flag indicates that should process ext messages
+    process_ext_messages: bool,
+    /// we started ext messages reading before and can continue reading from read_to
+    ext_messages_reader_started: bool,
+    /// flag indicates that should process new messages
+    process_new_messages: bool,
+    /// current read positions of internals mq iterator
+    /// when it is not finished
+    current_iterator_positions: FastHashMap<ShardIdent, InternalMessageKey>,
+}
+
+pub(super) struct MessagesExecutor {
     shard_id: ShardIdent,
     // this time is used if account's lt is smaller
     min_next_lt: u64,
@@ -30,54 +54,377 @@ pub(super) struct ExecutionManager {
     config: Arc<PreloadedBlockchainConfig>,
     /// vm execution params related to current block
     params: Arc<ExecuteParams>,
-    /// messages groups
-    message_groups: MessageGroups,
-    /// group limit
-    group_limit: usize,
-    /// group vertical size
-    group_vert_size: usize,
+    /// shard accounts
     accounts_cache: AccountsCache,
 }
-
-type MessageGroups = FastHashMap<u32, MessageGroup>;
-type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
 
 impl ExecutionManager {
     /// constructor
     pub fn new(
         shard_id: ShardIdent,
+        messages_buffer_limit: usize,
+        group_limit: usize,
+        group_vert_size: usize,
+    ) -> Self {
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_buffer_limit")
+            .set(messages_buffer_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_limit").set(group_limit as f64);
+        metrics::gauge!("tycho_do_collate_msgs_exec_params_group_vert_size")
+            .set(group_vert_size as f64);
+
+        Self {
+            shard_id,
+            messages_buffer_limit,
+            message_groups: MessageGroups::new(group_limit, group_vert_size),
+            executor: None,
+            process_ext_messages: false,
+            ext_messages_reader_started: false,
+            process_new_messages: false,
+            current_iterator_positions: Default::default(),
+        }
+    }
+
+    pub fn init_executor(
+        &mut self,
         min_next_lt: u64,
         config: Arc<PreloadedBlockchainConfig>,
         params: Arc<ExecuteParams>,
-        group_limit: usize,
-        group_vert_size: usize,
         shard_accounts: ShardAccounts,
-    ) -> Self {
-        Self {
-            shard_id,
+    ) {
+        self.executor = Some(MessagesExecutor {
+            shard_id: self.shard_id,
             min_next_lt,
             config,
             params,
-            group_limit,
-            group_vert_size,
-            message_groups: FastHashMap::default(),
             accounts_cache: AccountsCache {
                 shard_accounts,
                 items: Default::default(),
             },
-        }
+        });
     }
 
+    pub fn executor(&self) -> &MessagesExecutor {
+        self.executor
+            .as_ref()
+            .expect("should run `init_executor` first")
+    }
+
+    pub fn executor_mut(&mut self) -> &mut MessagesExecutor {
+        self.executor
+            .as_mut()
+            .expect("should run `init_executor` first")
+    }
+
+    pub fn get_current_iterator_positions(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+        self.current_iterator_positions.clone()
+    }
+
+    pub fn create_iterator_adapter(
+        &mut self,
+        mq_adapter: Arc<dyn MessageQueueAdapter>,
+    ) -> QueueIteratorAdapter {
+        self.process_ext_messages = false;
+        self.process_new_messages = false;
+
+        let current_iterator_positions = std::mem::take(&mut self.current_iterator_positions);
+        QueueIteratorAdapter::new(self.shard_id, mq_adapter, Some(current_iterator_positions))
+    }
+
+    pub fn release_iterator_adapter(
+        &mut self,
+        mq_iterator_adapter: QueueIteratorAdapter,
+    ) -> Result<bool> {
+        let (current_positions, has_pending_internals) = mq_iterator_adapter.release()?;
+        self.current_iterator_positions = current_positions;
+
+        Ok(has_pending_internals)
+    }
+
+    pub fn extract_changed_accounts(
+        &mut self,
+    ) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
+        let executor = self.executor.take().expect("`executor` is not initialized");
+        executor.accounts_cache.items.into_values()
+    }
+
+    #[tracing::instrument(skip_all)]
+    pub async fn get_next_message_group(
+        &mut self,
+        collator: &mut CollatorStdImpl,
+        collation_data: &mut BlockCollationData,
+        mq_iterator_adapter: &mut QueueIteratorAdapter,
+        max_new_message_key_to_current_shard: InternalMessageKey,
+    ) -> Result<Option<MessageGroup>> {
+        // messages polling logic differs regarding existing and new messages
+
+        let mut group_opt = None;
+
+        if !self.process_ext_messages && !self.process_new_messages {
+            // for existing messages we use ranged iterator and process maximum possible groups in parallel
+
+            // here iterator may not exist (on the first method call during collation)
+            // so init iterator for current not fully processed ranges or next available
+            if mq_iterator_adapter.iterator_is_none() {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "current iterator not exist, \
+                    will init iterator for current not fully processed ranges or next available"
+                );
+                mq_iterator_adapter
+                    .try_init_next_range_iterator(
+                        &mut collation_data.processed_upto,
+                        collator.working_state(),
+                    )
+                    .await?;
+            }
+
+            // read messages from iterator and fill messages groups
+            // until the first group fully loaded
+            // or max messages buffer limit reached
+            let mut existing_internals_read_count = 0;
+            while let Some(int_msg) = mq_iterator_adapter.next_existing_message()? {
+                assert!(!int_msg.is_new);
+
+                existing_internals_read_count += 1;
+
+                self.message_groups.add_message(Box::new(ParsedMessage {
+                    info: MsgInfo::Int(int_msg.message_with_source.message.info.clone()),
+                    dst_in_current_shard: true,
+                    cell: int_msg.message_with_source.message.cell.clone(),
+                    special_origin: None,
+                    dequeued: Some(Dequeued {
+                        same_shard: int_msg.message_with_source.shard_id == self.shard_id,
+                    }),
+                }));
+
+                if self.message_groups.messages_count() >= self.messages_buffer_limit {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "message_groups buffer filled on {}/{}, stop reading existing internals",
+                        self.message_groups.messages_count(), self.messages_buffer_limit,
+                    );
+                    break;
+                }
+
+                if self.message_groups.first_group_is_full() {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "first message group is full, stop reading existing internals",
+                    );
+                    break;
+                }
+            }
+            collation_data.read_int_msgs_from_iterator += existing_internals_read_count;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "existing_internals_read_count={}",
+                existing_internals_read_count,
+            );
+
+            group_opt = self.message_groups.extract_first_group();
+            if let Some(first_group) = group_opt.as_ref() {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "extracted first message group from message_groups buffer: {}",
+                    DisplayMessageGroup(first_group),
+                );
+            }
+
+            // when message_groups buffer is empty and no more existing internals in current iterator
+            // then set all read messages as processed
+            // and try to init iterator for the next available ranges
+            if self.message_groups.is_empty() && mq_iterator_adapter.no_pending_existing_internals()
+            {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "message_groups buffer is empty and there are no pending existing internals, \
+                    will try to init iterator for next available ranges"
+                );
+
+                // set all read existing internals as processed
+                set_int_upto_all_processed(&mut collation_data.processed_upto)?;
+                self.message_groups.reset();
+
+                // set all read externals as processed
+                if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+                    if externals.processed_to != externals.read_to {
+                        externals.processed_to = externals.read_to;
+                        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
+                            collation_data.processed_upto.externals,
+                        );
+                    }
+                }
+
+                let next_range_iterator_initialized = mq_iterator_adapter
+                    .try_init_next_range_iterator(
+                        &mut collation_data.processed_upto,
+                        collator.working_state(),
+                    )
+                    .await?;
+                if !next_range_iterator_initialized {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "there are no next available ranges for existing internals iterator, \
+                        will process externals"
+                    );
+                    self.process_ext_messages = true;
+                }
+            }
+        }
+
+        if group_opt.is_none() && self.process_ext_messages && !self.process_new_messages {
+            let mut externals_read_count = 0;
+            while collator.has_pending_externals {
+                let ext_msgs = collator.read_next_externals(
+                    1,
+                    collation_data,
+                    self.ext_messages_reader_started,
+                )?;
+                self.ext_messages_reader_started = true;
+
+                externals_read_count += ext_msgs.len() as u64;
+
+                for ext_msg in ext_msgs {
+                    self.message_groups.add_message(ext_msg);
+                }
+
+                if self.message_groups.messages_count() >= self.messages_buffer_limit {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "message_groups buffer filled on {}/{}, stop reading externals",
+                        self.message_groups.messages_count(), self.messages_buffer_limit,
+                    );
+                    break;
+                }
+
+                if self.message_groups.first_group_is_full() {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "first message group is full, stop reading externals",
+                    );
+                    break;
+                }
+            }
+            collation_data.read_ext_msgs += externals_read_count;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "externals_read_count={}",
+                externals_read_count,
+            );
+
+            group_opt = self.message_groups.extract_first_group();
+            if let Some(first_group) = group_opt.as_ref() {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "extracted first message group from message_groups buffer: {}",
+                    DisplayMessageGroup(first_group),
+                );
+            }
+
+            if self.message_groups.is_empty() && !collator.has_pending_externals {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "message_groups buffer is empty and there are no pending externals, will process new internals"
+                );
+
+                // set all read externals as processed
+                if let Some(externals) = collation_data.processed_upto.externals.as_mut() {
+                    if externals.processed_to != externals.read_to {
+                        externals.processed_to = externals.read_to;
+                        tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.externals = {:?}",
+                            collation_data.processed_upto.externals,
+                        );
+                    }
+                }
+                self.message_groups.reset();
+
+                self.process_new_messages = true;
+            }
+        }
+
+        if group_opt.is_none() && self.process_new_messages {
+            // when processing new messages we return group immediately when the next message does not fit it
+
+            mq_iterator_adapter
+                .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
+
+            let mut new_internals_read_count = 0;
+            while let Some(int_msg) = mq_iterator_adapter.next_new_message()? {
+                assert!(int_msg.is_new);
+
+                new_internals_read_count += 1;
+                collation_data.read_new_msgs_from_iterator += 1;
+
+                self.message_groups.add_message(Box::new(ParsedMessage {
+                    info: MsgInfo::Int(int_msg.message_with_source.message.info.clone()),
+                    dst_in_current_shard: true,
+                    cell: int_msg.message_with_source.message.cell.clone(),
+                    special_origin: None,
+                    dequeued: None,
+                }));
+
+                if self.message_groups.messages_count() >= self.messages_buffer_limit {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "message_groups buffer filled on {}/{}, stop reading new internals",
+                        self.message_groups.messages_count(), self.messages_buffer_limit,
+                    );
+                    break;
+                }
+
+                if self.message_groups.len() > 1 {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "next new message does not fit first group, stop reading new internals",
+                    );
+                    break;
+                }
+            }
+            collation_data.read_new_msgs_from_iterator += new_internals_read_count;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "new_internals_read_count={}",
+                new_internals_read_count,
+            );
+
+            // when we have 2 groups, the second one contains only one message
+            // that does not fit first group,
+            // so append this one message to first group (merge)
+            group_opt = self.message_groups.extract_merged_group();
+            if let Some(merged_group) = group_opt.as_ref() {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "extracted merged message group of new messages from message_groups buffer: {}",
+                    DisplayMessageGroup(merged_group),
+                );
+            }
+
+            // actually, we process all message groups with new messages in one step,
+            // so we update internals processed_upto each step
+            if self.message_groups.is_empty()
+                && self.message_groups.max_message_key() > &InternalMessageKey::default()
+            {
+                // set_int_upto_all_processed(&mut collation_data.processed_upto)?;
+                update_internals_processed_upto(
+                    &mut collation_data.processed_upto,
+                    ShardIdentFull::from(self.shard_id),
+                    Some(ProcessedUptoUpdate::Force(
+                        self.message_groups.max_message_key().clone(),
+                    )),
+                    Some(ProcessedUptoUpdate::Force(
+                        self.message_groups.max_message_key().clone(),
+                    )),
+                )?;
+                self.message_groups.reset();
+            }
+        }
+
+        // store actual offset of current interator range
+        if collation_data.processed_upto.processed_offset != self.message_groups.offset() {
+            collation_data.processed_upto.processed_offset = self.message_groups.offset();
+            tracing::debug!(target: tracing_targets::COLLATOR, "updated processed_upto.offset = {}",
+                collation_data.processed_upto.processed_offset,
+            );
+        }
+
+        Ok(group_opt)
+    }
+}
+
+impl MessagesExecutor {
     pub fn min_next_lt(&self) -> u64 {
         self.min_next_lt
     }
 
     pub fn executor_params(&self) -> &Arc<ExecuteParams> {
         &self.params
-    }
-
-    pub fn into_changed_accounts(self) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
-        self.accounts_cache.items.into_values()
     }
 
     pub fn take_account_stuff_if<F>(
@@ -91,35 +438,17 @@ impl ExecutionManager {
         self.accounts_cache.take_account_stuff_if(account_id, f)
     }
 
-    /// Set messages that will be executed
-    pub fn set_msgs_for_execution(&mut self, msgs: Vec<Box<ParsedMessage>>) {
-        let message_count = msgs.len();
-        self.message_groups = pre_calculate_groups(msgs, self.group_limit, self.group_vert_size);
-
-        tracing::info!(
-            target: tracing_targets::EXEC_MANAGER,
-            message_count,
-            group_count = self.message_groups.len(),
-            group_limit = self.group_limit,
-            group_vert_size = self.group_vert_size,
-            groups = %DisplayMessageGroups(&self.message_groups),
-            "added set of messages for execution, groups pre calculated",
-        );
-    }
-
-    /// Run one execution tick of parallel transactions
-    pub async fn tick(&mut self, offset: u32) -> Result<ExecutedTick> {
-        tracing::trace!(target: tracing_targets::EXEC_MANAGER, offset, "messages set execution tick");
+    /// Run one execution group of messages by accounts
+    pub async fn execute_group(&mut self, group: MessageGroup) -> Result<ExecutedGroup> {
+        tracing::trace!(target: tracing_targets::EXEC_MANAGER, "execute messages group");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
 
-        let (new_offset, group) = match self.message_groups.remove(&offset) {
-            Some(group) => (offset + 1, group),
-            None => return Ok(ExecutedTick::new_finished(offset)),
-        };
-        let finished = !self.message_groups.contains_key(&new_offset);
-
         let group_size = group.len();
+        let group_mean_vert_size = group
+            .messages_count()
+            .checked_div(group_size)
+            .unwrap_or_default();
         let mut group_max_vert_size = 0;
 
         // TODO check externals is not exist accounts needed ?
@@ -176,13 +505,16 @@ impl ExecutionManager {
             .unwrap_or_default();
 
         tracing::info!(target: tracing_targets::EXEC_MANAGER,
-            offset, group_size, group_max_vert_size,
+            group_size, group_max_vert_size,
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
             max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
+            "execute_group",
         );
 
         metrics::gauge!("tycho_do_collate_one_tick_group_size", labels).set(group_size as f64);
+        metrics::gauge!("tycho_do_collate_one_tick_group_mean_vert_size", labels)
+            .set(group_mean_vert_size as f64);
         metrics::gauge!("tycho_do_collate_one_tick_group_max_vert_size", labels)
             .set(group_max_vert_size as f64);
         metrics::histogram!(
@@ -196,9 +528,7 @@ impl ExecutionManager {
         )
         .record(max_account_msgs_exec_time);
 
-        Ok(ExecutedTick {
-            new_offset,
-            finished,
+        Ok(ExecutedGroup {
             items,
             ext_msgs_error_count,
         })
@@ -354,11 +684,15 @@ impl AccountsCache {
     }
 }
 
+pub struct ExecutedGroup {
+    pub items: Vec<ExecutedTickItem>,
+    pub ext_msgs_error_count: u64,
+}
+
 pub struct ExecutedTick {
     pub new_offset: u32,
     pub finished: bool,
-    pub items: Vec<ExecutedTickItem>,
-    pub ext_msgs_error_count: u64,
+    pub group: ExecutedGroup,
 }
 
 impl ExecutedTick {
@@ -366,8 +700,10 @@ impl ExecutedTick {
         Self {
             new_offset,
             finished: true,
-            items: Vec::new(),
-            ext_msgs_error_count: 0,
+            group: ExecutedGroup {
+                items: Vec::new(),
+                ext_msgs_error_count: 0,
+            },
         }
     }
 }
@@ -455,183 +791,107 @@ fn execute_ticktock_transaction(
     Ok(executor_output)
 }
 
-// TODO: Update
-/// calculate group
-// pub fn _calculate_group(
-//     messages_set: &[AsyncMessage],
-//     group_limit: u32,
-//     offset: u32,
-// ) -> (u32, FastHashMap<AccountId, AsyncMessage>) {
-//     let mut new_offset = offset;
-//     let mut holes_group: FastHashMap<AccountId, u32> = FastHashMap::default();
-//     let mut max_account_count = 0;
-//     let mut holes_max_count: i32 = 0;
-//     let mut holes_count: i32 = 0;
-//     let mut group = FastHashMap::default();
-//     for (i, msg) in messages_set.iter().enumerate() {
-//         let account_id = match msg {
-//             AsyncMessage::Ext(MsgInfo::ExtIn(ExtInMsgInfo { ref dst, .. }), _) => {
-//                 dst.as_std().map(|a| a.address).unwrap_or_default()
-//             }
-//             AsyncMessage::Int(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _, _) => {
-//                 dst.as_std().map(|a| a.address).unwrap_or_default()
-//             }
-//             AsyncMessage::NewInt(MsgInfo::Int(IntMsgInfo { ref dst, .. }), _) => {
-//                 dst.as_std().map(|a| a.address).unwrap_or_default()
-//             }
-//             s => {
-//                 tracing::error!("wrong async message - {s:?}");
-//                 unreachable!()
-//             }
-//         };
-//         if (i as u32) < offset {
-//             let count = holes_group.entry(account_id).or_default();
-//             *count += 1;
-//             if *count > max_account_count {
-//                 max_account_count = *count;
-//                 holes_max_count = (group_limit * max_account_count) as i32 - offset as i32;
-//             }
-//         } else if group.len() < group_limit as usize {
-//             match holes_group.get_mut(&account_id) {
-//                 None => {
-//                     if holes_max_count > 0 {
-//                         holes_group.insert(account_id, 1);
-//                         holes_max_count -= 1;
-//                         holes_count += 1;
-//                     } else {
-//                         // if group have this account we skip it
-//                         if let std::collections::hash_map::Entry::Vacant(e) =
-//                             group.entry(account_id)
-//                         {
-//                             e.insert(msg.clone());
-//                         } else {
-//                             // if the offset was not set previously, and the account is skipped then
-//                             // it means that we need to move by current group length
-//                             if new_offset == offset {
-//                                 new_offset += group.len() as u32 + holes_count as u32;
-//                             }
-//                         }
-//                     }
-//                 }
-//                 Some(count) => {
-//                     if *count != max_account_count && holes_max_count > 0 {
-//                         *count += 1;
-//                         holes_max_count -= 1;
-//                         holes_count += 1;
-//                     } else {
-//                         // group has this account, but it was not taken on previous runs
-//                         if let std::collections::hash_map::Entry::Vacant(e) =
-//                             group.entry(account_id)
-//                         {
-//                             e.insert(msg.clone());
-//                         } else {
-//                             // if the offset was not set previously, and the account is skipped then
-//                             // it means that we need to move by current group length
-//                             if new_offset == offset {
-//                                 new_offset += group.len() as u32 + holes_count as u32;
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//         } else {
-//             break;
-//         }
-//     }
-//     // if new offset was not set then it means that we took all group elements and all holes on our way
-//     if new_offset == offset {
-//         new_offset += group.len() as u32 + holes_count as u32;
-//     }
-//     (new_offset, group)
-// }
+#[derive(Clone)]
+pub(super) enum ProcessedUptoUpdate {
+    Force(InternalMessageKey),
+    IfHigher(InternalMessageKey),
+}
 
-/// calculate all groups in advance
-pub fn pre_calculate_groups(
-    messages_set: Vec<Box<ParsedMessage>>,
-    group_limit: usize,
-    group_vert_size: usize,
-) -> MessageGroups {
-    let mut res = MessageGroups::default();
-    for msg in messages_set {
-        assert_eq!(
-            msg.special_origin, None,
-            "unexpected special origin in ordinary messages set"
+pub(super) fn set_int_upto_all_processed(processed_upto: &mut ProcessedUptoInfo) -> Result<bool> {
+    let mut updated_int_upto = vec![];
+    for upto_info in processed_upto.internals.iter() {
+        let (shard_id_full, current_int_upto) = upto_info?;
+        updated_int_upto.push((shard_id_full, InternalsProcessedUpto {
+            processed_to_msg: current_int_upto.read_to_msg,
+            read_to_msg: current_int_upto.read_to_msg,
+        }));
+    }
+    let updated = !updated_int_upto.is_empty();
+    for (shard_id_full, int_upto) in updated_int_upto {
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "updated processed_upto.internals for shard {:?}: {:?}",
+            shard_id_full, int_upto,
         );
+        processed_upto.internals.set(shard_id_full, int_upto)?;
+    }
+    Ok(updated)
+}
 
-        let account_id = match &msg.info {
-            MsgInfo::ExtIn(ExtInMsgInfo { dst, .. }) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
+pub(super) fn update_internals_processed_upto(
+    processed_upto: &mut ProcessedUptoInfo,
+    shard_id_full: ShardIdentFull,
+    processed_to_opt: Option<ProcessedUptoUpdate>,
+    read_to_opt: Option<ProcessedUptoUpdate>,
+) -> Result<bool> {
+    use ProcessedUptoUpdate::{Force, IfHigher};
+
+    fn get_new_to_key<F>(
+        to_key_update_opt: Option<ProcessedUptoUpdate>,
+        get_current: F,
+    ) -> Option<InternalMessageKey>
+    where
+        F: FnOnce() -> InternalMessageKey,
+    {
+        if let Some(to_key_update) = to_key_update_opt {
+            match to_key_update {
+                Force(to_key) => Some(to_key),
+                IfHigher(to_key) => {
+                    let current_to_key = get_current();
+                    if to_key > current_to_key {
+                        Some(to_key)
+                    } else {
+                        None
+                    }
+                }
             }
-            MsgInfo::Int(IntMsgInfo { dst, .. }) => {
-                dst.as_std().map(|a| a.address).unwrap_or_default()
+        } else {
+            None
+        }
+    }
+
+    if processed_to_opt.is_none() && read_to_opt.is_none() {
+        return Ok(false);
+    }
+
+    let new_int_processed_upto_opt =
+        if let Some(current) = processed_upto.internals.get(shard_id_full.clone())? {
+            let new_processed_to_opt =
+                get_new_to_key(processed_to_opt, || current.processed_to_msg.into());
+            let new_read_to_opt = get_new_to_key(read_to_opt, || current.read_to_msg.into());
+            if new_processed_to_opt.is_none() && new_read_to_opt.is_none() {
+                None
+            } else {
+                Some(InternalsProcessedUpto {
+                    processed_to_msg: new_processed_to_opt
+                        .map_into_tuple()
+                        .unwrap_or(current.processed_to_msg),
+                    read_to_msg: new_read_to_opt
+                        .map_into_tuple()
+                        .unwrap_or(current.read_to_msg),
+                })
             }
-            MsgInfo::ExtOut(info) => {
-                unreachable!("ext out message in ordinary messages set: {info:?}")
-            }
+        } else {
+            Some(InternalsProcessedUpto {
+                processed_to_msg: match processed_to_opt {
+                    Some(Force(to_key) | IfHigher(to_key)) => to_key.into_tuple(),
+                    _ => InternalMessageKey::with_lt_and_min_hash(0).into_tuple(),
+                },
+                read_to_msg: match read_to_opt {
+                    Some(Force(to_key) | IfHigher(to_key)) => to_key.into_tuple(),
+                    _ => InternalMessageKey::with_lt_and_max_hash(0).into_tuple(),
+                },
+            })
         };
-
-        let mut g_idx = 0;
-        loop {
-            let group_entry = res.entry(g_idx).or_default();
-
-            let group_len = group_entry.len();
-            match group_entry.entry(account_id) {
-                Entry::Vacant(entry) => {
-                    if group_len < group_limit {
-                        entry.insert(vec![msg]);
-                        break;
-                    }
-
-                    g_idx += 1;
-                }
-                Entry::Occupied(mut entry) => {
-                    let msgs = entry.get_mut();
-                    if msgs.len() < group_vert_size {
-                        msgs.push(msg);
-                        break;
-                    }
-
-                    g_idx += 1;
-                }
-            }
-        }
-    }
-
-    res
-}
-
-struct DisplayMessageGroup<'a>(&'a MessageGroup);
-
-impl std::fmt::Debug for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroup<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut l = f.debug_list();
-        for messages in self.0.values() {
-            l.entry(&messages.len());
-        }
-        l.finish()
-    }
-}
-
-struct DisplayMessageGroups<'a>(&'a MessageGroups);
-
-impl std::fmt::Debug for DisplayMessageGroups<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(self, f)
-    }
-}
-
-impl std::fmt::Display for DisplayMessageGroups<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut m = f.debug_map();
-        for (k, v) in self.0.iter() {
-            m.entry(k, &DisplayMessageGroup(v));
-        }
-        m.finish()
+    if let Some(new_int_processed_upto) = new_int_processed_upto_opt {
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "updated processed_upto.internals for shard {:?}: {:?}",
+            shard_id_full, new_int_processed_upto,
+        );
+        processed_upto
+            .internals
+            .set(shard_id_full, new_int_processed_upto)?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
