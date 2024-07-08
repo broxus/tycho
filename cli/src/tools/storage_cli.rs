@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout)] // it's a CLI tool
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -126,8 +127,8 @@ impl BlockCmd {
 
                     println!("Found block full {}\n", &self.block_id);
                     println!("Block is link: {}\n", is_link);
-                    println!("Block hex {}\n", hex::encode(&block));
-                    println!("Block proof {}\n", hex::encode(&proof));
+                    println!("Block hex {}\n", hex::encode(block));
+                    println!("Block proof {}\n", hex::encode(proof));
                 }
                 _ => {
                     println!("Found block empty {}\n", &self.block_id);
@@ -168,11 +169,11 @@ impl BlockCmd {
 
                     println!("Found block full {}\n", &self.block_id);
                     println!("Block is link: {}\n", is_link);
-                    println!("Block hex {}\n", hex::encode(&block));
-                    println!("Block proof {}\n", hex::encode(&proof));
+                    println!("Block hex {}\n", hex::encode(block));
+                    println!("Block proof {}\n", hex::encode(proof));
                 }
                 _ => {
-                    println!("Found block empty {}\n", &self.block_id)
+                    println!("Found block empty {}\n", &self.block_id);
                 }
             };
             Ok::<(), anyhow::Error>(())

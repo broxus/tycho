@@ -88,7 +88,7 @@ struct MultisigCmd {
     #[clap(short, long)]
     lifetime: Option<u32>,
 
-    /// Use SetcodeMultisig instead of SafeMultisig
+    /// Use `SetcodeMultisig` instead of `SafeMultisig`
     #[clap(short, long)]
     updatable: bool,
 }

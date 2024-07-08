@@ -100,13 +100,13 @@ impl ShardStateStorage {
         if handle.meta().has_state() {
             return Ok(false);
         }
-
         let _gc_lock = self.gc_lock.lock().await;
 
         // Double check if the state is already stored
         if handle.meta().has_state() {
             return Ok(false);
         }
+        let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
 
         let block_id = *handle.id();
         let raw_db = self.db.rocksdb().clone();
