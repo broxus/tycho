@@ -147,6 +147,7 @@ where
         }
 
         // gc
+        return Ok(());
         {
             let mut processed_uptos_lock = self.processed_uptos.lock().await;
             processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
