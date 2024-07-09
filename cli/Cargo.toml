@@ -55,6 +55,7 @@ tycho-network = { workspace = true }
 tycho-rpc = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["cli"] }
+tycho-control = {workspace = true}
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }
