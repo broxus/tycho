@@ -13,14 +13,12 @@ license.workspace = true
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 bytes = { workspace = true }
-bytesize = { workspace = true }
 everscale-types = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 sha2 = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 # local deps
 tycho-util = { workspace = true }

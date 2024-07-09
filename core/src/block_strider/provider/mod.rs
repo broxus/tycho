@@ -23,7 +23,7 @@ mod archive_provider;
 mod blockchain_provider;
 mod storage_provider;
 
-pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
+pub type OptionalBlockStuff = Option<Result<BlockStuffAug>>;
 
 /// Block provider *MUST* validate the block before returning it.
 pub trait BlockProvider: Send + Sync + 'static {
@@ -79,15 +79,15 @@ impl<B: BlockProvider> BlockProviderExt for B {
 pub struct EmptyBlockProvider;
 
 impl BlockProvider for EmptyBlockProvider {
-    type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
-    type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type GetNextBlockFut<'a> = future::Ready<OptionalBlockStuff>;
+    type GetBlockFut<'a> = future::Ready<OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        futures_util::future::ready(None)
+        future::ready(None)
     }
 
     fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(None)
+        future::ready(None)
     }
 }
 

@@ -21,8 +21,16 @@ impl BlockHandleStorage {
         }
     }
 
-    pub fn store_block_applied(&self, handle: &BlockHandle) -> bool {
+    pub fn set_block_applied(&self, handle: &BlockHandle) -> bool {
         let updated = handle.meta().set_is_applied();
+        if updated {
+            self.store_handle(handle);
+        }
+        updated
+    }
+
+    pub fn set_has_persistent_state(&self, handle: &BlockHandle) -> bool {
+        let updated = handle.meta().set_has_persistent_state();
         if updated {
             self.store_handle(handle);
         }

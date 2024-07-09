@@ -25,9 +25,9 @@ use tycho_collator::validator::config::ValidatorConfig;
 use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriberExt, BlockchainBlockProvider,
-    BlockchainBlockProviderConfig, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, ShardStateApplier, StateSubscriber, StateSubscriberContext,
-    StorageBlockProvider,
+    BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
+    OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
+    StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -49,7 +49,6 @@ use crate::util::error::ResultExt;
 use crate::util::logger::{is_systemd_child, LoggerConfig};
 use crate::util::signal;
 
-mod boot;
 mod config;
 
 const SERVICE_NAME: &str = "tycho-node";
@@ -131,14 +130,14 @@ impl CmdRun {
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
         init_logger(self.logger_config)?;
 
+        if let Some(metrics_config) = &node_config.metrics {
+            init_metrics(metrics_config)?;
+        }
+
+        #[cfg(feature = "jemalloc")]
+        tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
+
         let node = {
-            if let Some(metrics_config) = &node_config.metrics {
-                init_metrics(metrics_config)?;
-            }
-
-            #[cfg(feature = "jemalloc")]
-            tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
-
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
                 .wrap_err("failed to load global config")?;
 
@@ -148,22 +147,16 @@ impl CmdRun {
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
-            Arc::new(Node::new(socket_addr, keys, node_config, global_config)?)
+            Node::new(socket_addr, keys, node_config, global_config)?
         };
 
-        // Ensure that there are some neighbours
-        tracing::info!("waiting for initial neighbours");
-        node.blockchain_rpc_client
-            .overlay_client()
-            .neighbours()
-            .wait_for_peers(1)
-            .await;
-        tracing::info!("found initial neighbours");
+        node.wait_for_neighbours().await;
 
         let init_block_id = node
-            .try_init(self.import_zerostate)
+            .boot(self.import_zerostate)
             .await
             .wrap_err("failed to init node")?;
+
         tracing::info!(%init_block_id, "node initialized");
 
         node.run(&init_block_id).await?;
@@ -424,22 +417,33 @@ impl Node {
         })
     }
 
+    async fn wait_for_neighbours(&self) {
+        // Ensure that there are some neighbours
+        tracing::info!("waiting for initial neighbours");
+        self.blockchain_rpc_client
+            .overlay_client()
+            .neighbours()
+            .wait_for_peers(1)
+            .await;
+        tracing::info!("found initial neighbours");
+    }
+
     /// Initialize the node and return the init block id.
-    async fn try_init(self: &Arc<Self>, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
+    async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
+        let starter = Starter::new(
+            self.storage.clone(),
+            self.blockchain_rpc_client.clone(),
+            self.zerostate,
+        );
+
         let last_key_block_id = match node_state.load_last_mc_block_id() {
-            Some(block_id) => {
-                tracing::info!("warm init");
-                boot::warm_boot::run(self, block_id).await?
-            }
+            Some(block_id) => starter.warm_boot(&block_id).await?,
             None => {
-                tracing::info!("cold init");
-
-                let last_mc_block_id = boot::cold_boot::run(self, zerostates).await?;
-                node_state.store_last_mc_block_id(&last_mc_block_id);
-
-                last_mc_block_id
+                starter
+                    .cold_boot(zerostates.map(FileZerostateProvider))
+                    .await?
             }
         };
 
@@ -451,7 +455,7 @@ impl Node {
         Ok(last_key_block_id)
     }
 
-    async fn run(&self, last_block_id: &BlockId) -> Result<()> {
+    async fn run(self, last_block_id: &BlockId) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage

@@ -97,12 +97,10 @@ impl BlockMeta {
         self.test_flag(BLOCK_META_FLAG_HAS_STATE)
     }
 
-    #[allow(unused)]
     pub fn set_has_persistent_state(&self) -> bool {
         self.set_flag(BLOCK_META_FLAG_HAS_PERSISTENT_STATE)
     }
 
-    #[allow(unused)]
     pub fn has_persistent_state(&self) -> bool {
         self.test_flag(BLOCK_META_FLAG_HAS_PERSISTENT_STATE)
     }

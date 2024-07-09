@@ -8,3 +8,5 @@ pub use self::top_blocks::{ShardHeights, TopBlocks, TopBlocksShortIdsIter};
 mod block_proof_stuff;
 mod block_stuff;
 mod top_blocks;
+
+pub const KEY_BLOCK_UTIME_STEP: u32 = 86400;

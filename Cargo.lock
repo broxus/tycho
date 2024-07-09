@@ -3277,7 +3277,6 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "bytes",
- "bytesize",
  "everscale-types",
  "hex",
  "parking_lot",
@@ -3285,7 +3284,6 @@ dependencies = [
  "sha2",
  "smallvec",
  "thiserror",
- "tracing",
  "tycho-util",
 ]
 

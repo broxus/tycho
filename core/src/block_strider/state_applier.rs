@@ -197,7 +197,7 @@ where
             .inner
             .storage
             .block_handle_storage()
-            .store_block_applied(&prepared.handle);
+            .set_block_applied(&prepared.handle);
 
         if applied && self.inner.storage.config().archives_gc.is_some() {
             tracing::trace!(block_id = %prepared.handle.id(), "saving block into archive");
