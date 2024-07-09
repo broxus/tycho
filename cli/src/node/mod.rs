@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,6 +40,8 @@ use tycho_network::{
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
 use tycho_util::cli::{LoggerConfig, LoggerTargets};
+
+use tycho_control::ControlServerImpl;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::util::alloc::memory_profiler;
@@ -591,6 +593,10 @@ impl Node {
                     .chain(GcSubscriber::new(self.storage.clone())),
             )
             .build();
+
+
+        let address = SocketAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 15022));
+        ControlServerImpl::serve(address, self.storage.clone()).await?;
 
         // Run block strider
         tracing::info!("block strider started");

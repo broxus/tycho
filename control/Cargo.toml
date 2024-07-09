@@ -1,0 +1,23 @@
+[package]
+name = "tycho-control"
+description = "Node control server."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = {workspace = true}
+clap = {workspace = true}
+everscale-types = {workspace = true}
+futures-util = {workspace = true}
+tarpc = { workspace = true }
+tokio = {workspace = true}
+tracing = {workspace = true}
+
+
+#local deps
+tycho-storage = { workspace = true }
+
