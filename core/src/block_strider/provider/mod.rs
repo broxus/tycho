@@ -3,22 +3,27 @@ use std::pin::pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
+use arc_swap::ArcSwapAny;
 use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
-use tycho_block_util::block::BlockStuffAug;
+use tycho_block_util::block::{
+    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockProofStuffAug,
+    BlockStuff, BlockStuffAug,
+};
+use tycho_block_util::state::ShardStateStuff;
+use tycho_storage::{BlockMetaData, BlockProofHandle, Storage};
+use tycho_util::metrics::HistogramGuard;
 
-#[cfg(any(test, feature = "test"))]
 pub use self::archive_provider::ArchiveBlockProvider;
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::storage_provider::StorageBlockProvider;
 
+mod archive_provider;
 mod blockchain_provider;
 mod storage_provider;
 
-#[cfg(any(test, feature = "test"))]
-mod archive_provider;
-
-pub type OptionalBlockStuff = Option<anyhow::Result<BlockStuffAug>>;
+pub type OptionalBlockStuff = Option<Result<BlockStuffAug>>;
 
 /// Block provider *MUST* validate the block before returning it.
 pub trait BlockProvider: Send + Sync + 'static {
@@ -74,15 +79,15 @@ impl<B: BlockProvider> BlockProviderExt for B {
 pub struct EmptyBlockProvider;
 
 impl BlockProvider for EmptyBlockProvider {
-    type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
-    type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type GetNextBlockFut<'a> = future::Ready<OptionalBlockStuff>;
+    type GetBlockFut<'a> = future::Ready<OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, _prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        futures_util::future::ready(None)
+        future::ready(None)
     }
 
     fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(None)
+        future::ready(None)
     }
 }
 
@@ -158,6 +163,122 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for (T1, T2) {
                 },
             }
         })
+    }
+}
+
+pub struct ProofChecker {
+    storage: Storage,
+    cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
+    cached_prev_key_block_proof: ArcSwapAny<Option<BlockProofStuff>>,
+}
+
+impl ProofChecker {
+    pub fn new(storage: Storage) -> Self {
+        Self {
+            storage,
+            cached_zerostate: Default::default(),
+            cached_prev_key_block_proof: Default::default(),
+        }
+    }
+
+    pub async fn check_proof(
+        &self,
+        block: &BlockStuff,
+        proof: &BlockProofStuffAug,
+        store_proof_on_success: bool,
+    ) -> Result<BlockMetaData> {
+        // TODO: Add labels with shard?
+        let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
+
+        anyhow::ensure!(
+            block.id() == &proof.proof().proof_for,
+            "proof_for and block id mismatch: proof_for={}, block_id={}",
+            proof.proof().proof_for,
+            block.id(),
+        );
+
+        let is_masterchain = block.id().is_masterchain();
+        anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
+
+        let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
+        let meta = BlockMetaData {
+            is_key_block: virt_block_info.key_block,
+            gen_utime: virt_block_info.gen_utime,
+            mc_ref_seqno: is_masterchain.then(|| block.id().seqno),
+        };
+
+        if !is_masterchain {
+            if store_proof_on_success {
+                // Store proof link
+                self.storage
+                    .block_storage()
+                    .store_block_proof(proof, BlockProofHandle::New(meta))
+                    .await?;
+            }
+            return Ok(meta);
+        }
+
+        let block_handles = self.storage.block_handle_storage();
+        let handle = block_handles
+            .load_key_block_handle(virt_block_info.prev_key_block_seqno)
+            .context("failed to load prev key block handle")?;
+
+        if handle.id().seqno == 0 {
+            let zerostate = 'zerostate: {
+                if let Some(zerostate) = self.cached_zerostate.load_full() {
+                    break 'zerostate zerostate;
+                }
+
+                let shard_states = self.storage.shard_state_storage();
+                let zerostate = shard_states
+                    .load_state(handle.id())
+                    .await
+                    .context("failed to load mc zerostate")?;
+
+                self.cached_zerostate.store(Some(zerostate.clone()));
+
+                zerostate
+            };
+
+            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)?;
+        } else {
+            let prev_key_block_proof = 'prev_proof: {
+                if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
+                    if &prev_proof.as_ref().proof_for == handle.id() {
+                        break 'prev_proof prev_proof;
+                    }
+                }
+
+                let blocks = self.storage.block_storage();
+                let prev_key_block_proof = blocks
+                    .load_block_proof(&handle, false)
+                    .await
+                    .context("failed to load prev key block proof")?;
+
+                // NOTE: Assume that there is only one masterchain block using this cache.
+                // Otherwise, it will be overwritten every time. Maybe use `rcu`.
+                self.cached_prev_key_block_proof
+                    .store(Some(prev_key_block_proof.clone()));
+
+                prev_key_block_proof
+            };
+
+            check_with_prev_key_block_proof(
+                proof,
+                &prev_key_block_proof,
+                &virt_block,
+                &virt_block_info,
+            )?;
+        }
+
+        if store_proof_on_success {
+            // Store proof
+            self.storage
+                .block_storage()
+                .store_block_proof(proof, BlockProofHandle::New(meta))
+                .await?;
+        }
+        Ok(meta)
     }
 }
 

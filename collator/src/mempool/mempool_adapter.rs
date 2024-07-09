@@ -12,7 +12,7 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{mpsc, Notify};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_consensus::{InputBufferImpl, Point};
+use tycho_consensus::{InputBuffer, InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 
 use crate::mempool::external_message_cache::ExternalMessageCache;
@@ -80,31 +80,46 @@ pub trait MempoolAdapter: Send + Sync + 'static {
 pub struct MempoolAdapterStdImpl {
     // TODO: replace with rocksdb
     anchors: Arc<RwLock<IndexMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
+
+    externals_rx: InputBuffer,
     externals_tx: mpsc::UnboundedSender<Bytes>,
 
     anchor_added: Arc<Notify>,
 }
 
 impl MempoolAdapterStdImpl {
-    pub fn new(
+    pub fn new() -> Arc<Self> {
+        let anchors = Arc::new(RwLock::new(IndexMap::new()));
+
+        let (externals_tx, externals_rx) = mpsc::unbounded_channel();
+
+        let mempool_adapter = Arc::new(Self {
+            anchors,
+            externals_tx,
+            externals_rx: InputBufferImpl::new(externals_rx),
+            anchor_added: Arc::new(Notify::new()),
+        });
+
+        mempool_adapter
+    }
+
+    pub fn run(
+        self: &Arc<Self>,
         key_pair: Arc<KeyPair>,
         dht_client: DhtClient,
         overlay_service: OverlayService,
         peers: Vec<PeerId>,
-    ) -> Arc<Self> {
+    ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
-        let anchors = Arc::new(RwLock::new(IndexMap::new()));
 
         let (sender, receiver) = mpsc::unbounded_channel();
 
-        // TODO receive from outside
-        let (externals_tx, externals_rx) = mpsc::unbounded_channel();
         let mut engine = tycho_consensus::Engine::new(
             key_pair,
             &dht_client,
             &overlay_service,
             sender,
-            InputBufferImpl::new(externals_rx),
+            self.externals_rx.clone(),
         );
 
         tokio::spawn(async move {
@@ -114,15 +129,7 @@ impl MempoolAdapterStdImpl {
 
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Mempool adapter created");
 
-        let mempool_adapter = Arc::new(Self {
-            anchors,
-            externals_tx,
-            anchor_added: Arc::new(Notify::new()),
-        });
-
-        tokio::spawn(handle_anchors(mempool_adapter.clone(), receiver));
-
-        mempool_adapter
+        tokio::spawn(handle_anchors(self.clone(), receiver));
     }
 
     pub fn send_external(&self, message: Bytes) {

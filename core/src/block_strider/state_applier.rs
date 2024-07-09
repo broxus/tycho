@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
-use tycho_storage::{BlockHandle, BlockMetaData, Storage};
+use tycho_storage::{BlockConnection, BlockHandle, BlockMetaData, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -53,6 +53,49 @@ where
             .get_block_handle(&cx.mc_block_id, &cx.block, &cx.archive_data)
             .await?;
 
+        let (prev_id, prev_id_alt) = cx
+            .block
+            .construct_prev_id()
+            .context("failed to construct prev id")?;
+
+        // Update block connections
+        {
+            let block_handles = self.inner.storage.block_handle_storage();
+            let connections = self.inner.storage.block_connection_storage();
+
+            let block_id = cx.block.id();
+
+            let prev_handle = block_handles.load_handle(&prev_id);
+
+            match prev_id_alt {
+                None => {
+                    if let Some(handle) = prev_handle {
+                        let direction = if block_id.shard != prev_id.shard
+                            && prev_id.shard.split().unwrap().1 == block_id.shard
+                        {
+                            // Special case for the right child after split
+                            BlockConnection::Next2
+                        } else {
+                            BlockConnection::Next1
+                        };
+                        connections.store_connection(&handle, direction, block_id);
+                    }
+                    connections.store_connection(&handle, BlockConnection::Prev1, &prev_id);
+                }
+                Some(ref prev_id_alt) => {
+                    if let Some(handle) = prev_handle {
+                        connections.store_connection(&handle, BlockConnection::Next1, block_id);
+                    }
+                    if let Some(handle) = block_handles.load_handle(prev_id_alt) {
+                        connections.store_connection(&handle, BlockConnection::Next1, block_id);
+                    }
+                    connections.store_connection(&handle, BlockConnection::Prev1, &prev_id);
+                    connections.store_connection(&handle, BlockConnection::Prev2, prev_id_alt);
+                }
+            }
+        }
+
+        // Load/Apply state
         let (state, handles) = if handle.meta().has_state() {
             // Fast path when state is already applied
             let state = state_storage
@@ -64,11 +107,6 @@ where
         } else {
             // Load previous states
             let (prev_root_cell, handles) = {
-                let (prev_id, prev_id_alt) = cx
-                    .block
-                    .construct_prev_id()
-                    .context("failed to construct prev id")?;
-
                 let prev_state = state_storage
                     .load_state(&prev_id)
                     .await
@@ -159,7 +197,7 @@ where
             .inner
             .storage
             .block_handle_storage()
-            .store_block_applied(&prepared.handle);
+            .set_block_applied(&prepared.handle);
 
         if applied && self.inner.storage.config().archives_gc.is_some() {
             tracing::trace!(block_id = %prepared.handle.id(), "saving block into archive");

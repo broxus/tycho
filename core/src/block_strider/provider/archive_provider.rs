@@ -1,75 +1,126 @@
-#![allow(clippy::map_err_ignore)]
-
-use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
-use everscale_types::cell::Load;
-use everscale_types::models::{Block, BlockId, BlockIdShort, BlockProof};
+use arc_swap::ArcSwapOption;
+use bytes::{BufMut, BytesMut};
+use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
-use sha2::Digest;
-use tycho_block_util::archive::{ArchiveEntryId, ArchiveReader};
-use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::archive::Archive;
+use tycho_storage::{BlockMetaData, Storage};
+use tycho_util::time::now_sec;
 
-use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff};
+use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
+use crate::blockchain_rpc::BlockchainRpcClient;
 
+#[derive(Clone)]
+#[repr(transparent)]
 pub struct ArchiveBlockProvider {
-    pub mc_block_ids: BTreeMap<u32, BlockId>,
-    pub blocks: BTreeMap<BlockId, ArchiveDataEntry>,
+    inner: Arc<Inner>,
 }
 
 impl ArchiveBlockProvider {
-    pub fn new(data: &[u8]) -> Result<Self> {
-        let reader = ArchiveReader::new(data)?;
+    pub fn new(client: BlockchainRpcClient, storage: Storage) -> Self {
+        let proof_checker = ProofChecker::new(storage);
 
-        let mut res = ArchiveBlockProvider {
-            mc_block_ids: Default::default(),
-            blocks: Default::default(),
+        Self {
+            inner: Arc::new(Inner {
+                client,
+                proof_checker,
+                last_known_archive: ArcSwapOption::empty(),
+            }),
+        }
+    }
+
+    async fn get_next_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
+        let this = self.inner.as_ref();
+
+        let next_block_seqno = block_id.seqno + 1;
+
+        let block_id;
+        let archive = loop {
+            if let Some(archive) = this.last_known_archive.load_full() {
+                if let Some(mc_block_id) = archive.mc_block_ids.get(&next_block_seqno) {
+                    block_id = *mc_block_id;
+                    break archive;
+                }
+            }
+
+            // TODO: Impl parallel download
+            match self.download_archive(next_block_seqno).await {
+                Ok(archive) => this.last_known_archive.store(Some(Arc::new(archive))),
+                Err(e) => return Some(Err(e)),
+            }
         };
 
-        for data in reader {
-            let entry = data?;
-            match ArchiveEntryId::from_filename(entry.name)? {
-                ArchiveEntryId::Block(id) => {
-                    let block = deserialize_block(&id, entry.data)?;
+        let (block, proof) = match (
+            archive.get_block_by_id(&block_id),
+            archive.get_proof_by_id(&block_id),
+        ) {
+            (Ok(block), Ok(proof)) => (block, proof),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+        };
 
-                    res.blocks.entry(id).or_default().block = Some(block);
-                    if id.shard.workchain() == -1 {
-                        // todo: add is_masterchain() method
-                        res.mc_block_ids.insert(id.seqno, id);
-                    }
-                }
-                ArchiveEntryId::Proof(id) if id.shard.workchain() == -1 => {
-                    let proof = deserialize_block_proof(&id, entry.data, false)?;
+        match this.proof_checker.check_proof(block, proof, true).await {
+            Ok(meta) if is_block_recent(&meta) => Some(Ok(block.clone())),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
 
-                    res.blocks.entry(id).or_default().proof = Some(proof);
-                    res.mc_block_ids.insert(id.seqno, id);
-                }
-                ArchiveEntryId::ProofLink(id) if id.shard.workchain() != -1 => {
-                    let proof = deserialize_block_proof(&id, entry.data, true)?;
+    async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
+        let this = self.inner.as_ref();
 
-                    res.blocks.entry(id).or_default().proof = Some(proof);
+        let Some(archive) = this.last_known_archive.load_full() else {
+            return Some(Err(anyhow::anyhow!("no archive available")));
+        };
+
+        let (block, proof) = match (
+            archive.get_block_by_id(block_id),
+            archive.get_proof_by_id(block_id),
+        ) {
+            (Ok(block), Ok(proof)) => (block, proof),
+            (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+        };
+
+        if let Err(e) = this.proof_checker.check_proof(block, proof, true).await {
+            return Some(Err(e));
+        }
+
+        // NOTE: Always return the block by id even if it's not recent
+        Some(Ok(block.clone()))
+    }
+
+    async fn download_archive(&self, seqno: u32) -> Result<Archive> {
+        let client = &self.inner.client;
+
+        loop {
+            let mut archive_data = BytesMut::new().writer();
+            client.download_archive(seqno, &mut archive_data).await?;
+            let archive_data = archive_data.into_inner().freeze();
+
+            match Archive::new(archive_data) {
+                Ok(archive) => return Ok(archive),
+                Err(e) => {
+                    tracing::error!(seqno, "failed to parse downloaded archive: {e}");
+
+                    // TODO: backoff
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
-                _ => continue,
             }
         }
-        Ok(res)
     }
+}
 
-    pub fn lowest_mc_id(&self) -> Option<&BlockId> {
-        self.mc_block_ids.values().next()
-    }
+fn is_block_recent(meta: &BlockMetaData) -> bool {
+    meta.gen_utime + 600 > now_sec()
+}
 
-    pub fn highest_mc_id(&self) -> Option<&BlockId> {
-        self.mc_block_ids.values().next_back()
-    }
-
-    pub fn get_block_by_id(&self, id: &BlockId) -> Option<Block> {
-        self.blocks
-            .get(id)
-            .map(|entry| entry.block.as_ref().unwrap())
-            .cloned()
-    }
+struct Inner {
+    client: BlockchainRpcClient,
+    proof_checker: ProofChecker,
+    last_known_archive: ArcSwapOption<Archive>,
 }
 
 impl BlockProvider for ArchiveBlockProvider {
@@ -77,81 +128,10 @@ impl BlockProvider for ArchiveBlockProvider {
     type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        let id = match self.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
-            Some(id) => id,
-            None => return Box::pin(futures_util::future::ready(None)),
-        };
-
-        self.get_block(id)
+        Box::pin(self.get_next_block_impl(prev_block_id))
     }
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        futures_util::future::ready(self.get_block_by_id(block_id).map(|b| {
-            Ok(BlockStuffAug::new(
-                BlockStuff::with_block(*block_id, b.clone()),
-                everscale_types::boc::BocRepr::encode(b).unwrap(),
-            ))
-        }))
-        .boxed()
+        Box::pin(self.get_block_impl(block_id))
     }
-}
-
-#[derive(Default)]
-pub struct ArchiveDataEntry {
-    pub block: Option<Block>,
-    pub proof: Option<BlockProof>,
-}
-
-pub(crate) fn deserialize_block(id: &BlockId, data: &[u8]) -> Result<Block, ArchiveDataError> {
-    let file_hash = sha2::Sha256::digest(data);
-    if id.file_hash.as_slice() != file_hash.as_slice() {
-        Err(ArchiveDataError::InvalidFileHash(id.as_short_id()))
-    } else {
-        let root = everscale_types::boc::Boc::decode(data)
-            .map_err(|_| ArchiveDataError::InvalidBlockData)?;
-        if &id.root_hash != root.repr_hash() {
-            return Err(ArchiveDataError::InvalidRootHash);
-        }
-
-        Block::load_from(&mut root.as_slice()?).map_err(|_| ArchiveDataError::InvalidBlockData)
-    }
-}
-
-pub(crate) fn deserialize_block_proof(
-    block_id: &BlockId,
-    data: &[u8],
-    is_link: bool,
-) -> Result<BlockProof, ArchiveDataError> {
-    let root =
-        everscale_types::boc::Boc::decode(data).map_err(|_| ArchiveDataError::InvalidBlockProof)?;
-    let proof = everscale_types::models::BlockProof::load_from(&mut root.as_slice()?)
-        .map_err(|_| ArchiveDataError::InvalidBlockProof)?;
-
-    if &proof.proof_for != block_id {
-        return Err(ArchiveDataError::ProofForAnotherBlock);
-    }
-
-    if !block_id.shard.workchain() == -1 && !is_link {
-        Err(ArchiveDataError::ProofForNonMasterchainBlock)
-    } else {
-        Ok(proof)
-    }
-}
-
-#[derive(thiserror::Error, Debug)]
-pub(crate) enum ArchiveDataError {
-    #[error("Invalid file hash {0}")]
-    InvalidFileHash(BlockIdShort),
-    #[error("Invalid root hash")]
-    InvalidRootHash,
-    #[error("Invalid block data")]
-    InvalidBlockData,
-    #[error("Invalid block proof")]
-    InvalidBlockProof,
-    #[error("Proof for another block")]
-    ProofForAnotherBlock,
-    #[error("Proof for non-masterchain block")]
-    ProofForNonMasterchainBlock,
-    #[error(transparent)]
-    TypeError(#[from] everscale_types::error::Error),
 }

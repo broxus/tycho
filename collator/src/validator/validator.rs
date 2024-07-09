@@ -5,7 +5,9 @@ use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription};
+use everscale_types::models::{
+    Block, BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription,
+};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -24,7 +26,7 @@ use crate::validator::state::{
     NotificationStatus, SessionInfo, ValidationState, ValidationStateStdImpl,
 };
 use crate::validator::types::{
-    BlockValidationCandidate, OverlayNumber, StopValidationCommand, ValidationStatus, ValidatorInfo,
+    OverlayNumber, StopValidationCommand, ValidationStatus, ValidatorInfo,
 };
 
 // FACTORY
@@ -344,8 +346,8 @@ impl Validator for ValidatorStdImpl {
 }
 
 fn sign_block(key_pair: &KeyPair, block: &BlockId) -> anyhow::Result<Signature> {
-    let block_validation_candidate = BlockValidationCandidate::from(*block);
-    let signature = Signature(key_pair.sign(block_validation_candidate.as_bytes()));
+    let data = Block::build_data_for_sign(block);
+    let signature = Signature(key_pair.sign_raw(data.as_slice()));
     Ok(signature)
 }
 

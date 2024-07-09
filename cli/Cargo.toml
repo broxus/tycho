@@ -16,6 +16,7 @@ path = "./src/main.rs"
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }

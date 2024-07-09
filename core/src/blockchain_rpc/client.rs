@@ -1,9 +1,11 @@
+use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use tycho_block_util::archive::ArchiveVerifier;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::Storage;
@@ -163,6 +165,19 @@ impl BlockchainRpcClient {
         let data = client
             .query::<_, BlockFull>(&rpc::GetNextBlockFull {
                 prev_block_id: *prev_block,
+            })
+            .await?;
+        Ok(data)
+    }
+
+    pub async fn get_key_block_proof(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<QueryResponse<Data>, Error> {
+        let client = &self.inner.overlay_client;
+        let data = client
+            .query::<_, Data>(&rpc::GetKeyBlockProof {
+                block_id: *block_id,
             })
             .await?;
         Ok(data)
@@ -347,5 +362,106 @@ impl BlockchainRpcClient {
         Err(Error::Internal(anyhow::anyhow!(
             "downloaded incomplete state"
         )))
+    }
+
+    // TODO: Split into `find_` and `download_` methods to not spam the network.
+    pub async fn download_archive(
+        &self,
+        mc_seqno: u32,
+        output: &mut (dyn Write + Send),
+    ) -> Result<usize, Error> {
+        const CHUNK_SIZE: u32 = 2 << 20; // 2 MB
+
+        // TODO: Iterate through all known (or unknown) neighbours
+        const NEIGHBOUR_COUNT: usize = 10;
+        let neighbours = self
+            .overlay_client()
+            .neighbours()
+            .choose_multiple(NEIGHBOUR_COUNT)
+            .await;
+
+        // Find a neighbour which has the requested archive
+        let (neighbour, archive_id) = 'info: {
+            let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+
+            let mut futures = FuturesUnordered::new();
+            for neighbour in neighbours {
+                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
+            }
+
+            let mut err = None;
+            while let Some(info) = futures.next().await {
+                let (handle, info) = match info {
+                    Ok(res) => res.split(),
+                    Err(e) => {
+                        err = Some(e);
+                        continue;
+                    }
+                };
+
+                match info {
+                    ArchiveInfo::Found { id } => break 'info (handle.accept(), id),
+                    ArchiveInfo::NotFound => continue,
+                }
+            }
+
+            return match err {
+                None => Err(Error::Internal(anyhow::anyhow!(
+                    "no neighbour has the requested archive"
+                ))),
+                Some(err) => Err(err),
+            };
+        };
+
+        let mut verifier = ArchiveVerifier::default();
+
+        // TODO: add retry count to interrupt infinite loop
+        let mut offset = 0;
+        loop {
+            let req = Request::from_tl(rpc::GetArchiveSlice {
+                archive_id,
+                offset,
+                limit: CHUNK_SIZE,
+            });
+
+            let res = self
+                .overlay_client()
+                .query_raw::<Data>(neighbour.clone(), req)
+                .await;
+
+            match res {
+                Ok(res) => {
+                    let chunk = &res.data().data;
+
+                    verifier.write_verify(chunk).map_err(|e| {
+                        Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))
+                    })?;
+
+                    let is_last = chunk.len() < CHUNK_SIZE as usize;
+                    if is_last {
+                        verifier.final_check().map_err(|e| {
+                            Error::Internal(anyhow::anyhow!("Received invalid archive: {e}"))
+                        })?;
+                    }
+
+                    output.write_all(chunk).map_err(|e| {
+                        Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
+                    })?;
+
+                    offset += chunk.len() as u64;
+
+                    if is_last {
+                        return Ok(offset as usize);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        archive_id,
+                        offset,
+                        "Failed to download archive slice: {e:?}",
+                    );
+                }
+            }
+        }
     }
 }

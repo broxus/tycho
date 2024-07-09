@@ -3292,6 +3292,7 @@ name = "tycho-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bytes",

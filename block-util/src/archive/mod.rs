@@ -1,7 +1,13 @@
+use std::collections::BTreeMap;
+
+use anyhow::Result;
 use bytes::Bytes;
+use everscale_types::models::BlockId;
+use tycho_util::FastHashMap;
 
 pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
+use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 
 mod entry_id;
 mod reader;
@@ -9,6 +15,104 @@ mod reader;
 pub const ARCHIVE_PREFIX: [u8; 4] = u32::to_le_bytes(0xae8fdd01);
 pub const ARCHIVE_ENTRY_PREFIX: [u8; 2] = u16::to_le_bytes(0x1e8b);
 pub const ARCHIVE_ENTRY_HEADER_LEN: usize = ARCHIVE_ENTRY_PREFIX.len() + 2 + 4; // magic + filename len + data len
+
+pub struct Archive {
+    pub mc_block_ids: BTreeMap<u32, BlockId>,
+    pub blocks: FastHashMap<BlockId, ArchiveDataEntry>,
+}
+
+impl Archive {
+    pub fn new<T>(data: T) -> Result<Self>
+    where
+        Bytes: From<T>,
+    {
+        let data = Bytes::from(data);
+        let reader = ArchiveReader::new(&data)?;
+
+        let mut res = Archive {
+            mc_block_ids: Default::default(),
+            blocks: Default::default(),
+        };
+
+        for entry_data in reader {
+            let entry = entry_data?;
+            match ArchiveEntryId::from_filename(entry.name)? {
+                ArchiveEntryId::Block(id) => {
+                    let block = BlockStuff::deserialize_checked(&id, entry.data)?;
+
+                    if id.shard.is_masterchain() {
+                        res.mc_block_ids.insert(id.seqno, id);
+                    }
+
+                    let parsed = res.blocks.entry(id).or_default();
+                    anyhow::ensure!(parsed.block.is_none(), "duplicate block data for: {id}");
+                    parsed.block = Some(WithArchiveData::new::<Bytes>(
+                        block,
+                        data.slice_ref(entry.data),
+                    ));
+                }
+                ArchiveEntryId::Proof(id) => {
+                    let proof = BlockProofStuff::deserialize(&id, entry.data, false)?;
+
+                    res.mc_block_ids.insert(id.seqno, id);
+
+                    let parsed = res.blocks.entry(id).or_default();
+                    anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
+                    parsed.proof = Some(WithArchiveData::new::<Bytes>(
+                        proof,
+                        data.slice_ref(entry.data),
+                    ));
+                }
+                ArchiveEntryId::ProofLink(id) => {
+                    let proof = BlockProofStuff::deserialize(&id, entry.data, true)?;
+
+                    let parsed = res.blocks.entry(id).or_default();
+                    anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
+                    parsed.proof = Some(WithArchiveData::new::<Bytes>(
+                        proof,
+                        data.slice_ref(entry.data),
+                    ));
+                }
+            }
+        }
+
+        Ok(res)
+    }
+
+    pub fn get_block_by_id(&self, id: &BlockId) -> Result<&BlockStuffAug, ArchiveError> {
+        let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
+        entry.block.as_ref().ok_or(ArchiveError::BlockNotFound)
+    }
+
+    pub fn get_proof_by_id(&self, id: &BlockId) -> Result<&BlockProofStuffAug, ArchiveError> {
+        let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
+        entry.proof.as_ref().ok_or(ArchiveError::ProofNotFound)
+    }
+
+    pub fn get_mc_block_by_seqno(&self, seqno: u32) -> Result<&BlockStuffAug, ArchiveError> {
+        let id = self
+            .mc_block_ids
+            .get(&seqno)
+            .ok_or(ArchiveError::BlockNotFound)?;
+
+        self.get_block_by_id(id)
+    }
+
+    pub fn get_mc_proof_by_seqno(&self, seqno: u32) -> Result<&BlockProofStuffAug, ArchiveError> {
+        let id = self
+            .mc_block_ids
+            .get(&seqno)
+            .ok_or(ArchiveError::BlockNotFound)?;
+
+        self.get_proof_by_id(id)
+    }
+}
+
+#[derive(Default)]
+pub struct ArchiveDataEntry {
+    pub block: Option<BlockStuffAug>,
+    pub proof: Option<BlockProofStuffAug>,
+}
 
 #[derive(Clone)]
 pub enum ArchiveData {
@@ -79,6 +183,16 @@ impl<T> std::ops::Deref for WithArchiveData<T> {
 #[derive(Debug, Copy, Clone, thiserror::Error)]
 #[error("archive data not loaded")]
 pub struct WithArchiveDataError;
+
+#[derive(thiserror::Error, Debug)]
+pub enum ArchiveError {
+    #[error("mc block seqno out of range")]
+    OutOfRange,
+    #[error("block not found")]
+    BlockNotFound,
+    #[error("proof not found")]
+    ProofNotFound,
+}
 
 /// Encodes archive package segment.
 pub fn make_archive_entry(filename: &str, data: &[u8]) -> Vec<u8> {

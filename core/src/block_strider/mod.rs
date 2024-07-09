@@ -13,12 +13,12 @@ use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-#[cfg(any(test, feature = "test"))]
-pub use self::provider::ArchiveBlockProvider;
 pub use self::provider::{
-    BlockProvider, BlockProviderExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    ChainBlockProvider, EmptyBlockProvider, OptionalBlockStuff, StorageBlockProvider,
+    ArchiveBlockProvider, BlockProvider, BlockProviderExt, BlockchainBlockProvider,
+    BlockchainBlockProviderConfig, ChainBlockProvider, EmptyBlockProvider, OptionalBlockStuff,
+    ProofChecker, StorageBlockProvider,
 };
+pub use self::starter::{FileZerostateProvider, Starter, ZerostateProvider};
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};
 pub use self::state_applier::ShardStateApplier;
 #[cfg(any(test, feature = "test"))]
@@ -29,6 +29,7 @@ pub use self::subscriber::{
 };
 
 mod provider;
+mod starter;
 mod state;
 mod state_applier;
 mod subscriber;

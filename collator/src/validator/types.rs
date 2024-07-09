@@ -2,7 +2,7 @@ use std::convert::TryFrom;
 
 use everscale_crypto::ed25519::PublicKey;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
+use everscale_types::models::{BlockIdShort, ShardIdent, ValidatorDescription};
 use tl_proto::{TlRead, TlWrite};
 
 #[derive(Clone)]
@@ -23,31 +23,6 @@ impl TryFrom<&ValidatorDescription> for ValidatorInfo {
             public_key: pubkey,
             weight: value.weight,
         })
-    }
-}
-
-/// Block candidate for validation
-#[derive(Debug, Default, Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd, TlRead, TlWrite)]
-pub(crate) struct BlockValidationCandidate {
-    pub root_hash: [u8; 32],
-    pub file_hash: [u8; 32],
-}
-
-impl From<BlockId> for BlockValidationCandidate {
-    fn from(block_id: BlockId) -> Self {
-        Self {
-            root_hash: block_id.root_hash.0,
-            file_hash: block_id.file_hash.0,
-        }
-    }
-}
-
-impl BlockValidationCandidate {
-    pub fn as_bytes(&self) -> [u8; 64] {
-        let mut bytes = [0u8; 64];
-        bytes[..32].copy_from_slice(&self.root_hash);
-        bytes[32..].copy_from_slice(&self.file_hash);
-        bytes
     }
 }
 

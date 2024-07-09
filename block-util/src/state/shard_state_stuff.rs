@@ -52,10 +52,7 @@ impl ShardStateStuff {
             "shard state shard_ident mismatch"
         );
 
-        anyhow::ensure!(
-            shard_state.seqno == block_id.seqno,
-            "state state seqno mismatch"
-        );
+        anyhow::ensure!(shard_state.seqno == block_id.seqno, "state seqno mismatch");
 
         let handle = tracker.insert(shard_state.min_ref_mc_seqno);
         Ok(Self {

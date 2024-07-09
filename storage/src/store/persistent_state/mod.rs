@@ -9,14 +9,15 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
 use parking_lot::Mutex;
 use tokio::time::Instant;
+use tycho_block_util::block::KEY_BLOCK_UTIME_STEP;
 use tycho_util::sync::rayon_run;
 
 use crate::db::{BaseDb, FileDb, MappedFile};
+use crate::models::BlockHandle;
 use crate::store::BlockHandleStorage;
 
 mod state_writer;
 
-const KEY_BLOCK_UTIME_STEP: u32 = 86400;
 const BASE_DIR: &str = "states";
 
 pub struct PersistentStateStorage {
@@ -87,40 +88,45 @@ impl PersistentStateStorage {
         .ok()
     }
 
-    pub async fn store_state(
-        &self,
-        mc_seqno: u32,
-        block_id: &BlockId,
-        root_hash: &HashBytes,
-    ) -> Result<()> {
-        let block_id = *block_id;
-        let root_hash = *root_hash;
-        let is_cancelled = Some(self.is_cancelled.clone());
+    pub async fn store_state(&self, handle: &BlockHandle, root_hash: &HashBytes) -> Result<()> {
+        if handle.meta().has_persistent_state() {
+            return Ok(());
+        }
 
-        let span = tracing::Span::current();
-        let db = self.db.clone();
-        let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
+        rayon_run({
+            let handle = handle.clone();
+            let root_hash = *root_hash;
+            let is_cancelled = self.is_cancelled.clone();
 
-        rayon_run(move || {
-            let _span = span.enter();
-            let cell_writer = state_writer::StateWriter::new(&db, &states_dir, &block_id);
-            match cell_writer.write(&root_hash, is_cancelled.as_deref()) {
-                Ok(()) => tracing::info!(block_id = %block_id, "persistent state saved"),
-                Err(e) => {
-                    tracing::error!(
-                        block_id = %block_id,
-                        "failed to write persistent state: {e:?}"
-                    );
+            let span = tracing::Span::current();
+            let db = self.db.clone();
+            let states_dir = self.prepare_persistent_states_dir(handle.mc_ref_seqno())?;
+            let block_handles = self.block_handle_storage.clone();
 
-                    if let Err(e) = cell_writer.remove() {
-                        tracing::error!(%block_id, "{e}");
+            move || {
+                let _span = span.enter();
+                let cell_writer = state_writer::StateWriter::new(&db, &states_dir, handle.id());
+                match cell_writer.write(&root_hash, Some(&is_cancelled)) {
+                    Ok(()) => {
+                        block_handles.set_has_persistent_state(&handle);
+                        tracing::info!(block_id = %handle.id(), "persistent state saved");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            block_id = %handle.id(),
+                            "failed to write persistent state: {e:?}"
+                        );
+
+                        if let Err(e) = cell_writer.remove() {
+                            tracing::error!(block_id = %handle.id(), "{e}");
+                        }
                     }
                 }
             }
         })
         .await;
 
-        self.cache_state(mc_seqno, &block_id)
+        self.cache_state(handle)
     }
 
     pub fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<FileDb> {
@@ -167,11 +173,12 @@ impl PersistentStateStorage {
 
             let mut index = self.mc_seqno_to_block_ids.lock();
             index.retain(|&mc_seqno, block_ids| {
-                if mc_seqno >= recent_mc_seqno {
+                if mc_seqno >= recent_mc_seqno || mc_seqno == 0 {
                     return true;
                 }
 
                 for block_id in block_ids.drain(..) {
+                    // TODO: Clear flag in block handle
                     self.descriptor_cache.remove(&block_id);
                 }
                 false
@@ -206,8 +213,7 @@ impl PersistentStateStorage {
                 continue;
             };
 
-            let is_recent =
-                matches!(name.parse::<u32>(), Ok(seqno) if seqno >= recent_block_id.seqno);
+            let is_recent = matches!(name.parse::<u32>(), Ok(seqno) if seqno >= recent_block_id.seqno || seqno == 0);
 
             if !is_recent {
                 directories_to_remove.push(path);
@@ -231,6 +237,7 @@ impl PersistentStateStorage {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     fn preload_states(&self) -> Result<()> {
         // For each mc_seqno directory
         let process_states = |path: &PathBuf, mc_seqno: u32| -> Result<()> {
@@ -251,8 +258,18 @@ impl PersistentStateStorage {
                         break 'file;
                     };
 
+                    let Some(handle) = self.block_handle_storage.load_handle(&block_id) else {
+                        tracing::warn!(%block_id, "block handle not found");
+                        continue 'outer;
+                    };
+
+                    if handle.meta().masterchain_ref_seqno() != mc_seqno {
+                        tracing::warn!(%block_id, mc_seqno, "block handle has wrong ref seqno");
+                        continue 'outer;
+                    }
+
                     // Cache the state
-                    self.cache_state(mc_seqno, &block_id)?;
+                    self.cache_state(&handle)?;
                     continue 'outer;
                 }
                 tracing::warn!(path = %path.display(), "unexpected file");
@@ -287,8 +304,11 @@ impl PersistentStateStorage {
         Ok(())
     }
 
-    fn cache_state(&self, mc_seqno: u32, block_id: &BlockId) -> Result<()> {
+    fn cache_state(&self, block_handle: &BlockHandle) -> Result<()> {
         use dashmap::mapref::entry::Entry;
+
+        let mc_seqno = block_handle.mc_ref_seqno();
+        let block_id = block_handle.id();
 
         let states = self.mc_states_dir(mc_seqno);
         let mut file = states.file(block_id.to_string());
