@@ -145,7 +145,7 @@ pub(super) struct PrevData {
     pure_states: Vec<ShardStateStuff>,
     pure_state_root: Cell,
 
-    gen_chain_time: u32,
+    gen_chain_time: u64,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
     gas_used_from_last_anchor: AtomicU64,
@@ -178,6 +178,7 @@ impl PrevData {
         )?];
 
         let gen_utime = observable_states[0].state().gen_utime;
+        let gen_utime_ms = observable_states[0].state().gen_utime_ms;
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
@@ -195,7 +196,7 @@ impl PrevData {
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root.clone(),
 
-            gen_chain_time: gen_utime,
+            gen_chain_time: gen_utime as u64 * 1000 + gen_utime_ms as u64,
             gen_lt,
             total_validator_fees,
             gas_used_from_last_anchor,
@@ -253,7 +254,7 @@ impl PrevData {
         &self.pure_state_root
     }
 
-    pub fn gen_chain_time(&self) -> u32 {
+    pub fn gen_chain_time(&self) -> u64 {
         self.gen_chain_time
     }
 
