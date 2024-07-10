@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -326,6 +326,8 @@ impl StateNodeAdapterStdImpl {
         block_boc: &[u8],
         signatures: &FastHashMap<HashBytes, Signature>,
     ) -> Result<Box<BlockProof>> {
+        static EMPTY_SIGNATURES: OnceLock<FastHashMap<HashBytes, Signature>> = OnceLock::new();
+
         let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
 
         let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
@@ -353,7 +355,11 @@ impl StateNodeAdapterStdImpl {
         let signatures = Self::process_signatures(
             info.gen_validator_list_hash_short,
             info.gen_catchain_seqno,
-            signatures,
+            if block_id.is_masterchain() {
+                signatures
+            } else {
+                EMPTY_SIGNATURES.get_or_init(FastHashMap::default)
+            },
         )?;
 
         Ok(Box::new(BlockProof {

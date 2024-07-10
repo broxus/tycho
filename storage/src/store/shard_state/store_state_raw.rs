@@ -233,7 +233,7 @@ impl StoreStateRaw {
         self.cell_storage.apply_temp_cell(&HashBytes(*root_hash))?;
         ctx.clear_temp_cells(&self.db)?;
 
-        let shard_state_key = self.block_id.as_short_id().to_vec();
+        let shard_state_key = self.block_id.to_vec();
         self.db.shard_states.insert(&shard_state_key, root_hash)?;
 
         progress_bar.complete();

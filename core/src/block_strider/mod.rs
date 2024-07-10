@@ -137,10 +137,12 @@ where
     pub async fn run(self) -> Result<()> {
         tracing::info!("block strider loop started");
 
-        let mut next_master_fut = JoinTask::new(self.fetch_next_master_block());
+        let mut next_master_fut =
+            JoinTask::new(self.fetch_next_master_block(&self.state.load_last_mc_block_id()));
+
         while let Some(next) = next_master_fut.await {
             // NOTE: Start fetching the next master block in parallel to the processing of the current one
-            next_master_fut = JoinTask::new(self.fetch_next_master_block());
+            next_master_fut = JoinTask::new(self.fetch_next_master_block(next.id()));
 
             let _histogram = HistogramGuard::begin("tycho_core_process_strider_step_time");
             self.process_mc_block(next.data, next.archive_data).await?;
@@ -296,13 +298,14 @@ where
 
     fn fetch_next_master_block(
         &self,
+        prev_block_id: &BlockId,
     ) -> impl Future<Output = Option<BlockStuffAug>> + Send + 'static {
         let _histogram = HistogramGuard::begin("tycho_core_download_mc_block_time");
 
-        let prev_block_id = self.state.load_last_mc_block_id();
         tracing::debug!(%prev_block_id, "fetching next master block");
 
         let provider = self.provider.clone();
+        let prev_block_id = *prev_block_id;
         async move {
             loop {
                 match provider.get_next_block(&prev_block_id).await? {

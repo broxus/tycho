@@ -407,7 +407,7 @@ impl BlockchainRpcClient {
 
             return match err {
                 None => Err(Error::Internal(anyhow::anyhow!(
-                    "no neighbour has the requested archive"
+                    "no neighbour has the requested archive",
                 ))),
                 Some(err) => Err(err),
             };

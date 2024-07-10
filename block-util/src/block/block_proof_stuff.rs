@@ -155,8 +155,8 @@ impl BlockProofStuff {
         );
 
         anyhow::ensure!(
-            block_id.is_masterchain()
-                != (info.after_merge || info.before_split || info.after_split),
+            !block_id.is_masterchain()
+                || !info.after_merge && !info.before_split && !info.after_split,
             "proof has incorrect split/merge flags in block info",
         );
 
