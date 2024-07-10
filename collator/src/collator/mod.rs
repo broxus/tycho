@@ -321,6 +321,11 @@ impl CollatorStdImpl {
             .as_ref()
             .map(|upto| upto.processed_to.0)
         {
+            tracing::info!(target: tracing_targets::COLLATOR,
+                "Collator (block_id={}): init: import anchors from processed upto anchor id {} ...",
+                self.next_block_id_short,
+                processed_upto_anchor_id,
+            );
             self.import_anchors_on_init(
                 processed_upto_anchor_id,
                 working_state.prev_shard_data.gen_chain_time(),
