@@ -508,6 +508,7 @@ impl<B> Inner<B> {
         let block_storage = self.storage.block_storage();
 
         let get_archive_slice = || {
+            // TODO: Add a range check for the `limit` field
             let Some(archive_slice) = block_storage.get_archive_slice(
                 req.archive_id as u32,
                 req.offset as usize,

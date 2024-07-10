@@ -51,7 +51,9 @@ impl<T> Future for JoinTask<T> {
                 if e.is_panic() {
                     std::panic::resume_unwind(e.into_panic());
                 }
-                unreachable!()
+
+                // Can only happen on program termination
+                Poll::Pending
             }
         }
     }

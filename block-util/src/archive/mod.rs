@@ -186,7 +186,7 @@ pub struct WithArchiveDataError;
 
 #[derive(thiserror::Error, Debug)]
 pub enum ArchiveError {
-    #[error("mc block seqno out of range")]
+    #[error("block id is out of range")]
     OutOfRange,
     #[error("block not found")]
     BlockNotFound,

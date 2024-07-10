@@ -370,7 +370,7 @@ impl BlockchainRpcClient {
         mc_seqno: u32,
         output: &mut (dyn Write + Send),
     ) -> Result<usize, Error> {
-        const CHUNK_SIZE: u32 = 2 << 20; // 2 MB
+        const CHUNK_SIZE: u32 = 5 << 20; // 5 MB
 
         // TODO: Iterate through all known (or unknown) neighbours
         const NEIGHBOUR_COUNT: usize = 10;
@@ -413,6 +413,8 @@ impl BlockchainRpcClient {
             };
         };
 
+        tracing::debug!(peer_id = %neighbour.peer_id(), archive_id, "archive found");
+
         let mut verifier = ArchiveVerifier::default();
 
         // TODO: add retry count to interrupt infinite loop
@@ -432,6 +434,11 @@ impl BlockchainRpcClient {
             match res {
                 Ok(res) => {
                     let chunk = &res.data().data;
+
+                    tracing::debug!(
+                        downloaded = %bytesize::ByteSize::b(offset + chunk.len() as u64),
+                        "got archive chunk"
+                    );
 
                     verifier.write_verify(chunk).map_err(|e| {
                         Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))

@@ -116,11 +116,11 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'_> {
         Box::pin(async {
-            let res = self.left.get_block(block_id).await;
-            if res.is_some() {
-                return res;
+            if self.is_right.load(Ordering::Acquire) {
+                self.right.get_block(block_id).await
+            } else {
+                self.left.get_block(block_id).await
             }
-            self.right.get_block(block_id).await
         })
     }
 }
