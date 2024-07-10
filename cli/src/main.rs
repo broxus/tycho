@@ -5,10 +5,10 @@ use std::sync::OnceLock;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-
-use crate::tools::storage_cli::StorageCmd;
+use tycho_control::*;
 
 mod tools {
+    pub mod control;
     pub mod gen_account;
     pub mod gen_dht;
     pub mod gen_key;
@@ -58,13 +58,10 @@ impl App {
 enum Cmd {
     #[clap(subcommand)]
     Node(NodeCmd),
-
     #[clap(subcommand)]
     Tool(ToolCmd),
     #[clap(subcommand)]
-    Storage(StorageCmd),
-    //#[clap(subcommand)]
-    //Control()
+    Control(ControlServerCmd),
 }
 
 impl Cmd {
@@ -72,7 +69,7 @@ impl Cmd {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
-            Cmd::Storage(cmd) => cmd.run(),
+            Cmd::Control(cmd) => cmd.run(),
         }
     }
 }
@@ -108,6 +105,37 @@ impl ToolCmd {
             ToolCmd::GenZerostate(cmd) => cmd.run(),
             ToolCmd::GenAccount(cmd) => cmd.run(),
         }
+    }
+}
+
+#[derive(Subcommand)]
+pub enum ControlServerCmd {
+    Ping(PingCmd),
+    TriggerGc(TriggerGcCmd),
+    GetBlockFull(GetBlockFullCmd),
+}
+
+impl ControlServerCmd {
+    pub(crate) fn run(self) -> anyhow::Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        rt.block_on(async move {
+            match self {
+                Self::Ping(cmd) => cmd.run().await,
+                Self::TriggerGc(cmd) => cmd.run().await,
+                // Self::GetNextKeyblockIds(cmd) => cmd.run(),
+                Self::GetBlockFull(cmd) => cmd.run().await,
+                // Self::GetNextBlockFull(cmd) => cmd.run_next().await,
+                // Self::GetArchiveInfo(cmd) => cmd.run(),
+                // Self::GetArchiveSlice(cmd) => cmd.run(),
+                // Self::GetPersistentStateInfo(cmd) => cmd.get_state_info(),
+                // Self::GetPersistentStatePart => Ok(()),
+            }
+        });
+
+        Ok(())
     }
 }
 

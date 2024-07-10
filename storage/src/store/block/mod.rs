@@ -580,9 +580,8 @@ impl BlockStorage {
         mc_seqno: u32,
         max_blocks_per_batch: Option<usize>,
     ) -> Result<()> {
-
         if mc_seqno == 0 {
-            return Ok(())
+            return Ok(());
         }
 
         tracing::info!("started blocks GC for mc_block {mc_seqno}");

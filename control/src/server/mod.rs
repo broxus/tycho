@@ -1,36 +1,44 @@
-use std::net::SocketAddr;
+use std::future::Future;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::BlockId;
+use everscale_types::models::{Block, BlockId};
 use futures_util::StreamExt;
 use tarpc::context::Context;
+use tarpc::serde::Serialize;
 use tarpc::server::incoming::Incoming;
 use tarpc::server::{self, Channel};
 use tarpc::tokio_serde::formats::Json;
 use tarpc::{client, context};
 use tokio::net::ToSocketAddrs;
+use tycho_core::block_strider::{GcTrigger, TriggerTx};
 use tycho_storage::{KeyBlocksDirection, Storage};
 
+use crate::models::BlockFull;
 use crate::ControlServer;
 
 #[derive(Clone)]
 pub struct ControlServerImpl {
+    connection_address: SocketAddr,
     inner: Arc<Inner>,
 }
 
 impl ControlServerImpl {
-    fn create(address: SocketAddr, storage: Storage) -> Self {
+    fn create_inner(storage: Storage, trigger_tx: TriggerTx) -> Arc<Inner> {
         let inner = Inner {
-            socket_address: address,
             storage,
+            gc_trigger: trigger_tx,
         };
 
-        Self {
-            inner: Arc::new(inner),
-        }
+        Arc::new(inner)
     }
-    pub async fn serve<A: ToSocketAddrs>(addr: A, storage: Storage) -> Result<()> {
+    pub async fn serve<A: ToSocketAddrs>(
+        addr: A,
+        storage: Storage,
+        trigger_tx: TriggerTx,
+    ) -> Result<()> {
+        let inner = Self::create_inner(storage, trigger_tx);
         let mut listener = tarpc::serde_transport::tcp::listen(&addr, Json::default).await?;
         tracing::info!(target:"control", "Cli Tarpc listening on port {}", listener.local_addr().port());
         listener.config_mut().max_frame_length(usize::MAX);
@@ -41,8 +49,11 @@ impl ControlServerImpl {
             // Limit channels to 1 per IP.
             .max_channels_per_key(1, |t| t.transport().peer_addr().unwrap().ip())
             .map(|channel| {
-                let server =
-                    Self::create(channel.transport().peer_addr().unwrap(), storage.clone());
+                let server = ControlServerImpl {
+                    connection_address: channel.transport().peer_addr().unwrap(),
+                    inner: inner.clone(),
+                };
+
                 channel.execute(server.serve()).for_each(|x| async move {
                     tokio::spawn(x);
                 })
@@ -59,6 +70,13 @@ impl ControlServerImpl {
 impl ControlServer for ControlServerImpl {
     async fn ping(self, _: Context, i: u32) -> u32 {
         i.saturating_add(1)
+    }
+
+    async fn trigger_gc(self, _: Context, mc_block_id: BlockId, last_key_block_seqno: u32) -> () {
+        self.inner.gc_trigger.send_replace(Some(GcTrigger {
+            mc_block_id,
+            last_key_block_seqno,
+        }));
     }
 
     async fn get_next_key_blocks_ids(
@@ -92,10 +110,35 @@ impl ControlServer for ControlServerImpl {
 
         Some(iterator.take(max_size).collect::<Vec<_>>())
     }
+
+    async fn get_block_full(self, _: Context, block_id: BlockId) -> Option<BlockFull> {
+        let block_handle_storage = self.inner.storage.block_handle_storage();
+        let block_storage = self.inner.storage.block_storage();
+
+        let mut is_link = false;
+        match block_handle_storage.load_handle(&block_id) {
+            Some(handle) if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) => {
+                let block = block_storage.load_block_data_raw(&handle).await;
+                let proof = block_storage.load_block_proof_raw(&handle, is_link).await;
+                match (block, proof) {
+                    (Ok(block), Ok(proof)) => Some(BlockFull {
+                        id: block_id,
+                        block,
+                        proof,
+                        is_link,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => {
+                tracing::error!("Found block empty {}\n", &block_id);
+                None
+            }
+        }
+    }
 }
 
 struct Inner {
-    socket_address: SocketAddr,
-
     storage: Storage,
+    gc_trigger: TriggerTx,
 }
