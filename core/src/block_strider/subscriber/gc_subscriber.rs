@@ -9,6 +9,7 @@ use rand::Rng;
 use scopeguard::defer;
 use tokio::select;
 use tokio::sync::watch;
+use tokio::sync::watch::{Receiver, Sender};
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_storage::{BlocksGcType, Storage};
@@ -25,13 +26,12 @@ pub struct GcSubscriber {
 }
 
 impl GcSubscriber {
-    pub fn new(storage: Storage) -> Self {
+    pub fn new(trigger_rx: TriggerRx, trigger_tx: TriggerTx, storage: Storage) -> Self {
         let last_key_block_seqno = storage
             .block_handle_storage()
             .find_last_key_block()
             .map_or(0, |handle| handle.id().seqno);
 
-        let (trigger_tx, trigger_rx) = watch::channel(None::<Trigger>);
         let blocks_gc = tokio::spawn(Self::blocks_gc(trigger_rx.clone(), storage.clone()));
         let states_gc = tokio::spawn(Self::states_gc(trigger_rx, storage.clone()));
         let archives_gc = tokio::spawn(Self::archives_gc(storage));
@@ -58,7 +58,7 @@ impl GcSubscriber {
                 .store(block.id().seqno, Ordering::Relaxed);
         }
 
-        self.inner.trigger_tx.send_replace(Some(Trigger {
+        self.inner.trigger_tx.send_replace(Some(GcTrigger {
             last_key_block_seqno: self.inner.last_key_block_seqno.load(Ordering::Relaxed),
             mc_block_id: *block.id(),
         }));
@@ -279,13 +279,13 @@ impl Drop for Inner {
 }
 
 #[derive(Debug, Clone)]
-struct Trigger {
-    mc_block_id: BlockId,
-    last_key_block_seqno: u32,
+pub struct GcTrigger {
+    pub mc_block_id: BlockId,
+    pub last_key_block_seqno: u32,
 }
 
-type TriggerTx = watch::Sender<Option<Trigger>>;
-type TriggerRx = watch::Receiver<Option<Trigger>>;
+pub type TriggerTx = watch::Sender<Option<GcTrigger>>;
+pub type TriggerRx = watch::Receiver<Option<GcTrigger>>;
 
 impl StateSubscriber for GcSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;

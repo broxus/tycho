@@ -9,6 +9,8 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
+use tokio::sync::watch;
+use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
@@ -22,6 +24,7 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
+use tycho_control::ControlServerImpl;
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
@@ -40,8 +43,6 @@ use tycho_network::{
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
 use tycho_util::cli::{LoggerConfig, LoggerTargets};
-
-use tycho_control::ControlServerImpl;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::util::alloc::memory_profiler;
@@ -299,6 +300,8 @@ pub struct Node {
 
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
+
+    control_server_port: u16,
 }
 
 impl Node {
@@ -420,6 +423,7 @@ impl Node {
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
+            control_server_port: node_config.control_server_port,
         })
     }
 
@@ -575,6 +579,8 @@ impl Node {
         let _archive_block_provider =
             ArchiveBlockProvider::new(self.blockchain_rpc_client.clone(), self.storage.clone());
 
+        let (trigger_tx, trigger_rx) = watch::channel(None::<tycho_core::block_strider::GcTrigger>);
+
         let block_strider = BlockStrider::builder()
             .with_provider((
                 (blockchain_block_provider, storage_block_provider),
@@ -590,13 +596,28 @@ impl Node {
                     ),
                     (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
-                    .chain(GcSubscriber::new(self.storage.clone())),
+                    .chain(GcSubscriber::new(
+                        trigger_rx.clone(),
+                        trigger_tx.clone(),
+                        self.storage.clone(),
+                    )),
             )
             .build();
 
-
-        let address = SocketAddr::from(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 15022));
-        ControlServerImpl::serve(address, self.storage.clone()).await?;
+        tokio::spawn(async move {
+            if let Err(e) = ControlServerImpl::serve(
+                SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::LOCALHOST,
+                    self.control_server_port,
+                )),
+                self.storage.clone(),
+                trigger_tx.clone(),
+            )
+            .await
+            {
+                tracing::error!("Failed to start control server. {e:?}");
+            }
+        });
 
         // Run block strider
         tracing::info!("block strider started");
