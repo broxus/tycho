@@ -3336,6 +3336,7 @@ name = "tycho-collator"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "backon",
  "base64 0.22.1",
@@ -3355,6 +3356,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
  "tl-proto",
  "tokio",
  "tokio-util",

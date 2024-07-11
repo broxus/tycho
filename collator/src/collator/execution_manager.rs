@@ -19,7 +19,7 @@ use tycho_util::FastHashMap;
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
     AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, MessageGroup, MessageGroups,
-    ParsedMessage, ShardAccountStuff,
+    ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::internal_queue::types::{InternalMessageKey, InternalMessageKeyOpt};
@@ -154,6 +154,7 @@ impl ExecutionManager {
         collation_data: &mut BlockCollationData,
         mq_iterator_adapter: &mut QueueIteratorAdapter,
         max_new_message_key_to_current_shard: InternalMessageKey,
+        working_state: &WorkingState,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
 
@@ -170,10 +171,7 @@ impl ExecutionManager {
                     will init iterator for current not fully processed ranges or next available"
                 );
                 mq_iterator_adapter
-                    .try_init_next_range_iterator(
-                        &mut collation_data.processed_upto,
-                        collator.working_state(),
-                    )
+                    .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
                     .await?;
             }
 
@@ -251,10 +249,7 @@ impl ExecutionManager {
                 }
 
                 let next_range_iterator_initialized = mq_iterator_adapter
-                    .try_init_next_range_iterator(
-                        &mut collation_data.processed_upto,
-                        collator.working_state(),
-                    )
+                    .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
                     .await?;
                 if !next_range_iterator_initialized {
                     tracing::debug!(target: tracing_targets::COLLATOR,
