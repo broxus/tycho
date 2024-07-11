@@ -15,7 +15,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
-use super::execution_manager::ExecutionManager;
+use super::execution_manager::{ExecutionManager, MessagesExecutor};
 use super::types::{
     BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin, WorkingState,
 };
@@ -149,7 +149,8 @@ impl CollatorStdImpl {
         // prepare to read and execute internals and externals
 
         // init executor
-        exec_manager.init_executor(
+        let mut executor = MessagesExecutor::new(
+            self.shard_id,
             collation_data.next_lt,
             Arc::new(PreloadedBlockchainConfig::with_config(
                 mc_data.config.clone(),
@@ -170,7 +171,7 @@ impl CollatorStdImpl {
         );
 
         // create iterator adapter
-        let mut mq_iterator_adapter = exec_manager.create_iterator_adapter(self.mq_adapter.clone());
+        let mut mq_iterator_adapter = exec_manager.create_iterator_adapter();
 
         let prepare_elapsed = prepare_histogram.finish();
 
@@ -184,11 +185,11 @@ impl CollatorStdImpl {
                 &mc_data,
                 TickTock::Tick,
                 &mut collation_data,
-                &mut exec_manager,
+                &mut executor,
             )
             .await?;
 
-            self.create_special_transactions(&mc_data, &mut collation_data, &mut exec_manager)
+            self.create_special_transactions(&mc_data, &mut collation_data, &mut executor)
                 .await?;
 
             execute_tick_elapsed = histogram.finish();
@@ -223,10 +224,7 @@ impl CollatorStdImpl {
                 if let Some(msgs_group) = msgs_group_opt {
                     // Execute messages group
                     timer = std::time::Instant::now();
-                    let group_result = exec_manager
-                        .executor_mut()
-                        .execute_group(msgs_group)
-                        .await?;
+                    let group_result = executor.execute_group(msgs_group).await?;
                     execute_msgs_total_elapsed += timer.elapsed();
                     executed_groups_count += 1;
                     collation_data.tx_count += group_result.items.len() as u64;
@@ -269,7 +267,7 @@ impl CollatorStdImpl {
                             )?;
                         }
 
-                        collation_data.next_lt = exec_manager.executor().min_next_lt();
+                        collation_data.next_lt = executor.min_next_lt();
                         collation_data.block_limit.lt_current = collation_data.next_lt;
                     }
                     process_txs_total_elapsed += timer.elapsed();
@@ -318,7 +316,7 @@ impl CollatorStdImpl {
                 &mc_data,
                 TickTock::Tock,
                 &mut collation_data,
-                &mut exec_manager,
+                &mut executor,
             )
             .await?;
             execute_tock_elapsed = histogram.finish();
@@ -342,7 +340,7 @@ impl CollatorStdImpl {
         // TODO: Move into rayon
         tokio::task::yield_now().await;
         let finalized = tokio::task::block_in_place(|| {
-            self.finalize_block(&mut collation_data, &mut exec_manager, &working_state)
+            self.finalize_block(&mut collation_data, executor, &working_state)
         })?;
         tokio::task::yield_now().await;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
@@ -361,7 +359,12 @@ impl CollatorStdImpl {
                 mc_ref_seqno: None,
             };
             let adapter = self.state_node_adapter.clone();
+            let labels = [("workchain", self.shard_id.workchain().to_string())];
             async move {
+                let _histogram = HistogramGuard::begin_with_labels(
+                    "tycho_collator_build_new_state_time",
+                    &labels,
+                );
                 adapter
                     .store_state_root(&block_id, meta, finalized.new_state_root)
                     .await
@@ -916,7 +919,7 @@ impl CollatorStdImpl {
         &self,
         mc_data: &McData,
         collator_data: &mut BlockCollationData,
-        exec_manager: &mut ExecutionManager,
+        executor: &mut MessagesExecutor,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions");
 
@@ -930,7 +933,7 @@ impl CollatorStdImpl {
                 collator_data.value_flow.recovered.clone(),
                 SpecialOrigin::Recover,
                 collator_data,
-                exec_manager,
+                executor,
             )
             .await?;
         }
@@ -944,7 +947,7 @@ impl CollatorStdImpl {
                 collator_data.value_flow.minted.clone(),
                 SpecialOrigin::Mint,
                 collator_data,
-                exec_manager,
+                executor,
             )
             .await?;
         }
@@ -958,7 +961,7 @@ impl CollatorStdImpl {
         amount: CurrencyCollection,
         special_origin: SpecialOrigin,
         collation_data: &mut BlockCollationData,
-        exec_manager: &mut ExecutionManager,
+        executor: &mut MessagesExecutor,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -968,10 +971,7 @@ impl CollatorStdImpl {
             "create_special_transaction",
         );
 
-        let Some(account_stuff) = exec_manager
-            .executor_mut()
-            .take_account_stuff_if(account_id, |_| true)?
-        else {
+        let Some(account_stuff) = executor.take_account_stuff_if(account_id, |_| true)? else {
             return Ok(());
         };
 
@@ -1004,8 +1004,7 @@ impl CollatorStdImpl {
             })
         };
 
-        let executed = exec_manager
-            .executor_mut()
+        let executed = executor
             .execute_ordinary_transaction(account_stuff, in_message)
             .await?;
 
@@ -1018,7 +1017,7 @@ impl CollatorStdImpl {
             executed.in_message,
         )?;
 
-        collation_data.next_lt = exec_manager.executor().min_next_lt();
+        collation_data.next_lt = executor.min_next_lt();
         Ok(())
     }
 
@@ -1027,7 +1026,7 @@ impl CollatorStdImpl {
         mc_data: &McData,
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
-        exec_manager: &mut ExecutionManager,
+        executor: &mut MessagesExecutor,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -1039,11 +1038,11 @@ impl CollatorStdImpl {
 
         let config = &mc_data.config;
         for account_id in config.get_fundamental_addresses()?.keys() {
-            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data, exec_manager)
+            self.create_ticktock_transaction(&account_id?, tick_tock, collation_data, executor)
                 .await?;
         }
 
-        self.create_ticktock_transaction(&config.address, tick_tock, collation_data, exec_manager)
+        self.create_ticktock_transaction(&config.address, tick_tock, collation_data, executor)
             .await?;
         Ok(())
     }
@@ -1053,7 +1052,7 @@ impl CollatorStdImpl {
         account_id: &HashBytes,
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
-        exec_manager: &mut ExecutionManager,
+        executor: &mut MessagesExecutor,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::COLLATOR,
@@ -1062,19 +1061,16 @@ impl CollatorStdImpl {
             "create_ticktock_transaction",
         );
 
-        let Some(account_stuff) = exec_manager.executor_mut().take_account_stuff_if(
-            &account_id,
-            |stuff| match tick_tock {
+        let Some(account_stuff) =
+            executor.take_account_stuff_if(&account_id, |stuff| match tick_tock {
                 TickTock::Tick => stuff.special.tick,
                 TickTock::Tock => stuff.special.tock,
-            },
-        )?
+            })?
         else {
             return Ok(());
         };
 
-        let _executor_output = exec_manager
-            .executor_mut()
+        let _executor_output = executor
             .execute_ticktock_transaction(account_stuff, tick_tock)
             .await?;
 
@@ -1082,7 +1078,7 @@ impl CollatorStdImpl {
         // new_transaction(collation_data, &self.shard_id, transaction.1, async_message)?;
 
         collation_data.execute_count_all += 1;
-        collation_data.next_lt = exec_manager.executor().min_next_lt();
+        collation_data.next_lt = executor.min_next_lt();
         Ok(())
     }
 
