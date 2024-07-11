@@ -5,7 +5,7 @@ use everscale_types::prelude::*;
 
 use crate::collator::types::{BlockCollationDataBuilder, CachedMempoolAnchor};
 use crate::collator::CollatorStdImpl;
-use crate::mempool::_stub_create_random_anchor_with_stub_externals;
+use crate::mempool::make_stub_anchor;
 use crate::test_utils::try_init_test_tracing;
 
 #[test]
@@ -20,18 +20,18 @@ fn test_read_next_externals() {
         if anchor_id % 4 != 0 {
             continue;
         }
-        let anchor = _stub_create_random_anchor_with_stub_externals(anchor_id);
-        let has_externals = anchor.check_has_externals_for(&shard_id);
+        let anchor = make_stub_anchor(anchor_id);
+        let has_externals = anchor.has_externals_for(&shard_id);
         tracing::trace!(
             "anchor (id: {}, chain_time: {}, externals_count: {}): has_externals for shard {}: {}, externals dst: {:?}",
             anchor_id,
-            anchor.chain_time(),
-            anchor.externals_count(),
+            anchor.chain_time,
+            anchor.externals.len(),
             shard_id,
             has_externals,
             anchor
-                .externals_iterator(0)
-                .map(|ext_msg| ext_msg.info().dst.to_string())
+                .iter_externals(0)
+                .map(|ext_msg| ext_msg.info.dst.to_string())
                 .collect::<Vec<_>>()
                 .as_slice(),
         );

@@ -111,11 +111,7 @@ async fn persistent_storage_everscale() -> Result<()> {
 
     storage
         .persistent_state_storage()
-        .store_state(
-            zerostate.state().seqno,
-            zerostate.block_id(),
-            zero_state_raw.cell.repr_hash(),
-        )
+        .store_state(&handle, zero_state_raw.cell.repr_hash())
         .await?;
 
     // Check if state exists

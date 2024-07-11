@@ -513,7 +513,7 @@ impl CollatorStdImpl {
             }
         };
 
-        let externals_count = next_anchor.externals_count_for(&self.shard_id);
+        let externals_count = next_anchor.count_externals_for(&self.shard_id);
         let has_externals = externals_count > 0;
         if has_externals {
             self.has_pending_externals = true;
@@ -523,13 +523,13 @@ impl CollatorStdImpl {
             .increment(externals_count as _);
 
         let chain_time_elapsed =
-            next_anchor.chain_time() - self.last_imported_anchor_chain_time.unwrap_or_default();
+            next_anchor.chain_time - self.last_imported_anchor_chain_time.unwrap_or_default();
 
-        self.last_imported_anchor_id = Some(next_anchor.id());
-        self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
-        self.last_imported_anchor_author = Some(next_anchor.author());
+        self.last_imported_anchor_id = Some(next_anchor.id);
+        self.last_imported_anchor_chain_time = Some(next_anchor.chain_time);
+        self.last_imported_anchor_author = Some(next_anchor.author);
         self.anchors_cache
-            .push_back((next_anchor.id(), CachedMempoolAnchor {
+            .push_back((next_anchor.id, CachedMempoolAnchor {
                 anchor: next_anchor.clone(),
                 has_externals,
             }));
@@ -538,9 +538,9 @@ impl CollatorStdImpl {
             elapsed = timer.elapsed().as_millis(),
             chain_time_elapsed,
             "imported next anchor (id: {}, chain_time: {}, externals: {})",
-            next_anchor.id(),
-            next_anchor.chain_time(),
-            next_anchor.externals_count(),
+            next_anchor.id,
+            next_anchor.chain_time,
+            next_anchor.externals.len(),
         );
 
         Ok((next_anchor, has_externals))

@@ -23,6 +23,7 @@ impl ExternalMessageCache {
             round_threshold,
         }
     }
+
     pub fn check_unique(&mut self, anchor_round: MempoolAnchorId, hash: &HashBytes) -> bool {
         if self
             .round_to_hashes
@@ -89,9 +90,7 @@ impl ExternalMessageCache {
 
 #[cfg(test)]
 mod tests {
-    use everscale_types::prelude::HashBytes;
-
-    use crate::mempool::external_message_cache::ExternalMessageCache;
+    use super::*;
 
     #[test]
     pub fn dedup_externals_test() {
