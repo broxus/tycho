@@ -557,9 +557,9 @@ impl CollatorStdImpl {
         }
 
         let mut next_anchor_chain_time = next_anchor.chain_time();
-        let mut last_anchor_id = processed_upto_anchor_id;
+        let mut last_anchor_id = next_anchor.id();
         self.anchors_cache
-            .push_back((processed_upto_anchor_id, CachedMempoolAnchor {
+            .push_back((last_anchor_id, CachedMempoolAnchor {
                 anchor: next_anchor.clone(),
                 has_externals,
             }));
@@ -569,7 +569,7 @@ impl CollatorStdImpl {
             chain_time: next_anchor_chain_time,
             externals_count,
         });
-        while last_block_chain_time > next_anchor_chain_time {
+        while last_block_chain_time >= next_anchor_chain_time {
             next_anchor = self.mpool_adapter.get_next_anchor(last_anchor_id).await?;
 
             externals_count = next_anchor.externals_count_for(&self.shard_id);
@@ -581,7 +581,7 @@ impl CollatorStdImpl {
             next_anchor_chain_time = next_anchor.chain_time();
             last_anchor_id = next_anchor.id();
             self.anchors_cache
-                .push_back((processed_upto_anchor_id, CachedMempoolAnchor {
+                .push_back((last_anchor_id, CachedMempoolAnchor {
                     anchor: next_anchor.clone(),
                     has_externals,
                 }));
@@ -602,7 +602,8 @@ impl CollatorStdImpl {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             elapsed = timer.elapsed().as_millis(),
-            "imported anchors on init ({:?})",
+            "Collator (block_id={}): init: imported anchors on init ({:?})",
+            self.next_block_id_short,
             anchors
         );
 
