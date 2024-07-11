@@ -1,23 +1,25 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
+use arc_swap::ArcSwap;
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, BlockchainConfig, CurrencyCollection, ExtInMsgInfo, HashUpdate, ImportFees, InMsg,
-    IntMsgInfo, Lazy, LibDescr, McStateExtra, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
-    ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees,
-    ShardIdent, ShardIdentFull, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    BlockRef, CurrencyCollection, ExtInMsgInfo, HashUpdate, ImportFees, InMsg, IntMsgInfo, Lazy,
+    LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::MempoolAnchor;
-use crate::types::ProofFunds;
+use crate::types::{McData, ProofFunds};
 
 // В текущем коллаторе перед коллацией блока импортируется:
 // - предыдущий мастер стейт
@@ -93,91 +95,44 @@ use crate::types::ProofFunds;
 // из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
 
 pub(super) struct WorkingState {
-    pub mc_data: McData,
+    pub mc_data: ArcSwap<McData>,
     pub prev_shard_data: PrevData,
     pub usage_tree: UsageTree,
-    pub has_pending_internals: Option<bool>,
+    pub pending_internals: PendingInternalsState,
 }
 
-pub(super) struct McData {
-    global_id: i32,
-    mc_state_extra: McStateExtra,
-    prev_key_block_seqno: u32,
-    // TODO: remove if we do not need this
-    _prev_key_block: Option<BlockId>,
-    mc_state_stuff: ShardStateStuff,
-}
+#[derive(Default)]
+pub struct PendingInternalsState(AtomicU32);
 
-impl McData {
-    pub fn build(mc_state_stuff: ShardStateStuff) -> Result<Self> {
-        let mc_state_extra = mc_state_stuff.state_extra()?;
+impl PendingInternalsState {
+    const INITIALIZED_MASK: u32 = 1;
+    const HAS_INTERNALS_MASK: u32 = 2;
 
-        // prev key block
-        let (prev_key_block_seqno, prev_key_block) = if mc_state_extra.after_key_block {
-            (
-                mc_state_stuff.block_id().seqno,
-                Some(*mc_state_stuff.block_id()),
-            )
-        } else if let Some(block_ref) = mc_state_extra.last_key_block.as_ref() {
-            (
-                block_ref.seqno,
-                Some(BlockId {
-                    shard: ShardIdent::MASTERCHAIN,
-                    seqno: block_ref.seqno,
-                    root_hash: block_ref.root_hash,
-                    file_hash: block_ref.file_hash,
-                }),
-            )
-        } else {
-            (0, None)
-        };
-
-        Ok(Self {
-            global_id: mc_state_stuff.state().global_id,
-            mc_state_extra: mc_state_extra.clone(),
-            _prev_key_block: prev_key_block,
-            prev_key_block_seqno,
-            mc_state_stuff,
-        })
+    pub fn new(has_internals: bool) -> Self {
+        Self(AtomicU32::new(
+            Self::INITIALIZED_MASK | (has_internals as u32) << 1,
+        ))
     }
 
-    pub fn global_id(&self) -> i32 {
-        self.global_id
+    pub fn get(&self) -> Option<bool> {
+        let value = self.0.load(Ordering::Acquire);
+        (value & Self::INITIALIZED_MASK != 0).then(|| value & Self::HAS_INTERNALS_MASK != 0)
     }
 
-    pub fn prev_key_block_seqno(&self) -> u32 {
-        self.prev_key_block_seqno
+    pub fn set(&self, has_internals: bool) {
+        self.0.store(
+            Self::INITIALIZED_MASK | (has_internals as u32) << 1,
+            Ordering::Release,
+        );
     }
 
-    pub fn mc_state_stuff(&self) -> ShardStateStuff {
-        self.mc_state_stuff.clone()
-    }
-
-    pub fn mc_state_extra(&self) -> &McStateExtra {
-        &self.mc_state_extra
-    }
-
-    pub fn get_master_ref(&self) -> BlockRef {
-        let end_lt = self.mc_state_stuff.state().gen_lt;
-        let block_id = self.mc_state_stuff.block_id();
-        BlockRef {
-            end_lt,
-            seqno: block_id.seqno,
-            root_hash: block_id.root_hash,
-            file_hash: block_id.file_hash,
-        }
-    }
-
-    pub fn config(&self) -> &BlockchainConfig {
-        &self.mc_state_extra.config
-    }
-
-    pub fn libraries(&self) -> &Dict<HashBytes, LibDescr> {
-        &self.mc_state_stuff.state().libraries
-    }
-
-    pub fn get_lt_align(&self) -> u64 {
-        1000000
+    pub fn reset_if_no_internals(&self) {
+        _ = self.0.compare_exchange(
+            Self::INITIALIZED_MASK,
+            0,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
     }
 }
 
@@ -193,7 +148,7 @@ pub(super) struct PrevData {
     gen_chain_time: u32,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
-    gas_used_from_last_anchor: u64,
+    gas_used_from_last_anchor: AtomicU64,
     // TODO: remove if we do not need this
     _underload_history: u64,
 
@@ -226,7 +181,8 @@ impl PrevData {
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
-        let gas_used_from_last_anchor = observable_states[0].state().overload_history;
+        let gas_used_from_last_anchor =
+            AtomicU64::new(observable_states[0].state().overload_history);
         let underload_history = observable_states[0].state().underload_history;
         let processed_upto = pure_prev_states[0].state().processed_upto.load()?;
 
@@ -306,11 +262,11 @@ impl PrevData {
     }
 
     pub fn gas_used_from_last_anchor(&self) -> u64 {
-        self.gas_used_from_last_anchor
+        self.gas_used_from_last_anchor.load(Ordering::Acquire)
     }
 
-    pub fn clear_gas_used(&mut self) {
-        self.gas_used_from_last_anchor = 0;
+    pub fn clear_gas_used(&self) {
+        self.gas_used_from_last_anchor.store(0, Ordering::Release);
     }
 
     pub fn total_validator_fees(&self) -> &CurrencyCollection {
