@@ -432,27 +432,25 @@ impl Node {
     async fn boot(&self, zerostates: Option<Vec<PathBuf>>) -> Result<BlockId> {
         let node_state = self.storage.node_state();
 
-        let starter = Starter::new(
-            self.storage.clone(),
-            self.blockchain_rpc_client.clone(),
-            self.zerostate,
-        );
-
-        let last_key_block_id = match node_state.load_last_mc_block_id() {
-            Some(block_id) => starter.warm_boot(&block_id).await?,
+        let last_mc_block_id = match node_state.load_last_mc_block_id() {
+            Some(block_id) => block_id,
             None => {
-                starter
-                    .cold_boot(zerostates.map(FileZerostateProvider))
-                    .await?
+                Starter::new(
+                    self.storage.clone(),
+                    self.blockchain_rpc_client.clone(),
+                    self.zerostate,
+                )
+                .cold_boot(zerostates.map(FileZerostateProvider))
+                .await?
             }
         };
 
         tracing::info!(
-            %last_key_block_id,
+            %last_mc_block_id,
             "boot finished"
         );
 
-        Ok(last_key_block_id)
+        Ok(last_mc_block_id)
     }
 
     async fn run(self, last_block_id: &BlockId) -> Result<()> {

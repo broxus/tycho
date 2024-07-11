@@ -11,7 +11,6 @@ use crate::blockchain_rpc::BlockchainRpcClient;
 use crate::global_config::ZerostateId;
 
 mod cold_boot;
-mod warm_boot;
 
 /// Bootstrapping utils.
 ///
@@ -35,14 +34,6 @@ impl Starter {
                 zerostate,
             }),
         }
-    }
-
-    /// Boot type when the node already synced or started syncing
-    /// (there are states for each workchain).
-    ///
-    /// Returns the last masterchain key block id.
-    pub async fn warm_boot(&self, last_mc_block_id: &BlockId) -> Result<BlockId> {
-        self.inner.warm_boot(*last_mc_block_id).await
     }
 
     /// Boot type when the node has not yet started syncing
