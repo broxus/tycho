@@ -3,16 +3,6 @@
 version = 3
 
 [[package]]
-name = "Inflector"
-version = "0.11.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
-dependencies = [
- "lazy_static",
- "regex",
-]
-
-[[package]]
 name = "addr2line"
 version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -142,9 +132,9 @@ checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 
 [[package]]
 name = "asn1-rs"
-version = "0.6.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22ad1373757efa0f70ec53939aabc7152e1591cb485208052993070ac8d2429d"
+checksum = "7f6fd5ddaf0351dff5b8da21b2fb4ff8e08ddd02857f0bf69c47639106c0fff0"
 dependencies = [
  "asn1-rs-derive",
  "asn1-rs-impl",
@@ -158,9 +148,9 @@ dependencies = [
 
 [[package]]
 name = "asn1-rs-derive"
-version = "0.5.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7378575ff571966e99a744addeff0bff98b8ada0dedf1956d59e634db95eaac1"
+checksum = "726535892e8eae7e70657b4c8ea93d26b8553afb1ce617caee529ef96d7dee6c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -170,9 +160,9 @@ dependencies = [
 
 [[package]]
 name = "asn1-rs-impl"
-version = "0.2.0"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b18050c2cd6fe86c3a76584ef5e0baf286d038cda203eb6223df2cc413565f7"
+checksum = "2777730b2039ac0f95f093556e61b6d26cebed5393ca6f152717777cec3a42ed"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -441,8 +431,7 @@ dependencies = [
 [[package]]
 name = "castaway"
 version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0abae9be0aaf9ea96a3b1b8b1b55c602ca751eba1b1500220cea4ecbafe7c0d5"
+source = "git+https://github.com/sagebind/castaway.git#7e15c4627055c582d45c30a75ac275e20fa69a69"
 dependencies = [
  "rustversion",
 ]
@@ -726,9 +715,9 @@ dependencies = [
 
 [[package]]
 name = "der-parser"
-version = "9.0.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cd0a5c643689626bec213c4d8bd4d96acc8ffdb4ad4bb6bc16abf27d5f4b553"
+checksum = "dbd676fbbab537128ef0278adb5576cf363cff6aa22a7b24effe97347cfab61e"
 dependencies = [
  "asn1-rs",
  "displaydoc",
@@ -798,9 +787,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.13.0"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
+checksum = "3dca9240753cf90908d7e4aac30f630662b02aebaa1b58a3cadabdb23385b58b"
 
 [[package]]
 name = "endian-type"
@@ -1820,9 +1809,9 @@ dependencies = [
 
 [[package]]
 name = "oid-registry"
-version = "0.7.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c958dd45046245b9c3c2547369bb634eb461670b2e7e0de552905801a648d1d"
+checksum = "9bedf36ffb6ba96c2eb7144ef6270557b52e54b20c0a8e1eb2ff99a6c6959bff"
 dependencies = [
  "asn1-rs",
 ]
@@ -2137,9 +2126,9 @@ dependencies = [
 
 [[package]]
 name = "quick_cache"
-version = "0.6.1"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac3327c42419cab9678a66fb21f4c6222b6df3ad9114e56816b0defcd7649e0c"
+checksum = "347e1a588d1de074eeb3c00eadff93db4db65aeb62aee852b1efd0949fe65b6c"
 dependencies = [
  "ahash",
  "equivalent",
@@ -2723,9 +2712,9 @@ checksum = "a7065abeca94b6a8a577f9bd45aa0867a2238b74e8eb67cf10d492bc39351394"
 
 [[package]]
 name = "synstructure"
-version = "0.13.1"
+version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8af7666ab7b6390ab78131fb5b0fce11d6b7a6951602017c35fa82800708971"
+checksum = "f36bdaa60a83aca3921b5259d5400cbf5e90fc51931376a9bd4a0eb79aa7210f"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2969,9 +2958,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.38.1"
+version = "1.38.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb2caba9f80616f438e09748d5acda951967e1ea58508ef53d9c6402485a46df"
+checksum = "ba4f4a02a7a80d6f274636f0aa95c7e383b912d41fe721a31f29e29698585a4a"
 dependencies = [
  "backtrace",
  "bytes",
@@ -3213,23 +3202,11 @@ dependencies = [
 name = "tracing-serde"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc6b213177105856957181934e4920de57730fc69bf42c37ee5bb664d406d9e1"
+checksum = "21ebb87a95ea13271332df069020513ab70bdb5637ca42d6e492dc3bbbad48de"
 dependencies = [
- "serde",
- "tracing-core",
-]
-
-[[package]]
-name = "tracing-stackdriver"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80048836e000e1f058562f01d69cc46f476955bf389c0dc2d2d7edb98ca63ac1"
-dependencies = [
- "Inflector",
- "serde",
- "serde_json",
- "thiserror",
- "time",
+ "once_cell",
+ "opentelemetry",
+ "tracing",
  "tracing-core",
  "tracing-subscriber",
 ]
@@ -3244,15 +3221,33 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex",
- "serde",
- "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
- "tracing-serde",
+]
+
+[[package]]
+name = "tracing-test"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "557b891436fe0d5e0e363427fc7f217abf9ccd510d5136549847bdcbcd011d68"
+dependencies = [
+ "tracing-core",
+ "tracing-subscriber",
+ "tracing-test-macro",
+]
+
+[[package]]
+name = "tracing-test-macro"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04659ddb06c87d233c566112c1c9c5b9e98256d9af50ec3bc9c8327f873a7568"
+dependencies = [
+ "quote",
+ "syn 2.0.66",
 ]
 
 [[package]]
@@ -3304,6 +3299,7 @@ name = "tycho-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -3325,6 +3321,7 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "sha2",
+ "tempfile",
  "thiserror",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -3349,7 +3346,9 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "backon",
+ "base64 0.22.1",
  "bytes",
+ "bytesize",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
@@ -3362,6 +3361,7 @@ dependencies = [
  "scc",
  "scopeguard",
  "serde",
+ "serde_json",
  "sha2",
  "thiserror",
  "tl-proto",
@@ -3370,6 +3370,7 @@ dependencies = [
  "ton_executor",
  "tracing",
  "tracing-subscriber",
+ "tracing-test",
  "trait-variant",
  "tycho-block-util",
  "tycho-collator",
@@ -3388,10 +3389,12 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
+ "async-trait",
  "bincode",
  "blake3",
  "bytes",
  "clap",
+ "dashmap",
  "everscale-crypto",
  "futures-util",
  "hex",
@@ -3401,18 +3404,20 @@ dependencies = [
  "parking_lot",
  "rand",
  "rand_pcg",
- "rayon",
  "serde",
  "serde_json",
  "tikv-jemallocator",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-flame",
  "tracing-subscriber",
  "tycho-network",
+ "tycho-storage",
  "tycho-util",
+ "weedb",
 ]
 
 [[package]]
@@ -3420,6 +3425,7 @@ name = "tycho-control"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "everscale-types",
  "futures-util",
@@ -3440,9 +3446,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "bytesize",
+ "castaway",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
+ "itertools",
  "metrics",
  "parking_lot",
  "rand",
@@ -3454,6 +3462,7 @@ dependencies = [
  "tl-proto",
  "tokio",
  "tracing",
+ "tracing-test",
  "tycho-block-util",
  "tycho-network",
  "tycho-storage",
@@ -3499,6 +3508,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tracing-test",
  "tycho-util",
  "x509-parser",
 ]
@@ -3518,6 +3528,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "serde_path_to_error",
  "thiserror",
  "tokio",
  "tower",
@@ -3550,6 +3561,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
+ "base64 0.22.1",
  "bumpalo",
  "bytes",
  "bytesize",
@@ -3557,14 +3569,19 @@ dependencies = [
  "dashmap",
  "everscale-types",
  "fdlimit",
+ "hex",
  "humantime",
  "libc",
  "metrics",
+ "num-traits",
  "parking_lot",
  "parking_lot_core",
  "quick_cache",
+ "rand",
  "rlimit",
+ "scc",
  "serde",
+ "serde_json",
  "sha2",
  "smallvec",
  "sysinfo",
@@ -3572,6 +3589,9 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tracing-test",
  "triomphe",
  "tycho-block-util",
  "tycho-storage",
@@ -3587,7 +3607,9 @@ dependencies = [
  "anyhow",
  "castaway",
  "dashmap",
+ "everscale-crypto",
  "futures-util",
+ "hex",
  "humantime",
  "libc",
  "metrics",
@@ -3637,6 +3659,12 @@ checksum = "a56d1686db2308d901306f92a263857ef59ea39678a5458e7cb17f01415101f5"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-xid"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f962df74c8c05a667b5ee8bcf162993134c104e96440b663c8daa176dc772d8c"
 
 [[package]]
 name = "untrusted"
@@ -3974,9 +4002,9 @@ checksum = "bec47e5bfd1bff0eeaf6d8b485cc1074891a197ab4225d504cb7a1ab88b02bf0"
 
 [[package]]
 name = "x509-parser"
-version = "0.16.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fcbc162f30700d6f3f82a24bf7cc62ffe7caea42c0b2cba8bf7f3ae50cf51f69"
+checksum = "7069fba5b66b9193bd2c5d3d4ff12b839118f6bcbef5328efafafb5395cf63da"
 dependencies = [
  "asn1-rs",
  "data-encoding",

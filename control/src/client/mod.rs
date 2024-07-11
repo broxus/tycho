@@ -1,6 +1,8 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
 
-use clap::{Parser, Subcommand};
+use base64::prelude::BASE64_STANDARD;
+use base64::Engine;
+use clap::Parser;
 use everscale_types::models::BlockId;
 use tarpc::serde::Deserialize;
 use tarpc::tokio_serde::formats::Json;
@@ -56,6 +58,36 @@ impl TriggerGcCmd {
                 return;
             }
         };
+        if let Err(e) = client
+            .trigger_gc(context::current(), self.mc_block_id, self.last_key_block_id)
+            .await
+        {
+            println!("Failed to trigger GC: {e:?}")
+        }
+    }
+}
+
+#[derive(Deserialize, Parser)]
+pub struct SwitchMemoryProfilerCmd {
+    pub target: bool,
+    pub node_addr: SocketAddr,
+}
+
+impl SwitchMemoryProfilerCmd {
+    pub async fn run(&self) {
+        let client = match get_client(self.node_addr).await {
+            Ok(client) => client,
+            Err(e) => {
+                println!("Failed to create cli. {e:?}");
+                return;
+            }
+        };
+        if let Err(e) = client
+            .trigger_memory_profiler(context::current(), self.target)
+            .await
+        {
+            println!("Failed to trigger memory profiler: {e:?}")
+        }
     }
 }
 
@@ -84,9 +116,11 @@ impl GetBlockFullCmd {
         };
 
         if let Some(block) = block_opt {
-            println!("Block full received: \n");
-            println!("Block {}", block.is_link);
+            println!("Block full received: ");
             println!("Id {}", block.id);
+            println!("Block {}", BASE64_STANDARD.encode(block.block));
+            println!("Proof {}", BASE64_STANDARD.encode(block.proof));
+            println!("Proof is link: {}", block.is_link)
         } else {
             println!("Block not found");
         }

@@ -112,6 +112,7 @@ impl ToolCmd {
 pub enum ControlServerCmd {
     Ping(PingCmd),
     TriggerGc(TriggerGcCmd),
+    SwitchMemoryProfiler(SwitchMemoryProfilerCmd),
     GetBlockFull(GetBlockFullCmd),
 }
 
@@ -125,6 +126,7 @@ impl ControlServerCmd {
             match self {
                 Self::Ping(cmd) => cmd.run().await,
                 Self::TriggerGc(cmd) => cmd.run().await,
+                Self::SwitchMemoryProfiler(cmd) => cmd.run().await,
                 // Self::GetNextKeyblockIds(cmd) => cmd.run(),
                 Self::GetBlockFull(cmd) => cmd.run().await,
                 // Self::GetNextBlockFull(cmd) => cmd.run_next().await,

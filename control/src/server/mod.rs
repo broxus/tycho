@@ -1,17 +1,16 @@
-use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
-use everscale_types::models::{Block, BlockId};
+use everscale_types::models::BlockId;
 use futures_util::StreamExt;
 use tarpc::context::Context;
-use tarpc::serde::Serialize;
 use tarpc::server::incoming::Incoming;
 use tarpc::server::{self, Channel};
 use tarpc::tokio_serde::formats::Json;
-use tarpc::{client, context};
 use tokio::net::ToSocketAddrs;
+use tokio::sync::mpsc::UnboundedSender;
 use tycho_core::block_strider::{GcTrigger, TriggerTx};
 use tycho_storage::{KeyBlocksDirection, Storage};
 
@@ -25,10 +24,17 @@ pub struct ControlServerImpl {
 }
 
 impl ControlServerImpl {
-    fn create_inner(storage: Storage, trigger_tx: TriggerTx) -> Arc<Inner> {
+    fn create_inner(
+        storage: Storage,
+        trigger_tx: TriggerTx,
+        memory_profiler_trigger: UnboundedSender<bool>,
+        memory_profiler_state: Arc<AtomicBool>,
+    ) -> Arc<Inner> {
         let inner = Inner {
             storage,
             gc_trigger: trigger_tx,
+            memory_profiler_trigger,
+            memory_profiler_state,
         };
 
         Arc::new(inner)
@@ -37,10 +43,17 @@ impl ControlServerImpl {
         addr: A,
         storage: Storage,
         trigger_tx: TriggerTx,
+        memory_profiler_trigger: UnboundedSender<bool>,
+        memory_profiler_state: Arc<AtomicBool>,
     ) -> Result<()> {
-        let inner = Self::create_inner(storage, trigger_tx);
+        let inner = Self::create_inner(
+            storage,
+            trigger_tx,
+            memory_profiler_trigger,
+            memory_profiler_state,
+        );
         let mut listener = tarpc::serde_transport::tcp::listen(&addr, Json::default).await?;
-        tracing::info!(target:"control", "Cli Tarpc listening on port {}", listener.local_addr().port());
+        tracing::info!(target:"control", "Control server is listening on port {}", listener.local_addr().port());
         listener.config_mut().max_frame_length(usize::MAX);
         listener
             // Ignore accept errors.
@@ -77,6 +90,21 @@ impl ControlServer for ControlServerImpl {
             mc_block_id,
             last_key_block_seqno,
         }));
+    }
+
+    async fn trigger_memory_profiler(self, _: Context, set: bool) -> bool {
+        let is_active = self.inner.memory_profiler_state.load(Ordering::Acquire);
+        if is_active == set {
+            tracing::info!("Profiler state has not changed");
+            return false;
+        }
+
+        if let Err(e) = self.inner.memory_profiler_trigger.send(set) {
+            tracing::error!("Failed to change memory profiler state. {e:?}");
+            return false;
+        }
+
+        return true;
     }
 
     async fn get_next_key_blocks_ids(
@@ -141,4 +169,7 @@ impl ControlServer for ControlServerImpl {
 struct Inner {
     storage: Storage,
     gc_trigger: TriggerTx,
+
+    memory_profiler_trigger: UnboundedSender<bool>,
+    memory_profiler_state: Arc<AtomicBool>,
 }
