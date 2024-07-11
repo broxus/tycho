@@ -69,7 +69,7 @@ impl ArchiveBlockProvider {
                     }
 
                     // Update the last known archive
-                    this.last_known_archive.store(Some(Arc::new(archive)))
+                    this.last_known_archive.store(Some(Arc::new(archive)));
                 }
                 Err(e) => return Some(Err(e)),
             }

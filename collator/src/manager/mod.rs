@@ -369,7 +369,7 @@ where
             "Processing requested mc state for block ({})...",
             mc_state.block_id().as_short_id()
         );
-        Self::notify_mempool_about_mc_block(mpool_adapter, mc_state.clone()).await?;
+        Self::notify_mempool_about_mc_block(mpool_adapter, &mc_block_id).await?;
 
         dispatcher
             .enqueue_task(method_to_async_task_closure!(
@@ -938,11 +938,8 @@ where
                     candidate_chain_time,
                 );
 
-                Self::notify_mempool_about_mc_block(
-                    self.mpool_adapter.clone(),
-                    new_mc_state.clone(),
-                )
-                .await?;
+                Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &candidate_id)
+                    .await?;
 
                 self.dispatcher
                     .enqueue_task(method_to_async_task_closure!(
@@ -975,16 +972,14 @@ where
     /// Send master state related to master block to mempool (it may perform gc or nodes rotation)
     async fn notify_mempool_about_mc_block(
         mpool_adapter: Arc<dyn MempoolAdapter>,
-        mc_state: ShardStateStuff,
+        mc_block_id: &BlockId,
     ) -> Result<()> {
         // TODO: in current implementation CollationProcessor should not notify mempool
         //      about one master block more than once, but better to handle repeated request here or at mempool
-        mpool_adapter
-            .enqueue_process_new_mc_block_state(mc_state)
-            .await
+        mpool_adapter.on_new_mc_state(mc_block_id).await
     }
 
-    #[tracing::instrument(skip_all, fields(block_id = %next_block_id_short, ct = anchor.chain_time(), force_mc_block))]
+    #[tracing::instrument(skip_all, fields(block_id = %next_block_id_short, ct = anchor.chain_time, force_mc_block))]
     async fn process_skipped_anchor(
         &mut self,
         next_block_id_short: BlockIdShort,
@@ -996,7 +991,7 @@ where
         );
         self.collate_mc_block_by_interval_or_continue_shard_collation(
             next_block_id_short.shard,
-            anchor.chain_time(),
+            anchor.chain_time,
             force_mc_block,
             None,
         )

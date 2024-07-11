@@ -220,15 +220,6 @@ impl IntAdrExt for IntAddr {
     }
 }
 
-pub(crate) trait ShardIdentExt {
-    fn contains_address(&self, addr: &IntAddr) -> bool;
-}
-impl ShardIdentExt for ShardIdent {
-    fn contains_address(&self, addr: &IntAddr) -> bool {
-        self.workchain() == addr.workchain() && self.contains_account(&addr.get_address())
-    }
-}
-
 #[derive(Clone)]
 pub struct ValidatorNetwork {
     pub overlay_service: OverlayService,

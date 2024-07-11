@@ -27,7 +27,7 @@ use crate::collator::types::{
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
-use crate::types::{BlockCollationResult, ShardIdentExt, TopBlockDescription};
+use crate::types::{BlockCollationResult, TopBlockDescription};
 
 #[cfg(test)]
 #[path = "tests/do_collate_tests.rs"]
@@ -624,12 +624,12 @@ impl CollatorStdImpl {
                 let expire_timeout = 60 * 1000; // 1 minute
                 let next_chain_time =
                     collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
-                if next_chain_time - anchor.chain_time() > expire_timeout {
-                    let iter = anchor.externals_iterator(0);
+                if next_chain_time - anchor.chain_time > expire_timeout {
+                    let iter = anchor.iter_externals(0);
                     let mut expired_msgs_count = 0;
                     for ext_msg in iter {
                         tracing::debug!(target: tracing_targets::COLLATOR,
-                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info().dst,
+                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
                         );
                         expired_msgs_count += 1;
                     }
@@ -648,7 +648,7 @@ impl CollatorStdImpl {
                     continue;
                 }
 
-                if key == was_read_to.0 && anchor.externals_count() == was_read_to.1 as usize {
+                if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
                     // skip and remove fully processed anchor
                     let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -659,7 +659,7 @@ impl CollatorStdImpl {
                 }
 
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "next anchor externals count: {}", anchor.externals_count(),
+                    "next anchor externals count: {}", anchor.externals.len(),
                 );
 
                 if key == was_read_to.0 {
@@ -676,28 +676,28 @@ impl CollatorStdImpl {
 
                 // get iterator and read messages
                 let mut msgs_collected_from_last_anchor = 0;
-                let iter = anchor.externals_iterator(msgs_read_offset_in_last_anchor as usize);
+                let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
                 for ext_msg in iter {
                     tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "read ext_msg dst: {}", ext_msg.info().dst,
+                        "read ext_msg dst: {}", ext_msg.info.dst,
                     );
                     if total_msgs_collected < count {
                         msgs_read_offset_in_last_anchor += 1;
                     }
-                    if shard_id.contains_address(&ext_msg.info().dst) {
+                    if shard_id.contains_address(&ext_msg.info.dst) {
                         if total_msgs_collected < count {
                             // get msgs for target shard until target count reached
                             ext_messages.push(Box::new(ParsedMessage {
-                                info: MsgInfo::ExtIn(ext_msg.info().clone()),
+                                info: MsgInfo::ExtIn(ext_msg.info.clone()),
                                 dst_in_current_shard: true,
-                                cell: ext_msg.cell().clone(),
+                                cell: ext_msg.cell.clone(),
                                 special_origin: None,
                                 dequeued: None,
                             }));
                             total_msgs_collected += 1;
                             msgs_collected_from_last_anchor += 1;
                             tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                                "collected ext_msg dst: {}", ext_msg.info().dst,
+                                "collected ext_msg dst: {}", ext_msg.info.dst,
                             );
                         } else {
                             // when target msgs count reached
