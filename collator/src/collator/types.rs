@@ -631,6 +631,11 @@ pub(super) struct CollatorStats {
     pub total_execute_count_int: u64,
     pub total_execute_count_new_int: u64,
     pub int_queue_length: u64,
+
+    pub tps_block: u32,
+    pub tps_timer: Option<std::time::Instant>,
+    pub tps_execute_count: u64,
+    pub tps: u128,
 }
 
 pub(super) struct CachedMempoolAnchor {

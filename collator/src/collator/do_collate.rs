@@ -1180,6 +1180,20 @@ impl CollatorStdImpl {
             .int_queue_length
             .checked_sub(collation_data.int_dequeue_count)
             .unwrap_or_default();
+
+        self.stats.tps_block += 1;
+        self.stats.tps_execute_count += collation_data.execute_count_all;
+        if self.stats.tps_block == 10 {
+            if let Some(timer) = self.stats.tps_timer {
+                let elapsed = timer.elapsed();
+                self.stats.tps = (self.stats.tps_execute_count as u128 * 1000 * 1000)
+                    .checked_div(elapsed.as_micros())
+                    .unwrap_or_default();
+            }
+            self.stats.tps_timer = Some(std::time::Instant::now());
+            self.stats.tps_block = 0;
+            self.stats.tps_execute_count = 0;
+        }
     }
 }
 
