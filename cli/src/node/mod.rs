@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
@@ -136,8 +137,21 @@ impl CmdRun {
             init_metrics(metrics_config)?;
         }
 
+        let memory_profiler_state = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+
+        let cs = ControlServerInfo {
+            port: node_config.control_server_port,
+            memory_profile_state: memory_profiler_state.clone(),
+            memory_profiler_trigger: tx,
+        };
+
         #[cfg(feature = "jemalloc")]
-        tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
+        tokio::spawn(memory_profiler(
+            node_config.profiling.profiling_dir.clone(),
+            rx,
+            memory_profiler_state.clone(),
+        ));
 
         let node = {
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
@@ -149,7 +163,7 @@ impl CmdRun {
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
-            Node::new(socket_addr, keys, node_config, global_config)?
+            Node::new(socket_addr, keys, node_config, global_config, cs)?
         };
 
         node.wait_for_neighbours().await;
@@ -281,6 +295,12 @@ async fn resolve_public_ip(ip: Option<IpAddr>) -> Result<IpAddr> {
     }
 }
 
+pub struct ControlServerInfo {
+    port: u16,
+    memory_profile_state: Arc<AtomicBool>,
+    memory_profiler_trigger: mpsc::UnboundedSender<bool>,
+}
+
 pub struct Node {
     keypair: Arc<ed25519::KeyPair>,
 
@@ -301,7 +321,7 @@ pub struct Node {
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
 
-    control_server_port: u16,
+    control_server: ControlServerInfo,
 }
 
 impl Node {
@@ -310,6 +330,8 @@ impl Node {
         keys: NodeKeys,
         node_config: NodeConfig,
         global_config: GlobalConfig,
+
+        control_server_info: ControlServerInfo,
     ) -> Result<Self> {
         // Setup network
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
@@ -423,7 +445,7 @@ impl Node {
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
-            control_server_port: node_config.control_server_port,
+            control_server: control_server_info,
         })
     }
 
@@ -608,10 +630,12 @@ impl Node {
             if let Err(e) = ControlServerImpl::serve(
                 SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::LOCALHOST,
-                    self.control_server_port,
+                    self.control_server.port,
                 )),
                 self.storage.clone(),
                 trigger_tx.clone(),
+                self.control_server.memory_profiler_trigger,
+                self.control_server.memory_profile_state.clone(),
             )
             .await
             {

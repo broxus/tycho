@@ -1,9 +1,12 @@
 use std::ffi::{c_char, CString};
 use std::os::unix::prelude::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 pub use tikv_jemalloc_ctl::Error;
 use tikv_jemalloc_ctl::{epoch, stats};
+use tokio::sync::mpsc;
 
 macro_rules! set_metrics {
     ($($metric_name:expr => $metric_value:expr),* $(,)?) => {
@@ -68,9 +71,11 @@ pub struct JemallocStats {
     pub fragmentation: u64,
 }
 
-pub async fn memory_profiler(profiling_dir: PathBuf) {
-    use tokio::signal::unix;
-
+pub async fn memory_profiler(
+    profiling_dir: PathBuf,
+    mut trigger: mpsc::UnboundedReceiver<bool>,
+    profiler_state: Arc<AtomicBool>,
+) {
     if std::env::var("MALLOC_CONF").is_err() {
         tracing::warn!(
             "MALLOC_CONF is not set, memory profiler is disabled. \
@@ -78,9 +83,6 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
         );
         return;
     }
-
-    let signal = unix::SignalKind::user_defined1();
-    let mut stream = unix::signal(signal).expect("failed to create signal stream");
 
     if let Err(e) = std::fs::create_dir_all(&profiling_dir) {
         tracing::error!(
@@ -90,9 +92,10 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
         return;
     }
 
-    let mut is_active = false;
-    while stream.recv().await.is_some() {
+    profiler_state.store(false, Ordering::Release);
+    while trigger.recv().await.is_some() {
         tracing::info!("memory profiler signal received");
+        let is_active = profiler_state.load(Ordering::Acquire);
         if !is_active {
             tracing::info!("activating memory profiler");
             if let Err(e) = profiler_start() {
@@ -112,7 +115,7 @@ pub async fn memory_profiler(profiling_dir: PathBuf) {
             }
         }
 
-        is_active = !is_active;
+        profiler_state.store(!is_active, Ordering::Release);
     }
 }
 
