@@ -33,14 +33,14 @@ pub(super) struct ExecutionManager {
     message_groups: MessageGroups,
     /// max number of messages that could be loaded into runtime
     messages_buffer_limit: usize,
-    /// messages executor for current block
-    executor: Option<MessagesExecutor>,
     /// flag indicates that should process ext messages
     process_ext_messages: bool,
     /// we started ext messages reading before and can continue reading from read_to
     ext_messages_reader_started: bool,
     /// flag indicates that should process new messages
     process_new_messages: bool,
+    /// internal mq adapter
+    mq_adapter: Arc<dyn MessageQueueAdapter>,
     /// current read positions of internals mq iterator
     /// when it is not finished
     current_iterator_positions: FastHashMap<ShardIdent, InternalMessageKey>,
@@ -62,6 +62,7 @@ impl ExecutionManager {
     /// constructor
     pub fn new(
         shard_id: ShardIdent,
+        mq_adapter: Arc<dyn MessageQueueAdapter>,
         messages_buffer_limit: usize,
         group_limit: usize,
         group_vert_size: usize,
@@ -76,58 +77,28 @@ impl ExecutionManager {
             shard_id,
             messages_buffer_limit,
             message_groups: MessageGroups::new(group_limit, group_vert_size),
-            executor: None,
             process_ext_messages: false,
             ext_messages_reader_started: false,
             process_new_messages: false,
+            mq_adapter,
             current_iterator_positions: Default::default(),
         }
-    }
-
-    pub fn init_executor(
-        &mut self,
-        min_next_lt: u64,
-        config: Arc<PreloadedBlockchainConfig>,
-        params: Arc<ExecuteParams>,
-        shard_accounts: ShardAccounts,
-    ) {
-        self.executor = Some(MessagesExecutor {
-            shard_id: self.shard_id,
-            min_next_lt,
-            config,
-            params,
-            accounts_cache: AccountsCache {
-                shard_accounts,
-                items: Default::default(),
-            },
-        });
-    }
-
-    pub fn executor(&self) -> &MessagesExecutor {
-        self.executor
-            .as_ref()
-            .expect("should run `init_executor` first")
-    }
-
-    pub fn executor_mut(&mut self) -> &mut MessagesExecutor {
-        self.executor
-            .as_mut()
-            .expect("should run `init_executor` first")
     }
 
     pub fn get_current_iterator_positions(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
         self.current_iterator_positions.clone()
     }
 
-    pub fn create_iterator_adapter(
-        &mut self,
-        mq_adapter: Arc<dyn MessageQueueAdapter>,
-    ) -> QueueIteratorAdapter {
+    pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter {
         self.process_ext_messages = false;
         self.process_new_messages = false;
 
         let current_iterator_positions = std::mem::take(&mut self.current_iterator_positions);
-        QueueIteratorAdapter::new(self.shard_id, mq_adapter, Some(current_iterator_positions))
+        QueueIteratorAdapter::new(
+            self.shard_id,
+            self.mq_adapter.clone(),
+            Some(current_iterator_positions),
+        )
     }
 
     pub fn release_iterator_adapter(
@@ -138,13 +109,6 @@ impl ExecutionManager {
         self.current_iterator_positions = current_positions;
 
         Ok(has_pending_internals)
-    }
-
-    pub fn extract_changed_accounts(
-        &mut self,
-    ) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
-        let executor = self.executor.take().expect("`executor` is not initialized");
-        executor.accounts_cache.items.into_values()
     }
 
     #[tracing::instrument(skip_all)]
@@ -414,12 +378,35 @@ impl ExecutionManager {
 }
 
 impl MessagesExecutor {
+    pub fn new(
+        shard_id: ShardIdent,
+        min_next_lt: u64,
+        config: Arc<PreloadedBlockchainConfig>,
+        params: Arc<ExecuteParams>,
+        shard_accounts: ShardAccounts,
+    ) -> Self {
+        Self {
+            shard_id,
+            min_next_lt,
+            config,
+            params,
+            accounts_cache: AccountsCache {
+                shard_accounts,
+                items: Default::default(),
+            },
+        }
+    }
+
     pub fn min_next_lt(&self) -> u64 {
         self.min_next_lt
     }
 
     pub fn executor_params(&self) -> &Arc<ExecuteParams> {
         &self.params
+    }
+
+    pub fn into_changed_accounts(self) -> impl ExactSizeIterator<Item = Box<ShardAccountStuff>> {
+        self.accounts_cache.items.into_values()
     }
 
     pub fn take_account_stuff_if<F>(

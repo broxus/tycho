@@ -12,7 +12,7 @@ use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_util::metrics::HistogramGuard;
 
-use super::execution_manager::ExecutionManager;
+use super::execution_manager::MessagesExecutor;
 use super::types::WorkingState;
 use super::CollatorStdImpl;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
@@ -29,7 +29,7 @@ impl CollatorStdImpl {
     pub(super) fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,
-        exec_manager: &mut ExecutionManager,
+        executor: MessagesExecutor,
         working_state: &WorkingState,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
@@ -42,7 +42,7 @@ impl CollatorStdImpl {
         let prev_shard_data = &working_state.prev_shard_data;
 
         // update shard accounts tree and prepare accounts blocks
-        let mut global_libraries = exec_manager.executor().executor_params().state_libs.clone();
+        let mut global_libraries = executor.executor_params().state_libs.clone();
 
         let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
         let config_address = &mc_data.config.address;
@@ -53,6 +53,10 @@ impl CollatorStdImpl {
         let mut build_in_msgs_elapsed = Duration::ZERO;
         let mut out_msgs_res = Ok(Default::default());
         let mut build_out_msgs_elapsed = Duration::ZERO;
+        let histogram_build_account_blocks_and_messages = HistogramGuard::begin_with_labels(
+            "tycho_collator_finalize_build_account_blocks_and_msgs_time",
+            labels,
+        );
         rayon::scope(|s| {
             s.spawn(|_| {
                 let histogram = HistogramGuard::begin_with_labels(
@@ -60,8 +64,8 @@ impl CollatorStdImpl {
                     labels,
                 );
 
-                processed_accounts_res = self.build_accounts(
-                    exec_manager,
+                processed_accounts_res = Self::build_accounts(
+                    executor,
                     prev_shard_data,
                     is_masterchain,
                     config_address,
@@ -74,7 +78,7 @@ impl CollatorStdImpl {
                     "tycho_collator_finalize_build_in_msgs_time",
                     labels,
                 );
-                in_msgs_res = self.build_in_msgs(&collation_data.in_msgs);
+                in_msgs_res = Self::build_in_msgs(&collation_data.in_msgs);
                 build_in_msgs_elapsed = histogram.finish();
             });
             s.spawn(|_| {
@@ -82,10 +86,12 @@ impl CollatorStdImpl {
                     "tycho_collator_finalize_build_out_msgs_time",
                     labels,
                 );
-                out_msgs_res = self.build_out_msgs(&collation_data.out_msgs);
+                out_msgs_res = Self::build_out_msgs(&collation_data.out_msgs);
                 build_out_msgs_elapsed = histogram.finish();
             });
         });
+        let build_account_blocks_and_messages_elased =
+            histogram_build_account_blocks_and_messages.finish();
 
         let processed_accounts = processed_accounts_res?;
         let in_msgs = in_msgs_res?;
@@ -295,8 +301,6 @@ impl CollatorStdImpl {
                 extra: Lazy::new(&new_block_extra)?,
             };
 
-            build_block_elapsed = histogram.finish();
-
             // TODO: Check (assert) whether the serialized block contains usage cells
             let new_block_root = CellBuilder::build_from(&new_block)?;
 
@@ -307,6 +311,9 @@ impl CollatorStdImpl {
                 root_hash: *new_block_root.repr_hash(),
                 file_hash: Boc::file_hash(&new_block_boc),
             };
+
+            build_block_elapsed = histogram.finish();
+
             new_block
         };
 
@@ -358,9 +365,10 @@ impl CollatorStdImpl {
         tracing::debug!(
             target: tracing_targets::COLLATOR,
             total = %format_duration(total_elapsed),
-            build_account_blocks = %format_duration(build_account_blocks_elapsed),
-            build_in_msgs = %format_duration(build_in_msgs_elapsed),
-            build_out_msgs = %format_duration(build_out_msgs_elapsed),
+            parallel_build_accounts_and_msgs = %format_duration(build_account_blocks_and_messages_elased),
+            only_build_account_blocks = %format_duration(build_account_blocks_elapsed),
+            only_build_in_msgs = %format_duration(build_in_msgs_elapsed),
+            only_build_out_msgs = %format_duration(build_out_msgs_elapsed),
             build_mc_state_extra = %format_duration(build_mc_state_extra_elapsed),
             build_state_update = %format_duration(build_state_update_elapsed),
             build_block = %format_duration(build_block_elapsed),
@@ -519,8 +527,7 @@ impl CollatorStdImpl {
     }
 
     fn build_accounts(
-        &self,
-        exec_manager: &mut ExecutionManager,
+        executor: MessagesExecutor,
         prev_shard_data: &PrevData,
         is_masterchain: bool,
         config_address: &HashBytes,
@@ -530,7 +537,7 @@ impl CollatorStdImpl {
         let mut shard_accounts = RelaxedAugDict::from_full(prev_shard_data.observable_accounts());
         let mut new_config_params = None;
 
-        for updated_account in exec_manager.extract_changed_accounts() {
+        for updated_account in executor.into_changed_accounts() {
             if updated_account.transactions.is_empty() {
                 continue;
             }
@@ -587,7 +594,7 @@ impl CollatorStdImpl {
         })
     }
 
-    fn build_in_msgs(&self, items: &BTreeMap<HashBytes, PreparedInMsg>) -> Result<InMsgDescr> {
+    fn build_in_msgs(items: &BTreeMap<HashBytes, PreparedInMsg>) -> Result<InMsgDescr> {
         RelaxedAugDict::try_from_sorted_iter_lazy(
             items
                 .iter()
@@ -597,7 +604,7 @@ impl CollatorStdImpl {
         .map_err(Into::into)
     }
 
-    fn build_out_msgs(&self, items: &BTreeMap<HashBytes, PreparedOutMsg>) -> Result<OutMsgDescr> {
+    fn build_out_msgs(items: &BTreeMap<HashBytes, PreparedOutMsg>) -> Result<OutMsgDescr> {
         RelaxedAugDict::try_from_sorted_iter_lazy(
             items
                 .iter()

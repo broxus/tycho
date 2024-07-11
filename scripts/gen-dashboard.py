@@ -486,18 +486,23 @@ def collator_finalize_block() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_finalize_build_account_blocks_and_msgs_time",
+            "Build in parallel account blocks, InMsgDescr, OutMsgDescr",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_finalize_build_account_blocks_time",
-            "Build account blocks",
+            "only Build account blocks",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_collator_finalize_build_in_msgs_time",
-            "Build InMsgDescr",
+            "only Build InMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_collator_finalize_build_out_msgs_time",
-            "Build OutMsgDescr",
+            "only Build OutMsgDescr",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -513,11 +518,6 @@ def collator_finalize_block() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_finalize_build_block_time",
             "Build Block",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_collator_finalize_build_new_state_time",
-            "Build State",
             labels=['workchain=~"$workchain"'],
         ),
     ]
@@ -791,6 +791,11 @@ def collator_misc_operations_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_try_collate_next_shard_block_without_do_collate_time",
             "Try collate next shard block",
+        ),
+        create_heatmap_panel(
+            "tycho_collator_build_new_state_time",
+            "Build Pure State for next collation",
+            labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_collator_refresh_collation_sessions_time",

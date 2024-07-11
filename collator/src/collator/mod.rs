@@ -223,6 +223,7 @@ impl CollatorStdImpl {
 
         let exec_manager = ExecutionManager::new(
             shard_id,
+            mq_adapter.clone(),
             config.msgs_exec_params.buffer_limit as _,
             config.msgs_exec_params.group_limit as _,
             config.msgs_exec_params.group_vert_size as _,
