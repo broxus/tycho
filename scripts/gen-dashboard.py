@@ -569,12 +569,22 @@ def block_metrics() -> RowPanel:
 def collator_execution_metrics() -> RowPanel:
     metrics = [
         create_gauge_panel(
+            "tycho_do_collate_msgs_exec_buffer_messages_count",
+            "Messages count in exec buffer",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
             "tycho_do_collate_exec_msgs_groups_per_block",
             "Number of msgs groups per block",
             labels=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
-            "tycho_do_collate_one_tick_group_size",
+            "tycho_do_collate_one_tick_group_messages_count",
+            "One exec tick group messages count",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_do_collate_one_tick_group_horizontal_size",
             "One exec tick group horizontal size",
             labels=['workchain=~"$workchain"'],
         ),

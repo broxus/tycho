@@ -859,6 +859,8 @@ pub struct Dequeued {
 
 #[derive(Default)]
 pub(super) struct MessageGroups {
+    shard_id: ShardIdent,
+
     offset: u32,
     max_message_key: InternalMessageKey,
     groups: FastHashMap<u32, MessageGroup>,
@@ -871,8 +873,9 @@ pub(super) struct MessageGroups {
 }
 
 impl MessageGroups {
-    pub fn new(group_limit: usize, group_vert_size: usize) -> Self {
+    pub fn new(shard_id: ShardIdent, group_limit: usize, group_vert_size: usize) -> Self {
         Self {
+            shard_id,
             group_limit,
             group_vert_size,
             ..Default::default()
@@ -978,6 +981,10 @@ impl MessageGroups {
                 }
             }
         }
+
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
+            .set(self.messages_count() as f64);
     }
 
     pub fn first_group_is_full(&self) -> bool {
@@ -1008,6 +1015,11 @@ impl MessageGroups {
         if let Some(first_group) = self.groups.remove(&self.offset) {
             self.int_messages_count -= first_group.int_messages_count;
             self.ext_messages_count -= first_group.ext_messages_count;
+
+            let labels = [("workchain", self.shard_id.workchain().to_string())];
+            metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
+                .set(self.messages_count() as f64);
+
             Some(first_group)
         } else {
             None

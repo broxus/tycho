@@ -76,7 +76,7 @@ impl ExecutionManager {
         Self {
             shard_id,
             messages_buffer_limit,
-            message_groups: MessageGroups::new(group_limit, group_vert_size),
+            message_groups: MessageGroups::new(shard_id, group_limit, group_vert_size),
             process_ext_messages: false,
             ext_messages_reader_started: false,
             process_new_messages: false,
@@ -426,10 +426,10 @@ impl MessagesExecutor {
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
 
-        let group_size = group.len();
-        let group_mean_vert_size = group
-            .messages_count()
-            .checked_div(group_size)
+        let group_horizontal_size = group.len();
+        let group_messages_count = group.messages_count();
+        let group_mean_vert_size = group_messages_count
+            .checked_div(group_horizontal_size)
             .unwrap_or_default();
         let mut group_max_vert_size = 0;
 
@@ -441,7 +441,7 @@ impl MessagesExecutor {
             futures.push(self.execute_messages(shard_account_stuff, msgs));
         }
 
-        let mut items = Vec::with_capacity(group_size);
+        let mut items = Vec::with_capacity(group_messages_count);
         let mut ext_msgs_error_count = 0;
 
         let mut max_account_msgs_exec_time = Duration::ZERO;
@@ -483,18 +483,21 @@ impl MessagesExecutor {
         }
 
         let mean_account_msgs_exec_time = total_exec_time
-            .checked_div(group_size as u32)
+            .checked_div(group_horizontal_size as u32)
             .unwrap_or_default();
 
         tracing::info!(target: tracing_targets::EXEC_MANAGER,
-            group_size, group_max_vert_size,
+            group_horizontal_size, group_max_vert_size,
             total_exec_time = %format_duration(total_exec_time),
             mean_account_msgs_exec_time = %format_duration(mean_account_msgs_exec_time),
             max_account_msgs_exec_time = %format_duration(max_account_msgs_exec_time),
             "execute_group",
         );
 
-        metrics::gauge!("tycho_do_collate_one_tick_group_size", labels).set(group_size as f64);
+        metrics::gauge!("tycho_do_collate_one_tick_group_messages_count", labels)
+            .set(group_messages_count as f64);
+        metrics::gauge!("tycho_do_collate_one_tick_group_horizontal_size", labels)
+            .set(group_horizontal_size as f64);
         metrics::gauge!("tycho_do_collate_one_tick_group_mean_vert_size", labels)
             .set(group_mean_vert_size as f64);
         metrics::gauge!("tycho_do_collate_one_tick_group_max_vert_size", labels)
