@@ -14,7 +14,7 @@ use everscale_types::models::{
     ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
     SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::types::InternalMessageKey;
@@ -156,10 +156,7 @@ pub(super) struct PrevData {
 }
 
 impl PrevData {
-    pub fn build(
-        prev_states: Vec<ShardStateStuff>,
-        state_tracker: &MinRefMcStateTracker,
-    ) -> Result<(Self, UsageTree)> {
+    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Self, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -174,7 +171,7 @@ impl PrevData {
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
-            state_tracker,
+            prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
         let gen_utime = observable_states[0].state().gen_utime;

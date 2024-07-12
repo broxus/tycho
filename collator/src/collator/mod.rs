@@ -8,7 +8,7 @@ use execution_manager::ExecutionManager;
 use futures_util::future::{BoxFuture, Future};
 use mq_iterator_adapter::QueueIteratorAdapter;
 use tokio::sync::oneshot;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::metrics::HistogramGuardWithLabels;
@@ -46,7 +46,6 @@ pub struct CollatorContext {
     pub shard_id: ShardIdent,
     pub prev_blocks_ids: Vec<BlockId>,
     pub mc_data: Arc<McData>,
-    pub state_tracker: MinRefMcStateTracker,
 }
 
 #[async_trait]
@@ -125,7 +124,6 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.shard_id,
             cx.prev_blocks_ids,
             cx.mc_data,
-            cx.state_tracker,
         )
         .await
     }
@@ -194,9 +192,6 @@ pub struct CollatorStdImpl {
     /// Updated in the `import_next_anchor()` and `read_next_externals()`
     has_pending_externals: bool,
 
-    /// State tracker for creating `ShardStateStuff` locally
-    state_tracker: MinRefMcStateTracker,
-
     stats: CollatorStats,
     timer: std::time::Instant,
 }
@@ -215,7 +210,6 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
-        state_tracker: MinRefMcStateTracker,
     ) -> AsyncQueuedDispatcher<Self> {
         let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
         let next_block_id_short = BlockIdShort {
@@ -265,8 +259,6 @@ impl CollatorStdImpl {
             last_imported_anchor_author: None,
 
             has_pending_externals: false,
-
-            state_tracker,
 
             stats: Default::default(),
             timer: std::time::Instant::now(),
@@ -324,8 +316,7 @@ impl CollatorStdImpl {
             "Collator (block_id={}): init: building working state...", self.next_block_id_short,
         );
 
-        let working_state =
-            Self::build_and_validate_working_state(mc_data, prev_states, &self.state_tracker)?;
+        let working_state = Self::build_and_validate_working_state(mc_data, prev_states)?;
 
         working_state_tx.send(Ok(working_state)).ok();
 
@@ -364,14 +355,13 @@ impl CollatorStdImpl {
 
         // TODO: Check if the result mc_data is properly updated on masterchain block
         let mc_data = mc_data.unwrap_or_else(|| prev_working_state.mc_data.load_full());
-        let state_tracker = self.state_tracker.clone();
 
         self.working_state_fut = Shared::new(Box::pin(async move {
             let new_state_stuff = new_state_stuff.await?;
 
             let prev_states = vec![new_state_stuff];
             Self::check_prev_states_and_master(&mc_data, &prev_states)?;
-            let (prev_shard_data, usage_tree) = PrevData::build(prev_states, &state_tracker)?;
+            let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
 
             Ok(Arc::new(WorkingState {
                 mc_data: mc_data.into(),
@@ -419,12 +409,11 @@ impl CollatorStdImpl {
     fn build_and_validate_working_state(
         mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
-        state_tracker: &MinRefMcStateTracker,
     ) -> Result<Arc<WorkingState>> {
         // TODO: make real implementation
 
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, state_tracker)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
 
         Ok(Arc::new(WorkingState {
             mc_data: mc_data.into(),

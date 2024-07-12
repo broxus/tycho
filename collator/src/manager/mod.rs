@@ -84,8 +84,6 @@ where
     active_collators: FastHashMap<ShardIdent, CF::Collator>,
     collators_to_stop: FastHashMap<CollationSessionId, CF::Collator>,
 
-    state_tracker: MinRefMcStateTracker,
-
     blocks_cache: BlocksCache,
 
     last_processed_mc_block_id: Option<BlockId>,
@@ -259,7 +257,6 @@ where
             mq_adapter: mq_adapter.clone(),
             collator_factory,
             validator,
-            state_tracker: MinRefMcStateTracker::default(),
             active_collation_sessions: FastHashMap::default(),
             collation_sessions_to_finish: FastHashMap::default(),
             active_collators: FastHashMap::default(),
@@ -759,7 +756,6 @@ where
                             shard_id,
                             prev_blocks_ids,
                             mc_data: mc_data.clone(),
-                            state_tracker: self.state_tracker.clone(),
                         })
                         .await;
                     entry.insert(collator);
