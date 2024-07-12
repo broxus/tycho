@@ -671,25 +671,6 @@ pub struct ExecutedGroup {
     pub ext_msgs_error_count: u64,
 }
 
-pub struct ExecutedTick {
-    pub new_offset: u32,
-    pub finished: bool,
-    pub group: ExecutedGroup,
-}
-
-impl ExecutedTick {
-    fn new_finished(new_offset: u32) -> Self {
-        Self {
-            new_offset,
-            finished: true,
-            group: ExecutedGroup {
-                items: Vec::new(),
-                ext_msgs_error_count: 0,
-            },
-        }
-    }
-}
-
 pub struct ExecutedTickItem {
     pub in_message: Box<ParsedMessage>,
     pub executor_output: ExecutorOutput,
