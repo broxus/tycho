@@ -456,10 +456,7 @@ impl CollatorStdImpl {
     /// 3. Store anchor in cache and return it
     ///
     /// Returns: (`next_anchor`, `has_externals`)
-    async fn import_next_anchor(
-        &mut self,
-        working_state: &WorkingState,
-    ) -> Result<(Arc<MempoolAnchor>, bool)> {
+    async fn import_next_anchor(&mut self) -> Result<(Arc<MempoolAnchor>, bool)> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
         let _histogram =
@@ -529,8 +526,6 @@ impl CollatorStdImpl {
 
         #[derive(Debug)]
         struct AnchorInfo {
-            id: u32,
-            chain_time: u64,
             externals_count: usize,
         }
 
@@ -550,11 +545,7 @@ impl CollatorStdImpl {
                 has_externals,
             }));
 
-        anchors.push(AnchorInfo {
-            id: last_anchor_id,
-            chain_time: next_anchor_chain_time,
-            externals_count,
-        });
+        anchors.push(AnchorInfo { externals_count });
         while last_block_chain_time > next_anchor_chain_time {
             next_anchor = self.mpool_adapter.get_next_anchor(last_anchor_id).await?;
 
@@ -572,11 +563,7 @@ impl CollatorStdImpl {
                     has_externals,
                 }));
 
-            anchors.push(AnchorInfo {
-                id: last_anchor_id,
-                chain_time: next_anchor_chain_time,
-                externals_count,
-            });
+            anchors.push(AnchorInfo { externals_count });
         }
 
         metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
@@ -700,7 +687,7 @@ impl CollatorStdImpl {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "there are no internals, will import next anchor",
             );
-            let (next_anchor, has_externals) = self.import_next_anchor(&working_state).await?;
+            let (next_anchor, has_externals) = self.import_next_anchor().await?;
             if has_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals for master",
@@ -796,8 +783,7 @@ impl CollatorStdImpl {
                     gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
-            let (next_anchor, next_anchor_has_externals) =
-                self.import_next_anchor(&working_state).await?;
+            let (next_anchor, next_anchor_has_externals) = self.import_next_anchor().await?;
             has_externals = next_anchor_has_externals;
             if has_externals && !force_mc_block_by_uncommitted_chain {
                 tracing::info!(target: tracing_targets::COLLATOR,
