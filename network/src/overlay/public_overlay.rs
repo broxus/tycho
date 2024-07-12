@@ -14,6 +14,7 @@ use tycho_util::{FastDashSet, FastHasherState};
 
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
+use crate::overlay::metrics::Metrics;
 use crate::overlay::OverlayId;
 use crate::proto::overlay::{rpc, PublicEntry, PublicEntryToSign};
 use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
@@ -25,6 +26,7 @@ pub struct PublicOverlayBuilder {
     entry_ttl: Duration,
     banned_peer_ids: FastDashSet<PeerId>,
     peer_resolver: Option<PeerResolver>,
+    name: Option<&'static str>,
 }
 
 impl PublicOverlayBuilder {
@@ -65,6 +67,12 @@ impl PublicOverlayBuilder {
         self
     }
 
+    /// Name of the overlay used in metrics.
+    pub fn named(mut self, name: &'static str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
     pub fn build<S>(self, service: S) -> PublicOverlay
     where
         S: Send + Sync + 'static,
@@ -94,6 +102,10 @@ impl PublicOverlayBuilder {
                 banned_peer_ids: self.banned_peer_ids,
                 service: service.boxed(),
                 request_prefix: request_prefix.into_boxed_slice(),
+                metrics: self
+                    .name
+                    .map(|label| Metrics::new("tycho_private_overlay", label))
+                    .unwrap_or_default(),
             }),
         }
     }
@@ -113,6 +125,7 @@ impl PublicOverlay {
             entry_ttl: Duration::from_secs(3600),
             banned_peer_ids: Default::default(),
             peer_resolver: None,
+            name: None,
         }
     }
 
@@ -131,6 +144,7 @@ impl PublicOverlay {
         peer_id: &PeerId,
         mut request: Request,
     ) -> Result<Response> {
+        self.inner.metrics.record_tx(request.body.len());
         self.prepend_prefix_to_body(&mut request.body);
         network.query(peer_id, request).await
     }
@@ -141,6 +155,7 @@ impl PublicOverlay {
         peer_id: &PeerId,
         mut request: Request,
     ) -> Result<()> {
+        self.inner.metrics.record_tx(request.body.len());
         self.prepend_prefix_to_body(&mut request.body);
         network.send(peer_id, request).await
     }
@@ -180,6 +195,7 @@ impl PublicOverlay {
     }
 
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
+        self.inner.metrics.record_rx(req.body.len());
         if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
             // TODO: add peer from metadata to the overlay
             BoxFutureOrNoop::future(self.inner.service.on_query(req))
@@ -189,6 +205,7 @@ impl PublicOverlay {
     }
 
     pub(crate) fn handle_message(&self, req: ServiceRequest) -> BoxFutureOrNoop<()> {
+        self.inner.metrics.record_rx(req.body.len());
         if !self.inner.banned_peer_ids.contains(&req.metadata.peer_id) {
             // TODO: add peer from metadata to the overlay
             BoxFutureOrNoop::future(self.inner.service.on_message(req))
@@ -360,6 +377,7 @@ struct Inner {
     banned_peer_ids: FastDashSet<PeerId>,
     service: BoxService<ServiceRequest, Response>,
     request_prefix: Box<[u8]>,
+    metrics: Metrics,
 }
 
 pub struct PublicOverlayEntries {

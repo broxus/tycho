@@ -12,6 +12,7 @@ use tycho_util::{FastHashSet, FastHasherState};
 
 use crate::dht::{PeerResolver, PeerResolverHandle};
 use crate::network::Network;
+use crate::overlay::metrics::Metrics;
 use crate::overlay::OverlayId;
 use crate::proto::overlay::rpc;
 use crate::types::{BoxService, PeerId, Request, Response, Service, ServiceExt, ServiceRequest};
@@ -22,6 +23,7 @@ pub struct PrivateOverlayBuilder {
     entries: FastHashSet<PeerId>,
     entry_events_channel_size: usize,
     peer_resolver: Option<PeerResolver>,
+    name: Option<&'static str>,
 }
 
 impl PrivateOverlayBuilder {
@@ -51,6 +53,12 @@ impl PrivateOverlayBuilder {
         self
     }
 
+    /// Name of the overlay used in metrics.
+    pub fn named(mut self, name: &'static str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
     pub fn build<S>(self, service: S) -> PrivateOverlay
     where
         S: Send + Sync + 'static,
@@ -75,6 +83,10 @@ impl PrivateOverlayBuilder {
                 entries: RwLock::new(entries),
                 service: service.boxed(),
                 request_prefix: request_prefix.into_boxed_slice(),
+                metrics: self
+                    .name
+                    .map(|label| Metrics::new("tycho_private_overlay", label))
+                    .unwrap_or_default(),
             }),
         }
     }
@@ -92,6 +104,7 @@ impl PrivateOverlay {
             entries: Default::default(),
             entry_events_channel_size: 100,
             peer_resolver: None,
+            name: None,
         }
     }
 
@@ -106,6 +119,7 @@ impl PrivateOverlay {
         peer_id: &PeerId,
         mut request: Request,
     ) -> Result<Response> {
+        self.inner.metrics.record_rx(request.body.len());
         self.prepend_prefix_to_body(&mut request.body);
         network.query(peer_id, request).await
     }
@@ -116,6 +130,7 @@ impl PrivateOverlay {
         peer_id: &PeerId,
         mut request: Request,
     ) -> Result<()> {
+        self.inner.metrics.record_rx(request.body.len());
         self.prepend_prefix_to_body(&mut request.body);
         network.send(peer_id, request).await
     }
@@ -133,6 +148,7 @@ impl PrivateOverlay {
     }
 
     pub(crate) fn handle_query(&self, req: ServiceRequest) -> BoxFutureOrNoop<Option<Response>> {
+        self.inner.metrics.record_rx(req.body.len());
         if self.inner.entries.read().contains(&req.metadata.peer_id) {
             BoxFutureOrNoop::future(self.inner.service.on_query(req))
         } else {
@@ -141,6 +157,7 @@ impl PrivateOverlay {
     }
 
     pub(crate) fn handle_message(&self, req: ServiceRequest) -> BoxFutureOrNoop<()> {
+        self.inner.metrics.record_rx(req.body.len());
         if self.inner.entries.read().contains(&req.metadata.peer_id) {
             BoxFutureOrNoop::future(self.inner.service.on_message(req))
         } else {
@@ -170,6 +187,7 @@ struct Inner {
     entries: RwLock<PrivateOverlayEntries>,
     service: BoxService<ServiceRequest, Response>,
     request_prefix: Box<[u8]>,
+    metrics: Metrics,
 }
 
 // NOTE: `#[derive(Default)]` is missing to prevent construction outside the

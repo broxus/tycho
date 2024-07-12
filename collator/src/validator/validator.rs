@@ -288,6 +288,7 @@ impl Validator for ValidatorStdImpl {
 
         let private_overlay = PrivateOverlay::builder(overlay_id)
             .with_peer_resolver(peer_resolver)
+            .named("validator")
             .build(network_service.clone());
 
         let is_overlay_added = network

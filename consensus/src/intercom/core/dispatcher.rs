@@ -27,6 +27,7 @@ impl Dispatcher {
 
         let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
             .with_peer_resolver(peer_resolver)
+            .named("mempool")
             .build(responder);
 
         overlay_service.add_private_overlay(&private_overlay);

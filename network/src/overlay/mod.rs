@@ -28,6 +28,7 @@ use crate::util::Routable;
 mod background_tasks;
 mod config;
 mod entries_merger;
+mod metrics;
 mod overlay_id;
 mod private_overlay;
 mod public_overlay;
