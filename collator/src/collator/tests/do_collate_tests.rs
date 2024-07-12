@@ -21,7 +21,7 @@ fn test_read_next_externals() {
             continue;
         }
         let anchor = make_stub_anchor(anchor_id);
-        let has_externals = anchor.has_externals_for(&shard_id);
+        let has_externals = anchor.has_externals_for(&shard_id, 0);
         tracing::trace!(
             "anchor (id: {}, chain_time: {}, externals_count: {}): has_externals for shard {}: {}, externals dst: {:?}",
             anchor_id,
