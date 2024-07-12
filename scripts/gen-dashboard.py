@@ -798,6 +798,11 @@ def collator_misc_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_wait_for_working_state_time",
+            "Wait for updated WorkingState",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_refresh_collation_sessions_time",
             "Refresh collation sessions",
         ),
