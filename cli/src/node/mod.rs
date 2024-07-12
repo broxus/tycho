@@ -370,7 +370,7 @@ impl Node {
         let zerostate = global_config.zerostate;
 
         let rpc_mempool_adapter = RpcMempoolAdapter {
-            inner: MempoolAdapterStdImpl::new(),
+            inner: Arc::new(MempoolAdapterStdImpl::new()),
         };
 
         let blockchain_rpc_service = BlockchainRpcService::builder()

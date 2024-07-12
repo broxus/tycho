@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -12,31 +13,39 @@ use tycho_block_util::dict::RelaxedAugDict;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::ExecutionManager;
+use super::types::WorkingState;
 use super::CollatorStdImpl;
 use crate::collator::types::{BlockCollationData, PreparedInMsg, PreparedOutMsg, PrevData};
 use crate::tracing_targets;
-use crate::types::BlockCandidate;
+use crate::types::{BlockCandidate, McData};
+
+pub struct FinalizedBlock {
+    pub block_candidate: Box<BlockCandidate>,
+    pub mc_data: Option<Arc<McData>>,
+    pub new_state_root: Cell,
+}
 
 impl CollatorStdImpl {
     pub(super) fn finalize_block(
         &mut self,
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
-    ) -> Result<(Box<BlockCandidate>, Cell)> {
+        working_state: &WorkingState,
+    ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
         let labels = &[("workchain", self.shard_id.workchain().to_string())];
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
 
-        let mc_data = &self.working_state().mc_data;
-        let prev_shard_data = &self.working_state().prev_shard_data;
+        let mc_data = working_state.mc_data.as_ref();
+        let prev_shard_data = &working_state.prev_shard_data;
 
         // update shard accounts tree and prepare accounts blocks
         let mut global_libraries = exec_manager.executor().executor_params().state_libs.clone();
 
         let is_masterchain = collation_data.block_id_short.shard.is_masterchain();
-        let config_address = &self.working_state().mc_data.config().address;
+        let config_address = &mc_data.config.address;
 
         let mut processed_accounts_res = Ok(Default::default());
         let mut build_account_blocks_elapsed = Duration::ZERO;
@@ -122,6 +131,7 @@ impl CollatorStdImpl {
                         address: *config_address,
                         params,
                     }),
+                working_state,
             )?;
             collation_data.update_ref_min_mc_seqno(min_ref_mc_seqno);
 
@@ -129,7 +139,7 @@ impl CollatorStdImpl {
             (Some(extra), None)
         } else {
             build_mc_state_extra_elapsed = Duration::ZERO;
-            (None, Some(mc_data.get_master_ref()))
+            (None, Some(mc_data.make_block_ref()))
         };
 
         // build block info
@@ -145,7 +155,7 @@ impl CollatorStdImpl {
             gen_validator_list_hash_short: self.collation_session.collators().short_hash,
             gen_catchain_seqno: self.collation_session.seqno(),
             min_ref_mc_seqno: collation_data.min_ref_mc_seqno,
-            prev_key_block_seqno: mc_data.prev_key_block_seqno(),
+            prev_key_block_seqno: mc_data.prev_key_block_seqno,
             master_ref: master_ref.as_ref().map(Lazy::new).transpose()?,
             ..Default::default()
         };
@@ -158,7 +168,7 @@ impl CollatorStdImpl {
         // info.want_split = false;
         // info.want_merge = false;
 
-        let capabilities = mc_data.config().get_global_version()?.capabilities;
+        let capabilities = mc_data.config.get_global_version()?.capabilities;
         if capabilities.contains(GlobalCapability::CapReportVersion) {
             new_block_info.set_gen_software(Some(GlobalVersion {
                 version: self.config.supported_block_version,
@@ -168,6 +178,7 @@ impl CollatorStdImpl {
 
         let build_state_update_elapsed;
         let new_state_root;
+        let total_validator_fees;
         let state_update = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_state_update_time",
@@ -176,7 +187,7 @@ impl CollatorStdImpl {
 
             // build new state
             let mut new_observable_state = Box::new(ShardStateUnsplit {
-                global_id: mc_data.global_id(),
+                global_id: mc_data.global_id,
                 shard_ident: new_block_info.shard,
                 seqno: new_block_info.seqno,
                 vert_seqno: 0,
@@ -207,18 +218,20 @@ impl CollatorStdImpl {
                 .try_sub_assign(&value_flow.recovered)?;
 
             if is_masterchain {
-                new_observable_state.libraries = global_libraries;
+                new_observable_state.libraries = global_libraries.clone();
             }
 
             // TODO: update smc on hard fork
 
             new_state_root = CellBuilder::build_from(&new_observable_state)?;
 
+            total_validator_fees = new_observable_state.total_validator_fees;
+
             // calc merkle update
             let merkle_update = create_merkle_update(
                 prev_shard_data.pure_state_root(),
                 &new_state_root,
-                &self.working_state().usage_tree,
+                &working_state.usage_tree,
             )?;
 
             build_state_update_elapsed = histogram.finish();
@@ -244,7 +257,7 @@ impl CollatorStdImpl {
                 ..Default::default()
             };
 
-            if let Some(mc_state_extra) = mc_state_extra {
+            if let Some(mc_state_extra) = &mc_state_extra {
                 let new_mc_block_extra = McBlockExtra {
                     shards: mc_state_extra.shards.clone(),
                     fees: collation_data.shard_fees.clone(),
@@ -273,7 +286,7 @@ impl CollatorStdImpl {
 
             // construct block
             let new_block = Block {
-                global_id: mc_data.global_id(),
+                global_id: mc_data.global_id,
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
@@ -297,6 +310,31 @@ impl CollatorStdImpl {
             new_block
         };
 
+        let mc_data = mc_state_extra.map(|extra| {
+            let prev_key_block_seqno = if extra.after_key_block {
+                new_block_id.seqno
+            } else if let Some(block_ref) = &extra.last_key_block {
+                block_ref.seqno
+            } else {
+                0
+            };
+
+            Arc::new(McData {
+                global_id: new_block.global_id,
+                block_id: new_block_id,
+
+                prev_key_block_seqno,
+                gen_lt: new_block_info.end_lt,
+                libraries: global_libraries,
+                total_validator_fees,
+
+                global_balance: extra.global_balance.clone(),
+                shards: extra.shards,
+                config: extra.config,
+                validator_info: extra.validator_info,
+            })
+        });
+
         // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
 
@@ -305,7 +343,7 @@ impl CollatorStdImpl {
             block: new_block,
             prev_blocks_ids: prev_shard_data.blocks_ids().clone(),
             top_shard_blocks_ids: collation_data.top_shard_blocks_ids.clone(),
-            data: new_block_boc,
+            data: new_block_boc.into(),
             collated_data,
             collated_file_hash: HashBytes::ZERO,
             chain_time: (new_block_info.gen_utime as u64 * 1000)
@@ -329,15 +367,20 @@ impl CollatorStdImpl {
             "finalize block timings"
         );
 
-        Ok((block_candidate, new_state_root))
+        Ok(FinalizedBlock {
+            block_candidate,
+            mc_data,
+            new_state_root,
+        })
     }
 
     fn create_mc_state_extra(
         &self,
         collation_data: &mut BlockCollationData,
         config_params: Option<BlockchainConfig>,
+        working_state: &WorkingState,
     ) -> Result<(McStateExtra, u32)> {
-        let prev_shard_data = &self.working_state().prev_shard_data;
+        let prev_shard_data = &working_state.prev_shard_data;
         let prev_state = &prev_shard_data.observable_states()[0];
 
         // 1. update config params and detect key block

@@ -7,7 +7,7 @@ use everscale_types::models::{ProcessedUptoInfo, ShardIdent, ShardIdentFull};
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
-use super::types::{BlockCollationData, WorkingState};
+use super::types::WorkingState;
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -146,7 +146,7 @@ impl QueueIteratorAdapter {
             let new_mc_read_to_lt = if self.shard_id.is_masterchain() {
                 working_state.prev_shard_data.gen_lt()
             } else {
-                working_state.mc_data.mc_state_stuff().state().gen_lt
+                working_state.mc_data.gen_lt
             };
             if mc_read_to.lt < new_mc_read_to_lt {
                 mc_read_to.lt = new_mc_read_to_lt;
@@ -155,7 +155,7 @@ impl QueueIteratorAdapter {
             }
 
             // try update shardchains ranges
-            for shard in working_state.mc_data.mc_state_extra().shards.iter() {
+            for shard in working_state.mc_data.shards.iter() {
                 let (shard_id, shard_descr) = shard?;
 
                 // add default shardchain range if not exist

@@ -10,7 +10,6 @@ use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
-use crate::types::ShardIdentExt;
 
 pub trait QueueIterator: Send {
     /// Get next message

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -7,16 +8,18 @@ use everscale_types::models::*;
 use execution_manager::ExecutionManager;
 use futures_util::future::{BoxFuture, Future};
 use mq_iterator_adapter::QueueIteratorAdapter;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tokio::sync::oneshot;
+use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
+use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuardWithLabels;
 
-use self::types::{CachedMempoolAnchor, CollatorStats, McData, PrevData, WorkingState};
+use self::types::{CachedMempoolAnchor, CollatorStats, PrevData, WorkingState};
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
-    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
+    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo, McData,
     TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
@@ -41,8 +44,7 @@ pub struct CollatorContext {
     pub listener: Arc<dyn CollatorEventListener>,
     pub shard_id: ShardIdent,
     pub prev_blocks_ids: Vec<BlockId>,
-    pub mc_state: ShardStateStuff,
-    pub state_tracker: MinRefMcStateTracker,
+    pub mc_data: Arc<McData>,
 }
 
 #[async_trait]
@@ -91,7 +93,7 @@ pub trait Collator: Send + Sync + 'static {
     /// Enqueue collator stop task
     async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
     /// Enqueue update of McData in working state and run attempt to collate next shard block
-    async fn equeue_update_mc_data_and_try_collate(&self, mc_state: ShardStateStuff) -> Result<()>;
+    async fn equeue_update_mc_data_and_try_collate(&self, mc_data: Arc<McData>) -> Result<()>;
     /// Enqueue next attemt to collate block
     /// (with check if there are internals or externals for collation).
     /// Check implementation for master and shards for details
@@ -120,8 +122,7 @@ impl CollatorFactory for CollatorStdImplFactory {
             cx.listener,
             cx.shard_id,
             cx.prev_blocks_ids,
-            cx.mc_state,
-            cx.state_tracker,
+            cx.mc_data,
         )
         .await
     }
@@ -133,10 +134,10 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         todo!()
     }
 
-    async fn equeue_update_mc_data_and_try_collate(&self, mc_state: ShardStateStuff) -> Result<()> {
+    async fn equeue_update_mc_data_and_try_collate(&self, mc_data: Arc<McData>) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
             update_mc_data_and_try_collate,
-            mc_state
+            mc_data
         ))
         .await
     }
@@ -152,9 +153,9 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
         self.enqueue_task(method_to_async_task_closure!(
-            do_collate,
+            wait_state_and_do_collate,
             next_chain_time,
-            Some(top_shard_blocks_info)
+            top_shard_blocks_info
         ))
         .await
     }
@@ -173,7 +174,7 @@ pub struct CollatorStdImpl {
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     shard_id: ShardIdent,
-    working_state: Option<WorkingState>,
+    working_state: DelayedWorkingState,
 
     /// The cache of imported from mempool anchors that were not processed yet.
     /// Anchor is removed from the cache when all its externals are processed.
@@ -190,9 +191,6 @@ pub struct CollatorStdImpl {
     /// Updated in the `import_next_anchor()` and `read_next_externals()`
     has_pending_externals: bool,
 
-    /// State tracker for creating `ShardStateStuff` locally
-    state_tracker: MinRefMcStateTracker,
-
     stats: CollatorStats,
     timer: std::time::Instant,
 }
@@ -208,8 +206,7 @@ impl CollatorStdImpl {
         listener: Arc<dyn CollatorEventListener>,
         shard_id: ShardIdent,
         prev_blocks_ids: Vec<BlockId>,
-        mc_state: ShardStateStuff,
-        state_tracker: MinRefMcStateTracker,
+        mc_data: Arc<McData>,
     ) -> AsyncQueuedDispatcher<Self> {
         let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
         let next_block_id_short = BlockIdShort {
@@ -231,6 +228,8 @@ impl CollatorStdImpl {
             config.msgs_exec_params.group_vert_size as _,
         );
 
+        let (working_state_tx, working_state_rx) = oneshot::channel::<Result<WorkingState>>();
+
         let processor = Self {
             next_block_id_short,
             config,
@@ -242,7 +241,12 @@ impl CollatorStdImpl {
             mpool_adapter,
             state_node_adapter,
             shard_id,
-            working_state: None,
+            working_state: DelayedWorkingState::new(shard_id, async move {
+                match working_state_rx.await {
+                    Ok(state) => state,
+                    Err(_) => anyhow::bail!("collator init cancelled"),
+                }
+            }),
 
             anchors_cache: VecDeque::new(),
             last_imported_anchor_id: None,
@@ -250,8 +254,6 @@ impl CollatorStdImpl {
             last_imported_anchor_author: None,
 
             has_pending_externals: false,
-
-            state_tracker,
 
             stats: Default::default(),
             timer: std::time::Instant::now(),
@@ -268,7 +270,8 @@ impl CollatorStdImpl {
             .enqueue_task(method_to_async_task_closure!(
                 init,
                 prev_blocks_ids,
-                mc_state
+                mc_data,
+                working_state_tx
             ))
             .await
             .expect("task receiver had to be not closed or dropped here");
@@ -283,27 +286,12 @@ impl CollatorStdImpl {
         dispatcher
     }
 
-    fn working_state(&self) -> &WorkingState {
-        self.working_state
-            .as_ref()
-            .expect("should `init` collator before calling `working_state`")
-    }
-
-    fn working_state_mut(&mut self) -> &mut WorkingState {
-        self.working_state
-            .as_mut()
-            .expect("should `init` collator before calling `working_state`")
-    }
-
-    fn set_working_state(&mut self, working_state: WorkingState) {
-        self.working_state = Some(working_state);
-    }
-
     // Initialize collator working state then run collation
     async fn init(
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
-        mc_state: ShardStateStuff,
+        mc_data: Arc<McData>,
+        working_state_tx: oneshot::Sender<Result<WorkingState>>,
     ) -> Result<()> {
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): initializing...", self.next_block_id_short,
@@ -315,21 +303,17 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): init: loading initial shard state...", self.next_block_id_short,
         );
-        let (mc_state, prev_states) = Self::load_init_states(
-            self.state_node_adapter.clone(),
-            self.shard_id,
-            prev_blocks_ids,
-            mc_state,
-        )
-        .await?;
+        let prev_states =
+            Self::load_init_states(self.state_node_adapter.as_ref(), prev_blocks_ids).await?;
 
         // build, validate and set working state
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): init: building working state...", self.next_block_id_short,
         );
-        let working_state =
-            Self::build_and_validate_working_state(mc_state, prev_states, &self.state_tracker)?;
-        self.set_working_state(working_state);
+
+        let working_state = Self::build_and_validate_working_state(mc_data, prev_states)?;
+
+        working_state_tx.send(Ok(working_state)).ok();
 
         self.timer = std::time::Instant::now();
 
@@ -353,31 +337,34 @@ impl CollatorStdImpl {
     /// Update working state from new block and state after block collation
     fn update_working_state(
         &mut self,
-        new_state_stuff: ShardStateStuff,
+        block_id: &BlockId,
+        new_state_stuff: JoinTask<Result<ShardStateStuff>>,
+        mc_data: Option<Arc<McData>>,
         has_pending_internals: bool,
+        prev_working_state: WorkingState,
     ) -> Result<()> {
         self.next_block_id_short = BlockIdShort {
-            shard: new_state_stuff.block_id().shard,
-            seqno: new_state_stuff.block_id().seqno + 1,
+            shard: block_id.shard,
+            seqno: block_id.seqno + 1,
         };
 
-        let working_state_mut = self
-            .working_state
-            .as_mut()
-            .expect("should `init` collator before calling `update_working_state`");
+        // TODO: Check if the result mc_data is properly updated on masterchain block
+        let mc_data = mc_data.unwrap_or_else(|| prev_working_state.mc_data);
 
-        working_state_mut.has_pending_internals = Some(has_pending_internals);
+        self.working_state.future = Some(Box::pin(async move {
+            let new_state_stuff = new_state_stuff.await?;
 
-        if new_state_stuff.block_id().shard.is_masterchain() {
-            let new_mc_data = McData::build(new_state_stuff.clone())?;
-            working_state_mut.mc_data = new_mc_data;
-        }
+            let prev_states = vec![new_state_stuff];
+            Self::check_prev_states_and_master(&mc_data, &prev_states)?;
+            let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
 
-        let prev_states = vec![new_state_stuff];
-        Self::check_prev_states_and_master(&working_state_mut.mc_data, &prev_states)?;
-        let (new_prev_shard_data, usage_tree) = PrevData::build(prev_states, &self.state_tracker)?;
-        working_state_mut.prev_shard_data = new_prev_shard_data;
-        working_state_mut.usage_tree = usage_tree;
+            Ok(WorkingState {
+                mc_data: mc_data.into(),
+                prev_shard_data,
+                usage_tree,
+                has_pending_internals: Some(has_pending_internals),
+            })
+        }));
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             "working state updated from just collated block",
@@ -386,43 +373,12 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Update McData in working state
-    #[tracing::instrument(skip_all, fields(block_id = %self.next_block_id_short))]
-    fn update_mc_data(&mut self, mc_state: ShardStateStuff) -> Result<()> {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
-
-        let _histogram =
-            HistogramGuardWithLabels::begin("tycho_collator_update_mc_data_time", &labels);
-
-        let mc_state_block_id_short = mc_state.block_id().as_short_id();
-
-        let new_mc_data = McData::build(mc_state)?;
-
-        let working_state_mut = self.working_state_mut();
-
-        working_state_mut.mc_data = new_mc_data;
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "McData updated in working state from new master state (block_id={})",
-            mc_state_block_id_short,
-        );
-
-        Ok(())
-    }
-
     /// Load required initial states:
     /// master state + list of previous shard states
     async fn load_init_states(
-        state_node_adapter: Arc<dyn StateNodeAdapter>,
-        shard_id: ShardIdent,
+        state_node_adapter: &dyn StateNodeAdapter,
         prev_blocks_ids: Vec<BlockId>,
-        mc_state: ShardStateStuff,
-    ) -> Result<(ShardStateStuff, Vec<ShardStateStuff>)> {
-        // if current shard is a masterchain then can take current master state
-        if shard_id.is_masterchain() {
-            return Ok((mc_state.clone(), vec![mc_state]));
-        }
-
+    ) -> Result<Vec<ShardStateStuff>> {
         // otherwise await prev states by prev block ids
         let mut prev_states = vec![];
         for prev_block_id in prev_blocks_ids {
@@ -436,7 +392,7 @@ impl CollatorStdImpl {
             prev_states.push(state);
         }
 
-        Ok((mc_state, prev_states))
+        Ok(prev_states)
     }
 
     /// Build working state structure:
@@ -446,24 +402,20 @@ impl CollatorStdImpl {
     ///
     /// Perform some validations on state
     fn build_and_validate_working_state(
-        mc_state: ShardStateStuff,
+        mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
-        state_tracker: &MinRefMcStateTracker,
     ) -> Result<WorkingState> {
         // TODO: make real implementation
 
-        let mc_data = McData::build(mc_state)?;
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, state_tracker)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
 
-        let working_state = WorkingState {
-            mc_data,
+        Ok(WorkingState {
+            mc_data: mc_data.into(),
             prev_shard_data,
             usage_tree,
             has_pending_internals: None,
-        };
-
-        Ok(working_state)
+        })
     }
 
     /// (TODO) Perform some checks on master state and prev states
@@ -482,7 +434,10 @@ impl CollatorStdImpl {
     /// 3. Store anchor in cache and return it
     ///
     /// Returns: (`next_anchor`, `has_externals`)
-    async fn import_next_anchor(&mut self) -> Result<(Arc<MempoolAnchor>, bool)> {
+    async fn import_next_anchor(
+        &mut self,
+        working_state: &WorkingState,
+    ) -> Result<(Arc<MempoolAnchor>, bool)> {
         // TODO: make real implementation
 
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -496,8 +451,7 @@ impl CollatorStdImpl {
         let next_anchor = if let Some(prev_anchor_id) = self.last_imported_anchor_id {
             self.mpool_adapter.get_next_anchor(prev_anchor_id).await?
         } else {
-            let anchor_id_opt = self
-                .working_state()
+            let anchor_id_opt = working_state
                 .prev_shard_data
                 .processed_upto()
                 .externals
@@ -513,7 +467,7 @@ impl CollatorStdImpl {
             }
         };
 
-        let externals_count = next_anchor.externals_count_for(&self.shard_id);
+        let externals_count = next_anchor.count_externals_for(&self.shard_id);
         let has_externals = externals_count > 0;
         if has_externals {
             self.has_pending_externals = true;
@@ -523,13 +477,13 @@ impl CollatorStdImpl {
             .increment(externals_count as _);
 
         let chain_time_elapsed =
-            next_anchor.chain_time() - self.last_imported_anchor_chain_time.unwrap_or_default();
+            next_anchor.chain_time - self.last_imported_anchor_chain_time.unwrap_or_default();
 
-        self.last_imported_anchor_id = Some(next_anchor.id());
-        self.last_imported_anchor_chain_time = Some(next_anchor.chain_time());
-        self.last_imported_anchor_author = Some(next_anchor.author());
+        self.last_imported_anchor_id = Some(next_anchor.id);
+        self.last_imported_anchor_chain_time = Some(next_anchor.chain_time);
+        self.last_imported_anchor_author = Some(next_anchor.author);
         self.anchors_cache
-            .push_back((next_anchor.id(), CachedMempoolAnchor {
+            .push_back((next_anchor.id, CachedMempoolAnchor {
                 anchor: next_anchor.clone(),
                 has_externals,
             }));
@@ -538,9 +492,9 @@ impl CollatorStdImpl {
             elapsed = timer.elapsed().as_millis(),
             chain_time_elapsed,
             "imported next anchor (id: {}, chain_time: {}, externals: {})",
-            next_anchor.id(),
-            next_anchor.chain_time(),
-            next_anchor.externals_count(),
+            next_anchor.id,
+            next_anchor.chain_time,
+            next_anchor.externals.len(),
         );
 
         Ok((next_anchor, has_externals))
@@ -550,38 +504,45 @@ impl CollatorStdImpl {
         self.last_imported_anchor_chain_time.unwrap()
     }
 
-    async fn check_has_pending_internals(&mut self) -> Result<bool> {
-        if self.working_state().has_pending_internals.is_none() {
-            let mut mq_iterator_adapter = QueueIteratorAdapter::new(
-                self.shard_id,
-                self.mq_adapter.clone(),
-                Some(
-                    self.exec_manager
-                        .as_ref()
-                        .unwrap()
-                        .get_current_iterator_positions(),
-                ),
-            );
-            let mut current_processed_upto = self
-                .working_state()
-                .prev_shard_data
-                .processed_upto()
-                .clone();
-            mq_iterator_adapter
-                .try_init_next_range_iterator(&mut current_processed_upto, self.working_state())
-                .await?;
-            let has_internals = mq_iterator_adapter.iterator().next(true)?.is_some();
-            self.working_state_mut().has_pending_internals = Some(has_internals);
+    async fn check_has_pending_internals(
+        &mut self,
+        working_state: &mut WorkingState,
+    ) -> Result<bool> {
+        if let Some(has_internals) = working_state.has_pending_internals {
+            return Ok(has_internals);
         }
-        Ok(self.working_state().has_pending_internals.unwrap())
+
+        let mut mq_iterator_adapter = QueueIteratorAdapter::new(
+            self.shard_id,
+            self.mq_adapter.clone(),
+            Some(
+                self.exec_manager
+                    .as_ref()
+                    .unwrap()
+                    .get_current_iterator_positions(),
+            ),
+        );
+
+        let mut current_processed_upto = working_state.prev_shard_data.processed_upto().clone();
+        mq_iterator_adapter
+            .try_init_next_range_iterator(&mut current_processed_upto, working_state)
+            .await?;
+
+        let has_internals = mq_iterator_adapter.iterator().next(true)?.is_some();
+        working_state.has_pending_internals = Some(has_internals);
+
+        Ok(has_internals)
     }
 
-    async fn update_mc_data_and_try_collate(&mut self, mc_state: ShardStateStuff) -> Result<()> {
-        self.update_mc_data(mc_state)?;
-        if matches!(self.working_state().has_pending_internals, Some(false)) {
-            self.working_state_mut().has_pending_internals = None;
+    async fn update_mc_data_and_try_collate(&mut self, mc_data: Arc<McData>) -> Result<()> {
+        let mut working_state = self.working_state.wait().await?;
+
+        working_state.mc_data = mc_data;
+        if working_state.has_pending_internals == Some(false) {
+            working_state.has_pending_internals = None;
         }
-        self.try_collate_next_shard_block_impl().await
+
+        self.try_collate_next_shard_block_impl(working_state).await
     }
 
     fn try_collate(&mut self) -> BoxFuture<'_, Result<()>> {
@@ -590,18 +551,33 @@ impl CollatorStdImpl {
     }
 
     async fn try_collate_impl(&mut self) -> Result<()> {
+        let working_state = self.working_state.wait().await?;
+
         if self.shard_id.is_masterchain() {
-            self.try_collate_next_master_block_impl().await
+            self.try_collate_next_master_block_impl(working_state).await
         } else {
-            self.try_collate_next_shard_block_impl().await
+            self.try_collate_next_shard_block_impl(working_state).await
         }
+    }
+
+    async fn wait_state_and_do_collate(
+        &mut self,
+        next_chain_time: u64,
+        top_shard_blocks_info: Vec<TopBlockDescription>,
+    ) -> Result<()> {
+        let working_state = self.working_state.wait().await?;
+        self.do_collate(working_state, next_chain_time, Some(top_shard_blocks_info))
+            .await
     }
 
     /// Run collation if there are internals,
     /// otherwise import next anchor and notify it to manager
     /// that will route next collation steps
     #[tracing::instrument(name = "try_collate_next_master_block", skip_all, fields(block_id = %self.next_block_id_short))]
-    async fn try_collate_next_master_block_impl(&mut self) -> Result<()> {
+    async fn try_collate_next_master_block_impl(
+        &mut self,
+        mut working_state: WorkingState,
+    ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Check if can collate next master block",
         );
@@ -614,20 +590,21 @@ impl CollatorStdImpl {
         );
 
         // check has pending internals
-        let has_internals = self.check_has_pending_internals().await?;
+        let has_internals = self.check_has_pending_internals(&mut working_state).await?;
         if has_internals {
             // collate if has internals
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed internals from previous block, will collate next block",
             );
-            let next_chain_time = self.working_state().prev_shard_data.gen_chain_time() as u64;
-            self.do_collate(next_chain_time, None).await?;
+            let next_chain_time = working_state.prev_shard_data.gen_chain_time() as u64;
+            self.do_collate(working_state, next_chain_time, None)
+                .await?;
         } else {
             // otherwise import next anchor and return it notify to manager
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "there are no internals, will import next anchor",
             );
-            let (next_anchor, has_externals) = self.import_next_anchor().await?;
+            let (next_anchor, has_externals) = self.import_next_anchor(&working_state).await?;
             if has_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals for master",
@@ -637,6 +614,8 @@ impl CollatorStdImpl {
             self.listener
                 .on_skipped_anchor(self.next_block_id_short, next_anchor, false)
                 .await?;
+
+            self.working_state.delay(working_state)
         }
 
         Ok(())
@@ -648,7 +627,10 @@ impl CollatorStdImpl {
     /// otherwise return empty anchor to manager
     /// that will route next collation steps
     #[tracing::instrument(name = "try_collate_next_shard_block", skip_all, fields(block_id = %self.next_block_id_short))]
-    async fn try_collate_next_shard_block_impl(&mut self) -> Result<()> {
+    async fn try_collate_next_shard_block_impl(
+        &mut self,
+        mut working_state: WorkingState,
+    ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Check if can collate next shard block",
         );
@@ -661,7 +643,7 @@ impl CollatorStdImpl {
         );
 
         // check has pending internals
-        let has_internals = self.check_has_pending_internals().await?;
+        let has_internals = self.check_has_pending_internals(&mut working_state).await?;
         if has_internals {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed internals from previous block, will collate next block",
@@ -678,7 +660,7 @@ impl CollatorStdImpl {
 
         // calc uncommitted chain length
         let mut last_committed_seqno = 0;
-        for shard in self.working_state().mc_data.mc_state_extra().shards.iter() {
+        for shard in working_state.mc_data.shards.iter() {
             let (shard_id, shard_descr) = shard?;
             if shard_id == self.shard_id {
                 last_committed_seqno = shard_descr.seqno;
@@ -691,10 +673,7 @@ impl CollatorStdImpl {
             uncommitted_chain_length >= self.config.max_uncommitted_chain_length;
 
         // should import anchor after fixed gas used by shard blocks in uncommitted blocks chain
-        let gas_used_from_last_anchor = self
-            .working_state()
-            .prev_shard_data
-            .gas_used_from_last_anchor();
+        let gas_used_from_last_anchor = working_state.prev_shard_data.gas_used_from_last_anchor();
         let force_import_anchor_by_used_gas = uncommitted_chain_length > 0
             && gas_used_from_last_anchor > self.config.gas_used_to_import_next_anchor;
 
@@ -721,14 +700,15 @@ impl CollatorStdImpl {
                     gas_used_from_last_anchor, self.config.gas_used_to_import_next_anchor,  uncommitted_chain_length,
                 );
             }
-            let (next_anchor, next_anchor_has_externals) = self.import_next_anchor().await?;
+            let (next_anchor, next_anchor_has_externals) =
+                self.import_next_anchor(&working_state).await?;
             has_externals = next_anchor_has_externals;
             if has_externals && !force_mc_block_by_uncommitted_chain {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",
                 );
             }
-            self.working_state_mut().prev_shard_data.clear_gas_used();
+            working_state.prev_shard_data.clear_gas_used();
             Some((next_anchor, next_anchor_has_externals))
         } else {
             None
@@ -739,7 +719,8 @@ impl CollatorStdImpl {
         // collate block if has internals or externals
         if (has_internals || has_externals) && !force_mc_block_by_uncommitted_chain {
             let next_chain_time = self.get_last_imported_anchor_chain_time();
-            self.do_collate(next_chain_time, None).await?;
+            self.do_collate(working_state, next_chain_time, None)
+                .await?;
         } else {
             // otherwise we have definitely imported the next anchor
             let (next_anchor, next_anchor_has_externals) =
@@ -765,8 +746,50 @@ impl CollatorStdImpl {
                     )
                     .await?;
             }
+
+            self.working_state.delay(working_state);
         }
 
         Ok(())
+    }
+}
+
+struct DelayedWorkingState {
+    shard_id: ShardIdent,
+    future: Option<Pin<Box<dyn Future<Output = Result<WorkingState>> + Send + Sync + 'static>>>,
+    unused: Option<WorkingState>,
+}
+
+impl DelayedWorkingState {
+    fn new<F>(shard_id: ShardIdent, f: F) -> Self
+    where
+        F: Future<Output = Result<WorkingState>> + Send + Sync + 'static,
+    {
+        Self {
+            shard_id,
+            future: Some(Box::pin(f)),
+            unused: None,
+        }
+    }
+
+    #[must_use]
+    async fn wait(&mut self) -> Result<WorkingState> {
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        let _histogram =
+            HistogramGuardWithLabels::begin("tycho_collator_wait_for_working_state_time", &labels);
+
+        if let Some(state) = self.unused.take() {
+            return Ok(state);
+        }
+
+        if let Some(fut) = self.future.take() {
+            return fut.await;
+        }
+
+        anyhow::bail!("No pending working state found");
+    }
+
+    fn delay(&mut self, state: WorkingState) {
+        self.unused = Some(state);
     }
 }

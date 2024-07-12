@@ -871,7 +871,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#49a2c0342fd0f97533a283bb87e235cc5adf88e2"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#bffb69b909fd6494037cb4c6da759cf7bc169788"
 dependencies = [
  "ahash",
  "base64 0.21.7",
@@ -880,6 +880,7 @@ dependencies = [
  "everscale-crypto",
  "everscale-types-proc",
  "hex",
+ "rand",
  "scc",
  "serde",
  "sha2",
@@ -891,7 +892,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#49a2c0342fd0f97533a283bb87e235cc5adf88e2"
+source = "git+https://github.com/broxus/everscale-types.git?branch=tycho#bffb69b909fd6494037cb4c6da759cf7bc169788"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3335,6 +3336,7 @@ name = "tycho-collator"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "backon",
  "base64 0.22.1",
@@ -3349,10 +3351,12 @@ dependencies = [
  "parking_lot",
  "rand",
  "rayon",
+ "scopeguard",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror",
  "tl-proto",
  "tokio",
  "tokio-util",

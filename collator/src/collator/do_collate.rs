@@ -17,17 +17,16 @@ use tycho_util::FastHashMap;
 
 use super::execution_manager::ExecutionManager;
 use super::types::{
-    BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin,
+    BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
-    BlockCollationData, McData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData,
-    ShardDescriptionExt,
+    BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
-use crate::types::{BlockCollationResult, ShardIdentExt, TopBlockDescription};
+use crate::types::{BlockCollationResult, McData, TopBlockDescription};
 
 #[cfg(test)]
 #[path = "tests/do_collate_tests.rs"]
@@ -37,6 +36,7 @@ impl CollatorStdImpl {
     #[tracing::instrument(parent =  None, skip_all, fields(block_id = %self.next_block_id_short, ct = next_chain_time))]
     pub(super) async fn do_collate(
         &mut self,
+        working_state: WorkingState,
         next_chain_time: u64,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
@@ -49,8 +49,8 @@ impl CollatorStdImpl {
 
         let mut exec_manager = self.take_exec_manager();
 
-        let mc_data = &self.working_state().mc_data;
-        let prev_shard_data = &self.working_state().prev_shard_data;
+        let mc_data = &working_state.mc_data;
+        let prev_shard_data = &working_state.prev_shard_data;
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: top_shard_blocks_ids: {:?}",
@@ -74,7 +74,7 @@ impl CollatorStdImpl {
             shard: prev_block_id.shard,
             seqno: prev_block_id.seqno + 1,
         };
-        let block_limits = mc_data.config().get_block_limits(is_masterchain)?;
+        let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
             block_limits
@@ -88,7 +88,7 @@ impl CollatorStdImpl {
         let mut collation_data_builder = BlockCollationDataBuilder::new(
             block_id_short,
             rand_seed,
-            mc_data.mc_state_stuff().state().seqno,
+            mc_data.block_id.seqno,
             next_chain_time,
             prev_shard_data.processed_upto().clone(),
             created_by,
@@ -110,7 +110,7 @@ impl CollatorStdImpl {
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
                 self.import_new_shard_top_blocks_for_masterchain(
-                    mc_data.config(),
+                    &mc_data.config,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
                 )?;
@@ -118,7 +118,7 @@ impl CollatorStdImpl {
         }
 
         let start_lt = Self::calc_start_lt(
-            mc_data,
+            &mc_data,
             prev_shard_data,
             is_masterchain,
             collation_data_builder.shards_max_end_lt,
@@ -144,7 +144,7 @@ impl CollatorStdImpl {
             });
 
         // compute created / minted / recovered / from_prev_block
-        self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
+        self.update_value_flow(&mc_data, prev_shard_data, &mut collation_data)?;
 
         // prepare to read and execute internals and externals
 
@@ -152,11 +152,11 @@ impl CollatorStdImpl {
         exec_manager.init_executor(
             collation_data.next_lt,
             Arc::new(PreloadedBlockchainConfig::with_config(
-                mc_data.config().clone(),
-                mc_data.global_id(),
+                mc_data.config.clone(),
+                mc_data.global_id,
             )?),
             Arc::new(ExecuteParams {
-                state_libs: mc_data.libraries().clone(),
+                state_libs: mc_data.libraries.clone(),
                 // generated unix time
                 block_unixtime: collation_data.gen_utime,
                 // block's start logical time
@@ -181,13 +181,14 @@ impl CollatorStdImpl {
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", labels);
 
             self.create_ticktock_transactions(
+                &mc_data,
                 TickTock::Tick,
                 &mut collation_data,
                 &mut exec_manager,
             )
             .await?;
 
-            self.create_special_transactions(&mut collation_data, &mut exec_manager)
+            self.create_special_transactions(&mc_data, &mut collation_data, &mut exec_manager)
                 .await?;
 
             execute_tick_elapsed = histogram.finish();
@@ -214,6 +215,7 @@ impl CollatorStdImpl {
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         max_new_message_key_to_current_shard.clone(),
+                        &working_state,
                     )
                     .await?;
                 fill_msgs_total_elapsed += timer.elapsed();
@@ -313,6 +315,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", labels);
             self.create_ticktock_transactions(
+                &mc_data,
                 TickTock::Tock,
                 &mut collation_data,
                 &mut exec_manager,
@@ -338,8 +341,8 @@ impl CollatorStdImpl {
         let finalize_block_timer = std::time::Instant::now();
         // TODO: Move into rayon
         tokio::task::yield_now().await;
-        let (candidate, new_state_root) = tokio::task::block_in_place(|| {
-            self.finalize_block(&mut collation_data, &mut exec_manager)
+        let finalized = tokio::task::block_in_place(|| {
+            self.finalize_block(&mut collation_data, &mut exec_manager, &working_state)
         })?;
         tokio::task::yield_now().await;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
@@ -350,8 +353,8 @@ impl CollatorStdImpl {
         metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
 
+        let block_id = finalized.block_candidate.block_id;
         let new_state_stuff = JoinTask::new({
-            let block_id = candidate.block_id;
             let meta = BlockMetaData {
                 is_key_block: false, // TODO: set from collation data
                 gen_utime: collation_data.gen_utime,
@@ -360,7 +363,7 @@ impl CollatorStdImpl {
             let adapter = self.state_node_adapter.clone();
             async move {
                 adapter
-                    .store_state_root(&block_id, meta, new_state_root)
+                    .store_state_root(&block_id, meta, finalized.new_state_root)
                     .await
             }
         });
@@ -371,7 +374,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_apply_queue_diff_time", labels);
             self.mq_adapter
-                .apply_diff(diff, candidate.block_id.as_short_id())
+                .apply_diff(diff, finalized.block_candidate.block_id.as_short_id())
                 .await?;
             apply_queue_diff_elapsed = histogram.finish();
         }
@@ -383,19 +386,23 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let new_state_stuff = new_state_stuff.await?;
-
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
-                    candidate,
-                    new_state_stuff: new_state_stuff.clone(),
+                    candidate: finalized.block_candidate,
+                    mc_data: finalized.mc_data.clone(),
                     has_pending_internals,
                 })
                 .await?;
 
             // update PrevData in working state
-            self.update_working_state(new_state_stuff, has_pending_internals)?;
+            self.update_working_state(
+                &block_id,
+                new_state_stuff,
+                finalized.mc_data.clone(),
+                has_pending_internals,
+                working_state,
+            )?;
 
             handle_block_candidate_elapsed = histogram.finish();
         }
@@ -624,12 +631,12 @@ impl CollatorStdImpl {
                 let expire_timeout = 60 * 1000; // 1 minute
                 let next_chain_time =
                     collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
-                if next_chain_time - anchor.chain_time() > expire_timeout {
-                    let iter = anchor.externals_iterator(0);
+                if next_chain_time - anchor.chain_time > expire_timeout {
+                    let iter = anchor.iter_externals(0);
                     let mut expired_msgs_count = 0;
                     for ext_msg in iter {
                         tracing::debug!(target: tracing_targets::COLLATOR,
-                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info().dst,
+                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
                         );
                         expired_msgs_count += 1;
                     }
@@ -648,7 +655,7 @@ impl CollatorStdImpl {
                     continue;
                 }
 
-                if key == was_read_to.0 && anchor.externals_count() == was_read_to.1 as usize {
+                if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
                     // skip and remove fully processed anchor
                     let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -659,7 +666,7 @@ impl CollatorStdImpl {
                 }
 
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                    "next anchor externals count: {}", anchor.externals_count(),
+                    "next anchor externals count: {}", anchor.externals.len(),
                 );
 
                 if key == was_read_to.0 {
@@ -676,28 +683,28 @@ impl CollatorStdImpl {
 
                 // get iterator and read messages
                 let mut msgs_collected_from_last_anchor = 0;
-                let iter = anchor.externals_iterator(msgs_read_offset_in_last_anchor as usize);
+                let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
                 for ext_msg in iter {
                     tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                        "read ext_msg dst: {}", ext_msg.info().dst,
+                        "read ext_msg dst: {}", ext_msg.info.dst,
                     );
                     if total_msgs_collected < count {
                         msgs_read_offset_in_last_anchor += 1;
                     }
-                    if shard_id.contains_address(&ext_msg.info().dst) {
+                    if shard_id.contains_address(&ext_msg.info.dst) {
                         if total_msgs_collected < count {
                             // get msgs for target shard until target count reached
                             ext_messages.push(Box::new(ParsedMessage {
-                                info: MsgInfo::ExtIn(ext_msg.info().clone()),
+                                info: MsgInfo::ExtIn(ext_msg.info.clone()),
                                 dst_in_current_shard: true,
-                                cell: ext_msg.cell().clone(),
+                                cell: ext_msg.cell.clone(),
                                 special_origin: None,
                                 dequeued: None,
                             }));
                             total_msgs_collected += 1;
                             msgs_collected_from_last_anchor += 1;
                             tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
-                                "collected ext_msg dst: {}", ext_msg.info().dst,
+                                "collected ext_msg dst: {}", ext_msg.info.dst,
                             );
                         } else {
                             // when target msgs count reached
@@ -774,15 +781,12 @@ impl CollatorStdImpl {
         tracing::trace!(target: tracing_targets::COLLATOR, "calc_start_lt()");
 
         let mut start_lt = if !is_masterchain {
-            std::cmp::max(
-                mc_data.mc_state_stuff().state().gen_lt,
-                prev_shard_data.gen_lt(),
-            )
+            std::cmp::max(mc_data.gen_lt, prev_shard_data.gen_lt())
         } else {
-            std::cmp::max(mc_data.mc_state_stuff().state().gen_lt, shards_max_end_lt)
+            std::cmp::max(mc_data.gen_lt, shards_max_end_lt)
         };
 
-        let align = mc_data.get_lt_align();
+        let align = mc_data.lt_align();
         let incr = align - start_lt % align;
         if incr < align || 0 == start_lt {
             if start_lt >= (!incr + 1) {
@@ -806,7 +810,7 @@ impl CollatorStdImpl {
 
         if self.shard_id.is_masterchain() {
             collation_data.value_flow.created.tokens =
-                mc_data.config().get_block_creation_reward(true)?;
+                mc_data.config.get_block_creation_reward(true)?;
 
             collation_data.value_flow.recovered = collation_data.value_flow.created.clone();
             collation_data
@@ -816,9 +820,9 @@ impl CollatorStdImpl {
             collation_data
                 .value_flow
                 .recovered
-                .try_add_assign(&mc_data.mc_state_stuff().state().total_validator_fees)?;
+                .try_add_assign(&mc_data.total_validator_fees)?;
 
-            match mc_data.config().get_fee_collector_address() {
+            match mc_data.config.get_fee_collector_address() {
                 Err(_) => {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "fee recovery disabled (no collector smart contract defined in configuration)",
@@ -838,7 +842,7 @@ impl CollatorStdImpl {
             collation_data.value_flow.minted = self.compute_minted_amount(mc_data)?;
 
             if collation_data.value_flow.minted != CurrencyCollection::ZERO
-                && mc_data.config().get_minter_address().is_err()
+                && mc_data.config.get_minter_address().is_err()
             {
                 tracing::warn!(target: tracing_targets::COLLATOR,
                     "minting of {:?} disabled: no minting smart contract defined",
@@ -848,7 +852,7 @@ impl CollatorStdImpl {
             }
         } else {
             collation_data.value_flow.created.tokens =
-                mc_data.config().get_block_creation_reward(false)?;
+                mc_data.config.get_block_creation_reward(false)?;
             // TODO: should check if it is good to cast `prefix_len` from u16 to u8
             collation_data.value_flow.created.tokens >>=
                 collation_data.block_id_short.shard.prefix_len() as u8;
@@ -868,7 +872,7 @@ impl CollatorStdImpl {
 
         let mut to_mint = CurrencyCollection::default();
 
-        let to_mint_cp = match mc_data.config().get::<ConfigParam7>() {
+        let to_mint_cp = match mc_data.config.get::<ConfigParam7>() {
             Ok(Some(v)) => v,
             _ => {
                 tracing::warn!(target: tracing_targets::COLLATOR,
@@ -878,7 +882,7 @@ impl CollatorStdImpl {
             }
         };
 
-        let old_global_balance = &mc_data.mc_state_extra().global_balance;
+        let old_global_balance = &mc_data.global_balance;
         for item in to_mint_cp.as_dict().iter() {
             let (key, amount) = item?;
             let amount2 = old_global_balance
@@ -910,12 +914,13 @@ impl CollatorStdImpl {
     /// Create special transactions for the collator
     async fn create_special_transactions(
         &self,
+        mc_data: &McData,
         collator_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
     ) -> Result<()> {
         tracing::trace!(target: tracing_targets::COLLATOR, "create_special_transactions");
 
-        let config = self.working_state().mc_data.config();
+        let config = &mc_data.config;
 
         // TODO: Execute in parallel if addresses are distinct?
 
@@ -1019,6 +1024,7 @@ impl CollatorStdImpl {
 
     async fn create_ticktock_transactions(
         &self,
+        mc_data: &McData,
         tick_tock: TickTock,
         collation_data: &mut BlockCollationData,
         exec_manager: &mut ExecutionManager,
@@ -1031,7 +1037,7 @@ impl CollatorStdImpl {
 
         // TODO: Execute in parallel since these are unique accounts
 
-        let config = self.working_state().mc_data.config();
+        let config = &mc_data.config;
         for account_id in config.get_fundamental_addresses()?.keys() {
             self.create_ticktock_transaction(&account_id?, tick_tock, collation_data, exec_manager)
                 .await?;

@@ -7,17 +7,17 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, BlockchainConfig, CurrencyCollection, ExtInMsgInfo, HashUpdate, ImportFees, InMsg,
-    IntMsgInfo, Lazy, LibDescr, McStateExtra, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef,
-    ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees,
-    ShardIdent, ShardIdentFull, SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
+    BlockRef, CurrencyCollection, ExtInMsgInfo, HashUpdate, ImportFees, InMsg, IntMsgInfo, Lazy,
+    LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ProcessedUptoInfo, ShardAccount,
+    ShardAccounts, ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull,
+    SimpleLib, SpecialFlags, StateInit, Transaction, ValueFlow,
 };
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
+use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::MempoolAnchor;
-use crate::types::ProofFunds;
+use crate::types::{McData, ProofFunds};
 
 // В текущем коллаторе перед коллацией блока импортируется:
 // - предыдущий мастер стейт
@@ -93,92 +93,10 @@ use crate::types::ProofFunds;
 // из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
 
 pub(super) struct WorkingState {
-    pub mc_data: McData,
-    pub prev_shard_data: PrevData,
+    pub mc_data: Arc<McData>,
+    pub prev_shard_data: Box<PrevData>,
     pub usage_tree: UsageTree,
     pub has_pending_internals: Option<bool>,
-}
-
-pub(super) struct McData {
-    global_id: i32,
-    mc_state_extra: McStateExtra,
-    prev_key_block_seqno: u32,
-    // TODO: remove if we do not need this
-    _prev_key_block: Option<BlockId>,
-    mc_state_stuff: ShardStateStuff,
-}
-
-impl McData {
-    pub fn build(mc_state_stuff: ShardStateStuff) -> Result<Self> {
-        let mc_state_extra = mc_state_stuff.state_extra()?;
-
-        // prev key block
-        let (prev_key_block_seqno, prev_key_block) = if mc_state_extra.after_key_block {
-            (
-                mc_state_stuff.block_id().seqno,
-                Some(*mc_state_stuff.block_id()),
-            )
-        } else if let Some(block_ref) = mc_state_extra.last_key_block.as_ref() {
-            (
-                block_ref.seqno,
-                Some(BlockId {
-                    shard: ShardIdent::MASTERCHAIN,
-                    seqno: block_ref.seqno,
-                    root_hash: block_ref.root_hash,
-                    file_hash: block_ref.file_hash,
-                }),
-            )
-        } else {
-            (0, None)
-        };
-
-        Ok(Self {
-            global_id: mc_state_stuff.state().global_id,
-            mc_state_extra: mc_state_extra.clone(),
-            _prev_key_block: prev_key_block,
-            prev_key_block_seqno,
-            mc_state_stuff,
-        })
-    }
-
-    pub fn global_id(&self) -> i32 {
-        self.global_id
-    }
-
-    pub fn prev_key_block_seqno(&self) -> u32 {
-        self.prev_key_block_seqno
-    }
-
-    pub fn mc_state_stuff(&self) -> ShardStateStuff {
-        self.mc_state_stuff.clone()
-    }
-
-    pub fn mc_state_extra(&self) -> &McStateExtra {
-        &self.mc_state_extra
-    }
-
-    pub fn get_master_ref(&self) -> BlockRef {
-        let end_lt = self.mc_state_stuff.state().gen_lt;
-        let block_id = self.mc_state_stuff.block_id();
-        BlockRef {
-            end_lt,
-            seqno: block_id.seqno,
-            root_hash: block_id.root_hash,
-            file_hash: block_id.file_hash,
-        }
-    }
-
-    pub fn config(&self) -> &BlockchainConfig {
-        &self.mc_state_extra.config
-    }
-
-    pub fn libraries(&self) -> &Dict<HashBytes, LibDescr> {
-        &self.mc_state_stuff.state().libraries
-    }
-
-    pub fn get_lt_align(&self) -> u64 {
-        1000000
-    }
 }
 
 pub(super) struct PrevData {
@@ -201,10 +119,7 @@ pub(super) struct PrevData {
 }
 
 impl PrevData {
-    pub fn build(
-        prev_states: Vec<ShardStateStuff>,
-        state_tracker: &MinRefMcStateTracker,
-    ) -> Result<(Self, UsageTree)> {
+    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Box<Self>, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -219,7 +134,7 @@ impl PrevData {
         let observable_states = vec![ShardStateStuff::from_root(
             pure_prev_states[0].block_id(),
             observable_root,
-            state_tracker,
+            prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
         let gen_utime = observable_states[0].state().gen_utime;
@@ -230,7 +145,7 @@ impl PrevData {
         let underload_history = observable_states[0].state().underload_history;
         let processed_upto = pure_prev_states[0].state().processed_upto.load()?;
 
-        let prev_data = Self {
+        let prev_data = Box::new(Self {
             observable_states,
             observable_accounts,
 
@@ -246,7 +161,7 @@ impl PrevData {
             _underload_history: underload_history,
 
             processed_upto,
-        };
+        });
 
         Ok((prev_data, usage_tree))
     }

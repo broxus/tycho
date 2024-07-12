@@ -144,7 +144,7 @@ async fn test_collation_process_on_stubs() {
         config,
         Arc::new(message_queue_adapter),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
-        MempoolAdapterStubImpl::new,
+        MempoolAdapterStubImpl::with_stub_externals,
         ValidatorStdImplFactory {
             network: node_network.clone().into(),
             config: validator_config,

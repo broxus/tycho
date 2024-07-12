@@ -1,12 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Result;
+use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{
-    Block, BlockId, BlockInfo, CurrencyCollection, GlobalCapabilities, GlobalCapability, IntAddr,
-    ShardIdent, Signature, ValueFlow,
-};
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
@@ -89,9 +88,70 @@ impl Default for MsgsExecutionParams {
 
 pub struct BlockCollationResult {
     pub candidate: Box<BlockCandidate>,
-    pub new_state_stuff: ShardStateStuff,
+    pub mc_data: Option<Arc<McData>>,
     /// There are unprocessed internals in shard queue after block collation
     pub has_pending_internals: bool,
+}
+
+#[derive(Debug)]
+pub struct McData {
+    pub global_id: i32,
+    pub block_id: BlockId,
+
+    pub prev_key_block_seqno: u32,
+    pub gen_lt: u64,
+    pub libraries: Dict<HashBytes, LibDescr>,
+
+    pub total_validator_fees: CurrencyCollection,
+
+    pub global_balance: CurrencyCollection,
+    pub shards: ShardHashes,
+    pub config: BlockchainConfig,
+    pub validator_info: ValidatorInfo,
+}
+
+impl McData {
+    pub fn load_from_state(state: &ShardStateStuff) -> Result<Arc<Self>> {
+        let block_id = *state.block_id();
+        let extra = state.state_extra()?;
+        let state = state.as_ref();
+
+        let prev_key_block_seqno = if extra.after_key_block {
+            block_id.seqno
+        } else if let Some(block_ref) = &extra.last_key_block {
+            block_ref.seqno
+        } else {
+            0
+        };
+
+        Ok(Arc::new(Self {
+            global_id: state.global_id,
+            block_id,
+
+            prev_key_block_seqno,
+            gen_lt: state.gen_lt,
+            libraries: state.libraries.clone(),
+            total_validator_fees: state.total_validator_fees.clone(),
+
+            global_balance: extra.global_balance.clone(),
+            shards: extra.shards.clone(),
+            config: extra.config.clone(),
+            validator_info: extra.validator_info,
+        }))
+    }
+
+    pub fn make_block_ref(&self) -> BlockRef {
+        BlockRef {
+            end_lt: self.gen_lt,
+            seqno: self.block_id.seqno,
+            root_hash: self.block_id.root_hash,
+            file_hash: self.block_id.file_hash,
+        }
+    }
+
+    pub fn lt_align(&self) -> u64 {
+        1000000
+    }
 }
 
 #[derive(Clone)]
@@ -100,7 +160,7 @@ pub struct BlockCandidate {
     pub block: Block,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
-    pub data: Vec<u8>,
+    pub data: Bytes,
     pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
@@ -217,15 +277,6 @@ impl IntAdrExt for IntAddr {
             Self::Std(std_addr) => std_addr.address,
             Self::Var(var_addr) => HashBytes::from_slice(var_addr.address.as_slice()),
         }
-    }
-}
-
-pub(crate) trait ShardIdentExt {
-    fn contains_address(&self, addr: &IntAddr) -> bool;
-}
-impl ShardIdentExt for ShardIdent {
-    fn contains_address(&self, addr: &IntAddr) -> bool {
-        self.workchain() == addr.workchain() && self.contains_account(&addr.get_address())
     }
 }
 

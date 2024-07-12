@@ -23,11 +23,23 @@ impl MinRefMcStateTracker {
     pub(crate) fn insert(&self, mc_seqno: u32) -> RefMcStateHandle {
         self.inner.insert(mc_seqno)
     }
+
+    #[inline]
+    fn wrap(inner: &Arc<Inner>) -> &Self {
+        // SAFETY: `MinRefMcStateTracker` has the same memory layout as `Arc<Inner>`.
+        unsafe { &*(inner as *const Arc<Inner>).cast::<Self>() }
+    }
 }
 
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct RefMcStateHandle(Arc<HandleInner>);
+
+impl RefMcStateHandle {
+    pub fn tracker(&self) -> &MinRefMcStateTracker {
+        MinRefMcStateTracker::wrap(&self.0.min_ref_mc_state)
+    }
+}
 
 impl std::fmt::Debug for RefMcStateHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
