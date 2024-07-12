@@ -38,7 +38,7 @@ impl CollatorStdImpl {
         let histogram =
             HistogramGuard::begin_with_labels("tycho_collator_finalize_block_time", labels);
 
-        let mc_data = working_state.mc_data.load_full();
+        let mc_data = working_state.mc_data.as_ref();
         let prev_shard_data = &working_state.prev_shard_data;
 
         // update shard accounts tree and prepare accounts blocks

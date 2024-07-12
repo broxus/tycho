@@ -1,10 +1,8 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
-use arc_swap::ArcSwap;
 use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
@@ -95,45 +93,10 @@ use crate::types::{McData, ProofFunds};
 // из него можно собрать новый ShardStateStuff, который может использоваться для дальнейшей коллации
 
 pub(super) struct WorkingState {
-    pub mc_data: ArcSwap<McData>,
-    pub prev_shard_data: PrevData,
+    pub mc_data: Arc<McData>,
+    pub prev_shard_data: Box<PrevData>,
     pub usage_tree: UsageTree,
-    pub pending_internals: PendingInternalsState,
-}
-
-#[derive(Default)]
-pub struct PendingInternalsState(AtomicU32);
-
-impl PendingInternalsState {
-    const INITIALIZED_MASK: u32 = 1;
-    const HAS_INTERNALS_MASK: u32 = 2;
-
-    pub fn new(has_internals: bool) -> Self {
-        Self(AtomicU32::new(
-            Self::INITIALIZED_MASK | (has_internals as u32) << 1,
-        ))
-    }
-
-    pub fn get(&self) -> Option<bool> {
-        let value = self.0.load(Ordering::Acquire);
-        (value & Self::INITIALIZED_MASK != 0).then(|| value & Self::HAS_INTERNALS_MASK != 0)
-    }
-
-    pub fn set(&self, has_internals: bool) {
-        self.0.store(
-            Self::INITIALIZED_MASK | (has_internals as u32) << 1,
-            Ordering::Release,
-        );
-    }
-
-    pub fn reset_if_no_internals(&self) {
-        _ = self.0.compare_exchange(
-            Self::INITIALIZED_MASK,
-            0,
-            Ordering::Release,
-            Ordering::Relaxed,
-        );
-    }
+    pub has_pending_internals: Option<bool>,
 }
 
 pub(super) struct PrevData {
@@ -148,7 +111,7 @@ pub(super) struct PrevData {
     gen_chain_time: u32,
     gen_lt: u64,
     total_validator_fees: CurrencyCollection,
-    gas_used_from_last_anchor: AtomicU64,
+    gas_used_from_last_anchor: u64,
     // TODO: remove if we do not need this
     _underload_history: u64,
 
@@ -156,7 +119,7 @@ pub(super) struct PrevData {
 }
 
 impl PrevData {
-    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Self, UsageTree)> {
+    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Box<Self>, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -178,12 +141,11 @@ impl PrevData {
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
-        let gas_used_from_last_anchor =
-            AtomicU64::new(observable_states[0].state().overload_history);
+        let gas_used_from_last_anchor = observable_states[0].state().overload_history;
         let underload_history = observable_states[0].state().underload_history;
         let processed_upto = pure_prev_states[0].state().processed_upto.load()?;
 
-        let prev_data = Self {
+        let prev_data = Box::new(Self {
             observable_states,
             observable_accounts,
 
@@ -199,7 +161,7 @@ impl PrevData {
             _underload_history: underload_history,
 
             processed_upto,
-        };
+        });
 
         Ok((prev_data, usage_tree))
     }
@@ -259,11 +221,11 @@ impl PrevData {
     }
 
     pub fn gas_used_from_last_anchor(&self) -> u64 {
-        self.gas_used_from_last_anchor.load(Ordering::Acquire)
+        self.gas_used_from_last_anchor
     }
 
-    pub fn clear_gas_used(&self) {
-        self.gas_used_from_last_anchor.store(0, Ordering::Release);
+    pub fn clear_gas_used(&mut self) {
+        self.gas_used_from_last_anchor = 0;
     }
 
     pub fn total_validator_fees(&self) -> &CurrencyCollection {

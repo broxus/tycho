@@ -86,8 +86,6 @@ impl QueueIteratorAdapter {
     ) -> Result<bool> {
         let timer = std::time::Instant::now();
 
-        let mc_data = working_state.mc_data.load_full();
-
         // get current ranges
         let mut ranges_from = FastHashMap::<_, InternalMessageKey>::default();
         let mut ranges_to = FastHashMap::<_, InternalMessageKey>::default();
@@ -148,7 +146,7 @@ impl QueueIteratorAdapter {
             let new_mc_read_to_lt = if self.shard_id.is_masterchain() {
                 working_state.prev_shard_data.gen_lt()
             } else {
-                mc_data.gen_lt
+                working_state.mc_data.gen_lt
             };
             if mc_read_to.lt < new_mc_read_to_lt {
                 mc_read_to.lt = new_mc_read_to_lt;
@@ -157,7 +155,7 @@ impl QueueIteratorAdapter {
             }
 
             // try update shardchains ranges
-            for shard in mc_data.shards.iter() {
+            for shard in working_state.mc_data.shards.iter() {
                 let (shard_id, shard_descr) = shard?;
 
                 // add default shardchain range if not exist

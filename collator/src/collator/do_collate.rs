@@ -36,7 +36,7 @@ impl CollatorStdImpl {
     #[tracing::instrument(parent =  None, skip_all, fields(block_id = %self.next_block_id_short, ct = next_chain_time))]
     pub(super) async fn do_collate(
         &mut self,
-        working_state: &WorkingState,
+        working_state: WorkingState,
         next_chain_time: u64,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
@@ -49,7 +49,7 @@ impl CollatorStdImpl {
 
         let mut exec_manager = self.take_exec_manager();
 
-        let mc_data = working_state.mc_data.load_full();
+        let mc_data = &working_state.mc_data;
         let prev_shard_data = &working_state.prev_shard_data;
 
         tracing::info!(target: tracing_targets::COLLATOR,
@@ -215,7 +215,7 @@ impl CollatorStdImpl {
                         &mut collation_data,
                         &mut mq_iterator_adapter,
                         max_new_message_key_to_current_shard.clone(),
-                        working_state,
+                        &working_state,
                     )
                     .await?;
                 fill_msgs_total_elapsed += timer.elapsed();
@@ -342,7 +342,7 @@ impl CollatorStdImpl {
         // TODO: Move into rayon
         tokio::task::yield_now().await;
         let finalized = tokio::task::block_in_place(|| {
-            self.finalize_block(&mut collation_data, &mut exec_manager, working_state)
+            self.finalize_block(&mut collation_data, &mut exec_manager, &working_state)
         })?;
         tokio::task::yield_now().await;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
