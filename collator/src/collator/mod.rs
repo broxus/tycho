@@ -332,18 +332,20 @@ impl CollatorStdImpl {
             .processed_upto()
             .externals
             .as_ref()
-            .map(|upto| upto.processed_to.0)
+            .map(|upto| upto.processed_to)
         {
             tracing::info!(target: tracing_targets::COLLATOR,
-                "Collator (block_id={}): init: import anchors from processed upto anchor id {} ...",
+                "Collator (block_id={}): init: import anchors from processed upto anchor id {} offset {} ...",
                 self.next_block_id_short,
-                processed_upto_anchor_id,
+                processed_upto_anchor_id.0,
+                processed_upto_anchor_id.1,
             );
             self.import_anchors_on_init(
-                processed_upto_anchor_id,
+                processed_upto_anchor_id.0,
+                processed_upto_anchor_id.1 as usize,
                 working_state.prev_shard_data.gen_chain_time(),
             )
-                .await?;
+            .await?;
         }
 
         working_state_tx.send(Ok(working_state)).ok();
@@ -473,7 +475,6 @@ impl CollatorStdImpl {
         &mut self,
         working_state: &WorkingState,
     ) -> Result<(Arc<MempoolAnchor>, bool)> {
-
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
         let _histogram =
@@ -486,7 +487,7 @@ impl CollatorStdImpl {
             .get_next_anchor(self.last_imported_anchor_id.unwrap_or_default())
             .await?;
 
-        let externals_count = next_anchor.count_externals_for(&self.shard_id);
+        let externals_count = next_anchor.count_externals_for(&self.shard_id, 0);
         let has_externals = externals_count > 0;
         if has_externals {
             self.has_pending_externals = true;
@@ -525,6 +526,7 @@ impl CollatorStdImpl {
     async fn import_anchors_on_init(
         &mut self,
         processed_upto_anchor_id: u32,
+        processed_upto_offset: usize,
         last_block_chain_time: u64,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -550,14 +552,15 @@ impl CollatorStdImpl {
         }
 
         let mut anchors: Vec<AnchorInfo> = vec![];
-        let mut externals_count = next_anchor.externals_count_for(&self.shard_id);
+        let mut externals_count =
+            next_anchor.count_externals_for(&self.shard_id, processed_upto_offset);
         let has_externals = externals_count > 0;
         if has_externals {
             self.has_pending_externals = true;
         }
 
-        let mut next_anchor_chain_time = next_anchor.chain_time();
-        let mut last_anchor_id = next_anchor.id();
+        let mut next_anchor_chain_time = next_anchor.chain_time;
+        let mut last_anchor_id = next_anchor.id;
         self.anchors_cache
             .push_back((last_anchor_id, CachedMempoolAnchor {
                 anchor: next_anchor.clone(),
@@ -569,17 +572,17 @@ impl CollatorStdImpl {
             chain_time: next_anchor_chain_time,
             externals_count,
         });
-        while last_block_chain_time >= next_anchor_chain_time {
+        while last_block_chain_time > next_anchor_chain_time {
             next_anchor = self.mpool_adapter.get_next_anchor(last_anchor_id).await?;
 
-            externals_count = next_anchor.externals_count_for(&self.shard_id);
+            externals_count = next_anchor.count_externals_for(&self.shard_id, 0);
             let has_externals = externals_count > 0;
             if has_externals {
                 self.has_pending_externals = true;
             }
 
-            next_anchor_chain_time = next_anchor.chain_time();
-            last_anchor_id = next_anchor.id();
+            next_anchor_chain_time = next_anchor.chain_time;
+            last_anchor_id = next_anchor.id;
             self.anchors_cache
                 .push_back((last_anchor_id, CachedMempoolAnchor {
                     anchor: next_anchor.clone(),
@@ -598,7 +601,7 @@ impl CollatorStdImpl {
 
         self.last_imported_anchor_id = Some(last_anchor_id);
         self.last_imported_anchor_chain_time = Some(next_anchor_chain_time);
-        self.last_imported_anchor_author = Some(next_anchor.author());
+        self.last_imported_anchor_author = Some(next_anchor.author);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             elapsed = timer.elapsed().as_millis(),
