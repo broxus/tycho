@@ -1,0 +1,45 @@
+[package]
+name = "tycho-light-node"
+edition = "2021"
+version.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# crates.io deps
+anyhow = { workspace = true }
+clap = { workspace = true }
+everscale-crypto = { workspace = true }
+everscale-types = { workspace = true, features = ["rand"] }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+
+# local deps
+tycho-block-util = { workspace = true }
+tycho-core = { workspace = true }
+tycho-network = { workspace = true }
+tycho-rpc = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true, features = ["cli"] }
+
+[dev-dependencies]
+tycho-core = { workspace = true, features = ["test"] }
+
+[lib]
+name = "tycho_light_node"
+path = "src/lib.rs"
+
+[[example]]
+name = "light-node"
+path = "examples/node.rs"
+
+[features]
+test = ["tycho-core/test"]
+
+[lints]
+workspace = true
