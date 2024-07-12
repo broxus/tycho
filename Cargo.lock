@@ -434,9 +434,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.1.10"
+version = "1.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9e8aabfac534be767c909e0690571677d49f41bd8465ae876fe043d52ba5292"
+checksum = "26a5c3fd7bfa1ce3897a3a3501d362b2d87b7f2583ebcb4a949ec25911025cbc"
 dependencies = [
  "jobserver",
  "libc",
@@ -1978,11 +1978,12 @@ checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
-version = "0.2.20"
+version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77957b295656769bb8ad2b6a6b09d897d94f05c41b069aede1fcdaa675eaea04"
+checksum = "2288c0e17cc8d342c712bb43a257a80ebffce59cdb33d5000d8348f3ec02528b"
 dependencies = [
  "zerocopy",
+ "zerocopy-derive",
 ]
 
 [[package]]
@@ -3334,7 +3335,6 @@ dependencies = [
  "everscale-types",
  "futures-util",
  "hex",
- "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "parking_lot",
@@ -3347,12 +3347,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "tempfile",
- "thiserror",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "tycho-block-util",
  "tycho-collator",
  "tycho-consensus",
@@ -3429,13 +3427,11 @@ dependencies = [
  "rand_pcg",
  "rayon",
  "serde",
- "serde_json",
  "tikv-jemallocator",
  "tl-proto",
  "tokio",
  "tokio-stream",
  "tracing",
- "tracing-appender",
  "tracing-flame",
  "tracing-subscriber",
  "tycho-consensus",
@@ -3498,6 +3494,27 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "prost-build",
+]
+
+[[package]]
+name = "tycho-light-node"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "everscale-crypto",
+ "everscale-types",
+ "rand",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tycho-block-util",
+ "tycho-core",
+ "tycho-network",
+ "tycho-rpc",
+ "tycho-storage",
+ "tycho-util",
 ]
 
 [[package]]

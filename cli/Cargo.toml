@@ -25,7 +25,6 @@ everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
 hex = { workspace = true }
-libc = { workspace = true }
 metrics = { workspace = true, optional = true }
 metrics-exporter-prometheus = { workspace = true }
 parking_lot = { workspace = true }
@@ -37,7 +36,6 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
 tempfile = { workspace = true }
-thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
@@ -46,7 +44,6 @@ tikv-jemallocator = { workspace = true, features = [
 tikv-jemalloc-ctl = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }

@@ -54,8 +54,6 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 # examples' dependencies
 clap = { workspace = true, features = ["wrap_help"] }
-serde_json = { workspace = true }
-tracing-appender = { workspace = true }
 
 tycho-consensus = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
