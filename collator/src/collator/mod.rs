@@ -505,7 +505,7 @@ impl CollatorStdImpl {
     }
 
     /// 1. Get anchor from `externals_processed_upto`
-    /// 2. Get next anchors until last_chain_time
+    /// 2. Get next anchors until `last_block_chain_time`
     /// 3. Store anchors in cache
     async fn import_anchors_on_init(
         &mut self,
@@ -515,12 +515,10 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        let _histogram = HistogramGuardWithLabels::begin(
-            "tycho_collator_import_next_anchors_hot_start_time",
+        let histogram = HistogramGuardWithLabels::begin(
+            "tycho_collator_import_next_anchors_on_init_time",
             &labels,
         );
-
-        let timer = std::time::Instant::now();
 
         let mut next_anchor = self
             .mpool_adapter
@@ -588,10 +586,10 @@ impl CollatorStdImpl {
         self.last_imported_anchor_author = Some(next_anchor.author);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            elapsed = timer.elapsed().as_millis(),
+            elapsed = histogram.finish().as_millis(),
             "Collator (block_id={}): init: imported anchors on init ({:?})",
             self.next_block_id_short,
-            anchors
+            anchors.as_slice()
         );
 
         Ok(())
@@ -693,7 +691,7 @@ impl CollatorStdImpl {
             tracing::info!(target: tracing_targets::COLLATOR,
                 "there are unprocessed internals from previous block, will collate next block",
             );
-            let next_chain_time = working_state.prev_shard_data.gen_chain_time() as u64;
+            let next_chain_time = working_state.prev_shard_data.gen_chain_time();
             self.do_collate(working_state, next_chain_time, None)
                 .await?;
         } else {
