@@ -381,6 +381,7 @@ impl Node {
 
         let public_overlay = PublicOverlay::builder(zerostate.compute_public_overlay_id())
             .with_peer_resolver(peer_resolver.clone())
+            .named("blockchain_rpc")
             .build(blockchain_rpc_service);
         overlay_service.add_public_overlay(&public_overlay);
 

@@ -81,8 +81,10 @@ def create_counter_panel(
     title: str,
     unit_format: str = UNITS.NUMBER_FORMAT,
     labels: List[str] = [],
+    legend_format: str | None = None,
 ) -> Panel:
-    legend_format = generate_legend_format(labels)
+    if legend_format is None:
+        legend_format = generate_legend_format(labels)
 
     if isinstance(expr, str):
         targets = [
@@ -188,6 +190,37 @@ def core_bc() -> RowPanel:
         ),
     ]
     return create_row("Blockchain", metrics)
+
+
+def net_traffic() -> RowPanel:
+    legend_format = "{{instance}} - {{service}}"
+    metrics = [
+        create_counter_panel(
+            "tycho_private_overlay_tx",
+            "Private overlay traffic sent",
+            UNITS.BYTES_SEC_IEC,
+            legend_format=legend_format,
+        ),
+        create_counter_panel(
+            "tycho_private_overlay_rx",
+            "Private overlay traffic received",
+            UNITS.BYTES_SEC_IEC,
+            legend_format=legend_format,
+        ),
+        create_counter_panel(
+            "tycho_public_overlay_tx",
+            "Public overlay traffic sent",
+            UNITS.BYTES_SEC_IEC,
+            legend_format=legend_format,
+        ),
+        create_counter_panel(
+            "tycho_public_overlay_rx",
+            "Public overlay traffic received",
+            UNITS.BYTES_SEC_IEC,
+            legend_format=legend_format,
+        ),
+    ]
+    return create_row("network: Traffic", metrics)
 
 
 def net_conn_manager() -> RowPanel:
@@ -527,14 +560,15 @@ def collator_finalize_block() -> RowPanel:
 def collator_params_metrics() -> RowPanel:
     metrics = [
         create_gauge_panel(
-            "tycho_do_collate_msgs_exec_params_buffer_limit", "Params: msgs buffer limit"
+            "tycho_do_collate_msgs_exec_params_buffer_limit",
+            "Params: msgs buffer limit",
         ),
         create_gauge_panel(
             "tycho_do_collate_msgs_exec_params_group_limit", "Params: group limit"
         ),
         create_gauge_panel(
-            "tycho_do_collate_msgs_exec_params_group_vert_size", "Params: group vertical size"
-            "Params: group vertical size limit",
+            "tycho_do_collate_msgs_exec_params_group_vert_size",
+            "Params: group vertical size" "Params: group vertical size limit",
         ),
     ]
     return create_row("collator: Parameters", metrics)
@@ -777,7 +811,6 @@ def collator_core_operations_metrics() -> RowPanel:
             "Handle block candidate",
             labels=['workchain=~"$workchain"'],
         ),
-
     ]
     return create_row("collator: Core Operations Metrics", metrics)
 
@@ -1141,6 +1174,7 @@ dashboard = Dashboard(
         collator_execution_manager(),
         mempool(),
         mempool_components(),
+        net_traffic(),
         net_conn_manager(),
         net_request_handler(),
         net_peer(),
@@ -1153,7 +1187,7 @@ dashboard = Dashboard(
     version=9,
     schemaVersion=14,
     graphTooltip=GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,
-    timezone="browser",
+    timezone="utc",
 ).auto_panel_ids()
 
 
