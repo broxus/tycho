@@ -836,6 +836,11 @@ def collator_misc_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_collator_import_next_anchors_on_init_time",
+            "Import anchors on init time",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_collator_try_collate_next_master_block_time",
             "Try collate next master block",
         ),
