@@ -104,16 +104,18 @@ pub struct MempoolAnchor {
 }
 
 impl MempoolAnchor {
-    pub fn count_externals_for(&self, shard_id: &ShardIdent) -> usize {
+    pub fn count_externals_for(&self, shard_id: &ShardIdent, offset: usize) -> usize {
         self.externals
             .iter()
+            .skip(offset)
             .filter(|ext| shard_id.contains_address(&ext.info.dst))
             .count()
     }
 
-    pub fn has_externals_for(&self, shard_id: &ShardIdent) -> bool {
+    pub fn has_externals_for(&self, shard_id: &ShardIdent, offset: usize) -> bool {
         self.externals
             .iter()
+            .skip(offset)
             .any(|ext| shard_id.contains_address(&ext.info.dst))
     }
 
