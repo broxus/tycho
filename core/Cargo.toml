@@ -14,10 +14,8 @@ arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
-castaway = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
-itertools = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
@@ -38,7 +36,6 @@ tycho-util = { workspace = true }
 [dev-dependencies]
 everscale-crypto = { workspace = true }
 tempfile = { workspace = true }
-tracing-test = { workspace = true }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 

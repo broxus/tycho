@@ -3178,27 +3178,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-test"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "557b891436fe0d5e0e363427fc7f217abf9ccd510d5136549847bdcbcd011d68"
-dependencies = [
- "tracing-core",
- "tracing-subscriber",
- "tracing-test-macro",
-]
-
-[[package]]
-name = "tracing-test-macro"
-version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04659ddb06c87d233c566112c1c9c5b9e98256d9af50ec3bc9c8327f873a7568"
-dependencies = [
- "quote",
- "syn 2.0.66",
-]
-
-[[package]]
 name = "trait-variant"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3292,7 +3271,6 @@ name = "tycho-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "arc-swap",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -3314,7 +3292,6 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "sha2",
- "tempfile",
  "thiserror",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
@@ -3339,7 +3316,6 @@ dependencies = [
  "backon",
  "base64 0.22.1",
  "bytes",
- "bytesize",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
@@ -3350,16 +3326,13 @@ dependencies = [
  "rand",
  "rayon",
  "serde",
- "serde_json",
  "sha2",
- "tempfile",
  "tl-proto",
  "tokio",
  "tokio-util",
  "ton_executor",
  "tracing",
  "tracing-subscriber",
- "tracing-test",
  "trait-variant",
  "tycho-block-util",
  "tycho-collator",
@@ -3378,11 +3351,9 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
- "async-trait",
  "bincode",
  "bytes",
  "clap",
- "dashmap",
  "everscale-crypto",
  "futures-util",
  "hex",
@@ -3398,15 +3369,12 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-stream",
- "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-flame",
  "tracing-subscriber",
  "tycho-network",
- "tycho-storage",
  "tycho-util",
- "weedb",
 ]
 
 [[package]]
@@ -3418,11 +3386,9 @@ dependencies = [
  "async-trait",
  "bytes",
  "bytesize",
- "castaway",
  "everscale-crypto",
  "everscale-types",
  "futures-util",
- "itertools",
  "metrics",
  "parking_lot",
  "rand",
@@ -3434,7 +3400,6 @@ dependencies = [
  "tl-proto",
  "tokio",
  "tracing",
- "tracing-test",
  "tycho-block-util",
  "tycho-network",
  "tycho-storage",
@@ -3480,7 +3445,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "tracing-test",
  "tycho-util",
  "x509-parser",
 ]
@@ -3500,7 +3464,6 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "serde_path_to_error",
  "thiserror",
  "tokio",
  "tower",
@@ -3533,7 +3496,6 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
- "base64 0.22.1",
  "bumpalo",
  "bytes",
  "bytesize",
@@ -3541,19 +3503,15 @@ dependencies = [
  "dashmap",
  "everscale-types",
  "fdlimit",
- "hex",
  "humantime",
  "libc",
  "metrics",
- "num-traits",
  "parking_lot",
  "parking_lot_core",
  "quick_cache",
- "rand",
  "rlimit",
  "scc",
  "serde",
- "serde_json",
  "sha2",
  "smallvec",
  "sysinfo",
@@ -3561,9 +3519,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tracing-test",
  "triomphe",
  "tycho-block-util",
  "tycho-storage",
@@ -3579,11 +3534,8 @@ dependencies = [
  "anyhow",
  "castaway",
  "dashmap",
- "everscale-crypto",
  "futures-util",
- "hex",
  "humantime",
- "libc",
  "metrics",
  "rand",
  "rayon",

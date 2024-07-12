@@ -22,10 +22,8 @@ required-features = ["test"]
 ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
-async-trait = { workspace = true }
 bincode = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
-dashmap = { workspace = true }
 everscale-crypto = { workspace = true }
 futures-util = { workspace = true }
 itertools = { workspace = true }
@@ -37,13 +35,10 @@ serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, default-features = false }
 tokio-stream = { workspace = true, optional = true }
-tokio-util = { workspace = true }
 tracing = { workspace = true }
-weedb = { workspace = true }
 
 # local deps
 tycho-network = { workspace = true }
-tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]

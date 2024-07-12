@@ -19,15 +19,12 @@ crc = { workspace = true }
 dashmap = { workspace = true }
 everscale-types = { workspace = true, features = ["tycho", "stats"] }
 fdlimit = { workspace = true }
-hex = { workspace = true }
 humantime = { workspace = true }
 libc = { workspace = true }
 metrics = { workspace = true }
-num-traits = { workspace = true }
 parking_lot = { workspace = true }
 parking_lot_core = { workspace = true }
 quick_cache = { workspace = true }
-rand = { workspace = true }
 rlimit = { workspace = true }
 scc = { workspace = true }
 serde = { workspace = true }
@@ -47,14 +44,9 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
-base64 = { workspace = true }
 bytesize = { workspace = true }
-serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-tracing-appender = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-test = { workspace = true }
 
 tycho-util = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }

@@ -14,11 +14,8 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
-everscale-crypto = { workspace = true }
 futures-util = { workspace = true }
-hex = { workspace = true }
 humantime = { workspace = true }
-libc = { workspace = true }
 metrics = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
