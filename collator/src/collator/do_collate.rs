@@ -638,7 +638,7 @@ impl CollatorStdImpl {
                     let iter = anchor.iter_externals(0);
                     let mut expired_msgs_count = 0;
                     for ext_msg in iter {
-                        tracing::debug!(target: tracing_targets::COLLATOR,
+                        tracing::trace!(target: tracing_targets::COLLATOR,
                             "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
                         );
                         expired_msgs_count += 1;
