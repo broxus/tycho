@@ -104,7 +104,7 @@ impl PublicOverlayBuilder {
                 request_prefix: request_prefix.into_boxed_slice(),
                 metrics: self
                     .name
-                    .map(|label| Metrics::new("tycho_private_overlay", label))
+                    .map(|label| Metrics::new("tycho_public_overlay", label))
                     .unwrap_or_default(),
             }),
         }

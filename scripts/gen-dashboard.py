@@ -80,16 +80,19 @@ def create_counter_panel(
     expr: Union[str, List[Union[str, Expr]]],
     title: str,
     unit_format: str = UNITS.NUMBER_FORMAT,
-    labels: List[str] = [],
+    labels_selectors: List[str] = [],
     legend_format: str | None = None,
+    by_labels: list[str] = ["instance"],
 ) -> Panel:
     if legend_format is None:
-        legend_format = generate_legend_format(labels)
+        legend_format = generate_legend_format(labels_selectors)
 
     if isinstance(expr, str):
         targets = [
             target(
-                expr_sum_rate(expr, label_selectors=labels),
+                expr_sum_rate(
+                    expr, label_selectors=labels_selectors, by_labels=by_labels
+                ),
                 legend_format=legend_format,
             )
         ]
@@ -97,7 +100,7 @@ def create_counter_panel(
         if all(isinstance(e, str) for e in expr):
             targets = [
                 target(
-                    expr_sum_rate(e, label_selectors=labels),
+                    expr_sum_rate(e, label_selectors=labels_selectors),
                     legend_format=legend_format,
                 )
                 for e in expr
@@ -194,30 +197,35 @@ def core_bc() -> RowPanel:
 
 def net_traffic() -> RowPanel:
     legend_format = "{{instance}} - {{service}}"
+    by_labels = ["service", "instance"]
     metrics = [
         create_counter_panel(
             "tycho_private_overlay_tx",
             "Private overlay traffic sent",
             UNITS.BYTES_SEC_IEC,
             legend_format=legend_format,
+            by_labels=by_labels,
         ),
         create_counter_panel(
             "tycho_private_overlay_rx",
             "Private overlay traffic received",
             UNITS.BYTES_SEC_IEC,
             legend_format=legend_format,
+            by_labels=by_labels,
         ),
         create_counter_panel(
             "tycho_public_overlay_tx",
             "Public overlay traffic sent",
             UNITS.BYTES_SEC_IEC,
             legend_format=legend_format,
+            by_labels=by_labels,
         ),
         create_counter_panel(
             "tycho_public_overlay_rx",
             "Public overlay traffic received",
             UNITS.BYTES_SEC_IEC,
             legend_format=legend_format,
+            by_labels=by_labels,
         ),
     ]
     return create_row("network: Traffic", metrics)
@@ -579,17 +587,17 @@ def block_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_do_collate_blocks_count",
             "Blocks rate",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_blocks_with_limits_reached_count",
             "Number of blocks with limits reached",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_tx_total",
             "Number of transactions over time",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_gauge_panel(
             "tycho_do_collate_block_seqno",
@@ -651,62 +659,62 @@ def collator_message_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_all",
             "All executed msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_collator_ext_msgs_imported_count",
             "Imported Ext msgs count from mempool",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_read_count_ext",
             "Read Ext msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_ext",
             "Executed Ext msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_error_count_ext",
             "Ext msgs error count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_ext_msgs_expired_count",
             "Ext msgs expired count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_read_count_int",
             "Read Int msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_int",
             "Executed Int msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_new_msgs_created_count",
             "Created NewInt msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_new_msgs_inserted_to_iterator_count",
             "Inserted to iterator NewInt msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_read_count_new_int",
             "Read NewInt msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
             "tycho_do_collate_msgs_exec_count_new_int",
             "Executed NewInt msgs count",
-            labels=['workchain=~"$workchain"'],
+            labels_selectors=['workchain=~"$workchain"'],
         ),
     ]
     return create_row("collator: Message Metrics", metrics)
@@ -1016,7 +1024,7 @@ def mempool_components() -> RowPanel:
         create_counter_panel(
             "tycho_mempool_verifier_verify",
             "Verifier: verify() errors",
-            labels=['kind=~"$kind"'],
+            labels_selectors=['kind=~"$kind"'],
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_verify_time",
@@ -1025,7 +1033,7 @@ def mempool_components() -> RowPanel:
         create_counter_panel(
             "tycho_mempool_verifier_validate",
             "Verifier: validate() errors and warnings",
-            labels=['kind=~"$kind"'],
+            labels_selectors=['kind=~"$kind"'],
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_validate_time",
@@ -1187,7 +1195,7 @@ dashboard = Dashboard(
     version=9,
     schemaVersion=14,
     graphTooltip=GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,
-    timezone="utc",
+    timezone="browser",
 ).auto_panel_ids()
 
 
