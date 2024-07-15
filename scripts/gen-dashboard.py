@@ -967,6 +967,15 @@ def mempool() -> RowPanel:
             "Adapter: removed duplicate externals size",
             unit_format=UNITS.BYTES,
         ),
+        create_counter_panel(
+            "tycho_mempool_evicted_externals_count",
+            "Input buffer: evicted externals count",
+        ),
+        create_counter_panel(
+            "tycho_mempool_evicted_externals_size",
+            "Input buffer: evicted externals size",
+            unit_format=UNITS.BYTES,
+        ),
         # == Engine own point == #
         create_counter_panel(
             "tycho_mempool_point_payload_count",

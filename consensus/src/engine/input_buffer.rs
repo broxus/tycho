@@ -112,8 +112,10 @@ impl InputBufferData {
             _ = self.data.drain(..to_drop);
 
             metrics::counter!("tycho_mempool_evicted_externals_count").increment(to_drop as _);
+            metrics::counter!("tycho_mempool_evicted_externals_size")
+                .increment((data_bytes_pre - self.data_bytes) as _);
 
-            tracing::warn!(
+            tracing::trace!(
                 count = to_drop,
                 size = data_bytes_pre - self.data_bytes,
                 "evicted externals",
