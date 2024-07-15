@@ -1,5 +1,5 @@
 import sys
-from typing import Union, List
+from typing import Union, List, Literal
 
 from grafanalib import formatunits as UNITS, _gen
 from grafanalib.core import (
@@ -84,6 +84,24 @@ def create_counter_panel(
     legend_format: str | None = None,
     by_labels: list[str] = ["instance"],
 ) -> Panel:
+    """
+    Create a counter panel for visualization.
+
+    Args:
+        expr (Union[str, List[Union[str, Expr]]]): Expression or list of expressions to visualize.
+        title (str): Title of the panel.
+        unit_format (str, optional): Format for the unit display. Defaults to UNITS.NUMBER_FORMAT.
+        labels_selectors (List[str], optional): List of label selectors. Defaults to an empty list.
+        legend_format (str | None, optional): Format for the legend. If None, it's generated automatically. Defaults to None.
+        by_labels (list[str], optional): Labels to group by. Defaults to ["instance"].
+
+    Returns:
+        Panel: A timeseries panel object.
+
+    Raises:
+        ValueError: If the list elements in expr are not all strings or all Expr objects.
+        TypeError: If expr is not a string, a list of strings, or a list of Expr objects.
+    """
     if legend_format is None:
         legend_format = generate_legend_format(labels_selectors)
 
@@ -137,17 +155,45 @@ def create_heatmap_panel(
     )
 
 
+# Type alias for accepted quantiles
+ACCEPTED_QUANTILES = {"0", "0.5", "0.9", "0.95", "0.99", "0.999", "1"}
+AcceptedQuantile = Literal["0", "0.5", "0.9", "0.95", "0.99", "0.999", "1"]
+
+
 def create_heatmap_quantile_panel(
     metric_name: str,
     title: str,
-    unit_format=UNITS.NUMBER_FORMAT,
+    unit_format: str = UNITS.NUMBER_FORMAT,
+    quantile: AcceptedQuantile = "0.95",
 ) -> Panel:
+    """
+    Create a heatmap quantile panel for the given metric.
+
+    Args:
+        metric_name (str): Name of the metric to visualize.
+        title (str): Title of the panel.
+        unit_format (str, optional): Unit format for the panel. Defaults to UNITS.NUMBER_FORMAT.
+        quantile (AcceptedQuantile, optional): Quantile to use (as an integer 0-100). Defaults to 95.
+
+    Returns:
+        Panel: A configured grafanalib Panel object.
+
+    Raises:
+        ValueError: If the quantile is not one of the accepted values.
+    """
+
+    if quantile not in ACCEPTED_QUANTILES:
+        raise ValueError(f"Quantile must be one of {ACCEPTED_QUANTILES}")
+
+    legend_format = f"{{{{instance}}}} p{quantile}"
+    quantile_expr = f'quantile="{quantile}"'
+
     return timeseries_panel(
         title=title,
         targets=[
             target(
-                Expr(metric_name, label_selectors=['quantile="0.95"']),
-                legend_format="{{instance}}",
+                expr=Expr(metric_name, label_selectors=[quantile_expr]),
+                legend_format=legend_format,
             )
         ],
         unit=unit_format,
@@ -176,20 +222,27 @@ def core_bc() -> RowPanel:
             "tycho_bc_contract_delete_total", "Number of contract deletions over time"
         ),
         create_heatmap_quantile_panel(
-            "tycho_bc_total_gas_used", "Total gas used per block"
+            "tycho_bc_total_gas_used", "Total gas used per block", quantile="1"
         ),
         create_heatmap_quantile_panel(
-            "tycho_bc_in_msg_count", "Number of inbound messages per block"
+            "tycho_bc_in_msg_count",
+            "Number of inbound messages per block",
+            quantile="0.999",
         ),
         create_heatmap_quantile_panel(
-            "tycho_bc_out_msg_count", "Number of outbound messages per block"
+            "tycho_bc_out_msg_count",
+            "Number of outbound messages per block",
+            quantile="0.999",
         ),
         create_heatmap_quantile_panel(
-            "tycho_bc_out_in_msg_ratio", "Out/In message ratio per block"
+            "tycho_bc_out_in_msg_ratio",
+            "Out/In message ratio per block",
+            quantile="0.999",
         ),
         create_heatmap_quantile_panel(
             "tycho_bc_out_msg_acc_ratio",
             "Out message/Account ratio per block",
+            quantile="0.999",
         ),
     ]
     return create_row("Blockchain", metrics)
@@ -418,10 +471,15 @@ def core_block_strider() -> RowPanel:
             "tycho_storage_get_cell_from_rocksdb_time", "Time to load cell from RocksDB"
         ),
         create_heatmap_quantile_panel(
-            "tycho_storage_store_block_data_size", "Block data size", UNITS.BYTES
+            "tycho_storage_store_block_data_size",
+            "Block data size",
+            UNITS.BYTES,
+            "0.999",
         ),
         create_heatmap_quantile_panel(
-            "tycho_storage_cell_count", "Number of new cells from merkle update"
+            "tycho_storage_cell_count",
+            "Number of new cells from merkle update",
+            quantile="0.999",
         ),
         create_heatmap_panel(
             "tycho_storage_state_update_time", "Time to write state update to rocksdb"
@@ -1039,6 +1097,7 @@ def mempool_components() -> RowPanel:
             "tycho_mempool_verifier_verify",
             "Verifier: verify() errors",
             labels_selectors=['kind=~"$kind"'],
+            by_labels=["kind", "instance"],
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_verify_time",
@@ -1048,6 +1107,7 @@ def mempool_components() -> RowPanel:
             "tycho_mempool_verifier_validate",
             "Verifier: validate() errors and warnings",
             labels_selectors=['kind=~"$kind"'],
+            by_labels=["kind", "instance"],
         ),
         create_heatmap_panel(
             "tycho_mempool_verifier_validate_time",
@@ -1163,6 +1223,16 @@ def templates() -> Templating:
             template(
                 name="workchain",
                 query="label_values(tycho_do_collate_block_time_diff,workchain)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
+            template(
+                name="kind",
+                query="label_values(tycho_mempool_verifier_verify,kind)",
                 data_source="${source}",
                 hide=0,
                 regex=None,
