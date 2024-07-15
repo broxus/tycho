@@ -8,7 +8,7 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 
-pub use self::gc_subscriber::{GcSubscriber, GcTrigger, TriggerTx};
+pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
 
 mod gc_subscriber;

@@ -26,8 +26,8 @@ pub use self::state_applier::ShardStateApplier;
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber,
-    GcTrigger, MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt, TriggerTx,
+    ManualGcTrigger, MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext,
+    StateSubscriberExt,
 };
 
 mod provider;
