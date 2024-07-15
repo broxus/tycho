@@ -13,7 +13,6 @@ mod tools {
     pub mod gen_dht;
     pub mod gen_key;
     pub mod gen_zerostate;
-    pub mod storage_cli;
 }
 
 mod node;
@@ -114,6 +113,10 @@ pub enum ControlServerCmd {
     TriggerGc(TriggerGcCmd),
     SwitchMemoryProfiler(SwitchMemoryProfilerCmd),
     GetBlockFull(GetBlockFullCmd),
+    //GetNextKeyBlockIds(GetNextKeyBlockIdsCmd),
+    FindArchive(FindArchiveCmd),
+    DumpArchive(DumpArchiveCmd)
+
 }
 
 impl ControlServerCmd {
@@ -127,13 +130,12 @@ impl ControlServerCmd {
                 Self::Ping(cmd) => cmd.run().await,
                 Self::TriggerGc(cmd) => cmd.run().await,
                 Self::SwitchMemoryProfiler(cmd) => cmd.run().await,
-                // Self::GetNextKeyblockIds(cmd) => cmd.run(),
+                //Self::GetNextKeyblockIds(cmd) => cmd.run(),
                 Self::GetBlockFull(cmd) => cmd.run().await,
-                // Self::GetNextBlockFull(cmd) => cmd.run_next().await,
-                // Self::GetArchiveInfo(cmd) => cmd.run(),
-                // Self::GetArchiveSlice(cmd) => cmd.run(),
-                // Self::GetPersistentStateInfo(cmd) => cmd.get_state_info(),
-                // Self::GetPersistentStatePart => Ok(()),
+                Self::FindArchive(cmd) => cmd.run().await,
+                Self::DumpArchive(cmd) => cmd.run().await,
+
+
             }
         });
 

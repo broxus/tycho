@@ -25,7 +25,7 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
-use tycho_control::ControlServerImpl;
+use tycho_control::{ControlServerImpl, ControlServerListener};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
@@ -601,7 +601,7 @@ impl Node {
         let _archive_block_provider =
             ArchiveBlockProvider::new(self.blockchain_rpc_client.clone(), self.storage.clone());
 
-        let (trigger_tx, trigger_rx) = watch::channel(None::<tycho_core::block_strider::GcTrigger>);
+        let control_server = ControlServerImpl::new(self.storage.clone());
 
         let block_strider = BlockStrider::builder()
             .with_provider((
@@ -619,23 +619,19 @@ impl Node {
                     (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
                     .chain(GcSubscriber::new(
-                        trigger_rx.clone(),
-                        trigger_tx.clone(),
                         self.storage.clone(),
+                        control_server.manual_gc_receiver(),
                     )),
             )
             .build();
 
         tokio::spawn(async move {
-            if let Err(e) = ControlServerImpl::serve(
+            if let Err(e) = ControlServerListener::serve(
                 SocketAddr::V4(SocketAddrV4::new(
                     Ipv4Addr::LOCALHOST,
                     self.control_server.port,
                 )),
-                self.storage.clone(),
-                trigger_tx.clone(),
-                self.control_server.memory_profiler_trigger,
-                self.control_server.memory_profile_state.clone(),
+                control_server.clone(),
             )
             .await
             {

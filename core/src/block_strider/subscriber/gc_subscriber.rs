@@ -7,6 +7,7 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
+use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::watch;
 use tokio::sync::watch::{Receiver, Sender};
@@ -26,11 +27,16 @@ pub struct GcSubscriber {
 }
 
 impl GcSubscriber {
-    pub fn new(trigger_rx: TriggerRx, trigger_tx: TriggerTx, storage: Storage) -> Self {
+    pub fn new(
+        storage: Storage,
+        _manual_gc_trigger: watch::Receiver<Option<ManualGcTrigger>>,
+    ) -> Self {
         let last_key_block_seqno = storage
             .block_handle_storage()
             .find_last_key_block()
             .map_or(0, |handle| handle.id().seqno);
+
+        let (trigger_tx, trigger_rx) = watch::channel(None::<GcTrigger>);
 
         let blocks_gc = tokio::spawn(Self::blocks_gc(trigger_rx.clone(), storage.clone()));
         let states_gc = tokio::spawn(Self::states_gc(trigger_rx, storage.clone()));
@@ -282,6 +288,13 @@ impl Drop for Inner {
 pub struct GcTrigger {
     pub mc_block_id: BlockId,
     pub last_key_block_seqno: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ManualGcTrigger {
+    Archives,
+    Blocks,
+    States,
 }
 
 pub type TriggerTx = watch::Sender<Option<GcTrigger>>;
