@@ -1,9 +1,8 @@
 use std::convert::TryFrom;
 
 use everscale_crypto::ed25519::PublicKey;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, ShardIdent, ValidatorDescription};
-use tl_proto::{TlRead, TlWrite};
+use everscale_types::models::*;
+use everscale_types::prelude::*;
 
 #[derive(Clone)]
 pub struct ValidatorInfo {
@@ -31,15 +30,6 @@ pub enum StopValidationCommand {
     ByTopShardBlock(BlockIdShort),
     ByBlock(BlockIdShort),
 }
-
-#[derive(TlWrite, TlRead)]
-#[tl(boxed, id = "types.overlayNumber", scheme = "proto.tl")]
-pub struct OverlayNumber {
-    #[tl(with = "tl_shard_ident")]
-    pub shard_ident: ShardIdent,
-    pub session_seqno: u32,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ValidationStatus {
     Valid,

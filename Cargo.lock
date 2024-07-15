@@ -3399,6 +3399,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "rayon",
+ "scc",
  "scopeguard",
  "serde",
  "sha2",

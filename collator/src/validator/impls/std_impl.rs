@@ -55,16 +55,6 @@ where
     }
 }
 
-#[trait_variant::make(ValidatorEventEmitter: Send)]
-pub trait ValidatorEventEmitterInternal {
-    /// When shard or master block was validated by validator
-    async fn on_block_validated_event(
-        &self,
-        block_id: BlockId,
-        event: OnValidatedBlockEvent,
-    ) -> Result<()>;
-}
-
 #[async_trait]
 pub trait ValidatorEventListener: Send + Sync {
     /// Process validated shard or master block
