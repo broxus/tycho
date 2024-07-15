@@ -111,17 +111,6 @@ where
 }
 
 #[async_trait]
-impl<CF, V> MempoolEventListener for CollationManager<CF, V>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> Result<()> {
-        self.process_new_anchor_from_mempool(anchor).await
-    }
-}
-
-#[async_trait]
 impl<CF, V> StateNodeEventListener for AsyncDispatcher<CollationManager<CF, V>>
 where
     CF: CollatorFactory,
@@ -142,32 +131,6 @@ where
             let mc_data = McData::load_from_state(state)?;
             self.spawn_task(method_to_async_closure!(process_mc_block_from_bc, mc_data))
                 .await
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[async_trait]
-impl<CF, V> StateNodeEventListener for CollationManager<CF, V>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
-        // TODO: remove accepted block from cache
-        // STUB: do nothing, currently we remove block from cache when it sent to state node
-        Ok(())
-    }
-
-    async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
-        // TODO: should store block info from blockchain if it was not already collated
-        //      and validated by ourself. Will use this info for faster validation further:
-        //      will consider that just collated block is already validated if it have the
-        //      same root hash and file hash
-        if state.block_id().is_masterchain() {
-            let mc_data = McData::load_from_state(state)?;
-            self.process_mc_block_from_bc(mc_data).await
         } else {
             Ok(())
         }
@@ -206,32 +169,6 @@ where
     async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
         self.spawn_task(method_to_async_closure!(process_collator_stopped, stop_key))
             .await
-    }
-}
-
-#[async_trait]
-impl<CF, V> CollatorEventListener for CollationManager<CF, V>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_skipped_anchor(
-        &self,
-        next_block_id_short: BlockIdShort,
-        anchor: Arc<MempoolAnchor>,
-        force_mc_block: bool,
-    ) -> Result<()> {
-        self.process_skipped_anchor(next_block_id_short, anchor, force_mc_block)
-            .await
-    }
-
-    async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()> {
-        self.process_collated_block_candidate(collation_result)
-            .await
-    }
-
-    async fn on_collator_stopped(&self, stop_key: CollationSessionId) -> Result<()> {
-        self.process_collator_stopped(stop_key).await
     }
 }
 
@@ -430,7 +367,7 @@ where
         } else {
             // When we do not have last own collated master block then check last processed master block
             // If None then we should process incoming master block anyway to init collation process
-            // If we have already processed some previous incoming master block and colaltions were started
+            // If we have already processed some previous incoming master block and collations were started
             // then we should wait for the first own collated master block
             // but not more then `max_mc_block_delta_from_bc_to_await_own`
             if last_processed_mc_block_id_opt.is_some() {
