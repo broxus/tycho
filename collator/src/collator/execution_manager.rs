@@ -44,6 +44,9 @@ pub(super) struct ExecutionManager {
     /// current read positions of internals mq iterator
     /// when it is not finished
     current_iterator_positions: FastHashMap<ShardIdent, InternalMessageKey>,
+
+    /// sum total time of reading external messages
+    read_ext_messages_total_elapsed: Duration,
 }
 
 pub(super) struct MessagesExecutor {
@@ -82,6 +85,7 @@ impl ExecutionManager {
             process_new_messages: false,
             mq_adapter,
             current_iterator_positions: Default::default(),
+            read_ext_messages_total_elapsed: Duration::ZERO,
         }
     }
 
@@ -92,6 +96,8 @@ impl ExecutionManager {
     pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter {
         self.process_ext_messages = false;
         self.process_new_messages = false;
+
+        self.read_ext_messages_total_elapsed = Duration::ZERO;
 
         let current_iterator_positions = std::mem::take(&mut self.current_iterator_positions);
         QueueIteratorAdapter::new(
@@ -109,6 +115,10 @@ impl ExecutionManager {
         self.current_iterator_positions = current_positions;
 
         Ok(has_pending_internals)
+    }
+
+    pub fn read_ext_messages_total_elapsed(&self) -> Duration {
+        self.read_ext_messages_total_elapsed
     }
 
     #[tracing::instrument(skip_all)]
@@ -228,11 +238,13 @@ impl ExecutionManager {
         if group_opt.is_none() && self.process_ext_messages && !self.process_new_messages {
             let mut externals_read_count = 0;
             while collator.has_pending_externals {
+                let timer = std::time::Instant::now();
                 let ext_msgs = collator.read_next_externals(
-                    1,
+                    3,
                     collation_data,
                     self.ext_messages_reader_started,
                 )?;
+                self.read_ext_messages_total_elapsed += timer.elapsed();
                 self.ext_messages_reader_started = true;
 
                 externals_read_count += ext_msgs.len() as u64;

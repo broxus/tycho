@@ -294,12 +294,23 @@ impl CollatorStdImpl {
                 .set(executed_groups_count as f64);
         }
 
+        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", labels)
+            .record(fill_msgs_total_elapsed);
+
         let init_iterator_elapsed = mq_iterator_adapter.init_iterator_total_elapsed();
         metrics::histogram!("tycho_do_collate_init_iterator_time", labels)
             .record(init_iterator_elapsed);
+        let read_existing_messages_elapsed =
+            mq_iterator_adapter.read_existing_messages_total_elapsed();
+        metrics::histogram!("tycho_do_collate_read_int_msgs_time", labels)
+            .record(read_existing_messages_elapsed);
+        let read_new_messages_elapsed = mq_iterator_adapter.read_new_messages_total_elapsed();
+        metrics::histogram!("tycho_do_collate_read_new_msgs_time", labels)
+            .record(read_new_messages_elapsed);
+        let read_ext_messages_elapsed = exec_manager.read_ext_messages_total_elapsed();
+        metrics::histogram!("tycho_do_collate_read_ext_msgs_time", labels)
+            .record(read_ext_messages_elapsed);
 
-        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", labels)
-            .record(fill_msgs_total_elapsed);
         metrics::histogram!("tycho_do_collate_exec_msgs_total_time", labels)
             .record(execute_msgs_total_elapsed);
         metrics::histogram!("tycho_do_collate_process_txs_total_time", labels)
@@ -476,7 +487,7 @@ impl CollatorStdImpl {
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Created and sent block candidate: time_diff={}, \
-            collation_time={}, elapsed_from_prev_block={}, overhead = {}, \
+            collation_time={}, elapsed_from_prev_block={}, overhead={}, \
             start_lt={}, end_lt={}, exec_count={}, \
             exec_ext={}, exec_int={}, exec_new_int={}, \
             enqueue_count={}, dequeue_count={}, \
@@ -507,12 +518,16 @@ impl CollatorStdImpl {
             overhead = %format_duration(collation_mngmnt_overhead),
             total = %format_duration(total_elapsed),
             prepare = %format_duration(prepare_elapsed),
-            init_iterator = %format_duration(init_iterator_elapsed),
             execute_tick = %format_duration(execute_tick_elapsed),
             execute_tock = %format_duration(execute_tock_elapsed),
             execute_total = %format_duration(execute_elapsed),
 
             fill_msgs_total = %format_duration(fill_msgs_total_elapsed),
+            init_iterator = %format_duration(init_iterator_elapsed),
+            read_existing = %format_duration(read_existing_messages_elapsed),
+            read_ext = %format_duration(read_ext_messages_elapsed),
+            read_new = %format_duration(read_new_messages_elapsed),
+
             exec_msgs_total = %format_duration(execute_msgs_total_elapsed),
             process_txs_total = %format_duration(process_txs_total_elapsed),
 

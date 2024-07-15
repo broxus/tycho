@@ -775,28 +775,43 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
-            "tycho_do_collate_init_iterator_time",
-            "Init iterator time",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
             "tycho_do_collate_execute_time",
             "Execution time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_fill_msgs_total_time",
-            "Execution time: incl Fill messages time",
+            "Execution time: incl Fill messages",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_init_iterator_time",
+            "Execution time: incl Fill messages: init iterator",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_read_int_msgs_time",
+            "Execution time: incl Fill messages: read existing",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_read_ext_msgs_time",
+            "Execution time: incl Fill messages: read externals",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
+            "tycho_do_collate_read_new_msgs_time",
+            "Execution time: incl Fill messages: read new",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_exec_msgs_total_time",
-            "Execution time: incl Execute messages time",
+            "Execution time: incl Execute messages",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_process_txs_total_time",
-            "Execution time: incl Process transactions time",
+            "Execution time: incl Process transactions",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
