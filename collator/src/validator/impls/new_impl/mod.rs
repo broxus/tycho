@@ -4,10 +4,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
-use tycho_util::FastDashMap;
+use scc::TreeIndex;
+use tycho_util::FastHashMap;
 
 use self::session::ValidatorSession;
-use crate::validator::{NetworkContext, Validator};
+use crate::validator::rpc::ExchangeSignaturesBackoff;
+use crate::validator::{BriefValidatorDescr, NetworkContext, Validator};
 
 mod session;
 
@@ -25,23 +27,94 @@ impl Validator for ValidatorStdImpl {
 
     async fn add_session(
         &self,
-        session_id: u32,
         shard_ident: &ShardIdent,
+        session_id: u32,
         validators: &[ValidatorDescription],
     ) -> Result<()> {
+        let mut validators_map = FastHashMap::default();
+        for descr in validators {
+            // TODO: Skip invalid entries? But what should we do with the total weight?
+            let validator_info = BriefValidatorDescr::try_from(descr)?;
+            validators_map.insert(validator_info.peer_id, validator_info);
+        }
+
+        let peer_id = self.inner.net_context.network.peer_id();
+        if !validators_map.contains_key(peer_id) {
+            tracing::warn!(
+                %peer_id,
+                shard_ident,
+                session_id,
+                "this node is not in the validator set"
+            );
+            return Ok(());
+        }
+
+        let session = ValidatorSession::new(
+            shard_ident,
+            session_id,
+            validators_map,
+            &self.inner.backoff,
+            &self.inner.net_context,
+        )?;
+        if self
+            .inner
+            .sessions
+            .insert((*shard_ident, session_id), session)
+            .is_err()
+        {
+            anyhow::bail!("validator session already exists: ({shard_ident}, {session_id})");
+        }
+
+        Ok(())
     }
 
     async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<()> {
+        let Some(session) = self
+            .inner
+            .sessions
+            .peek(&(block_id.shard, session_id), &scc::ebr::Guard::new())
+            .map(|s| s.clone())
+        else {
+            anyhow::bail!(
+                "validator session not found: ({}, {session_id})",
+                block_id.shard
+            );
+        };
+
         todo!()
     }
 
     async fn cancel_validation(&self, before: &BlockIdShort) -> Result<()> {
-        todo!()
+        let session = {
+            let guard = scc::ebr::Guard::new();
+
+            // Find the latest session and remove all previous ones.
+            let mut latest_session = None;
+            let sessions_range = (before.shard, 0)..=(before.shard, u32::MAX);
+            for (session_key, session) in self.inner.sessions.range(sessions_range, &guard) {
+                if let Some((prev_key, _)) = latest_session.replace((session_key, session)) {
+                    self.inner.sessions.remove(prev_key);
+                }
+            }
+
+            match latest_session {
+                // Exit guard scope with the latest session.
+                Some((_, session)) => session,
+                // Do nothing if there are no sessions.
+                None => return Ok(()),
+            }
+        };
+
+        session.cancel_before(before.seqno).await;
+        Ok(())
     }
 }
 
 struct Inner {
     net_context: NetworkContext,
     keypair: Arc<KeyPair>,
-    sessions: FastDashMap<(ShardIdent, u32), ValidatorSession>,
+    sessions: TreeIndex<(ShardIdent, u32), ValidatorSession>,
+    backoff: ExchangeSignaturesBackoff,
 }
+
+type SessionKey = (ShardIdent, u32);

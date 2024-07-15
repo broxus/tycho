@@ -45,8 +45,8 @@ pub mod rpc {
     #[tl(boxed, id = "validator.exchangeSignatures", scheme = "proto.tl")]
     pub struct ExchangeSignaturesOwned {
         pub block_seqno: u32,
-        #[tl(with = "tycho_util::tl::signature_owned")]
-        pub signature: Box<[u8; 64]>,
+        #[tl(with = "tycho_util::tl::signature_arc")]
+        pub signature: Arc<[u8; 64]>,
     }
 
     #[derive(Debug, Clone, TlRead, TlWrite)]

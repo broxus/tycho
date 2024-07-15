@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
+use bytes::Buf;
 use everscale_types::models::ShardIdent;
 use tycho_network::{PeerId, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
@@ -11,7 +12,7 @@ use crate::validator::rpc::ExchangeSignatures;
 pub struct ValidatorService<E> {
     pub shard_ident: ShardIdent,
     pub session_id: u32,
-    pub exchanger: E,
+    pub exchanger: Weak<E>,
 }
 
 impl<E: ExchangeSignatures + Clone> ValidatorService<E> {
@@ -21,7 +22,10 @@ impl<E: ExchangeSignatures + Clone> ValidatorService<E> {
         block_seqno: u32,
         signature: Arc<[u8; 64]>,
     ) -> BoxFutureOrNoop<Option<Response>> {
-        let exchanger = self.exchanger.clone();
+        let Some(exchanger) = self.exchanger.upgrade() else {
+            return BoxFutureOrNoop::Noop;
+        };
+
         let peer_id = *peer_id;
         BoxFutureOrNoop::future(async move {
             match exchanger
@@ -42,7 +46,7 @@ impl<E: ExchangeSignatures + Clone> ValidatorService<E> {
     }
 }
 
-impl<E: Clone> Clone for ValidatorService<E> {
+impl<E> Clone for ValidatorService<E> {
     #[inline]
     fn clone(&self) -> Self {
         Self {
@@ -55,7 +59,7 @@ impl<E: Clone> Clone for ValidatorService<E> {
 
 impl<E> Service<ServiceRequest> for ValidatorService<E>
 where
-    E: ExchangeSignatures + Clone,
+    E: ExchangeSignatures,
 {
     type QueryResponse = Response;
     type OnQueryFuture = BoxFutureOrNoop<Option<Self::QueryResponse>>;

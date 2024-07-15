@@ -10,7 +10,6 @@ use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_util::FastHashMap;
 
 pub mod config;
-pub mod network;
 pub mod proto;
 pub mod rpc;
 pub mod state;
@@ -32,8 +31,8 @@ pub trait Validator: Send + Sync {
     /// Adds a new session for the specified shard.
     async fn add_session(
         &self,
-        session_id: u32,
         shard_ident: &ShardIdent,
+        session_id: u32,
         validators: &[ValidatorDescription],
     ) -> Result<()>;
 
@@ -69,8 +68,24 @@ pub enum ValidationStatus {
 
 pub type BlockSignatures = FastHashMap<HashBytes, Signature>;
 
-pub struct ValidatorInfo {
+pub struct BriefValidatorDescr {
     pub peer_id: PeerId,
     pub public_key: PublicKey,
     pub weight: u64,
+}
+
+impl TryFrom<&ValidatorDescription> for BriefValidatorDescr {
+    type Error = anyhow::Error;
+
+    fn try_from(descr: &ValidatorDescription) -> Result<Self> {
+        let Some(public_key) = PublicKey::from_bytes(descr.public_key.0) else {
+            anyhow::bail!("invalid validator public key");
+        };
+
+        Ok(Self {
+            peer_id: PeerId(descr.public_key.0),
+            public_key,
+            weight: descr.weight,
+        })
+    }
 }

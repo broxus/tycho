@@ -1,16 +1,20 @@
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use everscale_types::models::*;
 use scc::TreeIndex;
+use tokio_util::sync::CancellationToken;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay};
 use tycho_util::FastHashMap;
 
+use crate::tracing_targets;
 use crate::validator::rpc::{
     ExchangeSignatures, ExchangeSignaturesBackoff, ValidatorClient, ValidatorService,
 };
-use crate::validator::{proto, NetworkContext, ValidatorInfo};
+use crate::validator::{proto, BriefValidatorDescr, NetworkContext};
 
 /// Validator session is unique for each shard whithin each validator set.
 #[derive(Clone)]
@@ -21,34 +25,42 @@ pub struct ValidatorSession {
 
 impl ValidatorSession {
     pub fn new(
-        shard_ident: ShardIdent,
+        shard_ident: &ShardIdent,
         session_id: u32,
-        mut validators: FastHashMap<PeerId, ValidatorInfo>,
+        mut validators: FastHashMap<PeerId, BriefValidatorDescr>,
         backoff: &ExchangeSignaturesBackoff,
         net_context: &NetworkContext,
     ) -> Result<Self> {
-        let max_weight = validators.values().map(|v| v.weight).sum();
+        let max_weight = validators.values().map(|v| v.weight).sum::<u64>();
+        let weight_threshold = max_weight.saturating_mul(2) / 3 + 1;
+
+        let peer_id = net_context.network.peer_id();
+        if validators.remove(peer_id).is_none() {
+            anyhow::bail!("our node is not in the validator set");
+        }
+
+        // NOTE: At this point we are sure that our node is in the validator set
 
         let state = Arc::new(SessionState {
             peer_id: *net_context.network.peer_id(),
-            shard_ident,
+            shard_ident: *shard_ident,
             session_id,
-            max_weight,
+            weight_threshold,
             validators,
             signatures: tokio::sync::RwLock::new(Signatures::default()),
         });
 
         let overlay_id =
-            compute_session_overlay_id(&net_context.zerostate_id, &shard_ident, session_id);
+            compute_session_overlay_id(&net_context.zerostate_id, shard_ident, session_id);
 
         let overlay = PrivateOverlay::builder(overlay_id)
             .named("validator")
             .with_peer_resolver(net_context.peer_resolver.clone())
             .with_entries(validators.values().map(|v| v.peer_id))
             .build(ValidatorService {
-                shard_ident,
+                shard_ident: *shard_ident,
                 session_id,
-                exchanger: state.clone(),
+                exchanger: Arc::downgrade(&state),
             });
 
         if !net_context.overlays.add_private_overlay(&overlay) {
@@ -73,6 +85,23 @@ impl ValidatorSession {
     pub fn session_id(&self) -> u32 {
         self.inner.state.session_id
     }
+
+    pub async fn cancel_before(&self, block_seqno: u32) {
+        let mut signatures = self.inner.state.signatures.write().await;
+
+        // Remove all cached signatures before the specified seqno
+        // NOTE: `split_off` returns the part of the map after the specified key (inclusive)
+        // so we need to swap it back and drop the part before the key.
+        let mut cached = signatures.cached.split_off(&block_seqno);
+        std::mem::swap(&mut cached, &mut signatures.cached);
+
+        // Remove all blocks before the specified seqno
+        let mut blocks = signatures.blocks.split_off(&block_seqno);
+        std::mem::swap(&mut blocks, &mut signatures.blocks);
+
+        // NOTE: Release the lock before dropping the maps
+        drop(signatures);
+    }
 }
 
 struct Inner {
@@ -84,26 +113,36 @@ struct SessionState {
     peer_id: PeerId,
     shard_ident: ShardIdent,
     session_id: u32,
-    max_weight: u64,
-    validators: FastHashMap<PeerId, ValidatorInfo>,
+    weight_threshold: u64,
+    validators: FastHashMap<PeerId, BriefValidatorDescr>,
     signatures: tokio::sync::RwLock<Signatures>,
+    disabled: AtomicBool,
 }
 
 #[derive(Default)]
 struct Signatures {
-    blocks: TreeIndex<u32, Arc<BlockSignatures>>,
-    cached: TreeIndex<u32, Arc<SignaturesMap>>,
+    blocks: BTreeMap<u32, Arc<BlockSignatures>>,
+    cached: BTreeMap<u32, Arc<SignaturesMap>>,
 }
 
 struct BlockSignatures {
     block_id: BlockId,
     own_signature: Arc<[u8; 64]>,
     other_signatures: Arc<SignaturesMap>,
+    total_weight: AtomicU64,
+    validated: AtomicBool,
+    cancellation_token: CancellationToken,
+}
+
+impl Drop for BlockSignatures {
+    fn drop(&mut self) {
+        self.cancellation_token.cancel();
+    }
 }
 
 type SignaturesMap = FastHashMap<PeerId, ArcSwapOption<[u8; 64]>>;
 
-impl ExchangeSignatures for Arc<SessionState> {
+impl ExchangeSignatures for SessionState {
     type IntoIter = Vec<proto::PeerSignatureOwned>;
 
     type Err = ValidationError;
@@ -114,12 +153,16 @@ impl ExchangeSignatures for Arc<SessionState> {
         block_seqno: u32,
         signature: Arc<[u8; 64]>,
     ) -> Result<Self::IntoIter, Self::Err> {
+        if self.disabled.load(Ordering::Relaxed) {
+            return Err(ValidationError::Cancelled);
+        }
+
         let signatures = self.signatures.read().await;
 
-        let guard = scc::ebr::Guard::new();
-
         // NOTE: scc's `peek` does not lock the tree
-        if let Some(signatures) = signatures.blocks.peek(&block_seqno, &guard) {
+        let mut result;
+        let action;
+        if let Some(signatures) = signatures.blocks.get(&block_seqno) {
             // Full signature exchange if we know the block
             let Some(saved) = signatures.other_signatures.get(peer_id) else {
                 return Err(ValidationError::UnknownPeer);
@@ -133,6 +176,10 @@ impl ExchangeSignatures for Arc<SessionState> {
                     None => {}
                 }
 
+                // TODO: Skip if `validated` is already set?
+                //       The reason against it is that we might slash some validators and
+                //       we would prefer to have some fallback signatures in this case.
+
                 let data = Block::build_data_for_sign(&signatures.block_id);
 
                 // TODO: Store expanded public key with the signature?
@@ -145,13 +192,28 @@ impl ExchangeSignatures for Arc<SessionState> {
                     return Err(ValidationError::InvalidSignature);
                 }
 
-                if matches!(
-                    &*saved.compare_and_swap(None, Some(signature.clone())),
-                    Some(saved) if saved != signature
-                ) {
-                    // NOTE: Ensure that other query from the same peer does
-                    // not have a different signature
-                    return Err(ValidationError::SignatureChanged);
+                let mut can_notify = false;
+                match &*saved.compare_and_swap(None, Some(signature.clone())) {
+                    None => {
+                        // Update the total weight of the block if the signature is new
+                        let total_weight = signatures
+                            .total_weight
+                            .fetch_add(validator_info.weight, Ordering::Relaxed)
+                            + validator_info.weight;
+
+                        can_notify = total_weight >= self.weight_threshold;
+                    }
+                    Some(saved) => {
+                        if saved != signature {
+                            // NOTE: Ensure that other query from the same peer does
+                            // not have a different signature
+                            return Err(ValidationError::SignatureChanged);
+                        }
+                    }
+                }
+
+                if can_notify && !signatures.validated.swap(true, Ordering::Relaxed) {
+                    // TODO: Notify the client that the block is validated
                 }
 
                 // NOTE: At this point the signature is guaranteed to be valid
@@ -159,9 +221,9 @@ impl ExchangeSignatures for Arc<SessionState> {
             }
 
             // TODO: Select random subset of signatures to return
-            let mut result = Vec::with_capacity(1 + signatures.other_signatures.len());
+            result = Vec::with_capacity(1 + signatures.other_signatures.len());
             result.push(proto::PeerSignatureOwned {
-                peer_id: self.peer_id,
+                peer_id: self.peer_id.0,
                 signature: signatures.own_signature.clone(),
             });
             for (peer_id, stored) in &signatures.other_signatures {
@@ -172,16 +234,13 @@ impl ExchangeSignatures for Arc<SessionState> {
                     });
                 }
             }
-            Ok(result)
+
+            action = "store_for_block";
         } else {
             // Cache the signature for the block that we don't know yet
 
             // Find the slot for the specified block seqno.
-            let Some::<Arc<SignaturesMap>>(signatures) = signatures
-                .cached
-                .peek(&block_seqno, &scc::ebr::Guard::new())
-                .and_then(Arc::clone)
-            else {
+            let Some::<Arc<SignaturesMap>>(signatures) = signatures.cached.get(&block_seqno) else {
                 return Err(ValidationError::NoSlot);
             };
 
@@ -193,8 +252,22 @@ impl ExchangeSignatures for Arc<SessionState> {
             saved_signature.store(Some(signature.clone()));
 
             // Do not return any signatures since we can't verify them yet
-            Ok(Vec::new())
+            result = Vec::new();
+
+            action = "cache_only";
         }
+
+        drop(signatures);
+
+        tracing::trace!(
+            target: tracing_targets::VALIDATOR,
+            %peer_id,
+            block_seqno,
+            action,
+            "exchanged signatures"
+        );
+
+        Ok(result)
     }
 }
 
@@ -204,8 +277,8 @@ fn compute_session_overlay_id(
     session_id: u32,
 ) -> OverlayId {
     OverlayId(tl_proto::hash(proto::OverlayIdData {
-        zerostate_root_hash: zerostate_id.root_hash,
-        zerostate_file_hash: zerostate_id.file_hash,
+        zerostate_root_hash: zerostate_id.root_hash.0,
+        zerostate_file_hash: zerostate_id.file_hash.0,
         shard_ident: *shard_ident,
         session_id,
     }))
@@ -213,6 +286,8 @@ fn compute_session_overlay_id(
 
 #[derive(Debug, thiserror::Error)]
 enum ValidationError {
+    #[error("session is cancelled")]
+    Cancelled,
     #[error("no slot available for the specified seqno")]
     NoSlot,
     #[error("peer is not a known validator")]
