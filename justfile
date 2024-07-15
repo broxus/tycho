@@ -4,6 +4,9 @@ default:
 install_fmt:
     rustup component add rustfmt --toolchain nightly
 
+install_nextest:
+    cargo install cargo-nextest --locked
+
 install_lychee:
     cargo install lychee
 
@@ -63,8 +66,8 @@ docs:
     export RUSTDOCFLAGS=-D warnings
     cargo doc --no-deps --document-private-items --all-features --workspace
 
-test:
-    cargo test --all-targets --all-features --workspace
+test: install_nextest
+    cargo nextest r
 
 # runs all tests including ignored. Will take a lot of time to run
 integration_test: prepare_integration_tests

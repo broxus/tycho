@@ -161,6 +161,7 @@ fn make_network(node_count: usize) -> Vec<Node> {
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
     let global_validated_blocks = Arc::new(AtomicUsize::new(0));
 

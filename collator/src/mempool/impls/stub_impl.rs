@@ -71,7 +71,7 @@ impl MempoolAdapterStubImpl {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
-        for anchor_id in 1.. {
+        for anchor_id in 1..100 {
             tokio::time::sleep(make_round_interval() * 5).await;
 
             let anchor = make_stub_anchor(anchor_id);
