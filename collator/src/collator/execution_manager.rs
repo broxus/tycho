@@ -51,6 +51,8 @@ pub(super) struct ExecutionManager {
     read_new_messages_total_elapsed: Duration,
     /// sum total time of reading external messages
     read_ext_messages_total_elapsed: Duration,
+    /// sum total time of adding messages to groups
+    add_to_message_groups_total_elapsed: Duration,
 }
 
 pub(super) struct MessagesExecutor {
@@ -92,6 +94,7 @@ impl ExecutionManager {
             read_existing_messages_total_elapsed: Duration::ZERO,
             read_new_messages_total_elapsed: Duration::ZERO,
             read_ext_messages_total_elapsed: Duration::ZERO,
+            add_to_message_groups_total_elapsed: Duration::ZERO,
         }
     }
 
@@ -106,6 +109,7 @@ impl ExecutionManager {
         self.read_existing_messages_total_elapsed = Duration::ZERO;
         self.read_new_messages_total_elapsed = Duration::ZERO;
         self.read_ext_messages_total_elapsed = Duration::ZERO;
+        self.add_to_message_groups_total_elapsed = Duration::ZERO;
 
         let current_iterator_positions = std::mem::take(&mut self.current_iterator_positions);
         QueueIteratorAdapter::new(
@@ -137,6 +141,10 @@ impl ExecutionManager {
         self.read_ext_messages_total_elapsed
     }
 
+    pub fn add_to_message_groups_total_elapsed(&self) -> Duration {
+        self.add_to_message_groups_total_elapsed
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn get_next_message_group(
         &mut self,
@@ -166,6 +174,7 @@ impl ExecutionManager {
             }
 
             let timer = std::time::Instant::now();
+            let mut add_to_groups_elapsed = Duration::ZERO;
 
             // read messages from iterator and fill messages groups
             // until the first group fully loaded
@@ -176,6 +185,7 @@ impl ExecutionManager {
 
                 existing_internals_read_count += 1;
 
+                let timer_add_to_groups = std::time::Instant::now();
                 self.message_groups.add_message(Box::new(ParsedMessage {
                     info: MsgInfo::Int(int_msg.message_with_source.message.info.clone()),
                     dst_in_current_shard: true,
@@ -185,6 +195,7 @@ impl ExecutionManager {
                         same_shard: int_msg.message_with_source.shard_id == self.shard_id,
                     }),
                 }));
+                add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
                 if self.message_groups.messages_count() >= self.messages_buffer_limit {
                     tracing::debug!(target: tracing_targets::COLLATOR,
@@ -217,6 +228,8 @@ impl ExecutionManager {
             }
 
             self.read_existing_messages_total_elapsed += timer.elapsed();
+            self.read_existing_messages_total_elapsed -= add_to_groups_elapsed;
+            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
             // when message_groups buffer is empty and no more existing internals in current iterator
             // then set all read messages as processed
@@ -257,6 +270,7 @@ impl ExecutionManager {
 
         if group_opt.is_none() && self.process_ext_messages && !self.process_new_messages {
             let timer = std::time::Instant::now();
+            let mut add_to_groups_elapsed = Duration::ZERO;
 
             let mut externals_read_count = 0;
             while collator.has_pending_externals {
@@ -269,9 +283,11 @@ impl ExecutionManager {
 
                 externals_read_count += ext_msgs.len() as u64;
 
+                let timer_add_to_groups = std::time::Instant::now();
                 for ext_msg in ext_msgs {
                     self.message_groups.add_message(ext_msg);
                 }
+                add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
                 if self.message_groups.messages_count() >= self.messages_buffer_limit {
                     tracing::debug!(target: tracing_targets::COLLATOR,
@@ -304,6 +320,8 @@ impl ExecutionManager {
             }
 
             self.read_ext_messages_total_elapsed += timer.elapsed();
+            self.read_ext_messages_total_elapsed -= add_to_groups_elapsed;
+            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
             if self.message_groups.is_empty() && !collator.has_pending_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
@@ -332,14 +350,15 @@ impl ExecutionManager {
                 .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
 
             let timer = std::time::Instant::now();
+            let mut add_to_groups_elapsed = Duration::ZERO;
 
             let mut new_internals_read_count = 0;
             while let Some(int_msg) = mq_iterator_adapter.next_new_message()? {
                 assert!(int_msg.is_new);
 
                 new_internals_read_count += 1;
-                collation_data.read_new_msgs_from_iterator += 1;
 
+                let timer_add_to_groups = std::time::Instant::now();
                 self.message_groups.add_message(Box::new(ParsedMessage {
                     info: MsgInfo::Int(int_msg.message_with_source.message.info.clone()),
                     dst_in_current_shard: true,
@@ -347,6 +366,7 @@ impl ExecutionManager {
                     special_origin: None,
                     dequeued: None,
                 }));
+                add_to_groups_elapsed += timer_add_to_groups.elapsed();
 
                 if self.message_groups.messages_count() >= self.messages_buffer_limit {
                     tracing::debug!(target: tracing_targets::COLLATOR,
@@ -382,6 +402,8 @@ impl ExecutionManager {
             }
 
             self.read_new_messages_total_elapsed += timer.elapsed();
+            self.read_new_messages_total_elapsed -= add_to_groups_elapsed;
+            self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
             // actually, we process all message groups with new messages in one step,
             // so we update internals processed_upto each step

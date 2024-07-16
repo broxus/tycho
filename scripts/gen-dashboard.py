@@ -863,6 +863,11 @@ def collator_core_operations_metrics() -> RowPanel:
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
+            "tycho_do_collate_add_to_msg_groups_time",
+            "Execution time: incl Fill messages: add to msg groups",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_heatmap_panel(
             "tycho_do_collate_exec_msgs_total_time",
             "Execution time: incl Execute messages",
             labels=['workchain=~"$workchain"'],
