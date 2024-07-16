@@ -181,7 +181,7 @@ impl OnValidatedBlockEvent {
 
 #[derive(Default, Clone)]
 pub struct BlockSignatures {
-    pub signatures: FastHashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<HashBytes, Arc<[u8; 64]>>,
 }
 
 pub struct ValidatedBlock {

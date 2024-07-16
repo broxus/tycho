@@ -5,7 +5,6 @@ use async_trait::async_trait;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription};
-use tokio::sync::mpsc;
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_util::FastHashMap;
 
@@ -51,9 +50,6 @@ pub struct NetworkContext {
     pub overlays: OverlayService,
     pub zerostate_id: BlockId,
 }
-
-pub type ValidatedBlockTx = mpsc::Sender<ValidatedBlock>;
-pub type ValidatedBlockRx = mpsc::Receiver<ValidatedBlock>;
 
 pub struct ValidatedBlock {
     pub block_id: BlockId,

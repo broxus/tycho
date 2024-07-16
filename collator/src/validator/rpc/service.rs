@@ -32,9 +32,7 @@ impl<E: ExchangeSignatures + Clone> ValidatorService<E> {
                 .exchange_signatures(&peer_id, block_seqno, signature)
                 .await
             {
-                Ok(_iter) => {
-                    todo!()
-                }
+                Ok(res) => Some(Response::from_tl(res)),
                 Err(e) => {
                     // TODO: Is it ok to WARN here? Since we can be ddosed with invalid signatures
                     // and the log will be full of these warnings.

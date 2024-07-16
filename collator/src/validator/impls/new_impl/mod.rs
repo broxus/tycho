@@ -53,6 +53,7 @@ impl Validator for ValidatorStdImpl {
             shard_ident,
             session_id,
             validators_map,
+            self.inner.keypair.clone(),
             &self.inner.backoff,
             &self.inner.net_context,
         )?;
@@ -81,7 +82,7 @@ impl Validator for ValidatorStdImpl {
             );
         };
 
-        todo!()
+        session.validate_block(block_id).await
     }
 
     async fn cancel_validation(&self, before: &BlockIdShort) -> Result<()> {

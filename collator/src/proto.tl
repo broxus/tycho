@@ -11,17 +11,6 @@ validator.overlayIdData
     = validator.OverlayIdData;
 
 /**
-* A signature of a single node
-*
-* @param peer_id    ADNL peer id of the node
-* @param signature  64-bytes of ed25519 signature
-*/
-validator.peerSignature
-    peer_id:int256
-    signature:bytes
-    = validator.PeerSignature;
-
-/**
 * @param workchain  workchain identifier
 * @param prefix     shard prefix with tag
 */
@@ -31,11 +20,16 @@ validator.shardIdent
     = validator.ShardIdent;
 
 /**
-* Signature exchange response
+* Signature exchange response (full)
 *
-* @param items      Validator signatures
+* @param signature  Validator signature
 */
-validator.signatures items:(vector validator.PeerSignature) = validator.Signatures;
+validator.exchange.complete signature:bytes = validator.Exchange;
+
+/**
+* Signature exchange response (partial)
+*/
+validator.exchange.cached = validator.Exchange;
 
 ---functions---
 
@@ -48,4 +42,4 @@ validator.signatures items:(vector validator.PeerSignature) = validator.Signatur
 validator.exchangeSignatures
     block_seqno:int
     signature:bytes
-    = validator.Signatures;
+    = validator.Exchange;

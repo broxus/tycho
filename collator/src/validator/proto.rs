@@ -16,26 +16,12 @@ pub struct OverlayIdData {
 }
 
 #[derive(Debug, Clone, TlRead, TlWrite)]
-#[tl(boxed, id = "validator.peerSignature", scheme = "proto.tl")]
-pub struct PeerSignatureRef<'tl> {
-    pub peer_id: &'tl [u8; 32],
-    #[tl(with = "tycho_util::tl::signature_ref")]
-    pub signature: &'tl [u8; 64],
-}
-
-#[derive(Debug, Clone, TlRead, TlWrite)]
-#[tl(boxed, id = "validator.peerSignature", scheme = "proto.tl")]
-pub struct PeerSignatureOwned {
-    pub peer_id: [u8; 32],
-    #[tl(with = "tycho_util::tl::signature_arc")]
-    pub signature: Arc<[u8; 64]>,
-}
-
-#[derive(Debug, Clone, TlRead, TlWrite)]
-#[tl(boxed, id = "validator.signatures", scheme = "proto.tl")]
-pub struct SignaturesOwned {
-    #[tl(with = "tycho_util::tl::VecWithMaxLen::<100>")]
-    pub items: Vec<PeerSignatureOwned>,
+#[tl(boxed, scheme = "proto.tl")]
+pub enum Exchange {
+    #[tl(id = "validator.exchange.complete")]
+    Complete(#[tl(with = "tycho_util::tl::signature_arc")] Arc<[u8; 64]>),
+    #[tl(id = "validator.exchange.cached")]
+    Cached,
 }
 
 pub mod rpc {
