@@ -1234,6 +1234,30 @@ def allocator_stats() -> RowPanel:
     return create_row("Allocator Stats", metrics)
 
 
+def rayon_stats() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_rayon_lifo_threads", "LIFO Threads", yaxis(UNITS.NUMBER_FORMAT)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_fifo_threads", "FIFO Threads", yaxis(UNITS.NUMBER_FORMAT)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_lifo_task_time", "LIFO Task Time", yaxis(UNITS.SECONDS)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_fifo_task_time", "FIFO Task Time", yaxis(UNITS.SECONDS)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_lifo_queue_time", "LIFO Queue Time", yaxis(UNITS.SECONDS)
+        ),
+        create_heatmap_panel(
+            "tycho_rayon_fifo_queue_time", "FIFO Queue Time", yaxis(UNITS.SECONDS)
+        ),
+    ]
+    return create_row("Rayon Stats", metrics)
+
+
 def templates() -> Templating:
     return Templating(
         list=[
@@ -1305,6 +1329,7 @@ dashboard = Dashboard(
         net_peer(),
         net_dht(),
         allocator_stats(),
+        rayon_stats(),
         jrpc(),
     ],
     annotations=Annotations(),
