@@ -10,6 +10,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tracing::Instrument;
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 
 use crate::dag::{Dag, DagRound, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{
@@ -205,7 +206,7 @@ impl Engine {
                 let input_buffer = self.input_buffer.clone();
                 let last_own_point = last_own_point.clone();
                 futures_util::future::Either::Right(
-                    tokio::task::spawn_blocking(move || {
+                    rayon_run(move || {
                         let task_start_time = Instant::now();
                         Producer::new_point(
                             &current_dag_round,
@@ -225,7 +226,7 @@ impl Engine {
                 )
             } else {
                 drop(own_point_state_tx);
-                futures_util::future::Either::Left(futures_util::future::ready(Ok(None::<Point>)))
+                futures_util::future::Either::Left(futures_util::future::ready(None::<Point>))
             };
 
             let bcaster_run = tokio::spawn({
@@ -235,7 +236,7 @@ impl Engine {
                 let mut broadcaster = self.broadcaster;
                 let downloader = self.downloader.clone();
                 async move {
-                    let own_point = own_point_fut.await.expect("new point producer");
+                    let own_point = own_point_fut.await;
                     round_effects.own_point(own_point.as_ref());
 
                     if let Some(own_point) = own_point {
@@ -266,7 +267,7 @@ impl Engine {
                 }
             });
 
-            let commit_run = tokio::task::spawn_blocking({
+            let commit_run = rayon_run({
                 let mut dag = self.dag;
                 let next_dag_round = next_dag_round.clone();
                 let committed_tx = self.committed.clone();
@@ -319,7 +320,7 @@ impl Engine {
             );
 
             match tokio::join!(collector_run, bcaster_run, commit_run) {
-                (Ok((collector, next_round)), Ok((bcaster, new_last_own_point)), Ok(dag)) => {
+                (Ok((collector, next_round)), Ok((bcaster, new_last_own_point)), dag) => {
                     self.broadcaster = bcaster;
                     // do not reset to None, Producer decides whether to use old value or not
                     if let Some(new_last_own_point) = new_last_own_point {
@@ -330,11 +331,10 @@ impl Engine {
                     self.collector = collector;
                     self.dag = dag;
                 }
-                (collector, bcaster, commit) => {
+                (collector, bcaster, _) => {
                     let msg = Self::join_err_msg(&[
                         (collector.err(), "collector"),
                         (bcaster.err(), "broadcaster"),
-                        (commit.err(), "commit"),
                     ]);
                     let _span = round_effects.span().enter();
                     panic!("{msg}")

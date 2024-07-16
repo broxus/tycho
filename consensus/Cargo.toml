@@ -33,6 +33,7 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 sha2 = { workspace = true }
 tokio = { workspace = true, default-features = false }

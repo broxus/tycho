@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as Sha2Digest, Sha256};
 use tycho_network::PeerId;
@@ -170,12 +171,12 @@ pub struct PrevPoint {
 }
 impl PrevPoint {
     pub fn signatures_match(&self) -> bool {
-        for (peer, sig) in &self.evidence {
-            if !sig.verifies(peer, &self.digest) {
-                return false;
-            }
-        }
-        true
+        // according to the rule of thumb to yield every 0.01-0.1 ms,
+        // and that each signature check takes near 0.03 ms,
+        // every check deserves its own async task - delegate to rayon
+        self.evidence
+            .par_iter()
+            .all(|(peer, sig)| sig.verifies(peer, &self.digest))
     }
 }
 
@@ -570,7 +571,7 @@ mod tests {
             humantime::format_duration(elapsed_start)
         );
         println!(
-            "check {PEERS} with rayon took {}",
+            "check {PEERS} sigs on rayon took {}",
             humantime::format_duration(elapsed_run)
         );
     }

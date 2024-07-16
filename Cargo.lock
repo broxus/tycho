@@ -3396,6 +3396,7 @@ dependencies = [
  "parking_lot",
  "rand",
  "rand_pcg",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
