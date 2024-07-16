@@ -30,10 +30,6 @@ pub(super) struct QueueIteratorAdapter {
 
     /// sum total iterators initialization time
     init_iterator_total_elapsed: Duration,
-    /// sum total time of reading existing internal messages
-    read_existing_messages_total_elapsed: Duration,
-    /// sum total time of reading new internal messages
-    read_new_messages_total_elapsed: Duration,
 }
 
 impl QueueIteratorAdapter {
@@ -51,8 +47,6 @@ impl QueueIteratorAdapter {
             new_messages_read_to: InternalMessageKey::default(),
             current_positions: current_positions_opt.unwrap_or_default(),
             init_iterator_total_elapsed: Duration::ZERO,
-            read_existing_messages_total_elapsed: Duration::ZERO,
-            read_new_messages_total_elapsed: Duration::ZERO,
         }
     }
 
@@ -245,10 +239,6 @@ impl QueueIteratorAdapter {
         Ok(res)
     }
 
-    pub fn read_existing_messages_total_elapsed(&self) -> Duration {
-        self.read_existing_messages_total_elapsed
-    }
-
     pub fn next_existing_message(&mut self) -> Result<Option<IterItem>> {
         if self.no_pending_existing_internals {
             Ok(None)
@@ -288,10 +278,6 @@ impl QueueIteratorAdapter {
         } else {
             Ok(false)
         }
-    }
-
-    pub fn read_new_messages_total_elapsed(&self) -> Duration {
-        self.read_new_messages_total_elapsed
     }
 
     pub fn next_new_message(&mut self) -> Result<Option<IterItem>> {

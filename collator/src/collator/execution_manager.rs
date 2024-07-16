@@ -45,6 +45,10 @@ pub(super) struct ExecutionManager {
     /// when it is not finished
     current_iterator_positions: FastHashMap<ShardIdent, InternalMessageKey>,
 
+    /// sum total time of reading existing internal messages
+    read_existing_messages_total_elapsed: Duration,
+    /// sum total time of reading new internal messages
+    read_new_messages_total_elapsed: Duration,
     /// sum total time of reading external messages
     read_ext_messages_total_elapsed: Duration,
 }
@@ -85,6 +89,8 @@ impl ExecutionManager {
             process_new_messages: false,
             mq_adapter,
             current_iterator_positions: Default::default(),
+            read_existing_messages_total_elapsed: Duration::ZERO,
+            read_new_messages_total_elapsed: Duration::ZERO,
             read_ext_messages_total_elapsed: Duration::ZERO,
         }
     }
@@ -97,6 +103,8 @@ impl ExecutionManager {
         self.process_ext_messages = false;
         self.process_new_messages = false;
 
+        self.read_existing_messages_total_elapsed = Duration::ZERO;
+        self.read_new_messages_total_elapsed = Duration::ZERO;
         self.read_ext_messages_total_elapsed = Duration::ZERO;
 
         let current_iterator_positions = std::mem::take(&mut self.current_iterator_positions);
@@ -115,6 +123,14 @@ impl ExecutionManager {
         self.current_iterator_positions = current_positions;
 
         Ok(has_pending_internals)
+    }
+
+    pub fn read_existing_messages_total_elapsed(&self) -> Duration {
+        self.read_existing_messages_total_elapsed
+    }
+
+    pub fn read_new_messages_total_elapsed(&self) -> Duration {
+        self.read_new_messages_total_elapsed
     }
 
     pub fn read_ext_messages_total_elapsed(&self) -> Duration {
@@ -148,6 +164,8 @@ impl ExecutionManager {
                     .try_init_next_range_iterator(&mut collation_data.processed_upto, working_state)
                     .await?;
             }
+
+            let timer = std::time::Instant::now();
 
             // read messages from iterator and fill messages groups
             // until the first group fully loaded
@@ -198,6 +216,8 @@ impl ExecutionManager {
                 );
             }
 
+            self.read_existing_messages_total_elapsed += timer.elapsed();
+
             // when message_groups buffer is empty and no more existing internals in current iterator
             // then set all read messages as processed
             // and try to init iterator for the next available ranges
@@ -236,15 +256,15 @@ impl ExecutionManager {
         }
 
         if group_opt.is_none() && self.process_ext_messages && !self.process_new_messages {
+            let timer = std::time::Instant::now();
+
             let mut externals_read_count = 0;
             while collator.has_pending_externals {
-                let timer = std::time::Instant::now();
                 let ext_msgs = collator.read_next_externals(
                     3,
                     collation_data,
                     self.ext_messages_reader_started,
                 )?;
-                self.read_ext_messages_total_elapsed += timer.elapsed();
                 self.ext_messages_reader_started = true;
 
                 externals_read_count += ext_msgs.len() as u64;
@@ -283,6 +303,8 @@ impl ExecutionManager {
                 );
             }
 
+            self.read_ext_messages_total_elapsed += timer.elapsed();
+
             if self.message_groups.is_empty() && !collator.has_pending_externals {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "message_groups buffer is empty and there are no pending externals, will process new internals"
@@ -308,6 +330,8 @@ impl ExecutionManager {
 
             mq_iterator_adapter
                 .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
+
+            let timer = std::time::Instant::now();
 
             let mut new_internals_read_count = 0;
             while let Some(int_msg) = mq_iterator_adapter.next_new_message()? {
@@ -356,6 +380,8 @@ impl ExecutionManager {
                     DisplayMessageGroup(merged_group),
                 );
             }
+
+            self.read_new_messages_total_elapsed += timer.elapsed();
 
             // actually, we process all message groups with new messages in one step,
             // so we update internals processed_upto each step

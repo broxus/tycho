@@ -300,11 +300,10 @@ impl CollatorStdImpl {
         let init_iterator_elapsed = mq_iterator_adapter.init_iterator_total_elapsed();
         metrics::histogram!("tycho_do_collate_init_iterator_time", labels)
             .record(init_iterator_elapsed);
-        let read_existing_messages_elapsed =
-            mq_iterator_adapter.read_existing_messages_total_elapsed();
+        let read_existing_messages_elapsed = exec_manager.read_existing_messages_total_elapsed();
         metrics::histogram!("tycho_do_collate_read_int_msgs_time", labels)
             .record(read_existing_messages_elapsed);
-        let read_new_messages_elapsed = mq_iterator_adapter.read_new_messages_total_elapsed();
+        let read_new_messages_elapsed = exec_manager.read_new_messages_total_elapsed();
         metrics::histogram!("tycho_do_collate_read_new_msgs_time", labels)
             .record(read_new_messages_elapsed);
         let read_ext_messages_elapsed = exec_manager.read_ext_messages_total_elapsed();
