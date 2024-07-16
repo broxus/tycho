@@ -8,14 +8,10 @@ use futures_util::StreamExt;
 use tarpc::context::Context;
 use tarpc::server::incoming::Incoming;
 use tarpc::server::{self, Channel};
-use tarpc::tokio_serde::formats::Json;
+use tarpc::tokio_serde::formats::{Bincode};
 use tokio::net::ToSocketAddrs;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::{watch, Notify};
+use tokio::sync::{watch};
 use tycho_core::block_strider::ManualGcTrigger;
-use tycho_core::blockchain_rpc::INTERNAL_ERROR_CODE;
-use tycho_core::proto::blockchain::{ArchiveInfo, Data};
-use tycho_core::proto::overlay;
 use tycho_storage::{KeyBlocksDirection, Storage};
 
 use crate::models::BlockFull;
@@ -29,7 +25,7 @@ pub struct ControlServerListener {
 
 impl ControlServerListener {
     pub async fn serve<A: ToSocketAddrs>(addr: A, control_server: ControlServerImpl) -> Result<()> {
-        let mut listener = tarpc::serde_transport::tcp::listen(&addr, Json::default).await?;
+        let mut listener = tarpc::serde_transport::tcp::listen(&addr, Bincode::default).await?;
         tracing::info!(target:"control", "Control server is listening on port {}", listener.local_addr().port());
         listener.config_mut().max_frame_length(usize::MAX);
         listener
@@ -207,6 +203,7 @@ impl ControlServer for ControlServerListener {
                     Some(id) => Some(id),
                     None => None,
                 }
+
             }
             None => {
                 tracing::warn!("get_archive_id failed: no blocks applied");
@@ -218,16 +215,21 @@ impl ControlServer for ControlServerListener {
     async fn get_archive_slice(self, _: Context, id: u32, limit: u32, offset: u64) -> Option<Vec<u8>> {
         let block_storage = self.server.inner.storage.block_storage();
 
+
         let archive_res = block_storage.get_archive_slice(
             id,
-            limit as usize,
             offset as usize,
+            limit as usize,
         );
 
         match archive_res {
             Ok(Some(data)) => Some(data),
-            _ => {
+            Ok(None) => {
                 tracing::warn!("get_archive_slice failed. Archive not found.");
+                None
+            }
+            Err(e) => {
+                tracing::error!("get_archive_slice failed. {e:?}");
                 None
             }
         }
