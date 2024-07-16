@@ -254,9 +254,11 @@ fn init_metrics(config: &MetricsConfig) -> Result<()> {
         0.000001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
         60.0, 120.0, 300.0, 600.0, 3600.0,
     ];
+    const EXPONENTIAL_THREADS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(Matcher::Suffix("_time".to_string()), EXPONENTIAL_SECONDS)?
+        .set_buckets_for_metric(Matcher::Suffix("_threads".to_string()), EXPONENTIAL_THREADS)?
         .with_http_listener(config.listen_addr)
         .install()
         .wrap_err("failed to initialize a metrics exporter")?;
