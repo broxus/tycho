@@ -48,17 +48,15 @@ impl BlockHandleStorage {
         block_id: &BlockId,
         meta_data: BlockMetaData,
     ) -> (BlockHandle, HandleCreationStatus) {
-        use scc::hash_index::Entry;
+        use dashmap::mapref::entry::Entry;
 
         let block_handles = &self.db.block_handles;
 
         // Fast path - lookup in cache
-        if let Some(handle) = self
-            .cache
-            .peek(block_id, &scc::ebr::Guard::new())
-            .and_then(|h| h.upgrade())
-        {
-            return (handle, HandleCreationStatus::Fetched);
+        if let Some(handle) = self.cache.get(block_id) {
+            if let Some(handle) = handle.upgrade() {
+                return (handle, HandleCreationStatus::Fetched);
+            }
         }
 
         match block_handles.get(block_id.root_hash.as_slice()).unwrap() {
@@ -83,13 +81,13 @@ impl BlockHandleStorage {
                 // Fill the cache with the new handle
                 match self.cache.entry(*block_id) {
                     Entry::Vacant(entry) => {
-                        entry.insert_entry(handle.downgrade());
+                        entry.insert(handle.downgrade());
                     }
-                    Entry::Occupied(entry) => match entry.get().upgrade() {
+                    Entry::Occupied(mut entry) => match entry.get().upgrade() {
                         // Another thread has created the handle
                         Some(handle) => return (handle, HandleCreationStatus::Fetched),
                         None => {
-                            entry.update(handle.downgrade());
+                            entry.insert(handle.downgrade());
                         }
                     },
                 };
@@ -107,12 +105,10 @@ impl BlockHandleStorage {
         let block_handles = &self.db.block_handles;
 
         // Fast path - lookup in cache
-        if let Some(handle) = self
-            .cache
-            .peek(block_id, &scc::ebr::Guard::new())
-            .and_then(|c| c.upgrade())
-        {
-            return Some(handle);
+        if let Some(handle) = self.cache.get(block_id) {
+            if let Some(handle) = handle.upgrade() {
+                return Some(handle);
+            }
         }
 
         // Load meta from storage
@@ -271,19 +267,19 @@ impl BlockHandleStorage {
     }
 
     fn fill_cache(&self, block_id: &BlockId, meta: BlockMeta) -> BlockHandle {
-        use scc::hash_index::Entry;
+        use dashmap::mapref::entry::Entry;
 
         match self.cache.entry(*block_id) {
             Entry::Vacant(entry) => {
                 let handle = BlockHandle::new(block_id, meta, self.cache.clone());
-                entry.insert_entry(handle.downgrade());
+                entry.insert(handle.downgrade());
                 handle
             }
-            Entry::Occupied(entry) => match entry.get().upgrade() {
+            Entry::Occupied(mut entry) => match entry.get().upgrade() {
                 Some(handle) => handle,
                 None => {
                     let handle = BlockHandle::new(block_id, meta, self.cache.clone());
-                    entry.update(handle.downgrade());
+                    entry.insert(handle.downgrade());
                     handle
                 }
             },

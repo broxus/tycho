@@ -8,10 +8,9 @@ use anyhow::{Context, Result};
 use bumpalo::Bump;
 use everscale_types::cell::*;
 use quick_cache::sync::{Cache, DefaultLifecycle};
-use scc::HashIndex;
 use triomphe::ThinArc;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastHashMap, FastHasherState};
+use tycho_util::{FastDashMap, FastHashMap, FastHasherState};
 use weedb::{rocksdb, BoundedCfHandle};
 
 use crate::db::*;
@@ -22,7 +21,7 @@ pub struct CellStorage {
     raw_cells_cache: RawCellsCache,
 }
 
-type CellsIndex = HashIndex<HashBytes, Weak<StorageCell>, FastHasherState>;
+type CellsIndex = FastDashMap<HashBytes, Weak<StorageCell>>;
 
 impl CellStorage {
     pub fn new(db: BaseDb, cache_size_bytes: u64) -> Arc<Self> {
@@ -378,12 +377,10 @@ impl CellStorage {
     ) -> Result<Arc<StorageCell>, CellStorageError> {
         let _histogram = HistogramGuard::begin("tycho_storage_load_cell_time");
 
-        if let Some(cell) = self
-            .cells_cache
-            .peek(&hash, &scc::ebr::Guard::new())
-            .and_then(|c| c.upgrade())
-        {
-            return Ok(cell);
+        if let Some(cell) = self.cells_cache.get(&hash) {
+            if let Some(cell) = cell.upgrade() {
+                return Ok(cell);
+            }
         }
 
         let cell = match self.raw_cells_cache.get_raw(&self.db, &hash) {
@@ -401,7 +398,8 @@ impl CellStorage {
             }
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
-        _ = self.cells_cache.insert(hash, Arc::downgrade(&cell));
+
+        self.cells_cache.insert(hash, Arc::downgrade(&cell));
 
         Ok(cell)
     }

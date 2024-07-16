@@ -1,13 +1,12 @@
 use std::sync::{Arc, Weak};
 
 use everscale_types::models::*;
-use scc::HashIndex;
 use tokio::sync::RwLock;
-use tycho_util::FastHasherState;
+use tycho_util::FastDashMap;
 
 use super::BlockMeta;
 
-pub type BlockHandleCache = HashIndex<BlockId, WeakBlockHandle, FastHasherState>;
+pub type BlockHandleCache = FastDashMap<BlockId, WeakBlockHandle>;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -131,6 +130,6 @@ pub struct Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         self.cache
-            .remove_if(&self.id, |weak| weak.strong_count() == 0);
+            .remove_if(&self.id, |_, weak| weak.strong_count() == 0);
     }
 }
