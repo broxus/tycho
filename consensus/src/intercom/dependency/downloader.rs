@@ -302,24 +302,32 @@ impl DownloadTask {
         peer_id: &PeerId,
         resolved: anyhow::Result<PointByIdResponse>,
     ) -> Option<Point> {
-        let response = match resolved {
-            Ok(response) => response,
-            Err(network_err) => {
-                let status = self
-                    .undone_peers
-                    .get_mut(peer_id)
-                    .unwrap_or_else(|| panic!("Coding error: peer not in map {}", peer_id.alt()));
-                status.is_in_flight = false;
-                status.failed_queries = status.failed_queries.saturating_add(1);
-                metrics::counter!(DownloadContext::FAILED_QUERY).increment(1);
-                tracing::warn!(
-                    peer = display(peer_id.alt()),
-                    error = display(network_err),
-                    "network error",
-                );
-                return None;
-            }
-        };
+        let defined_response =
+            match resolved {
+                Ok(PointByIdResponse::Defined(response)) => response,
+                Ok(PointByIdResponse::TryLater) => {
+                    let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
+                        panic!("Coding error: peer not in map {}", peer_id.alt())
+                    });
+                    status.is_in_flight = false;
+                    tracing::trace!(peer = display(peer_id.alt()), "try later");
+                    return None;
+                }
+                Err(network_err) => {
+                    let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
+                        panic!("Coding error: peer not in map {}", peer_id.alt())
+                    });
+                    status.is_in_flight = false;
+                    status.failed_queries = status.failed_queries.saturating_add(1);
+                    metrics::counter!(DownloadContext::FAILED_QUERY).increment(1);
+                    tracing::warn!(
+                        peer = display(peer_id.alt()),
+                        error = display(network_err),
+                        "network error",
+                    );
+                    return None;
+                }
+            };
 
         let Some(status) = self.undone_peers.remove(peer_id) else {
             panic!("peer {} was removed, concurrent download?", peer_id.alt());
@@ -330,8 +338,8 @@ impl DownloadTask {
             peer_id.alt(),
         );
 
-        match response {
-            PointByIdResponse(None) => {
+        match defined_response {
+            None => {
                 if status.is_depender {
                     // if points are persisted in storage - it's a ban;
                     // else - peer evicted this point from its cache, as the point
@@ -342,11 +350,11 @@ impl DownloadTask {
                     tracing::warn!(peer = display(peer_id.alt()), "must have returned");
                 } else {
                     self.reliably_not_found = self.reliably_not_found.saturating_add(1);
-                    tracing::debug!(peer = display(peer_id.alt()), "didn't return");
+                    tracing::trace!(peer = display(peer_id.alt()), "didn't return");
                 }
                 None
             }
-            PointByIdResponse(Some(point)) if point.id() != self.point_id => {
+            Some(point) if point.id() != self.point_id => {
                 // it's a ban
                 self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                 tracing::error!(
@@ -358,7 +366,7 @@ impl DownloadTask {
                 );
                 None
             }
-            PointByIdResponse(Some(point)) => {
+            Some(point) => {
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
                     Err(dag_point) => {
                         // reliable peer won't return unverifiable point

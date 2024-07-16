@@ -91,7 +91,7 @@ impl Responder {
                 MPResponse::Broadcast
             }
             MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
-                None => PointByIdResponse(None),
+                None => PointByIdResponse::TryLater,
                 Some(inner) => {
                     Uploader::find(&peer_id, &point_id, &inner.top_dag_round, &inner.effects)
                 }
@@ -124,12 +124,12 @@ impl EngineContext {
             MPResponse::Signature(
                 SignatureResponse::Signature(_) | SignatureResponse::Rejected(_),
             ) => "tycho_mempool_signature_query_responder_data_time",
-            MPResponse::PointById(PointByIdResponse(Some(_))) => {
+            MPResponse::PointById(PointByIdResponse::Defined(Some(_))) => {
                 "tycho_mempool_download_query_responder_some_time"
             }
-            MPResponse::PointById(PointByIdResponse(None)) => {
-                "tycho_mempool_download_query_responder_none_time"
-            }
+            MPResponse::PointById(
+                PointByIdResponse::Defined(None) | PointByIdResponse::TryLater,
+            ) => "tycho_mempool_download_query_responder_none_time",
         };
         metrics::histogram!(metric_name).record(elapsed);
     }

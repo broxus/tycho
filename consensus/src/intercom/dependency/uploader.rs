@@ -61,10 +61,12 @@ impl Uploader {
             digest = display(point_id.digest.alt()),
             "upload",
         );
-        PointByIdResponse(
-            ready
-                .and_then(|dag_point| dag_point.into_trusted())
-                .map(|valid| valid.point),
-        )
+        match ready {
+            Some(dag_point) => {
+                PointByIdResponse::Defined(dag_point.into_trusted().map(|valid| valid.point))
+            }
+            None if task_found => PointByIdResponse::TryLater,
+            None => PointByIdResponse::Defined(None),
+        }
     }
 }

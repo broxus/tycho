@@ -6,7 +6,10 @@ use crate::effects::{AltFmt, AltFormat};
 use crate::models::{Point, Signature};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PointByIdResponse(pub Option<Point>);
+pub enum PointByIdResponse {
+    Defined(Option<Point>),
+    TryLater,
+}
 
 /// Denotes that broadcasts should be done via network query, not send message.
 /// Because initiator must not duplicate its broadcasts, thus should wait for receiver to respond.
