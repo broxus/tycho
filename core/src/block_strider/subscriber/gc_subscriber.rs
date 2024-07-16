@@ -91,14 +91,17 @@ impl GcSubscriber {
 
             tracing::debug!(?trigger);
 
-            let Some(last_mc) = storage.node_state().load_last_mc_block_id() else {
-                tracing::warn!("No mc block found. Maybe try manual gc later?");
-                continue;
-            };
+            let last_mc = storage.node_state().load_last_mc_block_id().unwrap_or_else(|| {
+                tracing::warn!("No mc block found. BeforePreviousKeyBlock and BeforePreviousPersistentState gc would not be performed");
+                BlockId::default()
+            });
 
             let last_key_block_seqno = match storage.block_handle_storage().find_last_key_block() {
                 Some(key_block) => key_block.id().seqno,
-                None => 0,
+                None => {
+                    tracing::warn!("No mc block found. BeforePreviousKeyBlock and BeforePreviousPersistentState gc probably would not be performed");
+                    0
+                }
             };
 
             let gc_trigger = GcTrigger {
@@ -106,7 +109,7 @@ impl GcSubscriber {
                 last_key_block_seqno,
             };
 
-                match trigger {
+            match trigger {
                 ManualGcTrigger::Blocks | ManualGcTrigger::States => {
                     if let Err(e) = trigger_tx.send(Some(gc_trigger)) {
                         tracing::error!("Failed to send signal for manual GC. {e:?}");
