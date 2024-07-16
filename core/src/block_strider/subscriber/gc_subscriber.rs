@@ -8,6 +8,7 @@ use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
+use tl_proto::TlWrite;
 use tokio::select;
 use tokio::sync::watch;
 use tokio::sync::watch::{Receiver, Sender};
@@ -29,7 +30,7 @@ pub struct GcSubscriber {
 impl GcSubscriber {
     pub fn new(
         storage: Storage,
-        _manual_gc_trigger: watch::Receiver<Option<ManualGcTrigger>>,
+        mut manual_gc_trigger: watch::Receiver<Option<ManualGcTrigger>>,
     ) -> Self {
         let last_key_block_seqno = storage
             .block_handle_storage()
@@ -40,7 +41,13 @@ impl GcSubscriber {
 
         let blocks_gc = tokio::spawn(Self::blocks_gc(trigger_rx.clone(), storage.clone()));
         let states_gc = tokio::spawn(Self::states_gc(trigger_rx, storage.clone()));
-        let archives_gc = tokio::spawn(Self::archives_gc(storage));
+        let archives_gc = tokio::spawn(Self::archives_gc(storage.clone()));
+
+        let manual_gc = tokio::spawn(Self::manual_gc(
+            manual_gc_trigger,
+            trigger_tx.clone(),
+            storage,
+        ));
 
         Self {
             inner: Arc::new(Inner {
@@ -49,6 +56,7 @@ impl GcSubscriber {
                 handle_block_task: blocks_gc.abort_handle(),
                 handle_state_task: states_gc.abort_handle(),
                 archives_handle: archives_gc.abort_handle(),
+                manual_gc_handle: manual_gc.abort_handle(),
             }),
         }
     }
@@ -68,6 +76,45 @@ impl GcSubscriber {
             last_key_block_seqno: self.inner.last_key_block_seqno.load(Ordering::Relaxed),
             mc_block_id: *block.id(),
         }));
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn manual_gc(
+        mut manual_gc_trigger: watch::Receiver<Option<ManualGcTrigger>>,
+        trigger_tx: TriggerTx,
+        storage: Storage,
+    ) {
+        while manual_gc_trigger.changed().await.is_ok() {
+            let Some(trigger) = manual_gc_trigger.borrow_and_update().clone() else {
+                continue;
+            };
+
+            tracing::debug!(?trigger);
+
+            let Some(last_mc) = storage.node_state().load_last_mc_block_id() else {
+                tracing::warn!("No mc block found. Maybe try manual gc later?");
+                continue;
+            };
+
+            let last_key_block_seqno = match storage.block_handle_storage().find_last_key_block() {
+                Some(key_block) => key_block.id().seqno,
+                None => 0,
+            };
+
+            let gc_trigger = GcTrigger {
+                mc_block_id: last_mc,
+                last_key_block_seqno,
+            };
+
+                match trigger {
+                ManualGcTrigger::Blocks | ManualGcTrigger::States => {
+                    if let Err(e) = trigger_tx.send(Some(gc_trigger)) {
+                        tracing::error!("Failed to send signal for manual GC. {e:?}");
+                    }
+                }
+                ManualGcTrigger::Archives => {}
+            }
+        }
     }
 
     #[tracing::instrument(skip_all)]
@@ -274,6 +321,8 @@ struct Inner {
     handle_block_task: AbortHandle,
     handle_state_task: AbortHandle,
     archives_handle: AbortHandle,
+
+    manual_gc_handle: AbortHandle,
 }
 
 impl Drop for Inner {
@@ -281,6 +330,8 @@ impl Drop for Inner {
         self.handle_block_task.abort();
         self.handle_state_task.abort();
         self.archives_handle.abort();
+
+        self.manual_gc_handle.abort();
     }
 }
 

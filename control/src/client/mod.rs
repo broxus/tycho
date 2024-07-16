@@ -8,20 +8,13 @@ use base64::Engine;
 use clap::Parser;
 use everscale_types::models::BlockId;
 use tarpc::serde::Deserialize;
-use tarpc::tokio_serde::formats::{Bincode, Json};
+use tarpc::tokio_serde::formats::{Bincode};
 use tarpc::{client, context};
 use tycho_core::block_strider::ManualGcTrigger;
 
 use crate::ControlServerClient;
 
 pub async fn get_client(server_address: SocketAddr) -> anyhow::Result<ControlServerClient> {
-    let mut transport = tarpc::serde_transport::tcp::connect(server_address, Json::default);
-    transport.config_mut().max_frame_length(usize::MAX);
-
-    Ok(ControlServerClient::new(client::Config::default(), transport.await?).spawn())
-}
-
-pub async fn get_bincode_client(server_address: SocketAddr) -> anyhow::Result<ControlServerClient> {
     let mut transport = tarpc::serde_transport::tcp::connect(server_address, Bincode::default);
     transport.config_mut().max_frame_length(usize::MAX);
 
@@ -180,7 +173,7 @@ pub struct DumpArchiveCmd {
 
 impl DumpArchiveCmd {
     pub async fn run(&self) {
-        let client = match get_bincode_client(self.node_addr).await {
+        let client = match get_client(self.node_addr).await {
             Ok(client) => client,
             Err(e) => {
                 println!("Failed to create cli. {e:?}");
@@ -201,6 +194,7 @@ impl DumpArchiveCmd {
         let request_size = 1048576; // 1 mb
 
         loop {
+            println!("Downloading archive request size {request_size}, current offset {current_offset}");
             match client
                 .get_archive_slice(context::current(), self.id, request_size, current_offset)
                 .await
@@ -221,7 +215,10 @@ impl DumpArchiveCmd {
                     current_offset += bytes.len() as u64
                 }
                 Ok(None) => println!("Archive slice not found."),
-                Err(e) => println!("Failed to get archive slice. Transport error: {e:?}"),
+                Err(e) => {
+                    println!("Failed to get archive slice. Transport error: {e:?}");
+                    return;
+                },
             }
         }
 

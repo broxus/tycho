@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use everscale_types::models::BlockId;
 
 use crate::models::BlockFull;
