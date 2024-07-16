@@ -56,10 +56,10 @@ impl MempoolConfig {
     /// hard limit on cached external messages ring buffer, see [`Self::PAYLOAD_BATCH_BYTES`]
     pub const PAYLOAD_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
-    /// should not be less than 3 (as in average 1 of 3 is unreliable and another one did not sign);
-    /// value is multiplied by the current attempt number, until 2F+1 successfully responded
-    /// or a verifiable point is found (ill-formed or incorrectly signed points are not eligible)
-    pub const DOWNLOAD_PEERS: u8 = 5;
+    /// amount of random peers to request at each attempt; does not include mandatory peers;
+    /// value increases exponentially with each attempt, until 2F successfully responded `None`
+    /// or a verifiable point is found (ill-formed or incorrectly signed points do not count)
+    pub const DOWNLOAD_PEERS: u8 = 2;
 
     /// [`Downloader`](crate::intercom::Downloader) makes responses in groups after previous
     /// group completed or this interval elapsed (in order to not wait for some slow responding peer)
@@ -70,7 +70,7 @@ impl MempoolConfig {
     ///
     /// Notice that reliable peers respond immediately with points they already have
     /// validated successfully, or return `None`.
-    pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(30);
+    pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(25);
 }
 
 const _: () = assert!(

@@ -1,4 +1,4 @@
-use std::collections::hash_map::Entry;
+use std::iter;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -7,6 +7,7 @@ use futures_util::{FutureExt, StreamExt};
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::time::{Interval, MissedTickBehavior};
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
@@ -84,29 +85,23 @@ impl Downloader {
         };
         let peer_count = PeerCount::try_from(undone_peers.len())
             .expect("validator set is unknown, must keep prev epoch's set for DAG_DEPTH rounds");
-        let mut undone_peers = undone_peers
+        let undone_peers = undone_peers
             .iter()
+            // query author no matter if it is scheduled for the next round or not;
+            // it won't affect 2F reliable `NotFound`s to break the task with `DagPoint::NotExists`:
+            // author is a depender for its point, so its `NotFound` response is not reliable
+            .chain(iter::once((&point_id.location.author, &author_state)))
             .map(|(peer_id, state)| {
-                (*peer_id, PeerStatus {
+                let status = PeerStatus {
                     state: *state,
                     failed_queries: 0,
-                    is_depender: peer_id == point_id.location.author,
+                    is_depender: false, // `true` comes from channel to start immediate download
                     is_in_flight: false,
-                })
+                };
+                (*peer_id, status)
             })
             .collect::<FastHashMap<_, _>>();
-        // query author no matter if it is in the next round, but that won't affect 2F "NotFound"
-        match undone_peers.entry(point_id.location.author) {
-            Entry::Vacant(vacant) if author_state == PeerState::Resolved => {
-                vacant.insert(PeerStatus {
-                    state: author_state,
-                    failed_queries: 0,
-                    is_depender: true, // as author is a depender, its 'NotFound' is not reliable
-                    is_in_flight: false,
-                });
-            }
-            _ => {}
-        };
+
         let point_dag_round = point_dag_round_strong.downgrade();
         // do not leak span and strong round ref across await
         drop(point_dag_round_strong);
@@ -124,7 +119,7 @@ impl Downloader {
             undone_peers,
             downloading: FuturesUnordered::new(),
             attempt: 0,
-            skip_next_attempt: false,
+            interval: tokio::time::interval(MempoolConfig::DOWNLOAD_INTERVAL),
         };
         let downloaded = task
             .run(verified_broadcast)
@@ -187,24 +182,25 @@ struct DownloadTask {
 
     attempt: u8,
     /// skip time-driven attempt if an attempt was init by empty task queue
-    skip_next_attempt: bool,
+    interval: Interval,
 }
 
 impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
-    pub async fn run(&mut self, verified_broadcast: oneshot::Receiver<Point>) -> Option<Point> {
-        self.download_random(true);
-        let mut interval = tokio::time::interval(MempoolConfig::DOWNLOAD_INTERVAL);
-        let mut verified_broadcast = std::pin::pin!(verified_broadcast);
+    pub async fn run(&mut self, mut verified_broadcast: oneshot::Receiver<Point>) -> Option<Point> {
+        // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
+        self.interval
+            .set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 Ok(point) = &mut verified_broadcast => break Some(point),
                 Some(depender) = self.dependers.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update),
-                Some((peer_id, downloaded)) = self.downloading.next() =>
-                    match self.verify(&peer_id, downloaded) {
+                Some((peer_id, result)) = self.downloading.next() =>
+                    match self.verify(&peer_id, result) {
                         Some(point) => break Some(point),
                         None => if self.shall_continue() {
                             continue
@@ -213,7 +209,7 @@ impl DownloadTask {
                         }
                     },
                 // most rare arm to make progress despite slow responding peers
-                _ = interval.tick() => self.download_random(false),
+                _ = self.interval.tick() => self.download_random(), // first tick fires immediately
             }
         }
         // on exit futures are dropped and receivers are cleaned,
@@ -222,12 +218,12 @@ impl DownloadTask {
 
     fn add_depender(&mut self, peer_id: &PeerId) {
         let is_suitable = match self.undone_peers.get_mut(peer_id) {
-            Some(state) if !state.is_depender => {
-                state.is_depender = true;
-                !state.is_in_flight
-                    && state.state == PeerState::Resolved
+            Some(status) if !status.is_depender => {
+                status.is_depender = true;
+                !status.is_in_flight
+                    && status.state == PeerState::Resolved
                     // do not re-download immediately if already requested
-                    && state.failed_queries == 0
+                    && status.failed_queries == 0
             }
             _ => false, // either already marked or requested and removed, no panic
         };
@@ -237,19 +233,7 @@ impl DownloadTask {
         }
     }
 
-    fn download_random(&mut self, force: bool) {
-        if self.skip_next_attempt {
-            // reset `skip_attempt` flag; do nothing, if not forced
-            self.skip_next_attempt = false;
-            if !force {
-                return;
-            }
-        }
-        self.attempt = self.attempt.wrapping_add(1);
-        let count = (MempoolConfig::DOWNLOAD_PEERS as usize)
-            .saturating_mul(self.attempt as usize)
-            .min(self.undone_peers.len());
-
+    fn download_random(&mut self) {
         let mut filtered = self
             .undone_peers
             .iter()
@@ -270,9 +254,17 @@ impl DownloadTask {
             .collect::<Vec<_>>();
         filtered.sort_unstable_by(|(_, ord_l), (_, ord_r)| ord_l.cmp(ord_r));
 
+        let count = (MempoolConfig::DOWNLOAD_PEERS as usize)
+            .saturating_mul(
+                (MempoolConfig::DOWNLOAD_PEERS as usize).saturating_pow(self.attempt as u32),
+            )
+            .min(filtered.len());
+
         for (peer_id, _) in filtered.iter().take(count) {
             self.download_one(peer_id);
         }
+
+        self.attempt = self.attempt.wrapping_add(1);
     }
 
     fn download_one(&mut self, peer_id: &PeerId) {
@@ -300,16 +292,18 @@ impl DownloadTask {
     fn verify(
         &mut self,
         peer_id: &PeerId,
-        resolved: anyhow::Result<PointByIdResponse>,
+        result: anyhow::Result<PointByIdResponse>,
     ) -> Option<Point> {
         let defined_response =
-            match resolved {
+            match result {
                 Ok(PointByIdResponse::Defined(response)) => response,
                 Ok(PointByIdResponse::TryLater) => {
                     let status = self.undone_peers.get_mut(peer_id).unwrap_or_else(|| {
                         panic!("Coding error: peer not in map {}", peer_id.alt())
                     });
                     status.is_in_flight = false;
+                    // apply the same retry strategy as for network errors
+                    status.failed_queries = status.failed_queries.saturating_add(1);
                     tracing::trace!(peer = display(peer_id.alt()), "try later");
                     return None;
                 }
@@ -401,8 +395,8 @@ impl DownloadTask {
             false
         } else {
             if self.downloading.is_empty() {
-                self.download_random(true);
-                self.skip_next_attempt = true;
+                self.interval.reset(); // start new interval at current moment
+                self.download_random();
             }
             true
         }
