@@ -309,6 +309,9 @@ impl CollatorStdImpl {
         let read_ext_messages_elapsed = exec_manager.read_ext_messages_total_elapsed();
         metrics::histogram!("tycho_do_collate_read_ext_msgs_time", labels)
             .record(read_ext_messages_elapsed);
+        let add_to_message_groups_elapsed = exec_manager.add_to_message_groups_total_elapsed();
+        metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", labels)
+            .record(add_to_message_groups_elapsed);
 
         metrics::histogram!("tycho_do_collate_exec_msgs_total_time", labels)
             .record(execute_msgs_total_elapsed);
@@ -526,6 +529,7 @@ impl CollatorStdImpl {
             read_existing = %format_duration(read_existing_messages_elapsed),
             read_ext = %format_duration(read_ext_messages_elapsed),
             read_new = %format_duration(read_new_messages_elapsed),
+            add_to_groups = %format_duration(add_to_message_groups_elapsed),
 
             exec_msgs_total = %format_duration(execute_msgs_total_elapsed),
             process_txs_total = %format_duration(process_txs_total_elapsed),
