@@ -3,7 +3,6 @@ use std::sync::{Arc, Weak};
 use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-use tracing::Span;
 use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
@@ -175,29 +174,19 @@ impl DagRound {
         future
     }
 
-    /// for genesis and own points
-    pub fn insert_exact_sign(
-        &self,
-        point: &Point,
-        peer_schedule: &PeerSchedule,
-        span: &Span,
-    ) -> InclusionState {
+    /// for genesis (next round key pair) and own points (point round key pair)
+    pub fn insert_exact_sign(&self, point: &Point, key_pair: Option<&KeyPair>) -> InclusionState {
         let state = self.insert_exact(
             &point.body().location.author,
             &DagPoint::Trusted(ValidPoint::new(point.clone())),
         );
         if let Some(signable) = state.signable() {
-            let key_pair = peer_schedule.atomic().local_keys(self.round().next());
-            signable.sign(
-                self.round(),
-                key_pair.as_deref(),
-                MempoolConfig::sign_time_range(),
-            );
+            signable.sign(self.round(), key_pair, MempoolConfig::sign_time_range());
         }
-        let _guard = span.enter();
         assert!(
             state.signed_point(self.round()).is_some(),
-            "Coding or configuration error: valid point cannot be signed; time issue?"
+            "Coding or configuration error: valid point cannot be signed; \
+            time issue or node is not in validator set?"
         );
         state
     }

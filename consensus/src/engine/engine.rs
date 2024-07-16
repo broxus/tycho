@@ -7,10 +7,11 @@ use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinHandle};
+use tracing::Instrument;
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Dag, DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
+use crate::dag::{Dag, DagRound, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{
     AltFormat, ChainedRoundsContext, CollectorContext, Effects, EngineContext, ValidateContext,
 };
@@ -127,7 +128,8 @@ impl Engine {
         let next_dag_round = current_dag_round.next(&self.peer_schedule);
 
         let genesis_state =
-            current_dag_round.insert_exact_sign(&genesis, &self.peer_schedule, &entered_span);
+            current_dag_round.insert_exact_sign(&genesis, next_dag_round.key_pair());
+
         let next_round = next_dag_round.round();
 
         self.dag.init(current_dag_round, next_dag_round);
@@ -199,21 +201,28 @@ impl Engine {
             let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
 
             let own_point_fut = if prev_round_ok {
-                let round_effects = round_effects.clone();
                 let current_dag_round = current_dag_round.clone();
-                let peer_schedule = self.peer_schedule.clone();
                 let input_buffer = self.input_buffer.clone();
                 let last_own_point = last_own_point.clone();
-                futures_util::future::Either::Right(tokio::task::spawn_blocking(move || {
-                    Self::produce(
-                        round_effects,
-                        current_dag_round,
-                        last_own_point,
-                        peer_schedule,
-                        own_point_state_tx,
-                        input_buffer,
-                    )
-                }))
+                futures_util::future::Either::Right(
+                    tokio::task::spawn_blocking(move || {
+                        let task_start_time = Instant::now();
+                        Producer::new_point(
+                            &current_dag_round,
+                            last_own_point.as_deref(),
+                            &input_buffer,
+                        )
+                        .inspect(|own_point| {
+                            let state = current_dag_round
+                                .insert_exact_sign(own_point, current_dag_round.key_pair());
+                            own_point_state_tx.send(state).ok();
+                            metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
+                                .record(task_start_time.elapsed());
+                        })
+                        // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
+                    })
+                    .instrument(round_effects.span().clone()),
+                )
             } else {
                 drop(own_point_state_tx);
                 futures_util::future::Either::Left(futures_util::future::ready(Ok(None::<Point>)))
@@ -227,7 +236,7 @@ impl Engine {
                 let downloader = self.downloader.clone();
                 async move {
                     let own_point = own_point_fut.await.expect("new point producer");
-                    EngineContext::own_point_metrics(own_point.as_ref());
+                    round_effects.own_point(own_point.as_ref());
 
                     if let Some(own_point) = own_point {
                         let paranoid = Self::expect_own_trusted_point(
@@ -334,44 +343,6 @@ impl Engine {
         }
     }
 
-    fn produce(
-        round_effects: Effects<EngineContext>,
-        current_dag_round: DagRound,
-        last_own_point: Option<Arc<LastOwnPoint>>,
-        peer_schedule: PeerSchedule,
-        own_point_state: oneshot::Sender<InclusionState>,
-        input_buffer: InputBuffer,
-    ) -> Option<Point> {
-        let task_start_time = Instant::now();
-        if let Some(own_point) =
-            Producer::new_point(&current_dag_round, last_own_point.as_deref(), &input_buffer)
-        {
-            tracing::info!(
-                parent: round_effects.span(),
-                digest = display(own_point.digest().alt()),
-                payload_bytes = own_point
-                    .body().payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
-                externals = own_point.body().payload.len(),
-                is_proof = Some(own_point.body().anchor_proof == Link::ToSelf).filter(|x| *x),
-                is_trigger = Some(own_point.body().anchor_trigger == Link::ToSelf).filter(|x| *x),
-                "produced point"
-            );
-            let state = current_dag_round.insert_exact_sign(
-                &own_point,
-                &peer_schedule,
-                round_effects.span(),
-            );
-            own_point_state.send(state).ok();
-            metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
-                .record(task_start_time.elapsed());
-            Some(own_point)
-        } else {
-            tracing::info!(parent: round_effects.span(), "will not produce point");
-            // drop(own_point_state); goes out of scope
-            None
-        }
-    }
-
     fn join_err_msg(maybe_err: &[(Option<JoinError>, &'static str)]) -> String {
         maybe_err
             .iter()
@@ -423,8 +394,10 @@ impl EngineContext {
     const ROUND_DURATION: &'static str = "tycho_mempool_engine_round_time";
     const PRODUCE_POINT_DURATION: &'static str = "tycho_mempool_engine_produce_time";
     const COMMIT_DURATION: &'static str = "tycho_mempool_engine_commit_time";
+}
 
-    fn own_point_metrics(own_point: Option<&Point>) {
+impl Effects<EngineContext> {
+    fn own_point(&self, own_point: Option<&Point>) {
         // refresh counters with zeros every round
         metrics::counter!("tycho_mempool_engine_produce_skipped")
             .increment(own_point.is_none() as _);
@@ -444,6 +417,20 @@ impl EngineContext {
         });
         metrics::counter!("tycho_mempool_point_payload_bytes")
             .increment(payload_bytes.unwrap_or_default());
+
+        match own_point {
+            Some(own_point) => tracing::info!(
+                parent: self.span(),
+                digest = display(own_point.digest().alt()),
+                payload_bytes = own_point
+                    .body().payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
+                externals = own_point.body().payload.len(),
+                is_proof = Some(own_point.body().anchor_proof == Link::ToSelf).filter(|x| *x),
+                is_trigger = Some(own_point.body().anchor_trigger == Link::ToSelf).filter(|x| *x),
+                "produced point"
+            ),
+            None => tracing::info!(parent: self.span(), "will not produce point"),
+        };
 
         // FIXME all commented metrics needs `gauge.set_max()` or `gauge.set_min()`,
         //  or (better) should be accumulated per round as standalone values
@@ -471,9 +458,7 @@ impl EngineContext {
         // metrics::gauge!("tycho_mempool_point_last_anchor_trigger_rounds_ago")
         //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Trigger).0);
     }
-}
 
-impl Effects<EngineContext> {
     fn commit_metrics(&self, committed: &[(Point, Vec<Point>)]) {
         metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
 
