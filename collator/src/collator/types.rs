@@ -951,6 +951,11 @@ impl MessageGroups {
         loop {
             let group_entry = self.groups.entry(offset).or_default();
 
+            if group_entry.is_full {
+                offset += 1;
+                continue;
+            }
+
             let group_len = group_entry.inner.len();
             match group_entry.inner.entry(account_id) {
                 Entry::Vacant(entry) => {
