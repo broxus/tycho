@@ -116,6 +116,7 @@ impl StateIteratorImpl {
                         let message_with_source =
                             Self::create_message_with_source(info, cell, iter.shard_ident);
 
+                        // TODO: why do we need this check?
                         for key in self.message_queue.iter() {
                             if key.0.message.key() == message_with_source.message.key() {
                                 panic!("Duplicate message in the queue");

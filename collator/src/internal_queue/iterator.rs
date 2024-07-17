@@ -14,6 +14,8 @@ use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDif
 pub trait QueueIterator: Send {
     /// Get next message
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
+    /// Get next only new message
+    fn next_new(&mut self) -> Result<Option<IterItem>>;
     fn update_last_read_message(
         &mut self,
         source_shard: ShardIdent,
@@ -95,8 +97,6 @@ impl QueueIterator for QueueIteratorImpl {
                     message_with_source: next_message.clone(),
                     is_new: false,
                 }));
-            } else {
-                continue;
             }
         }
 
@@ -106,6 +106,11 @@ impl QueueIterator for QueueIteratorImpl {
         }
 
         Ok(None)
+    }
+
+    fn next_new(&mut self) -> Result<Option<IterItem>> {
+        // Process the new messages if required
+        self.process_new_messages()
     }
 
     // Function to update the committed position
@@ -127,19 +132,10 @@ impl QueueIterator for QueueIteratorImpl {
     // Function to process the new messages
     fn process_new_messages(&mut self) -> Result<Option<IterItem>> {
         if let Some(next_message) = self.messages_for_current_shard.pop() {
-            let message_key = next_message.0.message.key();
-
-            if self.new_messages.contains_key(&message_key) {
-                return Ok(Some(IterItem {
-                    message_with_source: next_message.0.clone(),
-                    is_new: true,
-                }));
-            } else {
-                bail!(
-                    "Message is not in new messages but in current shard messages: {:?}",
-                    message_key
-                );
-            }
+            return Ok(Some(IterItem {
+                message_with_source: next_message.0.clone(),
+                is_new: true,
+            }));
         }
         Ok(None)
     }
@@ -223,7 +219,7 @@ impl QueueIterator for QueueIteratorImpl {
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
         self.new_messages.insert(message.key(), message.clone());
         if self.for_shard.contains_address(&message.info.dst) {
-            let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
+            let message_with_source = MessageWithSource::new(self.for_shard, message);
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));
         };

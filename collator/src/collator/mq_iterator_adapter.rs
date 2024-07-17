@@ -90,11 +90,11 @@ impl QueueIteratorAdapter {
         // get current ranges
         let mut ranges_from = FastHashMap::<_, InternalMessageKey>::default();
         let mut ranges_to = FastHashMap::<_, InternalMessageKey>::default();
-        let mut ranges_are_not_fully_read = false;
+        let mut ranges_fully_read = true;
         for item in processed_upto.internals.iter() {
             let (shard_id_full, int_processed_upto) = item?;
             if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
-                ranges_are_not_fully_read = true;
+                ranges_fully_read = false;
             }
             let shard_id = ShardIdent::try_from(shard_id_full)?;
             ranges_from.insert(shard_id, int_processed_upto.processed_to_msg.into());
@@ -102,25 +102,38 @@ impl QueueIteratorAdapter {
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "try_init_next_range_iterator: initialized={}, existing ranges_are_not_fully_read={}, \
+            "try_init_next_range_iterator: initialized={}, existing ranges_fully_read={}, \
             ranges_from={:?}, ranges_to={:?}",
-            self.iterator_opt.is_some(), ranges_are_not_fully_read,
+            self.iterator_opt.is_some(), ranges_fully_read,
             ranges_from, ranges_to,
         );
 
-        let new_iterator_opt = if self.iterator_opt.is_none() && ranges_are_not_fully_read {
+        let new_iterator_opt = if self.iterator_opt.is_none() && !ranges_fully_read {
             // when current iterator is not initialized we have 2 possible cases:
             // 1. ranges were not fully read in previous collation
             // 2. ranges were fully read (processed_to == read_to)
 
             // we use existing ranges to init iterator only when they were not fully read
             // but will read from current position
+            // and check if ranges are fully read from current position
+            ranges_fully_read = true;
             for (shard_id, from) in ranges_from.iter_mut() {
                 if let Some(curren_position) = self.current_positions.get(shard_id) {
                     from.lt = curren_position.lt;
                     from.hash = curren_position.hash;
                 }
+                let to = ranges_to.get(shard_id).unwrap();
+                if from != to {
+                    ranges_fully_read = false;
+                }
             }
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "try_init_next_range_iterator: ranges updated from current position, ranges_fully_read={}, \
+                ranges_from={:?}, ranges_to={:?}",
+                ranges_fully_read,
+                ranges_from, ranges_to,
+            );
+
             let current_ranges_iterator = self
                 .mq_adapter
                 .create_iterator(self.shard_id, ranges_from, ranges_to)
@@ -186,6 +199,9 @@ impl QueueIteratorAdapter {
 
             // if ranges changed then init new iterator
             if ranges_updated {
+                // if ranges changed then to > from, so they are not fully read
+                ranges_fully_read = false;
+
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "try_init_next_range_iterator: updated ranges_from={:?}, ranges_to={:?}",
                     ranges_from, ranges_to,
@@ -214,7 +230,7 @@ impl QueueIteratorAdapter {
         };
 
         let res = if self.iterator_opt.is_none() {
-            self.no_pending_existing_internals = false;
+            self.no_pending_existing_internals = ranges_fully_read;
             assert!(new_iterator_opt.is_some());
             self.iterator_opt = new_iterator_opt;
             true
@@ -286,7 +302,7 @@ impl QueueIteratorAdapter {
         if self.no_pending_new_messages {
             Ok(None)
         } else {
-            match self.iterator_opt.as_mut().unwrap().next(true)? {
+            match self.iterator_opt.as_mut().unwrap().next_new()? {
                 Some(int_msg) => {
                     let message_key = int_msg.message_with_source.message.key();
 
