@@ -1228,7 +1228,9 @@ fn new_transaction(
     );
 
     collation_data.execute_count_all += 1;
-    collation_data.block_limit.gas_used += executor_output.gas_used as u32;
+
+    let gas_used = &mut collation_data.block_limit.gas_used;
+    *gas_used = gas_used.saturating_add(executor_output.gas_used.try_into().unwrap_or(u32::MAX));
 
     let import_fees;
     let in_msg_hash = *in_msg.cell.repr_hash();

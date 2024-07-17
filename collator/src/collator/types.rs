@@ -423,6 +423,7 @@ pub(super) struct BlockCollationData {
     // TODO: set from anchor
     pub created_by: HashBytes,
 }
+
 #[derive(Debug)]
 pub struct BlockLimitStats {
     pub gas_used: u32,
@@ -485,7 +486,7 @@ impl BlockLimitStats {
             ..
         } = lt_delta;
 
-        let delta_lt = (self.lt_current - self.lt_start) as u32;
+        let delta_lt = u32::try_from(self.lt_current - self.lt_start).unwrap_or(u32::MAX);
         if delta_lt >= *hard_limit {
             return true;
         }
