@@ -477,6 +477,8 @@ impl CollatorStdImpl {
 
         metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
             .increment(externals_count as _);
+        metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+            .increment(externals_count as f64);
 
         let chain_time_elapsed =
             next_anchor.chain_time - self.last_imported_anchor_chain_time.unwrap_or_default();

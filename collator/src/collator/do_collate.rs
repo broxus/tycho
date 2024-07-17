@@ -663,10 +663,12 @@ impl CollatorStdImpl {
                     let iter = anchor.iter_externals(iter_from);
                     let mut expired_msgs_count = 0;
                     for ext_msg in iter {
-                        tracing::trace!(target: tracing_targets::COLLATOR,
-                            "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
-                        );
-                        expired_msgs_count += 1;
+                        if shard_id.contains_address(&ext_msg.info.dst) {
+                            tracing::trace!(target: tracing_targets::COLLATOR,
+                                "ext_msg hash: {}, dst: {} is expired", ext_msg.hash(), ext_msg.info.dst,
+                            );
+                            expired_msgs_count += 1;
+                        }
                     }
 
                     metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
@@ -711,14 +713,12 @@ impl CollatorStdImpl {
                 );
 
                 // get iterator and read messages
-                let mut msgs_read_from_last_anchor = 0;
                 let mut msgs_collected_from_last_anchor = 0;
                 let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
                 for ext_msg in iter {
                     tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "read ext_msg dst: {}", ext_msg.info.dst,
                     );
-                    msgs_read_from_last_anchor += 1;
                     if total_msgs_collected < count {
                         msgs_read_offset_in_last_anchor += 1;
                     }
@@ -748,7 +748,7 @@ impl CollatorStdImpl {
                 }
 
                 metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
-                    .decrement(msgs_read_from_last_anchor as f64);
+                    .decrement(msgs_collected_from_last_anchor as f64);
 
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "{} externals collected from anchor {}, msgs_read_offset_in_last_anchor: {}",
