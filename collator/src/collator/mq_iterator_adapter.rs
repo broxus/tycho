@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{ProcessedUptoInfo, ShardIdent, ShardIdentFull};
+use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
-use super::types::WorkingState;
+use super::types::{ProcessedUptoInfoStuff, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -82,7 +82,7 @@ impl QueueIteratorAdapter {
 
     pub async fn try_init_next_range_iterator(
         &mut self,
-        processed_upto: &mut ProcessedUptoInfo,
+        processed_upto: &mut ProcessedUptoInfoStuff,
         working_state: &WorkingState,
     ) -> Result<bool> {
         let timer = std::time::Instant::now();
@@ -90,37 +90,48 @@ impl QueueIteratorAdapter {
         // get current ranges
         let mut ranges_from = FastHashMap::<_, InternalMessageKey>::default();
         let mut ranges_to = FastHashMap::<_, InternalMessageKey>::default();
-        let mut ranges_are_not_fully_read = false;
-        for item in processed_upto.internals.iter() {
-            let (shard_id_full, int_processed_upto) = item?;
+        let mut ranges_fully_read = true;
+        for (shard_id, int_processed_upto) in processed_upto.internals.iter() {
             if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
-                ranges_are_not_fully_read = true;
+                ranges_fully_read = false;
             }
-            let shard_id = ShardIdent::try_from(shard_id_full)?;
-            ranges_from.insert(shard_id, int_processed_upto.processed_to_msg.into());
-            ranges_to.insert(shard_id, int_processed_upto.read_to_msg.into());
+            ranges_from.insert(*shard_id, int_processed_upto.processed_to_msg.clone());
+            ranges_to.insert(*shard_id, int_processed_upto.read_to_msg.clone());
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "try_init_next_range_iterator: initialized={}, existing ranges_are_not_fully_read={}, \
+            "try_init_next_range_iterator: initialized={}, existing ranges_fully_read={}, \
             ranges_from={:?}, ranges_to={:?}",
-            self.iterator_opt.is_some(), ranges_are_not_fully_read,
+            self.iterator_opt.is_some(), ranges_fully_read,
             ranges_from, ranges_to,
         );
 
-        let new_iterator_opt = if self.iterator_opt.is_none() && ranges_are_not_fully_read {
+        let new_iterator_opt = if self.iterator_opt.is_none() && !ranges_fully_read {
             // when current iterator is not initialized we have 2 possible cases:
             // 1. ranges were not fully read in previous collation
             // 2. ranges were fully read (processed_to == read_to)
 
             // we use existing ranges to init iterator only when they were not fully read
             // but will read from current position
+            // and check if ranges are fully read from current position
+            ranges_fully_read = true;
             for (shard_id, from) in ranges_from.iter_mut() {
                 if let Some(curren_position) = self.current_positions.get(shard_id) {
                     from.lt = curren_position.lt;
                     from.hash = curren_position.hash;
                 }
+                let to = ranges_to.get(shard_id).unwrap();
+                if from != to {
+                    ranges_fully_read = false;
+                }
             }
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "try_init_next_range_iterator: ranges updated from current position, ranges_fully_read={}, \
+                ranges_from={:?}, ranges_to={:?}",
+                ranges_fully_read,
+                ranges_from, ranges_to,
+            );
+
             let current_ranges_iterator = self
                 .mq_adapter
                 .create_iterator(self.shard_id, ranges_from, ranges_to)
@@ -186,6 +197,9 @@ impl QueueIteratorAdapter {
 
             // if ranges changed then init new iterator
             if ranges_updated {
+                // if ranges changed then to > from, so they are not fully read
+                ranges_fully_read = false;
+
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "try_init_next_range_iterator: updated ranges_from={:?}, ranges_to={:?}",
                     ranges_from, ranges_to,
@@ -195,10 +209,10 @@ impl QueueIteratorAdapter {
                     let new_read_to_key = ranges_to.get(shard_id).unwrap();
                     update_internals_processed_upto(
                         processed_upto,
-                        ShardIdentFull::from(*shard_id),
+                        *shard_id,
                         Some(ProcessedUptoUpdate::Force(new_process_to_key.clone())),
                         Some(ProcessedUptoUpdate::Force(new_read_to_key.clone())),
-                    )?;
+                    );
                 }
                 // and init iterator
                 let new_ranges_iterator = self
@@ -214,7 +228,7 @@ impl QueueIteratorAdapter {
         };
 
         let res = if self.iterator_opt.is_none() {
-            self.no_pending_existing_internals = false;
+            self.no_pending_existing_internals = ranges_fully_read;
             assert!(new_iterator_opt.is_some());
             self.iterator_opt = new_iterator_opt;
             true
@@ -286,7 +300,7 @@ impl QueueIteratorAdapter {
         if self.no_pending_new_messages {
             Ok(None)
         } else {
-            match self.iterator_opt.as_mut().unwrap().next(true)? {
+            match self.iterator_opt.as_mut().unwrap().next_new()? {
                 Some(int_msg) => {
                     let message_key = int_msg.message_with_source.message.key();
 

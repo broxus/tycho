@@ -624,7 +624,11 @@ impl CollatorStdImpl {
             .try_init_next_range_iterator(&mut current_processed_upto, working_state)
             .await?;
 
-        let has_internals = mq_iterator_adapter.iterator().next(true)?.is_some();
+        let has_internals = if !mq_iterator_adapter.no_pending_existing_internals() {
+            mq_iterator_adapter.iterator().next(true)?.is_some()
+        } else {
+            false
+        };
         working_state.has_pending_internals = Some(has_internals);
 
         Ok(has_internals)

@@ -14,6 +14,10 @@ use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDif
 pub trait QueueIterator: Send {
     /// Get next message
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
+    /// Get next only new message
+    fn next_new(&mut self) -> Result<Option<IterItem>>;
+    /// Returns true if there are new messages to current shard
+    fn has_new_messages_for_current_shard(&self) -> bool;
     fn update_last_read_message(
         &mut self,
         source_shard: ShardIdent,
@@ -21,8 +25,6 @@ pub trait QueueIterator: Send {
     );
     fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
     /// Take diff from iterator
-    /// Move current position to commited position
-    /// Create new transaction
     fn take_diff(&self) -> QueueDiff;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
@@ -95,8 +97,6 @@ impl QueueIterator for QueueIteratorImpl {
                     message_with_source: next_message.clone(),
                     is_new: false,
                 }));
-            } else {
-                continue;
             }
         }
 
@@ -108,7 +108,16 @@ impl QueueIterator for QueueIteratorImpl {
         Ok(None)
     }
 
-    // Function to update the committed position
+    fn next_new(&mut self) -> Result<Option<IterItem>> {
+        // Process the new messages if required
+        self.process_new_messages()
+    }
+
+    fn has_new_messages_for_current_shard(&self) -> bool {
+        !self.messages_for_current_shard.is_empty()
+    }
+
+    // Function to update the read position
     fn update_last_read_message(
         &mut self,
         source_shard: ShardIdent,
@@ -127,19 +136,10 @@ impl QueueIterator for QueueIteratorImpl {
     // Function to process the new messages
     fn process_new_messages(&mut self) -> Result<Option<IterItem>> {
         if let Some(next_message) = self.messages_for_current_shard.pop() {
-            let message_key = next_message.0.message.key();
-
-            if self.new_messages.contains_key(&message_key) {
-                return Ok(Some(IterItem {
-                    message_with_source: next_message.0.clone(),
-                    is_new: true,
-                }));
-            } else {
-                bail!(
-                    "Message is not in new messages but in current shard messages: {:?}",
-                    message_key
-                );
-            }
+            return Ok(Some(IterItem {
+                message_with_source: next_message.0.clone(),
+                is_new: true,
+            }));
         }
         Ok(None)
     }
@@ -152,52 +152,60 @@ impl QueueIterator for QueueIteratorImpl {
 
         let mut diff = QueueDiff::default();
 
-        let mut read_position = self.read_position.clone();
+        // actually we update last processed message via commit()
+        // during the execution, so we can just use value as is
 
-        for processed_last_message in self.last_processed_message.iter() {
-            if !read_position.contains_key(&processed_last_message.0) {
-                read_position.insert(
-                    processed_last_message.0.clone(),
-                    processed_last_message.1.clone(),
-                );
-            }
+        for (shard_id, message_key) in self.last_processed_message.iter() {
+            // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
+            diff.processed_upto.insert(*shard_id, message_key.clone());
         }
 
-        for (shard_id, last_read_key) in read_position.iter() {
-            let last_read_message_for_current_shard = self
-                .last_read_message_for_current_shard
-                .get(&shard_id)
-                .cloned();
-            let processed_last_message = self.last_processed_message.get(&shard_id).cloned();
+        // let mut read_position = self.read_position.clone();
 
-            match (last_read_message_for_current_shard, processed_last_message) {
-                (Some(read_last_message), Some(processed_last_message)) => {
-                    if read_last_message == processed_last_message {
-                        // processed all read messages
-                        diff.processed_upto
-                            .insert(*shard_id, read_last_message.clone());
-                    } else {
-                        // processed greater than read or lower
-                        diff.processed_upto
-                            .insert(*shard_id, processed_last_message);
-                    }
-                }
-                (Some(_read_last_message), None) => {
-                    // read last message but no one processed. try again next time
-                    // diff.processed_upto
-                    //     .insert(*shard_id, read_last_message.clone());
-                }
-                (None, Some(processed_last_message)) => {
-                    // no old messages read, but some new processed
-                    diff.processed_upto
-                        .insert(*shard_id, processed_last_message.clone());
-                }
-                (None, None) => {
-                    // no old messages read, no new processed
-                    diff.processed_upto.insert(*shard_id, last_read_key.clone());
-                }
-            }
-        }
+        // for processed_last_message in self.last_processed_message.iter() {
+        //     if !read_position.contains_key(&processed_last_message.0) {
+        //         read_position.insert(
+        //             processed_last_message.0.clone(),
+        //             processed_last_message.1.clone(),
+        //         );
+        //     }
+        // }
+
+        // for (shard_id, last_read_key) in read_position.iter() {
+        //     let last_read_message_for_current_shard = self
+        //         .last_read_message_for_current_shard
+        //         .get(&shard_id)
+        //         .cloned();
+        //     let processed_last_message = self.last_processed_message.get(&shard_id).cloned();
+
+        //     match (last_read_message_for_current_shard, processed_last_message) {
+        //         (Some(read_last_message), Some(processed_last_message)) => {
+        //             if read_last_message == processed_last_message {
+        //                 // processed all read messages
+        //                 diff.processed_upto
+        //                     .insert(*shard_id, read_last_message.clone());
+        //             } else {
+        //                 // processed greater than read or lower
+        //                 diff.processed_upto
+        //                     .insert(*shard_id, processed_last_message);
+        //             }
+        //         }
+        //         (Some(_read_last_message), None) => {
+        //             // read last message but no one processed. try again next time
+        //             // diff.processed_upto
+        //             //     .insert(*shard_id, read_last_message.clone());
+        //         }
+        //         (None, Some(processed_last_message)) => {
+        //             // no old messages read, but some new processed
+        //             diff.processed_upto
+        //                 .insert(*shard_id, processed_last_message.clone());
+        //         }
+        //         (None, None) => {
+        //             // no old messages read, no new processed
+        //             diff.processed_upto.insert(*shard_id, last_read_key.clone());
+        //         }
+        //     }
+        // }
 
         for message in self.new_messages.values() {
             diff.messages.insert(message.key(), message.clone());
@@ -206,6 +214,7 @@ impl QueueIterator for QueueIteratorImpl {
         diff
     }
 
+    // Function to update the commit position
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
         for (source_shard, message_key) in messages {
             self.last_processed_message
@@ -223,7 +232,7 @@ impl QueueIterator for QueueIteratorImpl {
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
         self.new_messages.insert(message.key(), message.clone());
         if self.for_shard.contains_address(&message.info.dst) {
-            let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
+            let message_with_source = MessageWithSource::new(self.for_shard, message);
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));
         };

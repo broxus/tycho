@@ -135,10 +135,9 @@ impl CollatorStdImpl {
             .processed_upto
             .internals
             .iter()
-            .for_each(|result| {
-                let (shard_ident, processed_upto) = result.unwrap();
+            .for_each(|(shard_ident, processed_upto)| {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "initial processed_upto.internals for shard {:?}: {:?}",
+                    "initial processed_upto.internals for shard {}: {:?}",
                     shard_ident, processed_upto,
                 );
             });
@@ -342,6 +341,17 @@ impl CollatorStdImpl {
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
 
         let diff = mq_iterator_adapter.take_diff();
+
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            "collator_data.processed_upto.internals: {:?} \
+            diff processed upto: {:?}",
+            collation_data.processed_upto.internals,
+            diff.processed_upto,
+        );
+        for (shard_id, int_upto_info) in collation_data.processed_upto.internals.iter() {
+            let diff_int_upto_info = diff.processed_upto.get(shard_id).unwrap();
+            assert_eq!(diff_int_upto_info, &int_upto_info.processed_to_msg);
+        }
 
         // indicate that there are still unprocessed internals when collation loop finished
         let has_pending_internals = exec_manager.release_iterator_adapter(mq_iterator_adapter)?;
