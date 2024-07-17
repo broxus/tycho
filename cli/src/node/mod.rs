@@ -46,7 +46,7 @@ use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
 use crate::util::error::ResultExt;
-use crate::util::logger::{is_systemd_child, LoggerConfig};
+use crate::util::logger::{file_logging_layer, is_systemd_child, LoggerTargets, LoggingConfig};
 use crate::util::signal;
 
 mod config;
@@ -127,8 +127,8 @@ impl CmdRun {
             })
     }
 
-    async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
-        init_logger(self.logger_config)?;
+    async fn run_impl(self, mut node_config: NodeConfig) -> Result<()> {
+        init_logger(self.logger_config, node_config.logs.take())?;
 
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
@@ -165,7 +165,10 @@ impl CmdRun {
     }
 }
 
-fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
+fn init_logger(
+    logger_config: Option<PathBuf>,
+    logging_config: Option<LoggingConfig>,
+) -> Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::{fmt, reload, EnvFilter};
 
@@ -176,7 +179,7 @@ fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
                 None => EnvFilter::builder()
                     .with_default_directive(tracing::Level::INFO.into())
                     .from_env_lossy(),
-                Some(path) => LoggerConfig::load_from(path)
+                Some(path) => LoggerTargets::load_from(path)
                     .wrap_err("failed to load logger config")?
                     .build_subscriber(),
             })
@@ -191,7 +194,8 @@ fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
             fmt::layer().without_time().with_ansi(false).boxed()
         } else {
             fmt::layer().boxed()
-        });
+        })
+        .with(file_logging_layer(logging_config)?);
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
     if let Some(logger_config) = logger_config {

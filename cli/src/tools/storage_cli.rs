@@ -1,4 +1,3 @@
-#![allow(clippy::print_stdout)] // it's a CLI tool
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -263,7 +262,7 @@ impl GetArchiveSliceCmd {
 
         match get_archive_slice() {
             Ok(data) => {
-                println!("Archive slice: {}", hex::encode(&data));
+                println!("Archive slice: {}", hex::encode(data));
                 Ok(())
             }
             Err(e) => {

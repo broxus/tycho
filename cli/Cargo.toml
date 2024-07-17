@@ -47,7 +47,9 @@ tikv-jemallocator = { workspace = true, features = [
 tikv-jemalloc-ctl = { version = "0.5", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing = { workspace = true }
+tracing-appender = "0.2.3"
 tracing-subscriber = { workspace = true }
+tracing-stackdriver = "0.10.0"
 
 # local deps
 tycho-block-util = { workspace = true }
