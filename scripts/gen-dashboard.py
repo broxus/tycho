@@ -719,9 +719,19 @@ def collator_message_metrics() -> RowPanel:
             "All executed msgs count",
             labels_selectors=['workchain=~"$workchain"'],
         ),
+        create_gauge_panel(
+            "tycho_collator_ext_msgs_imported_queue_size",
+            "Ext msgs imported queue size",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_counter_panel(
             "tycho_collator_ext_msgs_imported_count",
             "Imported Ext msgs count from mempool",
+            labels_selectors=['workchain=~"$workchain"'],
+        ),
+        create_counter_panel(
+            "tycho_do_collate_ext_msgs_expired_count",
+            "Ext msgs expired count",
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(
@@ -737,11 +747,6 @@ def collator_message_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_do_collate_msgs_error_count_ext",
             "Ext msgs error count",
-            labels_selectors=['workchain=~"$workchain"'],
-        ),
-        create_counter_panel(
-            "tycho_do_collate_ext_msgs_expired_count",
-            "Ext msgs expired count",
             labels_selectors=['workchain=~"$workchain"'],
         ),
         create_counter_panel(

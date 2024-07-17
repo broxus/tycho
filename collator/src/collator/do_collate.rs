@@ -577,6 +577,8 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
     ) -> Result<(Vec<Box<ParsedMessage>>, bool)> {
+        let labels = [("workchain", shard_id.workchain().to_string())];
+
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
             "shard: {}, count: {}", shard_id, count,
         );
@@ -653,7 +655,12 @@ impl CollatorStdImpl {
                 let next_chain_time =
                     collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
                 if next_chain_time - anchor.chain_time > expire_timeout {
-                    let iter = anchor.iter_externals(0);
+                    let iter_from = if key == was_read_to.0 {
+                        was_read_to.1 as usize
+                    } else {
+                        0
+                    };
+                    let iter = anchor.iter_externals(iter_from);
                     let mut expired_msgs_count = 0;
                     for ext_msg in iter {
                         tracing::trace!(target: tracing_targets::COLLATOR,
@@ -662,11 +669,12 @@ impl CollatorStdImpl {
                         expired_msgs_count += 1;
                     }
 
-                    let labels = &[("workchain", shard_id.workchain().to_string())];
-                    metrics::counter!("tycho_do_collate_ext_msgs_expired_count", labels)
+                    metrics::counter!("tycho_do_collate_ext_msgs_expired_count", &labels)
                         .increment(expired_msgs_count);
+                    metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                        .decrement(expired_msgs_count as f64);
 
-                    // skip and remove fully expired anchor
+                    // skip and remove expired anchor
                     let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
@@ -703,12 +711,14 @@ impl CollatorStdImpl {
                 );
 
                 // get iterator and read messages
+                let mut msgs_read_from_last_anchor = 0;
                 let mut msgs_collected_from_last_anchor = 0;
                 let iter = anchor.iter_externals(msgs_read_offset_in_last_anchor as usize);
                 for ext_msg in iter {
                     tracing::trace!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "read ext_msg dst: {}", ext_msg.info.dst,
                     );
+                    msgs_read_from_last_anchor += 1;
                     if total_msgs_collected < count {
                         msgs_read_offset_in_last_anchor += 1;
                     }
@@ -736,6 +746,10 @@ impl CollatorStdImpl {
                         }
                     }
                 }
+
+                metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+                    .decrement(msgs_read_from_last_anchor as f64);
+
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "{} externals collected from anchor {}, msgs_read_offset_in_last_anchor: {}",
                     msgs_collected_from_last_anchor, key, msgs_read_offset_in_last_anchor,

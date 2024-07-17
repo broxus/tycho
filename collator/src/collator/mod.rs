@@ -513,10 +513,7 @@ impl CollatorStdImpl {
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
 
-        let histogram = HistogramGuardWithLabels::begin(
-            "tycho_collator_import_next_anchors_on_init_time",
-            &labels,
-        );
+        let timer = std::time::Instant::now();
 
         let mut next_anchor = self
             .mpool_adapter
@@ -524,9 +521,12 @@ impl CollatorStdImpl {
             .await?
             .unwrap();
 
+        #[allow(dead_code)]
         #[derive(Debug)]
         struct AnchorInfo {
-            externals_count: usize,
+            id: MempoolAnchorId,
+            ct: u64,
+            externals: usize,
         }
 
         let mut anchors: Vec<AnchorInfo> = vec![];
@@ -545,7 +545,11 @@ impl CollatorStdImpl {
                 has_externals,
             }));
 
-        anchors.push(AnchorInfo { externals_count });
+        anchors.push(AnchorInfo {
+            id: next_anchor.id,
+            ct: next_anchor.chain_time,
+            externals: externals_count,
+        });
         while last_block_chain_time > next_anchor_chain_time {
             next_anchor = self.mpool_adapter.get_next_anchor(last_anchor_id).await?;
 
@@ -563,19 +567,26 @@ impl CollatorStdImpl {
                     has_externals,
                 }));
 
-            anchors.push(AnchorInfo { externals_count });
+            anchors.push(AnchorInfo {
+                id: next_anchor.id,
+                ct: next_anchor.chain_time,
+                externals: externals_count,
+            });
         }
 
+        let imported_count: usize = anchors.iter().map(|a| a.externals).sum();
         metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
-            .increment(anchors.iter().map(|a| a.externals_count).sum::<usize>() as u64);
+            .increment(imported_count as u64);
+        metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
+            .increment(imported_count as f64);
 
         self.last_imported_anchor_id = Some(last_anchor_id);
         self.last_imported_anchor_chain_time = Some(next_anchor_chain_time);
         self.last_imported_anchor_author = Some(next_anchor.author);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
-            elapsed = histogram.finish().as_millis(),
-            "Collator (block_id={}): init: imported anchors on init ({:?})",
+            elapsed = timer.elapsed().as_millis(),
+            "Collator (block_id={}): init: imported anchors on init: {:?}",
             self.next_block_id_short,
             anchors.as_slice()
         );
