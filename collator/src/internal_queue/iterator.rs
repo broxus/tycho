@@ -24,6 +24,8 @@ pub trait QueueIterator: Send {
         message_key: &InternalMessageKey,
     );
     fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
+    /// Extract diff from iterator and return has_pending_internals flag
+    fn into_diff(self) -> Result<(QueueDiff, bool)>;
     /// Take diff from iterator
     fn take_diff(&self) -> QueueDiff;
     /// Commit processed messages
@@ -37,7 +39,7 @@ pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
     commited_current_position: BTreeMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
-    new_messages: FastHashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+    new_messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     snapshot_manager: StatesIteratorsManager,
     last_processed_message: FastHashMap<ShardIdent, InternalMessageKey>,
     last_read_message_for_current_shard: FastHashMap<ShardIdent, InternalMessageKey>,
@@ -136,12 +138,43 @@ impl QueueIterator for QueueIteratorImpl {
     // Function to process the new messages
     fn process_new_messages(&mut self) -> Result<Option<IterItem>> {
         if let Some(next_message) = self.messages_for_current_shard.pop() {
+            // remove message from new_messages
+            self.new_messages.remove(&next_message.0.message.key());
+
             return Ok(Some(IterItem {
                 message_with_source: next_message.0.clone(),
                 is_new: true,
             }));
         }
         Ok(None)
+    }
+
+    fn into_diff(mut self) -> Result<(QueueDiff, bool)> {
+        tracing::trace!(
+            target: crate::tracing_targets::MQ,
+            "Extracting diff from iterator. New messages count: {}",
+            self.new_messages.len());
+
+        let mut diff = QueueDiff::default();
+
+        // fill processed_upto
+        for (shard_id, message_key) in self.last_processed_message.iter() {
+            // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
+            diff.processed_upto.insert(*shard_id, message_key.clone());
+        }
+
+        // check if has pending internals in new messages
+        let mut has_pending_internals = !self.messages_for_current_shard.is_empty();
+
+        // check if has pending internals among existing
+        if !has_pending_internals {
+            has_pending_internals = self.next(false)?.is_some();
+        }
+
+        // fill new messages (new_messages shoul not be updated in previous operations)
+        diff.messages = self.new_messages;
+
+        Ok((diff, has_pending_internals))
     }
 
     fn take_diff(&self) -> QueueDiff {
@@ -159,6 +192,8 @@ impl QueueIterator for QueueIteratorImpl {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
             diff.processed_upto.insert(*shard_id, message_key.clone());
         }
+
+        diff.messages = self.new_messages.clone();
 
         // let mut read_position = self.read_position.clone();
 
@@ -207,9 +242,9 @@ impl QueueIterator for QueueIteratorImpl {
         //     }
         // }
 
-        for message in self.new_messages.values() {
-            diff.messages.insert(message.key(), message.clone());
-        }
+        // for message in self.new_messages.values() {
+        //     diff.messages.insert(message.key(), message.clone());
+        // }
 
         diff
     }
