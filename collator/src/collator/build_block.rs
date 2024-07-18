@@ -201,7 +201,7 @@ impl CollatorStdImpl {
                 gen_utime_ms: new_block_info.gen_utime_ms,
                 gen_lt: new_block_info.end_lt,
                 min_ref_mc_seqno: new_block_info.min_ref_mc_seqno,
-                processed_upto: Lazy::new(&collation_data.processed_upto)?,
+                processed_upto: Lazy::new(&collation_data.processed_upto.clone().try_into()?)?,
                 before_split: new_block_info.before_split,
                 accounts: Lazy::new(&processed_accounts.shard_accounts)?,
                 overload_history: prev_shard_data.gas_used_from_last_anchor()

@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{ProcessedUptoInfo, ShardIdent, ShardIdentFull};
+use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
-use super::types::WorkingState;
+use super::types::{ProcessedUptoInfoStuff, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -82,7 +82,7 @@ impl QueueIteratorAdapter {
 
     pub async fn try_init_next_range_iterator(
         &mut self,
-        processed_upto: &mut ProcessedUptoInfo,
+        processed_upto: &mut ProcessedUptoInfoStuff,
         working_state: &WorkingState,
     ) -> Result<bool> {
         let timer = std::time::Instant::now();
@@ -91,14 +91,12 @@ impl QueueIteratorAdapter {
         let mut ranges_from = FastHashMap::<_, InternalMessageKey>::default();
         let mut ranges_to = FastHashMap::<_, InternalMessageKey>::default();
         let mut ranges_fully_read = true;
-        for item in processed_upto.internals.iter() {
-            let (shard_id_full, int_processed_upto) = item?;
+        for (shard_id, int_processed_upto) in processed_upto.internals.iter() {
             if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
                 ranges_fully_read = false;
             }
-            let shard_id = ShardIdent::try_from(shard_id_full)?;
-            ranges_from.insert(shard_id, int_processed_upto.processed_to_msg.into());
-            ranges_to.insert(shard_id, int_processed_upto.read_to_msg.into());
+            ranges_from.insert(*shard_id, int_processed_upto.processed_to_msg.clone());
+            ranges_to.insert(*shard_id, int_processed_upto.read_to_msg.clone());
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -211,10 +209,10 @@ impl QueueIteratorAdapter {
                     let new_read_to_key = ranges_to.get(shard_id).unwrap();
                     update_internals_processed_upto(
                         processed_upto,
-                        ShardIdentFull::from(*shard_id),
+                        *shard_id,
                         Some(ProcessedUptoUpdate::Force(new_process_to_key.clone())),
                         Some(ProcessedUptoUpdate::Force(new_read_to_key.clone())),
-                    )?;
+                    );
                 }
                 // and init iterator
                 let new_ranges_iterator = self
