@@ -48,9 +48,13 @@ impl PingCmd {
 
 #[derive(Deserialize, Parser)]
 pub struct TriggerGcCmd {
+    #[arg(short, long)]
     pub ty: ManualTriggerValue,
+    #[arg(short, long)]
     pub seqno: Option<u32>,
+    #[arg(short, long)]
     pub distance: Option<u32>,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 
@@ -59,9 +63,8 @@ pub struct TriggerGcCmd {
 pub enum ManualTriggerValue {
     Blocks,
     Archives,
-    States
+    States,
 }
-
 
 impl TriggerGcCmd {
     pub async fn run(&self) {
@@ -73,7 +76,12 @@ impl TriggerGcCmd {
             }
         };
         if let Err(e) = client
-            .trigger_gc(context::current(), self.ty.clone(), self.seqno, self.distance)
+            .trigger_gc(
+                context::current(),
+                self.ty.clone(),
+                self.seqno,
+                self.distance,
+            )
             .await
         {
             println!("Failed to trigger GC: {e:?}")

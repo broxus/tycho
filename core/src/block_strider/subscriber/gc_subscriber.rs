@@ -1,4 +1,3 @@
-use std::os::macos::raw::stat;
 use std::pin::pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -121,12 +120,13 @@ impl GcSubscriber {
                     if let Some(handle) = persistent_state_keeper.current() {
                         source = Some(HandleSource::PersistentStateKeeper {handle});
                     } else {
-                                continue;
-                            };
+                        continue;
+                    };
                 },
                 tr = manual_gc_trigger.recv() => {
                     match tr {
                         Ok(ManualGcTrigger::Archives {ty}) => {
+                            tracing::debug!("Archives GC manual trigger received {:?}", &ty);
                             if let Ok(Some((seqno, distance))) = Self::get_mc_block_seqno_manual(ty, storage.clone()).await {
                                 source = Some(HandleSource::ManualSelection {seqno, distance});
                             } else {
@@ -160,11 +160,13 @@ impl GcSubscriber {
                     }
                 }
                 Some(HandleSource::ManualSelection { seqno, distance }) => {
+                    tracing::info!(target: "gc-subscriber", "Manual seqno selection...");
                     seqno.saturating_sub(distance)
                 }
                 _ => continue,
             };
 
+            tracing::debug!("Archives GC calculated target seqno {}", seqno);
             if let Err(e) = storage
                 .block_storage()
                 .remove_outdated_archives(seqno)
@@ -172,8 +174,6 @@ impl GcSubscriber {
             {
                 tracing::error!("failed to remove outdated archives: {e:?}");
             }
-
-            // new_state_found.await;
         }
     }
 
@@ -193,7 +193,7 @@ impl GcSubscriber {
                 return match storage.node_state().load_last_mc_block_id() {
                     Some(block) => {
                         let state = storage.shard_state_storage().load_state(&block).await?;
-                        let Some((key_max_lt, mc_block_ref)) =
+                        let Some((_, mc_block_ref)) =
                             state.state_extra()?.prev_blocks.get(mc_seqno)?
                         else {
                             anyhow::bail!("Failed to find mc block ref")
@@ -235,6 +235,7 @@ impl GcSubscriber {
                data = manual_gc_trigger.recv() => {
                     match data {
                         Ok(data) => {
+                            tracing::debug!("Blocks GC manual trigger received {:?}", &data);
                             let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
                             GcTriggerSource::Manual {data, last_known_mc_seqno}
                         }
@@ -350,6 +351,8 @@ impl GcSubscriber {
             // NOTE: You should update this in other branches as well,
             // if we want to debounce other types of GC.
             last_tiggered_at = Some(Instant::now());
+
+            tracing::debug!("Blocks GC calculated target seqno {}", target_seqno);
 
             if let Err(e) = storage
                 .block_storage()
