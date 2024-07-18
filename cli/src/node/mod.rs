@@ -620,7 +620,7 @@ impl Node {
                 )
                     .chain(GcSubscriber::new(
                         self.storage.clone(),
-                        control_server.manual_gc_receiver(),
+                        control_server.manual_gc_trigger(),
                     )),
             )
             .build();

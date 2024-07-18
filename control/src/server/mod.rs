@@ -8,14 +8,14 @@ use futures_util::StreamExt;
 use tarpc::context::Context;
 use tarpc::server::incoming::Incoming;
 use tarpc::server::{self, Channel};
-use tarpc::tokio_serde::formats::{Bincode};
+use tarpc::tokio_serde::formats::Bincode;
 use tokio::net::ToSocketAddrs;
-use tokio::sync::{watch};
-use tycho_core::block_strider::ManualGcTrigger;
+use tokio::sync::{broadcast, watch};
+use tycho_core::block_strider::{ManualGcTrigger, TriggerType};
 use tycho_storage::{KeyBlocksDirection, Storage};
 
 use crate::models::BlockFull;
-use crate::ControlServer;
+use crate::{ControlServer, ManualTriggerValue};
 
 #[derive(Clone)]
 pub struct ControlServerListener {
@@ -60,13 +60,13 @@ pub struct ControlServerImpl {
 
 impl ControlServerImpl {
     pub fn new(storage: Storage) -> Self {
-        let (manual_gc_trigger, manual_gc_receiver) = watch::channel(None::<ManualGcTrigger>);
+        //let (manual_gc_trigger, manual_gc_receiver) = broadcast::::channel(None::<ManualGcTrigger>);
+        let (manual_gc_trigger, _) = broadcast::channel(10);
         let (memory_profiler_trigger, memory_profiler_receiver) = watch::channel(false);
 
         let inner = Inner {
             storage,
             manual_gc_trigger,
-            manual_gc_receiver,
 
             memory_profiler_trigger,
             memory_profiler_receiver,
@@ -82,13 +82,13 @@ impl ControlServerImpl {
         self.inner.memory_profiler_state.clone()
     }
 
-    pub fn manual_gc_trigger(&self) -> watch::Sender<Option<ManualGcTrigger>> {
+    pub fn manual_gc_trigger(&self) -> broadcast::Sender<ManualGcTrigger>  {
         self.inner.manual_gc_trigger.clone()
     }
 
-    pub fn manual_gc_receiver(&self) -> watch::Receiver<Option<ManualGcTrigger>> {
-        self.inner.manual_gc_receiver.clone()
-    }
+    // pub fn manual_gc_receiver(&self) -> broadcast::Sender<ManualGcTrigger> {
+    //     self.inner.manual_gc_receiver.clone()
+    // }
 
     pub fn profiler_switch(&self) -> watch::Sender<bool> {
         self.inner.memory_profiler_trigger.clone()
@@ -104,11 +104,37 @@ impl ControlServer for ControlServerListener {
         i.saturating_add(1)
     }
 
-    async fn trigger_gc(self, _: Context, manual_gc_trigger: ManualGcTrigger) -> () {
-        self.server
+    async fn trigger_gc(
+        self,
+        _: Context,
+        manual_trigger_value: ManualTriggerValue,
+        seqno: Option<u32>,
+        distance: Option<u32>,
+    ) -> () {
+        let trigger_type = match (seqno, distance) {
+            (Some(_), Some(_)) => {
+                tracing::error!("Params should be exclusive");
+                return ();
+            },
+            (None, None) => {
+                tracing::error!("Params are not specified");
+                return ();
+            }
+            (Some(seqno), None) => TriggerType::McSeqno(seqno),
+            (None, Some(distance)) => TriggerType::Distance(distance)
+        };
+        let mtv = match (manual_trigger_value) {
+            ManualTriggerValue::Blocks => ManualGcTrigger::Blocks {ty: trigger_type},
+            ManualTriggerValue::States => ManualGcTrigger::States {ty: trigger_type},
+            ManualTriggerValue::Archives => ManualGcTrigger::Archives {ty: trigger_type},
+        };
+
+        if let Err(e) = self.server
             .inner
             .manual_gc_trigger
-            .send_replace(Some(manual_gc_trigger));
+            .send(mtv) {
+            tracing::error!("Failed to send manual gc broadcast {e:?}")
+        }
     }
 
     async fn trigger_memory_profiler(self, _: Context, set: bool) -> bool {
@@ -197,13 +223,12 @@ impl ControlServer for ControlServerListener {
                     return None;
                 }
 
-                let block_storage =  self.server.inner.storage.block_storage();
+                let block_storage = self.server.inner.storage.block_storage();
 
                 match block_storage.get_archive_id(mc_seqno) {
                     Some(id) => Some(id),
                     None => None,
                 }
-
             }
             None => {
                 tracing::warn!("get_archive_id failed: no blocks applied");
@@ -212,15 +237,16 @@ impl ControlServer for ControlServerListener {
         }
     }
 
-    async fn get_archive_slice(self, _: Context, id: u32, limit: u32, offset: u64) -> Option<Vec<u8>> {
+    async fn get_archive_slice(
+        self,
+        _: Context,
+        id: u32,
+        limit: u32,
+        offset: u64,
+    ) -> Option<Vec<u8>> {
         let block_storage = self.server.inner.storage.block_storage();
 
-
-        let archive_res = block_storage.get_archive_slice(
-            id,
-            offset as usize,
-            limit as usize,
-        );
+        let archive_res = block_storage.get_archive_slice(id, offset as usize, limit as usize);
 
         match archive_res {
             Ok(Some(data)) => Some(data),
@@ -238,8 +264,8 @@ impl ControlServer for ControlServerListener {
 
 struct Inner {
     storage: Storage,
-    manual_gc_trigger: watch::Sender<Option<ManualGcTrigger>>,
-    manual_gc_receiver: watch::Receiver<Option<ManualGcTrigger>>,
+    manual_gc_trigger: broadcast::Sender<ManualGcTrigger> ,
+    //manual_gc_receiver: watch::Receiver<Option<ManualGcTrigger>>,
 
     memory_profiler_trigger: watch::Sender<bool>,
     memory_profiler_receiver: watch::Receiver<bool>,
