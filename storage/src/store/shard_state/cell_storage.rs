@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
@@ -399,7 +399,13 @@ impl CellStorage {
             Err(e) => return Err(CellStorageError::Internal(e)),
         };
 
-        self.cells_cache.insert(hash, Arc::downgrade(&cell));
+        if self
+            .cells_cache
+            .insert(hash, Arc::downgrade(&cell))
+            .is_none()
+        {
+            metrics::gauge!("tycho_storage_cells_tree_cache_size").increment(1f64);
+        }
 
         Ok(cell)
     }
@@ -491,7 +497,9 @@ impl CellStorage {
     }
 
     pub fn drop_cell(&self, hash: &HashBytes) {
-        self.cells_cache.remove(hash);
+        if self.cells_cache.remove(hash).is_some() {
+            metrics::gauge!("tycho_storage_cells_tree_cache_size").decrement(1f64);
+        }
     }
 }
 

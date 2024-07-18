@@ -464,6 +464,12 @@ def core_block_strider() -> RowPanel:
             "tycho_core_metrics_subscriber_handle_block_time",
             "Time to handle block by MetricsSubscriber",
         ),
+    ]
+    return create_row("block strider: Core Metrics", metrics)
+
+
+def storage() -> RowPanel:
+    metrics = [
         create_heatmap_panel(
             "tycho_storage_load_cell_time", "Time to load cell from storage"
         ),
@@ -505,8 +511,9 @@ def core_block_strider() -> RowPanel:
             unit="Blocks",
             title="GC lag",
         ),
+        create_gauge_panel("tycho_storage_cells_tree_cache_size", "Cells tree cache size"),
     ]
-    return create_row("block strider: Core Metrics", metrics)
+    return create_row("Storage", metrics)
 
 
 def jrpc() -> RowPanel:
@@ -1276,6 +1283,7 @@ dashboard = Dashboard(
     panels=[
         core_bc(),
         core_block_strider(),
+        storage(),
         collator_params_metrics(),
         block_metrics(),
         collator_execution_metrics(),
