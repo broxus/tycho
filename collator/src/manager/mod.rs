@@ -300,9 +300,10 @@ where
     /// 1. Load block state
     /// 2. Notify mempool about new master block
     /// 3. Enqueue collation sessions refresh task
+    /// 4. Save block in cache with status Synced
     pub async fn process_mc_block_from_bc(&self, mc_data: Arc<McData>) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Processing master block ({})", mc_data.block_id.as_short_id(),
+            "Processing master block ({}) from blockchain", mc_data.block_id.as_short_id(),
         );
 
         // check if we should skip this master block from the blockchain
@@ -316,11 +317,14 @@ where
 
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Processing requested mc state for block ({})...",
+            "Processing requested mc state for block ({}) received from blockchain ...",
             mc_data.block_id.as_short_id()
         );
 
         Self::notify_mempool_about_mc_block(mpool_adapter, &mc_data.block_id).await?;
+
+        self.store_mc_block_from_bc_in_cache(mc_data.clone())
+            .await?;
 
         self.refresh_collation_sessions(mc_data).await?;
 
@@ -853,35 +857,38 @@ where
             "Saving block candidate to cache...",
         );
 
-        self.store_candidate(collation_result.candidate)?;
+        let mc_block_already_stored_by_blockchain =
+            self.store_candidate(collation_result.candidate)?;
 
-        // send validation task to validator
-        // we need to send session info with the collators list to the validator
-        // to understand whom we must ask for signatures
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Enqueueing block candidate validation...",
-        );
+        if !mc_block_already_stored_by_blockchain {
+            // send validation task to validator
+            // we need to send session info with the collators list to the validator
+            // to understand whom we must ask for signatures
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                "Enqueueing block candidate validation...",
+            );
 
-        let validator = self.validator.clone();
-        let session_seqno = session_info.seqno();
-        let dispatcher = self.dispatcher.clone();
-        tokio::spawn(async move {
-            // TODO: Fail collation instead of panicking?
-            let status = validator.validate(session_seqno, &block_id).await.unwrap();
+            let validator = self.validator.clone();
+            let session_seqno = session_info.seqno();
+            let dispatcher = self.dispatcher.clone();
+            tokio::spawn(async move {
+                // TODO: Fail collation instead of panicking?
+                let status = validator.validate(session_seqno, &block_id).await.unwrap();
 
-            _ = dispatcher
-                .spawn_task(method_to_async_closure!(
-                    process_validated_block,
-                    block_id,
-                    status
-                ))
-                .await;
-        });
+                _ = dispatcher
+                    .spawn_task(method_to_async_closure!(
+                        process_validated_block,
+                        block_id,
+                        status
+                    ))
+                    .await;
+            });
 
-        debug_assert_eq!(
-            block_id.is_masterchain(),
-            collation_result.mc_data.is_some(),
-        );
+            debug_assert_eq!(
+                block_id.is_masterchain(),
+                collation_result.mc_data.is_some(),
+            );
+        }
 
         // when candidate is master
         if let Some(mc_data) = collation_result.mc_data {
@@ -1302,14 +1309,15 @@ where
         Ok(())
     }
 
-    /// Store block in a cache structure that allow to append signatures
-    fn store_candidate(&self, candidate: Box<BlockCandidate>) -> Result<()> {
+    /// Store block in a cache structure that allow to append signatures, returning if block is already stored in cache
+    fn store_candidate(&self, candidate: Box<BlockCandidate>) -> Result<bool> {
         // TODO: in future we may store to cache a block received from blockchain before,
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
+        let mut already_stored = false;
         let block_id = *candidate.block.id();
-        let block_container = BlockCandidateContainer::new(candidate);
+        let mut block_container = BlockCandidateContainer::new(candidate);
         if block_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container
@@ -1336,16 +1344,38 @@ where
                 }
             }
 
-            // save block to cache
-            if let Some(_existing) = self
-                .blocks_cache
-                .master
-                .insert(*block_container.key(), block_container)
-            {
-                bail!(
-                    "Should not collate the same master block ({}) again!",
-                    block_id,
-                );
+            if let Some(mut existing) = self.blocks_cache.master.get_mut(block_container.key()) {
+                if existing.send_sync_status == SendSyncStatus::Synced {
+                    assert_eq!(
+                        existing.block_id().root_hash,
+                        block_container.block_id().root_hash,
+                        "Block received from bc root hash mismatch with collated one"
+                    );
+                    // TODO: check block_id file hash ?
+
+                    // Block was previously received from bc and doesn't need to be validated further
+                    let container = existing.value_mut();
+                    if let Some(entry) = container.entry.as_mut() {
+                        if let Some(block_container_entry) = block_container.entry {
+                            entry.candidate = block_container_entry.candidate;
+                        }
+                    }
+                    container.prev_blocks_keys = block_container.prev_blocks_keys;
+                    container.top_shard_blocks_keys = block_container.top_shard_blocks_keys;
+                    container.containing_mc_block = block_container.containing_mc_block;
+                    already_stored = true;
+                } else {
+                    bail!(
+                        "Should not collate the same master block ({}) again!",
+                        block_id,
+                    );
+                }
+            } else {
+                block_container.send_sync_status = SendSyncStatus::ValidationReady;
+                // save block to cache
+                self.blocks_cache
+                    .master
+                    .insert(*block_container.key(), block_container);
             }
         } else {
             let mut shard_cache = self
@@ -1363,6 +1393,36 @@ where
             }
         }
 
+        Ok(already_stored)
+    }
+
+    /// Store mc block received from bc in a cache structure
+    async fn store_mc_block_from_bc_in_cache(&self, mc_data: Arc<McData>) -> Result<()> {
+        let block_container = BlockCandidateContainer::create_from_mc_data(mc_data);
+        let short_id = block_container.block_id().as_short_id();
+        // save block to cache
+        if let Some(existed) = self
+            .blocks_cache
+            .master
+            .insert(*block_container.key(), block_container)
+        {
+            match existed.send_sync_status {
+                SendSyncStatus::NotReady => {
+                    // Do nothing, new status will be checked on store_candidate
+                }
+                SendSyncStatus::ValidationReady => {
+                    // Validation process started, need to stop it
+                    self.validator.cancel_validation(&short_id)?;
+                    // Need to do routine
+                }
+                SendSyncStatus::Ready | SendSyncStatus::Sending | SendSyncStatus::Sent => {
+                    // No need to send to syncing - do nothing
+                }
+                SendSyncStatus::Synced => {
+                    // Already synced - do nothing
+                }
+            }
+        }
         Ok(())
     }
 
