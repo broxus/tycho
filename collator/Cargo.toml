@@ -50,7 +50,7 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 tracing-test = { workspace = true }
 tycho-block-util = { workspace = true, features = ["test"] }
 tycho-collator = { workspace = true, features = ["test"] }

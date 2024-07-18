@@ -17,7 +17,6 @@ bytesize = { workspace = true }
 castaway = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
-itertools = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }

@@ -1,4 +1,5 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::exit)] // it's a CLI tool
+
 use std::process::ExitCode;
 use std::sync::OnceLock;
 

@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -75,40 +76,91 @@ impl<'de> Deserialize<'de> for LoggerTargets {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    pub path: PathBuf,
+pub struct LoggerConfig {
+    pub outputs: Vec<LoggerOutput>,
+}
+
+impl Default for LoggerConfig {
+    fn default() -> Self {
+        Self {
+            outputs: vec![LoggerOutput::Stderr(LoggerStderrOutput)],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum LoggerOutput {
+    Stderr(LoggerStderrOutput),
+    File(LoggerFileOutput),
+}
+
+impl LoggerOutput {
+    pub fn as_layer<S>(&self) -> Result<Box<dyn Layer<S> + Send + Sync + 'static>>
+    where
+        S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        match self {
+            Self::Stderr(stderr) => Ok(stderr.as_layer()),
+            Self::File(file) => file.as_layer::<S>(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggerStderrOutput;
+
+impl LoggerStderrOutput {
+    pub fn as_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static>
+    where
+        S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        if is_systemd_child() {
+            fmt::layer().without_time().with_ansi(false).boxed()
+        } else {
+            fmt::layer().boxed()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggerFileOutput {
+    pub dir: PathBuf,
     #[serde(default)]
     pub human_readable: bool,
+    #[serde(default = "log_file_prefix")]
+    pub file_prefix: String,
+    #[serde(default = "max_log_files")]
+    pub max_files: NonZeroUsize,
 }
 
-pub fn file_logging_layer<S>(
-    config: Option<LoggingConfig>,
-) -> Result<Box<dyn Layer<S> + Send + Sync + 'static>>
-where
-    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    let Some(config) = config else {
-        return Ok(NoopLayer.boxed());
-    };
-    let writer = tracing_appender::rolling::Builder::new()
-        .rotation(Rotation::HOURLY)
-        .filename_prefix("tycho.log")
-        .max_log_files(24)
-        .build(config.path)?;
+impl LoggerFileOutput {
+    pub fn as_layer<S>(&self) -> Result<Box<dyn Layer<S> + Send + Sync + 'static>>
+    where
+        S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        let writer = tracing_appender::rolling::Builder::new()
+            .rotation(Rotation::HOURLY)
+            .filename_prefix(&self.file_prefix)
+            .max_log_files(self.max_files.get())
+            .build(&self.dir)?;
 
-    let layer = if config.human_readable {
-        fmt::layer()
-            .without_time()
-            .with_ansi(false)
-            .with_writer(writer)
-            .boxed()
-    } else {
-        tracing_stackdriver::layer().with_writer(writer).boxed()
-    };
-
-    Ok(layer)
+        Ok(if self.human_readable {
+            fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(writer)
+                .boxed()
+        } else {
+            tracing_stackdriver::layer().with_writer(writer).boxed()
+        })
+    }
 }
 
-struct NoopLayer;
+fn log_file_prefix() -> String {
+    "tycho.log".to_owned()
+}
 
-impl<S> Layer<S> for NoopLayer where S: Subscriber {}
+fn max_log_files() -> NonZeroUsize {
+    NonZeroUsize::new(25).unwrap()
+}
