@@ -5,12 +5,12 @@ use std::path::PathBuf;
 
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use everscale_types::models::BlockId;
+use serde::Serialize;
 use tarpc::serde::Deserialize;
-use tarpc::tokio_serde::formats::{Bincode};
+use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
-use tycho_core::block_strider::ManualGcTrigger;
 
 use crate::ControlServerClient;
 
@@ -48,10 +48,20 @@ impl PingCmd {
 
 #[derive(Deserialize, Parser)]
 pub struct TriggerGcCmd {
-    pub mc_block_id: BlockId,
-    pub last_key_block_id: u32,
+    pub ty: ManualTriggerValue,
+    pub seqno: Option<u32>,
+    pub distance: Option<u32>,
     pub node_addr: SocketAddr,
 }
+
+#[derive(ValueEnum, Debug, Clone, Deserialize, Serialize)]
+#[clap(rename_all = "kebab_case")]
+pub enum ManualTriggerValue {
+    Blocks,
+    Archives,
+    States
+}
+
 
 impl TriggerGcCmd {
     pub async fn run(&self) {
@@ -63,7 +73,7 @@ impl TriggerGcCmd {
             }
         };
         if let Err(e) = client
-            .trigger_gc(context::current(), ManualGcTrigger::Blocks) // TODO: from console
+            .trigger_gc(context::current(), self.ty.clone(), self.seqno, self.distance)
             .await
         {
             println!("Failed to trigger GC: {e:?}")
@@ -189,12 +199,13 @@ impl DumpArchiveCmd {
             }
         };
 
-
         let mut current_offset: u64 = 0;
         let request_size = 1048576; // 1 mb
 
         loop {
-            println!("Downloading archive request size {request_size}, current offset {current_offset}");
+            println!(
+                "Downloading archive request size {request_size}, current offset {current_offset}"
+            );
             match client
                 .get_archive_slice(context::current(), self.id, request_size, current_offset)
                 .await
@@ -218,10 +229,10 @@ impl DumpArchiveCmd {
                 Err(e) => {
                     println!("Failed to get archive slice. Transport error: {e:?}");
                     return;
-                },
+                }
             }
         }
 
-        println!("Archive saved to: {:?}", &self.to )
+        println!("Archive saved to: {:?}", &self.to)
     }
 }

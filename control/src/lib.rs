@@ -8,7 +8,6 @@ mod server;
 
 pub use client::*;
 pub use server::{ControlServerImpl, ControlServerListener};
-use tycho_core::block_strider::ManualGcTrigger;
 
 #[tarpc::service]
 pub trait ControlServer {
@@ -16,7 +15,7 @@ pub trait ControlServer {
     async fn ping(i: u32) -> u32;
 
     /// Triggers GC for specified mc_block_id
-    async fn trigger_gc(trigger: ManualGcTrigger);
+    async fn trigger_gc(trigger: ManualTriggerValue, seqno: Option<u32>, distance: Option<u32>);
 
     /// Sets profiler state to targeted value. Return bool result indicates if state was changed
     async fn trigger_memory_profiler(set: bool) -> bool;
