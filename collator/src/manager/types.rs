@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent};
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync};
+use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync, McData};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -41,8 +42,10 @@ impl BlockCandidateEntry {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum SendSyncStatus {
     NotReady,
+    ValidationReady,
     Ready,
     Sending,
     Sent,
@@ -53,21 +56,21 @@ pub struct BlockCandidateContainer {
     key: BlockCacheKey,
     block_id: BlockId,
     /// Current block candidate entry with signatures
-    entry: Option<BlockCandidateEntry>,
+    pub entry: Option<BlockCandidateEntry>,
     /// True when the candidate became valid due to the applied validation result.
     /// Updates by `set_validation_result()`
-    is_valid: bool,
+    pub is_valid: bool,
     /// * `NotReady` - is not ready to send to sync (no master block or it is not validated)
     /// * `Ready` - is ready to send to sync (containing master block validated and all including shard blocks too)
     /// * `Sending` - block candidate extracted for sending to sync
     /// * `Sent` - block cadidate is already sent to sync
     pub send_sync_status: SendSyncStatus,
     /// Hash ids of 1 or 2 (in case of merge) previous blocks in the shard or master chain
-    prev_blocks_keys: Vec<BlockCacheKey>,
+    pub prev_blocks_keys: Vec<BlockCacheKey>,
     /// Hash ids of all top shard blocks of corresponding shard chains, included in current block.
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without a master.
-    top_shard_blocks_keys: Vec<BlockCacheKey>,
+    pub top_shard_blocks_keys: Vec<BlockCacheKey>,
     /// Hash id of master block that includes current shard block in his subgraph
     pub containing_mc_block: Option<BlockCacheKey>,
 }
@@ -194,6 +197,21 @@ impl BlockCandidateContainer {
             .as_ref()
             .ok_or_else(|| anyhow!("`entry` was extracted"))?;
         Ok(entry.candidate.block.as_ref())
+    }
+
+    pub fn create_from_mc_data(mc_data: Arc<McData>) -> Self {
+        let &McData { block_id, .. } = mc_data.as_ref();
+
+        Self {
+            key: block_id.as_short_id(),
+            block_id,
+            is_valid: true,
+            send_sync_status: SendSyncStatus::Synced,
+            entry: None,
+            containing_mc_block: None,
+            prev_blocks_keys: vec![],
+            top_shard_blocks_keys: vec![],
+        }
     }
 }
 
