@@ -60,7 +60,6 @@ pub struct ControlServerImpl {
 
 impl ControlServerImpl {
     pub fn new(storage: Storage) -> Self {
-        //let (manual_gc_trigger, manual_gc_receiver) = broadcast::::channel(None::<ManualGcTrigger>);
         let (manual_gc_trigger, _) = broadcast::channel(10);
         let (memory_profiler_trigger, memory_profiler_receiver) = watch::channel(false);
 
@@ -82,13 +81,9 @@ impl ControlServerImpl {
         self.inner.memory_profiler_state.clone()
     }
 
-    pub fn manual_gc_trigger(&self) -> broadcast::Sender<ManualGcTrigger>  {
+    pub fn manual_gc_trigger(&self) -> broadcast::Sender<ManualGcTrigger> {
         self.inner.manual_gc_trigger.clone()
     }
-
-    // pub fn manual_gc_receiver(&self) -> broadcast::Sender<ManualGcTrigger> {
-    //     self.inner.manual_gc_receiver.clone()
-    // }
 
     pub fn profiler_switch(&self) -> watch::Sender<bool> {
         self.inner.memory_profiler_trigger.clone()
@@ -115,26 +110,26 @@ impl ControlServer for ControlServerListener {
             (Some(_), Some(_)) => {
                 tracing::error!("Params should be exclusive");
                 return ();
-            },
+            }
             (None, None) => {
                 tracing::error!("Params are not specified");
                 return ();
             }
             (Some(seqno), None) => TriggerType::McSeqno(seqno),
-            (None, Some(distance)) => TriggerType::Distance(distance)
+            (None, Some(distance)) => TriggerType::Distance(distance),
         };
         let mtv = match (manual_trigger_value) {
-            ManualTriggerValue::Blocks => ManualGcTrigger::Blocks {ty: trigger_type},
-            ManualTriggerValue::States => ManualGcTrigger::States {ty: trigger_type},
-            ManualTriggerValue::Archives => ManualGcTrigger::Archives {ty: trigger_type},
+            ManualTriggerValue::Blocks => ManualGcTrigger::Blocks { ty: trigger_type },
+            ManualTriggerValue::States => ManualGcTrigger::States { ty: trigger_type },
+            ManualTriggerValue::Archives => ManualGcTrigger::Archives { ty: trigger_type },
         };
 
-        if let Err(e) = self.server
-            .inner
-            .manual_gc_trigger
-            .send(mtv) {
+        tracing::info!("Manually triggering GC with {mtv:?}");
+
+        if let Err(e) = self.server.inner.manual_gc_trigger.send(mtv) {
             tracing::error!("Failed to send manual gc broadcast {e:?}")
         }
+        tracing::info!("Trigger GC broadcast sent");
     }
 
     async fn trigger_memory_profiler(self, _: Context, set: bool) -> bool {
@@ -264,8 +259,7 @@ impl ControlServer for ControlServerListener {
 
 struct Inner {
     storage: Storage,
-    manual_gc_trigger: broadcast::Sender<ManualGcTrigger> ,
-    //manual_gc_receiver: watch::Receiver<Option<ManualGcTrigger>>,
+    manual_gc_trigger: broadcast::Sender<ManualGcTrigger>,
 
     memory_profiler_trigger: watch::Sender<bool>,
     memory_profiler_receiver: watch::Receiver<bool>,
