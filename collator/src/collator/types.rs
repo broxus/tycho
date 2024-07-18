@@ -1099,10 +1099,6 @@ impl MessageGroups {
             self.int_messages_count -= first_group.int_messages_count;
             self.ext_messages_count -= first_group.ext_messages_count;
 
-            let labels = [("workchain", self.shard_id.workchain().to_string())];
-            metrics::gauge!("tycho_do_collate_msgs_exec_buffer_messages_count", &labels)
-                .set(self.messages_count() as f64);
-
             Some(first_group)
         } else {
             None

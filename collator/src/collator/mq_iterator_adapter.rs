@@ -114,6 +114,7 @@ impl QueueIteratorAdapter {
             // we use existing ranges to init iterator only when they were not fully read
             // but will read from current position
             // and check if ranges are fully read from current position
+            let current_ranges_from = ranges_from.clone();
             ranges_fully_read = true;
             for (shard_id, from) in ranges_from.iter_mut() {
                 if let Some(curren_position) = self.current_positions.get(shard_id) {
@@ -132,10 +133,12 @@ impl QueueIteratorAdapter {
                 ranges_from, ranges_to,
             );
 
-            let current_ranges_iterator = self
+            let mut current_ranges_iterator = self
                 .mq_adapter
                 .create_iterator(self.shard_id, ranges_from, ranges_to)
                 .await?;
+            // set processed messages in iterator by original ranges_from
+            current_ranges_iterator.commit(current_ranges_from.into_iter().collect())?;
             Some(current_ranges_iterator)
         } else {
             // when current iterator exists or existing ranges fully read
@@ -215,10 +218,12 @@ impl QueueIteratorAdapter {
                     );
                 }
                 // and init iterator
-                let new_ranges_iterator = self
+                let mut new_ranges_iterator = self
                     .mq_adapter
-                    .create_iterator(self.shard_id, ranges_from, ranges_to)
+                    .create_iterator(self.shard_id, ranges_from.clone(), ranges_to)
                     .await?;
+                // set processed messages in iterator by ranges_from
+                new_ranges_iterator.commit(ranges_from.into_iter().collect())?;
                 // we created iterator for new ranges - clear current position
                 self.current_positions.clear();
                 Some(new_ranges_iterator)
