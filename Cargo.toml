@@ -86,6 +86,7 @@ tikv-jemallocator = { version = "0.5", features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
 ] }
+tikv-jemalloc-ctl = { version = "0.5" }
 tl-proto = "0.4"
 tokio = { version = "1", default-features = false }
 tokio-stream = "0.1.15"
@@ -95,6 +96,7 @@ tower-http = "0.5"
 tracing = "0.1"
 tracing-appender = "0.2.3"
 tracing-flame = "0.2"
+tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-test = "0.2"
 trait-variant = "0.1.2"

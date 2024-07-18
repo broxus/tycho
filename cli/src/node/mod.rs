@@ -9,7 +9,6 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
-use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
@@ -46,7 +45,7 @@ use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
 use crate::util::error::ResultExt;
-use crate::util::logger::{is_systemd_child, LoggerConfig};
+use crate::util::logger::{LoggerConfig, LoggerTargets};
 use crate::util::signal;
 
 mod config;
@@ -128,7 +127,7 @@ impl CmdRun {
     }
 
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
-        init_logger(self.logger_config)?;
+        init_logger(&node_config.logger, self.logger_config)?;
 
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
@@ -165,18 +164,18 @@ impl CmdRun {
     }
 }
 
-fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
+fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Result<()> {
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::{fmt, reload, EnvFilter};
+    use tracing_subscriber::{reload, EnvFilter};
 
     let try_make_filter = {
-        let logger_config = logger_config.clone();
+        let logger_targets = logger_targets.clone();
         move || {
-            Ok::<_, anyhow::Error>(match &logger_config {
+            Ok::<_, anyhow::Error>(match &logger_targets {
                 None => EnvFilter::builder()
                     .with_default_directive(tracing::Level::INFO.into())
                     .from_env_lossy(),
-                Some(path) => LoggerConfig::load_from(path)
+                Some(path) => LoggerTargets::load_from(path)
                     .wrap_err("failed to load logger config")?
                     .build_subscriber(),
             })
@@ -185,16 +184,16 @@ fn init_logger(logger_config: Option<PathBuf>) -> Result<()> {
 
     let (layer, handle) = reload::Layer::new(try_make_filter()?);
 
-    let subscriber = tracing_subscriber::registry()
-        .with(layer)
-        .with(if is_systemd_child() {
-            fmt::layer().without_time().with_ansi(false).boxed()
-        } else {
-            fmt::layer().boxed()
-        });
+    let subscriber = tracing_subscriber::registry().with(layer).with(
+        config
+            .outputs
+            .iter()
+            .map(|o| o.as_layer())
+            .collect::<Result<Vec<_>>>()?,
+    );
     tracing::subscriber::set_global_default(subscriber).unwrap();
 
-    if let Some(logger_config) = logger_config {
+    if let Some(logger_config) = logger_targets {
         tokio::spawn(async move {
             tracing::info!(
                 logger_config = %logger_config.display(),

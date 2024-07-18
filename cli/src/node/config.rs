@@ -13,6 +13,8 @@ use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig}
 use tycho_rpc::RpcConfig;
 use tycho_storage::StorageConfig;
 
+use crate::util::logger::LoggerConfig;
+
 #[derive(Debug, Deserialize)]
 pub struct NodeKeys {
     pub secret: HashBytes,
@@ -69,6 +71,8 @@ pub struct NodeConfig {
     pub threads: ThreadPoolConfig,
 
     pub profiling: MemoryProfilingConfig,
+
+    pub logger: LoggerConfig,
 }
 
 impl Default for NodeConfig {
@@ -90,6 +94,7 @@ impl Default for NodeConfig {
             metrics: Some(MetricsConfig::default()),
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),
+            logger: Default::default(),
         }
     }
 }
