@@ -10,7 +10,6 @@ use metrics::atomics::AtomicU64;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
 use tycho_util::FastHashMap;
 use weedb::{rocksdb, OwnedSnapshot};
 
@@ -129,14 +128,16 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "sync_min_tx_lt", skip_all)]
-    pub async fn sync_min_tx_lt(&self) -> Result<(), rocksdb::Error> {
+    pub async fn sync_min_tx_lt(&self) -> Result<()> {
         let min_lt = match self.db.state.get(TX_MIN_LT)? {
             Some(value) if value.is_empty() => None,
             Some(value) => Some(u64::from_le_bytes(value.as_ref().try_into().unwrap())),
             None => {
                 let span = tracing::Span::current();
                 let db = self.db.clone();
-                rayon_run(move || {
+
+                // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+                tokio::task::spawn_blocking(move || {
                     let _span = span.enter();
 
                     tracing::info!("started searching for the minimum transaction LT");
@@ -159,7 +160,7 @@ impl RpcStorage {
                     );
                     Ok::<_, rocksdb::Error>(min_lt)
                 })
-                .await?
+                .await??
             }
         };
 
@@ -215,7 +216,9 @@ impl RpcStorage {
         // Rebuild code hashes
         let db = self.db.clone();
         let span = tracing::Span::current();
-        rayon_run(move || {
+
+        // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+        tokio::task::spawn_blocking(move || {
             let _guard = span.enter();
 
             tracing::info!(split_depth, "started building new code hash indices");
@@ -293,7 +296,7 @@ impl RpcStorage {
             );
             Ok(())
         })
-        .await
+        .await?
     }
 
     #[tracing::instrument(
@@ -415,7 +418,9 @@ impl RpcStorage {
 
         let db = self.db.clone();
         let span = tracing::Span::current();
-        rayon_run(move || {
+
+        // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+        tokio::task::spawn_blocking(move || {
             let _span = span.enter();
 
             let raw = db.rocksdb().as_ref();
@@ -517,7 +522,7 @@ impl RpcStorage {
             );
             Ok(())
         })
-        .await
+        .await?
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
@@ -532,7 +537,9 @@ impl RpcStorage {
 
         let span = tracing::Span::current();
         let db = self.db.clone();
-        rayon_run(move || {
+
+        // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+        tokio::task::spawn_blocking(move || {
             let prepare_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_prepare_batch_time");
 
@@ -659,7 +666,7 @@ impl RpcStorage {
 
             Ok(())
         })
-        .await
+        .await?
     }
 
     fn update_code_hash(
@@ -743,7 +750,7 @@ impl RpcStorage {
         Ok(())
     }
 
-    async fn remove_code_hashes(&self, shard: &ShardIdent) -> Result<(), rocksdb::Error> {
+    async fn remove_code_hashes(&self, shard: &ShardIdent) -> Result<()> {
         let workchain = shard.workchain() as u8;
 
         // Remove from the secondary index first
@@ -776,7 +783,8 @@ impl RpcStorage {
         let db = self.db.clone();
         let shard = *shard;
 
-        rayon_run(move || {
+        // NOTE: `spawn_blocking` is used here instead of `rayon_run` as it is IO-bound task.
+        tokio::task::spawn_blocking(move || {
             let cf = &db.code_hashes.cf();
 
             let raw = db.rocksdb().as_ref();
@@ -799,7 +807,7 @@ impl RpcStorage {
             loop {
                 let key = match iter.key() {
                     Some(key) => key,
-                    None => return iter.status(),
+                    None => break iter.status()?,
                 };
 
                 if key.len() != tables::CodeHashes::KEY_LEN
@@ -815,8 +823,10 @@ impl RpcStorage {
 
                 iter.next();
             }
+
+            Ok(())
         })
-        .await
+        .await?
     }
 }
 
