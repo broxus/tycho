@@ -33,7 +33,6 @@ pub struct BlockCandidateEntry {
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum SendSyncStatus {
     NotReady,
-    ValidationReady,
     Ready,
     Sending,
     Sent,
@@ -189,33 +188,19 @@ impl BlockCandidateContainer {
 
     pub fn create_from_mc_data(mc_data: Arc<McData>) -> Self {
         let &McData {
-            global_id,
             block_id,
-            gen_lt,
             ..
         } = mc_data.as_ref();
-        let block_candidate = Box::new(BlockCandidate {
-            block_id,
-            block: Block {
-                global_id,
-                info: Lazy::new(&Default::default()).unwrap(),
-                value_flow: Lazy::new(&Default::default()).unwrap(),
-                state_update: Lazy::new(&Default::default()).unwrap(),
-                out_msg_queue_updates: Default::default(),
-                extra: Lazy::new(&Default::default()).unwrap(),
-            }, // TODO: fill on collation
-            prev_blocks_ids: Default::default(), // TODO: fill on collation
-            top_shard_blocks_ids: Default::default(), // TODO: fill on collation
-            data: Default::default(), // TODO: fill on collation
-            collated_data: vec![], // TODO: fill on collation
-            collated_file_hash: HashBytes::ZERO, // TODO: fill on collation
-            chain_time: gen_lt
-        });
-        
+      
         Self {
+            key: block_id.as_short_id(),
+            block_id,
             is_valid: true,
             send_sync_status: SendSyncStatus::Synced,
-            ..Self::new(block_candidate)
+            entry: None,
+            prev_blocks_keys: vec![],
+            top_shard_blocks_keys: vec![],
+            containing_mc_block: None,
         }
     }
 
