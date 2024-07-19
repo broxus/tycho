@@ -532,7 +532,7 @@ impl RpcStorage {
 
         let span = tracing::Span::current();
         let db = self.db.clone();
-        rayon_run(move || {
+        tokio::task::spawn_blocking(move || {
             let prepare_batch_histogram =
                 HistogramGuard::begin("tycho_storage_rpc_prepare_batch_time");
 
@@ -659,7 +659,7 @@ impl RpcStorage {
 
             Ok(())
         })
-        .await
+        .await?
     }
 
     fn update_code_hash(
@@ -743,7 +743,7 @@ impl RpcStorage {
         Ok(())
     }
 
-    async fn remove_code_hashes(&self, shard: &ShardIdent) -> Result<(), rocksdb::Error> {
+    async fn remove_code_hashes(&self, shard: &ShardIdent) -> Result<()> {
         let workchain = shard.workchain() as u8;
 
         // Remove from the secondary index first
@@ -776,7 +776,7 @@ impl RpcStorage {
         let db = self.db.clone();
         let shard = *shard;
 
-        rayon_run(move || {
+        tokio::task::spawn_blocking(move || {
             let cf = &db.code_hashes.cf();
 
             let raw = db.rocksdb().as_ref();
@@ -799,7 +799,7 @@ impl RpcStorage {
             loop {
                 let key = match iter.key() {
                     Some(key) => key,
-                    None => return iter.status(),
+                    None => break iter.status()?,
                 };
 
                 if key.len() != tables::CodeHashes::KEY_LEN
@@ -815,8 +815,10 @@ impl RpcStorage {
 
                 iter.next();
             }
+
+            Ok(())
         })
-        .await
+        .await?
     }
 }
 
