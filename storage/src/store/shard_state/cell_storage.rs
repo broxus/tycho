@@ -1,7 +1,7 @@
 use std::cell::UnsafeCell;
 use std::collections::hash_map;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use std::sync::atomic::{AtomicI64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
@@ -865,13 +865,13 @@ type RawCellsCacheItem = ThinArc<AtomicI64, u8>;
 #[derive(Clone, Copy)]
 pub struct CellSizeEstimator;
 impl quick_cache::Weighter<HashBytes, RawCellsCacheItem> for CellSizeEstimator {
-    fn weight(&self, key: &HashBytes, val: &RawCellsCacheItem) -> u32 {
+    fn weight(&self, key: &HashBytes, val: &RawCellsCacheItem) -> u64 {
         const STATIC_SIZE: usize = std::mem::size_of::<RawCellsCacheItem>()
             + std::mem::size_of::<i64>()
             + std::mem::size_of::<usize>() * 2; // ArcInner refs + HeaderWithLength length
 
         let len = key.0.len() + val.slice.len() + STATIC_SIZE;
-        len as u32
+        len as u64
     }
 }
 
