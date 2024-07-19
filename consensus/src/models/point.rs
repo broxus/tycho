@@ -385,6 +385,8 @@ impl PointInner {
             && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(author)
             // in contrast, evidence must contain only signatures of others
             && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
+            // also cannot witness own point
+            && !self.body.witness.contains_key(&self.body.location.author)
             && self.is_link_well_formed(LinkField::Proof)
             && self.is_link_well_formed(LinkField::Trigger)
             && self.body.time >= self.body.anchor_time

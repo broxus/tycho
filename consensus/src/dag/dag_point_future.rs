@@ -25,12 +25,11 @@ impl Future for DagPointFuture {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
-            DagPointFutureType::Broadcast(task) | DagPointFutureType::Download { task, .. } => {
-                match task.poll_unpin(cx) {
-                    Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
-                    Poll::Pending => Poll::Pending,
-                }
-            }
+            DagPointFutureType::Broadcast { task, .. }
+            | DagPointFutureType::Download { task, .. } => match task.poll_unpin(cx) {
+                Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
+                Poll::Pending => Poll::Pending,
+            },
             DagPointFutureType::Local(ready) => ready.poll_unpin(cx),
         }
     }
@@ -38,9 +37,17 @@ impl Future for DagPointFuture {
 
 #[derive(Clone)]
 enum DagPointFutureType {
-    Broadcast(Shared<JoinTask<DagPoint>>),
+    Broadcast {
+        task: Shared<JoinTask<DagPoint>>,
+        // normally, if we are among the last nodes to validate some broadcast point,
+        // we can receive its proof from author, trust its signatures and skip vertex validation;
+        // also, any still not locally validated dependencies of a vertex become trusted
+        is_trusted: Arc<OnceTake<oneshot::Sender<()>>>,
+    },
     Download {
         task: Shared<JoinTask<DagPoint>>,
+        // this could be a `Notify`, but both sender and receiver must be used only once
+        is_trusted: Arc<OnceTake<oneshot::Sender<()>>>,
         dependents: mpsc::UnboundedSender<PeerId>,
         verified: Arc<OnceTake<oneshot::Sender<Point>>>,
     },
@@ -67,10 +74,14 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.downgrade();
         let point = point.clone();
         let state = state.clone();
-        DagPointFuture(DagPointFutureType::Broadcast(Shared::new(JoinTask::new(
-            Verifier::validate(point, point_dag_round, downloader, effects)
-                .inspect(move |dag_point| state.init(dag_point)),
-        ))))
+        let (is_trusted_tx, is_trusted_rx) = oneshot::channel();
+        DagPointFuture(DagPointFutureType::Broadcast {
+            task: Shared::new(JoinTask::new(
+                Verifier::validate(point, point_dag_round, downloader, is_trusted_rx, effects)
+                    .inspect(move |dag_point| state.init(dag_point)),
+            )),
+            is_trusted: Arc::new(OnceTake::new(is_trusted_tx)),
+        })
     }
 
     pub fn new_download(
@@ -86,6 +97,7 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.clone();
         let (dependents_tx, dependents_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
+        let (is_trusted_tx, is_trusted_rx) = oneshot::channel();
         let point_id = PointId {
             location: Location {
                 author: *author,
@@ -100,12 +112,14 @@ impl DagPointFuture {
                     .run(
                         point_id,
                         point_dag_round,
+                        is_trusted_rx,
                         dependents_rx,
                         broadcast_rx,
                         effects,
                     )
                     .inspect(move |dag_point| state.init(dag_point)),
             )),
+            is_trusted: Arc::new(OnceTake::new(is_trusted_tx)),
             dependents: dependents_tx,
             verified: Arc::new(OnceTake::new(broadcast_tx)),
         })
@@ -123,6 +137,17 @@ impl DagPointFuture {
             if let Some(oneshot) = verified.take() {
                 // receiver is dropped upon completion
                 _ = oneshot.send(broadcast.clone());
+            }
+        }
+    }
+
+    pub fn trust_consensus(&self) {
+        if let DagPointFutureType::Broadcast { is_trusted, .. }
+        | DagPointFutureType::Download { is_trusted, .. } = &self.0
+        {
+            if let Some(oneshot) = is_trusted.take() {
+                // receiver is dropped upon completion
+                _ = oneshot.send(());
             }
         }
     }

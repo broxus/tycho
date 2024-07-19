@@ -149,10 +149,9 @@ impl CollectorTask {
     async fn run(
         mut self,
         from_bcast_filter: &mut mpsc::UnboundedReceiver<ConsensusEvent>,
-        bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
+        mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Result<FuturesUnordered<BoxFuture<'static, InclusionState>>, Round> {
         let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
-        let mut bcaster_signal = std::pin::pin!(bcaster_signal);
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
@@ -267,7 +266,7 @@ impl CollectorTask {
             }
         };
         if let Some(decided) = result {
-            tracing::warn!(
+            tracing::info!(
                 parent: self.effects.span(),
                 finished = decided.is_ok(),
                 to_round = point_round.0,

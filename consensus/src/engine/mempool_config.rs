@@ -43,7 +43,7 @@ impl MempoolConfig {
     /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
     /// and allows [`Dag`](crate::dag::Dag) to grow in one time to catch up the lag behind consensus
     /// without explicit sync
-    pub const ROUNDS_LAG_BEFORE_SYNC: u8 = 120;
+    pub const ROUNDS_LAG_BEFORE_SYNC: u8 = 20;
 
     /// see [`LogFlavor`]
     pub const LOG_FLAVOR: LogFlavor = LogFlavor::Truncated;
