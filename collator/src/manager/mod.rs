@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use self::types::{
     BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache, ChainTimesSyncState,
@@ -323,8 +323,14 @@ where
 
         Self::notify_mempool_about_mc_block(mpool_adapter, &mc_data.block_id).await?;
 
-        self.store_mc_block_from_bc_in_cache(mc_data.clone())
-            .await?;
+        let stop_validation = self.store_mc_block_from_bc_in_cache(mc_data.clone());
+
+        if stop_validation {
+            let short_id = mc_data.block_id.as_short_id();
+            self.validator.cancel_validation(&short_id)?;
+            // Need to do validation routine
+            self.process_valid_master_block(&mc_data.block_id).await?;
+        }
 
         self.refresh_collation_sessions(mc_data).await?;
 
@@ -860,7 +866,9 @@ where
         let mc_block_already_stored_by_blockchain =
             self.store_candidate(collation_result.candidate)?;
 
-        if !mc_block_already_stored_by_blockchain {
+        if mc_block_already_stored_by_blockchain {
+            self.process_valid_master_block(&block_id).await?;
+        } else {
             // send validation task to validator
             // we need to send session info with the collators list to the validator
             // to understand whom we must ask for signatures
@@ -1317,7 +1325,7 @@ where
 
         let mut already_stored = false;
         let block_id = *candidate.block.id();
-        let mut block_container = BlockCandidateContainer::new(candidate);
+        let block_container = BlockCandidateContainer::new(candidate);
         if block_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container
@@ -1371,7 +1379,6 @@ where
                     );
                 }
             } else {
-                block_container.send_sync_status = SendSyncStatus::ValidationReady;
                 // save block to cache
                 self.blocks_cache
                     .master
@@ -1397,33 +1404,37 @@ where
     }
 
     /// Store mc block received from bc in a cache structure
-    async fn store_mc_block_from_bc_in_cache(&self, mc_data: Arc<McData>) -> Result<()> {
+    fn store_mc_block_from_bc_in_cache(&self, mc_data: Arc<McData>) -> bool {
         let block_container = BlockCandidateContainer::create_from_mc_data(mc_data);
-        let short_id = block_container.block_id().as_short_id();
+        let mut stop_validation = false;
         // save block to cache
-        if let Some(existed) = self
-            .blocks_cache
-            .master
-            .insert(*block_container.key(), block_container)
-        {
-            match existed.send_sync_status {
-                SendSyncStatus::NotReady => {
-                    // Do nothing, new status will be checked on store_candidate
-                }
-                SendSyncStatus::ValidationReady => {
-                    // Validation process started, need to stop it
-                    self.validator.cancel_validation(&short_id)?;
-                    // Need to do routine
-                }
-                SendSyncStatus::Ready | SendSyncStatus::Sending | SendSyncStatus::Sent => {
-                    // No need to send to syncing - do nothing
-                }
-                SendSyncStatus::Synced => {
-                    // Already synced - do nothing
+        match self.blocks_cache.master.entry(*block_container.key()) {
+            DashMapEntry::Occupied(mut occupied) => {
+                assert_eq!(
+                    occupied.get().block_id().root_hash,
+                    block_container.block_id().root_hash,
+                    "Block received from bc root hash mismatch with collated one"
+                );
+
+                match occupied.get().send_sync_status {
+                    SendSyncStatus::NotReady => {
+                        // Validation process started, need to stop it
+                        stop_validation = true;
+                    }
+                    SendSyncStatus::Ready => {
+                        // No need to send to syncing - do nothing
+                        occupied.get_mut().send_sync_status = SendSyncStatus::Synced;
+                    }
+                    SendSyncStatus::Sending | SendSyncStatus::Sent | SendSyncStatus::Synced => {
+                        // Already synced - do nothing
+                    }
                 }
             }
+            DashMapEntry::Vacant(vacant) => {
+                vacant.insert(block_container);
+            }
         }
-        Ok(())
+        stop_validation
     }
 
     /// Find block candidate in cache, append signatures info and return updated

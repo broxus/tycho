@@ -45,7 +45,6 @@ impl BlockCandidateEntry {
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum SendSyncStatus {
     NotReady,
-    ValidationReady,
     Ready,
     Sending,
     Sent,
