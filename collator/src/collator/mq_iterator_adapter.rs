@@ -82,10 +82,6 @@ impl QueueIteratorAdapter {
             .expect("`iterator_opt` should be initialized first")
     }
 
-    pub fn take_diff(&mut self) -> QueueDiff {
-        self.iterator().take_diff()
-    }
-
     pub fn init_iterator_total_elapsed(&self) -> Duration {
         self.init_iterator_total_elapsed
     }
@@ -250,14 +246,11 @@ impl QueueIteratorAdapter {
         } else if let Some(new_iterator) = new_iterator_opt {
             self.no_pending_existing_internals = false;
             // replace current iterator
-            let prev_iterator = self.iterator_opt.replace(new_iterator).unwrap();
-            // move diff to new iterator
-            // FIXME: add optimized apply_diff() method for iterator
+            let mut prev_iterator = self.iterator_opt.replace(new_iterator).unwrap();
+            // move new messages to new iterator
             let new_iterator = self.iterator();
-            let diff = prev_iterator.take_diff();
-            for (_, new_msg) in diff.messages {
-                new_iterator.add_message(new_msg)?;
-            }
+            let full_diff = prev_iterator.extract_full_diff();
+            new_iterator.set_new_messages_from_full_diff(full_diff);
             true
         } else {
             false
