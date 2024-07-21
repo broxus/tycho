@@ -40,12 +40,12 @@ impl CollatorStdImpl {
         next_chain_time: u64,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
-        let labels = &[("workchain", self.shard_id.workchain().to_string())];
+        let labels = [("workchain", self.shard_id.workchain().to_string())];
         let total_collation_histogram =
-            HistogramGuard::begin_with_labels("tycho_do_collate_total_time", labels);
+            HistogramGuard::begin_with_labels("tycho_do_collate_total_time", &labels);
 
         let prepare_histogram =
-            HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", labels);
+            HistogramGuard::begin_with_labels("tycho_do_collate_prepare_time", &labels);
 
         let mut exec_manager = self.take_exec_manager();
 
@@ -178,7 +178,7 @@ impl CollatorStdImpl {
         let execute_tick_elapsed;
         if is_masterchain {
             let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", labels);
+                HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
             self.create_ticktock_transactions(
                 &mc_data,
@@ -197,7 +197,7 @@ impl CollatorStdImpl {
         }
 
         let execute_histogram =
-            HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", labels);
+            HistogramGuard::begin_with_labels("tycho_do_collate_execute_time", &labels);
 
         let mut fill_msgs_total_elapsed = Duration::ZERO;
         let mut execute_msgs_total_elapsed = Duration::ZERO;
@@ -277,7 +277,7 @@ impl CollatorStdImpl {
                         );
                         metrics::counter!(
                             "tycho_do_collate_blocks_with_limits_reached_count",
-                            labels
+                            &labels
                         )
                         .increment(1);
                         break;
@@ -289,32 +289,32 @@ impl CollatorStdImpl {
                 }
             }
 
-            metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", labels)
+            metrics::gauge!("tycho_do_collate_exec_msgs_groups_per_block", &labels)
                 .set(executed_groups_count as f64);
         }
 
-        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", labels)
+        metrics::histogram!("tycho_do_collate_fill_msgs_total_time", &labels)
             .record(fill_msgs_total_elapsed);
 
         let init_iterator_elapsed = mq_iterator_adapter.init_iterator_total_elapsed();
-        metrics::histogram!("tycho_do_collate_init_iterator_time", labels)
+        metrics::histogram!("tycho_do_collate_init_iterator_time", &labels)
             .record(init_iterator_elapsed);
         let read_existing_messages_elapsed = exec_manager.read_existing_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_int_msgs_time", labels)
+        metrics::histogram!("tycho_do_collate_read_int_msgs_time", &labels)
             .record(read_existing_messages_elapsed);
         let read_new_messages_elapsed = exec_manager.read_new_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_new_msgs_time", labels)
+        metrics::histogram!("tycho_do_collate_read_new_msgs_time", &labels)
             .record(read_new_messages_elapsed);
         let read_ext_messages_elapsed = exec_manager.read_ext_messages_total_elapsed();
-        metrics::histogram!("tycho_do_collate_read_ext_msgs_time", labels)
+        metrics::histogram!("tycho_do_collate_read_ext_msgs_time", &labels)
             .record(read_ext_messages_elapsed);
         let add_to_message_groups_elapsed = exec_manager.add_to_message_groups_total_elapsed();
-        metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", labels)
+        metrics::histogram!("tycho_do_collate_add_to_msg_groups_time", &labels)
             .record(add_to_message_groups_elapsed);
 
-        metrics::histogram!("tycho_do_collate_exec_msgs_total_time", labels)
+        metrics::histogram!("tycho_do_collate_exec_msgs_total_time", &labels)
             .record(execute_msgs_total_elapsed);
-        metrics::histogram!("tycho_do_collate_process_txs_total_time", labels)
+        metrics::histogram!("tycho_do_collate_process_txs_total_time", &labels)
             .record(process_txs_total_elapsed);
 
         let execute_elapsed = execute_histogram.finish();
@@ -323,7 +323,7 @@ impl CollatorStdImpl {
         let execute_tock_elapsed;
         if is_masterchain {
             let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", labels);
+                HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
             self.create_ticktock_transactions(
                 &mc_data,
                 TickTock::Tock,
@@ -336,27 +336,55 @@ impl CollatorStdImpl {
             execute_tock_elapsed = Duration::ZERO;
         }
 
-        // get queue diff
-        let histogram_create_queue_diff =
-            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", labels);
+        // start async update queue task
+        let update_queue_task = JoinTask::<Result<_>>::new({
+            let current_processed_upto = collation_data.processed_upto.clone();
+            let mq_adapter = self.mq_adapter.clone();
+            let labels = labels.clone();
+            async move {
+                // get queue diff and check for pending internals
+                let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
+                    "tycho_do_collate_create_queue_diff_time",
+                    &labels,
+                );
+                let (current_positions, has_pending_internals, diff) =
+                    mq_iterator_adapter.release()?;
+                // TODO: remove this log and check after stabilizing
+                {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "collator_data.processed_upto.internals: {:?} \
+                        diff processed upto: {:?}",
+                        current_processed_upto.internals,
+                        diff.processed_upto,
+                    );
+                    for (shard_id, int_upto_info) in current_processed_upto.internals.iter() {
+                        let diff_int_upto_info = diff.processed_upto.get(shard_id).unwrap();
+                        assert_eq!(diff_int_upto_info, &int_upto_info.processed_to_msg);
+                    }
+                }
+                let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
 
-        let diff = mq_iterator_adapter.take_diff();
+                let diff_messages_len = diff.messages.len();
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "collator_data.processed_upto.internals: {:?} \
-            diff processed upto: {:?}",
-            collation_data.processed_upto.internals,
-            diff.processed_upto,
-        );
-        for (shard_id, int_upto_info) in collation_data.processed_upto.internals.iter() {
-            let diff_int_upto_info = diff.processed_upto.get(shard_id).unwrap();
-            assert_eq!(diff_int_upto_info, &int_upto_info.processed_to_msg);
-        }
+                // apply queue diff
+                let histogram = HistogramGuard::begin_with_labels(
+                    "tycho_do_collate_apply_queue_diff_time",
+                    &labels,
+                );
+                mq_adapter.apply_diff(diff, block_id_short).await?;
+                let apply_queue_diff_elapsed = histogram.finish();
 
-        // indicate that there are still unprocessed internals when collation loop finished
-        let has_pending_internals = exec_manager.release_iterator_adapter(mq_iterator_adapter)?;
-
-        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+                Ok((
+                    current_positions,
+                    has_pending_internals,
+                    (
+                        diff_messages_len,
+                        create_queue_diff_elapsed,
+                        apply_queue_diff_elapsed,
+                    ),
+                ))
+            }
+        });
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
@@ -368,11 +396,9 @@ impl CollatorStdImpl {
         tokio::task::yield_now().await;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
 
-        // return updated exec manager into collator
-        self.set_exec_manager(exec_manager);
-
-        metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
-        metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
+        metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
+        metrics::gauge!("tycho_do_collate_block_seqno", &labels)
+            .set(self.next_block_id_short.seqno);
 
         let block_id = *finalized.block_candidate.block.id();
         let new_state_stuff = JoinTask::new({
@@ -382,7 +408,7 @@ impl CollatorStdImpl {
                 mc_ref_seqno: None,
             };
             let adapter = self.state_node_adapter.clone();
-            let labels = [("workchain", self.shard_id.workchain().to_string())];
+            let labels = labels.clone();
             async move {
                 let _histogram = HistogramGuard::begin_with_labels(
                     "tycho_collator_build_new_state_time",
@@ -394,22 +420,22 @@ impl CollatorStdImpl {
             }
         });
 
-        let diff_messages_len = diff.messages.len();
-        let apply_queue_diff_elapsed;
-        {
-            let histogram =
-                HistogramGuard::begin_with_labels("tycho_do_collate_apply_queue_diff_time", labels);
-            self.mq_adapter
-                .apply_diff(diff, block_id.as_short_id())
-                .await?;
-            apply_queue_diff_elapsed = histogram.finish();
-        }
+        // resolve update queue task
+        let (
+            current_positions,
+            has_pending_internals,
+            (diff_messages_len, create_queue_diff_elapsed, apply_queue_diff_elapsed),
+        ) = update_queue_task.await?;
+        exec_manager.set_current_iterator_positions(current_positions);
+
+        // return updated exec manager into collator
+        self.set_exec_manager(exec_manager);
 
         let handle_block_candidate_elapsed;
         {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_do_collate_handle_block_candidate_time",
-                labels,
+                &labels,
             );
 
             // return collation result
@@ -434,7 +460,7 @@ impl CollatorStdImpl {
         }
 
         // metrics
-        metrics::counter!("tycho_do_collate_tx_total", labels).increment(collation_data.tx_count);
+        metrics::counter!("tycho_do_collate_tx_total", &labels).increment(collation_data.tx_count);
 
         metrics::counter!("tycho_do_collate_int_enqueue_count")
             .increment(collation_data.int_enqueue_count);
@@ -445,32 +471,32 @@ impl CollatorStdImpl {
                 as f64,
         );
 
-        metrics::counter!("tycho_do_collate_msgs_exec_count_all", labels)
+        metrics::counter!("tycho_do_collate_msgs_exec_count_all", &labels)
             .increment(collation_data.execute_count_all);
 
-        metrics::counter!("tycho_do_collate_msgs_read_count_ext", labels)
+        metrics::counter!("tycho_do_collate_msgs_read_count_ext", &labels)
             .increment(collation_data.read_ext_msgs);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_ext", labels)
+        metrics::counter!("tycho_do_collate_msgs_exec_count_ext", &labels)
             .increment(collation_data.execute_count_ext);
-        metrics::counter!("tycho_do_collate_msgs_error_count_ext", labels)
+        metrics::counter!("tycho_do_collate_msgs_error_count_ext", &labels)
             .increment(collation_data.ext_msgs_error_count);
 
-        metrics::counter!("tycho_do_collate_msgs_read_count_int", labels)
+        metrics::counter!("tycho_do_collate_msgs_read_count_int", &labels)
             .increment(collation_data.read_int_msgs_from_iterator);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_int", labels)
+        metrics::counter!("tycho_do_collate_msgs_exec_count_int", &labels)
             .increment(collation_data.execute_count_int);
 
         // new internals messages
-        metrics::counter!("tycho_do_collate_new_msgs_created_count", labels)
+        metrics::counter!("tycho_do_collate_new_msgs_created_count", &labels)
             .increment(collation_data.new_msgs_created);
         metrics::counter!(
             "tycho_do_collate_new_msgs_inserted_to_iterator_count",
-            labels
+            &labels
         )
         .increment(collation_data.inserted_new_msgs_to_iterator);
-        metrics::counter!("tycho_do_collate_msgs_read_count_new_int", labels)
+        metrics::counter!("tycho_do_collate_msgs_read_count_new_int", &labels)
             .increment(collation_data.read_new_msgs_from_iterator);
-        metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", labels)
+        metrics::counter!("tycho_do_collate_msgs_exec_count_new_int", &labels)
             .increment(collation_data.execute_count_new_int);
 
         collation_data.total_execute_msgs_time_mc = execute_msgs_total_elapsed.as_micros();
@@ -482,15 +508,15 @@ impl CollatorStdImpl {
         let elapsed_from_prev_block = self.timer.elapsed();
         let collation_mngmnt_overhead = elapsed_from_prev_block - total_elapsed;
         self.timer = std::time::Instant::now();
-        metrics::histogram!("tycho_do_collate_from_prev_block_time", labels)
+        metrics::histogram!("tycho_do_collate_from_prev_block_time", &labels)
             .record(elapsed_from_prev_block);
-        metrics::histogram!("tycho_do_collate_overhead_time", labels)
+        metrics::histogram!("tycho_do_collate_overhead_time", &labels)
             .record(collation_mngmnt_overhead);
 
         // block time diff from now
         let block_time_diff = {
             let diff_time = now_millis() as i64 - next_chain_time as i64;
-            metrics::gauge!("tycho_do_collate_block_time_diff", labels)
+            metrics::gauge!("tycho_do_collate_block_time_diff", &labels)
                 .set(diff_time as f64 / 1000.0);
             diff_time
         };
