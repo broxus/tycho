@@ -23,7 +23,7 @@ use super::types::{
     WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::internal_queue::types::InternalMessageKey;
+use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 
@@ -103,6 +103,13 @@ impl ExecutionManager {
         self.current_iterator_positions.clone()
     }
 
+    pub fn set_current_iterator_positions(
+        &mut self,
+        positions: FastHashMap<ShardIdent, InternalMessageKey>,
+    ) {
+        self.current_iterator_positions = positions;
+    }
+
     pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter {
         self.process_ext_messages = false;
         self.process_new_messages = false;
@@ -123,11 +130,11 @@ impl ExecutionManager {
     pub fn release_iterator_adapter(
         &mut self,
         mq_iterator_adapter: QueueIteratorAdapter,
-    ) -> Result<bool> {
-        let (current_positions, has_pending_internals) = mq_iterator_adapter.release()?;
+    ) -> Result<(bool, QueueDiff)> {
+        let (current_positions, has_pending_internals, diff) = mq_iterator_adapter.release()?;
         self.current_iterator_positions = current_positions;
 
-        Ok(has_pending_internals)
+        Ok((has_pending_internals, diff))
     }
 
     pub fn read_existing_messages_total_elapsed(&self) -> Duration {

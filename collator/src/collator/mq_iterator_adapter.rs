@@ -50,9 +50,19 @@ impl QueueIteratorAdapter {
         }
     }
 
-    pub fn release(mut self) -> Result<(FastHashMap<ShardIdent, InternalMessageKey>, bool)> {
-        let has_pending_internals = self.iterator().next(true)?.is_some();
-        Ok((self.current_positions, has_pending_internals))
+    pub fn release(
+        mut self,
+    ) -> Result<(FastHashMap<ShardIdent, InternalMessageKey>, bool, QueueDiff)> {
+        let mut has_pending_internals = self.iterator().has_new_messages_for_current_shard();
+        if !has_pending_internals && !self.no_pending_existing_internals {
+            has_pending_internals = self.iterator().next(false)?.is_some();
+        }
+        let full_diff = self.iterator().extract_full_diff();
+        Ok((
+            self.current_positions,
+            has_pending_internals,
+            full_diff.diff,
+        ))
     }
 
     pub fn no_pending_existing_internals(&self) -> bool {

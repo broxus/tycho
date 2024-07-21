@@ -9,7 +9,7 @@ use tycho_util::FastHashMap;
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff, QueueFullDiff};
 
 pub trait QueueIterator: Send {
     /// Get next message
@@ -24,8 +24,8 @@ pub trait QueueIterator: Send {
         message_key: &InternalMessageKey,
     );
     fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
-    /// Extract diff from iterator and return has_pending_internals flag
-    fn into_diff(self) -> Result<(QueueDiff, bool)>;
+    /// Extract diff from iterator
+    fn extract_full_diff(&mut self) -> QueueFullDiff;
     /// Take diff from iterator
     fn take_diff(&self) -> QueueDiff;
     /// Commit processed messages
@@ -33,6 +33,8 @@ pub trait QueueIterator: Send {
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
     /// Add new message to iterator
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
+    /// Set iterator new messages buffer from full diff
+    fn set_new_messages_from_full_diff(&mut self, full_diff: QueueFullDiff);
 }
 
 pub struct QueueIteratorImpl {
@@ -149,7 +151,7 @@ impl QueueIterator for QueueIteratorImpl {
         Ok(None)
     }
 
-    fn into_diff(mut self) -> Result<(QueueDiff, bool)> {
+    fn extract_full_diff(&mut self) -> QueueFullDiff {
         tracing::trace!(
             target: crate::tracing_targets::MQ,
             "Extracting diff from iterator. New messages count: {}",
@@ -163,18 +165,20 @@ impl QueueIterator for QueueIteratorImpl {
             diff.processed_upto.insert(*shard_id, message_key.clone());
         }
 
-        // check if has pending internals in new messages
-        let mut has_pending_internals = !self.messages_for_current_shard.is_empty();
+        // move new messages
+        std::mem::swap(&mut diff.messages, &mut self.new_messages);
 
-        // check if has pending internals among existing
-        if !has_pending_internals {
-            has_pending_internals = self.next(false)?.is_some();
-        }
+        // move messages for current shard
+        let mut full_diff = QueueFullDiff {
+            diff,
+            messages_for_current_shard: Default::default(),
+        };
+        std::mem::swap(
+            &mut full_diff.messages_for_current_shard,
+            &mut self.messages_for_current_shard,
+        );
 
-        // fill new messages (new_messages shoul not be updated in previous operations)
-        diff.messages = self.new_messages;
-
-        Ok((diff, has_pending_internals))
+        full_diff
     }
 
     fn take_diff(&self) -> QueueDiff {
@@ -272,6 +276,14 @@ impl QueueIterator for QueueIteratorImpl {
                 .push(Reverse(Arc::new(message_with_source)));
         };
         Ok(())
+    }
+
+    fn set_new_messages_from_full_diff(&mut self, mut full_diff: QueueFullDiff) {
+        std::mem::swap(&mut self.new_messages, &mut full_diff.diff.messages);
+        std::mem::swap(
+            &mut self.messages_for_current_shard,
+            &mut full_diff.messages_for_current_shard,
+        );
     }
 }
 
