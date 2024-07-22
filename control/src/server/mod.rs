@@ -14,7 +14,6 @@ use tokio::sync::{broadcast, watch};
 use tycho_core::block_strider::{ManualGcTrigger, TriggerType};
 use tycho_storage::{KeyBlocksDirection, Storage};
 
-use crate::models::BlockFull;
 use crate::{ControlServer, ManualTriggerValue};
 
 #[derive(Clone)]
@@ -151,59 +150,40 @@ impl ControlServer for ControlServerListener {
         return true;
     }
 
-    async fn get_next_key_blocks_ids(
-        self,
-        _: Context,
-        block_id: BlockId,
-        max_size: usize,
-    ) -> Option<Vec<BlockId>> {
+    async fn get_block(self, _: Context, block_id: BlockId) -> Option<Vec<u8>> {
         let block_handle_storage = self.server.inner.storage.block_handle_storage();
+        let block_storage = self.server.inner.storage.block_storage();
 
-        if !block_id.shard.is_masterchain() {
-            tracing::error!("first block id is not from masterchain");
-            return None;
+        match block_handle_storage.load_handle(&block_id) {
+            Some(handle) if handle.meta().has_data() => {
+                let block = block_storage.load_block_data_raw(&handle).await;
+                match block {
+                    Ok(bytes) => Some(bytes),
+                    _ => None,
+                }
+            }
+            _ => {
+                tracing::error!("Found block empty {}\n", &block_id);
+                None
+            }
         }
-
-        let mut iterator = block_handle_storage
-            .key_blocks_iterator(KeyBlocksDirection::ForwardFrom(block_id.seqno))
-            .take(max_size);
-
-        if let Some(id) = iterator.next() {
-            if id.root_hash != block_id.root_hash {
-                tracing::error!("first block root hash mismatch");
-                return None;
-            }
-
-            if id.file_hash != block_id.file_hash {
-                tracing::error!("first block file hash mismatch");
-                return None;
-            }
-        };
-
-        Some(iterator.take(max_size).collect::<Vec<_>>())
     }
 
-    async fn get_block_full(self, _: Context, block_id: BlockId) -> Option<BlockFull> {
+    async fn get_block_proof(self, _: Context, block_id: BlockId) -> Option<(Vec<u8>, bool)> {
         let block_handle_storage = self.server.inner.storage.block_handle_storage();
         let block_storage = self.server.inner.storage.block_storage();
 
         let mut is_link = false;
         match block_handle_storage.load_handle(&block_id) {
             Some(handle) if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) => {
-                let block = block_storage.load_block_data_raw(&handle).await;
                 let proof = block_storage.load_block_proof_raw(&handle, is_link).await;
-                match (block, proof) {
-                    (Ok(block), Ok(proof)) => Some(BlockFull {
-                        id: block_id,
-                        block,
-                        proof,
-                        is_link,
-                    }),
+                match proof {
+                    Ok(proof) => Some((proof, is_link)),
                     _ => None,
                 }
             }
             _ => {
-                tracing::error!("Found block empty {}\n", &block_id);
+                tracing::error!("Block {} proof not found", &block_id);
                 None
             }
         }

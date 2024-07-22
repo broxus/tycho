@@ -3,8 +3,6 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use base64::prelude::BASE64_STANDARD;
-use base64::Engine;
 use clap::{Parser, ValueEnum};
 use everscale_types::models::BlockId;
 use serde::Serialize;
@@ -114,13 +112,14 @@ impl SwitchMemoryProfilerCmd {
 }
 
 #[derive(Deserialize, Parser)]
-pub struct GetBlockFullCmd {
+pub struct DumpBlock {
     pub block_id: BlockId,
+    pub to: PathBuf,
     pub node_addr: SocketAddr,
 }
 
-impl GetBlockFullCmd {
-    pub async fn run(&self) {
+impl DumpBlock {
+    pub async fn dump_block(&self) {
         let client = match get_client(self.node_addr).await {
             Ok(client) => client,
             Err(e) => {
@@ -129,20 +128,65 @@ impl GetBlockFullCmd {
             }
         };
 
+        let mut file = match File::create(&self.to) {
+            Ok(file) => file,
+            Err(e) => {
+                println!("Failed to create block file. {e:?}");
+                return;
+            }
+        };
+
         let Ok(block_opt) = client
-            .get_block_full(context::current(), self.block_id)
+            .get_block(context::current(), self.block_id)
             .await
         else {
-            println!("Failed to get block full");
+            println!("Failed to get block data");
             return;
         };
 
         if let Some(block) = block_opt {
-            println!("Block full received: ");
-            println!("Id {}", block.id);
-            println!("Block {}", BASE64_STANDARD.encode(block.block));
-            println!("Proof {}", BASE64_STANDARD.encode(block.proof));
-            println!("Proof is link: {}", block.is_link)
+            if let Err(e) = file.write(block.as_slice()) {
+                println!("Failed to write block data to file. {e:?}")
+            }
+
+            println!("Block full saved to {:?} ", &self.to);
+        } else {
+            println!("Block not found");
+        }
+    }
+
+    pub async fn dump_block_proof(&self) {
+        let client = match get_client(self.node_addr).await {
+            Ok(client) => client,
+            Err(e) => {
+                println!("Failed to create cli. {e:?}");
+                return;
+            }
+        };
+
+        let mut file = match File::create(&self.to) {
+            Ok(file) => file,
+            Err(e) => {
+                println!("Failed to create proof file. {e:?}");
+                return;
+            }
+        };
+
+        let Ok(block_opt) = client
+            .get_block_proof(context::current(), self.block_id)
+            .await
+        else {
+            println!("Failed to get block proof");
+            return;
+        };
+
+        if let Some((proof, is_link)) = block_opt {
+            if let Err(e) = file.write(proof.as_slice()) {
+                println!("Failed to write block proof to file. {e:?}")
+            }
+
+            println!("Block proof saved to {:?} ", &self.to);
+            println!("Block proof is link: {is_link}");
         } else {
             println!("Block not found");
         }
