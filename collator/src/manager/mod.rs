@@ -1,3 +1,4 @@
+use std::collections::btree_map::BTreeMap;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -128,13 +129,10 @@ where
         //      and validated by ourself. Will use this info for faster validation further:
         //      will consider that just collated block is already validated if it have the
         //      same root hash and file hash
-        if state.block_id().is_masterchain() {
-            let mc_data = McData::load_from_state(state)?;
-            self.spawn_task(method_to_async_closure!(process_mc_block_from_bc, mc_data))
-                .await
-        } else {
-            Ok(())
-        }
+        let state = state.clone();
+        self.spawn_task(method_to_async_closure!(process_block_from_bc, state))
+            .await?;
+        Ok(())
     }
 }
 
@@ -325,50 +323,64 @@ where
         Ok(())
     }
 
-    /// Process new master block from blockchain:
-    /// 1. Load block state
-    /// 2. Notify mempool about new master block
-    /// 3. Enqueue collation sessions refresh task
-    /// 4. Save block in cache with status Synced
-    pub async fn process_mc_block_from_bc(&self, mc_data: Arc<McData>) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Processing master block ({}) from blockchain", mc_data.block_id.as_short_id(),
+    /// Process new block from blockchain:
+    /// 1. Notify mempool about new master block if it is masterchain block
+    /// 2. Save block in cache with status Synced
+    /// 3. Stop validation if needed
+    /// 4. Refresh collation sessions if it is masterchain block
+    pub async fn process_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
+        let block_id = state.block_id();
+
+        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
+            "Processing block ({}) from blockchain", block_id.as_short_id(),
         );
 
-        // check if we should skip this master block from the blockchain
-        // because it is not far ahead of last collated by ourselves
-        if !self.check_should_process_mc_block_from_bc(&mc_data.block_id) {
-            return Ok(());
-        }
+        let stop_validation = if block_id.is_masterchain() {
+            // check if we should skip this master block from the blockchain
+            // because it is not far ahead of last collated by ourselves
+            if !self.check_should_process_mc_block_from_bc(&block_id) {
+                return Ok(());
+            }
+            // when state received execute master block processing routines
+            let mpool_adapter = self.mpool_adapter.clone();
 
-        // when state received execute master block processing routines
-        let mpool_adapter = self.mpool_adapter.clone();
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Processing requested mc state for block ({}) received from blockchain ...",
+                block_id.as_short_id()
+            );
 
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Processing requested mc state for block ({}) received from blockchain ...",
-            mc_data.block_id.as_short_id()
-        );
+            Self::notify_mempool_about_mc_block(mpool_adapter, block_id).await?;
 
-        Self::notify_mempool_about_mc_block(mpool_adapter, &mc_data.block_id).await?;
+            self.store_mc_block_from_bc_in_cache(*block_id)
+        } else {
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Processing requested shardchain state for block ({}) received from blockchain ...",
+                block_id.as_short_id()
+            );
 
-        let stop_validation = self.store_mc_block_from_bc_in_cache(mc_data.clone());
+            self.store_shard_block_from_bc_in_cache(*block_id)
+        };
 
         if stop_validation {
-            let short_id = mc_data.block_id.as_short_id();
+            let short_id = block_id.as_short_id();
             self.validator
                 .stop_validation(StopValidationCommand::ByBlock(short_id))
                 .await?;
             // Need to do validation routine
-            self.process_valid_master_block(&mc_data.block_id).await?;
+            self.process_valid_master_block(&block_id).await?;
         }
 
-        self.dispatcher
-            .spawn_task(method_to_async_closure!(
-                refresh_collation_sessions,
-                mc_data
-            ))
-            .await?;
+        if block_id.is_masterchain() {
+            let mc_data = McData::load_from_state(&state)?;
+            self.dispatcher
+                .spawn_task(method_to_async_closure!(
+                    refresh_collation_sessions,
+                    mc_data
+                ))
+                .await?;
+        }
 
         Ok(())
     }
@@ -515,9 +527,8 @@ where
             .state_node_adapter
             .load_state(&last_mc_block_id)
             .await?;
-        let mc_data = McData::load_from_state(&state)?;
 
-        self.process_mc_block_from_bc(mc_data).await
+        self.process_block_from_bc(state).await
     }
 
     /// Get shards info from the master state,
@@ -546,7 +557,7 @@ where
         //      notably ahead of last collated by ourselves
         //
         //      So we will:
-        //      1. Check if we should process master block from the blockchain in `process_mc_block_from_bc`
+        //      1. Check if we should process master block from the blockchain in `process_block_from_bc`
         //      2. Skip refreshing sessions if this master was processed by any chance
 
         // do not re-process this master block if it is lower then last processed or equal to it
@@ -1436,8 +1447,8 @@ where
     }
 
     /// Store mc block received from bc in a cache structure
-    fn store_mc_block_from_bc_in_cache(&self, mc_data: Arc<McData>) -> bool {
-        let block_container = BlockCandidateContainer::create_from_mc_data(mc_data);
+    fn store_mc_block_from_bc_in_cache(&self, block_id: BlockId) -> bool {
+        let block_container = BlockCandidateContainer::create_synced_from_bc(block_id);
         let mut stop_validation = false;
         // save block to cache
         match self.blocks_cache.master.entry(*block_container.key()) {
@@ -1446,6 +1457,11 @@ where
                     occupied.get().block_id().root_hash,
                     block_container.block_id().root_hash,
                     "Block received from bc root hash mismatch with collated one"
+                );
+
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "On apply block from bc, stored mc block in cache has status {:?}",
+                    occupied.get().send_sync_status
                 );
 
                 match occupied.get().send_sync_status {
@@ -1463,7 +1479,70 @@ where
                 }
             }
             DashMapEntry::Vacant(vacant) => {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "On apply block from bc, there is no stored mc block in cache",
+                );
+
                 vacant.insert(block_container);
+            }
+        }
+        stop_validation
+    }
+
+    /// Store shard block received from bc in a cache structure
+    fn store_shard_block_from_bc_in_cache(&self, block_id: BlockId) -> bool {
+        let block_container = BlockCandidateContainer::create_synced_from_bc(block_id);
+        let mut stop_validation = false;
+        // save block to cache
+        match self.blocks_cache.shards.entry(block_container.key().shard) {
+            DashMapEntry::Occupied(mut occupied) => {
+                let btreemap = occupied.get_mut();
+
+                match btreemap.entry(block_container.key().seqno) {
+                    std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                        assert_eq!(
+                            occupied.get().block_id().root_hash,
+                            block_container.block_id().root_hash,
+                            "Block received from bc root hash mismatch with collated one"
+                        );
+
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            "On apply block from bc, stored shard block in cache has status {:?}",
+                            occupied.get().send_sync_status
+                        );
+
+                        match occupied.get().send_sync_status {
+                            SendSyncStatus::NotReady => {
+                                // Validation process started, need to stop it
+                                stop_validation = true;
+                            }
+                            SendSyncStatus::Ready => {
+                                // No need to send to syncing - do nothing
+                                occupied.get_mut().send_sync_status = SendSyncStatus::Synced;
+                            }
+                            SendSyncStatus::Sending
+                            | SendSyncStatus::Sent
+                            | SendSyncStatus::Synced => {
+                                // Already synced - do nothing
+                            }
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(vacant) => {
+                        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                            "On apply block from bc, there is no stored shard block in cache",
+                        );
+                        vacant.insert(block_container);
+                    }
+                }
+            }
+            DashMapEntry::Vacant(vacant) => {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "On apply block from bc, there is no stored shard block in cache",
+                );
+
+                let mut btreemap = BTreeMap::new();
+                btreemap.insert(block_container.key().seqno, block_container);
+                vacant.insert(btreemap);
             }
         }
         stop_validation

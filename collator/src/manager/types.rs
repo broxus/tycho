@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::models::{Block, BlockId, BlockIdShort, Lazy, ShardIdent, Signature};
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
 use everscale_types::prelude::*;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::types::{BlockCandidate, McData};
+use crate::types::{BlockCandidate};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -186,12 +185,7 @@ impl BlockCandidateContainer {
         Ok(&entry.candidate.block)
     }
 
-    pub fn create_from_mc_data(mc_data: Arc<McData>) -> Self {
-        let &McData {
-            block_id,
-            ..
-        } = mc_data.as_ref();
-      
+    pub fn create_synced_from_bc(block_id: BlockId) -> Self {
         Self {
             key: block_id.as_short_id(),
             block_id,
