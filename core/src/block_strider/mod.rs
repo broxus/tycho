@@ -4,7 +4,6 @@ use anyhow::Result;
 use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::Future;
-use tokio::sync::watch;
 use tokio::time::Instant;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockStuff, BlockStuffAug, ShardHeights};
