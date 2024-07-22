@@ -11,7 +11,7 @@ use tycho_util::{serde_helpers, FastHashMap};
 
 use self::session::ValidatorSession;
 use crate::validator::rpc::ExchangeSignaturesBackoff;
-use crate::validator::{BriefValidatorDescr, NetworkContext, ValidationStatus, Validator};
+use crate::validator::{BriefValidatorDescr, ValidatorNetworkContext, ValidationStatus, Validator};
 
 mod session;
 
@@ -50,7 +50,7 @@ pub struct ValidatorStdImpl {
 
 impl ValidatorStdImpl {
     pub fn new(
-        net_context: NetworkContext,
+        net_context: ValidatorNetworkContext,
         keypair: Arc<KeyPair>,
         config: ValidatorStdImplConfig,
     ) -> Self {
@@ -71,7 +71,7 @@ impl Validator for ValidatorStdImpl {
         self.inner.keypair.clone()
     }
 
-    async fn add_session(
+    fn add_session(
         &self,
         shard_ident: &ShardIdent,
         session_id: u32,
@@ -88,7 +88,7 @@ impl Validator for ValidatorStdImpl {
         if !validators_map.contains_key(peer_id) {
             tracing::warn!(
                 %peer_id,
-                shard_ident,
+                %shard_ident,
                 session_id,
                 "this node is not in the validator set"
             );
@@ -99,9 +99,9 @@ impl Validator for ValidatorStdImpl {
             shard_ident,
             session_id,
             validators_map,
-            self.inner.keypair.clone(),
-            &self.inner.backoff,
             &self.inner.net_context,
+            self.inner.keypair.clone(),
+            &self.inner.config,
         )?;
         if self
             .inner
@@ -131,10 +131,10 @@ impl Validator for ValidatorStdImpl {
         session.validate_block(block_id).await
     }
 
-    async fn cancel_validation(&self, before: &BlockIdShort) -> Result<()> {
-        let session = {
-            let guard = scc::ebr::Guard::new();
+    fn cancel_validation(&self, before: &BlockIdShort) -> Result<()> {
+        let guard = scc::ebr::Guard::new();
 
+        let session = {
             // Find the latest session and remove all previous ones.
             let mut latest_session = None;
             let sessions_range = (before.shard, 0)..=(before.shard, u32::MAX);
@@ -152,15 +152,15 @@ impl Validator for ValidatorStdImpl {
             }
         };
 
-        session.cancel_before(before.seqno).await;
+        session.cancel_before(before.seqno);
         Ok(())
     }
 }
 
 struct Inner {
-    net_context: NetworkContext,
+    net_context: ValidatorNetworkContext,
     keypair: Arc<KeyPair>,
-    sessions: TreeIndex<(ShardIdent, u32), ValidatorSession>,
+    sessions: TreeIndex<SessionKey, ValidatorSession>,
     config: ValidatorStdImplConfig,
 }
 

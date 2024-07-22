@@ -16,11 +16,7 @@ use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{CollationSessionInfo, OnValidatedBlockEvent, ValidatorNetwork};
-use tycho_collator::validator::client::retry::BackoffConfig;
-use tycho_collator::validator::config::ValidatorConfig;
-use tycho_collator::validator::state::{ValidationState, ValidationStateStdImpl};
-use tycho_collator::validator::validator::{Validator, ValidatorEventListener, ValidatorStdImpl};
+use tycho_collator::types::{CollationSessionInfo, ValidatorNetwork};
 use tycho_core::block_strider::{
     BlockStrider, EmptyBlockProvider, PersistentBlockStriderState, PrintSubscriber,
 };

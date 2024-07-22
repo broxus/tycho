@@ -8,7 +8,7 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_network::{DhtClient, OverlayService, PeerResolver};
+use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
 use tycho_util::{serde_helpers, FastHashMap};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -163,26 +163,12 @@ pub struct BlockCandidate {
     pub chain_time: u64,
 }
 
-#[derive(Clone)]
-pub enum OnValidatedBlockEvent {
-    ValidByState,
-    Invalid,
-    Valid(BlockSignatures),
-}
-
-impl OnValidatedBlockEvent {
-    pub fn is_valid(&self) -> bool {
-        match self {
-            Self::ValidByState | Self::Valid(_) => true,
-            Self::Invalid => false,
-        }
-    }
-}
-
 #[derive(Default, Clone)]
 pub struct BlockSignatures {
-    pub signatures: FastHashMap<HashBytes, Arc<[u8; 64]>>,
+    pub signatures: FastHashMap<HashBytes, ArcSignature>,
 }
+
+pub type ArcSignature = Arc<[u8; 64]>;
 
 pub struct ValidatedBlock {
     block: BlockId,
@@ -217,7 +203,7 @@ impl ValidatedBlock {
 
 pub struct BlockStuffForSync {
     pub block_stuff_aug: BlockStuffAug,
-    pub signatures: FastHashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<PeerId, ArcSignature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
 }

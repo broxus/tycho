@@ -20,7 +20,7 @@ use tycho_util::FastHashMap;
 use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
-use crate::validator::{proto, BriefValidatorDescr, NetworkContext, ValidationStatus};
+use crate::validator::{proto, BriefValidatorDescr, ValidatorNetworkContext, ValidationStatus};
 
 /// Validator session is unique for each shard whithin each validator set.
 #[derive(Clone)]
@@ -34,7 +34,7 @@ impl ValidatorSession {
         shard_ident: &ShardIdent,
         session_id: u32,
         mut validators: FastHashMap<PeerId, BriefValidatorDescr>,
-        net_context: &NetworkContext,
+        net_context: &ValidatorNetworkContext,
         key_pair: Arc<KeyPair>,
         config: &ValidatorStdImplConfig,
     ) -> Result<Self> {
@@ -49,10 +49,10 @@ impl ValidatorSession {
 
         // NOTE: At this point we are sure that our node is in the validator set
 
+        let peer_ids = validators.values().map(|v| v.peer_id).collect::<Vec<_>>();
+
         let state = Arc::new(SessionState {
-            peer_id: *net_context.network.peer_id(),
             shard_ident: *shard_ident,
-            session_id,
             weight_threshold,
             validators: Arc::new(validators),
             block_signatures: TreeIndex::new(),
@@ -67,7 +67,7 @@ impl ValidatorSession {
         let overlay = PrivateOverlay::builder(overlay_id)
             .named("validator")
             .with_peer_resolver(net_context.peer_resolver.clone())
-            .with_entries(validators.values().map(|v| v.peer_id))
+            .with_entries(peer_ids)
             .build(ValidatorService {
                 shard_ident: *shard_ident,
                 session_id,
@@ -89,15 +89,7 @@ impl ValidatorSession {
         })
     }
 
-    pub fn shard_ident(&self) -> &ShardIdent {
-        &self.inner.state.shard_ident
-    }
-
-    pub fn session_id(&self) -> u32 {
-        self.inner.state.session_id
-    }
-
-    pub async fn cancel_before(&self, block_seqno: u32) {
+    pub fn cancel_before(&self, block_seqno: u32) {
         let state = self.inner.state.as_ref();
         state.cached_signatures.remove_range(..block_seqno);
         state.block_signatures.remove_range(..block_seqno);
@@ -210,7 +202,7 @@ impl ValidatorSession {
         // Pre-allocate the result map which will contain all validators' signatures (only valid ones)
         let validators = self.inner.state.validators.as_ref();
         let mut result =
-            SignaturesMap::with_capacity_and_hasher(validators.len(), Default::default());
+            SignatureSlotsMap::with_capacity_and_hasher(validators.len(), Default::default());
 
         for peer_id in validators.keys() {
             result.insert(*peer_id, Default::default());
@@ -241,7 +233,7 @@ impl ValidatorSession {
 
             // Pre-allocate the result map which will contain all validators' signatures (only valid ones)
             let mut result =
-                SignaturesMap::with_capacity_and_hasher(cached.len(), Default::default());
+                SignatureSlotsMap::with_capacity_and_hasher(cached.len(), Default::default());
 
             for (peer_id, cached) in cached.iter() {
                 let stored = 'stored: {
@@ -266,7 +258,7 @@ impl ValidatorSession {
                     Some(signature)
                 };
 
-                result.insert(*peer_id, ArcSwapOption::new(stored));
+                result.insert(*peer_id, SignatureSlot::new(stored));
             }
 
             BlockSignaturesBuilder {
@@ -388,9 +380,7 @@ impl Inner {
 }
 
 struct SessionState {
-    peer_id: PeerId,
     shard_ident: ShardIdent,
-    session_id: u32,
     weight_threshold: u64,
     validators: Arc<FastHashMap<PeerId, BriefValidatorDescr>>,
     block_signatures: TreeIndex<u32, Arc<BlockSignatures>>,
@@ -464,7 +454,7 @@ struct ValidSignature {
 
 struct BlockSignaturesBuilder {
     own_signature: Arc<[u8; 64]>,
-    other_signatures: Arc<SignaturesMap>,
+    other_signatures: Arc<SignatureSlotsMap>,
     total_weight: u64,
 }
 
@@ -556,6 +546,7 @@ impl ExchangeSignatures for SessionState {
     }
 }
 
+#[derive(Default)]
 struct SignatureSlot {
     value: ArcSwapOption<[u8; 64]>,
     waker: parking_lot::Mutex<Option<Waker>>,

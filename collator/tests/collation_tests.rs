@@ -19,9 +19,6 @@ use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{supported_capabilities, CollationConfig, MsgsExecutionParams};
-use tycho_collator::validator::client::retry::BackoffConfig;
-use tycho_collator::validator::config::ValidatorConfig;
-use tycho_collator::validator::validator::ValidatorStdImplFactory;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
     PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,

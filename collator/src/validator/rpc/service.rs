@@ -15,7 +15,7 @@ pub struct ValidatorService<E> {
     pub exchanger: Weak<E>,
 }
 
-impl<E: ExchangeSignatures + Clone> ValidatorService<E> {
+impl<E: ExchangeSignatures> ValidatorService<E> {
     fn handle_exchange_signatures(
         &self,
         peer_id: &PeerId,
@@ -36,7 +36,7 @@ impl<E: ExchangeSignatures + Clone> ValidatorService<E> {
                 Err(e) => {
                     // TODO: Is it ok to WARN here? Since we can be ddosed with invalid signatures
                     // and the log will be full of these warnings.
-                    tracing::warn!("failed to exchange signatures: {e}");
+                    tracing::warn!("failed to exchange signatures: {e:?}");
                     None
                 }
             }

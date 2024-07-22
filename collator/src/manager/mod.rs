@@ -23,14 +23,14 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-    CollationSessionInfo, McData, OnValidatedBlockEvent, ProofFunds, TopBlockDescription,
+    CollationSessionInfo, McData, ProofFunds, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
 };
 use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
-use crate::validator::{Validator, ValidatorContext, ValidatorEventListener, ValidatorFactory};
+use crate::validator::{ValidationStatus, Validator};
 use crate::{method_to_async_task_closure, tracing_targets};
 
 mod types;
@@ -89,8 +89,6 @@ where
     last_processed_mc_block_id: Option<BlockId>,
     /// id of last master block collated by ourselves
     last_collated_mc_block_id: Option<BlockId>,
-    /// chain time of last collated master block or received from bc
-    last_collated_mc_block_chain_time: u64,
     /// chain time for next master block to be collated
     next_mc_block_chain_time: u64,
 
@@ -184,46 +182,25 @@ where
     }
 }
 
-#[async_trait]
-impl<CF, V> ValidatorEventListener for AsyncQueuedDispatcher<CollationManager<CF, V>>
-where
-    CF: CollatorFactory,
-    V: Validator,
-{
-    async fn on_block_validated(
-        &self,
-        block_id: BlockId,
-        event: OnValidatedBlockEvent,
-    ) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
-            process_validated_block,
-            block_id,
-            event
-        ))
-        .await
-    }
-}
-
 impl<CF, V> CollationManager<CF, V>
 where
     CF: CollatorFactory,
     V: Validator,
 {
     #[allow(clippy::too_many_arguments)]
-    pub fn start<STF, MPF, VF>(
+    pub fn start<STF, MPF>(
         keypair: Arc<KeyPair>,
         config: CollationConfig,
         mq_adapter: Arc<dyn MessageQueueAdapter>,
         state_node_adapter_factory: STF,
         mpool_adapter_factory: MPF,
-        validator_factory: VF,
+        validator: V,
         collator_factory: CF,
         #[cfg(any(test, feature = "test"))] test_validators_keypairs: Vec<Arc<KeyPair>>,
     ) -> RunningCollationManager<CF, V>
     where
         STF: StateNodeAdapterFactory,
         MPF: MempoolAdapterFactory,
-        VF: ValidatorFactory<Validator = V>,
     {
         tracing::info!(target: tracing_targets::COLLATION_MANAGER, "Creating collation manager...");
 
@@ -238,13 +215,6 @@ where
 
         // create mempool adapter
         let mpool_adapter = mpool_adapter_factory.create(arc_dispatcher.clone());
-
-        // create validator and start its tasks queue
-        let validator = validator_factory.create(ValidatorContext {
-            listeners: vec![arc_dispatcher.clone()],
-            state_node_adapter: state_node_adapter.clone(),
-            keypair: keypair.clone(),
-        });
 
         let validator = Arc::new(validator);
 
@@ -266,7 +236,6 @@ where
 
             last_processed_mc_block_id: None,
             last_collated_mc_block_id: None,
-            last_collated_mc_block_chain_time: 0,
             next_mc_block_chain_time: 0,
 
             last_collated_chain_times_by_shards: FastHashMap::default(),
@@ -765,13 +734,11 @@ where
 
                 let session_seqno = new_session_info.seqno();
 
-                self.validator
-                    .add_session(
-                        shard_id,
-                        session_seqno,
-                        new_session_info.collators().validators.as_slice(),
-                    )
-                    .await?;
+                self.validator.add_session(
+                    &shard_id,
+                    session_seqno,
+                    new_session_info.collators().validators.as_slice(),
+                )?;
             } else {
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -905,11 +872,24 @@ where
             "Enqueueing block candidate validation...",
         );
 
-        let _handle = self
-            .validator
-            .clone()
-            .spawn_validate(block_id, session_info.seqno())
-            .await;
+        let validator = self.validator.clone();
+        let session_seqno = session_info.seqno();
+        let dispatcher = self.dispatcher.clone();
+        tokio::spawn(async move {
+            // TODO: Fail collation instead of panicking?
+            let status = validator
+                .validate(session_seqno, &candidate_id)
+                .await
+                .unwrap();
+
+            _ = dispatcher
+                .enqueue_task(method_to_async_task_closure!(
+                    process_validated_block,
+                    candidate_id,
+                    status
+                ))
+                .await;
+        });
 
         debug_assert_eq!(
             block_id.is_masterchain(),
@@ -1297,28 +1277,24 @@ where
     pub async fn process_validated_block(
         &mut self,
         block_id: BlockId,
-        validation_result: OnValidatedBlockEvent,
+        status: ValidationStatus,
     ) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            is_valid = validation_result.is_valid(),
+            is_complete = matches!(&status, ValidationStatus::Complete(_)),
             "Start processing block validation result...",
         );
 
         let _histogram = HistogramGuard::begin("tycho_collator_process_validated_block_time");
 
         // execute required actions if block invalid
-        if !validation_result.is_valid() {
-            // TODO: implement more graceful reaction on invalid block
-            panic!("Block has collected more than 1/3 invalid signatures! Unable to continue collation process!")
-        }
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Saving block validation result to cache...",
         );
         // update block in cache with signatures info
-        let updated = self.store_block_validation_result(block_id, validation_result);
+        let updated = self.store_block_validation_result(block_id, status);
         if !updated {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -1405,7 +1381,7 @@ where
     fn store_block_validation_result(
         &mut self,
         block_id: BlockId,
-        validation_result: OnValidatedBlockEvent,
+        validation_result: ValidationStatus,
     ) -> bool {
         if let Some(block_container) = if block_id.is_masterchain() {
             self.blocks_cache.master.get_mut(&block_id.as_short_id())
@@ -1416,9 +1392,8 @@ where
                 .and_then(|shard_cache| shard_cache.get_mut(&block_id.seqno))
         } {
             let (is_valid, already_synced, signatures) = match validation_result {
-                OnValidatedBlockEvent::ValidByState => (true, true, Default::default()),
-                OnValidatedBlockEvent::Valid(bs) => (true, false, bs.signatures),
-                OnValidatedBlockEvent::Invalid => (false, false, Default::default()),
+                ValidationStatus::Skipped => (true, true, Default::default()),
+                ValidationStatus::Complete(signatures) => (true, false, signatures),
             };
 
             block_container.set_validation_result(is_valid, already_synced, signatures);

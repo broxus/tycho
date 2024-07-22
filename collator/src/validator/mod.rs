@@ -7,13 +7,13 @@ use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescri
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_util::FastHashMap;
 
-pub use self::impls::ValidatorStdImpl;
+pub use self::impls::*;
 
 pub mod proto;
 pub mod rpc;
 
 mod impls {
-    pub use self::std_impl::ValidatorStdImpl;
+    pub use self::std_impl::{ValidatorStdImpl, ValidatorStdImplConfig};
 
     mod std_impl;
 }
@@ -21,12 +21,12 @@ mod impls {
 // === Validator ===
 
 #[async_trait]
-pub trait Validator: Send + Sync {
+pub trait Validator: Send + Sync + 'static {
     /// Returns the key pair used by the validator.
     fn key_pair(&self) -> Arc<KeyPair>;
 
     /// Adds a new session for the specified shard.
-    async fn add_session(
+    fn add_session(
         &self,
         shard_ident: &ShardIdent,
         session_id: u32,
@@ -37,12 +37,12 @@ pub trait Validator: Send + Sync {
     async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus>;
 
     /// Cancels validation before the specified block.
-    async fn cancel_validation(&self, before: &BlockIdShort) -> Result<()>;
+    fn cancel_validation(&self, before: &BlockIdShort) -> Result<()>;
 }
 
 // === Types ===
 
-pub struct NetworkContext {
+pub struct ValidatorNetworkContext {
     pub network: Network,
     pub peer_resolver: PeerResolver,
     pub overlays: OverlayService,

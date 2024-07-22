@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::future::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::PeerId;
 use tycho_util::serde_helpers;
@@ -13,7 +14,7 @@ mod client;
 mod service;
 
 // TODO: Add jitter as well?
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExchangeSignaturesBackoff {
     #[serde(with = "serde_helpers::humantime")]
@@ -36,10 +37,10 @@ impl Default for ExchangeSignaturesBackoff {
 pub trait ExchangeSignatures: Send + Sync + 'static {
     type Err: std::fmt::Debug + Send;
 
-    async fn exchange_signatures(
+    fn exchange_signatures(
         &self,
         peer_id: &PeerId,
         block_seqno: u32,
         signature: Arc<[u8; 64]>,
-    ) -> Result<proto::Exchange, Self::Err>;
+    ) -> impl Future<Output = Result<proto::Exchange, Self::Err>> + Send;
 }
