@@ -8,9 +8,7 @@ use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
-use tl_proto::TlWrite;
 use tokio::select;
-use tokio::sync::watch::{Receiver, Sender};
 use tokio::sync::{broadcast, watch};
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
@@ -21,6 +19,7 @@ use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 
+#[derive(Debug, Clone)]
 enum GcTriggerSource {
     Automatic {
         data: Option<GcTrigger>,
@@ -134,7 +133,7 @@ impl GcSubscriber {
                             };
                         },
                         Err(e) => {
-                            tracing::error!("Failed to read manual gv trigger broadcast");
+                            tracing::error!("Failed to read manual gv trigger broadcast {e:?}");
                             continue;
                         }
                         _ => continue,
@@ -232,19 +231,14 @@ impl GcSubscriber {
                     let data = trigger_rx.borrow_and_update().clone();
                     GcTriggerSource::Automatic {data}
                 }
-               data = manual_gc_trigger.recv() => {
-                    match data {
-                        Ok(data) => {
-                            tracing::debug!("Blocks GC manual trigger received {:?}", &data);
-                            let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
-                            GcTriggerSource::Manual {data, last_known_mc_seqno}
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to read manual gc trigger source. {e:?}");
-                            continue;
-                        }
-                    }
-
+                Ok(data) = manual_gc_trigger.recv() => {
+                    tracing::debug!("Blocks GC manual trigger received {:?}", &data);
+                    let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
+                    GcTriggerSource::Manual {data, last_known_mc_seqno}
+                }
+                else => {
+                    tracing::warn!("Failed to read determine gc trigger source");
+                    continue;
                 }
             };
 
@@ -366,7 +360,7 @@ impl GcSubscriber {
 
     #[tracing::instrument(skip_all)]
     async fn states_gc(
-        manual_gc_trigger: broadcast::Receiver<ManualGcTrigger>,
+        mut manual_gc_trigger: broadcast::Receiver<ManualGcTrigger>,
         mut trigger_rx: TriggerRx,
         storage: Storage,
     ) {
@@ -385,40 +379,73 @@ impl GcSubscriber {
 
         loop {
             // either the interval has ticked or a new trigger has arrived
-            select! {
-                _ = interval.tick() => {},
-                Ok(_) = trigger_rx.changed() => {},
-                else => break,
-            }
-
-            let now = Instant::now();
-
-            if let Some(last) = last_triggered_at {
-                let next_gc: Instant = last + config.interval;
-                if next_gc > now {
-                    time::sleep_until(next_gc.into()).await;
+            let trigger_source = select! {
+                _ = interval.tick() => {
+                    let data = trigger_rx.borrow_and_update().clone();
+                    GcTriggerSource::Automatic {data}
+                },
+                Ok(data) = manual_gc_trigger.recv() => {
+                    tracing::debug!("Archives GC manual trigger received {:?}", &data);
+                    let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
+                    GcTriggerSource::Manual {data, last_known_mc_seqno}
                 }
-            } else if config.random_offset {
-                let offset = rand::thread_rng().gen_range(Duration::ZERO..config.interval);
-                time::sleep(offset).await;
+                Ok(_) = trigger_rx.changed() => {
+                    let data = trigger_rx.borrow_and_update().clone();
+                    GcTriggerSource::Automatic {data}
+                },
+                else => break,
+            };
+
+            tracing::debug!(?trigger_source);
+
+            match trigger_source {
+                GcTriggerSource::Automatic { .. } => {
+                    let now = Instant::now();
+
+                    if let Some(last) = last_triggered_at {
+                        let next_gc: Instant = last + config.interval;
+                        if next_gc > now {
+                            time::sleep_until(next_gc.into()).await;
+                        }
+                    } else if config.random_offset {
+                        let offset = rand::thread_rng().gen_range(Duration::ZERO..config.interval);
+                        time::sleep(offset).await;
+                    }
+                }
+                _ => (),
             }
 
             last_triggered_at = Some(Instant::now());
 
-            let Some(trigger) = trigger_rx.borrow_and_update().clone() else {
-                continue;
+            let target_seqno = match trigger_source {
+                GcTriggerSource::Manual {
+                    data: ManualGcTrigger::States { ty },
+                    ..
+                } => match Self::get_mc_block_seqno_manual(ty, storage.clone()).await {
+                    Ok(Some((seqno, distance))) => seqno.saturating_sub(distance),
+                    _ => continue,
+                },
+                GcTriggerSource::Manual { .. } => {
+                    tracing::debug!("Ignoring other types of GC");
+                    continue;
+                }
+                GcTriggerSource::Automatic { data } => {
+                    let Some(data) = data else {
+                        continue;
+                    };
+                    data.mc_block_id.seqno
+                }
             };
-            tracing::debug!(?trigger);
 
             let _hist = HistogramGuard::begin("tycho_gc_states_time");
             if let Err(e) = storage
                 .shard_state_storage()
-                .remove_outdated_states(trigger.mc_block_id.seqno)
+                .remove_outdated_states(target_seqno)
                 .await
             {
                 tracing::error!("failed to remove outdated states: {e:?}");
             }
-            metrics::gauge!("tycho_gc_states_seqno").set(trigger.mc_block_id.seqno as f64);
+            metrics::gauge!("tycho_gc_states_seqno").set(target_seqno as f64);
         }
     }
 }
