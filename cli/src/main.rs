@@ -112,8 +112,8 @@ pub enum ControlServerCmd {
     Ping(PingCmd),
     TriggerGc(TriggerGcCmd),
     SwitchMemoryProfiler(SwitchMemoryProfilerCmd),
-    GetBlockFull(GetBlockFullCmd),
-    // GetNextKeyBlockIds(GetNextKeyBlockIdsCmd),
+    DumpBlock(DumpBlock),
+    DumpBlockProof(DumpBlock),
     FindArchive(FindArchiveCmd),
     DumpArchive(DumpArchiveCmd),
 }
@@ -129,8 +129,8 @@ impl ControlServerCmd {
                 Self::Ping(cmd) => cmd.run().await,
                 Self::TriggerGc(cmd) => cmd.run().await,
                 Self::SwitchMemoryProfiler(cmd) => cmd.run().await,
-                // Self::GetNextKeyblockIds(cmd) => cmd.run(),
-                Self::GetBlockFull(cmd) => cmd.run().await,
+                Self::DumpBlock(cmd) => cmd.dump_block().await,
+                Self::DumpBlockProof(cmd) => cmd.dump_block_proof().await,
                 Self::FindArchive(cmd) => cmd.run().await,
                 Self::DumpArchive(cmd) => cmd.run().await,
             }
