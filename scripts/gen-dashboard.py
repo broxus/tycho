@@ -891,12 +891,12 @@ def collator_core_operations_metrics() -> RowPanel:
         ),
         create_heatmap_panel(
             "tycho_do_collate_create_queue_diff_time",
-            "Create message queue diff",
+            "async Create message queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
             "tycho_do_collate_apply_queue_diff_time",
-            "Apply message queue diff",
+            "async Apply message queue diff",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
@@ -923,11 +923,6 @@ def collator_misc_operations_metrics() -> RowPanel:
         create_heatmap_panel(
             "tycho_collator_import_next_anchor_time",
             "Import next anchor time",
-            labels=['workchain=~"$workchain"'],
-        ),
-        create_heatmap_panel(
-            "tycho_collator_import_next_anchors_on_init_time",
-            "Import anchors on init time",
             labels=['workchain=~"$workchain"'],
         ),
         create_heatmap_panel(
