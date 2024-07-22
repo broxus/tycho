@@ -20,7 +20,7 @@ pub trait ControlServer {
     /// Get block bytes
     async fn get_block(block_id: BlockId) -> Option<Vec<u8>>;
 
-    ///Get proof bytes
+    /// Get proof bytes
     async fn get_block_proof(block_id: BlockId) -> Option<(Vec<u8>, bool)>;
 
     /// Get archive id
