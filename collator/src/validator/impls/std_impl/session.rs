@@ -1,6 +1,6 @@
 use std::future::IntoFuture;
 use std::pin::{pin, Pin};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -20,7 +20,7 @@ use tycho_util::FastHashMap;
 use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
-use crate::validator::{proto, BriefValidatorDescr, ValidatorNetworkContext, ValidationStatus};
+use crate::validator::{proto, BriefValidatorDescr, ValidationStatus, ValidatorNetworkContext};
 
 /// Validator session is unique for each shard whithin each validator set.
 #[derive(Clone)]
@@ -85,11 +85,16 @@ impl ValidatorSession {
                 key_pair,
                 own_weight,
                 state,
+                min_seqno: AtomicU32::new(0),
             }),
         })
     }
 
     pub fn cancel_before(&self, block_seqno: u32) {
+        self.inner
+            .min_seqno
+            .fetch_max(block_seqno, Ordering::Release);
+
         let state = self.inner.state.as_ref();
         state.cached_signatures.remove_range(..block_seqno);
         state.block_signatures.remove_range(..block_seqno);
@@ -99,6 +104,12 @@ impl ValidatorSession {
         const MAX_PARALLEL_REQUESTS: usize = 10;
 
         debug_assert_eq!(self.inner.state.shard_ident, block_id.shard);
+
+        self.inner
+            .min_seqno
+            .fetch_max(block_id.seqno, Ordering::Release);
+
+        self.create_cache_slots(block_id.seqno, self.inner.config.signature_cache_slots);
 
         let state = &self.inner.state;
 
@@ -269,6 +280,31 @@ impl ValidatorSession {
         })
         .await
     }
+
+    fn create_cache_slots(&self, after_seqno: u32, n: u32) {
+        let inner = self.inner.as_ref();
+
+        let last_seqno = after_seqno + n;
+        let first_seqno = inner.min_seqno.load(Ordering::Acquire).max(after_seqno + 1);
+
+        if first_seqno > last_seqno {
+            return;
+        }
+
+        for seqno in first_seqno..=last_seqno {
+            let signatures = inner
+                .state
+                .validators
+                .keys()
+                .map(|peer_id| (*peer_id, Default::default()))
+                .collect::<SignaturesMap>();
+
+            _ = inner
+                .state
+                .cached_signatures
+                .insert(seqno, Arc::new(signatures));
+        }
+    }
 }
 
 struct Inner {
@@ -277,6 +313,7 @@ struct Inner {
     key_pair: Arc<KeyPair>,
     own_weight: u64,
     state: Arc<SessionState>,
+    min_seqno: AtomicU32,
 }
 
 impl Inner {
@@ -322,6 +359,7 @@ impl Inner {
                 .with_min_delay(backoff.min_interval)
                 .with_max_delay(backoff.max_interval)
                 .with_factor(backoff.factor)
+                .with_max_times(usize::MAX)
                 .build();
 
             let signature_fut = slot.into_future();

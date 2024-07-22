@@ -11,7 +11,7 @@ use tycho_util::{serde_helpers, FastHashMap};
 
 use self::session::ValidatorSession;
 use crate::validator::rpc::ExchangeSignaturesBackoff;
-use crate::validator::{BriefValidatorDescr, ValidatorNetworkContext, ValidationStatus, Validator};
+use crate::validator::{BriefValidatorDescr, ValidationStatus, Validator, ValidatorNetworkContext};
 
 mod session;
 
@@ -30,6 +30,11 @@ pub struct ValidatorStdImplConfig {
     ///
     /// Default: 10 seconds.
     pub failed_exchange_interval: Duration,
+
+    /// Number of slots for future signatures.
+    ///
+    /// Default: 3.
+    pub signature_cache_slots: u32,
 }
 
 impl Default for ValidatorStdImplConfig {
@@ -38,6 +43,7 @@ impl Default for ValidatorStdImplConfig {
             exchange_signatures_backoff: Default::default(),
             exchange_signatures_timeout: Duration::from_secs(1),
             failed_exchange_interval: Duration::from_secs(10),
+            signature_cache_slots: 3,
         }
     }
 }
