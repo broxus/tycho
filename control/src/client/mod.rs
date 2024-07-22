@@ -136,10 +136,7 @@ impl DumpBlock {
             }
         };
 
-        let Ok(block_opt) = client
-            .get_block(context::current(), self.block_id)
-            .await
-        else {
+        let Ok(block_opt) = client.get_block(context::current(), self.block_id).await else {
             println!("Failed to get block data");
             return;
         };
