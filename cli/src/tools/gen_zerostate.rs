@@ -8,7 +8,6 @@ use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
 use tycho_util::FastHashMap;
 
 use crate::util::compute_storage_used;
@@ -97,7 +96,7 @@ fn generate_zerostate(
 
     let root_hash = *boc.repr_hash();
     let data = Boc::encode(&boc);
-    let file_hash = HashBytes::from(sha2::Sha256::digest(&data));
+    let file_hash = Boc::file_hash_blake(&data);
 
     std::fs::write(output_path, data).wrap_err("failed to write masterchain zerostate")?;
 
@@ -177,7 +176,7 @@ impl ZerostateConfig {
                 let cell = CellBuilder::build_from(&shard_state)?;
                 workchain.zerostate_root_hash = *cell.repr_hash();
                 let bytes = Boc::encode(&cell);
-                workchain.zerostate_file_hash = sha2::Sha256::digest(bytes).into();
+                workchain.zerostate_file_hash = Boc::file_hash_blake(bytes);
 
                 workchains.set(id, &workchain)?;
                 updated = true;

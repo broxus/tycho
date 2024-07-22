@@ -4,7 +4,6 @@ use anyhow::Result;
 use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use sha2::Digest;
 use tycho_util::FastHashMap;
 
 use crate::archive::WithArchiveData;
@@ -40,7 +39,7 @@ impl BlockStuff {
 
         let cell = CellBuilder::build_from(&block).unwrap();
         let root_hash = *cell.repr_hash();
-        let file_hash = Boc::file_hash(Boc::encode(&cell));
+        let file_hash = Boc::file_hash_blake(Boc::encode(&cell));
 
         let block_id = BlockId {
             shard: block_info.shard,
@@ -59,7 +58,7 @@ impl BlockStuff {
     }
 
     pub fn deserialize_checked(id: &BlockId, data: &[u8]) -> Result<Self> {
-        let file_hash = sha2::Sha256::digest(data);
+        let file_hash = Boc::file_hash_blake(data);
         anyhow::ensure!(
             id.file_hash.as_slice() == file_hash.as_slice(),
             "file_hash mismatch for {id}"

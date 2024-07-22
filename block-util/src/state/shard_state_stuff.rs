@@ -3,7 +3,6 @@ use std::sync::Arc;
 use anyhow::Result;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use sha2::Digest;
 
 use crate::state::{MinRefMcStateTracker, RefMcStateHandle};
 
@@ -69,7 +68,7 @@ impl ShardStateStuff {
     pub fn deserialize_zerostate(zerostate_id: &BlockId, bytes: &[u8]) -> Result<Self> {
         anyhow::ensure!(zerostate_id.seqno == 0, "given id has a non-zero seqno");
 
-        let file_hash = sha2::Sha256::digest(bytes);
+        let file_hash = Boc::file_hash_blake(bytes);
         anyhow::ensure!(
             zerostate_id.file_hash.as_slice() == file_hash.as_slice(),
             "file_hash mismatch. Expected: {}, got: {}",

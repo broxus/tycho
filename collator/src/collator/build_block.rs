@@ -309,7 +309,7 @@ impl CollatorStdImpl {
                 shard: collation_data.block_id_short.shard,
                 seqno: collation_data.block_id_short.seqno,
                 root_hash: *new_block_root.repr_hash(),
-                file_hash: Boc::file_hash(&new_block_boc),
+                file_hash: Boc::file_hash_blake(&new_block_boc),
             };
 
             build_block_elapsed = histogram.finish();
