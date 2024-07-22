@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent};
@@ -198,9 +197,7 @@ impl BlockCandidateContainer {
         Ok(entry.candidate.block.as_ref())
     }
 
-    pub fn create_from_mc_data(mc_data: Arc<McData>) -> Self {
-        let &McData { block_id, .. } = mc_data.as_ref();
-
+    pub fn create_synced_from_bc(block_id: BlockId) -> Self {
         Self {
             key: block_id.as_short_id(),
             block_id,
