@@ -10,18 +10,17 @@ use backon::BackoffBuilder;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use futures_util::stream::FuturesUnordered;
-use futures_util::Future;
+use futures_util::{Future, StreamExt};
 use scc::TreeIndex;
 use tokio::sync::{Notify, Semaphore};
-use tokio_util::sync::CancellationToken;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
+use tycho_util::futures::JoinTask;
 use tycho_util::FastHashMap;
 
+use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
-use crate::validator::rpc::{
-    ExchangeSignatures, ExchangeSignaturesBackoff, ValidatorClient, ValidatorService,
-};
-use crate::validator::{proto, BriefValidatorDescr, NetworkContext};
+use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
+use crate::validator::{proto, BriefValidatorDescr, NetworkContext, ValidationStatus};
 
 /// Validator session is unique for each shard whithin each validator set.
 #[derive(Clone)]
@@ -35,9 +34,9 @@ impl ValidatorSession {
         shard_ident: &ShardIdent,
         session_id: u32,
         mut validators: FastHashMap<PeerId, BriefValidatorDescr>,
-        key_pair: Arc<KeyPair>,
-        backoff: &ExchangeSignaturesBackoff,
         net_context: &NetworkContext,
+        key_pair: Arc<KeyPair>,
+        config: &ValidatorStdImplConfig,
     ) -> Result<Self> {
         let max_weight = validators.values().map(|v| v.weight).sum::<u64>();
         let weight_threshold = max_weight.saturating_mul(2) / 3 + 1;
@@ -81,8 +80,8 @@ impl ValidatorSession {
 
         Ok(Self {
             inner: Arc::new(Inner {
+                config: config.clone(),
                 client: ValidatorClient::new(net_context.network.clone(), overlay),
-                backoff: backoff.clone(),
                 key_pair,
                 own_weight,
                 state,
@@ -104,7 +103,7 @@ impl ValidatorSession {
         state.block_signatures.remove_range(..block_seqno);
     }
 
-    pub async fn validate_block(&self, block_id: &BlockId) -> Result<()> {
+    pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
         const MAX_PARALLEL_REQUESTS: usize = 10;
 
         debug_assert_eq!(self.inner.state.shard_ident, block_id.shard);
@@ -143,62 +142,63 @@ impl ValidatorSession {
         //   have not yet processed them. We will use them later.
         state.cached_signatures.remove(&block_id.seqno);
 
-        let mut session_cancelled = pin!(state.cancelled_signal.notified());
-        let mut validation_cancelled = pin!(block_signatures.validation.cancelled());
-
+        // Start collecting signatures from other validators
         let mut result = FastHashMap::default();
+        result.insert(
+            *self.inner.client.peer_id(),
+            block_signatures.own_signature.clone(),
+        );
+        let mut total_weight = self.inner.own_weight;
 
         let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_REQUESTS));
         let mut futures = FuturesUnordered::new();
         for (peer_id, signature) in block_signatures.other_signatures.iter() {
             if let Some(valid_signature) = signature.load_full() {
                 result.insert(*peer_id, valid_signature);
+
+                let validator_info = state
+                    .validators
+                    .get(peer_id)
+                    .expect("peer info out of sync");
+
+                total_weight += validator_info.weight;
                 continue;
             }
 
-            // if let Some(cached) = cached.as_ref().and_then(|c| c.get(peer_id)) {
-            //     if let Some(signature) = cached.load_full() {
-            //         // TODO: Validate and store the signature
-            //         continue;
-            //     }
-            // }
+            let cached = cached
+                .as_ref()
+                .and_then(|c| c.get(peer_id))
+                .and_then(|c| c.load_full());
 
-            let peer_id = *peer_id;
-            let client = self.inner.client.clone();
-            let other_signatures = block_signatures.other_signatures.clone();
-            let semaphore = semaphore.clone();
-            let req = req.clone();
-            futures.push(async move {
-                let slot = other_signatures.get(&peer_id).expect("peer id out of sync");
-
-                let fetch = async {
-                    loop {
-                        let _permit = semaphore.acquire().await.unwrap();
-
-                        let result = client.query_with_retry(&peer_id, req).await;
-                    }
-                };
-
-                tokio::select! {
-                    signature = slot.into_future() => signature,
-                    segnature = fetch => signature,
-                }
-            });
+            futures.push(JoinTask::new(self.inner.clone().receive_signature(
+                *peer_id,
+                block_signatures.clone(),
+                cached,
+                semaphore.clone(),
+            )));
         }
 
-        let mut stopped = false;
-        while !stopped {
-            tokio::select! {
-                _ = &mut session_cancelled => {
-                    stopped = true;
-                }
-                _ = &mut validation_cancelled => {
-                    stopped = true;
-                }
-            }
+        let mut session_cancelled = pin!(state.cancelled_signal.notified());
+        while total_weight < state.weight_threshold {
+            let res = tokio::select! {
+                res = futures.next() => match res {
+                    Some(res) => res,
+                    None => anyhow::bail!("no more signatures to collect but the threshold is not reached"),
+                },
+                _ = &mut session_cancelled => return Ok(ValidationStatus::Skipped),
+            };
+
+            let validator_info = state
+                .validators
+                .get(&res.peer_id)
+                .expect("peer info out of sync");
+
+            let prev = result.insert(res.peer_id, res.signature);
+            debug_assert!(prev.is_none(), "duplicate signature in result");
+            total_weight += validator_info.weight;
         }
 
-        Ok(())
+        Ok(ValidationStatus::Complete(result))
     }
 
     fn prepare_new_signatures(&self, block_id: &BlockId) -> BlockSignaturesBuilder {
@@ -229,6 +229,7 @@ impl ValidatorSession {
         cached: Arc<SignaturesMap>,
     ) -> BlockSignaturesBuilder {
         let data = Block::build_data_for_sign(block_id);
+        let block_seqno = block_id.seqno;
 
         let key_pair = self.inner.key_pair.clone();
         let validators = self.inner.state.validators.clone();
@@ -250,6 +251,13 @@ impl ValidatorSession {
 
                     let validator_info = validators.get(peer_id).expect("peer info out of sync");
                     if !validator_info.public_key.verify_raw(&data, &signature) {
+                        tracing::warn!(
+                            %peer_id,
+                            block_seqno,
+                            "cached signature is invalid: {}",
+                            ValidationError::InvalidSignature
+                        );
+
                         // TODO: Somehow mark that this validator sent an invalid signature?
                         break 'stored Default::default();
                     }
@@ -272,19 +280,22 @@ impl ValidatorSession {
 }
 
 struct Inner {
+    config: ValidatorStdImplConfig,
     client: ValidatorClient,
-    backoff: ExchangeSignaturesBackoff,
     key_pair: Arc<KeyPair>,
     own_weight: u64,
     state: Arc<SessionState>,
 }
 
 impl Inner {
+    #[tracing::instrument(skip_all, fields(%peer_id, block_seqno = block_signatures.block_id.seqno))]
     async fn receive_signature(
         self: Arc<Self>,
         peer_id: PeerId,
         block_signatures: Arc<BlockSignatures>,
-    ) -> Result<Arc<[u8; 64]>, ValidationError> {
+        cached: Option<Arc<[u8; 64]>>,
+        semaphore: Arc<Semaphore>,
+    ) -> ValidSignature {
         let block_seqno = block_signatures.block_id.seqno;
         let req = Request::from_tl(proto::rpc::ExchangeSignaturesRef {
             block_seqno,
@@ -294,34 +305,85 @@ impl Inner {
         let slot = block_signatures
             .other_signatures
             .get(&peer_id)
-            .expect("peer id out of sync");
+            .expect("peer info out of sync");
 
-        let mut retry = backon::ExponentialBuilder::default()
-            .with_min_delay(self.backoff.min_interval)
-            .with_max_delay(self.backoff.max_interval)
-            .with_factor(self.backoff.factor)
-            .build();
+        let state = self.state.as_ref();
 
-        let signature = loop {
-            match self.client.query(&peer_id, req.clone()).await {
-                Ok(res) => match res.parse_tl() {
-                    Ok(proto::Exchange::Complete(signature)) => break signature,
-                    Ok(proto::Exchange::Cached) => {}
-                    Err(e) => {
-                        tracing::trace!(%peer_id, block_seqno, "failed to parse response: {e:?}");
+        // Try to use the cached signature first
+        if let Some(signature) = cached {
+            match state.add_signature(&block_signatures, slot, &peer_id, &signature) {
+                Ok(()) => return ValidSignature { peer_id, signature },
+                Err(ValidationError::SignatureChanged) => {
+                    if let Some(signature) = slot.load_full() {
+                        return ValidSignature { peer_id, signature };
                     }
-                },
-                Err(e) => tracing::trace!(%peer_id, block_seqno, "query failed: {e:?}"),
+                }
+                Err(e) => {
+                    tracing::warn!("cached signature is invalid: {e:?}");
+                }
+            }
+        }
+
+        let backoff = &self.config.exchange_signatures_backoff;
+        let signature = loop {
+            let mut retry = backon::ExponentialBuilder::default()
+                .with_min_delay(backoff.min_interval)
+                .with_max_delay(backoff.max_interval)
+                .with_factor(backoff.factor)
+                .build();
+
+            let signature_fut = slot.into_future();
+            let recv_fut = async {
+                loop {
+                    let permit = semaphore.acquire().await.unwrap();
+
+                    let timeout = self.config.exchange_signatures_timeout;
+                    let query = self.client.query(&peer_id, req.clone());
+                    match tokio::time::timeout(timeout, query).await {
+                        Ok(Ok(res)) => match res.parse_tl() {
+                            Ok(proto::Exchange::Complete(signature)) => break signature,
+                            Ok(proto::Exchange::Cached) => {
+                                tracing::trace!("partial signature exchange");
+                            }
+                            Err(e) => {
+                                tracing::trace!("failed to parse response: {e:?}");
+                            }
+                        },
+                        Ok(Err(e)) => tracing::trace!("query failed: {e:?}"),
+                        Err(_) => tracing::trace!("query timed out"),
+                    }
+                    drop(permit);
+
+                    let delay = retry.next().unwrap();
+                    tokio::time::sleep(delay).await;
+                }
+            };
+
+            // TODO: Check if there is any contention on the `signature_fut`
+            let signature = tokio::select! {
+                signature = signature_fut => signature,
+                signature = recv_fut => signature,
+            };
+
+            match state.add_signature(&block_signatures, slot, &peer_id, &signature) {
+                Ok(()) => break signature,
+                Err(ValidationError::SignatureChanged) => {
+                    if let Some(signature) = slot.load_full() {
+                        break signature;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("fetched signature is invalid: {e:?}");
+                }
             }
 
-            let delay = retry.next().unwrap();
-            tokio::time::sleep(delay).await;
+            // NOTE: Outer interval is used for retries in case of invalid signatures.
+            // It will keep this future alive until we either receive enough signatures
+            // from other validators or this one finally return a valid signature.
+            tokio::time::sleep(self.config.failed_exchange_interval).await;
         };
 
-        self.state
-            .add_signature(&block_signatures, slot, &peer_id, &signature)?;
-
-        Ok(signature)
+        ValidSignature { peer_id, signature }
     }
 }
 
@@ -351,10 +413,6 @@ impl SessionState {
             // NOTE: Do nothing here to drop the `arc_swap::Guard` before the signature check
             None => {}
         }
-
-        // TODO: Skip if `validated` is already set?
-        //       The reason against it is that we might slash some validators and
-        //       we would prefer to have some fallback signatures in this case.
 
         let data = Block::build_data_for_sign(&block.block_id);
 
@@ -391,12 +449,17 @@ impl SessionState {
             }
         }
 
-        if can_notify && !block.validated.swap(true, Ordering::Relaxed) {
-            block.validation.cancel();
+        if can_notify {
+            block.validated.store(true, Ordering::Release);
         }
 
         Ok(())
     }
+}
+
+struct ValidSignature {
+    peer_id: PeerId,
+    signature: Arc<[u8; 64]>,
 }
 
 struct BlockSignaturesBuilder {
@@ -413,7 +476,6 @@ impl BlockSignaturesBuilder {
             other_signatures: self.other_signatures,
             total_weight: AtomicU64::new(self.total_weight),
             validated: AtomicBool::new(self.total_weight >= weight_threshold),
-            validation: CancellationToken::new(),
         })
     }
 }
@@ -424,13 +486,6 @@ struct BlockSignatures {
     other_signatures: Arc<SignatureSlotsMap>,
     total_weight: AtomicU64,
     validated: AtomicBool,
-    validation: CancellationToken,
-}
-
-impl Drop for BlockSignatures {
-    fn drop(&mut self) {
-        self.validation.cancel();
-    }
 }
 
 type SignatureSlotsMap = FastHashMap<PeerId, SignatureSlot>;
@@ -451,19 +506,22 @@ impl ExchangeSignatures for SessionState {
 
         let guard = scc::ebr::Guard::new();
 
+        // Full signature exchange if we know the block.
+        // Otherwise, cache the signature for the block to use it later.
+        //
         // NOTE: scc's `peek` does not lock the tree
         let result = if let Some(signatures) = self.block_signatures.peek(&block_seqno, &guard) {
-            // Full signature exchange if we know the block
             let Some(slot) = signatures.other_signatures.get(peer_id) else {
                 return Err(ValidationError::UnknownPeer);
             };
 
-            self.add_signature(&signatures, slot, peer_id, &signature)?;
+            // If more signatures are still needed, validate and store new to the block
+            if !signatures.validated.load(Ordering::Acquire) {
+                self.add_signature(&signatures, slot, peer_id, &signature)?;
+            }
 
             proto::Exchange::Complete(signatures.own_signature.clone())
         } else {
-            // Cache the signature for the block that we don't know yet
-
             // Find the slot for the specified block seqno.
             let Some(signatures) = self.cached_signatures.peek(&block_seqno, &guard) else {
                 return Err(ValidationError::NoSlot);

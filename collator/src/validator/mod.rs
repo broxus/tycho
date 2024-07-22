@@ -3,20 +3,18 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::{KeyPair, PublicKey};
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, Signature, ValidatorDescription};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_util::FastHashMap;
 
-pub mod config;
+pub use self::impls::ValidatorStdImpl;
+
 pub mod proto;
 pub mod rpc;
-pub mod state;
-pub mod types;
 
 mod impls {
+    pub use self::std_impl::ValidatorStdImpl;
 
-    mod new_impl;
     mod std_impl;
 }
 
@@ -36,7 +34,7 @@ pub trait Validator: Send + Sync {
     ) -> Result<()>;
 
     /// Collects signatures for the specified block.
-    async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<()>;
+    async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus>;
 
     /// Cancels validation before the specified block.
     async fn cancel_validation(&self, before: &BlockIdShort) -> Result<()>;
@@ -51,18 +49,12 @@ pub struct NetworkContext {
     pub zerostate_id: BlockId,
 }
 
-pub struct ValidatedBlock {
-    pub block_id: BlockId,
-    pub status: ValidationStatus,
-}
-
 pub enum ValidationStatus {
-    Invalid,
     Skipped,
-    Valid(BlockSignatures),
+    Complete(BlockSignatures),
 }
 
-pub type BlockSignatures = FastHashMap<HashBytes, Signature>;
+pub type BlockSignatures = FastHashMap<PeerId, Arc<[u8; 64]>>;
 
 pub struct BriefValidatorDescr {
     pub peer_id: PeerId,

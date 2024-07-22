@@ -1,22 +1,68 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use scc::TreeIndex;
-use tycho_util::FastHashMap;
+use serde::{Deserialize, Serialize};
+use tycho_util::{serde_helpers, FastHashMap};
 
 use self::session::ValidatorSession;
 use crate::validator::rpc::ExchangeSignaturesBackoff;
-use crate::validator::{BriefValidatorDescr, NetworkContext, Validator};
+use crate::validator::{BriefValidatorDescr, NetworkContext, ValidationStatus, Validator};
 
 mod session;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidatorStdImplConfig {
+    /// Backoff configuration for exchanging signatures.
+    pub exchange_signatures_backoff: ExchangeSignaturesBackoff,
+
+    /// Timeout for exchanging signatures request.
+    ///
+    /// Default: 1 second.
+    #[serde(with = "serde_helpers::humantime")]
+    pub exchange_signatures_timeout: Duration,
+
+    /// Interval for failed exchange retries.
+    ///
+    /// Default: 10 seconds.
+    pub failed_exchange_interval: Duration,
+}
+
+impl Default for ValidatorStdImplConfig {
+    fn default() -> Self {
+        Self {
+            exchange_signatures_backoff: Default::default(),
+            exchange_signatures_timeout: Duration::from_secs(1),
+            failed_exchange_interval: Duration::from_secs(10),
+        }
+    }
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct ValidatorStdImpl {
     inner: Arc<Inner>,
+}
+
+impl ValidatorStdImpl {
+    pub fn new(
+        net_context: NetworkContext,
+        keypair: Arc<KeyPair>,
+        config: ValidatorStdImplConfig,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                net_context,
+                keypair,
+                sessions: Default::default(),
+                config,
+            }),
+        }
+    }
 }
 
 #[async_trait]
@@ -69,7 +115,7 @@ impl Validator for ValidatorStdImpl {
         Ok(())
     }
 
-    async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<()> {
+    async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus> {
         let Some(session) = self
             .inner
             .sessions
@@ -115,7 +161,7 @@ struct Inner {
     net_context: NetworkContext,
     keypair: Arc<KeyPair>,
     sessions: TreeIndex<(ShardIdent, u32), ValidatorSession>,
-    backoff: ExchangeSignaturesBackoff,
+    config: ValidatorStdImplConfig,
 }
 
 type SessionKey = (ShardIdent, u32);
