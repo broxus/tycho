@@ -21,7 +21,9 @@ pub async fn get_client(server_address: SocketAddr) -> anyhow::Result<ControlSer
 
 #[derive(Deserialize, Parser)]
 pub struct PingCmd {
-    pub i: u32,
+    #[arg(short, long)]
+    pub value: u32,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 
@@ -35,7 +37,7 @@ impl PingCmd {
             }
         };
 
-        let Ok(pong) = client.ping(context::current(), self.i).await else {
+        let Ok(pong) = client.ping(context::current(), self.value).await else {
             println!("Failed to get pong");
             return;
         };
@@ -89,7 +91,9 @@ impl TriggerGcCmd {
 
 #[derive(Deserialize, Parser)]
 pub struct SwitchMemoryProfilerCmd {
+    #[arg(short, long)]
     pub target: bool,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 
@@ -113,8 +117,11 @@ impl SwitchMemoryProfilerCmd {
 
 #[derive(Deserialize, Parser)]
 pub struct DumpBlock {
+    #[arg(short, long)]
     pub block_id: BlockId,
+    #[arg(short, long)]
     pub to: PathBuf,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 
@@ -192,14 +199,19 @@ impl DumpBlock {
 
 #[derive(Deserialize, Parser)]
 pub struct GetNextKeyBlockIdsCmd {
+    #[arg(short, long)]
     pub block_id: BlockId,
+    #[arg(short, long)]
     pub limit: usize,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 
 #[derive(Deserialize, Parser)]
 pub struct FindArchiveCmd {
+    #[arg(short, long)]
     pub mc_seqno: u32,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 
@@ -225,8 +237,11 @@ impl FindArchiveCmd {
 
 #[derive(Deserialize, Parser)]
 pub struct DumpArchiveCmd {
+    #[arg(short, long)]
     pub id: u32,
+    #[arg(short, long)]
     pub to: PathBuf,
+    #[arg(short, long)]
     pub node_addr: SocketAddr,
 }
 

@@ -12,7 +12,7 @@ use tarpc::tokio_serde::formats::Bincode;
 use tokio::net::ToSocketAddrs;
 use tokio::sync::{broadcast, watch};
 use tycho_core::block_strider::{ManualGcTrigger, TriggerType};
-use tycho_storage::{KeyBlocksDirection, Storage};
+use tycho_storage::Storage;
 
 use crate::{ControlServer, ManualTriggerValue};
 
@@ -104,20 +104,24 @@ impl ControlServer for ControlServerListener {
         manual_trigger_value: ManualTriggerValue,
         seqno: Option<u32>,
         distance: Option<u32>,
-    ) -> () {
+    ) {
+        tracing::info!(
+            "Incoming trigger_gc connection for control server from {}",
+            self.connection_address
+        );
         let trigger_type = match (seqno, distance) {
             (Some(_), Some(_)) => {
                 tracing::error!("Params should be exclusive");
-                return ();
+                return;
             }
             (None, None) => {
                 tracing::error!("Params are not specified");
-                return ();
+                return;
             }
             (Some(seqno), None) => TriggerType::McSeqno(seqno),
             (None, Some(distance)) => TriggerType::Distance(distance),
         };
-        let mtv = match (manual_trigger_value) {
+        let mtv = match manual_trigger_value {
             ManualTriggerValue::Blocks => ManualGcTrigger::Blocks { ty: trigger_type },
             ManualTriggerValue::States => ManualGcTrigger::States { ty: trigger_type },
             ManualTriggerValue::Archives => ManualGcTrigger::Archives { ty: trigger_type },
@@ -132,6 +136,10 @@ impl ControlServer for ControlServerListener {
     }
 
     async fn trigger_memory_profiler(self, _: Context, set: bool) -> bool {
+        tracing::info!(
+            "Incoming trigger_memory_profiler connection for control server from {}",
+            self.connection_address
+        );
         let is_active = self
             .server
             .inner
@@ -146,11 +154,14 @@ impl ControlServer for ControlServerListener {
             tracing::error!("Failed to change memory profiler state. {e:?}");
             return false;
         }
-
-        return true;
+        true
     }
 
     async fn get_block(self, _: Context, block_id: BlockId) -> Option<Vec<u8>> {
+        tracing::info!(
+            "Incoming get_block connection for control server from {}",
+            self.connection_address
+        );
         let block_handle_storage = self.server.inner.storage.block_handle_storage();
         let block_storage = self.server.inner.storage.block_storage();
 
@@ -170,6 +181,10 @@ impl ControlServer for ControlServerListener {
     }
 
     async fn get_block_proof(self, _: Context, block_id: BlockId) -> Option<(Vec<u8>, bool)> {
+        tracing::info!(
+            "Incoming get_block_proof connection for control server from {}",
+            self.connection_address
+        );
         let block_handle_storage = self.server.inner.storage.block_handle_storage();
         let block_storage = self.server.inner.storage.block_storage();
 
@@ -190,6 +205,10 @@ impl ControlServer for ControlServerListener {
     }
 
     async fn get_archive_info(self, _: Context, mc_seqno: u32) -> Option<u32> {
+        tracing::info!(
+            "Incoming get_archive_info connection for control server from {}",
+            self.connection_address
+        );
         let node_state = self.server.inner.storage.node_state();
 
         match node_state.load_last_mc_block_id() {
@@ -199,11 +218,7 @@ impl ControlServer for ControlServerListener {
                 }
 
                 let block_storage = self.server.inner.storage.block_storage();
-
-                match block_storage.get_archive_id(mc_seqno) {
-                    Some(id) => Some(id),
-                    None => None,
-                }
+                block_storage.get_archive_id(mc_seqno)
             }
             None => {
                 tracing::warn!("get_archive_id failed: no blocks applied");
@@ -219,8 +234,11 @@ impl ControlServer for ControlServerListener {
         limit: u32,
         offset: u64,
     ) -> Option<Vec<u8>> {
+        tracing::info!(
+            "Incoming get_archive_slice connection for control server from {}",
+            self.connection_address
+        );
         let block_storage = self.server.inner.storage.block_storage();
-
         let archive_res = block_storage.get_archive_slice(id, offset as usize, limit as usize);
 
         match archive_res {

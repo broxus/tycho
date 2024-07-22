@@ -126,7 +126,7 @@ impl GcSubscriber {
                     match tr {
                         Ok(ManualGcTrigger::Archives {ty}) => {
                             tracing::debug!("Archives GC manual trigger received {:?}", &ty);
-                            if let Ok(Some((seqno, distance))) = Self::get_mc_block_seqno_manual(ty, storage.clone()).await {
+                            if let Ok(Some((seqno, distance))) = Self::find_mc_seqno_by_trigger_tye(ty, storage.clone()).await {
                                 source = Some(HandleSource::ManualSelection {seqno, distance});
                             } else {
                                 continue;
@@ -176,7 +176,7 @@ impl GcSubscriber {
         }
     }
 
-    async fn get_mc_block_seqno_manual(
+    async fn find_mc_seqno_by_trigger_tye(
         ty: TriggerType,
         storage: Storage,
     ) -> Result<Option<(u32, u32)>> {
@@ -232,7 +232,7 @@ impl GcSubscriber {
                     GcTriggerSource::Automatic {data}
                 }
                 Ok(data) = manual_gc_trigger.recv() => {
-                    tracing::debug!("Blocks GC manual trigger received {:?}", &data);
+                    tracing::debug!("Blocks GC received manual trigger for {:?}", &data);
                     let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
                     GcTriggerSource::Manual {data, last_known_mc_seqno}
                 }
@@ -266,7 +266,10 @@ impl GcSubscriber {
                     },
                     _,
                 ) => mc_seqno,
-                (GcTriggerSource::Manual { .. }, _) => continue,
+                (GcTriggerSource::Manual { data, .. }, _) => {
+                    tracing::info!("Block GC ignoring {data:?}");
+                    continue;
+                }
                 (
                     GcTriggerSource::Automatic {
                         data: Some(trigger),
@@ -418,17 +421,21 @@ impl GcSubscriber {
             last_triggered_at = Some(Instant::now());
 
             let target_seqno = match trigger_source {
-                GcTriggerSource::Manual {
-                    data: ManualGcTrigger::States { ty },
-                    ..
-                } => match Self::get_mc_block_seqno_manual(ty, storage.clone()).await {
-                    Ok(Some((seqno, distance))) => seqno.saturating_sub(distance),
-                    _ => continue,
+                GcTriggerSource::Manual { data, .. } => match data {
+                    ManualGcTrigger::States { ty } => {
+                        let Ok(Some((seqno, distance))) =
+                            Self::find_mc_seqno_by_trigger_tye(ty, storage.clone()).await
+                        else {
+                            tracing::error!("Failed to determine target seqno");
+                            continue;
+                        };
+                        seqno.saturating_sub(distance)
+                    }
+                    _ => {
+                        tracing::debug!("Ignoring other types of GC");
+                        continue;
+                    }
                 },
-                GcTriggerSource::Manual { .. } => {
-                    tracing::debug!("Ignoring other types of GC");
-                    continue;
-                }
                 GcTriggerSource::Automatic { data } => {
                     let Some(data) = data else {
                         continue;
