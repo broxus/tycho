@@ -82,7 +82,7 @@ impl ZerostateProvider for FileZerostateProvider {
 
 fn load_zerostate(tracker: &MinRefMcStateTracker, path: &PathBuf) -> Result<ShardStateStuff> {
     let data = std::fs::read(path).context("failed to read file")?;
-    let file_hash = Boc::file_hash(&data);
+    let file_hash = Boc::file_hash_blake(&data);
 
     let root = Boc::decode(data).context("failed to decode BOC")?;
     let root_hash = *root.repr_hash();

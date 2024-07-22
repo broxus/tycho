@@ -14,7 +14,7 @@ arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 bytesize = { workspace = true }
-everscale-types = { workspace = true }
+everscale-types = { workspace = true, features = ["blake3", "rayon"] }
 futures-util = { workspace = true }
 metrics = { workspace = true }
 parking_lot = { workspace = true }

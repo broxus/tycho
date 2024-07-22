@@ -3,9 +3,8 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use everscale_types::cell::Load;
 use everscale_types::models::{Block, BlockId, BlockIdShort, BlockProof};
-use sha2::Digest;
+use everscale_types::prelude::*;
 use tycho_block_util::archive::{ArchiveEntryId, ArchiveReader, WithArchiveData};
 
 pub struct Archive {
@@ -52,7 +51,7 @@ pub struct ArchiveDataEntry {
 }
 
 pub fn deserialize_block(id: &BlockId, data: &[u8]) -> Result<Block, ArchiveDataError> {
-    let file_hash = sha2::Sha256::digest(data);
+    let file_hash = Boc::file_hash_blake(data);
     if id.file_hash.as_slice() != file_hash.as_slice() {
         Err(ArchiveDataError::InvalidFileHash(id.as_short_id()))
     } else {

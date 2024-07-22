@@ -5,7 +5,6 @@ use everscale_crypto::ed25519;
 use everscale_types::boc::Boc;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
-use sha2::Digest;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};
 use tycho_storage::{BlockMetaData, Storage};
@@ -70,7 +69,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
 
     // master state
     let master_bytes = include_bytes!("../../test/test_state_2_master.boc");
-    let master_file_hash: HashBytes = sha2::Sha256::digest(master_bytes).into();
+    let master_file_hash = Boc::file_hash_blake(master_bytes);
     let master_root = Boc::decode(master_bytes)?;
     let master_root_hash = *master_root.repr_hash();
     let master_state = master_root.parse::<Box<ShardStateUnsplit>>()?;
