@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
@@ -156,11 +155,9 @@ impl McData {
 
 #[derive(Clone)]
 pub struct BlockCandidate {
-    pub block_id: BlockId,
-    pub block: Block,
+    pub block: BlockStuffAug,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
-    pub data: Bytes,
     pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
@@ -219,9 +216,6 @@ impl ValidatedBlock {
 }
 
 pub struct BlockStuffForSync {
-    // STUB: will not parse Block because candidate does not contain real block
-    // TODO: remove `block_id` and make `block_stuff: BlockStuff` when collator will generate real blocks
-    pub block_id: BlockId,
     pub block_stuff_aug: BlockStuffAug,
     pub signatures: FastHashMap<HashBytes, Signature>,
     pub prev_blocks_ids: Vec<BlockId>,

@@ -364,7 +364,7 @@ impl CollatorStdImpl {
         metrics::counter!("tycho_do_collate_blocks_count", labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", labels).set(self.next_block_id_short.seqno);
 
-        let block_id = finalized.block_candidate.block_id;
+        let block_id = *finalized.block_candidate.block.id();
         let new_state_stuff = JoinTask::new({
             let meta = BlockMetaData {
                 is_key_block: false, // TODO: set from collation data
@@ -390,7 +390,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_apply_queue_diff_time", labels);
             self.mq_adapter
-                .apply_diff(diff, finalized.block_candidate.block_id.as_short_id())
+                .apply_diff(diff, block_id.as_short_id())
                 .await?;
             apply_queue_diff_elapsed = histogram.finish();
         }

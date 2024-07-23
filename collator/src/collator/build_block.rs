@@ -8,6 +8,8 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use humantime::format_duration;
 use tokio::time::Instant;
+use tycho_block_util::archive::WithArchiveData;
+use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
 use tycho_util::metrics::HistogramGuard;
@@ -245,8 +247,6 @@ impl CollatorStdImpl {
         };
 
         let build_block_elapsed;
-        let new_block_id;
-        let new_block_boc;
         let new_block = {
             let histogram = HistogramGuard::begin_with_labels(
                 "tycho_collator_finalize_build_block_time",
@@ -291,7 +291,7 @@ impl CollatorStdImpl {
             }
 
             // construct block
-            let new_block = Block {
+            let block = Block {
                 global_id: mc_data.global_id,
                 info: Lazy::new(&new_block_info)?,
                 value_flow: Lazy::new(&value_flow)?,
@@ -302,24 +302,25 @@ impl CollatorStdImpl {
             };
 
             // TODO: Check (assert) whether the serialized block contains usage cells
-            let new_block_root = CellBuilder::build_from(&new_block)?;
+            let root = CellBuilder::build_from(&block)?;
 
-            new_block_boc = everscale_types::boc::Boc::encode(&new_block_root);
-            new_block_id = BlockId {
+            let data = everscale_types::boc::Boc::encode(&root);
+            let block_id = BlockId {
                 shard: collation_data.block_id_short.shard,
                 seqno: collation_data.block_id_short.seqno,
-                root_hash: *new_block_root.repr_hash(),
-                file_hash: Boc::file_hash_blake(&new_block_boc),
+                root_hash: *root.repr_hash(),
+                file_hash: Boc::file_hash_blake(&data),
             };
 
             build_block_elapsed = histogram.finish();
 
-            new_block
+            let block = BlockStuff::from_block_and_root(&block_id, block, root);
+            WithArchiveData::new(block, data)
         };
 
         let mc_data = mc_state_extra.map(|extra| {
             let prev_key_block_seqno = if extra.after_key_block {
-                new_block_id.seqno
+                new_block.id().seqno
             } else if let Some(block_ref) = &extra.last_key_block {
                 block_ref.seqno
             } else {
@@ -327,8 +328,8 @@ impl CollatorStdImpl {
             };
 
             Arc::new(McData {
-                global_id: new_block.global_id,
-                block_id: new_block_id,
+                global_id: new_block.as_ref().global_id,
+                block_id: *new_block.id(),
 
                 prev_key_block_seqno,
                 gen_lt: new_block_info.end_lt,
@@ -346,19 +347,14 @@ impl CollatorStdImpl {
         let collated_data = vec![];
 
         let block_candidate = Box::new(BlockCandidate {
-            block_id: new_block_id,
             block: new_block,
             prev_blocks_ids: prev_shard_data.blocks_ids().clone(),
             top_shard_blocks_ids: collation_data.top_shard_blocks_ids.clone(),
-            data: new_block_boc.into(),
             collated_data,
             collated_file_hash: HashBytes::ZERO,
             chain_time: (new_block_info.gen_utime as u64 * 1000)
                 + new_block_info.gen_utime_ms as u64,
         });
-
-        // build new shard state using merkle update
-        // to get updated state without UsageTree
 
         let total_elapsed = histogram.finish();
 
