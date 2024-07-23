@@ -1169,6 +1169,7 @@ where
                     will collate next master block with chain time {}ms",
                     mc_block_min_interval_ms, max_first_chain_time_that_elapsed,
                 );
+                chain_times_guard.mc_block_latest_chain_time = max_first_chain_time_that_elapsed;
                 return (
                     should_collate_mc_block,
                     Some(max_first_chain_time_that_elapsed),

@@ -5,7 +5,7 @@ use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signatur
 use everscale_types::prelude::*;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::types::{BlockCandidate};
+use crate::types::BlockCandidate;
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
