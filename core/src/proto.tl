@@ -72,8 +72,12 @@ blockchain.blockFull.empty = blockchain.BlockFull;
 * A successul response for the 'getArchiveInfo' query
 *
 * @param id             archive id
+* @param size           archive size in bytes
 */
-blockchain.archiveInfo.found id:long = blockchain.ArchiveInfo;
+blockchain.archiveInfo.found
+    id:long
+    size:long
+    = blockchain.ArchiveInfo;
 /**
 * An unsuccessul response for the 'getArchiveInfo' query
 */

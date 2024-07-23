@@ -381,7 +381,7 @@ impl BlockchainRpcClient {
             .await;
 
         // Find a neighbour which has the requested archive
-        let (neighbour, archive_id) = 'info: {
+        let (neighbour, archive_id, archive_size) = 'info: {
             let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
 
             let mut futures = FuturesUnordered::new();
@@ -400,7 +400,7 @@ impl BlockchainRpcClient {
                 };
 
                 match info {
-                    ArchiveInfo::Found { id } => break 'info (handle.accept(), id),
+                    ArchiveInfo::Found { id, size } => break 'info (handle.accept(), id, size),
                     ArchiveInfo::NotFound => continue,
                 }
             }
@@ -413,7 +413,7 @@ impl BlockchainRpcClient {
             };
         };
 
-        tracing::debug!(peer_id = %neighbour.peer_id(), archive_id, "archive found");
+        tracing::debug!(peer_id = %neighbour.peer_id(), archive_id, "archive found. {archive_size} bytes");
 
         let mut verifier = ArchiveVerifier::default();
 

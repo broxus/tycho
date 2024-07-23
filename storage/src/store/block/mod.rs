@@ -550,6 +550,13 @@ impl BlockStorage {
         }
     }
 
+    pub fn get_archive_size(&self, id: u32) -> Result<Option<usize>> {
+        match self.db.archives.get(id.to_be_bytes())? {
+            Some(slice) => Ok(Some(slice.len())),
+            None => Ok(None),
+        }
+    }
+
     /// Loads an archive slice.
     pub fn get_archive_slice(
         &self,

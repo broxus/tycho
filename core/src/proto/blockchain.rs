@@ -52,8 +52,8 @@ pub enum PersistentStateInfo {
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
-    #[tl(id = "blockchain.archiveInfo.found", size_hint = 8)]
-    Found { id: u64 },
+    #[tl(id = "blockchain.archiveInfo.found", size_hint = 16)]
+    Found { id: u64, size: u64 },
     #[tl(id = "blockchain.archiveInfo.notFound")]
     NotFound,
 }
