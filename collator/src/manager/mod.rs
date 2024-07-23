@@ -1438,13 +1438,30 @@ where
                 .shards
                 .entry(block_container.key().shard)
                 .or_default();
-            if let Some(_existing) =
-                shard_cache.insert(block_container.key().seqno, block_container)
-            {
-                bail!(
-                    "Should not collate the same shard block ({}) again!",
-                    candidate_id,
-                );
+
+            match shard_cache.entry(block_container.key().seqno) {
+                std::collections::btree_map::Entry::Occupied(occupied) => {
+                    assert_eq!(
+                        occupied.get().block_id().root_hash,
+                        block_container.block_id().root_hash,
+                        "Block received from bc root hash mismatch with collated one"
+                    );
+
+                    match occupied.get().send_sync_status {
+                        SendSyncStatus::Synced => {
+                            already_stored = true;
+                        }
+                        _ => {
+                            bail!(
+                                "Should not collate the same shard block ({}) again!",
+                                candidate_id,
+                            );
+                        }
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert(block_container);
+                }
             }
         }
 
