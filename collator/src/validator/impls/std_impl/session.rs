@@ -13,6 +13,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use scc::TreeIndex;
 use tokio::sync::{Notify, Semaphore};
+use tokio_util::sync::CancellationToken;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
 use tycho_util::futures::JoinTask;
 use tycho_util::FastHashMap;
@@ -90,14 +91,23 @@ impl ValidatorSession {
         })
     }
 
-    pub fn cancel_before(&self, block_seqno: u32) {
+    pub fn cancel_until(&self, block_seqno: u32) {
         self.inner
             .min_seqno
             .fetch_max(block_seqno, Ordering::Release);
 
+        let range = ..=block_seqno;
+
         let state = self.inner.state.as_ref();
-        state.cached_signatures.remove_range(..block_seqno);
-        state.block_signatures.remove_range(..block_seqno);
+        state.cached_signatures.remove_range(range.clone());
+
+        let guard = scc::ebr::Guard::new();
+        for (_, validation) in state.block_signatures.range(range.clone(), &guard) {
+            validation.cancelled.cancel();
+        }
+        drop(guard);
+
+        state.block_signatures.remove_range(..=block_seqno);
     }
 
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
@@ -182,13 +192,21 @@ impl ValidatorSession {
         }
 
         let mut session_cancelled = pin!(state.cancelled_signal.notified());
+        let mut block_cancelled = pin!(block_signatures.cancelled.cancelled());
         while total_weight < state.weight_threshold {
             let res = tokio::select! {
                 res = futures.next() => match res {
                     Some(res) => res,
                     None => anyhow::bail!("no more signatures to collect but the threshold is not reached"),
                 },
-                _ = &mut session_cancelled => return Ok(ValidationStatus::Skipped),
+                _ = &mut session_cancelled => {
+                    tracing::trace!(block_seqno = block_id.seqno, "session cancelled");
+                    return Ok(ValidationStatus::Skipped)
+                },
+                _ = &mut block_cancelled => {
+                    tracing::trace!(block_seqno = block_id.seqno, "block cancelled");
+                    return Ok(ValidationStatus::Skipped)
+                },
             };
 
             let validator_info = state
@@ -504,6 +522,7 @@ impl BlockSignaturesBuilder {
             other_signatures: self.other_signatures,
             total_weight: AtomicU64::new(self.total_weight),
             validated: AtomicBool::new(self.total_weight >= weight_threshold),
+            cancelled: CancellationToken::new(),
         })
     }
 }
@@ -514,6 +533,7 @@ struct BlockSignatures {
     other_signatures: Arc<SignatureSlotsMap>,
     total_weight: AtomicU64,
     validated: AtomicBool,
+    cancelled: CancellationToken,
 }
 
 type SignatureSlotsMap = FastHashMap<PeerId, SignatureSlot>;

@@ -49,6 +49,7 @@ pub struct ValidatorNetworkContext {
     pub zerostate_id: BlockId,
 }
 
+#[derive(Debug, Clone)]
 pub enum ValidationStatus {
     Skipped,
     Complete(BlockSignatures),
@@ -56,6 +57,7 @@ pub enum ValidationStatus {
 
 pub type BlockSignatures = FastHashMap<PeerId, Arc<[u8; 64]>>;
 
+#[derive(Debug, Clone)]
 pub struct BriefValidatorDescr {
     pub peer_id: PeerId,
     pub public_key: PublicKey,

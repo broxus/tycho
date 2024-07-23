@@ -117,6 +117,10 @@ impl PeerResolver {
         }
     }
 
+    pub fn dht_service(&self) -> &DhtService {
+        &self.inner.dht_service
+    }
+
     // TODO: Use affinity flag to increase the handle affinity.
     pub fn insert(&self, peer_id: &PeerId, _with_affinity: bool) -> PeerResolverHandle {
         use dashmap::mapref::entry::Entry;

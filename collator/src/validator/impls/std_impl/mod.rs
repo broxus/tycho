@@ -137,13 +137,13 @@ impl Validator for ValidatorStdImpl {
         session.validate_block(block_id).await
     }
 
-    fn cancel_validation(&self, before: &BlockIdShort) -> Result<()> {
+    fn cancel_validation(&self, until: &BlockIdShort) -> Result<()> {
         let guard = scc::ebr::Guard::new();
 
         let session = {
             // Find the latest session and remove all previous ones.
             let mut latest_session = None;
-            let sessions_range = (before.shard, 0)..=(before.shard, u32::MAX);
+            let sessions_range = (until.shard, 0)..=(until.shard, u32::MAX);
             for (session_key, session) in self.inner.sessions.range(sessions_range, &guard) {
                 if let Some((prev_key, _)) = latest_session.replace((session_key, session)) {
                     self.inner.sessions.remove(prev_key);
@@ -158,7 +158,7 @@ impl Validator for ValidatorStdImpl {
             }
         };
 
-        session.cancel_before(before.seqno);
+        session.cancel_until(until.seqno);
         Ok(())
     }
 }

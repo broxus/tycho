@@ -8,7 +8,7 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_network::{DhtClient, OverlayService, PeerId, PeerResolver};
+use tycho_network::PeerId;
 use tycho_util::{serde_helpers, FastHashMap};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -258,30 +258,6 @@ impl IntAdrExt for IntAddr {
             Self::Var(var_addr) => HashBytes::from_slice(var_addr.address.as_slice()),
         }
     }
-}
-
-#[derive(Clone)]
-pub struct ValidatorNetwork {
-    pub overlay_service: OverlayService,
-    pub peer_resolver: PeerResolver,
-    pub dht_client: DhtClient,
-}
-
-impl From<NodeNetwork> for ValidatorNetwork {
-    fn from(node_network: NodeNetwork) -> Self {
-        Self {
-            overlay_service: node_network.overlay_service,
-            peer_resolver: node_network.peer_resolver,
-            dht_client: node_network.dht_client,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct NodeNetwork {
-    pub overlay_service: OverlayService,
-    pub peer_resolver: PeerResolver,
-    pub dht_client: DhtClient,
 }
 
 #[derive(Debug, Clone, Default)]

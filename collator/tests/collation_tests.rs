@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use everscale_crypto::ed25519;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
@@ -19,10 +20,13 @@ use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
 use tycho_collator::types::{supported_capabilities, CollationConfig, MsgsExecutionParams};
+use tycho_collator::validator::ValidatorStdImpl;
 use tycho_core::block_strider::{
     BlockProvider, BlockStrider, EmptyBlockProvider, OptionalBlockStuff,
     PersistentBlockStriderState, PrintSubscriber, StateSubscriber, StateSubscriberContext,
 };
+
+mod common;
 
 #[derive(Clone)]
 struct StrangeBlockProvider {
@@ -77,8 +81,10 @@ async fn test_collation_process_on_stubs() {
 
     block_strider.run().await.unwrap();
 
-    let mut rnd = rand::thread_rng();
-    let node_1_keypair = Arc::new(everscale_crypto::ed25519::KeyPair::generate(&mut rnd));
+    let node_1_secret = ed25519::SecretKey::generate(&mut rand::thread_rng());
+    let node_1_keypair = Arc::new(ed25519::KeyPair::from(&node_1_secret));
+
+    let validator_network = common::make_validator_network(&node_1_secret, &zerostate_id);
 
     let config = CollationConfig {
         supported_block_version: 50,
@@ -96,24 +102,6 @@ async fn test_collation_process_on_stubs() {
     };
 
     tracing::info!("Trying to start CollationManager");
-
-    let node_network = tycho_collator::test_utils::create_node_network();
-    let validator_config = ValidatorConfig {
-        request_signatures_backoff_config: BackoffConfig {
-            min_delay: Duration::from_millis(50),
-            max_delay: Duration::from_millis(150),
-            factor: 2.0,
-            max_times: 999999999,
-        },
-        error_backoff_config: BackoffConfig {
-            min_delay: Duration::from_millis(50),
-            max_delay: Duration::from_secs(1),
-            factor: 2.0,
-            max_times: 999999999,
-        },
-        request_timeout: Duration::from_millis(1000),
-        delay_between_requests: Duration::from_millis(50),
-    };
 
     let queue_config = QueueConfig {
         persistent_state_config: PersistentStateConfig {
@@ -142,10 +130,11 @@ async fn test_collation_process_on_stubs() {
         Arc::new(message_queue_adapter),
         |listener| StateNodeAdapterStdImpl::new(listener, storage.clone()),
         MempoolAdapterStubImpl::with_stub_externals,
-        ValidatorStdImplFactory {
-            network: node_network.clone().into(),
-            config: validator_config,
-        },
+        ValidatorStdImpl::new(
+            validator_network,
+            node_1_keypair.clone(),
+            Default::default(),
+        ),
         CollatorStdImplFactory,
         #[cfg(feature = "test")]
         vec![
