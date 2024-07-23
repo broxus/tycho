@@ -338,10 +338,14 @@ where
             let short_id = block_id.as_short_id();
             self.validator.cancel_validation(&short_id)?;
             // Need to do validation routine
-            self.process_valid_master_block(&block_id).await?;
+            if block_id.is_masterchain() {
+                self.process_valid_master_block(&block_id).await?;
+            } else {
+                self.process_valid_shard_block(&block_id).await?;
+            }
         }
 
-        if block_id.is_masterchain() {
+        if block_id.is_masterchain() && self.get_last_processed_mc_block_id().is_none() {
             let mc_data = McData::load_from_state(&state)?;
             self.refresh_collation_sessions(mc_data).await?;
         }
