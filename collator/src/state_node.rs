@@ -4,10 +4,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use everscale_types::boc::BocRepr;
+use everscale_types::merkle::MerkleProof;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tokio::sync::broadcast;
-use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockHandle, BlockMetaData, BlockProofHandle, Storage};
@@ -159,13 +159,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn accept_block(&self, block: BlockStuffForSync) -> Result<()> {
-        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block.block_id.as_short_id());
+        let block_id = *block.block_stuff_aug.id();
 
-        let block_id = block.block_id;
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Block accepted: {}", block_id.as_short_id());
+
         self.blocks
-            .entry(block.block_id.shard)
+            .entry(block_id.shard)
             .or_insert_with(BTreeMap::new)
-            .insert(block.block_id.seqno, block);
+            .insert(block_id.seqno, block);
 
         let broadcast_result = self.broadcaster.send(block_id).ok();
         tracing::trace!(target: tracing_targets::STATE_NODE_ADAPTER, "Block broadcast_result: {:?}", broadcast_result);
@@ -209,7 +210,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                         for id in &prev_mc_block.top_shard_blocks_ids {
                             to_split.push((id.shard, id.seqno + 1));
                         }
-                        to_split.push((shard, prev_mc_block.block_id.seqno + 1));
+                        to_split.push((shard, prev_mc_block.block_stuff_aug.id().seqno + 1));
                     }
                 }
 
@@ -283,13 +284,10 @@ impl StateNodeAdapterStdImpl {
 
     async fn save_block_proof(&self, block: &BlockStuffForSync) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_collator_save_block_proof_time");
-        let ArchiveData::New(bytes) = &block.block_stuff_aug.archive_data else {
-            return Ok(());
-        };
 
-        let block_info = block.block_stuff_aug.block().info.load()?;
-        let proof = Self::prepare_block_proof(&block.block_id, bytes, &block.signatures)
-            .context("failed to prepare block proof")?;
+        let PreparedProof { proof, block_info } =
+            prepare_block_proof(&block.block_stuff_aug.data, &block.signatures)
+                .context("failed to prepare block proof")?;
 
         let is_link = !proof.proof_for.is_masterchain();
         let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
@@ -319,92 +317,97 @@ impl StateNodeAdapterStdImpl {
 
         Ok(())
     }
+}
 
-    // TODO: This should possibly panic on error?
-    pub fn prepare_block_proof(
-        block_id: &BlockId,
-        block_boc: &[u8],
-        signatures: &FastHashMap<HashBytes, Signature>,
-    ) -> Result<Box<BlockProof>> {
-        let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
+// TODO: This should possibly panic on error?
+fn prepare_block_proof(
+    block_stuff: &BlockStuff,
+    signatures: &FastHashMap<HashBytes, Signature>,
+) -> Result<PreparedProof> {
+    let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
 
-        let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
-        let cell = Boc::decode(block_boc)?;
-        let tracked_cell = usage_tree.track(&cell);
-        let block = tracked_cell.parse::<Block>()?;
-        let subtree = block.value_flow.inner().as_ref();
-        usage_tree.add_subtree(subtree);
+    let mut usage_tree = UsageTree::new(UsageTreeMode::OnLoad).with_subtrees();
+    let tracked_cell = usage_tree.track(block_stuff.root_cell());
+    let block = tracked_cell.parse::<Block>()?;
+    let subtree = block.value_flow.inner().as_ref();
+    usage_tree.add_subtree(subtree);
 
-        let info = block.load_info()?;
+    let block_info = block.load_info()?;
 
-        info.load_prev_ref()?;
-        info.prev_vert_ref.map(|x| x.load());
-        info.master_ref.map(|x| x.load());
-        let extra = block.load_extra().unwrap();
+    block_info.load_prev_ref()?;
+    block_info.prev_vert_ref.as_ref().map(|x| x.load());
+    block_info.master_ref.as_ref().map(|x| x.load());
+    let extra = block.load_extra().unwrap();
 
-        let _state_update = block.load_state_update();
-        extra.load_custom()?;
+    let _state_update = block.load_state_update();
+    extra.load_custom()?;
 
-        let merkle_proof =
-            everscale_types::merkle::MerkleProof::create(cell.as_ref(), usage_tree).build()?;
+    let merkle_proof = MerkleProof::create(block_stuff.root_cell().as_ref(), usage_tree).build()?;
 
-        let cell = CellBuilder::build_from(merkle_proof)?;
+    let root = CellBuilder::build_from(merkle_proof)?;
 
-        let signatures = if block_id.is_masterchain() {
-            Some(Self::process_signatures(
-                info.gen_validator_list_hash_short,
-                info.gen_catchain_seqno,
-                signatures,
-            )?)
-        } else {
-            None
-        };
-
-        Ok(Box::new(BlockProof {
-            proof_for: *block_id,
-            root: cell,
+    let signatures = if block_stuff.id().is_masterchain() {
+        Some(process_signatures(
+            block_info.gen_validator_list_hash_short,
+            block_info.gen_catchain_seqno,
             signatures,
-        }))
-    }
+        )?)
+    } else {
+        None
+    };
 
-    fn process_signatures(
-        gen_validator_list_hash_short: u32,
-        gen_catchain_seqno: u32,
-        block_signatures: &FastHashMap<HashBytes, Signature>,
-    ) -> Result<everscale_types::models::block::BlockSignatures> {
-        use everscale_types::dict;
-
-        // TODO: Add helper for owned iter
-        let signatures = Dict::from_raw(dict::build_dict_from_sorted_iter(
-            block_signatures
-                .iter()
-                .enumerate()
-                .map(|(i, (key, value))| {
-                    let key_hash = tl_proto::hash(everscale_crypto::tl::PublicKey::Ed25519 {
-                        key: &key.as_array(),
-                    });
-
-                    (i as u16, BlockSignature {
-                        node_id_short: key_hash.into(),
-                        signature: *value,
-                    })
-                }),
-            16,
-            &mut Cell::empty_context(),
-        )?);
-
-        let sig_count = block_signatures.len() as u32;
-
-        Ok(everscale_types::models::block::BlockSignatures {
-            validator_info: ValidatorBaseInfo {
-                validator_list_hash_short: gen_validator_list_hash_short,
-                catchain_seqno: gen_catchain_seqno,
-            },
-            signature_count: sig_count,
-            total_weight: sig_count as u64,
+    Ok(PreparedProof {
+        proof: Box::new(BlockProof {
+            proof_for: *block_stuff.id(),
+            root,
             signatures,
-        })
-    }
+        }),
+        block_info,
+    })
+}
+
+fn process_signatures(
+    gen_validator_list_hash_short: u32,
+    gen_catchain_seqno: u32,
+    block_signatures: &FastHashMap<HashBytes, Signature>,
+) -> Result<everscale_types::models::block::BlockSignatures> {
+    use everscale_types::dict;
+
+    // TODO: Add helper for owned iter
+    let signatures = Dict::from_raw(dict::build_dict_from_sorted_iter(
+        block_signatures
+            .iter()
+            .enumerate()
+            .map(|(i, (key, value))| {
+                let key_hash = tl_proto::hash(everscale_crypto::tl::PublicKey::Ed25519 {
+                    key: &key.as_array(),
+                });
+
+                (i as u16, BlockSignature {
+                    node_id_short: key_hash.into(),
+                    signature: *value,
+                })
+            }),
+        16,
+        &mut Cell::empty_context(),
+    )?);
+
+    let sig_count = block_signatures.len() as u32;
+
+    Ok(everscale_types::models::block::BlockSignatures {
+        validator_info: ValidatorBaseInfo {
+            validator_list_hash_short: gen_validator_list_hash_short,
+            catchain_seqno: gen_catchain_seqno,
+        },
+        signature_count: sig_count,
+        total_weight: sig_count as u64,
+        signatures,
+    })
+}
+
+struct PreparedProof {
+    proof: Box<BlockProof>,
+    block_info: BlockInfo,
 }
 
 enum BlockIdToWait<'a> {

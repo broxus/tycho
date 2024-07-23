@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use everscale_crypto::ed25519;
 use everscale_types::boc::Boc;
-use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_network::{DhtConfig, DhtService, Network, OverlayService, PeerId, Router};

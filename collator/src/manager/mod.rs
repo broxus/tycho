@@ -16,7 +16,7 @@ use self::types::{
     BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache,
     McBlockSubgraphToSend, SendSyncStatus,
 };
-use self::utils::{build_block_stuff_for_sync, find_us_in_collators_set};
+use self::utils::find_us_in_collators_set;
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
 use crate::queue_adapter::MessageQueueAdapter;
@@ -864,7 +864,7 @@ where
     #[tracing::instrument(
         skip_all,
         fields(
-            block_id = %collation_result.candidate.block_id.as_short_id(),
+            block_id = %collation_result.candidate.block.id().as_short_id(),
             ct = collation_result.candidate.chain_time,
         ),
     )]
@@ -879,17 +879,18 @@ where
         let _histogram =
             HistogramGuard::begin("tycho_collator_process_collated_block_candidate_time");
 
+        let block_id = *collation_result.candidate.block.id();
+
         // find session related to this block by shard
         let session_info = self
             .active_collation_sessions
-            .get(&collation_result.candidate.block_id.shard)
+            .get(&block_id.shard)
             .ok_or(anyhow!(
                 "There is no active collation session for the shard that block belongs to"
             ))?
             .clone();
 
         let candidate_chain_time = collation_result.candidate.chain_time;
-        let candidate_id = collation_result.candidate.block_id;
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Saving block candidate to cache...",
@@ -907,11 +908,11 @@ where
         let _handle = self
             .validator
             .clone()
-            .spawn_validate(candidate_id, session_info.seqno())
+            .spawn_validate(block_id, session_info.seqno())
             .await;
 
         debug_assert_eq!(
-            candidate_id.is_masterchain(),
+            block_id.is_masterchain(),
             collation_result.mc_data.is_some(),
         );
 
@@ -922,26 +923,25 @@ where
                 "Candidate is a master block",
             );
             self.process_last_collated_mc_block_chain_time(candidate_chain_time);
-            self.set_last_collated_mc_block_id(candidate_id);
+            self.set_last_collated_mc_block_id(block_id);
 
             // collate next master block right now if there are pending internals
             if collation_result.has_pending_internals {
                 tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                     "there are pending internals in master queue",
                 );
-                self.enqueue_mc_block_collation(candidate_chain_time, Some(candidate_id))
+                self.enqueue_mc_block_collation(candidate_chain_time, Some(block_id))
                     .await?;
             } else {
                 // otherwise execute master block processing routines
                 tracing::debug!(
                     target: tracing_targets::COLLATION_MANAGER,
                     "Candidate (id: {}, chain_time: {}): will notify mempool and equeue collation sessions refresh",
-                    candidate_id.as_short_id(),
+                    block_id.as_short_id(),
                     candidate_chain_time,
                 );
 
-                Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &candidate_id)
-                    .await?;
+                Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &block_id).await?;
 
                 self.dispatcher
                     .enqueue_task(method_to_async_task_closure!(
@@ -956,14 +956,14 @@ where
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Will check if master block interval elapsed by chain time from candidate (id: {}, chain_time: {})",
-                candidate_id.as_short_id(),
+                block_id.as_short_id(),
                 candidate_chain_time,
             );
             self.collate_mc_block_by_interval_or_continue_shard_collation(
-                candidate_id.shard,
+                block_id.shard,
                 candidate_chain_time,
                 false,
-                Some(candidate_id),
+                Some(block_id),
             )
             .await?;
         }
@@ -1343,9 +1343,9 @@ where
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
-        let candidate_id = candidate.block_id;
+        let block_id = *candidate.block.id();
         let block_container = BlockCandidateContainer::new(candidate);
-        if candidate_id.shard.is_masterchain() {
+        if block_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container
                 .top_shard_blocks_keys()
@@ -1379,7 +1379,7 @@ where
             {
                 bail!(
                     "Should not collate the same master block ({}) again!",
-                    candidate_id,
+                    block_id,
                 );
             }
         } else {
@@ -1393,7 +1393,7 @@ where
             {
                 bail!(
                     "Should not collate the same shard block ({}) again!",
-                    candidate_id,
+                    block_id,
                 );
             }
         }
@@ -1739,7 +1739,7 @@ where
                 SendSyncStatus::Sent | SendSyncStatus::Synced => sent_blocks.push(block_to_send),
                 _ => {
                     let timer = std::time::Instant::now();
-                    let block_for_sync = build_block_stuff_for_sync(&block_to_send.entry)?;
+                    let block_for_sync = block_to_send.entry.as_block_for_sync();
                     build_stuff_for_sync_elapsed += timer.elapsed();
 
                     let timer = std::time::Instant::now();
@@ -1748,7 +1748,7 @@ where
                         tracing::warn!(
                             target: tracing_targets::COLLATION_MANAGER,
                             "Block ({}) sync: was not accepted. err: {:?}",
-                            block_to_send.entry.candidate.block_id.as_short_id(),
+                            block_to_send.entry.candidate.block.id().as_short_id(),
                             err,
                         );
                         should_restore_blocks_in_cache = true;
@@ -1757,7 +1757,7 @@ where
                         tracing::debug!(
                             target: tracing_targets::COLLATION_MANAGER,
                             "Block ({}) sync: was successfully sent to sync",
-                            block_to_send.entry.candidate.block_id.as_short_id(),
+                            block_to_send.entry.candidate.block.id().as_short_id(),
                         );
                         block_to_send.send_sync_status = SendSyncStatus::Sent;
                         sent_blocks.push(block_to_send);
@@ -1776,14 +1776,13 @@ where
             for sent_block in sent_blocks.iter() {
                 // TODO: handle if diff does not exist
 
-                if let Err(err) = mq_adapter
-                    .commit_diff(&sent_block.entry.candidate.block_id.as_short_id())
-                    .await
-                {
+                let block_id_short = sent_block.entry.candidate.block.id().as_short_id();
+
+                if let Err(err) = mq_adapter.commit_diff(&block_id_short).await {
                     tracing::warn!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block ({}) sync: error committing message queue diff: {:?}",
-                        sent_block.entry.candidate.block_id.as_short_id(),
+                        block_id_short,
                         err,
                     );
                     should_restore_blocks_in_cache = true;
@@ -1792,7 +1791,7 @@ where
                     tracing::debug!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block ({}) sync: message queue diff was committed",
-                        sent_block.entry.candidate.block_id.as_short_id(),
+                        block_id_short,
                     );
                 }
             }

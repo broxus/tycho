@@ -5,7 +5,7 @@ use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signatur
 use everscale_types::prelude::*;
 use tycho_util::FastHashMap;
 
-use crate::types::BlockCandidate;
+use crate::types::{BlockCandidate, BlockStuffForSync};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -20,6 +20,18 @@ pub struct BlockCandidateEntry {
     pub key: BlockCacheKey,
     pub candidate: Box<BlockCandidate>,
     pub signatures: FastHashMap<HashBytes, Signature>,
+}
+
+impl BlockCandidateEntry {
+    pub fn as_block_for_sync(&self) -> BlockStuffForSync {
+        // TODO: Rework cloning here
+        BlockStuffForSync {
+            block_stuff_aug: self.candidate.block.clone(),
+            signatures: self.signatures.clone(),
+            prev_blocks_ids: self.candidate.prev_blocks_ids.clone(),
+            top_shard_blocks_ids: self.candidate.top_shard_blocks_ids.clone(),
+        }
+    }
 }
 
 pub enum SendSyncStatus {
@@ -55,8 +67,8 @@ pub struct BlockCandidateContainer {
 
 impl BlockCandidateContainer {
     pub fn new(candidate: Box<BlockCandidate>) -> Self {
-        let block_id = candidate.block_id;
-        let key = candidate.block_id.as_short_id();
+        let block_id = *candidate.block.id();
+        let key = block_id.as_short_id();
         let entry = BlockCandidateEntry {
             key,
             candidate,
@@ -174,7 +186,7 @@ impl BlockCandidateContainer {
             .entry
             .as_ref()
             .ok_or_else(|| anyhow!("`entry` was extracted"))?;
-        Ok(&entry.candidate.block)
+        Ok(entry.candidate.block.as_ref())
     }
 }
 

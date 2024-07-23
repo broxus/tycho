@@ -3,8 +3,9 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_types::boc::Boc;
 use everscale_types::cell::Cell;
-use everscale_types::models::{BlockId, ShardIdent, ShardStateUnsplit};
+use everscale_types::models::{Block, BlockId, ShardIdent, ShardStateUnsplit};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
@@ -48,7 +49,6 @@ async fn test_add_and_get_block() {
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
 
     let block = BlockStuffForSync {
-        block_id,
         block_stuff_aug,
         signatures: Default::default(),
         prev_blocks_ids: Vec::new(),
@@ -117,7 +117,6 @@ async fn test_add_and_get_next_block() {
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
 
     let block = BlockStuffForSync {
-        block_id: *block_stuff_aug.data.id(),
         block_stuff_aug,
         signatures: Default::default(),
         prev_blocks_ids: vec![*prev_block_id],
@@ -166,7 +165,7 @@ async fn test_add_read_handle_1000_blocks_parallel() {
     ));
 
     let empty_block = get_empty_block();
-    let cloned_block = empty_block.block().clone();
+
     // Task 1: Adding 1000 blocks
     let add_blocks = {
         let adapter = adapter.clone();
@@ -175,16 +174,16 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 let block_id = BlockId {
                     shard: ShardIdent::new_full(0),
                     seqno: i,
-                    root_hash: Default::default(),
+                    root_hash: empty_block.id().root_hash,
                     file_hash: Default::default(),
                 };
-                let block_stuff_aug = BlockStuffAug::loaded(BlockStuff::with_block(
-                    block_id.clone(),
-                    cloned_block.clone(),
+                let block_stuff_aug = BlockStuffAug::loaded(BlockStuff::from_block_and_root(
+                    &block_id,
+                    empty_block.block().clone(),
+                    empty_block.root_cell().clone(),
                 ));
 
                 let block = BlockStuffForSync {
-                    block_id,
                     block_stuff_aug,
                     signatures: Default::default(),
                     prev_blocks_ids: Vec::new(),
@@ -247,9 +246,13 @@ async fn test_add_read_handle_1000_blocks_parallel() {
 
 pub fn get_empty_block() -> BlockStuffAug {
     let block_data = include_bytes!("../../core/tests/data/empty_block.bin");
-    let block = everscale_types::boc::BocRepr::decode(block_data).unwrap();
-    BlockStuffAug::new(
-        BlockStuff::with_block(BlockId::default(), block),
-        block_data.as_slice(),
-    )
+    let root = Boc::decode(block_data).unwrap();
+    let block = root.parse::<Block>().unwrap();
+
+    let block_id = BlockId {
+        root_hash: *root.repr_hash(),
+        ..Default::default()
+    };
+
+    BlockStuff::from_block_and_root(&block_id, block, root).with_archive_data(block_data.as_slice())
 }

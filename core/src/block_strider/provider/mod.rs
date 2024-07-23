@@ -287,6 +287,8 @@ mod test {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
+    use everscale_types::boc::Boc;
+    use everscale_types::models::Block;
     use tycho_block_util::block::BlockStuff;
 
     use super::*;
@@ -364,11 +366,16 @@ mod test {
 
     fn get_empty_block() -> BlockStuffAug {
         let block_data = include_bytes!("../../../tests/data/empty_block.bin");
-        let block = everscale_types::boc::BocRepr::decode(block_data).unwrap();
-        BlockStuffAug::new(
-            BlockStuff::with_block(get_default_block_id(), block),
-            block_data.as_slice(),
-        )
+        let root = Boc::decode(block_data).unwrap();
+        let block = root.parse::<Block>().unwrap();
+
+        let block_id = BlockId {
+            root_hash: *root.repr_hash(),
+            ..Default::default()
+        };
+
+        BlockStuff::from_block_and_root(&block_id, block, root)
+            .with_archive_data(block_data.as_slice())
     }
 
     fn get_default_block_id() -> BlockId {

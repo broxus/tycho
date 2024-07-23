@@ -37,9 +37,9 @@ impl BlockStuff {
             extra: Lazy::new(&BlockExtra::default()).unwrap(),
         };
 
-        let cell = CellBuilder::build_from(&block).unwrap();
-        let root_hash = *cell.repr_hash();
-        let file_hash = Boc::file_hash_blake(Boc::encode(&cell));
+        let root = CellBuilder::build_from(&block).unwrap();
+        let root_hash = *root.repr_hash();
+        let file_hash = Boc::file_hash_blake(Boc::encode(&root));
 
         let block_id = BlockId {
             shard: block_info.shard,
@@ -48,12 +48,18 @@ impl BlockStuff {
             file_hash,
         };
 
-        Self::with_block(block_id, block)
+        Self::from_block_and_root(&block_id, block, root)
     }
 
-    pub fn with_block(id: BlockId, block: Block) -> Self {
+    pub fn from_block_and_root(id: &BlockId, block: Block, root: Cell) -> Self {
+        debug_assert_eq!(&id.root_hash, root.repr_hash());
+
         Self {
-            inner: Arc::new(Inner { id, block }),
+            inner: Arc::new(Inner {
+                id: *id,
+                block,
+                root,
+            }),
         }
     }
 
@@ -76,8 +82,16 @@ impl BlockStuff {
 
         let block = root.parse::<Block>()?;
         Ok(Self {
-            inner: Arc::new(Inner { id: *id, block }),
+            inner: Arc::new(Inner {
+                id: *id,
+                block,
+                root,
+            }),
         })
+    }
+
+    pub fn root_cell(&self) -> &Cell {
+        &self.inner.root
     }
 
     pub fn with_archive_data<A>(self, data: A) -> WithArchiveData<Self>
@@ -202,4 +216,5 @@ unsafe impl arc_swap::RefCnt for BlockStuff {
 pub struct Inner {
     id: BlockId,
     block: Block,
+    root: Cell,
 }
