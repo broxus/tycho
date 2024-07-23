@@ -8,7 +8,6 @@ use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
-use tokio::select;
 use tokio::sync::{broadcast, watch};
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
@@ -18,17 +17,6 @@ use tycho_util::metrics::HistogramGuard;
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
-
-#[derive(Debug, Clone)]
-enum GcTriggerSource {
-    Automatic {
-        data: Option<GcTrigger>,
-    },
-    Manual {
-        data: ManualGcTrigger,
-        last_known_mc_seqno: Option<u32>,
-    },
-}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -126,7 +114,7 @@ impl GcSubscriber {
                     match tr {
                         Ok(ManualGcTrigger::Archives {ty}) => {
                             tracing::debug!("Archives GC manual trigger received {:?}", &ty);
-                            if let Ok(Some((seqno, distance))) = Self::find_mc_seqno_by_trigger_tye(ty, storage.clone()).await {
+                            if let Ok(Some((seqno, distance))) = Self::find_mc_seqno_by_trigger_type(ty, storage.clone()).await {
                                 source = Some(HandleSource::ManualSelection {seqno, distance});
                             } else {
                                 continue;
@@ -175,8 +163,7 @@ impl GcSubscriber {
             }
         }
     }
-
-    async fn find_mc_seqno_by_trigger_tye(
+    async fn find_mc_seqno_by_trigger_type(
         ty: TriggerType,
         storage: Storage,
     ) -> Result<Option<(u32, u32)>> {
@@ -382,7 +369,7 @@ impl GcSubscriber {
 
         loop {
             // either the interval has ticked or a new trigger has arrived
-            let trigger_source = select! {
+            let trigger_source = tokio::select! {
                 _ = interval.tick() => {
                     let data = trigger_rx.borrow_and_update().clone();
                     GcTriggerSource::Automatic {data}
@@ -424,7 +411,7 @@ impl GcSubscriber {
                 GcTriggerSource::Manual { data, .. } => match data {
                     ManualGcTrigger::States { ty } => {
                         let Ok(Some((seqno, distance))) =
-                            Self::find_mc_seqno_by_trigger_tye(ty, storage.clone()).await
+                            Self::find_mc_seqno_by_trigger_type(ty, storage.clone()).await
                         else {
                             tracing::error!("Failed to determine target seqno");
                             continue;
@@ -472,6 +459,17 @@ impl Drop for Inner {
         self.handle_state_task.abort();
         self.archives_handle.abort();
     }
+}
+
+#[derive(Debug, Clone)]
+enum GcTriggerSource {
+    Automatic {
+        data: Option<GcTrigger>,
+    },
+    Manual {
+        data: ManualGcTrigger,
+        last_known_mc_seqno: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone)]
