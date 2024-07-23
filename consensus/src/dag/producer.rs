@@ -8,7 +8,7 @@ use crate::models::{
     Digest, Link, LinkField, Location, PeerCount, Point, PointBody, PrevPoint, Round, Signature,
     Through, UnixTime,
 };
-use crate::{InputBuffer, MempoolConfig};
+use crate::InputBuffer;
 
 pub struct LastOwnPoint {
     pub digest: Digest,
@@ -28,17 +28,10 @@ impl Producer {
         let finished_round = current_round.prev().upgrade()?;
         let key_pair = current_round.key_pair()?;
 
-        let payload = input_buffer.fetch(last_own_point.as_ref().map_or(false, |last| {
-            // it's not necessary to resend external messages from previous round
-            // if at least 1F+1 peers (one reliable) signed previous point;
-            // also notice that payload elems are deduplicated in mempool adapter
-            current_round.round().0 - last.round.0 < MempoolConfig::COMMIT_DEPTH as u32
-                && last.evidence.len() >= last.signers.reliable_minority()
-        }));
         let prev_point = last_own_point
             // previous round's point needs 2F signatures from peers scheduled for current round
             .filter(|prev| {
-                // Note: prev point is used only once until weak links are implemented
+                // Note: prev point is used only once until weak links are supported
                 current_round.round().prev() == prev.round
                     && prev.evidence.len() >= prev.signers.majority_of_others()
             })
@@ -46,6 +39,8 @@ impl Producer {
                 digest: last.digest.clone(),
                 evidence: last.evidence.clone(),
             });
+        // as only vertices are committed, payload has to be resent until weak links are supported
+        let payload = input_buffer.fetch(prev_point.is_some());
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
             Some(AnchorStage::Proof { leader, .. } | AnchorStage::Trigger { leader, .. })

@@ -141,7 +141,7 @@ impl Dag {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
             self.drop_tail(anchor_round.round());
-            let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.point, anchor_round)
+            let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.point, &anchor_round)
             else {
                 break; // will continue at the next call
             };
@@ -325,31 +325,50 @@ impl Dag {
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
     fn gather_uncommitted_rev(
-        anchor: &Point,              // @ r+1
-        mut current_round: DagRound, // r+1
+        anchor: &Point,          // @ r+1
+        anchor_round: &DagRound, // r+1
     ) -> Option<Vec<ValidPoint>> {
-        fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
-            if to.is_empty() {
-                *to = from.clone();
-            } else {
-                for (peer, digest) in from {
-                    to.insert(*peer, digest.clone());
+        fn extend_with_proof(
+            to: &mut BTreeMap<PeerId, (Digest, bool)>,
+            point: &Point,
+            from: &BTreeMap<PeerId, Digest>,
+        ) {
+            match point.body().proof.as_ref() {
+                Some(proof) => {
+                    for (peer, digest) in from {
+                        let is_vertex =
+                            peer == point.body().location.author && digest == &proof.digest;
+                        let entry = to.entry(*peer).or_insert_with(|| (digest.clone(), false));
+                        entry.1 |= is_vertex;
+                    }
                 }
+                None => extend(to, from),
             }
         }
+        fn extend(to: &mut BTreeMap<PeerId, (Digest, bool)>, from: &BTreeMap<PeerId, Digest>) {
+            for (peer, digest) in from {
+                to.entry(*peer).or_insert((digest.clone(), false));
+            }
+        }
+
         assert_eq!(
-            current_round.round(),
+            anchor_round.round(),
             anchor.body().location.round,
             "passed anchor round does not match anchor point's round"
         );
+        let mut proof_round /* r+0 */ = anchor_round
+            .prev()
+            .upgrade()
+            .expect("previous round for anchor point round must stay in DAG");
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
+
         extend(&mut r[0], &anchor.body().includes); // points @ r+0
         extend(&mut r[1], &anchor.body().witness); // points @ r-1
 
         let mut rng = rand_pcg::Pcg64::from_seed(*anchor.digest().inner());
         let mut uncommitted_rev = Vec::new();
 
-        while let Some(point_round /* r+0 */) = current_round
+        while let Some(vertex_round /* r-1 */) = proof_round
             .prev()
             .upgrade()
             .filter(|_| !r.iter().all(BTreeMap::is_empty))
@@ -357,22 +376,23 @@ impl Dag {
             // take points @ r+0, shuffle deterministically with anchor digest as a seed
             let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
             sorted.shuffle(&mut rng);
-            for (node, digest) in &sorted {
+            for (node, (digest, is_vertex)) in &sorted {
                 // Every point must be valid (we've validated anchor dependencies already),
                 // but some points don't have previous one to proof as vertex.
-                // Any equivocated point (except anchor) is ok, as they are globally available
-                // because of anchor, and their payload is deduplicated after mempool anyway.
-                let global = // point @ r+0; break and return `None` if not ready yet
-                    Self::ready_valid_point(&point_round, node, digest)?;
-                // select only uncommitted ones
-                if !global.is_committed.load(Ordering::Relaxed) {
-                    extend(&mut r[1], &global.point.body().includes); // points @ r-1
-                    extend(&mut r[2], &global.point.body().witness); // points @ r-2
-                    uncommitted_rev.push(global);
+                // Any valid point among equivocated will do, as they include the same vertex.
+                let proof = // point @ r+0; break and return `None` if not ready yet
+                    Self::ready_valid_point(&proof_round, node, digest)?;
+                if proof.is_committed.load(Ordering::Relaxed) {
+                    continue;
+                }
+                extend_with_proof(&mut r[1], &proof.point, &proof.point.body().includes); // @ r-1
+                extend(&mut r[2], &proof.point.body().witness); // only points @ r-2
+                if *is_vertex {
+                    uncommitted_rev.push(proof);
                 }
             }
-            current_round = point_round; // r+0 is a new r+1
-            r.rotate_left(1); // [empty r_0, r-1, r-2] => [r-1 as r+0, r-2 as r-1, empty as r-2]
+            proof_round = vertex_round; // r-1 is a new r+0
+            r.rotate_left(1); // [empty r_0, r-1, r-2] => [r-1, r-2, empty]
         }
         Some(uncommitted_rev)
     }
