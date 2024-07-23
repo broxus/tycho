@@ -1,6 +1,5 @@
-use std::collections::btree_map::BTreeMap;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::btree_map::{self, BTreeMap};
+use std::collections::{hash_map, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -594,7 +593,7 @@ where
             for shard_info in new_shards_info {
                 missed_shards_ids.remove(&shard_info.0);
                 match active_collation_sessions_guard.entry(shard_info.0) {
-                    Entry::Occupied(entry) => {
+                    hash_map::Entry::Occupied(entry) => {
                         let existing_session = entry.get().clone();
                         if existing_session.seqno() >= new_session_seqno {
                             sessions_to_keep.insert(shard_info.0, existing_session);
@@ -605,7 +604,7 @@ where
                             entry.remove();
                         }
                     }
-                    Entry::Vacant(_) => {
+                    hash_map::Entry::Vacant(_) => {
                         sessions_to_start.push(shard_info);
                     }
                 }
@@ -1405,13 +1404,30 @@ where
                 .shards
                 .entry(block_container.key().shard)
                 .or_default();
-            if let Some(_existing) =
-                shard_cache.insert(block_container.key().seqno, block_container)
-            {
-                bail!(
-                    "Should not collate the same shard block ({}) again!",
-                    block_id,
-                );
+
+            match shard_cache.entry(block_container.key().seqno) {
+                btree_map::Entry::Occupied(occupied) => {
+                    assert_eq!(
+                        occupied.get().block_id().root_hash,
+                        block_container.block_id().root_hash,
+                        "Block received from bc root hash mismatch with collated one"
+                    );
+
+                    match occupied.get().send_sync_status {
+                        SendSyncStatus::Synced => {
+                            already_stored = true;
+                        }
+                        _ => {
+                            bail!(
+                                "Should not collate the same shard block ({}) again!",
+                                block_id,
+                            );
+                        }
+                    }
+                }
+                btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert(block_container);
+                }
             }
         }
 
@@ -1471,7 +1487,7 @@ where
                 let btreemap = occupied.get_mut();
 
                 match btreemap.entry(block_container.key().seqno) {
-                    std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                    btree_map::Entry::Occupied(mut occupied) => {
                         assert_eq!(
                             occupied.get().block_id().root_hash,
                             block_container.block_id().root_hash,
@@ -1499,7 +1515,7 @@ where
                             }
                         }
                     }
-                    std::collections::btree_map::Entry::Vacant(vacant) => {
+                    btree_map::Entry::Vacant(vacant) => {
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
                             "On apply block from bc, there is no stored shard block in cache",
                         );
