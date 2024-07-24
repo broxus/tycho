@@ -292,7 +292,7 @@ impl StateNodeAdapterStdImpl {
         let is_link = !proof.proof_for.is_masterchain();
         let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
 
-        let proof_boc = BocRepr::encode(block_proof_stuff.as_ref())?;
+        let proof_boc = BocRepr::encode_rayon(block_proof_stuff.as_ref())?;
         let archive_data = block_proof_stuff.with_archive_data(proof_boc);
 
         let result = self

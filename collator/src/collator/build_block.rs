@@ -304,7 +304,7 @@ impl CollatorStdImpl {
             // TODO: Check (assert) whether the serialized block contains usage cells
             let root = CellBuilder::build_from(&block)?;
 
-            let data = everscale_types::boc::Boc::encode(&root);
+            let data = everscale_types::boc::Boc::encode_rayon(&root);
             let block_id = BlockId {
                 shard: collation_data.block_id_short.shard,
                 seqno: collation_data.block_id_short.seqno,
