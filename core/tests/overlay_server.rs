@@ -6,13 +6,12 @@ use std::time::Duration;
 use anyhow::Result;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use tycho_block_util::block::{BlockProofStuff, BlockStuff};
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService, BroadcastListener};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStateInfo};
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
 use tycho_storage::Storage;
-
-use crate::common::archive::*;
 
 mod common;
 
@@ -308,13 +307,16 @@ async fn overlay_server_blocks() -> Result<()> {
                         proof,
                         ..
                     } => {
-                        let block = deserialize_block(block_id, block)?;
-                        assert_eq!(block, archive_data.block.unwrap().data);
+                        let block = BlockStuff::deserialize_checked(block_id, block)?;
+                        assert_eq!(block.as_ref(), archive_data.block.unwrap().as_ref());
 
-                        let proof = deserialize_block_proof(block_id, proof, false)?;
+                        let proof = BlockProofStuff::deserialize(block_id, proof, false)?;
                         let archive_proof = archive_data.proof.unwrap();
-                        assert_eq!(proof.proof_for, archive_proof.data.proof_for);
-                        assert_eq!(proof.root, archive_proof.data.root);
+                        assert_eq!(
+                            proof.as_ref().proof_for,
+                            archive_proof.data.as_ref().proof_for
+                        );
+                        assert_eq!(proof.as_ref().root, archive_proof.data.as_ref().root);
                     }
                     _ => anyhow::bail!("block not found"),
                 }

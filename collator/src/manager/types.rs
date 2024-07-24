@@ -5,7 +5,7 @@ use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent};
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::types::{BlockCandidate, BlockStuffForSync};
+use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;

@@ -323,7 +323,7 @@ impl StateNodeAdapterStdImpl {
 // TODO: This should possibly panic on error?
 fn prepare_block_proof(
     block_stuff: &BlockStuff,
-    signatures: &FastHashMap<HashBytes, ArcSignature>,
+    signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
 

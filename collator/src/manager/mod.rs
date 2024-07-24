@@ -877,15 +877,12 @@ where
         let dispatcher = self.dispatcher.clone();
         tokio::spawn(async move {
             // TODO: Fail collation instead of panicking?
-            let status = validator
-                .validate(session_seqno, &candidate_id)
-                .await
-                .unwrap();
+            let status = validator.validate(session_seqno, &block_id).await.unwrap();
 
             _ = dispatcher
                 .enqueue_task(method_to_async_task_closure!(
                     process_validated_block,
-                    candidate_id,
+                    block_id,
                     status
                 ))
                 .await;
