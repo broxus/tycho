@@ -42,12 +42,12 @@ enum DagPointFutureType {
         // normally, if we are among the last nodes to validate some broadcast point,
         // we can receive its proof from author, trust its signatures and skip vertex validation;
         // also, any still not locally validated dependencies of a vertex become trusted
-        is_trusted: Arc<OnceTake<oneshot::Sender<()>>>,
+        certified: Arc<OnceTake<oneshot::Sender<()>>>,
     },
     Download {
         task: Shared<JoinTask<DagPoint>>,
         // this could be a `Notify`, but both sender and receiver must be used only once
-        is_trusted: Arc<OnceTake<oneshot::Sender<()>>>,
+        certified: Arc<OnceTake<oneshot::Sender<()>>>,
         dependents: mpsc::UnboundedSender<PeerId>,
         verified: Arc<OnceTake<oneshot::Sender<Point>>>,
     },
@@ -74,13 +74,13 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.downgrade();
         let point = point.clone();
         let state = state.clone();
-        let (is_trusted_tx, is_trusted_rx) = oneshot::channel();
+        let (is_certified_tx, is_certified_rx) = oneshot::channel();
         DagPointFuture(DagPointFutureType::Broadcast {
             task: Shared::new(JoinTask::new(
-                Verifier::validate(point, point_dag_round, downloader, is_trusted_rx, effects)
+                Verifier::validate(point, point_dag_round, downloader, is_certified_rx, effects)
                     .inspect(move |dag_point| state.init(dag_point)),
             )),
-            is_trusted: Arc::new(OnceTake::new(is_trusted_tx)),
+            certified: Arc::new(OnceTake::new(is_certified_tx)),
         })
     }
 
@@ -97,7 +97,7 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.clone();
         let (dependents_tx, dependents_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
-        let (is_trusted_tx, is_trusted_rx) = oneshot::channel();
+        let (certified_tx, certified_rx) = oneshot::channel();
         let point_id = PointId {
             location: Location {
                 author: *author,
@@ -112,14 +112,14 @@ impl DagPointFuture {
                     .run(
                         point_id,
                         point_dag_round,
-                        is_trusted_rx,
+                        certified_rx,
                         dependents_rx,
                         broadcast_rx,
                         effects,
                     )
                     .inspect(move |dag_point| state.init(dag_point)),
             )),
-            is_trusted: Arc::new(OnceTake::new(is_trusted_tx)),
+            certified: Arc::new(OnceTake::new(certified_tx)),
             dependents: dependents_tx,
             verified: Arc::new(OnceTake::new(broadcast_tx)),
         })
@@ -141,11 +141,13 @@ impl DagPointFuture {
         }
     }
 
-    pub fn trust_consensus(&self) {
-        if let DagPointFutureType::Broadcast { is_trusted, .. }
-        | DagPointFutureType::Download { is_trusted, .. } = &self.0
+    pub fn make_certified(&self) {
+        // every vertex is certified by definition,
+        // but also every vertex dependency is certified transitively
+        if let DagPointFutureType::Broadcast { certified, .. }
+        | DagPointFutureType::Download { certified, .. } = &self.0
         {
-            if let Some(oneshot) = is_trusted.take() {
+            if let Some(oneshot) = certified.take() {
                 // receiver is dropped upon completion
                 _ = oneshot.send(());
             }

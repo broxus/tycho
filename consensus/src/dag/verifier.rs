@@ -55,7 +55,7 @@ impl Verifier {
         point: Point,      // @ r+0
         r_0: WeakDagRound, // r+0
         downloader: Downloader,
-        mut is_trusted: oneshot::Receiver<()>,
+        mut certified_rx: oneshot::Receiver<()>,
         effects: Effects<ValidateContext>,
     ) -> DagPoint {
         let _task_duration = HistogramGuard::begin(ValidateContext::VALIDATE_DURATION);
@@ -110,14 +110,14 @@ impl Verifier {
             return ValidateContext::validated(dag_point);
         };
 
-        let mut proven_point_fut = None;
+        let mut proven_vertex_dep = None;
         Self::gather_deps(
             &point,
             &r_1,
             &downloader,
             &effects,
             &mut dependencies,
-            &mut proven_point_fut,
+            &mut proven_vertex_dep,
         );
 
         let mut signatures_fut = std::pin::pin!(match point.body().proof.as_ref() {
@@ -159,24 +159,24 @@ impl Verifier {
         drop(r_1);
         drop(span_guard);
 
-        let mut trusted = None;
+        let mut certified = None;
         let mut valid = None;
         let mut sig_ok = None;
         let mut unique_in_loc = None;
 
         loop {
-            if trusted.unwrap_or_default()
+            if certified.unwrap_or_default()
                 || (valid.is_some() && unique_in_loc.is_some() && sig_ok.is_some())
             {
                 break;
             }
             tokio::select! {
                 biased;
-                recv_result = &mut is_trusted, if trusted.is_none() => {
-                    trusted = Some(recv_result.is_ok()); // oneshot cannot be lagged, only closed
+                recv_result = &mut certified_rx, if certified.is_none() => {
+                    certified = Some(recv_result.is_ok()); // oneshot cannot be lagged, only closed
                     if recv_result.is_ok() {
                         for shared in &dependencies {
-                            shared.trust_consensus();
+                            shared.make_certified();
                         }
                     }
                 },
@@ -184,8 +184,8 @@ impl Verifier {
                     sig_ok = Some(is_sig_ok);
                     if is_sig_ok {
                         // it's a noop if the point doesn't have a proof in its body
-                        if let Some(vertex) = &proven_point_fut {
-                            vertex.trust_consensus();
+                        if let Some(vertex) = &proven_vertex_dep {
+                            vertex.make_certified();
                         }
                     } else {
                         break;
@@ -203,7 +203,8 @@ impl Verifier {
             }
         }
 
-        let (dag_point, level) = match (trusted.unwrap_or_default(), valid, sig_ok, unique_in_loc) {
+        let (dag_point, level) = match (certified.unwrap_or_default(), valid, sig_ok, unique_in_loc)
+        {
             (true, _, _, _) => (
                 // here "trust consensus" call chain resolves;
                 // ignore other flags, though it looks like a race condition:
@@ -226,7 +227,7 @@ impl Verifier {
                 let _guard = effects.span().enter();
                 unreachable!(
                     "unexpected pattern in loop break: \
-                     trusted={trusted:?} valid={valid:?} \
+                     certified={certified:?} valid={valid:?} \
                      sig_ok={sig_ok:?} unique_in_loc={unique_in_loc:?}"
                 );
             }
@@ -235,7 +236,7 @@ impl Verifier {
             parent: effects.span(),
             level,
             result = display(dag_point.alt()),
-            trusted = debug(trusted),
+            certified = debug(certified),
             valid = debug(valid),
             sig_ok = debug(sig_ok),
             unique_in_loc = debug(unique_in_loc),
@@ -347,7 +348,7 @@ impl Verifier {
         downloader: &Downloader,
         effects: &Effects<ValidateContext>,
         dependencies: &mut Vec<DagPointFuture>,
-        proven_point_fut: &mut Option<DagPointFuture>,
+        proven_vertex_dep: &mut Option<DagPointFuture>,
     ) {
         let r_2_opt = r_1.prev().upgrade();
         if r_2_opt.is_none() {
@@ -382,7 +383,7 @@ impl Verifier {
             // * includes map contains same author at most once - and it matches proven point
             // * witness map cannot contain same author
             if author == point.body().location.author {
-                *proven_point_fut = Some(shared.clone());
+                *proven_vertex_dep = Some(shared.clone());
             }
 
             dependencies.push(shared);

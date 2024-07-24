@@ -369,12 +369,12 @@ impl Engine {
                     point.id().alt()
                 )
             }
-            let (_, never_trust_tx) = oneshot::channel();
+            let (_, do_not_certify_tx) = oneshot::channel();
             let dag_point = Verifier::validate(
                 point.clone(),
                 point_round,
                 downloader,
-                never_trust_tx,
+                do_not_certify_tx,
                 Effects::<ValidateContext>::new(&effects, &point),
             )
             .await;

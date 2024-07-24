@@ -64,7 +64,7 @@ impl Downloader {
         // Do not pass `WeakDagRound` here as it would be incorrect to return `DagPoint::NotExists`
         // if we need to download at a very deep round - let the start of this task hold strong ref.
         point_dag_round_strong: DagRound,
-        is_trusted: oneshot::Receiver<()>,
+        certified_rx: oneshot::Receiver<()>,
         dependers: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
@@ -141,7 +141,7 @@ impl Downloader {
                     point.clone(),
                     point_dag_round,
                     self.clone(),
-                    is_trusted,
+                    certified_rx,
                     Effects::<ValidateContext>::new(&effects, &point),
                 )
                 // this is the only `await` in the task, that resolves the download
