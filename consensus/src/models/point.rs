@@ -7,7 +7,6 @@ use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use sha2::{Digest as Sha2Digest, Sha256};
 use tycho_network::PeerId;
 
 use crate::engine::MempoolConfig;
@@ -36,9 +35,7 @@ impl Debug for Digest {
 impl Digest {
     fn new(point_body: &PointBody) -> Self {
         let body = bincode::serialize(&point_body).expect("shouldn't happen");
-        let mut hasher = Sha256::new();
-        hasher.update(body.as_slice());
-        Self(hasher.finalize().into())
+        Self(blake3::hash(body.as_slice()).into())
     }
     pub fn inner(&self) -> &'_ [u8; 32] {
         &self.0
@@ -589,7 +586,7 @@ mod tests {
         let bincode_elapsed = timer.elapsed();
 
         let timer = Instant::now();
-        let mut hasher = Sha256::new();
+        let mut hasher = blake3::Hasher::new();
         hasher.update(body.as_slice());
         let digest = Digest(hasher.finalize().into());
         let sha_elapsed = timer.elapsed();

@@ -23,6 +23,7 @@ ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 bincode = { workspace = true }
+blake3 = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
 everscale-crypto = { workspace = true }
 futures-util = { workspace = true }
@@ -33,7 +34,6 @@ rand = { workspace = true }
 rand_pcg = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-sha2 = { workspace = true }
 tokio = { workspace = true, default-features = false }
 tokio-stream = { workspace = true, optional = true }
 tracing = { workspace = true }
