@@ -20,13 +20,13 @@ use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
-    ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
+    Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriberExt, BlockchainBlockProvider,
-    BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
-    OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
-    StateSubscriberContext, StorageBlockProvider,
+    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
+    BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
+    MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter,
+    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -532,7 +532,7 @@ impl Node {
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
             mempool_adapter,
-            validator,
+            validator.clone(),
             CollatorStdImplFactory,
             #[cfg(test)]
             vec![],
@@ -586,7 +586,7 @@ impl Node {
                         self.storage.clone(),
                         (collator_state_subscriber, rpc_state),
                     ),
-                    MetricsSubscriber,
+                    (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
                     .chain(GcSubscriber::new(self.storage.clone())),
             )
@@ -610,6 +610,41 @@ impl StateSubscriber for CollatorStateSubscriber {
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         self.adapter.handle_state(&cx.state)
+    }
+}
+
+struct ValidatorBlockSubscriber {
+    validator: ValidatorStdImpl,
+}
+
+impl BlockSubscriber for ValidatorBlockSubscriber {
+    type Prepared = ();
+    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+    type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+
+    fn prepare_block<'a>(
+        &'a self,
+        _: &'a tycho_core::block_strider::BlockSubscriberContext,
+    ) -> Self::PrepareBlockFut<'a> {
+        futures_util::future::ok(())
+    }
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a tycho_core::block_strider::BlockSubscriberContext,
+        _: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        const OFFSET: u32 = 10;
+
+        let mut res = Ok(());
+
+        let mut block_id_short = cx.block.id().as_short_id();
+        if let Some(seqno) = block_id_short.seqno.checked_sub(OFFSET) {
+            block_id_short.seqno = seqno;
+            res = self.validator.cancel_validation(&block_id_short);
+        }
+
+        futures_util::future::ready(res)
     }
 }
 

@@ -597,12 +597,6 @@ struct BlockSignatures {
     cancelled: CancellationToken,
 }
 
-impl Drop for BlockSignatures {
-    fn drop(&mut self) {
-        tracing::info!(block_id = %self.block_id, "block signatures dropped");
-    }
-}
-
 type SignatureSlotsMap = FastHashMap<PeerId, SignatureSlot>;
 type SignaturesMap = FastHashMap<PeerId, ArcSwapOption<[u8; 64]>>;
 

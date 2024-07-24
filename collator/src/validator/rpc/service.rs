@@ -3,6 +3,7 @@ use std::sync::{Arc, Weak};
 use anyhow::Result;
 use bytes::Buf;
 use everscale_types::models::ShardIdent;
+use tracing::Instrument;
 use tycho_network::{PeerId, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
 
@@ -27,20 +28,23 @@ impl<E: ExchangeSignatures> ValidatorService<E> {
         };
 
         let peer_id = *peer_id;
-        BoxFutureOrNoop::future(async move {
-            match exchanger
-                .exchange_signatures(&peer_id, block_seqno, signature)
-                .await
-            {
-                Ok(res) => Some(Response::from_tl(res)),
-                Err(e) => {
-                    // TODO: Is it ok to WARN here? Since we can be ddosed with invalid signatures
-                    // and the log will be full of these warnings.
-                    tracing::warn!("failed to exchange signatures: {e:?}");
-                    None
+        BoxFutureOrNoop::future(
+            async move {
+                match exchanger
+                    .exchange_signatures(&peer_id, block_seqno, signature)
+                    .await
+                {
+                    Ok(res) => Some(Response::from_tl(res)),
+                    Err(e) => {
+                        // TODO: Is it ok to WARN here? Since we can be ddosed with invalid signatures
+                        // and the log will be full of these warnings.
+                        tracing::warn!("failed to exchange signatures: {e:?}");
+                        None
+                    }
                 }
             }
-        })
+            .instrument(tracing::Span::current()),
+        )
     }
 }
 
