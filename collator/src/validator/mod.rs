@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_crypto::ed25519::{KeyPair, PublicKey};
+use everscale_crypto::ed25519::PublicKey;
 use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValidatorDescription};
 use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_util::FastHashMap;
@@ -22,21 +22,15 @@ mod impls {
 
 #[async_trait]
 pub trait Validator: Send + Sync + 'static {
-    /// Returns the key pair used by the validator.
-    fn key_pair(&self) -> Arc<KeyPair>;
-
     /// Adds a new session for the specified shard.
-    fn add_session(
-        &self,
-        shard_ident: &ShardIdent,
-        session_id: u32,
-        validators: &[ValidatorDescription],
-    ) -> Result<()>;
+    fn add_session(&self, info: AddSession<'_>) -> Result<()>;
 
     /// Collects signatures for the specified block.
     async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus>;
 
     /// Cancels validation before the specified block.
+    ///
+    /// TODO: Simplify implementation by somehow passing a corresponding `session_id` as well.
     fn cancel_validation(&self, before: &BlockIdShort) -> Result<()>;
 }
 
@@ -47,6 +41,14 @@ pub struct ValidatorNetworkContext {
     pub peer_resolver: PeerResolver,
     pub overlays: OverlayService,
     pub zerostate_id: BlockId,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AddSession<'a> {
+    pub shard_ident: ShardIdent,
+    pub start_block_seqno: u32,
+    pub session_id: u32,
+    pub validators: &'a [ValidatorDescription],
 }
 
 #[derive(Debug, Clone)]

@@ -1,3 +1,4 @@
+use std::collections::btree_map::{self, BTreeMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,13 +6,12 @@ use anyhow::Result;
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
 use everscale_types::models::*;
-use scc::TreeIndex;
 use serde::{Deserialize, Serialize};
 use tycho_util::{serde_helpers, FastHashMap};
 
 use self::session::ValidatorSession;
 use crate::validator::rpc::ExchangeSignaturesBackoff;
-use crate::validator::{BriefValidatorDescr, ValidationStatus, Validator, ValidatorNetworkContext};
+use crate::validator::{AddSession, ValidationStatus, Validator, ValidatorNetworkContext};
 
 mod session;
 
@@ -73,61 +73,40 @@ impl ValidatorStdImpl {
 
 #[async_trait]
 impl Validator for ValidatorStdImpl {
-    fn key_pair(&self) -> Arc<KeyPair> {
-        self.inner.keypair.clone()
-    }
-
-    fn add_session(
-        &self,
-        shard_ident: &ShardIdent,
-        session_id: u32,
-        validators: &[ValidatorDescription],
-    ) -> Result<()> {
-        let mut validators_map = FastHashMap::default();
-        for descr in validators {
-            // TODO: Skip invalid entries? But what should we do with the total weight?
-            let validator_info = BriefValidatorDescr::try_from(descr)?;
-            validators_map.insert(validator_info.peer_id, validator_info);
-        }
-
-        let peer_id = self.inner.net_context.network.peer_id();
-        if !validators_map.contains_key(peer_id) {
-            tracing::warn!(
-                %peer_id,
-                %shard_ident,
-                session_id,
-                "this node is not in the validator set"
-            );
-            return Ok(());
-        }
-
+    fn add_session(&self, info: AddSession<'_>) -> Result<()> {
         let session = ValidatorSession::new(
-            shard_ident,
-            session_id,
-            validators_map,
             &self.inner.net_context,
             self.inner.keypair.clone(),
             &self.inner.config,
+            info,
         )?;
-        if self
-            .inner
-            .sessions
-            .insert((*shard_ident, session_id), session)
-            .is_err()
-        {
-            anyhow::bail!("validator session already exists: ({shard_ident}, {session_id})");
-        }
 
-        Ok(())
+        let mut sessions = self.inner.sessions.lock();
+        let shard_sessions = sessions.entry(info.shard_ident).or_default();
+
+        match shard_sessions.entry(info.session_id) {
+            btree_map::Entry::Vacant(entry) => {
+                entry.insert(session);
+                Ok(())
+            }
+            btree_map::Entry::Occupied(_) => {
+                anyhow::bail!(
+                    "validator session already exists: ({}, {})",
+                    info.shard_ident,
+                    info.session_id
+                )
+            }
+        }
     }
 
     async fn validate(&self, session_id: u32, block_id: &BlockId) -> Result<ValidationStatus> {
-        let Some(session) = self
-            .inner
-            .sessions
-            .peek(&(block_id.shard, session_id), &scc::ebr::Guard::new())
-            .map(|s| s.clone())
-        else {
+        let session = 'session: {
+            if let Some(shard_sessions) = self.inner.sessions.lock().get(&block_id.shard) {
+                if let Some(session) = shard_sessions.get(&session_id) {
+                    break 'session session.clone();
+                }
+            }
+
             anyhow::bail!(
                 "validator session not found: ({}, {session_id})",
                 block_id.shard
@@ -138,26 +117,34 @@ impl Validator for ValidatorStdImpl {
     }
 
     fn cancel_validation(&self, until: &BlockIdShort) -> Result<()> {
-        let guard = scc::ebr::Guard::new();
-
         let session = {
-            // Find the latest session and remove all previous ones.
-            let mut latest_session = None;
-            let sessions_range = (until.shard, 0)..=(until.shard, u32::MAX);
-            for (session_key, session) in self.inner.sessions.range(sessions_range, &guard) {
-                if let Some((prev_key, _)) = latest_session.replace((session_key, session)) {
-                    self.inner.sessions.remove(prev_key);
+            // Find the latest session that has started before the specified block.
+            let mut sessions = self.inner.sessions.lock();
+            let Some(shard_sessions) = sessions.get_mut(&until.shard) else {
+                return Ok(());
+            };
+
+            let Some((id, session)) = shard_sessions.iter().rev().find_map(|(id, session)| {
+                (session.start_block_seqno() <= until.seqno).then(|| (*id, session.clone()))
+            }) else {
+                return Ok(());
+            };
+
+            // Remove all sessions before the found one.
+            while let Some(entry) = shard_sessions.first_entry() {
+                if *entry.key() < id {
+                    // Fully cancel the session before removing it.
+                    entry.get().cancel();
+                    entry.remove();
+                } else {
+                    break;
                 }
             }
 
-            match latest_session {
-                // Exit guard scope with the latest session.
-                Some((_, session)) => session,
-                // Do nothing if there are no sessions.
-                None => return Ok(()),
-            }
+            session
         };
 
+        // Partially cancel the found session.
         session.cancel_until(until.seqno);
         Ok(())
     }
@@ -166,8 +153,9 @@ impl Validator for ValidatorStdImpl {
 struct Inner {
     net_context: ValidatorNetworkContext,
     keypair: Arc<KeyPair>,
-    sessions: TreeIndex<SessionKey, ValidatorSession>,
+    sessions: parking_lot::Mutex<Sessions>,
     config: ValidatorStdImplConfig,
 }
 
-type SessionKey = (ShardIdent, u32);
+type Sessions = FastHashMap<ShardIdent, ShardSessions>;
+type ShardSessions = BTreeMap<u32, ValidatorSession>;

@@ -30,7 +30,7 @@ use crate::utils::async_queued_dispatcher::{
 };
 use crate::utils::schedule_async_action;
 use crate::utils::shard::calc_split_merge_actions;
-use crate::validator::{ValidationStatus, Validator};
+use crate::validator::{AddSession, ValidationStatus, Validator};
 use crate::{method_to_async_task_closure, tracing_targets};
 
 mod types;
@@ -707,6 +707,8 @@ where
             ));
 
             if let Some(_local_pubkey) = local_pubkey_opt {
+                let prev_seqno = prev_blocks_ids.iter().map(|b| b.seqno).max().unwrap_or(0);
+
                 if let Entry::Vacant(entry) = self.active_collators.entry(shard_id) {
                     tracing::info!(
                         target: tracing_targets::COLLATION_MANAGER,
@@ -732,13 +734,14 @@ where
 
                 // notify validator, it will start overlay initialization
 
-                let session_seqno = new_session_info.seqno();
+                let session_id = new_session_info.seqno();
 
-                self.validator.add_session(
-                    &shard_id,
-                    session_seqno,
-                    new_session_info.collators().validators.as_slice(),
-                )?;
+                self.validator.add_session(AddSession {
+                    shard_ident: shard_id,
+                    session_id,
+                    start_block_seqno: prev_seqno + 1,
+                    validators: &new_session_info.collators().validators,
+                })?;
             } else {
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,

@@ -7,7 +7,8 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
 use futures_util::StreamExt;
 use tycho_collator::validator::{
-    BriefValidatorDescr, ValidationStatus, Validator, ValidatorStdImpl, ValidatorStdImplConfig,
+    AddSession, BriefValidatorDescr, ValidationStatus, Validator, ValidatorStdImpl,
+    ValidatorStdImplConfig,
 };
 use tycho_network::{DhtClient, PeerInfo};
 use tycho_util::futures::JoinTask;
@@ -124,8 +125,12 @@ async fn validator_signatures_match() -> Result<()> {
 
         let validators = make_description(block_id.seqno, &nodes);
         for node in &nodes {
-            node.validator
-                .add_session(&zerostate_id.shard, session_id, &validators)?;
+            node.validator.add_session(AddSession {
+                shard_ident: zerostate_id.shard,
+                session_id,
+                start_block_seqno: block_id.seqno,
+                validators: &validators,
+            })?;
         }
 
         for _ in 0..10 {
@@ -191,8 +196,12 @@ async fn malicious_validators_are_ignored() -> Result<()> {
 
         let validators = make_description(block_id.seqno, &nodes);
         for node in &nodes {
-            node.validator
-                .add_session(&zerostate_id.shard, session_id, &validators)?;
+            node.validator.add_session(AddSession {
+                shard_ident: zerostate_id.shard,
+                session_id,
+                start_block_seqno: block_id.seqno,
+                validators: &validators,
+            })?;
         }
 
         for _ in 0..10 {
@@ -285,8 +294,12 @@ async fn network_gets_stuck_without_signatures() -> Result<()> {
 
     let validators = make_description(block_id.seqno, &nodes);
     for node in &nodes {
-        node.validator
-            .add_session(&zerostate_id.shard, session_id, &validators)?;
+        node.validator.add_session(AddSession {
+            shard_ident: zerostate_id.shard,
+            session_id,
+            start_block_seqno: block_id.seqno,
+            validators: &validators,
+        })?;
     }
 
     let malicious_node_count = (NODE_COUNT / 3) + 1;

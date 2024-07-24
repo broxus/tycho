@@ -21,9 +21,11 @@ use tycho_util::FastHashMap;
 use super::ValidatorStdImplConfig;
 use crate::tracing_targets;
 use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorService};
-use crate::validator::{proto, BriefValidatorDescr, ValidationStatus, ValidatorNetworkContext};
+use crate::validator::{
+    proto, AddSession, BriefValidatorDescr, ValidationStatus, ValidatorNetworkContext,
+};
 
-/// Validator session is unique for each shard whithin each validator set.
+/// Validator session is unique for each shard within each validator set.
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct ValidatorSession {
@@ -32,28 +34,35 @@ pub struct ValidatorSession {
 
 impl ValidatorSession {
     pub fn new(
-        shard_ident: &ShardIdent,
-        session_id: u32,
-        mut validators: FastHashMap<PeerId, BriefValidatorDescr>,
         net_context: &ValidatorNetworkContext,
         key_pair: Arc<KeyPair>,
         config: &ValidatorStdImplConfig,
+        info: AddSession<'_>,
     ) -> Result<Self> {
+        // Prepare a map with other validators
+        let mut validators = FastHashMap::default();
+        for descr in info.validators {
+            // TODO: Skip invalid entries? But what should we do with the total weight?
+            let validator_info = BriefValidatorDescr::try_from(descr)?;
+            validators.insert(validator_info.peer_id, validator_info);
+        }
+
         let max_weight = validators.values().map(|v| v.weight).sum::<u64>();
         let weight_threshold = max_weight.saturating_mul(2) / 3 + 1;
 
         let peer_id = net_context.network.peer_id();
         let own_weight = match validators.remove(peer_id) {
             Some(info) => info.weight,
-            None => anyhow::bail!("our node is not in the validator set"),
+            None => anyhow::bail!("node is not in the validator set"),
         };
 
         // NOTE: At this point we are sure that our node is in the validator set
 
         let peer_ids = validators.values().map(|v| v.peer_id).collect::<Vec<_>>();
 
+        // Create the session state
         let state = Arc::new(SessionState {
-            shard_ident: *shard_ident,
+            shard_ident: info.shard_ident,
             weight_threshold,
             validators: Arc::new(validators),
             block_signatures: TreeIndex::new(),
@@ -62,16 +71,20 @@ impl ValidatorSession {
             cancelled_signal: Notify::new(),
         });
 
-        let overlay_id =
-            compute_session_overlay_id(&net_context.zerostate_id, shard_ident, session_id);
+        // Create the private overlay
+        let overlay_id = compute_session_overlay_id(
+            &net_context.zerostate_id,
+            &info.shard_ident,
+            info.session_id,
+        );
 
         let overlay = PrivateOverlay::builder(overlay_id)
             .named("validator")
             .with_peer_resolver(net_context.peer_resolver.clone())
             .with_entries(peer_ids)
             .build(ValidatorService {
-                shard_ident: *shard_ident,
-                session_id,
+                shard_ident: info.shard_ident,
+                session_id: info.session_id,
                 exchanger: Arc::downgrade(&state),
             });
 
@@ -79,16 +92,34 @@ impl ValidatorSession {
             anyhow::bail!("private overlay already exists: {overlay_id:?}");
         }
 
-        Ok(Self {
+        // Create the session
+        let session = Self {
             inner: Arc::new(Inner {
+                start_block_seqno: info.start_block_seqno,
+                session_id: info.session_id,
                 config: config.clone(),
                 client: ValidatorClient::new(net_context.network.clone(), overlay),
                 key_pair,
                 own_weight,
                 state,
-                min_seqno: AtomicU32::new(0),
+                min_seqno: AtomicU32::new(info.start_block_seqno),
             }),
-        })
+        };
+
+        // Prepare initial cache slots
+        session.create_cache_slots(info.start_block_seqno, config.signature_cache_slots);
+
+        // Done
+        Ok(session)
+    }
+
+    pub fn start_block_seqno(&self) -> u32 {
+        self.inner.start_block_seqno
+    }
+
+    pub fn cancel(&self) {
+        self.inner.state.cancelled.store(true, Ordering::Release);
+        self.inner.state.cancelled_signal.notify_waiters();
     }
 
     pub fn cancel_until(&self, block_seqno: u32) {
@@ -110,6 +141,14 @@ impl ValidatorSession {
         state.block_signatures.remove_range(..=block_seqno);
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            shard_ident = %self.inner.state.shard_ident,
+            session_id = self.inner.session_id,
+            %block_id
+        )
+    )]
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
         const MAX_PARALLEL_REQUESTS: usize = 10;
 
@@ -119,7 +158,7 @@ impl ValidatorSession {
             .min_seqno
             .fetch_max(block_id.seqno, Ordering::Release);
 
-        self.create_cache_slots(block_id.seqno, self.inner.config.signature_cache_slots);
+        self.create_cache_slots(block_id.seqno + 1, self.inner.config.signature_cache_slots);
 
         let state = &self.inner.state;
 
@@ -143,7 +182,11 @@ impl ValidatorSession {
             .is_err()
         {
             // TODO: Panic here?
-            anyhow::bail!("block validation is already in progress");
+            anyhow::bail!(
+                "block validation is already in progress. \
+                session_id={}, block_id={block_id}",
+                self.inner.session_id
+            );
         }
 
         // NOTE: To eliminate the gap inside exchange routine, we can remove cached signatures
@@ -167,13 +210,12 @@ impl ValidatorSession {
         let mut futures = FuturesUnordered::new();
         for (peer_id, signature) in block_signatures.other_signatures.iter() {
             if let Some(valid_signature) = signature.load_full() {
-                result.insert(*peer_id, valid_signature);
-
                 let validator_info = state
                     .validators
                     .get(peer_id)
                     .expect("peer info out of sync");
 
+                result.insert(*peer_id, valid_signature);
                 total_weight += validator_info.weight;
                 continue;
             }
@@ -192,6 +234,11 @@ impl ValidatorSession {
         }
 
         let mut session_cancelled = pin!(state.cancelled_signal.notified());
+        if state.cancelled.load(Ordering::Acquire) {
+            tracing::trace!(block_seqno = block_id.seqno, "session cancelled");
+            return Ok(ValidationStatus::Skipped);
+        }
+
         let mut block_cancelled = pin!(block_signatures.cancelled.cancelled());
         while total_weight < state.weight_threshold {
             let res = tokio::select! {
@@ -256,7 +303,10 @@ impl ValidatorSession {
         let validators = self.inner.state.validators.clone();
         let mut total_weight = self.inner.own_weight;
 
+        let span = tracing::Span::current();
         tycho_util::sync::rayon_run(move || {
+            let _span = span.enter();
+
             // Prepare our own signature
             let own_signature = Arc::new(key_pair.sign_raw(&data));
 
@@ -299,17 +349,17 @@ impl ValidatorSession {
         .await
     }
 
-    fn create_cache_slots(&self, after_seqno: u32, n: u32) {
+    fn create_cache_slots(&self, from: u32, n: u32) {
         let inner = self.inner.as_ref();
 
-        let last_seqno = after_seqno + n;
-        let first_seqno = inner.min_seqno.load(Ordering::Acquire).max(after_seqno + 1);
+        let to = from + n;
+        let from = inner.min_seqno.load(Ordering::Acquire).max(from);
 
-        if first_seqno > last_seqno {
+        if from >= to {
             return;
         }
 
-        for seqno in first_seqno..=last_seqno {
+        for seqno in from..to {
             let signatures = inner
                 .state
                 .validators
@@ -326,6 +376,8 @@ impl ValidatorSession {
 }
 
 struct Inner {
+    start_block_seqno: u32,
+    session_id: u32,
     config: ValidatorStdImplConfig,
     client: ValidatorClient,
     key_pair: Arc<KeyPair>,
@@ -335,7 +387,6 @@ struct Inner {
 }
 
 impl Inner {
-    #[tracing::instrument(skip_all, fields(%peer_id, block_seqno = block_signatures.block_id.seqno))]
     async fn receive_signature(
         self: Arc<Self>,
         peer_id: PeerId,
@@ -432,6 +483,16 @@ impl Inner {
         };
 
         ValidSignature { peer_id, signature }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        tracing::debug!(
+            shard_ident = %self.state.shard_ident,
+            session_id = self.session_id,
+            "validator session dropped"
+        );
     }
 }
 
@@ -536,6 +597,12 @@ struct BlockSignatures {
     cancelled: CancellationToken,
 }
 
+impl Drop for BlockSignatures {
+    fn drop(&mut self) {
+        tracing::info!(block_id = %self.block_id, "block signatures dropped");
+    }
+}
+
 type SignatureSlotsMap = FastHashMap<PeerId, SignatureSlot>;
 type SignaturesMap = FastHashMap<PeerId, ArcSwapOption<[u8; 64]>>;
 
@@ -548,7 +615,7 @@ impl ExchangeSignatures for SessionState {
         block_seqno: u32,
         signature: Arc<[u8; 64]>,
     ) -> Result<proto::Exchange, Self::Err> {
-        if self.cancelled.load(Ordering::Relaxed) {
+        if self.cancelled.load(Ordering::Acquire) {
             return Err(ValidationError::Cancelled);
         }
 
