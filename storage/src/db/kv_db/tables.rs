@@ -7,6 +7,11 @@ use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
 use super::refcount;
 
+// took from
+// https://github.com/tikv/tikv/blob/d60c7fb6f3657dc5f3c83b0e3fc6ac75636e1a48/src/config/mod.rs#L170
+// todo: need to benchmark and update if it's not optimal
+const DEFAULT_MIN_BLOB_SIZE: u64 = bytesize::KIB * 32;
+
 /// Stores generic node parameters
 /// - Key: `...`
 /// - Value: `...`
@@ -43,6 +48,7 @@ impl ColumnFamilyOptions<Caches> for Archives {
 
         opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
         opts.set_compression_type(DBCompressionType::Zstd);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
     }
 }
 
@@ -118,6 +124,7 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
         // to the higher level.
         // https://github.com/facebook/rocksdb/blob/81aeb15988e43c49952c795e32e5c8b224793589/include/rocksdb/advanced_options.h#L846
         opts.set_optimize_filters_for_hits(true);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
     }
 }
 
@@ -314,6 +321,7 @@ impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
         zstd_block_based_table_factory(opts, caches);
     }
 }
+
 /// Stores connections data
 pub struct ShardsInternalMessagesSession;
 impl ColumnFamily for ShardsInternalMessagesSession {
@@ -419,6 +427,7 @@ impl ColumnFamily for Transactions {
 impl ColumnFamilyOptions<Caches> for Transactions {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
     }
 }
 
@@ -495,4 +504,12 @@ fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     block_factory.set_block_cache(&caches.block_cache);
     opts.set_block_based_table_factory(&block_factory);
     opts.set_compression_type(DBCompressionType::Zstd);
+}
+
+fn with_blob_db(opts: &mut Options, min_value_size: u64) {
+    opts.set_enable_blob_files(true);
+    opts.set_enable_blob_gc(true);
+
+    opts.set_min_blob_size(min_value_size);
+    opts.set_blob_compression_type(DBCompressionType::Zstd);
 }
