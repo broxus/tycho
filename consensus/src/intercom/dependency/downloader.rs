@@ -19,7 +19,7 @@ use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
 use crate::models::{DagPoint, PeerCount, PointId};
-use crate::{dyn_event, Point};
+use crate::Point;
 
 #[derive(Clone)]
 pub struct Downloader {
@@ -64,6 +64,7 @@ impl Downloader {
         // Do not pass `WeakDagRound` here as it would be incorrect to return `DagPoint::NotExists`
         // if we need to download at a very deep round - let the start of this task hold strong ref.
         point_dag_round_strong: DagRound,
+        certified_rx: oneshot::Receiver<()>,
         dependers: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
@@ -136,28 +137,15 @@ impl Downloader {
                     peer = display(point.body().location.author.alt()),
                     "downloaded, now validating",
                 );
-                let dag_point = Verifier::validate(
+                Verifier::validate(
                     point.clone(),
                     point_dag_round,
                     self.clone(),
+                    certified_rx,
                     Effects::<ValidateContext>::new(&effects, &point),
                 )
                 // this is the only `await` in the task, that resolves the download
-                .await;
-                let level = if dag_point.trusted().is_some() {
-                    tracing::Level::DEBUG
-                } else if dag_point.valid().is_some() {
-                    tracing::Level::WARN
-                } else {
-                    tracing::Level::ERROR
-                };
-                dyn_event!(
-                    parent: effects.span(),
-                    level,
-                    result = display(dag_point.alt()),
-                    "validated",
-                );
-                dag_point
+                .await
             }
         }
     }
