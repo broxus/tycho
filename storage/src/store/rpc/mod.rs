@@ -612,7 +612,7 @@ impl RpcStorage {
                     let tx_hash = tx_cell.inner().repr_hash();
 
                     tx_buffer.clear();
-                    everscale_types::boc::ser::BocHeader::<ahash::RandomState>::new(
+                    everscale_types::boc::ser::BocHeader::<ahash::RandomState>::with_root(
                         tx_cell.inner().as_ref(),
                     )
                     .encode(&mut tx_buffer);
