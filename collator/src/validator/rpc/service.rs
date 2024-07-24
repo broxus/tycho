@@ -7,6 +7,7 @@ use tracing::Instrument;
 use tycho_network::{PeerId, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
 
+use crate::tracing_targets;
 use crate::validator::proto::rpc;
 use crate::validator::rpc::ExchangeSignatures;
 
@@ -38,7 +39,10 @@ impl<E: ExchangeSignatures> ValidatorService<E> {
                     Err(e) => {
                         // TODO: Is it ok to WARN here? Since we can be ddosed with invalid signatures
                         // and the log will be full of these warnings.
-                        tracing::warn!("failed to exchange signatures: {e:?}");
+                        tracing::warn!(
+                            target: tracing_targets::VALIDATOR,
+                            "failed to exchange signatures: {e:?}",
+                        );
                         None
                     }
                 }
@@ -69,7 +73,6 @@ where
     type OnDatagramFuture = futures_util::future::Ready<()>;
 
     #[tracing::instrument(
-        level = "debug",
         name = "on_validator_query",
         skip_all,
         fields(
@@ -81,21 +84,28 @@ where
         let (constructor, body) = match try_handle_prefix(&req) {
             Ok(rest) => rest,
             Err(e) => {
-                tracing::debug!("failed to deserializer query: {e}");
+                tracing::debug!(
+                    target: tracing_targets::VALIDATOR,
+                    "failed to deserializer query: {e}",
+                );
                 return BoxFutureOrNoop::Noop;
             }
         };
 
         tycho_network::match_tl_request!(body, tag = constructor, {
             rpc::ExchangeSignaturesOwned as r => {
-                tracing::debug!(
+                tracing::trace!(
+                    target: tracing_targets::VALIDATOR,
                     block_seqno = r.block_seqno,
                     "exchangeSignatures",
                 );
                 self.handle_exchange_signatures(&req.metadata.peer_id, r.block_seqno, r.signature)
             }
         }, e => {
-            tracing::debug!("failed to deserializer query: {e}");
+            tracing::debug!(
+                target: tracing_targets::VALIDATOR,
+                "failed to deserializer query: {e}",
+            );
             BoxFutureOrNoop::Noop
         })
     }

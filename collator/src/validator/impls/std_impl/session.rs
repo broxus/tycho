@@ -235,7 +235,11 @@ impl ValidatorSession {
 
         let mut session_cancelled = pin!(state.cancelled_signal.notified());
         if state.cancelled.load(Ordering::Acquire) {
-            tracing::trace!(block_seqno = block_id.seqno, "session cancelled");
+            tracing::trace!(
+                target: tracing_targets::VALIDATOR,
+                block_seqno = block_id.seqno,
+                "session cancelled",
+            );
             return Ok(ValidationStatus::Skipped);
         }
 
@@ -247,11 +251,19 @@ impl ValidatorSession {
                     None => anyhow::bail!("no more signatures to collect but the threshold is not reached"),
                 },
                 _ = &mut session_cancelled => {
-                    tracing::trace!(block_seqno = block_id.seqno, "session cancelled");
+                    tracing::trace!(
+                        target: tracing_targets::VALIDATOR,
+                        block_seqno = block_id.seqno,
+                        "session cancelled",
+                    );
                     return Ok(ValidationStatus::Skipped)
                 },
                 _ = &mut block_cancelled => {
-                    tracing::trace!(block_seqno = block_id.seqno, "block cancelled");
+                    tracing::trace!(
+                        target: tracing_targets::VALIDATOR,
+                        block_seqno = block_id.seqno,
+                        "block cancelled",
+                    );
                     return Ok(ValidationStatus::Skipped)
                 },
             };
@@ -323,6 +335,7 @@ impl ValidatorSession {
                     let validator_info = validators.get(peer_id).expect("peer info out of sync");
                     if !validator_info.public_key.verify_raw(&data, &signature) {
                         tracing::warn!(
+                            target: tracing_targets::VALIDATOR,
                             %peer_id,
                             block_seqno,
                             "cached signature is invalid: {}",
@@ -417,7 +430,10 @@ impl Inner {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("cached signature is invalid: {e:?}");
+                    tracing::warn!(
+                        target: tracing_targets::VALIDATOR,
+                        "cached signature is invalid: {e:?}",
+                    );
                 }
             }
         }
@@ -442,14 +458,26 @@ impl Inner {
                         Ok(Ok(res)) => match res.parse_tl() {
                             Ok(proto::Exchange::Complete(signature)) => break signature,
                             Ok(proto::Exchange::Cached) => {
-                                tracing::trace!("partial signature exchange");
+                                tracing::trace!(
+                                    target: tracing_targets::VALIDATOR,
+                                    "partial signature exchange",
+                                );
                             }
                             Err(e) => {
-                                tracing::trace!("failed to parse response: {e:?}");
+                                tracing::trace!(
+                                    target: tracing_targets::VALIDATOR,
+                                    "failed to parse response: {e:?}",
+                                );
                             }
                         },
-                        Ok(Err(e)) => tracing::trace!("query failed: {e:?}"),
-                        Err(_) => tracing::trace!("query timed out"),
+                        Ok(Err(e)) => tracing::trace!(
+                            target: tracing_targets::VALIDATOR,
+                            "query failed: {e:?}",
+                        ),
+                        Err(_) => tracing::trace!(
+                            target: tracing_targets::VALIDATOR,
+                            "query timed out",
+                        ),
                     }
                     drop(permit);
 
@@ -472,7 +500,10 @@ impl Inner {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("fetched signature is invalid: {e:?}");
+                    tracing::warn!(
+                        target: tracing_targets::VALIDATOR,
+                        "fetched signature is invalid: {e:?}",
+                    );
                 }
             }
 
@@ -489,6 +520,7 @@ impl Inner {
 impl Drop for Inner {
     fn drop(&mut self) {
         tracing::debug!(
+            target: tracing_targets::VALIDATOR,
             shard_ident = %self.state.shard_ident,
             session_id = self.session_id,
             "validator session dropped"
