@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
@@ -39,12 +39,10 @@ pub trait QueueIterator: Send {
 
 pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
-    commited_current_position: BTreeMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
     new_messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     snapshot_manager: StatesIteratorsManager,
     last_processed_message: FastHashMap<ShardIdent, InternalMessageKey>,
-    last_read_message_for_current_shard: FastHashMap<ShardIdent, InternalMessageKey>,
     read_position: BTreeMap<ShardIdent, InternalMessageKey>,
 }
 
@@ -59,10 +57,8 @@ impl QueueIteratorImpl {
             for_shard,
             messages_for_current_shard,
             new_messages: Default::default(),
-            commited_current_position: Default::default(),
             snapshot_manager,
             last_processed_message: Default::default(),
-            last_read_message_for_current_shard: Default::default(),
             read_position: Default::default(),
         })
     }
@@ -94,9 +90,6 @@ impl QueueIterator for QueueIteratorImpl {
                 .for_shard
                 .contains_address(&next_message.message.info.dst)
             {
-                self.last_read_message_for_current_shard
-                    .insert(next_message.shard_id, next_message.message.key());
-
                 return Ok(Some(IterItem {
                     message_with_source: next_message.clone(),
                     is_new: false,
