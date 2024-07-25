@@ -397,7 +397,16 @@ where
                 block_id.as_short_id()
             );
 
-            self.store_shard_block_from_bc_in_cache(*block_id);
+            let stop_validation = self.store_shard_block_from_bc_in_cache(*block_id);
+
+            if stop_validation {
+                let short_id = block_id.as_short_id();
+                self.validator
+                    .stop_validation(StopValidationCommand::ByBlock(short_id))
+                    .await?;
+                // Need to do validation routine
+                self.process_valid_master_block(&block_id).await?;
+            }
         }
 
         Ok(())
@@ -1532,8 +1541,9 @@ where
     }
 
     /// Store shard block received from bc in a cache structure
-    fn store_shard_block_from_bc_in_cache(&self, block_id: BlockId) {
+    fn store_shard_block_from_bc_in_cache(&self, block_id: BlockId) -> bool {
         let block_container = BlockCandidateContainer::create_synced_from_bc(block_id);
+        let mut stop_validation = false;
         // save block to cache
         match self.blocks_cache.shards.entry(block_container.key().shard) {
             DashMapEntry::Occupied(mut occupied) => {
@@ -1553,7 +1563,9 @@ where
                         );
 
                         match occupied.get().send_sync_status {
-                            SendSyncStatus::NotReady => {}
+                            SendSyncStatus::NotReady => {
+                                stop_validation = true;
+                            }
                             SendSyncStatus::Ready => {
                                 // No need to send to syncing - do nothing
                                 occupied.get_mut().send_sync_status = SendSyncStatus::Synced;
@@ -1583,6 +1595,7 @@ where
                 vacant.insert(btreemap);
             }
         }
+        stop_validation
     }
 
     /// Find block candidate in cache, append signatures info and return updated
