@@ -492,7 +492,9 @@ where
             .load_state(&last_mc_block_id)
             .await?;
 
-        self.process_block_from_bc(state).await
+        let mc_data = McData::load_from_state(&state)?;
+
+        self.refresh_collation_sessions(mc_data).await
     }
 
     /// Get shards info from the master state,
