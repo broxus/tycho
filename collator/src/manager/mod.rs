@@ -301,11 +301,15 @@ where
     pub async fn process_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
         let block_id = state.block_id();
 
-        tracing::info!(target: tracing_targets::COLLATION_MANAGER,
-            "Processing block ({}) from blockchain", block_id.as_short_id(),
-        );
+        if block_id.is_masterchain() {
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Store mc block ({}) received from blockchain ...",
+                block_id.as_short_id()
+            );
 
-        let stop_validation = if block_id.is_masterchain() {
+            let stop_validation = self.store_mc_block_from_bc_in_cache(*block_id);
+
             // check if we should skip this master block from the blockchain
             // because it is not far ahead of last collated by ourselves
             if !self.check_should_process_mc_block_from_bc(&block_id) {
@@ -322,31 +326,24 @@ where
 
             Self::notify_mempool_about_mc_block(mpool_adapter, block_id).await?;
 
-            self.store_mc_block_from_bc_in_cache(*block_id)
+            if stop_validation {
+                let short_id = block_id.as_short_id();
+                self.validator.cancel_validation(&short_id)?;
+                // Need to do validation routine
+                self.process_valid_master_block(&block_id).await?;
+            }
+
+            if self.get_last_processed_mc_block_id().is_none() {
+                let mc_data = McData::load_from_state(&state)?;
+                self.refresh_collation_sessions(mc_data).await?;
+            }
         } else {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
-                "Processing requested shardchain state for block ({}) received from blockchain ...",
+                "Store shard block ({}) received from blockchain ...",
                 block_id.as_short_id()
             );
-
-            self.store_shard_block_from_bc_in_cache(*block_id)
-        };
-
-        if stop_validation {
-            let short_id = block_id.as_short_id();
-            self.validator.cancel_validation(&short_id)?;
-            // Need to do validation routine
-            if block_id.is_masterchain() {
-                self.process_valid_master_block(&block_id).await?;
-            } else {
-                self.process_valid_shard_block(&block_id).await?;
-            }
-        }
-
-        if block_id.is_masterchain() && self.get_last_processed_mc_block_id().is_none() {
-            let mc_data = McData::load_from_state(&state)?;
-            self.refresh_collation_sessions(mc_data).await?;
+            self.store_shard_block_from_bc_in_cache(*block_id);
         }
 
         Ok(())
@@ -877,11 +874,15 @@ where
             "Saving block candidate to cache...",
         );
 
-        let mc_block_already_stored_by_blockchain =
+        let block_already_stored_by_blockchain =
             self.store_candidate(collation_result.candidate)?;
 
-        if mc_block_already_stored_by_blockchain {
-            self.process_valid_master_block(&block_id).await?;
+        if block_already_stored_by_blockchain {
+            if block_id.is_masterchain() {
+                self.process_valid_master_block(&block_id).await?;
+            } else {
+                self.process_valid_shard_block(&block_id).await?;
+            }
         } else {
             // send validation task to validator
             // we need to send session info with the collators list to the validator
@@ -1478,9 +1479,8 @@ where
     }
 
     /// Store shard block received from bc in a cache structure
-    fn store_shard_block_from_bc_in_cache(&self, block_id: BlockId) -> bool {
+    fn store_shard_block_from_bc_in_cache(&self, block_id: BlockId) {
         let block_container = BlockCandidateContainer::create_synced_from_bc(block_id);
-        let mut stop_validation = false;
         // save block to cache
         match self.blocks_cache.shards.entry(block_container.key().shard) {
             DashMapEntry::Occupied(mut occupied) => {
@@ -1500,10 +1500,7 @@ where
                         );
 
                         match occupied.get().send_sync_status {
-                            SendSyncStatus::NotReady => {
-                                // Validation process started, need to stop it
-                                stop_validation = true;
-                            }
+                            SendSyncStatus::NotReady => {}
                             SendSyncStatus::Ready => {
                                 // No need to send to syncing - do nothing
                                 occupied.get_mut().send_sync_status = SendSyncStatus::Synced;
@@ -1533,7 +1530,6 @@ where
                 vacant.insert(btreemap);
             }
         }
-        stop_validation
     }
 
     /// Find block candidate in cache, append signatures info and return updated
