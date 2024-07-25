@@ -52,9 +52,11 @@ impl QueueIteratorAdapter {
 
     pub fn release(
         mut self,
+        check_pending_internals: bool,
     ) -> Result<(FastHashMap<ShardIdent, InternalMessageKey>, bool, QueueDiff)> {
         let mut has_pending_internals = self.iterator().has_new_messages_for_current_shard();
-        if !has_pending_internals && !self.no_pending_existing_internals {
+        if !has_pending_internals && !self.no_pending_existing_internals && check_pending_internals
+        {
             has_pending_internals = self.iterator().next(false)?.is_some();
         }
         let full_diff = self.iterator().extract_full_diff();

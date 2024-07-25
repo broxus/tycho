@@ -988,6 +988,14 @@ impl MessageGroups {
         self.int_messages_count + self.ext_messages_count
     }
 
+    pub fn int_messages_count(&self) -> usize {
+        self.int_messages_count
+    }
+
+    pub fn ext_messages_count(&self) -> usize {
+        self.ext_messages_count
+    }
+
     fn incriment_counters(&mut self, is_int: bool) {
         if is_int {
             self.int_messages_count += 1;

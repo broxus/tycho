@@ -338,7 +338,7 @@ impl CollatorStdImpl {
 
         // start async update queue task
         let update_queue_task = JoinTask::<Result<_>>::new({
-            let current_processed_upto = collation_data.processed_upto.clone();
+            let has_pending_messages_in_buffer = exec_manager.has_pending_messages_in_buffer();
             let mq_adapter = self.mq_adapter.clone();
             let labels = labels.clone();
             async move {
@@ -348,21 +348,10 @@ impl CollatorStdImpl {
                     &labels,
                 );
                 let (current_positions, has_pending_internals, diff) =
-                    mq_iterator_adapter.release()?;
-                // TODO: remove this log and check after stabilizing
-                {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "collator_data.processed_upto.internals: {:?} \
-                        diff processed upto: {:?}",
-                        current_processed_upto.internals,
-                        diff.processed_upto,
-                    );
-                    for (shard_id, int_upto_info) in current_processed_upto.internals.iter() {
-                        let diff_int_upto_info = diff.processed_upto.get(shard_id).unwrap();
-                        assert_eq!(diff_int_upto_info, &int_upto_info.processed_to_msg);
-                    }
-                }
+                    mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;
                 let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+
+                let has_pending_messages = has_pending_messages_in_buffer || has_pending_internals;
 
                 let diff_messages_len = diff.messages.len();
 
@@ -376,7 +365,7 @@ impl CollatorStdImpl {
 
                 Ok((
                     current_positions,
-                    has_pending_internals,
+                    has_pending_messages,
                     (
                         diff_messages_len,
                         create_queue_diff_elapsed,
@@ -423,7 +412,7 @@ impl CollatorStdImpl {
         // resolve update queue task
         let (
             current_positions,
-            has_pending_internals,
+            has_pending_internals, // FIXME: rename into has_pending_messages everywhere
             (diff_messages_len, create_queue_diff_elapsed, apply_queue_diff_elapsed),
         ) = update_queue_task.await?;
         exec_manager.set_current_iterator_positions(current_positions);

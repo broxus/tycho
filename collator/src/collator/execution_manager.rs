@@ -110,6 +110,10 @@ impl ExecutionManager {
         self.current_iterator_positions = positions;
     }
 
+    pub fn has_pending_messages_in_buffer(&self) -> bool {
+        !self.message_groups.is_empty()
+    }
+
     pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter {
         self.process_ext_messages = false;
         self.process_new_messages = false;
@@ -131,10 +135,14 @@ impl ExecutionManager {
         &mut self,
         mq_iterator_adapter: QueueIteratorAdapter,
     ) -> Result<(bool, QueueDiff)> {
-        let (current_positions, has_pending_internals, diff) = mq_iterator_adapter.release()?;
+        let has_pending_messages_in_buffer = self.has_pending_messages_in_buffer();
+        let (current_positions, has_pending_internals, diff) =
+            mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;
         self.current_iterator_positions = current_positions;
 
-        Ok((has_pending_internals, diff))
+        let has_pending_messages = has_pending_messages_in_buffer || has_pending_internals;
+
+        Ok((has_pending_messages, diff))
     }
 
     pub fn read_existing_messages_total_elapsed(&self) -> Duration {
@@ -223,15 +231,17 @@ impl ExecutionManager {
             collation_data.read_int_msgs_from_iterator += existing_internals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "existing_internals_read_count={}",
+                "existing_internals_read_count={}, buffer int={}, ext={}",
                 existing_internals_read_count,
+                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
             );
 
             group_opt = self.message_groups.extract_first_group();
             if let Some(first_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: {}",
+                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
                     DisplayMessageGroup(first_group),
+                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
 
@@ -322,15 +332,17 @@ impl ExecutionManager {
             collation_data.read_ext_msgs += externals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "externals_read_count={}",
+                "externals_read_count={}, buffer int={}, ext={}",
                 externals_read_count,
+                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
             );
 
             group_opt = self.message_groups.extract_first_group();
             if let Some(first_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: {}",
+                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
                     DisplayMessageGroup(first_group),
+                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
 
@@ -403,8 +415,9 @@ impl ExecutionManager {
             collation_data.read_new_msgs_from_iterator += new_internals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "new_internals_read_count={}",
+                "new_internals_read_count={}, buffer int={}, ext={}",
                 new_internals_read_count,
+                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
             );
 
             // when we have 2 groups, the second one contains only one message
@@ -413,8 +426,9 @@ impl ExecutionManager {
             group_opt = self.message_groups.extract_merged_group();
             if let Some(merged_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted merged message group of new messages from message_groups buffer: {}",
+                    "extracted merged message group of new messages from message_groups buffer: group {}, buffer int={}, ext={}",
                     DisplayMessageGroup(merged_group),
+                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
 
