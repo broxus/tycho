@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::usize;
 
 use anyhow::{anyhow, Result};
 use tokio::sync::{mpsc, oneshot};

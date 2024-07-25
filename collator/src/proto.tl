@@ -1,62 +1,45 @@
 ---types---
 
 /**
-* @param session_seqno  The sequence number of the session
-* @param block_id_short The short identifier for a block
-* @param signatures     A vector of hash-signature pairs
+* Data for computing a private overlay id
 */
-queries.signaturesQueryRes
-    session_seqno:int
-    block_id_short:types.blockIdShort
-    signatures:(vector types.hashSignaturePair)
-    = queries.SignaturesQueryRes;
+validator.overlayIdData
+    zerostate_root_hash:int256
+    zerostate_file_hash:int256
+    shard_ident:validator.shardIdent
+    session_id:int
+    = validator.OverlayIdData;
 
 /**
-* @param session_seqno  The sequence number of the session
-* @param block_id_short The short identifier for a block
-* @param signatures     A vector of hash-signature pairs
+* @param workchain  workchain identifier
+* @param prefix     shard prefix with tag
 */
-queries.signaturesQueryReq
-    session_seqno:int
-    block_id_short:types.blockIdShort
-    signature:bytes
-    = queries.SignaturesQueryReq;
-
-/**
-* @param workchain Workchain identifier of the shard
-* @param prefix    Prefix of the shard
-* @param seqno     Sequence number of the block
-*/
-types.blockIdShort
+validator.shardIdent
     workchain:int
     prefix:long
-    seqno:int
-    = types.BlockIdShort;
+    = validator.ShardIdent;
 
 /**
-* @param hash       Hash of the data
-* @param signature  Signature data
+* Signature exchange response (full)
+*
+* @param signature  Validator signature
 */
-types.hashSignaturePair
-    hash:bytes
+validator.exchange.complete signature:bytes = validator.Exchange;
+
+/**
+* Signature exchange response (partial)
+*/
+validator.exchange.cached = validator.Exchange;
+
+---functions---
+
+/**
+* Exchange signatures for the specified block
+*
+* @param block_seqno    block height for the session's shard
+* @param signature      64-bytes of ed25519 signature
+*/
+validator.exchangeSignatures
+    block_seqno:int
     signature:bytes
-    = types.HashSignaturePair;
-
-
-/**
-* @param shard_ident   The identifier for a shard, serialized with tl_shard_ident
-* @param session_seqno The sequence number of the session
-*/
-types.overlayNumber
-    shard_ident:types.shardIdent
-    session_seqno:int
-    = overlays.OverlayNumber;
-
-/**
-* @param workchain Workchain identifier of the shard
-* @param prefix    Prefix of the shard
-*/
-types.shardIdent
-    workchain:int
-    prefix:long
-    = types.ShardIdent;
+    = validator.Exchange;

@@ -1,30 +1,25 @@
 use anyhow::{Context, Result};
 use tempfile::TempDir;
-use tycho_block_util::archive::ArchiveData;
-use tycho_block_util::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff};
+use tycho_block_util::archive::Archive;
 use tycho_storage::{BlockMetaData, Storage};
 
-use crate::common::*;
-
-pub(crate) fn get_archive() -> Result<archive::Archive> {
+pub(crate) fn get_archive() -> Result<Archive> {
     let data = include_bytes!("../../tests/data/00001");
-    let archive = archive::Archive::new(data)?;
-
-    Ok(archive)
+    Archive::new(data.as_slice())
 }
 
 pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp()?;
 
     let data = include_bytes!("../../tests/data/00001");
-    let provider = archive::Archive::new(data)?;
+    let provider = Archive::new(data.as_slice())?;
 
     for (block_id, archive) in provider.blocks {
         if block_id.shard.is_masterchain() {
             let block = archive.block.unwrap();
             let proof = archive.proof.unwrap();
 
-            let info = block.info.load().context("Failed to load block info")?;
+            let info = block.load_info().context("Failed to load block info")?;
 
             let meta = BlockMetaData {
                 is_key_block: info.key_block,
@@ -32,11 +27,9 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
                 mc_ref_seqno: None, // TODO: set mc ref seqno
             };
 
-            let block_stuff = BlockStuff::with_block(block_id, block.data);
-
             let block_result = storage
                 .block_storage()
-                .store_block_data(&block_stuff, &block.archive_data, meta)
+                .store_block_data(&block, &block.archive_data, meta)
                 .await?;
 
             assert!(block_result.new);
@@ -46,7 +39,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
                 .load_handle(&block_id)
                 .unwrap();
 
-            assert_eq!(handle.id(), block_stuff.id());
+            assert_eq!(handle.id(), block.id());
 
             let bs = storage
                 .block_storage()
@@ -54,25 +47,11 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
                 .await?;
 
             assert_eq!(bs.id(), &block_id);
-            assert_eq!(bs.block(), block_stuff.block());
-
-            let proof_archive_data = match proof.archive_data {
-                ArchiveData::New(archive_data) => archive_data,
-                ArchiveData::Existing => anyhow::bail!("invalid proof archive data"),
-            };
-
-            let block_proof = BlockProofStuff::deserialize(
-                &block_id,
-                everscale_types::boc::BocRepr::encode(&proof.data)?.as_slice(),
-                false,
-            )?;
-
-            let block_proof_with_data =
-                BlockProofStuffAug::new(block_proof.clone(), proof_archive_data);
+            assert_eq!(bs.block(), block.as_ref());
 
             let handle = storage
                 .block_storage()
-                .store_block_proof(&block_proof_with_data, handle.into())
+                .store_block_proof(&proof, handle.into())
                 .await?
                 .handle;
 
@@ -81,9 +60,9 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
                 .load_block_proof(&handle, false)
                 .await?;
 
-            assert_eq!(bp.is_link(), block_proof.is_link());
-            assert_eq!(bp.proof().root, block_proof.proof().root);
-            assert_eq!(bp.proof().proof_for, block_proof.proof().proof_for);
+            assert_eq!(bp.is_link(), proof.is_link());
+            assert_eq!(bp.proof().root, proof.as_ref().root);
+            assert_eq!(bp.proof().proof_for, proof.as_ref().proof_for);
         }
     }
 

@@ -1,478 +1,359 @@
-use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use std::usize;
 
-use anyhow::Result;
-use async_trait::async_trait;
+use anyhow::{Context, Result};
 use everscale_crypto::ed25519;
-use everscale_crypto::ed25519::KeyPair;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, ShardIdent, ValidatorDescription};
-use rand::prelude::ThreadRng;
-use tokio::sync::{Mutex, Notify};
-use tokio::time::sleep;
-use tycho_block_util::block::ValidatorSubsetInfo;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_collator::state_node::{StateNodeAdapterStdImpl, StateNodeEventListener};
-use tycho_collator::test_utils::{prepare_test_storage, try_init_test_tracing};
-use tycho_collator::types::{CollationSessionInfo, OnValidatedBlockEvent, ValidatorNetwork};
-use tycho_collator::validator::client::retry::BackoffConfig;
-use tycho_collator::validator::config::ValidatorConfig;
-use tycho_collator::validator::state::{ValidationState, ValidationStateStdImpl};
-use tycho_collator::validator::validator::{Validator, ValidatorEventListener, ValidatorStdImpl};
-use tycho_core::block_strider::{
-    BlockStrider, EmptyBlockProvider, PersistentBlockStriderState, PrintSubscriber,
+use futures_util::StreamExt;
+use tycho_collator::validator::{
+    AddSession, BriefValidatorDescr, ValidationStatus, Validator, ValidatorStdImpl,
+    ValidatorStdImplConfig,
 };
-use tycho_network::{
-    DhtClient, DhtConfig, DhtService, Network, OverlayService, PeerId, PeerResolver, Router,
-};
-use tycho_storage::Storage;
+use tycho_network::{DhtClient, PeerInfo};
+use tycho_util::futures::JoinTask;
 
-pub struct TestValidatorEventListener {
-    validated_blocks: Mutex<Vec<BlockId>>,
-    notify: Arc<Notify>,
-    expected_notifications: Mutex<u32>,
-    received_notifications: Mutex<u32>,
-    global_validated_blocks: Arc<AtomicUsize>,
-}
+mod common;
 
-impl TestValidatorEventListener {
-    pub fn new(expected_count: u32, global_validated_blocks: Arc<AtomicUsize>) -> Arc<Self> {
-        Arc::new(Self {
-            validated_blocks: Mutex::new(vec![]),
-            notify: Arc::new(Notify::new()),
-            expected_notifications: Mutex::new(expected_count),
-            received_notifications: Mutex::new(0),
-            global_validated_blocks,
-        })
-    }
-
-    pub async fn increment_and_check(&self) {
-        let mut received = self.received_notifications.lock().await;
-        *received += 1;
-        if *received == *self.expected_notifications.lock().await {
-            self.notify.notify_one();
-        }
-    }
-}
-
-#[async_trait]
-impl ValidatorEventListener for TestValidatorEventListener {
-    async fn on_block_validated(
-        &self,
-        block_id: BlockId,
-        _event: OnValidatedBlockEvent,
-    ) -> Result<()> {
-        let mut validated_blocks = self.validated_blocks.lock().await;
-        if validated_blocks.contains(&block_id) {
-            return Ok(());
-        } else {
-            validated_blocks.push(block_id);
-        }
-        if validated_blocks.len() == 100 {
-            tracing::info!("Validated 100 blocks");
-        }
-
-        self.global_validated_blocks.fetch_add(1, Ordering::SeqCst);
-
-        self.increment_and_check().await;
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl StateNodeEventListener for TestValidatorEventListener {
-    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
-        unimplemented!("Not implemented");
-    }
-
-    async fn on_block_accepted_external(&self, _state: &ShardStateStuff) -> Result<()> {
-        unimplemented!("Not implemented");
-    }
-}
-
-struct Node {
-    network: Network,
-    keypair: Arc<KeyPair>,
-    overlay_service: OverlayService,
+struct ValidatorNode {
     dht_client: DhtClient,
-    peer_resolver: PeerResolver,
+    peer_info: Arc<PeerInfo>,
+    validator: ValidatorStdImpl,
+    descr: BriefValidatorDescr,
 }
 
-impl Node {
-    fn new(key: &ed25519::SecretKey) -> Self {
-        let keypair = Arc::new(ed25519::KeyPair::from(key));
-        let local_id = PeerId::from(keypair.public_key);
+impl ValidatorNode {
+    fn generate(zerostate_id: &BlockId, rng: &mut impl rand::Rng) -> Self {
+        let secret_key = ed25519::SecretKey::generate(rng);
+        let keypair = Arc::new(ed25519::KeyPair::from(&secret_key));
 
-        let (dht_tasks, dht_service) = DhtService::builder(local_id)
-            .with_config(DhtConfig {
-                local_info_announce_period: Duration::from_secs(1),
-                local_info_announce_period_max_jitter: Duration::from_secs(1),
-                routing_table_refresh_period: Duration::from_secs(1),
-                routing_table_refresh_period_max_jitter: Duration::from_secs(1),
-                ..Default::default()
-            })
-            .build();
+        let validator_network = common::make_validator_network(&secret_key, zerostate_id);
+        let validator_descr = BriefValidatorDescr {
+            peer_id: *validator_network.network.peer_id(),
+            public_key: keypair.public_key,
+            weight: 1,
+        };
 
-        let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-            .with_dht_service(dht_service.clone())
-            .build();
+        let network = &validator_network.network;
+        let dht_client = validator_network
+            .peer_resolver
+            .dht_service()
+            .make_client(network);
+        let peer_info = Arc::new(network.sign_peer_info(0, u32::MAX));
 
-        let router = Router::builder()
-            .route(overlay_service.clone())
-            .route(dht_service.clone())
-            .build();
-
-        let network = Network::builder()
-            .with_private_key(key.to_bytes())
-            .with_service_name("test-service")
-            .build((Ipv4Addr::LOCALHOST, 0), router)
-            .unwrap();
-
-        let dht_client = dht_service.make_client(&network);
-        let peer_resolver = dht_service.make_peer_resolver().build(&network);
-
-        overlay_tasks.spawn(&network);
-        dht_tasks.spawn(&network);
+        let validator = ValidatorStdImpl::new(
+            validator_network,
+            keypair.clone(),
+            ValidatorStdImplConfig::default(),
+        );
 
         Self {
-            network,
-            keypair,
-            overlay_service,
             dht_client,
-            peer_resolver,
+            peer_info,
+            validator,
+            descr: validator_descr,
         }
     }
 }
 
-fn make_network(node_count: usize) -> Vec<Node> {
-    let keys = (0..node_count)
-        .map(|_| ed25519::SecretKey::generate(&mut rand::thread_rng()))
+fn generate_network(
+    zerostate_id: &BlockId,
+    node_count: usize,
+    rng: &mut impl rand::Rng,
+) -> Vec<ValidatorNode> {
+    let nodes = (0..node_count)
+        .map(|_| ValidatorNode::generate(&zerostate_id, rng))
         .collect::<Vec<_>>();
-    let nodes = keys.iter().map(Node::new).collect::<Vec<_>>();
-    let common_peer_info = nodes.first().unwrap().network.sign_peer_info(0, u32::MAX);
-    for node in &nodes {
-        node.dht_client
-            .add_peer(Arc::new(common_peer_info.clone()))
-            .unwrap();
+
+    for i in 0..nodes.len() {
+        for j in 0..nodes.len() {
+            if i == j {
+                continue;
+            }
+            let left = &nodes[i];
+            let right = &nodes[j];
+
+            left.dht_client.add_peer(right.peer_info.clone()).unwrap();
+            right.dht_client.add_peer(left.peer_info.clone()).unwrap();
+        }
     }
+
     nodes
 }
 
-#[tokio::test]
-async fn test_validator_accept_block_by_state() -> anyhow::Result<()> {
-    let global_validated_blocks = Arc::new(AtomicUsize::new(0));
-
-    let test_listener = TestValidatorEventListener::new(1, global_validated_blocks);
-    let _state_node_event_listener: Arc<dyn StateNodeEventListener> = test_listener.clone();
-
-    let storage = prepare_test_storage().await.unwrap();
-
-    let zerostate_id = BlockId::default();
-
-    let block_strider = BlockStrider::builder()
-        .with_provider(EmptyBlockProvider)
-        .with_state(PersistentBlockStriderState::new(
-            zerostate_id,
-            storage.clone(),
-        ))
-        .with_state_subscriber(
-            MinRefMcStateTracker::default(),
-            storage.clone(),
-            PrintSubscriber,
-        )
-        .build();
-
-    block_strider.run().await.unwrap();
-
-    let state_node_adapter = Arc::new(StateNodeAdapterStdImpl::new(
-        test_listener.clone(),
-        storage.clone(),
-    ));
-    let _validation_state = ValidationStateStdImpl::new();
-
-    let random_secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
-    let keypair = ed25519::KeyPair::from(&random_secret_key);
-    let local_id = PeerId::from(keypair.public_key);
-    let (_, _overlay_service) = OverlayService::builder(local_id).build();
-
-    let (_overlay_tasks, overlay_service) = OverlayService::builder(local_id).build();
-
-    let router = Router::builder().route(overlay_service.clone()).build();
-    let network = Network::builder()
-        .with_private_key(random_secret_key.to_bytes())
-        .with_service_name("test-service")
-        .build((Ipv4Addr::LOCALHOST, 0), router)
-        .unwrap();
-
-    let (_, dht_service) = DhtService::builder(local_id)
-        .with_config(DhtConfig {
-            local_info_announce_period: Duration::from_secs(1),
-            local_info_announce_period_max_jitter: Duration::from_secs(1),
-            routing_table_refresh_period: Duration::from_secs(1),
-            routing_table_refresh_period_max_jitter: Duration::from_secs(1),
-            ..Default::default()
-        })
-        .build();
-
-    let dht_client = dht_service.make_client(&network);
-    let peer_resolver = dht_service.make_peer_resolver().build(&network);
-
-    let validator_network = ValidatorNetwork {
-        overlay_service,
-        peer_resolver,
-        dht_client,
-    };
-
-    let validator = ValidatorStdImpl::new(
-        vec![test_listener.clone()],
-        state_node_adapter,
-        Arc::new(validator_network),
-        Arc::new(KeyPair::generate(&mut ThreadRng::default())),
-        validator_config(),
-    );
-
-    let validator_description = ValidatorDescription {
-        public_key: validator.keypair().public_key.to_bytes().into(),
-        weight: 1,
-        adnl_addr: None,
-        mc_seqno_since: 0,
-        prev_total_weight: 0,
-    };
-
-    let validator_description2 = ValidatorDescription {
-        public_key: KeyPair::generate(&mut ThreadRng::default())
-            .public_key
-            .to_bytes()
-            .into(),
-        weight: 3,
-        adnl_addr: None,
-        mc_seqno_since: 0,
-        prev_total_weight: 0,
-    };
-
-    let block_id = storage.node_state().load_last_mc_block_id().unwrap();
-
-    let block_handle = storage.block_handle_storage().load_handle(&block_id);
-    assert!(block_handle.is_some(), "Block handle not found in storage.");
-
-    let validators = ValidatorSubsetInfo {
-        validators: vec![validator_description, validator_description2],
-        short_hash: 0,
-    };
-    let keypair = Arc::new(KeyPair::generate(&mut ThreadRng::default()));
-    let shard_ident = ShardIdent::default();
-
-    let collator_session_info =
-        Arc::new(CollationSessionInfo::new(-1, 0, validators, Some(keypair)));
-
-    validator
-        .add_session(
-            shard_ident,
-            0,
-            collator_session_info.collators().validators.as_slice(),
-        )
-        .await
-        .unwrap();
-
-    validator
-        .validate(block_id, collator_session_info.seqno())
-        .await
-        .unwrap();
-
-    test_listener.notify.notified().await;
-    let validated_blocks = test_listener.validated_blocks.lock().await;
-    assert_eq!(
-        validated_blocks.len() as u32,
-        1,
-        "Expected each validator to validate the block once."
-    );
-    Ok(())
-}
-
-fn create_blocks(amount: u32, shard_ident: ShardIdent) -> Vec<BlockId> {
-    let mut blocks = vec![];
-    for i in 0..amount {
-        blocks.push(BlockId {
-            shard: shard_ident,
-            seqno: i,
-            root_hash: Default::default(),
-            file_hash: Default::default(),
-        });
-    }
-    blocks
-}
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_validator_accept_block_by_network() -> Result<()> {
-    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
-    tycho_util::test::init_logger("test_validator_accept_block_by_network", "debug");
-
-    let mut tmp_dirs = Vec::new();
-
-    let node_count = 13u32;
-    let network_nodes = make_network(node_count as usize);
-    let blocks_amount = 100u32;
-    let sessions = 3u32;
-    let max_concurrent_blocks = 5; // Limit to processing ten blocks at a time
-    let required_validations = blocks_amount * node_count; // Total required validations for all validators together
-    let global_validated_blocks = Arc::new(AtomicUsize::new(0));
-
-    let mut tasks = vec![];
-
-    let mut validators_descriptions = Vec::new();
-    for node in &network_nodes {
-        let peer_id = node.network.peer_id();
-        validators_descriptions.push(ValidatorDescription {
-            public_key: (*peer_id.as_bytes()).into(),
+fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<ValidatorDescription> {
+    let mut validators = Vec::with_capacity(nodes.len());
+    let mut prev_total_weight = 0;
+    for node in nodes {
+        validators.push(ValidatorDescription {
+            public_key: HashBytes(*node.descr.public_key.as_bytes()),
             weight: 1,
-            adnl_addr: None,
-            mc_seqno_since: 0,
-            prev_total_weight: 0,
+            adnl_addr: Some(HashBytes(*node.descr.peer_id.as_bytes())),
+            mc_seqno_since: seqno,
+            prev_total_weight: prev_total_weight,
         });
+        prev_total_weight += node.descr.weight;
     }
 
-    let validators_subset_info = ValidatorSubsetInfo {
-        validators: validators_descriptions,
-        short_hash: 0,
-    };
+    validators
+}
 
-    for node in network_nodes {
-        let (storage, tmp_dir) = Storage::new_temp()?;
-        tmp_dirs.push(tmp_dir);
-
-        let test_listener = TestValidatorEventListener::new(
-            blocks_amount * sessions,
-            global_validated_blocks.clone(),
-        );
-        let state_node_adapter =
-            Arc::new(StateNodeAdapterStdImpl::new(test_listener.clone(), storage));
-
-        let network = ValidatorNetwork {
-            overlay_service: node.overlay_service.clone(),
-            dht_client: node.dht_client.clone(),
-            peer_resolver: node.peer_resolver.clone(),
-        };
-
-        let validator_config = validator_config();
-
-        let validator = Arc::new(ValidatorStdImpl::new(
-            vec![test_listener.clone()],
-            state_node_adapter,
-            Arc::new(network),
-            node.keypair.clone(),
-            validator_config,
-        ));
-
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_blocks));
-        let task = tokio::spawn(handle_validator(
-            validator,
-            semaphore.clone(),
-            test_listener,
-            blocks_amount,
-            sessions,
-            validators_subset_info.clone(),
-            required_validations,
-            global_validated_blocks.clone(),
-        ));
-        tasks.push(task);
-    }
-
-    let results = futures_util::future::join_all(tasks).await;
-
-    results.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
-
-    // Assert that all validations are completed as expected
-    assert_eq!(
-        global_validated_blocks.load(Ordering::SeqCst),
-        (required_validations * sessions) as usize,
-        "Not all required validations were completed"
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn validator_signatures_match() -> Result<()> {
+    tycho_util::test::init_logger(
+        "validator_signatures_match",
+        "info,tycho_collator::validator=trace",
     );
 
-    Ok(())
-}
+    const NODE_COUNT: usize = 13;
+    const SESSION_COUNT: usize = 5;
 
-fn validator_config() -> ValidatorConfig {
-    ValidatorConfig {
-        error_backoff_config: BackoffConfig {
-            min_delay: Duration::from_millis(50),
-            max_delay: Duration::from_millis(1000),
-            factor: 2.0,
-            max_times: 999999999,
-        },
-        request_signatures_backoff_config: BackoffConfig {
-            min_delay: Duration::from_millis(50),
-            max_delay: Duration::from_millis(150),
-            factor: 2.0,
-            max_times: 999999999,
-        },
-        request_timeout: Duration::from_millis(1000),
-        delay_between_requests: Duration::from_millis(50),
-    }
-}
+    let zerostate_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: HashBytes::ZERO,
+        file_hash: HashBytes::ZERO,
+    };
+    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::thread_rng());
 
-async fn handle_validator(
-    validator: Arc<ValidatorStdImpl>,
-    semaphore: Arc<tokio::sync::Semaphore>,
-    listener: Arc<TestValidatorEventListener>,
-    blocks_amount: u32,
-    sessions: u32,
-    validators_subset_info: ValidatorSubsetInfo,
-    required_validations: u32,
-    global_validated_blocks: Arc<AtomicUsize>,
-) -> Result<()> {
-    for session in 1..=sessions {
-        tracing::info!("Validator start. Session: {}", session);
-        let shard_ident = ShardIdent::new(session as i32, ShardIdent::PREFIX_FULL).unwrap();
-        let blocks = create_blocks(blocks_amount, shard_ident);
-        let collator_session_info = Arc::new(CollationSessionInfo::new(
-            session as i32,
-            session,
-            validators_subset_info.clone(),
-            Some(validator.keypair()), // Assuming you have access to node's keypair here
-        ));
+    let mut block_id = BlockId {
+        seqno: 1,
+        ..zerostate_id
+    };
+    for session_id in (0..).step_by(1000).take(SESSION_COUNT) {
+        tracing::info!(session_id, %block_id, "adding session");
 
-        validator
-            .add_session(
-                shard_ident,
-                session,
-                collator_session_info.collators().validators.as_slice(),
-            )
-            .await?;
-
-        for block in blocks {
-            let cloned_block = block.clone();
-            let collator_info_clone = collator_session_info.clone();
-            let cloned_validator = validator.clone();
-
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            tokio::spawn(async move {
-                cloned_validator
-                    .validate(cloned_block, collator_info_clone.seqno())
-                    .await
-                    .unwrap();
-                drop(permit);
-            });
+        let validators = make_description(block_id.seqno, &nodes);
+        for node in &nodes {
+            node.validator.add_session(AddSession {
+                shard_ident: zerostate_id.shard,
+                session_id,
+                start_block_seqno: block_id.seqno,
+                validators: &validators,
+            })?;
         }
 
-        let attempts = 50;
-        let mut attempt = 0;
-        while global_validated_blocks.load(Ordering::SeqCst)
-            < (required_validations * session) as usize
-            && attempt < attempts
-        {
-            tracing::info!(
-                "Validator wait for session {session }: {:?}. required {}. validator {:?}",
-                global_validated_blocks.load(Ordering::SeqCst),
-                required_validations * session,
-                validator.keypair().public_key,
-            );
-            sleep(Duration::from_millis(300)).await;
-            attempt += 1;
+        for _ in 0..10 {
+            tracing::info!(%block_id, %session_id, "validating block");
+
+            let mut futures = futures_util::stream::FuturesOrdered::new();
+            for node in &nodes {
+                let peer_id = node.descr.peer_id;
+                let validator = node.validator.clone();
+                futures.push_back(JoinTask::new(async move {
+                    let res = validator.validate(session_id, &block_id).await;
+                    (peer_id, res)
+                }));
+            }
+
+            while let Some((peer_id, res)) = futures.next().await {
+                let status = res.with_context(|| {
+                    format!("failed to validate block {block_id} for {peer_id}")
+                })?;
+                let status = BriefStatus::from(&status);
+                assert_eq!(status, BriefStatus::Complete((NODE_COUNT * 2) / 3 + 1));
+
+                tracing::info!(%peer_id, ?status, "validation completed");
+            }
+
+            for node in &nodes {
+                node.validator.cancel_validation(&block_id.as_short_id())?;
+            }
+
+            block_id.seqno += 1;
         }
     }
 
-    listener.notify.notified().await;
-    tracing::debug!("Validator done: {:?}", validator.keypair().public_key);
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn malicious_validators_are_ignored() -> Result<()> {
+    tycho_util::test::init_logger(
+        "malicious_validators_are_ignored",
+        "info,tycho_collator::validator=trace",
+    );
+
+    const NODE_COUNT: usize = 13;
+    const MALICIOUS_NODE_COUNT: usize = 3;
+
+    const SESSION_COUNT: usize = 5;
+
+    let zerostate_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: HashBytes::ZERO,
+        file_hash: HashBytes::ZERO,
+    };
+    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::thread_rng());
+
+    let mut block_id = BlockId {
+        seqno: 1,
+        ..zerostate_id
+    };
+    for session_id in (0..).step_by(1000).take(SESSION_COUNT) {
+        tracing::info!(session_id, %block_id, "adding session");
+
+        let validators = make_description(block_id.seqno, &nodes);
+        for node in &nodes {
+            node.validator.add_session(AddSession {
+                shard_ident: zerostate_id.shard,
+                session_id,
+                start_block_seqno: block_id.seqno,
+                validators: &validators,
+            })?;
+        }
+
+        for _ in 0..10 {
+            tracing::info!(%block_id, %session_id, "validating block");
+
+            let mut good_validators = futures_util::stream::FuturesOrdered::new();
+            let mut bad_validators = futures_util::stream::FuturesOrdered::new();
+
+            for (i, node) in nodes.iter().enumerate() {
+                let peer_id = node.descr.peer_id;
+                let validator = node.validator.clone();
+
+                let is_malicious = i < MALICIOUS_NODE_COUNT;
+                if is_malicious {
+                    bad_validators.push_back(JoinTask::new(async move {
+                        let mut block_id = block_id;
+                        block_id.root_hash = rand::random();
+
+                        let res = validator.validate(session_id, &block_id).await;
+                        (peer_id, res)
+                    }));
+                } else {
+                    good_validators.push_back(JoinTask::new(async move {
+                        let res = validator.validate(session_id, &block_id).await;
+                        (peer_id, res)
+                    }));
+                }
+            }
+
+            while let Some((peer_id, res)) = good_validators.next().await {
+                let status = res.with_context(|| {
+                    format!("failed to validate block {block_id} for {peer_id}")
+                })?;
+
+                match &status {
+                    ValidationStatus::Complete(signatures) => {
+                        assert_eq!(signatures.len(), (NODE_COUNT * 2) / 3 + 1);
+                    }
+                    ValidationStatus::Skipped => panic!("good validator skipped block"),
+                }
+
+                tracing::info!(%peer_id, status = ?BriefStatus::from(&status), "validation completed");
+            }
+
+            for node in &nodes {
+                node.validator.cancel_validation(&block_id.as_short_id())?;
+            }
+
+            while let Some((peer_id, res)) = bad_validators.next().await {
+                let status = res.with_context(|| {
+                    format!("failed to validate block {block_id} for {peer_id}")
+                })?;
+
+                match &status {
+                    ValidationStatus::Complete(_) => panic!("bad validator completed block"),
+                    ValidationStatus::Skipped => tracing::info!(%peer_id, "validation skipped"),
+                }
+            }
+
+            block_id.seqno += 1;
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn network_gets_stuck_without_signatures() -> Result<()> {
+    tycho_util::test::init_logger(
+        "network_gets_stuck_without_signatures",
+        "info,tycho_collator::validator=trace",
+    );
+
+    const NODE_COUNT: usize = 13;
+    const STUCK_DURATION: Duration = Duration::from_secs(10);
+
+    let zerostate_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 0,
+        root_hash: HashBytes::ZERO,
+        file_hash: HashBytes::ZERO,
+    };
+    let nodes = generate_network(&zerostate_id, NODE_COUNT, &mut rand::thread_rng());
+
+    let block_id = BlockId {
+        seqno: 1,
+        ..zerostate_id
+    };
+    let session_id = 0;
+
+    let validators = make_description(block_id.seqno, &nodes);
+    for node in &nodes {
+        node.validator.add_session(AddSession {
+            shard_ident: zerostate_id.shard,
+            session_id,
+            start_block_seqno: block_id.seqno,
+            validators: &validators,
+        })?;
+    }
+
+    let malicious_node_count = (NODE_COUNT / 3) + 1;
+
+    let mut good_validators = futures_util::stream::FuturesOrdered::new();
+    let mut bad_validators = futures_util::stream::FuturesOrdered::new();
+
+    for (i, node) in nodes.iter().enumerate() {
+        let peer_id = node.descr.peer_id;
+        let validator = node.validator.clone();
+
+        let is_malicious = i < malicious_node_count;
+        if is_malicious {
+            bad_validators.push_back(JoinTask::new(async move {
+                let mut block_id = block_id;
+                block_id.root_hash = rand::random();
+
+                let res = validator.validate(session_id, &block_id).await;
+                (peer_id, res)
+            }));
+        } else {
+            good_validators.push_back(JoinTask::new(async move {
+                let res = validator.validate(session_id, &block_id).await;
+                (peer_id, res)
+            }));
+        }
+    }
+
+    tokio::select! {
+        _ = good_validators.next() => {
+            panic!("good validator completed block");
+        }
+        _ = bad_validators.next() => {
+            panic!("malicious validator got block from the stuck network");
+        }
+        _ = tokio::time::sleep(STUCK_DURATION) => {
+            tracing::info!("network got stuck as expected");
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BriefStatus {
+    Skipped,
+    Complete(usize),
+}
+
+impl From<&ValidationStatus> for BriefStatus {
+    fn from(value: &ValidationStatus) -> Self {
+        match value {
+            ValidationStatus::Skipped => Self::Skipped,
+            ValidationStatus::Complete(signatures) => Self::Complete(signatures.len()),
+        }
+    }
 }

@@ -2498,9 +2498,9 @@ checksum = "f3cb5ba0dc43242ce17de99c180e96db90b235b8a9fdc9543c96d2209116bd9f"
 
 [[package]]
 name = "scc"
-version = "2.1.1"
+version = "2.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76ad2bbb0ae5100a07b7a6f2ed7ab5fd0045551a4c507989b7a620046ea3efdc"
+checksum = "1fadf67e3cf23f8b11a6c8c48a16cb2437381503615acd91094ec7b4686a5a53"
 dependencies = [
  "sdd",
 ]
@@ -2522,9 +2522,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sdd"
-version = "0.2.0"
+version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b84345e4c9bd703274a082fb80caaa99b7612be48dfaa1dd9266577ec412309d"
+checksum = "85f05a494052771fc5bd0619742363b5e24e5ad72ab3111ec2e27925b8edc5f3"
 
 [[package]]
 name = "security-framework"
@@ -3387,6 +3387,7 @@ name = "tycho-collator"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-trait",
  "backon",
  "bytes",
@@ -3399,9 +3400,11 @@ dependencies = [
  "parking_lot",
  "rand",
  "rayon",
+ "scc",
  "scopeguard",
  "serde",
  "sha2",
+ "thiserror",
  "tl-proto",
  "tokio",
  "tokio-util",

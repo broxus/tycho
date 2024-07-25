@@ -10,12 +10,13 @@ use everscale_types::prelude::*;
 use tokio::sync::broadcast;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
+use tycho_network::PeerId;
 use tycho_storage::{BlockHandle, BlockMetaData, BlockProofHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::tracing_targets;
-use crate::types::BlockStuffForSync;
+use crate::types::{ArcSignature, BlockStuffForSync};
 
 // FACTORY
 
@@ -322,7 +323,7 @@ impl StateNodeAdapterStdImpl {
 // TODO: This should possibly panic on error?
 fn prepare_block_proof(
     block_stuff: &BlockStuff,
-    signatures: &FastHashMap<HashBytes, Signature>,
+    signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<PreparedProof> {
     let _histogram = HistogramGuard::begin("tycho_collator_prepare_block_proof_time");
 
@@ -369,7 +370,7 @@ fn prepare_block_proof(
 fn process_signatures(
     gen_validator_list_hash_short: u32,
     gen_catchain_seqno: u32,
-    block_signatures: &FastHashMap<HashBytes, Signature>,
+    block_signatures: &FastHashMap<PeerId, ArcSignature>,
 ) -> Result<everscale_types::models::block::BlockSignatures> {
     use everscale_types::dict;
 
@@ -380,12 +381,12 @@ fn process_signatures(
             .enumerate()
             .map(|(i, (key, value))| {
                 let key_hash = tl_proto::hash(everscale_crypto::tl::PublicKey::Ed25519 {
-                    key: &key.as_array(),
+                    key: key.as_bytes(),
                 });
 
                 (i as u16, BlockSignature {
                     node_id_short: key_hash.into(),
-                    signature: *value,
+                    signature: Signature(*value.as_ref()),
                 })
             }),
         16,

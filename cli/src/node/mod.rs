@@ -18,15 +18,15 @@ use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStdImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
 use tycho_collator::state_node::{StateNodeAdapter, StateNodeAdapterStdImpl};
-use tycho_collator::types::{CollationConfig, ValidatorNetwork};
-use tycho_collator::validator::client::retry::BackoffConfig;
-use tycho_collator::validator::config::ValidatorConfig;
-use tycho_collator::validator::validator::ValidatorStdImplFactory;
+use tycho_collator::types::CollationConfig;
+use tycho_collator::validator::{
+    Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
+};
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriberExt, BlockchainBlockProvider,
-    BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
-    OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
-    StateSubscriberContext, StorageBlockProvider,
+    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
+    BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
+    MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter,
+    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -296,6 +296,7 @@ pub struct Node {
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     collation_config: CollationConfig,
+    validator_config: ValidatorStdImplConfig,
 }
 
 impl Node {
@@ -416,6 +417,7 @@ impl Node {
             rpc_config: node_config.rpc,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
+            validator_config: node_config.validator,
         })
     }
 
@@ -513,36 +515,24 @@ impl Node {
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
 
+        let validator = ValidatorStdImpl::new(
+            ValidatorNetworkContext {
+                network: self.dht_client.network().clone(),
+                peer_resolver: self.peer_resolver.clone(),
+                overlays: self.overlay_service.clone(),
+                zerostate_id: self.zerostate.as_block_id(),
+            },
+            self.keypair.clone(),
+            self.validator_config,
+        );
+
         let collation_manager = CollationManager::start(
             self.keypair.clone(),
             self.collation_config.clone(),
             Arc::new(message_queue_adapter),
             |listener| StateNodeAdapterStdImpl::new(listener, self.storage.clone()),
             mempool_adapter,
-            ValidatorStdImplFactory {
-                network: ValidatorNetwork {
-                    overlay_service: self.overlay_service.clone(),
-                    peer_resolver: self.peer_resolver.clone(),
-                    dht_client: self.dht_client.clone(),
-                },
-                // TODO: Move into node config
-                config: ValidatorConfig {
-                    error_backoff_config: BackoffConfig {
-                        min_delay: Duration::from_millis(50),
-                        max_delay: Duration::from_secs(10),
-                        factor: 2.0,
-                        max_times: usize::MAX,
-                    },
-                    request_timeout: Duration::from_secs(1),
-                    delay_between_requests: Duration::from_millis(50),
-                    request_signatures_backoff_config: BackoffConfig {
-                        min_delay: Duration::from_millis(50),
-                        max_delay: Duration::from_secs(1),
-                        factor: 2.0,
-                        max_times: usize::MAX,
-                    },
-                },
-            },
+            validator.clone(),
             CollatorStdImplFactory,
             #[cfg(test)]
             vec![],
@@ -596,7 +586,7 @@ impl Node {
                         self.storage.clone(),
                         (collator_state_subscriber, rpc_state),
                     ),
-                    MetricsSubscriber,
+                    (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
                     .chain(GcSubscriber::new(self.storage.clone())),
             )
@@ -620,6 +610,33 @@ impl StateSubscriber for CollatorStateSubscriber {
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
         self.adapter.handle_state(&cx.state)
+    }
+}
+
+struct ValidatorBlockSubscriber {
+    validator: ValidatorStdImpl,
+}
+
+impl BlockSubscriber for ValidatorBlockSubscriber {
+    type Prepared = ();
+    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+    type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+
+    fn prepare_block<'a>(
+        &'a self,
+        _: &'a tycho_core::block_strider::BlockSubscriberContext,
+    ) -> Self::PrepareBlockFut<'a> {
+        futures_util::future::ok(())
+    }
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a tycho_core::block_strider::BlockSubscriberContext,
+        _: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        let block_id_short = cx.block.id().as_short_id();
+        let res = self.validator.cancel_validation(&block_id_short);
+        futures_util::future::ready(res)
     }
 }
 

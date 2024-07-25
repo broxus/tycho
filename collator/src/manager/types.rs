@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, Signature};
-use everscale_types::prelude::*;
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent};
+use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::types::{BlockCandidate, BlockStuffForSync};
+use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -19,7 +19,7 @@ pub(super) struct BlocksCache {
 pub struct BlockCandidateEntry {
     pub key: BlockCacheKey,
     pub candidate: Box<BlockCandidate>,
-    pub signatures: FastHashMap<HashBytes, Signature>,
+    pub signatures: FastHashMap<PeerId, ArcSignature>,
 }
 
 impl BlockCandidateEntry {
@@ -118,7 +118,7 @@ impl BlockCandidateContainer {
         &mut self,
         is_valid: bool,
         already_synced: bool,
-        signatures: FastHashMap<HashBytes, Signature>,
+        signatures: FastHashMap<PeerId, ArcSignature>,
     ) {
         if let Some(ref mut entry) = self.entry {
             entry.signatures = signatures;

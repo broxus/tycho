@@ -11,6 +11,7 @@ license.workspace = true
 [dependencies]
 # crates.io deps
 anyhow = { workspace = true }
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true }
 bytes = { workspace = true }
@@ -23,11 +24,13 @@ metrics = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+scc = { workspace = true }
 scopeguard = { workspace = true }
 serde = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true}
 tl-proto = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tokio-util = { workspace = true }
 ton_executor = { workspace = true }
 tracing = { workspace = true }

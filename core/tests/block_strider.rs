@@ -28,7 +28,7 @@ async fn storage_block_strider() -> anyhow::Result<()> {
                 let block = block?;
 
                 assert_eq!(&block_id, block.id());
-                assert_eq!(&data.block.unwrap().data, block.block());
+                assert_eq!(data.block.unwrap().as_ref(), block.block());
             }
         }
     }
@@ -129,7 +129,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
                 let block = block?;
 
                 assert_eq!(&block_id, block.id());
-                assert_eq!(&data.block.unwrap().data, block.block());
+                assert_eq!(data.block.unwrap().as_ref(), block.block());
             }
         }
     }

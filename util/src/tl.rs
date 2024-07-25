@@ -42,6 +42,31 @@ pub mod signature_owned {
     }
 }
 
+pub mod signature_arc {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[inline]
+    pub fn size_hint(signature: &[u8; 64]) -> usize {
+        signature.as_slice().max_size_hint()
+    }
+
+    #[inline]
+    pub fn write<P: TlPacket>(signature: &[u8; 64], packet: &mut P) {
+        signature.as_slice().write_to(packet);
+    }
+
+    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<Arc<[u8; 64]>> {
+        <&tl_proto::BoundedBytes<64>>::read_from(packet, offset).and_then(|bytes| {
+            let Ok::<[u8; 64], _>(bytes) = bytes.as_ref().try_into() else {
+                return Err(TlError::InvalidData);
+            };
+            Ok(Arc::new(bytes))
+        })
+    }
+}
+
 pub struct VecWithMaxLen<const N: usize>;
 
 impl<const N: usize> VecWithMaxLen<N> {
