@@ -16,11 +16,13 @@ fn test_read_next_externals() {
 
     let shard_id = ShardIdent::new_full(0);
 
+    let mut last_anchor_chain_time = 0;
     for anchor_id in 1..=40 {
         if anchor_id % 4 != 0 {
             continue;
         }
         let anchor = make_stub_anchor(anchor_id);
+        last_anchor_chain_time = anchor.chain_time;
         let has_externals = anchor.has_externals_for(&shard_id, 0);
         tracing::trace!(
             "anchor (id: {}, chain_time: {}, externals_count: {}): has_externals for shard {}: {}, externals dst: {:?}",
@@ -48,7 +50,7 @@ fn test_read_next_externals() {
         },
         HashBytes::ZERO,
         1,
-        0,
+        last_anchor_chain_time,
         Default::default(),
         HashBytes::ZERO,
     )
@@ -67,13 +69,13 @@ fn test_read_next_externals() {
     assert!(has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (4, 0));
-    assert_eq!(ext_processed_upto.read_to, (4, 3));
+    assert_eq!(ext_processed_upto.read_to, (8, 3));
     let kv = anchors_cache.front().unwrap();
-    assert_eq!(kv.0, 4);
+    assert_eq!(kv.0, 8);
 
     collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
-        processed_to: (4, 3),
-        read_to: (8, 1),
+        processed_to: (8, 3),
+        read_to: (12, 1),
     });
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
@@ -88,10 +90,10 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 3);
     assert!(has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (4, 3));
-    assert_eq!(ext_processed_upto.read_to, (8, 3));
+    assert_eq!(ext_processed_upto.processed_to, (8, 3));
+    assert_eq!(ext_processed_upto.read_to, (8, 8));
     let kv = anchors_cache.front().unwrap();
-    assert_eq!(kv.0, 4);
+    assert_eq!(kv.0, 8);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -105,10 +107,10 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 10);
     assert!(has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (4, 3));
-    assert_eq!(ext_processed_upto.read_to, (16, 6));
+    assert_eq!(ext_processed_upto.processed_to, (8, 3));
+    assert_eq!(ext_processed_upto.read_to, (24, 3));
     let kv = anchors_cache.front().unwrap();
-    assert_eq!(kv.0, 8);
+    assert_eq!(kv.0, 12);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -119,13 +121,13 @@ fn test_read_next_externals() {
     )
     .unwrap();
 
-    assert_eq!(externals.len(), 16);
+    assert_eq!(externals.len(), 13);
     assert!(!has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
     let kv = anchors_cache.front().unwrap();
-    assert_eq!(kv.0, 20);
+    assert_eq!(kv.0, 24);
 
     let (externals, has_pending_externals) = CollatorStdImpl::read_next_externals_impl(
         &shard_id,
@@ -139,7 +141,7 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 0);
     assert!(!has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
     let kv = anchors_cache.front();
     assert!(kv.is_none());
@@ -157,7 +159,7 @@ fn test_read_next_externals() {
     assert_eq!(externals.len(), 0);
     assert!(!has_pending_externals);
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
-    assert_eq!(ext_processed_upto.processed_to, (4, 3));
+    assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
     let kv = anchors_cache.front();
     assert!(kv.is_none());

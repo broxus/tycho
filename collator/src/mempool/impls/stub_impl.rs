@@ -263,9 +263,9 @@ pub(crate) fn make_empty_anchor(id: MempoolAnchorId, chain_time: u64) -> Arc<Mem
 
 pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> Arc<MempoolAnchor> {
     let chain_time = if id == 0 {
-        2600
+        1700
     } else {
-        id as u64 * 2136 % 1000000000
+        id as u64 * 1736 % 1000000000
     };
 
     let externals_count = (chain_time % 10) as u32;
