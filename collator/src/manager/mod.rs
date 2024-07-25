@@ -313,8 +313,6 @@ where
                     return Ok(());
                 }
             }
-            self.last_synced_blocs_from_bc
-                .insert(block_id.shard, block_id.seqno);
         }
 
         if block_id.is_masterchain() {
@@ -1501,6 +1499,10 @@ where
                 vacant.insert(block_container);
             }
         }
+
+        self.last_synced_blocs_from_bc
+            .insert(block_id.shard, block_id.seqno);
+
         stop_validation
     }
 
@@ -1559,6 +1561,10 @@ where
                 vacant.insert(btreemap);
             }
         }
+
+        self.last_synced_blocs_from_bc
+            .insert(block_id.shard, block_id.seqno);
+
         stop_validation
     }
 
@@ -1927,6 +1933,8 @@ where
                             block_to_send.entry.candidate.block.id().as_short_id(),
                         );
                         block_to_send.send_sync_status = SendSyncStatus::Sent;
+                        self.last_synced_blocs_from_bc
+                            .insert(block_to_send.entry.key.shard, block_to_send.entry.key.seqno);
                         sent_blocks.push(block_to_send);
                     }
 
