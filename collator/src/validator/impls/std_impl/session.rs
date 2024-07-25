@@ -14,6 +14,7 @@ use futures_util::{Future, StreamExt};
 use scc::TreeIndex;
 use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
 use tycho_util::futures::JoinTask;
 use tycho_util::FastHashMap;
@@ -127,27 +128,23 @@ impl ValidatorSession {
             .min_seqno
             .fetch_max(block_seqno, Ordering::Release);
 
-        let range = ..=block_seqno;
-
         let state = self.inner.state.as_ref();
-        state.cached_signatures.remove_range(range.clone());
+        state.cached_signatures.remove_range(..=block_seqno);
 
         let guard = scc::ebr::Guard::new();
-        for (_, validation) in state.block_signatures.range(range.clone(), &guard) {
+        for (_, validation) in state.block_signatures.range(..=block_seqno, &guard) {
             validation.cancelled.cancel();
         }
         drop(guard);
 
-        state.block_signatures.remove_range(..=block_seqno);
+        // NOTE: Remove only blocks that are old enough.
+        let until_seqno = block_seqno.saturating_sub(self.inner.config.old_blocks_to_keep);
+        state.block_signatures.remove_range(..=until_seqno);
     }
 
     #[tracing::instrument(
         skip_all,
-        fields(
-            shard_ident = %self.inner.state.shard_ident,
-            session_id = self.inner.session_id,
-            %block_id
-        )
+        fields(session_id = self.inner.session_id, %block_id)
     )]
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
         const MAX_PARALLEL_REQUESTS: usize = 10;
@@ -225,12 +222,13 @@ impl ValidatorSession {
                 .and_then(|c| c.get(peer_id))
                 .and_then(|c| c.load_full());
 
-            futures.push(JoinTask::new(self.inner.clone().receive_signature(
+            let fut = self.inner.clone().receive_signature(
                 *peer_id,
                 block_signatures.clone(),
                 cached,
                 semaphore.clone(),
-            )));
+            );
+            futures.push(JoinTask::new(fut.instrument(tracing::Span::current())));
         }
 
         let mut session_cancelled = pin!(state.cancelled_signal.notified());

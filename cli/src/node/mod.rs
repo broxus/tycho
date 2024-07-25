@@ -634,16 +634,8 @@ impl BlockSubscriber for ValidatorBlockSubscriber {
         cx: &'a tycho_core::block_strider::BlockSubscriberContext,
         _: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        const OFFSET: u32 = 10;
-
-        let mut res = Ok(());
-
-        let mut block_id_short = cx.block.id().as_short_id();
-        if let Some(seqno) = block_id_short.seqno.checked_sub(OFFSET) {
-            block_id_short.seqno = seqno;
-            res = self.validator.cancel_validation(&block_id_short);
-        }
-
+        let block_id_short = cx.block.id().as_short_id();
+        let res = self.validator.cancel_validation(&block_id_short);
         futures_util::future::ready(res)
     }
 }

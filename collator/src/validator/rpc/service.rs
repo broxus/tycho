@@ -41,6 +41,8 @@ impl<E: ExchangeSignatures> ValidatorService<E> {
                         // and the log will be full of these warnings.
                         tracing::warn!(
                             target: tracing_targets::VALIDATOR,
+                            %peer_id,
+                            block_seqno,
                             "failed to exchange signatures: {e:?}",
                         );
                         None

@@ -35,6 +35,11 @@ pub struct ValidatorStdImplConfig {
     ///
     /// Default: 3.
     pub signature_cache_slots: u32,
+
+    /// Number of blocks to keep even after their validation.
+    ///
+    /// Default: 10.
+    pub old_blocks_to_keep: u32,
 }
 
 impl Default for ValidatorStdImplConfig {
@@ -44,6 +49,7 @@ impl Default for ValidatorStdImplConfig {
             exchange_signatures_timeout: Duration::from_secs(1),
             failed_exchange_interval: Duration::from_secs(10),
             signature_cache_slots: 3,
+            old_blocks_to_keep: 10,
         }
     }
 }
@@ -131,13 +137,22 @@ impl Validator for ValidatorStdImpl {
             };
 
             // Remove all sessions before the found one.
-            while let Some(entry) = shard_sessions.first_entry() {
-                if *entry.key() < id {
-                    // Fully cancel the session before removing it.
-                    entry.get().cancel();
-                    entry.remove();
-                } else {
-                    break;
+
+            // NOTE: We need to wait for some blocks in the new session before removing the old ones,
+            // so that lagging validators have enough time to receive our signatures.
+            let seqno_threshold = session
+                .start_block_seqno()
+                .saturating_add(self.inner.config.old_blocks_to_keep);
+
+            if until.seqno >= seqno_threshold {
+                while let Some(entry) = shard_sessions.first_entry() {
+                    if *entry.key() < id {
+                        // Fully cancel the session before removing it.
+                        entry.get().cancel();
+                        entry.remove();
+                    } else {
+                        break;
+                    }
                 }
             }
 
