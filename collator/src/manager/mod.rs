@@ -89,6 +89,8 @@ where
     /// id of last master block collated by ourselves
     last_collated_mc_block_id: Mutex<Option<BlockId>>,
 
+    last_synced_blocs_from_bc: FastDashMap<ShardIdent, u32>,
+
     chain_times_sync_state: Mutex<ChainTimesSyncState>,
 
     #[cfg(any(test, feature = "test"))]
@@ -226,6 +228,7 @@ where
 
             last_processed_mc_block_id: Default::default(),
             last_collated_mc_block_id: Default::default(),
+            last_synced_blocs_from_bc: Default::default(),
             chain_times_sync_state: Default::default(),
 
             #[cfg(any(test, feature = "test"))]
@@ -301,6 +304,19 @@ where
     pub async fn process_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
         let block_id = state.block_id();
 
+        // check if block from bc is newer than the last one stored
+        {
+            if let Some(last_synced_block_from_bc) =
+                self.last_synced_blocs_from_bc.get(&block_id.shard)
+            {
+                if *last_synced_block_from_bc.value() >= block_id.seqno {
+                    return Ok(());
+                }
+            }
+            self.last_synced_blocs_from_bc
+                .insert(block_id.shard, block_id.seqno);
+        }
+
         if block_id.is_masterchain() {
             tracing::info!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -343,6 +359,7 @@ where
                 "Store shard block ({}) received from blockchain ...",
                 block_id.as_short_id()
             );
+
             self.store_shard_block_from_bc_in_cache(*block_id);
         }
 
