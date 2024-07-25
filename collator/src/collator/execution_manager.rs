@@ -18,11 +18,12 @@ use tycho_util::FastHashMap;
 
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
-    AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, MessageGroup, MessageGroups,
-    ParsedMessage, ShardAccountStuff, WorkingState,
+    AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, InternalsProcessedUptoStuff,
+    MessageGroup, MessageGroups, ParsedMessage, ProcessedUptoInfoStuff, ShardAccountStuff,
+    WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageKeyOpt};
+use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 
@@ -102,6 +103,17 @@ impl ExecutionManager {
         self.current_iterator_positions.clone()
     }
 
+    pub fn set_current_iterator_positions(
+        &mut self,
+        positions: FastHashMap<ShardIdent, InternalMessageKey>,
+    ) {
+        self.current_iterator_positions = positions;
+    }
+
+    pub fn has_pending_messages_in_buffer(&self) -> bool {
+        !self.message_groups.is_empty()
+    }
+
     pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter {
         self.process_ext_messages = false;
         self.process_new_messages = false;
@@ -122,11 +134,15 @@ impl ExecutionManager {
     pub fn release_iterator_adapter(
         &mut self,
         mq_iterator_adapter: QueueIteratorAdapter,
-    ) -> Result<bool> {
-        let (current_positions, has_pending_internals) = mq_iterator_adapter.release()?;
+    ) -> Result<(bool, QueueDiff)> {
+        let has_pending_messages_in_buffer = self.has_pending_messages_in_buffer();
+        let (current_positions, has_pending_internals, diff) =
+            mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;
         self.current_iterator_positions = current_positions;
 
-        Ok(has_pending_internals)
+        let has_pending_messages = has_pending_messages_in_buffer || has_pending_internals;
+
+        Ok((has_pending_messages, diff))
     }
 
     pub fn read_existing_messages_total_elapsed(&self) -> Duration {
@@ -215,15 +231,17 @@ impl ExecutionManager {
             collation_data.read_int_msgs_from_iterator += existing_internals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "existing_internals_read_count={}",
+                "existing_internals_read_count={}, buffer int={}, ext={}",
                 existing_internals_read_count,
+                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
             );
 
             group_opt = self.message_groups.extract_first_group();
             if let Some(first_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: {}",
+                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
                     DisplayMessageGroup(first_group),
+                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
 
@@ -242,7 +260,14 @@ impl ExecutionManager {
                 );
 
                 // set all read existing internals as processed
-                set_int_upto_all_processed(&mut collation_data.processed_upto)?;
+                let updated_processed_to =
+                    set_int_upto_all_processed(&mut collation_data.processed_upto);
+
+                // commit processed message to iterator
+                mq_iterator_adapter
+                    .iterator()
+                    .commit(updated_processed_to)?;
+
                 self.message_groups.reset();
 
                 // set all read externals as processed
@@ -307,15 +332,17 @@ impl ExecutionManager {
             collation_data.read_ext_msgs += externals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "externals_read_count={}",
+                "externals_read_count={}, buffer int={}, ext={}",
                 externals_read_count,
+                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
             );
 
             group_opt = self.message_groups.extract_first_group();
             if let Some(first_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: {}",
+                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
                     DisplayMessageGroup(first_group),
+                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
 
@@ -346,6 +373,8 @@ impl ExecutionManager {
         if group_opt.is_none() && self.process_new_messages {
             // when processing new messages we return group immediately when the next message does not fit it
 
+            // first new messages epoch is from existing internals and externals
+            // then we read next epoch of new messages only when the previous epoch processed
             mq_iterator_adapter
                 .try_update_new_messages_read_to(max_new_message_key_to_current_shard)?;
 
@@ -386,8 +415,9 @@ impl ExecutionManager {
             collation_data.read_new_msgs_from_iterator += new_internals_read_count;
 
             tracing::debug!(target: tracing_targets::COLLATOR,
-                "new_internals_read_count={}",
+                "new_internals_read_count={}, buffer int={}, ext={}",
                 new_internals_read_count,
+                self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
             );
 
             // when we have 2 groups, the second one contains only one message
@@ -396,8 +426,9 @@ impl ExecutionManager {
             group_opt = self.message_groups.extract_merged_group();
             if let Some(merged_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted merged message group of new messages from message_groups buffer: {}",
+                    "extracted merged message group of new messages from message_groups buffer: group {}, buffer int={}, ext={}",
                     DisplayMessageGroup(merged_group),
+                    self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
 
@@ -413,14 +444,21 @@ impl ExecutionManager {
                 // set_int_upto_all_processed(&mut collation_data.processed_upto)?;
                 update_internals_processed_upto(
                     &mut collation_data.processed_upto,
-                    ShardIdentFull::from(self.shard_id),
+                    self.shard_id,
                     Some(ProcessedUptoUpdate::Force(
                         self.message_groups.max_message_key().clone(),
                     )),
                     Some(ProcessedUptoUpdate::Force(
                         self.message_groups.max_message_key().clone(),
                     )),
-                )?;
+                );
+
+                // commit processed message to iterator
+                mq_iterator_adapter.iterator().commit(vec![(
+                    self.shard_id,
+                    self.message_groups.max_message_key().clone(),
+                )])?;
+
                 self.message_groups.reset();
             }
         }
@@ -823,32 +861,29 @@ pub(super) enum ProcessedUptoUpdate {
     IfHigher(InternalMessageKey),
 }
 
-pub(super) fn set_int_upto_all_processed(processed_upto: &mut ProcessedUptoInfo) -> Result<bool> {
-    let mut updated_int_upto = vec![];
-    for upto_info in processed_upto.internals.iter() {
-        let (shard_id_full, current_int_upto) = upto_info?;
-        updated_int_upto.push((shard_id_full, InternalsProcessedUpto {
-            processed_to_msg: current_int_upto.read_to_msg,
-            read_to_msg: current_int_upto.read_to_msg,
-        }));
-    }
-    let updated = !updated_int_upto.is_empty();
-    for (shard_id_full, int_upto) in updated_int_upto {
+pub(super) fn set_int_upto_all_processed(
+    processed_upto: &mut ProcessedUptoInfoStuff,
+) -> Vec<(ShardIdent, InternalMessageKey)> {
+    let mut updated_processed_to = vec![];
+    for (shard_id, int_upto) in processed_upto.internals.iter_mut() {
+        int_upto.processed_to_msg = int_upto.read_to_msg.clone();
+
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {:?}: {:?}",
-            shard_id_full, int_upto,
+            "updated processed_upto.internals for shard {}: {:?}",
+            shard_id, int_upto,
         );
-        processed_upto.internals.set(shard_id_full, int_upto)?;
+
+        updated_processed_to.push((*shard_id, int_upto.processed_to_msg.clone()));
     }
-    Ok(updated)
+    updated_processed_to
 }
 
 pub(super) fn update_internals_processed_upto(
-    processed_upto: &mut ProcessedUptoInfo,
-    shard_id_full: ShardIdentFull,
+    processed_upto: &mut ProcessedUptoInfoStuff,
+    shard_id: ShardIdent,
     processed_to_opt: Option<ProcessedUptoUpdate>,
     read_to_opt: Option<ProcessedUptoUpdate>,
-) -> Result<bool> {
+) -> bool {
     use ProcessedUptoUpdate::{Force, IfHigher};
 
     fn get_new_to_key<F>(
@@ -876,48 +911,44 @@ pub(super) fn update_internals_processed_upto(
     }
 
     if processed_to_opt.is_none() && read_to_opt.is_none() {
-        return Ok(false);
+        return false;
     }
 
-    let new_int_processed_upto_opt =
-        if let Some(current) = processed_upto.internals.get(shard_id_full.clone())? {
-            let new_processed_to_opt =
-                get_new_to_key(processed_to_opt, || current.processed_to_msg.into());
-            let new_read_to_opt = get_new_to_key(read_to_opt, || current.read_to_msg.into());
-            if new_processed_to_opt.is_none() && new_read_to_opt.is_none() {
-                None
-            } else {
-                Some(InternalsProcessedUpto {
-                    processed_to_msg: new_processed_to_opt
-                        .map_into_tuple()
-                        .unwrap_or(current.processed_to_msg),
-                    read_to_msg: new_read_to_opt
-                        .map_into_tuple()
-                        .unwrap_or(current.read_to_msg),
-                })
-            }
+    let new_int_processed_upto_opt = if let Some(current) = processed_upto.internals.get(&shard_id)
+    {
+        let new_processed_to_opt =
+            get_new_to_key(processed_to_opt, || current.processed_to_msg.clone());
+        let new_read_to_opt = get_new_to_key(read_to_opt, || current.read_to_msg.clone());
+        if new_processed_to_opt.is_none() && new_read_to_opt.is_none() {
+            None
         } else {
-            Some(InternalsProcessedUpto {
-                processed_to_msg: match processed_to_opt {
-                    Some(Force(to_key) | IfHigher(to_key)) => to_key.into_tuple(),
-                    _ => InternalMessageKey::with_lt_and_min_hash(0).into_tuple(),
-                },
-                read_to_msg: match read_to_opt {
-                    Some(Force(to_key) | IfHigher(to_key)) => to_key.into_tuple(),
-                    _ => InternalMessageKey::with_lt_and_max_hash(0).into_tuple(),
-                },
+            Some(InternalsProcessedUptoStuff {
+                processed_to_msg: new_processed_to_opt.unwrap_or(current.processed_to_msg.clone()),
+                read_to_msg: new_read_to_opt.unwrap_or(current.read_to_msg.clone()),
             })
-        };
+        }
+    } else {
+        Some(InternalsProcessedUptoStuff {
+            processed_to_msg: match processed_to_opt {
+                Some(Force(to_key) | IfHigher(to_key)) => to_key,
+                _ => InternalMessageKey::with_lt_and_min_hash(0),
+            },
+            read_to_msg: match read_to_opt {
+                Some(Force(to_key) | IfHigher(to_key)) => to_key,
+                _ => InternalMessageKey::with_lt_and_max_hash(0),
+            },
+        })
+    };
     if let Some(new_int_processed_upto) = new_int_processed_upto_opt {
         tracing::debug!(target: tracing_targets::COLLATOR,
-            "updated processed_upto.internals for shard {:?}: {:?}",
-            shard_id_full, new_int_processed_upto,
+            "updated processed_upto.internals for shard {}: {:?}",
+            shard_id, new_int_processed_upto,
         );
         processed_upto
             .internals
-            .set(shard_id_full, new_int_processed_upto)?;
-        Ok(true)
+            .insert(shard_id, new_int_processed_upto);
+        true
     } else {
-        Ok(false)
+        false
     }
 }

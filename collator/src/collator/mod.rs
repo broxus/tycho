@@ -608,6 +608,16 @@ impl CollatorStdImpl {
             return Ok(has_internals);
         }
 
+        let has_pending_messages_in_buffer = self
+            .exec_manager
+            .as_ref()
+            .unwrap()
+            .has_pending_messages_in_buffer();
+        if has_pending_messages_in_buffer {
+            working_state.has_pending_internals = Some(true);
+            return Ok(true);
+        }
+
         let mut mq_iterator_adapter = QueueIteratorAdapter::new(
             self.shard_id,
             self.mq_adapter.clone(),
@@ -624,7 +634,11 @@ impl CollatorStdImpl {
             .try_init_next_range_iterator(&mut current_processed_upto, working_state)
             .await?;
 
-        let has_internals = mq_iterator_adapter.iterator().next(true)?.is_some();
+        let has_internals = if !mq_iterator_adapter.no_pending_existing_internals() {
+            mq_iterator_adapter.iterator().next(true)?.is_some()
+        } else {
+            false
+        };
         working_state.has_pending_internals = Some(has_internals);
 
         Ok(has_internals)

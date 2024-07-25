@@ -1,9 +1,11 @@
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
 use everscale_types::cell::{Cell, HashBytes};
 use everscale_types::models::{IntAddr, IntMsgInfo, ShardIdent};
+
+use super::state::state_iterator::MessageWithSource;
 
 pub type Lt = u64;
 
@@ -19,6 +21,11 @@ impl QueueDiff {
         self.keys = self.messages.keys().cloned().collect();
         self.messages.clear();
     }
+}
+
+pub struct QueueFullDiff {
+    pub diff: QueueDiff,
+    pub messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
 }
 
 #[derive(Debug, Clone)]

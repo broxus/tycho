@@ -2,43 +2,47 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff, QueueFullDiff};
 
 pub trait QueueIterator: Send {
     /// Get next message
     fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
+    /// Get next only new message
+    fn next_new(&mut self) -> Result<Option<IterItem>>;
+    /// Returns true if there are new messages to current shard
+    fn has_new_messages_for_current_shard(&self) -> bool;
     fn update_last_read_message(
         &mut self,
         source_shard: ShardIdent,
         message_key: &InternalMessageKey,
     );
     fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
+    /// Extract diff from iterator
+    fn extract_full_diff(&mut self) -> QueueFullDiff;
     /// Take diff from iterator
-    /// Move current position to commited position
-    /// Create new transaction
     fn take_diff(&self) -> QueueDiff;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
     /// Add new message to iterator
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
+    /// Set iterator new messages buffer from full diff
+    fn set_new_messages_from_full_diff(&mut self, full_diff: QueueFullDiff);
 }
 
 pub struct QueueIteratorImpl {
     for_shard: ShardIdent,
-    commited_current_position: BTreeMap<ShardIdent, InternalMessageKey>,
     messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
-    new_messages: FastHashMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+    new_messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
     snapshot_manager: StatesIteratorsManager,
     last_processed_message: FastHashMap<ShardIdent, InternalMessageKey>,
-    last_read_message_for_current_shard: FastHashMap<ShardIdent, InternalMessageKey>,
     read_position: BTreeMap<ShardIdent, InternalMessageKey>,
 }
 
@@ -53,10 +57,8 @@ impl QueueIteratorImpl {
             for_shard,
             messages_for_current_shard,
             new_messages: Default::default(),
-            commited_current_position: Default::default(),
             snapshot_manager,
             last_processed_message: Default::default(),
-            last_read_message_for_current_shard: Default::default(),
             read_position: Default::default(),
         })
     }
@@ -88,15 +90,10 @@ impl QueueIterator for QueueIteratorImpl {
                 .for_shard
                 .contains_address(&next_message.message.info.dst)
             {
-                self.last_read_message_for_current_shard
-                    .insert(next_message.shard_id, next_message.message.key());
-
                 return Ok(Some(IterItem {
                     message_with_source: next_message.clone(),
                     is_new: false,
                 }));
-            } else {
-                continue;
             }
         }
 
@@ -108,7 +105,16 @@ impl QueueIterator for QueueIteratorImpl {
         Ok(None)
     }
 
-    // Function to update the committed position
+    fn next_new(&mut self) -> Result<Option<IterItem>> {
+        // Process the new messages if required
+        self.process_new_messages()
+    }
+
+    fn has_new_messages_for_current_shard(&self) -> bool {
+        !self.messages_for_current_shard.is_empty()
+    }
+
+    // Function to update the read position
     fn update_last_read_message(
         &mut self,
         source_shard: ShardIdent,
@@ -127,21 +133,45 @@ impl QueueIterator for QueueIteratorImpl {
     // Function to process the new messages
     fn process_new_messages(&mut self) -> Result<Option<IterItem>> {
         if let Some(next_message) = self.messages_for_current_shard.pop() {
-            let message_key = next_message.0.message.key();
+            // remove message from new_messages
+            self.new_messages.remove(&next_message.0.message.key());
 
-            if self.new_messages.contains_key(&message_key) {
-                return Ok(Some(IterItem {
-                    message_with_source: next_message.0.clone(),
-                    is_new: true,
-                }));
-            } else {
-                bail!(
-                    "Message is not in new messages but in current shard messages: {:?}",
-                    message_key
-                );
-            }
+            return Ok(Some(IterItem {
+                message_with_source: next_message.0.clone(),
+                is_new: true,
+            }));
         }
         Ok(None)
+    }
+
+    fn extract_full_diff(&mut self) -> QueueFullDiff {
+        tracing::trace!(
+            target: crate::tracing_targets::MQ,
+            "Extracting diff from iterator. New messages count: {}",
+            self.new_messages.len());
+
+        let mut diff = QueueDiff::default();
+
+        // fill processed_upto
+        for (shard_id, message_key) in self.last_processed_message.iter() {
+            // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
+            diff.processed_upto.insert(*shard_id, message_key.clone());
+        }
+
+        // move new messages
+        std::mem::swap(&mut diff.messages, &mut self.new_messages);
+
+        // move messages for current shard
+        let mut full_diff = QueueFullDiff {
+            diff,
+            messages_for_current_shard: Default::default(),
+        };
+        std::mem::swap(
+            &mut full_diff.messages_for_current_shard,
+            &mut self.messages_for_current_shard,
+        );
+
+        full_diff
     }
 
     fn take_diff(&self) -> QueueDiff {
@@ -152,60 +182,71 @@ impl QueueIterator for QueueIteratorImpl {
 
         let mut diff = QueueDiff::default();
 
-        let mut read_position = self.read_position.clone();
+        // actually we update last processed message via commit()
+        // during the execution, so we can just use value as is
 
-        for processed_last_message in self.last_processed_message.iter() {
-            if !read_position.contains_key(&processed_last_message.0) {
-                read_position.insert(
-                    processed_last_message.0.clone(),
-                    processed_last_message.1.clone(),
-                );
-            }
+        for (shard_id, message_key) in self.last_processed_message.iter() {
+            // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
+            diff.processed_upto.insert(*shard_id, message_key.clone());
         }
 
-        for (shard_id, last_read_key) in read_position.iter() {
-            let last_read_message_for_current_shard = self
-                .last_read_message_for_current_shard
-                .get(&shard_id)
-                .cloned();
-            let processed_last_message = self.last_processed_message.get(&shard_id).cloned();
+        diff.messages = self.new_messages.clone();
 
-            match (last_read_message_for_current_shard, processed_last_message) {
-                (Some(read_last_message), Some(processed_last_message)) => {
-                    if read_last_message == processed_last_message {
-                        // processed all read messages
-                        diff.processed_upto
-                            .insert(*shard_id, read_last_message.clone());
-                    } else {
-                        // processed greater than read or lower
-                        diff.processed_upto
-                            .insert(*shard_id, processed_last_message);
-                    }
-                }
-                (Some(_read_last_message), None) => {
-                    // read last message but no one processed. try again next time
-                    // diff.processed_upto
-                    //     .insert(*shard_id, read_last_message.clone());
-                }
-                (None, Some(processed_last_message)) => {
-                    // no old messages read, but some new processed
-                    diff.processed_upto
-                        .insert(*shard_id, processed_last_message.clone());
-                }
-                (None, None) => {
-                    // no old messages read, no new processed
-                    diff.processed_upto.insert(*shard_id, last_read_key.clone());
-                }
-            }
-        }
+        // let mut read_position = self.read_position.clone();
 
-        for message in self.new_messages.values() {
-            diff.messages.insert(message.key(), message.clone());
-        }
+        // for processed_last_message in self.last_processed_message.iter() {
+        //     if !read_position.contains_key(&processed_last_message.0) {
+        //         read_position.insert(
+        //             processed_last_message.0.clone(),
+        //             processed_last_message.1.clone(),
+        //         );
+        //     }
+        // }
+
+        // for (shard_id, last_read_key) in read_position.iter() {
+        //     let last_read_message_for_current_shard = self
+        //         .last_read_message_for_current_shard
+        //         .get(&shard_id)
+        //         .cloned();
+        //     let processed_last_message = self.last_processed_message.get(&shard_id).cloned();
+
+        //     match (last_read_message_for_current_shard, processed_last_message) {
+        //         (Some(read_last_message), Some(processed_last_message)) => {
+        //             if read_last_message == processed_last_message {
+        //                 // processed all read messages
+        //                 diff.processed_upto
+        //                     .insert(*shard_id, read_last_message.clone());
+        //             } else {
+        //                 // processed greater than read or lower
+        //                 diff.processed_upto
+        //                     .insert(*shard_id, processed_last_message);
+        //             }
+        //         }
+        //         (Some(_read_last_message), None) => {
+        //             // read last message but no one processed. try again next time
+        //             // diff.processed_upto
+        //             //     .insert(*shard_id, read_last_message.clone());
+        //         }
+        //         (None, Some(processed_last_message)) => {
+        //             // no old messages read, but some new processed
+        //             diff.processed_upto
+        //                 .insert(*shard_id, processed_last_message.clone());
+        //         }
+        //         (None, None) => {
+        //             // no old messages read, no new processed
+        //             diff.processed_upto.insert(*shard_id, last_read_key.clone());
+        //         }
+        //     }
+        // }
+
+        // for message in self.new_messages.values() {
+        //     diff.messages.insert(message.key(), message.clone());
+        // }
 
         diff
     }
 
+    // Function to update the commit position
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
         for (source_shard, message_key) in messages {
             self.last_processed_message
@@ -223,11 +264,19 @@ impl QueueIterator for QueueIteratorImpl {
     fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
         self.new_messages.insert(message.key(), message.clone());
         if self.for_shard.contains_address(&message.info.dst) {
-            let message_with_source = MessageWithSource::new(self.for_shard, message.clone());
+            let message_with_source = MessageWithSource::new(self.for_shard, message);
             self.messages_for_current_shard
                 .push(Reverse(Arc::new(message_with_source)));
         };
         Ok(())
+    }
+
+    fn set_new_messages_from_full_diff(&mut self, mut full_diff: QueueFullDiff) {
+        std::mem::swap(&mut self.new_messages, &mut full_diff.diff.messages);
+        std::mem::swap(
+            &mut self.messages_for_current_shard,
+            &mut full_diff.messages_for_current_shard,
+        );
     }
 }
 

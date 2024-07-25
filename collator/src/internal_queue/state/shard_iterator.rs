@@ -11,7 +11,6 @@ pub struct ShardIterator {
     pub(crate) shard_ident: ShardIdent,
     shard_range: ShardRange,
     receiver: ShardIdent,
-    // current_key: Option<InternalMessageKey>,
     pub(crate) iterator: OwnedIterator,
 }
 

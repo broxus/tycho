@@ -134,13 +134,10 @@ where
 
         let for_shard = diff_id.shard;
 
-        let first_key = diff.keys.first();
+        let first_key = Some(InternalMessageKey::default());
         let last_key = diff.keys.last();
 
         if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
-            if first_key.lt > last_key.lt {
-                panic!("first_key.lt > last_key.lt");
-            }
             let _ = self
                 .session_state
                 .commit_messages(for_shard, (&first_key, &last_key))?;
