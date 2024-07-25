@@ -1,15 +1,12 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
 
 use crate::internal_queue::state::state_iterator::{MessageWithSource, StateIterator};
-use crate::internal_queue::types::InternalMessageKey;
 
 pub struct StatesIteratorsManager {
     iterators: Vec<Box<dyn StateIterator>>,
     current_snapshot: usize,
-    seen_keys: HashSet<InternalMessageKey>,
     message_counts: Vec<usize>, // Add this line to keep track of message counts
 }
 
@@ -19,7 +16,6 @@ impl StatesIteratorsManager {
             message_counts: vec![0; iterators.len()], // Initialize the message_counts vector
             iterators,
             current_snapshot: 0,
-            seen_keys: HashSet::new(),
         }
     }
 
@@ -35,7 +31,6 @@ impl StatesIteratorsManager {
             self.current_snapshot += 1;
         }
 
-        // Print message counts when no more messages are available
         for (index, count) in self.message_counts.iter().enumerate() {
             tracing::debug!(target: "local_debug", "Iterator {} read {} messages", index, count);
         }
