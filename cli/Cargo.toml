@@ -24,12 +24,12 @@ clap = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
 futures-util = { workspace = true }
+getip = { workspace = true }
 hex = { workspace = true }
 libc = { workspace = true }
-metrics-exporter-prometheus = { workspace = true }
 metrics = { workspace = true, optional = true }
+metrics-exporter-prometheus = { workspace = true }
 parking_lot = { workspace = true }
-public-ip = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
