@@ -41,6 +41,7 @@ tracing = { workspace = true }
 # local deps
 tycho-network = { workspace = true }
 tycho-util = { workspace = true }
+tycho-storage = { workspace = true }
 
 [dev-dependencies]
 humantime = { workspace = true }
@@ -60,6 +61,7 @@ serde_json = { workspace = true }
 tracing-appender = { workspace = true }
 
 tycho-util = { workspace = true, features = ["test"] }
+tycho-storage = { workspace = true, features = ["test"] }
 
 [lints]
 workspace = true

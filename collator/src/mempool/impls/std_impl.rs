@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::{InputBuffer, InputBufferImpl, Point};
 use tycho_network::{DhtClient, OverlayService, PeerId};
-
+use tycho_storage::MempoolStorage;
 use crate::mempool::{
     ExternalMessage, ExternalMessageCache, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor,
     MempoolAnchorId, MempoolEventListener,
@@ -46,9 +46,11 @@ impl MempoolAdapterStdImpl {
     pub fn run(
         self: &Arc<Self>,
         key_pair: Arc<KeyPair>,
-        dht_client: DhtClient,
-        overlay_service: OverlayService,
+        dht_client: &DhtClient,
+        overlay_service: &OverlayService,
+        mempool_storage: &MempoolStorage,
         peers: Vec<PeerId>,
+        use_genesis: bool,
     ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
@@ -56,14 +58,17 @@ impl MempoolAdapterStdImpl {
 
         let mut engine = tycho_consensus::Engine::new(
             key_pair,
-            &dht_client,
-            &overlay_service,
+            dht_client,
+            overlay_service,
+            mempool_storage,
             sender,
             self.externals_rx.clone(),
         );
 
         tokio::spawn(async move {
-            engine.init_with_genesis(&peers).await;
+            if use_genesis {
+                engine.init_with_genesis(&peers).await;
+            }
             engine.run().await;
         });
 

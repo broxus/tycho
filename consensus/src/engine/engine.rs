@@ -6,6 +6,7 @@ use everscale_crypto::ed25519::KeyPair;
 use itertools::Itertools;
 use tokio::sync::mpsc;
 use tycho_network::{DhtClient, OverlayService, PeerId};
+use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -22,6 +23,7 @@ pub struct Engine {
     dag: Dag,
     committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     peer_schedule: PeerSchedule,
+    mempool_storage: MempoolStorage,
     consensus_round: ConsensusRound,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
@@ -32,6 +34,7 @@ impl Engine {
         key_pair: Arc<KeyPair>,
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
+        mempool_storage: &MempoolStorage,
         committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
         input_buffer: InputBuffer,
     ) -> Self {
@@ -59,6 +62,7 @@ impl Engine {
             dag: Dag::new(),
             committed,
             peer_schedule,
+            mempool_storage: mempool_storage.clone(),
             consensus_round,
             round_task,
             effects,

@@ -477,9 +477,11 @@ impl Node {
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
         mempool_adapter.run(
             self.keypair.clone(),
-            self.dht_client.clone(),
-            self.overlay_service.clone(),
+            &self.dht_client,
+            &self.overlay_service,
+            self.storage.mempool_storage(),
             get_validator_peer_ids(&mc_state)?,
+            last_block_id.seqno == 0,
         );
 
         // Create RPC

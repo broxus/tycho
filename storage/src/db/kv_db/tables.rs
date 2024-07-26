@@ -499,6 +499,26 @@ impl ColumnFamilyOptions<Caches> for CodeHashesByAddress {
     }
 }
 
+/// Stores mempool point data
+/// - Key: `round: u32, digest: [u8; 32]`
+/// - Value: `Point`
+pub struct Points;
+
+impl Points {
+    pub const KEY_LEN: usize = 4 + 32;
+}
+
+impl ColumnFamily for Points {
+    const NAME: &'static str = "points";
+}
+
+impl ColumnFamilyOptions<Caches> for Points {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        zstd_block_based_table_factory(opts, caches);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+    }
+}
+
 fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     let mut block_factory = BlockBasedOptions::default();
     block_factory.set_block_cache(&caches.block_cache);

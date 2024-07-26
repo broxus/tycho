@@ -31,6 +31,7 @@ pub use util::owned_iterator;
 const BASE_DB_SUBDIR: &str = "base";
 const RPC_DB_SUBDIR: &str = "rpc";
 const FILES_SUBDIR: &str = "files";
+const MEMPOOL_SUBDIR: &str = "mempool";
 
 pub struct StorageBuilder {
     config: StorageConfig,
@@ -109,7 +110,7 @@ impl StorageBuilder {
         };
 
         tracing::debug!(threads, fdlimit, subdir = BASE_DB_SUBDIR, "opening RocksDB");
-        let base_db = BaseDb::builder_prepared(self.config.root_dir.join(BASE_DB_SUBDIR), caches)
+        let base_db = BaseDb::builder_prepared(self.config.root_dir.join(BASE_DB_SUBDIR), caches.clone())
             .with_metrics_enabled(self.config.rocksdb_enable_metrics)
             .with_options(|opts, _| update_options(opts, threads, fdlimit))
             .build()?;
@@ -139,6 +140,15 @@ impl StorageBuilder {
 
         block_storage.preload_archive_ids();
 
+        let mempool_db = MempoolDb::builder_prepared(self.config.root_dir.join(MEMPOOL_SUBDIR), caches)
+            .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+            .with_options(|opts, _| update_options(opts, threads, fdlimit))
+            .build()?;
+
+        let mempool_storage = MempoolStorage::new(mempool_db);
+
+        // TODO: preload archive ids
+
         let inner = Arc::new(Inner {
             root,
             base_db,
@@ -152,6 +162,7 @@ impl StorageBuilder {
             runtime_storage,
             rpc_state,
             internal_queue_storage,
+            mempool_storage,
         });
 
         spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
@@ -249,6 +260,10 @@ impl Storage {
     pub fn internal_queue_storage(&self) -> &InternalQueueStorage {
         &self.inner.internal_queue_storage
     }
+
+    pub fn mempool_storage(&self) -> &MempoolStorage {
+        &self.inner.mempool_storage
+    }
 }
 
 struct Inner {
@@ -265,4 +280,5 @@ struct Inner {
     persistent_state_storage: PersistentStateStorage,
     rpc_state: Option<RpcStorage>,
     internal_queue_storage: InternalQueueStorage,
+    mempool_storage: MempoolStorage,
 }

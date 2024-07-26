@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 use tycho_consensus::test_utils::*;
 use tycho_consensus::{Engine, InputBufferStub};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId};
+use tycho_storage::Storage;
 
 mod logger;
 
@@ -150,14 +151,16 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
                                     .expect("add peer to dht client");
                             }
                         }
+                        let (mock_storage, _tmp_dir) = Storage::new_temp().unwrap();
                         let mut engine = Engine::new(
                             key_pair,
                             &dht_client,
                             &overlay_service,
+                            mock_storage.mempool_storage(),
                             committed_tx.clone(),
                             InputBufferStub::new(cli.points_in_step, cli.steps_until_full),
                         );
-                        engine.init_with_genesis(all_peers.as_slice()).await;
+                        engine.init_with_genesis(&all_peers).await;
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         engine.run().await;
                     });

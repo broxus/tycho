@@ -3328,6 +3328,7 @@ dependencies = [
  "tracing-flame",
  "tracing-subscriber",
  "tycho-network",
+ "tycho-storage",
  "tycho-util",
 ]
 
