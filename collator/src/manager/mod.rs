@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
 use self::types::{
     BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache, ChainTimesSyncState,
@@ -322,12 +322,7 @@ where
 
         Self::notify_mempool_about_mc_block(mpool_adapter, &mc_data.block_id).await?;
 
-        self.dispatcher
-            .spawn_task(method_to_async_closure!(
-                refresh_collation_sessions,
-                mc_data
-            ))
-            .await?;
+        self.refresh_collation_sessions(mc_data).await?;
 
         Ok(())
     }
@@ -627,10 +622,9 @@ where
         for (shard_id, _) in sessions_to_keep {
             // if there is no active collator then current node does not collate this shard
             // so we do not need to do anything
-            let Some(collator) = self.active_collators.get(&shard_id) else {
+            let Some(collator) = self.active_collators.get(&shard_id).map(|r| r.clone()) else {
                 continue;
             };
-            let collator = collator.value().clone();
 
             if shard_id.is_masterchain() {
                 tracing::debug!(
@@ -705,7 +699,7 @@ where
             if let Some(_local_pubkey) = local_pubkey_opt {
                 let prev_seqno = prev_blocks_ids.iter().map(|b| b.seqno).max().unwrap_or(0);
 
-                if let DashMapEntry::Vacant(entry) = self.active_collators.entry(shard_id) {
+                if !self.active_collators.contains_key(&shard_id) {
                     tracing::info!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "There is no active collator for collation session {}. Will start it",
@@ -725,7 +719,8 @@ where
                             mc_data: mc_data.clone(),
                         })
                         .await;
-                    entry.insert(Arc::new(collator));
+
+                    self.active_collators.insert(shard_id, Arc::new(collator));
                 }
 
                 // notify validator, it will start overlay initialization
@@ -767,12 +762,7 @@ where
         for (finish_key, session_info) in to_finish_sessions {
             self.collation_sessions_to_finish
                 .insert(finish_key, session_info.clone());
-            self.dispatcher
-                .spawn_task(method_to_async_closure!(
-                    finish_collation_session,
-                    session_info,
-                    finish_key
-                ))
+            self.finish_collation_session(session_info, finish_key)
                 .await?;
         }
 
@@ -846,14 +836,16 @@ where
         let block_id = *collation_result.candidate.block.id();
 
         // find session related to this block by shard
-        let session_info = self
+        let Some(session_info) = self
             .active_collation_sessions
             .read()
             .get(&block_id.shard)
-            .ok_or(anyhow!(
+            .cloned()
+        else {
+            anyhow::bail!(
                 "There is no active collation session for the shard that block belongs to"
-            ))?
-            .clone();
+            );
+        };
 
         let candidate_chain_time = collation_result.candidate.chain_time;
 
@@ -918,12 +910,7 @@ where
 
                 Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), &block_id).await?;
 
-                self.dispatcher
-                    .spawn_task(method_to_async_closure!(
-                        refresh_collation_sessions,
-                        mc_data
-                    ))
-                    .await?;
+                self.refresh_collation_sessions(mc_data).await?;
             }
         } else {
             // when candidate is shard
@@ -1214,7 +1201,11 @@ where
         let _histogram = HistogramGuard::begin("tycho_collator_enqueue_mc_block_collation_time");
 
         // get masterchain collator if exists
-        let Some(mc_collator) = self.active_collators.get(&ShardIdent::MASTERCHAIN) else {
+        let Some(mc_collator) = self
+            .active_collators
+            .get(&ShardIdent::MASTERCHAIN)
+            .map(|r| r.clone())
+        else {
             bail!("Masterchain collator is not started yet!");
         };
 
@@ -1246,7 +1237,7 @@ where
 
     async fn enqueue_try_collate(&self, shard_id: &ShardIdent) -> Result<()> {
         // get collator if exists
-        let Some(collator) = self.active_collators.get(shard_id) else {
+        let Some(collator) = self.active_collators.get(shard_id).map(|r| r.clone()) else {
             tracing::warn!(
                 target: tracing_targets::COLLATION_MANAGER,
                 "Node does not collate blocks for shard {}",
@@ -1425,7 +1416,7 @@ where
 
     /// Find all shard blocks that form master block subgraph.
     /// Then extract and return them if all are valid
-    async fn extract_mc_block_subgraph_if_valid(
+    fn extract_mc_block_subgraph_if_valid(
         &self,
         block_id: &BlockId,
     ) -> Result<Option<McBlockSubgraphToSend>> {
@@ -1504,8 +1495,7 @@ where
         if not_all_blocks_valid {
             let mut blocks_to_restore = vec![subgraph.mc_block];
             blocks_to_restore.append(&mut subgraph.shard_blocks);
-            self.restore_blocks_in_cache_async(blocks_to_restore)
-                .await?;
+            self.restore_blocks_in_cache(blocks_to_restore)?;
             return Ok(None);
         }
 
@@ -1524,7 +1514,7 @@ where
     }
 
     /// Remove block entries from cache and compact cache
-    async fn cleanup_blocks_from_cache(&self, blocks_keys: Vec<BlockCacheKey>) -> Result<()> {
+    fn cleanup_blocks_from_cache(&self, blocks_keys: Vec<BlockCacheKey>) -> Result<()> {
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
             "Cleaning up blocks from cache: {:?}",
@@ -1552,13 +1542,6 @@ where
             .as_slice(),
         );
         Ok(())
-    }
-
-    async fn restore_blocks_in_cache_async(
-        &self,
-        blocks_to_restore: Vec<BlockCandidateToSend>,
-    ) -> Result<()> {
-        self.restore_blocks_in_cache(blocks_to_restore)
     }
 
     /// Find and restore block entries in cache updating sync statuses
@@ -1626,7 +1609,7 @@ where
         let mut sync_elapsed = Default::default();
 
         // extract master block with all shard blocks if valid, and process them
-        if let Some(mc_block_subgraph) = self.extract_mc_block_subgraph_if_valid(block_id).await? {
+        if let Some(mc_block_subgraph) = self.extract_mc_block_subgraph_if_valid(block_id)? {
             extract_elapsed = histogram_extract.finish();
             let timer = std::time::Instant::now();
 
@@ -1795,7 +1778,7 @@ where
                     "All blocks were successfully sent to sync. Will cleanup them from cache: {:?}",
                     _tracing_sent_blocks_descr.as_slice(),
                 );
-                self.cleanup_blocks_from_cache(sent_blocks_keys).await?;
+                self.cleanup_blocks_from_cache(sent_blocks_keys)?;
             }
 
             commit_diffs_elapsed = histogram.finish();
@@ -1808,7 +1791,7 @@ where
                 _tracing_blocks_to_send_descr.as_slice(),
             );
             // queue blocks restore task
-            self.restore_blocks_in_cache_async(blocks_to_send).await?;
+            self.restore_blocks_in_cache(blocks_to_send)?;
             // TODO: should implement resending for restored blocks
         }
 
