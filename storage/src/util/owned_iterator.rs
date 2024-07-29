@@ -32,6 +32,10 @@ impl OwnedIterator {
         self.inner.seek(key.to_vec().as_slice());
     }
 
+    pub fn seek_for_prev<T: StoredValue>(&mut self, key: T) {
+        self.inner.seek_for_prev(key.to_vec().as_slice());
+    }
+
     pub fn key(&self) -> Option<&[u8]> {
         self.inner.key()
     }

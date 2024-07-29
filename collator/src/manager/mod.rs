@@ -19,6 +19,7 @@ use self::types::{
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
+use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
@@ -42,7 +43,7 @@ where
     dispatcher: AsyncDispatcher<CollationManager<CF, V>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
-    mq_adapter: Arc<dyn MessageQueueAdapter>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 }
 
 impl<CF: CollatorFactory, V> RunningCollationManager<CF, V> {
@@ -58,7 +59,7 @@ impl<CF: CollatorFactory, V> RunningCollationManager<CF, V> {
         &self.mpool_adapter
     }
 
-    pub fn mq_adapter(&self) -> &Arc<dyn MessageQueueAdapter> {
+    pub fn mq_adapter(&self) -> &Arc<dyn MessageQueueAdapter<EnqueuedMessage>> {
         &self.mq_adapter
     }
 }
@@ -73,7 +74,7 @@ where
     dispatcher: Arc<AsyncDispatcher<Self>>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
-    mq_adapter: Arc<dyn MessageQueueAdapter>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
 
     collator_factory: CF,
     validator: Arc<V>,
@@ -197,7 +198,7 @@ where
     pub fn start<STF, MPF>(
         keypair: Arc<KeyPair>,
         config: CollationConfig,
-        mq_adapter: Arc<dyn MessageQueueAdapter>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         state_node_adapter_factory: STF,
         mpool_adapter_factory: MPF,
         validator: V,
@@ -653,7 +654,7 @@ where
                 "Detected split/merge actions: {:?}",
                 split_merge_actions,
             );
-            self.mq_adapter.update_shards(split_merge_actions).await?;
+            // self.mq_adapter.update_shards(split_merge_actions).await?;
         }
 
         // find out the actual collation session seqno from master state
@@ -1854,7 +1855,7 @@ where
     /// 5. Return `Error` if it seems to be unrecoverable
     async fn send_blocks_to_sync(
         &self,
-        mq_adapter: Arc<dyn MessageQueueAdapter>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mut blocks_to_send: Vec<BlockCandidateToSend>,
     ) -> Result<()> {

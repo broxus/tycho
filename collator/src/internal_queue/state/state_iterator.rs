@@ -1,41 +1,63 @@
 use std::cmp::{Ordering, Reverse};
-use std::collections::{BTreeMap, BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use everscale_types::cell::{Cell, Load};
-use everscale_types::models::{IntMsgInfo, Message, MsgInfo, ShardIdent};
+use ahash::HashMapExt;
+use anyhow::{Context, Result};
+use everscale_types::models::ShardIdent;
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_util::FastHashMap;
 
-use crate::internal_queue::state::shard_iterator::ShardIterator;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
+use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
+use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
 
-#[derive(Debug, Clone, Eq)]
-pub struct MessageWithSource {
-    pub shard_id: ShardIdent,
-    pub message: Arc<EnqueuedMessage>,
+pub struct ShardIteratorWithRange {
+    pub iter: OwnedIterator,
+    pub range_start: InternalMessageKey,
+    pub range_end: InternalMessageKey,
 }
 
-impl MessageWithSource {
-    pub fn new(shard_id: ShardIdent, message: Arc<EnqueuedMessage>) -> Self {
-        MessageWithSource { shard_id, message }
+impl ShardIteratorWithRange {
+    pub fn new(
+        iter: OwnedIterator,
+        range_start: InternalMessageKey,
+        range_end: InternalMessageKey,
+    ) -> Self {
+        ShardIteratorWithRange {
+            iter,
+            range_start,
+            range_end,
+        }
     }
 }
 
-impl PartialEq<Self> for MessageWithSource {
+#[derive(Debug, Clone)]
+pub struct MessageExt<V: InternalMessageValue> {
+    pub source: ShardIdent,
+    pub message: Arc<V>,
+}
+
+impl<V: InternalMessageValue> MessageExt<V> {
+    pub fn new(source: ShardIdent, message: Arc<V>) -> Self {
+        MessageExt { source, message }
+    }
+}
+
+impl<V: InternalMessageValue> PartialEq for MessageExt<V> {
     fn eq(&self, other: &Self) -> bool {
         self.message == other.message
     }
 }
 
-impl PartialOrd<Self> for MessageWithSource {
+impl<V: InternalMessageValue> Eq for MessageExt<V> {}
+
+impl<V: InternalMessageValue> PartialOrd for MessageExt<V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.message.cmp(&other.message))
     }
 }
 
-impl Ord for MessageWithSource {
+impl<V: InternalMessageValue> Ord for MessageExt<V> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.message.cmp(&other.message)
     }
@@ -47,103 +69,107 @@ pub struct IterRange {
     pub key: InternalMessageKey,
 }
 
-#[derive(Debug, Clone)]
-pub struct ShardRange {
-    pub shard_id: ShardIdent,
-    pub from: Option<InternalMessageKey>,
-    pub to: Option<InternalMessageKey>,
+pub trait StateIterator<V: InternalMessageValue>: Send {
+    fn next(&mut self) -> Result<Option<MessageExt<V>>>;
+    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey>;
 }
 
-pub trait StateIterator: Send {
-    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>>;
-}
-
-pub struct StateIteratorImpl {
-    iters: BTreeMap<ShardIdent, ShardIterator>,
-    receiver: ShardIdent,
-    ranges: FastHashMap<ShardIdent, ShardRange>,
-    message_queue: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
+pub struct StateIteratorImpl<V: InternalMessageValue> {
+    iters: FastHashMap<ShardIdent, ShardIterator>,
+    message_queue: BinaryHeap<Reverse<MessageExt<V>>>,
     in_queue: HashSet<ShardIdent>,
+    current_position: FastHashMap<ShardIdent, InternalMessageKey>,
+    shards_to_remove: Vec<ShardIdent>,
 }
 
-impl StateIteratorImpl {
+impl<V: InternalMessageValue> StateIteratorImpl<V> {
     pub fn new(
-        shard_iters: BTreeMap<ShardIdent, OwnedIterator>,
+        shard_iters_with_ranges: FastHashMap<ShardIdent, ShardIteratorWithRange>,
         receiver: ShardIdent,
-        ranges: FastHashMap<ShardIdent, ShardRange>,
     ) -> Self {
-        let mut iters = BTreeMap::new();
-        for (shard_ident, iter) in shard_iters.into_iter() {
-            let range = ranges
-                .get(&shard_ident)
-                .expect("Failed to find range for shard");
-            let shard_iterator =
-                ShardIterator::new(shard_ident, range.clone(), receiver.clone(), iter);
+        let mut iters = FastHashMap::with_capacity(shard_iters_with_ranges.len());
+
+        for (shard_ident, shard_iter_with_range) in shard_iters_with_ranges {
+            let shard_iterator = ShardIterator::new(
+                shard_ident,
+                shard_iter_with_range.range_start,
+                shard_iter_with_range.range_end,
+                receiver,
+                shard_iter_with_range.iter,
+            );
+
             iters.insert(shard_ident, shard_iterator);
         }
+
         Self {
             iters,
-            receiver,
-            ranges,
             message_queue: BinaryHeap::new(),
             in_queue: HashSet::new(),
+            current_position: Default::default(),
+            shards_to_remove: Vec::new(),
         }
     }
 
-    fn load_message_from_cell(cell: Cell) -> Result<(IntMsgInfo, Cell)> {
-        let message = Message::load_from(&mut cell.as_slice().context("failed to load message")?)?;
-        match message.info {
-            MsgInfo::Int(info) => Ok((info, cell)),
-            _ => bail!("Expected internal message"),
-        }
-    }
+    fn refill_queue(&mut self) -> Result<()> {
+        self.shards_to_remove.clear();
 
-    fn create_message_with_source(
-        info: IntMsgInfo,
-        cell: Cell,
-        shard: ShardIdent,
-    ) -> Arc<MessageWithSource> {
-        let hash = *cell.repr_hash();
-        let enqueued_message = EnqueuedMessage { info, cell, hash };
-        Arc::new(MessageWithSource::new(shard, Arc::new(enqueued_message)))
-    }
+        for (&shard_ident, iter) in &mut self.iters {
+            if self.in_queue.contains(&shard_ident) {
+                continue;
+            }
 
-    fn refill_queue_if_needed(&mut self) {
-        for (shard_ident, iter) in self.iters.iter_mut() {
-            if !self.in_queue.contains(shard_ident) {
-                if let Some((_key, cell)) = iter.next_message() {
-                    if let Ok((info, cell)) = Self::load_message_from_cell(cell) {
-                        let message_with_source =
-                            Self::create_message_with_source(info, cell, iter.shard_ident);
-
-                        // TODO: why do we need this check?
-                        for key in self.message_queue.iter() {
-                            if key.0.message.key() == message_with_source.message.key() {
-                                panic!("Duplicate message in the queue");
-                            }
-                        }
-
-                        self.message_queue.push(Reverse(message_with_source));
-                        self.in_queue.insert(shard_ident.clone());
-                    } else {
-                        panic!("Failed to load message from value")
+            loop {
+                match iter.current()? {
+                    Some(IterResult::Value(value)) => {
+                        let message =
+                            V::deserialize(value).context("Failed to deserialize message")?;
+                        let message_ext = MessageExt::new(shard_ident, Arc::new(message));
+                        self.message_queue.push(Reverse(message_ext));
+                        self.in_queue.insert(shard_ident);
+                        iter.shift();
+                        break;
                     }
-                    iter.iterator.next();
+                    Some(IterResult::Skip(Some(key))) => {
+                        self.current_position
+                            .insert(key.shard_ident, key.internal_message_key.clone().into());
+                        iter.shift();
+                    }
+                    Some(IterResult::Skip(None)) => {
+                        iter.shift();
+                    }
+                    None => {
+                        self.shards_to_remove.push(shard_ident);
+                        break;
+                    }
                 }
             }
         }
+
+        for &shard_ident in &self.shards_to_remove {
+            self.iters.remove(&shard_ident);
+        }
+
+        Ok(())
     }
 }
 
-impl StateIterator for StateIteratorImpl {
-    fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
-        self.refill_queue_if_needed();
+impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
+    fn next(&mut self) -> Result<Option<MessageExt<V>>> {
+        self.refill_queue()?;
 
         if let Some(Reverse(message)) = self.message_queue.pop() {
-            self.in_queue.remove(&message.shard_id);
+            let message_key = message.message.key();
+            self.current_position
+                .insert(message.source, message_key.clone());
+
+            self.in_queue.remove(&message.source);
             return Ok(Some(message));
         }
 
         Ok(None)
+    }
+
+    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+        self.current_position.clone()
     }
 }

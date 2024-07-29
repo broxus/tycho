@@ -3261,6 +3261,7 @@ dependencies = [
 name = "tycho-collator"
 version = "0.0.1"
 dependencies = [
+ "ahash",
  "anyhow",
  "arc-swap",
  "async-trait",

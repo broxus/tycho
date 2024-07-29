@@ -361,3 +361,25 @@ pub struct TopBlockDescription {
     pub proof_funds: ProofFunds,
     pub creators: Vec<HashBytes>,
 }
+
+#[derive(Debug)]
+pub struct ShortAddr {
+    workchain: i32,
+    prefix: u64,
+}
+
+impl ShortAddr {
+    pub fn new(workchain: i32, prefix: u64) -> Self {
+        Self { workchain, prefix }
+    }
+}
+
+impl Addr for ShortAddr {
+    fn workchain(&self) -> i32 {
+        self.workchain
+    }
+
+    fn prefix(&self) -> u64 {
+        self.prefix
+    }
+}
