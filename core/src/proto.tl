@@ -1,3 +1,7 @@
+---types---
+
+bigBytes ? = BigBytes;
+
 // Overlay
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -62,7 +66,7 @@ blockchain.keyBlockIds block_ids:(vector blockchain.blockId) incomplete:Bool = b
 * @param block          block data raw
 * @param is_link        block proof link flag
 */
-blockchain.blockFull.found block_id:blockchain.blockId proof:bytes block:bytes is_link:Bool = blockchain.BlockFull;
+blockchain.blockFull.found block_id:blockchain.blockId proof:bytes block:bigBytes is_link:Bool = blockchain.BlockFull;
 /**
 * A response for getting empty block
 */

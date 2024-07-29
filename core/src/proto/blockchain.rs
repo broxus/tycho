@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 
-use crate::proto::{tl_block_id, tl_block_id_vec};
+use crate::proto::{tl_big_bytes, tl_block_id, tl_block_id_vec};
 
 /// Data for computing a public overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -33,6 +33,7 @@ pub enum BlockFull {
         #[tl(with = "tl_block_id")]
         block_id: everscale_types::models::BlockId,
         proof: Bytes,
+        #[tl(with = "tl_big_bytes")]
         block: Bytes,
         is_link: bool,
     },
