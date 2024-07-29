@@ -511,7 +511,9 @@ def storage() -> RowPanel:
             unit="Blocks",
             title="GC lag",
         ),
-        create_gauge_panel("tycho_storage_cells_tree_cache_size", "Cells tree cache size"),
+        create_gauge_panel(
+            "tycho_storage_cells_tree_cache_size", "Cells tree cache size"
+        ),
     ]
     return create_row("Storage", metrics)
 
@@ -1023,6 +1025,49 @@ def collator_adapter_metrics() -> RowPanel:
     return create_row("collator: Adapter Metrics", metrics)
 
 
+def validator() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_validator_validate_block_time", "Time to validate a block"
+        ),
+        create_heatmap_panel(
+            "tycho_validator_exchange_signature_time",
+            "Time of a single signature exchange",
+        ),
+        create_heatmap_panel(
+            "tycho_validator_receive_signature_time",
+            "Time to receive a valid signature from peer",
+        ),
+        create_counter_panel(
+            "tycho_validator_block_exchanges_in_total",
+            "Number of received block exchanges (full) over time",
+        ),
+        create_counter_panel(
+            "tycho_validator_cache_exchanges_in_total",
+            "Number of received cache exchanges (partial) over time",
+        ),
+        create_counter_panel(
+            "tycho_validator_miss_exchanges_in_total",
+            "Number of received exchanges out of known range over time",
+        ),
+        create_counter_panel(
+            "tycho_validator_invalid_signatures_in_total",
+            "Number of received invalid signatures over time",
+        ),
+        create_gauge_panel(
+            "tycho_validator_sessions_active",
+            "Number of currently active validator sessions",
+        ),
+        create_gauge_panel(
+            "tycho_validator_block_slots", "Number of currently active block slots"
+        ),
+        create_gauge_panel(
+            "tycho_validator_cache_slots", "Number of currently active cache slots"
+        ),
+    ]
+    return create_row("Validator", metrics)
+
+
 def mempool() -> RowPanel:
     metrics = [
         create_gauge_panel(
@@ -1316,6 +1361,7 @@ dashboard = Dashboard(
         collator_adapter_metrics(),
         collator_finalize_block(),
         collator_execution_manager(),
+        validator(),
         mempool(),
         mempool_components(),
         net_traffic(),

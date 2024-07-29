@@ -31,6 +31,11 @@ pub struct ValidatorStdImplConfig {
     /// Default: 10 seconds.
     pub failed_exchange_interval: Duration,
 
+    /// Maximum number of parallel requests for exchanging signatures.
+    ///
+    /// Default: 10.
+    pub max_parallel_requests: usize,
+
     /// Number of slots for future signatures.
     ///
     /// Default: 3.
@@ -48,6 +53,7 @@ impl Default for ValidatorStdImplConfig {
             exchange_signatures_backoff: Default::default(),
             exchange_signatures_timeout: Duration::from_secs(1),
             failed_exchange_interval: Duration::from_secs(10),
+            max_parallel_requests: 10,
             signature_cache_slots: 3,
             old_blocks_to_keep: 10,
         }

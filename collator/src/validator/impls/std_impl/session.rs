@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tycho_network::{OverlayId, PeerId, PrivateOverlay, Request};
 use tycho_util::futures::JoinTask;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 use super::ValidatorStdImplConfig;
@@ -25,6 +26,24 @@ use crate::validator::rpc::{ExchangeSignatures, ValidatorClient, ValidatorServic
 use crate::validator::{
     proto, AddSession, BriefValidatorDescr, ValidationStatus, ValidatorNetworkContext,
 };
+
+// Histograms
+const METRIC_VALIDATE_BLOCK_TIME: &str = "tycho_validator_validate_block_time";
+const METRIC_EXCHANGE_SIGNATURE_TIME: &str = "tycho_validator_exchange_signature_time";
+const METRIC_RECEIVE_SIGNATURE_TIME: &str = "tycho_validator_receive_signature_time";
+
+// Counters
+const METRIC_BLOCK_EXCHANGES_IN_TOTAL: &str = "tycho_validator_block_exchanges_in_total";
+const METRIC_CACHE_EXCHANGES_IN_TOTAL: &str = "tycho_validator_cache_exchanges_in_total";
+const METRIC_MISS_EXCHANGES_IN_TOTAL: &str = "tycho_validator_miss_exchanges_in_total";
+const METRIC_INVALID_SIGNATURES_IN_TOTAL: &str = "tycho_validator_invalid_signatures_in_total";
+const METRIC_INVALID_SIGNATURES_CACHED_TOTAL: &str =
+    "tycho_validator_invalid_signatures_cached_total";
+
+// Gauges
+const METRIC_SESSIONS_ACTIVE: &str = "tycho_validator_sessions_active";
+const METRIC_BLOCK_SLOTS: &str = "tycho_validator_block_slots";
+const METRIC_CACHE_SLOTS: &str = "tycho_validator_cache_slots";
 
 /// Validator session is unique for each shard within each validator set.
 #[derive(Clone)]
@@ -107,6 +126,8 @@ impl ValidatorSession {
             }),
         };
 
+        metrics::gauge!(METRIC_SESSIONS_ACTIVE).increment(1);
+
         // Prepare initial cache slots
         session.create_cache_slots(info.start_block_seqno, config.signature_cache_slots);
 
@@ -147,7 +168,7 @@ impl ValidatorSession {
         fields(session_id = self.inner.session_id, %block_id)
     )]
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
-        const MAX_PARALLEL_REQUESTS: usize = 10;
+        let _histogram = HistogramGuard::begin(METRIC_VALIDATE_BLOCK_TIME);
 
         debug_assert_eq!(self.inner.state.shard_ident, block_id.shard);
 
@@ -203,7 +224,7 @@ impl ValidatorSession {
         );
         let mut total_weight = self.inner.own_weight;
 
-        let semaphore = Arc::new(Semaphore::new(MAX_PARALLEL_REQUESTS));
+        let semaphore = Arc::new(Semaphore::new(self.inner.config.max_parallel_requests));
         let mut futures = FuturesUnordered::new();
         for (peer_id, signature) in block_signatures.other_signatures.iter() {
             if let Some(valid_signature) = signature.load_full() {
@@ -219,7 +240,7 @@ impl ValidatorSession {
 
             let cached = cached
                 .as_ref()
-                .and_then(|c| c.get(peer_id))
+                .and_then(|c| c.other_signatures.get(peer_id))
                 .and_then(|c| c.load_full());
 
             let fut = self.inner.clone().receive_signature(
@@ -287,16 +308,16 @@ impl ValidatorSession {
 
         // Pre-allocate the result map which will contain all validators' signatures (only valid ones)
         let validators = self.inner.state.validators.as_ref();
-        let mut result =
+        let mut other_signatures =
             SignatureSlotsMap::with_capacity_and_hasher(validators.len(), Default::default());
 
         for peer_id in validators.keys() {
-            result.insert(*peer_id, Default::default());
+            other_signatures.insert(*peer_id, Default::default());
         }
 
         BlockSignaturesBuilder {
             own_signature,
-            other_signatures: Arc::new(result),
+            other_signatures,
             total_weight: self.inner.own_weight,
         }
     }
@@ -304,7 +325,7 @@ impl ValidatorSession {
     async fn reuse_signatures(
         &self,
         block_id: &BlockId,
-        cached: Arc<SignaturesMap>,
+        cached: Arc<CachedSignatures>,
     ) -> BlockSignaturesBuilder {
         let data = Block::build_data_for_sign(block_id);
         let block_seqno = block_id.seqno;
@@ -321,10 +342,12 @@ impl ValidatorSession {
             let own_signature = Arc::new(key_pair.sign_raw(&data));
 
             // Pre-allocate the result map which will contain all validators' signatures (only valid ones)
-            let mut result =
-                SignatureSlotsMap::with_capacity_and_hasher(cached.len(), Default::default());
+            let mut other_signatures = SignatureSlotsMap::with_capacity_and_hasher(
+                cached.other_signatures.len(),
+                Default::default(),
+            );
 
-            for (peer_id, cached) in cached.iter() {
+            for (peer_id, cached) in cached.other_signatures.iter() {
                 let stored = 'stored: {
                     let Some(signature) = cached.load_full() else {
                         break 'stored Default::default();
@@ -340,6 +363,8 @@ impl ValidatorSession {
                             ValidationError::InvalidSignature
                         );
 
+                        metrics::counter!(METRIC_INVALID_SIGNATURES_CACHED_TOTAL).increment(1);
+
                         // TODO: Somehow mark that this validator sent an invalid signature?
                         break 'stored Default::default();
                     }
@@ -348,12 +373,12 @@ impl ValidatorSession {
                     Some(signature)
                 };
 
-                result.insert(*peer_id, SignatureSlot::new(stored));
+                other_signatures.insert(*peer_id, SignatureSlot::new(stored));
             }
 
             BlockSignaturesBuilder {
                 own_signature,
-                other_signatures: Arc::new(result),
+                other_signatures,
                 total_weight,
             }
         })
@@ -371,17 +396,8 @@ impl ValidatorSession {
         }
 
         for seqno in from..to {
-            let signatures = inner
-                .state
-                .validators
-                .keys()
-                .map(|peer_id| (*peer_id, Default::default()))
-                .collect::<SignaturesMap>();
-
-            _ = inner
-                .state
-                .cached_signatures
-                .insert(seqno, Arc::new(signatures));
+            let signatures = CachedSignatures::new(&inner.state.validators);
+            _ = inner.state.cached_signatures.insert(seqno, signatures);
         }
     }
 }
@@ -405,6 +421,8 @@ impl Inner {
         cached: Option<Arc<[u8; 64]>>,
         semaphore: Arc<Semaphore>,
     ) -> ValidSignature {
+        let _histogram = HistogramGuard::begin(METRIC_RECEIVE_SIGNATURE_TIME);
+
         let block_seqno = block_signatures.block_id.seqno;
         let req = Request::from_tl(proto::rpc::ExchangeSignaturesRef {
             block_seqno,
@@ -451,7 +469,11 @@ impl Inner {
                     let permit = semaphore.acquire().await.unwrap();
 
                     let timeout = self.config.exchange_signatures_timeout;
-                    let query = self.client.query(&peer_id, req.clone());
+                    let query = {
+                        let _histogram = HistogramGuard::begin(METRIC_EXCHANGE_SIGNATURE_TIME);
+                        self.client.query(&peer_id, req.clone())
+                    };
+
                     match tokio::time::timeout(timeout, query).await {
                         Ok(Ok(res)) => match res.parse_tl() {
                             Ok(proto::Exchange::Complete(signature)) => break signature,
@@ -517,6 +539,8 @@ impl Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
+        metrics::gauge!(METRIC_SESSIONS_ACTIVE).decrement(1);
+
         tracing::debug!(
             target: tracing_targets::VALIDATOR,
             shard_ident = %self.state.shard_ident,
@@ -531,7 +555,7 @@ struct SessionState {
     weight_threshold: u64,
     validators: Arc<FastHashMap<PeerId, BriefValidatorDescr>>,
     block_signatures: TreeIndex<u32, Arc<BlockSignatures>>,
-    cached_signatures: TreeIndex<u32, Arc<SignaturesMap>>,
+    cached_signatures: TreeIndex<u32, Arc<CachedSignatures>>,
     cancelled: AtomicBool,
     cancelled_signal: Notify,
 }
@@ -561,6 +585,7 @@ impl SessionState {
         {
             // TODO: Store that the signature is invalid to avoid further checks on retries
             // TODO: Collect statistics on invalid signatures to slash the malicious validator
+            metrics::counter!(METRIC_INVALID_SIGNATURES_IN_TOTAL).increment(1);
             return Err(ValidationError::InvalidSignature);
         }
 
@@ -601,12 +626,14 @@ struct ValidSignature {
 
 struct BlockSignaturesBuilder {
     own_signature: Arc<[u8; 64]>,
-    other_signatures: Arc<SignatureSlotsMap>,
+    other_signatures: SignatureSlotsMap,
     total_weight: u64,
 }
 
 impl BlockSignaturesBuilder {
     fn build(self, block_id: &BlockId, weight_threshold: u64) -> Arc<BlockSignatures> {
+        metrics::gauge!(METRIC_BLOCK_SLOTS).increment(1);
+
         Arc::new(BlockSignatures {
             block_id: *block_id,
             own_signature: self.own_signature,
@@ -621,14 +648,44 @@ impl BlockSignaturesBuilder {
 struct BlockSignatures {
     block_id: BlockId,
     own_signature: Arc<[u8; 64]>,
-    other_signatures: Arc<SignatureSlotsMap>,
+    other_signatures: SignatureSlotsMap,
     total_weight: AtomicU64,
     validated: AtomicBool,
     cancelled: CancellationToken,
 }
 
+impl Drop for BlockSignatures {
+    fn drop(&mut self) {
+        metrics::gauge!(METRIC_BLOCK_SLOTS).decrement(1);
+    }
+}
+
+struct CachedSignatures {
+    other_signatures: FastHashMap<PeerId, ArcSwapOption<[u8; 64]>>,
+}
+
+impl CachedSignatures {
+    fn new(validators: &FastHashMap<PeerId, BriefValidatorDescr>) -> Arc<Self> {
+        let signatures = validators
+            .keys()
+            .map(|peer_id| (*peer_id, Default::default()))
+            .collect();
+
+        metrics::gauge!(METRIC_CACHE_SLOTS).increment(1);
+
+        Arc::new(Self {
+            other_signatures: signatures,
+        })
+    }
+}
+
+impl Drop for CachedSignatures {
+    fn drop(&mut self) {
+        metrics::gauge!(METRIC_CACHE_SLOTS).decrement(1);
+    }
+}
+
 type SignatureSlotsMap = FastHashMap<PeerId, SignatureSlot>;
-type SignaturesMap = FastHashMap<PeerId, ArcSwapOption<[u8; 64]>>;
 
 impl ExchangeSignatures for SessionState {
     type Err = ValidationError;
@@ -650,6 +707,8 @@ impl ExchangeSignatures for SessionState {
         //
         // NOTE: scc's `peek` does not lock the tree
         let result = if let Some(signatures) = self.block_signatures.peek(&block_seqno, &guard) {
+            metrics::counter!(METRIC_BLOCK_EXCHANGES_IN_TOTAL).increment(1);
+
             let Some(slot) = signatures.other_signatures.get(peer_id) else {
                 return Err(ValidationError::UnknownPeer);
             };
@@ -662,11 +721,13 @@ impl ExchangeSignatures for SessionState {
             proto::Exchange::Complete(signatures.own_signature.clone())
         } else {
             // Find the slot for the specified block seqno.
-            let Some(signatures) = self.cached_signatures.peek(&block_seqno, &guard) else {
+            let Some(slot) = self.cached_signatures.peek(&block_seqno, &guard) else {
+                metrics::counter!(METRIC_MISS_EXCHANGES_IN_TOTAL).increment(1);
                 return Err(ValidationError::NoSlot);
             };
+            metrics::counter!(METRIC_CACHE_EXCHANGES_IN_TOTAL).increment(1);
 
-            let Some(saved_signature) = signatures.get(peer_id) else {
+            let Some(saved_signature) = slot.other_signatures.get(peer_id) else {
                 return Err(ValidationError::UnknownPeer);
             };
 
