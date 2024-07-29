@@ -13,12 +13,12 @@ use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagRound, Verifier};
-use crate::effects::{AltFormat, DownloadContext, Effects, ValidateContext};
+use crate::dag::Verifier;
+use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
-use crate::models::{DagPoint, PeerCount, PointId};
+use crate::models::{PeerCount, PointId};
 use crate::Point;
 
 #[derive(Clone)]
@@ -54,29 +54,15 @@ impl Downloader {
     }
 
     pub async fn run(
-        self,
-        point_id: PointId,
-        // Download task holds weak reference to containing round and does not prevent its drop,
-        // while passes weak ref to validate; so Verifier is able to break recursive validation
-        // (trust consensus on `DAG_DEPTH` at least) and does not require too deep points
-        // to be checked against their dependencies (if dag round is removed from DAG).
-        // The task will be dropped in case DAG round is dropped and no validation waits this point.
-        // Do not pass `WeakDagRound` here as it would be incorrect to return `DagPoint::NotExists`
-        // if we need to download at a very deep round - let the start of this task hold strong ref.
-        point_dag_round_strong: DagRound,
-        certified_rx: oneshot::Receiver<()>,
+        &self,
+        point_id: &PointId,
         dependers: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
-    ) -> DagPoint {
+    ) -> Option<Point> {
         let _task_duration = HistogramGuard::begin(DownloadContext::TASK_DURATION);
-        effects.meter_start(&point_id);
+        effects.meter_start(point_id);
         let span_guard = effects.span().enter();
-        assert_eq!(
-            point_id.location.round,
-            point_dag_round_strong.round(),
-            "point and DAG round mismatch"
-        );
         // request point from its signers (any depender is among them as point is already verified)
         let (undone_peers, author_state, updates) = {
             let guard = self.inner.peer_schedule.read();
@@ -103,14 +89,11 @@ impl Downloader {
             })
             .collect::<FastHashMap<_, _>>();
 
-        let point_dag_round = point_dag_round_strong.downgrade();
-        // do not leak span and strong round ref across await
-        drop(point_dag_round_strong);
         drop(span_guard);
 
         let mut task = DownloadTask {
             parent: self.clone(),
-            request: Dispatcher::point_by_id_request(&point_id),
+            request: Dispatcher::point_by_id_request(point_id),
             point_id: point_id.clone(),
             peer_count,
             reliably_not_found: 0, // this node is +1 to 2F
@@ -129,25 +112,7 @@ impl Downloader {
 
         DownloadContext::meter_task(&task);
 
-        match downloaded {
-            None => DagPoint::NotExists(Arc::new(point_id)),
-            Some(point) => {
-                tracing::trace!(
-                    parent: effects.span(),
-                    peer = display(point.body().location.author.alt()),
-                    "downloaded, now validating",
-                );
-                Verifier::validate(
-                    point.clone(),
-                    point_dag_round,
-                    self.clone(),
-                    certified_rx,
-                    Effects::<ValidateContext>::new(&effects, &point),
-                )
-                // this is the only `await` in the task, that resolves the download
-                .await
-            }
-        }
+        downloaded
     }
 }
 

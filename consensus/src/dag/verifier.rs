@@ -12,7 +12,7 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::dyn_event;
-use crate::effects::{AltFormat, Effects, ValidateContext};
+use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, Link, LinkField, Location, PeerCount, Point, ValidPoint};
@@ -38,9 +38,9 @@ impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
     pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), DagPoint> {
         let _task_duration = HistogramGuard::begin(ValidateContext::VERIFY_DURATION);
-        let result = if !point.is_integrity_ok() {
+        let result = if !(point.is_integrity_ok() && point.is_well_formed()) {
             Err(DagPoint::NotExists(Arc::new(point.id()))) // cannot use point body
-        } else if !(point.is_well_formed() && Self::is_list_of_signers_ok(point, peer_schedule)) {
+        } else if !Self::is_list_of_signers_ok(point, peer_schedule) {
             // point links, etc. will not be used
             Err(DagPoint::Invalid(point.clone()))
         } else {
@@ -55,6 +55,7 @@ impl Verifier {
         point: Point,      // @ r+0
         r_0: WeakDagRound, // r+0
         downloader: Downloader,
+        store: MempoolStore,
         mut certified_rx: oneshot::Receiver<()>,
         effects: Effects<ValidateContext>,
     ) -> DagPoint {
@@ -89,6 +90,7 @@ impl Verifier {
                 &point,
                 &r_0,
                 &downloader,
+                &store,
                 &effects,
                 &mut dependencies,
             )
@@ -97,6 +99,7 @@ impl Verifier {
                 &point,
                 &r_0,
                 &downloader,
+                &store,
                 &effects,
                 &mut dependencies,
             ))
@@ -115,6 +118,7 @@ impl Verifier {
             &point,
             &r_1,
             &downloader,
+            &store,
             &effects,
             &mut dependencies,
             &mut proven_vertex_dep,
@@ -274,6 +278,7 @@ impl Verifier {
         point: &Point,        // @ r+0
         dag_round: &DagRound, // start with r+0
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<ValidateContext>,
         dependencies: &mut Vec<DagPointFuture>,
     ) -> bool {
@@ -317,6 +322,7 @@ impl Verifier {
                     &linked_id.digest,
                     &point.body().location.author,
                     downloader,
+                    store,
                     effects,
                 ));
             }
@@ -346,6 +352,7 @@ impl Verifier {
         point: &Point,  // @ r+0
         r_1: &DagRound, // r-1
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<ValidateContext>,
         dependencies: &mut Vec<DagPointFuture>,
         proven_vertex_dep: &mut Option<DagPointFuture>,
@@ -376,6 +383,7 @@ impl Verifier {
                 digest,
                 &point.body().location.author,
                 downloader,
+                store,
                 effects,
             );
 

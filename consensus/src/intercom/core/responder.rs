@@ -5,7 +5,7 @@ use arc_swap::ArcSwapOption;
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagRound;
-use crate::effects::{AltFormat, Effects, EngineContext};
+use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::intercom::broadcast::Signer;
 use crate::intercom::core::dto::{MPQuery, MPResponse};
 use crate::intercom::dto::{PointByIdResponse, SignatureResponse};
@@ -19,6 +19,7 @@ struct ResponderInner {
     broadcast_filter: BroadcastFilter,
     top_dag_round: DagRound,
     downloader: Downloader,
+    store: MempoolStore,
     effects: Effects<EngineContext>,
 }
 
@@ -28,13 +29,15 @@ impl Responder {
         broadcast_filter: &BroadcastFilter,
         top_dag_round: &DagRound,
         downloader: &Downloader,
+        store: &MempoolStore,
         round_effects: &Effects<EngineContext>,
     ) {
-        broadcast_filter.advance_round(top_dag_round, downloader, round_effects);
+        broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
             top_dag_round: top_dag_round.clone(),
             downloader: downloader.clone(),
+            store: store.clone(),
             effects: round_effects.clone(),
         })));
     }
@@ -85,6 +88,7 @@ impl Responder {
                         &Arc::new(point),
                         &inner.top_dag_round,
                         &inner.downloader,
+                        &inner.store,
                         &inner.effects,
                     ),
                 };
@@ -92,9 +96,13 @@ impl Responder {
             }
             MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
                 None => PointByIdResponse::TryLater,
-                Some(inner) => {
-                    Uploader::find(&peer_id, &point_id, &inner.top_dag_round, &inner.effects)
-                }
+                Some(inner) => Uploader::find(
+                    &peer_id,
+                    &point_id,
+                    &inner.top_dag_round,
+                    &inner.store,
+                    &inner.effects,
+                ),
             }),
             MPQuery::Signature(round) => MPResponse::Signature(match inner {
                 None => SignatureResponse::TryLater,

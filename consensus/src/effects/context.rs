@@ -117,6 +117,7 @@ impl Effects<DownloadContext> {
     }
 }
 
+#[derive(Clone)]
 pub struct ValidateContext {
     current_round: Round,
     download_max_depth: Arc<AtomicU32>,
@@ -147,8 +148,8 @@ impl From<&EngineContext> for ValidateContext {
         }
     }
 }
-impl From<&DownloadContext> for ValidateContext {
-    fn from(parent: &DownloadContext) -> Self {
+impl From<&ValidateContext> for ValidateContext {
+    fn from(parent: &ValidateContext) -> Self {
         Self {
             current_round: parent.current_round,
             download_max_depth: parent.download_max_depth.clone(),

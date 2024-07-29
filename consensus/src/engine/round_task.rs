@@ -8,7 +8,9 @@ use tracing::Instrument;
 use tycho_util::sync::rayon_run;
 
 use crate::dag::{DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
-use crate::effects::{AltFormat, CollectorContext, Effects, EngineContext, ValidateContext};
+use crate::effects::{
+    AltFormat, CollectorContext, Effects, EngineContext, MempoolStore, ValidateContext,
+};
 use crate::engine::input_buffer::InputBuffer;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
@@ -17,11 +19,12 @@ use crate::intercom::{
 use crate::models::{ConsensusRound, Link, Point, Round};
 
 struct RoundTaskState {
-    responder: Responder,
-    downloader: Downloader,
-    broadcast_filter: BroadcastFilter,
-    input_buffer: InputBuffer,
     peer_schedule: PeerSchedule,
+    store: MempoolStore,
+    responder: Responder,
+    input_buffer: InputBuffer,
+    broadcast_filter: BroadcastFilter,
+    downloader: Downloader,
 }
 
 pub struct RoundTaskReady {
@@ -35,15 +38,15 @@ pub struct RoundTaskReady {
 
 impl RoundTaskReady {
     pub fn new(
-        peer_schedule: &PeerSchedule,
-        consensus_round: &ConsensusRound,
         dispatcher: &Dispatcher,
+        peer_schedule: &PeerSchedule,
+        store: &MempoolStore,
+        consensus_round: &ConsensusRound,
         responder: Responder,
         input_buffer: InputBuffer,
     ) -> Self {
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
-        let broadcast_filter =
-            BroadcastFilter::new(peer_schedule.clone(), bcast_tx, consensus_round.clone());
+        let broadcast_filter = BroadcastFilter::new(peer_schedule, consensus_round, bcast_tx);
         tokio::spawn({
             let this = broadcast_filter.clone();
             async move {
@@ -53,11 +56,12 @@ impl RoundTaskReady {
 
         Self {
             state: RoundTaskState {
-                responder,
-                downloader: Downloader::new(dispatcher, peer_schedule),
-                broadcast_filter,
-                input_buffer,
                 peer_schedule: peer_schedule.clone(),
+                store: store.clone(),
+                responder,
+                input_buffer,
+                broadcast_filter,
+                downloader: Downloader::new(dispatcher, peer_schedule),
             },
             broadcaster: Broadcaster::new(dispatcher),
             collector: Collector::new(bcast_rx),
@@ -85,6 +89,7 @@ impl RoundTaskReady {
             let current_dag_round = current_dag_round.clone();
             let input_buffer = self.state.input_buffer.clone();
             let last_own_point = self.last_own_point.clone();
+            let store = self.state.store.clone();
             futures_util::future::Either::Right(
                 rayon_run(move || {
                     let task_start_time = Instant::now();
@@ -94,8 +99,11 @@ impl RoundTaskReady {
                         &input_buffer,
                     )
                     .inspect(|own_point| {
-                        let state = current_dag_round
-                            .insert_exact_sign(own_point, current_dag_round.key_pair());
+                        let state = current_dag_round.insert_exact_sign(
+                            own_point,
+                            current_dag_round.key_pair(),
+                            &store,
+                        );
                         own_point_state_tx.send(state).ok();
                         metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
                             .record(task_start_time.elapsed());
@@ -115,6 +123,7 @@ impl RoundTaskReady {
             let mut broadcaster = self.broadcaster;
             let peer_schedule = self.state.peer_schedule.clone();
             let downloader = self.state.downloader.clone();
+            let store = self.state.store.clone();
             async move {
                 let own_point = own_point_fut.await;
                 round_effects.own_point(own_point.as_ref());
@@ -125,6 +134,7 @@ impl RoundTaskReady {
                         own_point.clone(),
                         peer_schedule.clone(),
                         downloader,
+                        store,
                         round_effects.clone(),
                     );
                     let new_last_own_point = broadcaster
@@ -169,6 +179,7 @@ impl RoundTaskReady {
             &self.state.broadcast_filter,
             next_dag_round,
             &self.state.downloader,
+            &self.state.store,
             round_effects,
         );
 
@@ -185,6 +196,7 @@ impl RoundTaskReady {
         point: Point,
         peer_schedule: PeerSchedule,
         downloader: Downloader,
+        store: MempoolStore,
         effects: Effects<EngineContext>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
@@ -201,6 +213,7 @@ impl RoundTaskReady {
                 point.clone(),
                 point_round,
                 downloader,
+                store,
                 do_not_certify_tx,
                 Effects::<ValidateContext>::new(&effects, &point),
             )

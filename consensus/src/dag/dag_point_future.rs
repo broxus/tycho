@@ -6,12 +6,13 @@ use std::task::{Context, Poll};
 use futures_util::FutureExt;
 use tokio::sync::{mpsc, oneshot};
 use tycho_network::PeerId;
+use tycho_storage::PointFlags;
 use tycho_util::futures::{JoinTask, Shared};
 use tycho_util::sync::OnceTake;
 
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
-use crate::effects::{DownloadContext, Effects, EngineContext, ValidateContext};
+use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::Downloader;
 use crate::models::{DagPoint, Digest, Location, PointId};
 use crate::Point;
@@ -55,8 +56,12 @@ enum DagPointFutureType {
 }
 
 impl DagPointFuture {
-    pub fn new_local(dag_point: &DagPoint, state: &InclusionState) -> Self {
+    pub fn new_local(dag_point: &DagPoint, state: &InclusionState, store: &MempoolStore) -> Self {
         state.init(dag_point);
+        // do not store invalid: after restart may not load smth or produce equivocation
+        if let Some(valid) = dag_point.valid() {
+            store.insert_point(&valid.point);
+        }
         Self(DagPointFutureType::Local(futures_util::future::ready(
             dag_point.clone(),
         )))
@@ -67,6 +72,7 @@ impl DagPointFuture {
         point: &Point,
         state: &InclusionState,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> Self {
         let downloader = downloader.clone();
@@ -74,13 +80,48 @@ impl DagPointFuture {
         let point_dag_round = point_dag_round.downgrade();
         let point = point.clone();
         let state = state.clone();
-        let (is_certified_tx, is_certified_rx) = oneshot::channel();
+        let store = store.clone();
+        let (certified_tx, certified_rx) = oneshot::channel();
+        let certified = Arc::new(OnceTake::new(certified_tx));
+        let certified_clone = certified.clone();
+        let task = async move {
+            let point_id = point.id();
+            let stored_fut = tokio::task::spawn_blocking({
+                let verified = point.clone();
+                let store = store.clone();
+                move || store.insert_point(&verified)
+            });
+            let validated_fut = Verifier::validate(
+                point,
+                point_dag_round,
+                downloader,
+                store.clone(),
+                certified_rx,
+                effects,
+            );
+            // do not abort store if not valid
+            let dag_point = match tokio::join!(stored_fut, validated_fut) {
+                (Ok(_), validated) => validated,
+                (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
+                (Err(_), _) => panic!("store point was cancelled"),
+            };
+            let flags = PointFlags {
+                is_validated: true,
+                is_valid: dag_point.valid().is_some(),
+                is_certified: certified_clone.is_taken(),
+                ..Default::default()
+            };
+            tokio::task::spawn_blocking(move || {
+                store.set_flags(point_id.location.round, &point_id.digest, &flags);
+            })
+            .await
+            .expect("db set point flags");
+            state.init(&dag_point);
+            dag_point
+        };
         DagPointFuture(DagPointFutureType::Broadcast {
-            task: Shared::new(JoinTask::new(
-                Verifier::validate(point, point_dag_round, downloader, is_certified_rx, effects)
-                    .inspect(move |dag_point| state.init(dag_point)),
-            )),
-            certified: Arc::new(OnceTake::new(is_certified_tx)),
+            task: Shared::new(JoinTask::new(task)),
+            certified,
         })
     }
 
@@ -90,14 +131,16 @@ impl DagPointFuture {
         digest: &Digest,
         state: &InclusionState,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<ValidateContext>,
     ) -> Self {
         let downloader = downloader.clone();
         let state = state.clone();
-        let point_dag_round = point_dag_round.clone();
         let (dependents_tx, dependents_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let (certified_tx, certified_rx) = oneshot::channel();
+        let certified = Arc::new(OnceTake::new(certified_tx));
+        let certified_clone = certified.clone();
         let point_id = PointId {
             location: Location {
                 author: *author,
@@ -105,21 +148,67 @@ impl DagPointFuture {
             },
             digest: digest.clone(),
         };
-        let effects = Effects::<DownloadContext>::new(effects, &point_id);
-        DagPointFuture(DagPointFutureType::Download {
-            task: Shared::new(JoinTask::new(
-                downloader
-                    .run(
-                        point_id,
+        let point_dag_round = point_dag_round.downgrade();
+        let store = store.clone();
+        let effects = effects.clone();
+        let task = async move {
+            let downloaded = downloader
+                .run(
+                    &point_id,
+                    dependents_rx,
+                    broadcast_rx,
+                    Effects::<DownloadContext>::new(&effects, &point_id),
+                )
+                .await;
+            let dag_point = match downloaded {
+                None => DagPoint::NotExists(Arc::new(point_id)),
+                Some(verified) => {
+                    let deeper_effects = Effects::<ValidateContext>::new(&effects, &verified);
+                    tracing::trace!(
+                        parent: deeper_effects.span(),
+                        "downloaded, start validating",
+                    );
+                    let stored_fut = tokio::task::spawn_blocking({
+                        let verified = verified.clone();
+                        let store = store.clone();
+                        move || store.insert_point(&verified)
+                    });
+                    let validated_fut = Verifier::validate(
+                        verified,
                         point_dag_round,
+                        downloader,
+                        store.clone(),
                         certified_rx,
-                        dependents_rx,
-                        broadcast_rx,
-                        effects,
-                    )
-                    .inspect(move |dag_point| state.init(dag_point)),
-            )),
-            certified: Arc::new(OnceTake::new(certified_tx)),
+                        deeper_effects,
+                    );
+                    // do not abort store if not valid
+                    let dag_point = match tokio::join!(stored_fut, validated_fut) {
+                        (Ok(_), validated) => validated,
+                        (Err(err), _) if err.is_panic() => {
+                            std::panic::resume_unwind(err.into_panic())
+                        }
+                        (Err(_), _) => panic!("store point was cancelled"),
+                    };
+                    let flags = PointFlags {
+                        is_validated: true,
+                        is_valid: dag_point.valid().is_some(),
+                        is_certified: certified_clone.is_taken(),
+                        ..Default::default()
+                    };
+                    tokio::task::spawn_blocking(move || {
+                        store.set_flags(point_id.location.round, &point_id.digest, &flags);
+                    })
+                    .await
+                    .expect("db set point flags");
+                    dag_point
+                }
+            };
+            state.init(&dag_point);
+            dag_point
+        };
+        DagPointFuture(DagPointFutureType::Download {
+            task: Shared::new(JoinTask::new(task)),
+            certified,
             dependents: dependents_tx,
             verified: Arc::new(OnceTake::new(broadcast_tx)),
         })

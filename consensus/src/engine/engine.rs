@@ -11,7 +11,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
 use crate::dag::{Dag, DagRound};
-use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext};
+use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
@@ -23,7 +23,7 @@ pub struct Engine {
     dag: Dag,
     committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     peer_schedule: PeerSchedule,
-    mempool_storage: MempoolStorage,
+    store: MempoolStore,
     consensus_round: ConsensusRound,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
@@ -45,10 +45,12 @@ impl Engine {
         let (dispatcher, overlay) = Dispatcher::new(dht_client, overlay_service, responder.clone());
         let peer_schedule = PeerSchedule::new(key_pair, overlay);
 
+        let store = MempoolStore::new(mempool_storage.clone());
         let round_task = RoundTaskReady::new(
-            &peer_schedule,
-            &consensus_round,
             &dispatcher,
+            &peer_schedule,
+            &store,
+            &consensus_round,
             responder,
             input_buffer,
         );
@@ -62,7 +64,7 @@ impl Engine {
             dag: Dag::new(),
             committed,
             peer_schedule,
-            mempool_storage: mempool_storage.clone(),
+            store,
             consensus_round,
             round_task,
             effects,
@@ -109,7 +111,7 @@ impl Engine {
         let next_dag_round = current_dag_round.next(&self.peer_schedule);
 
         let genesis_state =
-            current_dag_round.insert_exact_sign(&genesis, next_dag_round.key_pair());
+            current_dag_round.insert_exact_sign(&genesis, next_dag_round.key_pair(), &self.store);
 
         let next_round = next_dag_round.round();
 

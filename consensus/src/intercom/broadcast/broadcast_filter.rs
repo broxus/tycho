@@ -10,7 +10,7 @@ use tycho_util::FastDashMap;
 use super::dto::ConsensusEvent;
 use crate::dag::{DagRound, Verifier};
 use crate::dyn_event;
-use crate::effects::{AltFormat, Effects, EngineContext};
+use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
@@ -23,17 +23,17 @@ pub struct BroadcastFilter {
 
 impl BroadcastFilter {
     pub fn new(
-        peer_schedule: PeerSchedule,
+        peer_schedule: &PeerSchedule,
+        consensus_round: &ConsensusRound,
         output: mpsc::UnboundedSender<ConsensusEvent>,
-        consensus_round: ConsensusRound,
     ) -> Self {
         Self {
             inner: Arc::new(BroadcastFilterInner {
+                peer_schedule: peer_schedule.clone(),
+                consensus_round: consensus_round.clone(),
+                output,
                 last_by_peer: Default::default(),
                 by_round: Default::default(),
-                peer_schedule,
-                output,
-                consensus_round,
             }),
         }
     }
@@ -44,20 +44,22 @@ impl BroadcastFilter {
         point: &Point,
         top_dag_round: &DagRound,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
         self.inner
-            .add(sender, point, top_dag_round, downloader, effects);
+            .add(sender, point, top_dag_round, downloader, store, effects);
     }
 
     pub fn advance_round(
         &self,
         top_dag_round: &DagRound,
         downloader: &Downloader,
+        store: &MempoolStore,
         round_effects: &Effects<EngineContext>,
     ) {
         self.inner
-            .advance_round(top_dag_round, downloader, round_effects);
+            .advance_round(top_dag_round, downloader, store, round_effects);
     }
 
     /// must be run before broadcaster is set into responder
@@ -87,15 +89,15 @@ impl BroadcastFilter {
 
 type SimpleDagLocations = BTreeMap<PeerId, BTreeMap<Digest, Point>>;
 struct BroadcastFilterInner {
+    peer_schedule: PeerSchedule,
+    consensus_round: ConsensusRound,
+    output: mpsc::UnboundedSender<ConsensusEvent>,
     // defend from spam from future rounds:
     // should keep rounds greater than current dag round
     last_by_peer: FastDashMap<PeerId, (Round, usize)>,
     // very much like DAG structure, but without dependency check;
     // just to determine reliably that consensus advanced without current node
     by_round: FastDashMap<Round, (PeerCount, SimpleDagLocations)>,
-    peer_schedule: PeerSchedule,
-    output: mpsc::UnboundedSender<ConsensusEvent>,
-    consensus_round: ConsensusRound,
 }
 
 impl BroadcastFilterInner {
@@ -114,6 +116,7 @@ impl BroadcastFilterInner {
         point: &Point,
         top_dag_round: &DagRound,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
         // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=2
@@ -147,12 +150,20 @@ impl BroadcastFilterInner {
         };
 
         if round <= top_dag_round.round() {
+            // commented out: outdated broadcast may resolve download or short-circuit a validation
+            // if round < top_dag_round.round().prev() {
+            //     return; // will not be certified; look Signer's response `TooOldRound`
+            // }
             let Some(point_round) = top_dag_round.scan(point.body().location.round) else {
-                return; // too old point
+                // tracing::warn!("DAG is too shallow", round = round.0);
+                return; // cannot process anyway
             };
             match verified {
-                Ok(()) => self.send_validating(&point_round, point, downloader, effects),
-                Err(invalid) => point_round.insert_invalid_exact(sender, &invalid),
+                Ok(()) => self.send_validating(&point_round, point, downloader, store, effects),
+                Err(invalid @ DagPoint::Invalid(_)) => {
+                    point_round.insert_invalid_exact(sender, &invalid, store);
+                }
+                Err(_not_exists) => {} // FIXME separate failed downloads from broken signatures
             };
             return;
         } // else: either consensus moved forward without us,
@@ -174,8 +185,9 @@ impl BroadcastFilterInner {
             .or_insert((round, 0));
         if verified.is_err() || round < last_peer_round || duplicates > 0 {
             // we should ban a peer that broadcasts its rounds out of order,
-            //   though we cannot prove this decision for other nodes
-            let level = if verified.is_err() || round < last_peer_round || duplicates >= 3 {
+            //   though we cannot prove this decision for other nodes;
+            // rarely a consecutive pair of broadcasts may be reordered during high CPU load
+            let level = if verified.is_err() || round < last_peer_round.prev() || duplicates >= 3 {
                 // that's severe errors, that require ban
                 tracing::Level::ERROR
             } else {
@@ -243,6 +255,7 @@ impl BroadcastFilterInner {
         &self,
         top_dag_round: &DagRound,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
         // concurrent callers may break historical order of messages in channel
@@ -278,7 +291,7 @@ impl BroadcastFilterInner {
                 .send(ConsensusEvent::Forward(round))
                 .expect("channel from filter to collector closed");
             for (_, point) in points.iter().flat_map(|(_, v)| v.iter()) {
-                self.send_validating(&point_round, point, downloader, effects);
+                self.send_validating(&point_round, point, downloader, store, effects);
             }
             released.push(round.0);
         }
@@ -301,11 +314,14 @@ impl BroadcastFilterInner {
         point_round: &DagRound,
         point: &Point,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) {
         // this may be not the first insert into DAG - in case some node received it earlier,
         // and we've already received its point that references current broadcast
-        if let Some(first_state_fut) = point_round.add_broadcast_exact(point, downloader, effects) {
+        if let Some(first_state_fut) =
+            point_round.add_broadcast_exact(point, downloader, store, effects)
+        {
             let validating = ConsensusEvent::Validating {
                 point_id: point.id(),
                 task: first_state_fut,

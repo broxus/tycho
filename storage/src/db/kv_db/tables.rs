@@ -519,6 +519,27 @@ impl ColumnFamilyOptions<Caches> for Points {
     }
 }
 
+/// Stores mempool point flags
+/// - Key: `round: u32, digest: [u8; 32]`
+/// - Value: [`crate::models::PointFlags`]
+pub struct PointFlags;
+
+impl PointFlags {
+    pub const KEY_LEN: usize = Points::KEY_LEN;
+}
+
+impl ColumnFamily for PointFlags {
+    const NAME: &'static str = "point_flags";
+}
+
+impl ColumnFamilyOptions<Caches> for PointFlags {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        optimize_for_point_lookup(opts, caches);
+        opts.set_merge_operator_associative("point_flags_merge", crate::models::PointFlags::merge);
+    }
+}
+
 fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     let mut block_factory = BlockBasedOptions::default();
     block_factory.set_block_cache(&caches.block_cache);

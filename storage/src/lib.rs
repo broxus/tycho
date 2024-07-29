@@ -110,10 +110,11 @@ impl StorageBuilder {
         };
 
         tracing::debug!(threads, fdlimit, subdir = BASE_DB_SUBDIR, "opening RocksDB");
-        let base_db = BaseDb::builder_prepared(self.config.root_dir.join(BASE_DB_SUBDIR), caches.clone())
-            .with_metrics_enabled(self.config.rocksdb_enable_metrics)
-            .with_options(|opts, _| update_options(opts, threads, fdlimit))
-            .build()?;
+        let base_db =
+            BaseDb::builder_prepared(self.config.root_dir.join(BASE_DB_SUBDIR), caches.clone())
+                .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+                .with_options(|opts, _| update_options(opts, threads, fdlimit))
+                .build()?;
 
         let block_handle_storage = Arc::new(BlockHandleStorage::new(base_db.clone()));
         let block_connection_storage = Arc::new(BlockConnectionStorage::new(base_db.clone()));
@@ -140,10 +141,11 @@ impl StorageBuilder {
 
         block_storage.preload_archive_ids();
 
-        let mempool_db = MempoolDb::builder_prepared(self.config.root_dir.join(MEMPOOL_SUBDIR), caches)
-            .with_metrics_enabled(self.config.rocksdb_enable_metrics)
-            .with_options(|opts, _| update_options(opts, threads, fdlimit))
-            .build()?;
+        let mempool_db =
+            MempoolDb::builder_prepared(self.config.root_dir.join(MEMPOOL_SUBDIR), caches)
+                .with_metrics_enabled(self.config.rocksdb_enable_metrics)
+                .with_options(|opts, _| update_options(opts, threads, fdlimit))
+                .build()?;
 
         let mempool_storage = MempoolStorage::new(mempool_db);
 

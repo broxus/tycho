@@ -2,7 +2,7 @@ use crate::MempoolDb;
 
 #[derive(Clone)]
 pub struct MempoolStorage {
-    db: MempoolDb,
+    pub db: MempoolDb,
 }
 impl MempoolStorage {
     pub fn new(db: MempoolDb) -> Self {
