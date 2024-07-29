@@ -23,9 +23,9 @@ use crate::types::{
     TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
-    AsyncQueuedDispatcher, STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE,
+    AsyncQueuedDispatcher, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE,
 };
-use crate::{method_to_async_task_closure, tracing_targets};
+use crate::{method_to_queued_async_closure, tracing_targets};
 
 mod build_block;
 mod do_collate;
@@ -135,7 +135,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
     }
 
     async fn equeue_update_mc_data_and_try_collate(&self, mc_data: Arc<McData>) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
+        self.enqueue_task(method_to_queued_async_closure!(
             update_mc_data_and_try_collate,
             mc_data
         ))
@@ -143,7 +143,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
     }
 
     async fn equeue_try_collate(&self) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(try_collate,))
+        self.enqueue_task(method_to_queued_async_closure!(try_collate,))
             .await
     }
 
@@ -152,7 +152,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
         next_chain_time: u64,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
-        self.enqueue_task(method_to_async_task_closure!(
+        self.enqueue_task(method_to_queued_async_closure!(
             wait_state_and_do_collate,
             next_chain_time,
             top_shard_blocks_info
@@ -219,7 +219,7 @@ impl CollatorStdImpl {
 
         // create dispatcher for own async tasks queue
         let (dispatcher, receiver) =
-            AsyncQueuedDispatcher::new(STANDARD_DISPATCHER_QUEUE_BUFFER_SIZE);
+            AsyncQueuedDispatcher::new(STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
 
         let exec_manager = ExecutionManager::new(
             shard_id,
@@ -268,7 +268,7 @@ impl CollatorStdImpl {
         // equeue first initialization task
         // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
         dispatcher
-            .enqueue_task(method_to_async_task_closure!(
+            .enqueue_task(method_to_queued_async_closure!(
                 init,
                 prev_blocks_ids,
                 mc_data,
@@ -343,7 +343,7 @@ impl CollatorStdImpl {
 
         // enqueue collation attempt of next block
         self.dispatcher
-            .enqueue_task(method_to_async_task_closure!(try_collate,))
+            .enqueue_task(method_to_queued_async_closure!(try_collate,))
             .await?;
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): init: collation attempt enqueued", self.next_block_id_short,
