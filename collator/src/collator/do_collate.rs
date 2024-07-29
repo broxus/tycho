@@ -23,7 +23,7 @@ use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
-use crate::internal_queue::types::InternalMessageKey;
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
 use crate::types::{BlockCollationResult, McData, TopBlockDescription};
@@ -259,10 +259,12 @@ impl CollatorStdImpl {
 
                             collation_data.inserted_new_msgs_to_iterator += 1;
 
-                            // TODO: Reduce size of parameters
+                            let enqueued_message =
+                                EnqueuedMessage::from((int_msg_info, new_message.cell));
+
                             self.mq_adapter.add_message_to_iterator(
                                 mq_iterator_adapter.iterator(),
-                                (int_msg_info, new_message.cell),
+                                enqueued_message,
                             )?;
                         }
 

@@ -1,17 +1,18 @@
-use std::sync::Arc;
-
 use anyhow::Result;
+use everscale_types::models::ShardIdent;
+use tycho_util::FastHashMap;
 
-use crate::internal_queue::state::state_iterator::{MessageWithSource, StateIterator};
+use crate::internal_queue::state::state_iterator::{MessageExt, StateIterator};
+use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
 
-pub struct StatesIteratorsManager {
-    iterators: Vec<Box<dyn StateIterator>>,
+pub struct StatesIteratorsManager<V: InternalMessageValue> {
+    iterators: Vec<Box<dyn StateIterator<V>>>,
     current_snapshot: usize,
     message_counts: Vec<usize>, // Add this line to keep track of message counts
 }
 
-impl StatesIteratorsManager {
-    pub fn new(iterators: Vec<Box<dyn StateIterator>>) -> Self {
+impl<V: InternalMessageValue> StatesIteratorsManager<V> {
+    pub fn new(iterators: Vec<Box<dyn StateIterator<V>>>) -> Self {
         StatesIteratorsManager {
             message_counts: vec![0; iterators.len()], // Initialize the message_counts vector
             iterators,
@@ -21,7 +22,7 @@ impl StatesIteratorsManager {
 
     /// if first snapshot doesn't have any messages, it will try to get messages from the next snapshot and mark it as the current one
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self) -> Result<Option<Arc<MessageWithSource>>> {
+    pub fn next(&mut self) -> Result<Option<MessageExt<V>>> {
         while self.current_snapshot < self.iterators.len() {
             if let Some(message) = self.iterators[self.current_snapshot].next()? {
                 self.message_counts[self.current_snapshot] += 1; // Increment message count for the current iterator
@@ -36,5 +37,15 @@ impl StatesIteratorsManager {
         }
 
         Ok(None)
+    }
+
+    pub fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+        let mut result = FastHashMap::default();
+        for iterator in &self.iterators {
+            for (shard, position) in iterator.current_position() {
+                result.insert(shard, position);
+            }
+        }
+        result
     }
 }

@@ -1,112 +1,92 @@
-use everscale_types::boc::Boc;
-use everscale_types::cell::{Cell, HashBytes};
+use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
+use tycho_storage::model::ShardsInternalMessagesKey;
 use tycho_storage::owned_iterator::OwnedIterator;
-use tycho_storage::ShardsInternalMessagesKey;
 
-use crate::internal_queue::state::state_iterator::ShardRange;
 use crate::internal_queue::types::InternalMessageKey;
+use crate::types::ShortAddr;
+
+#[derive(Clone)]
+struct Range {
+    from: ShardsInternalMessagesKey,
+    to: ShardsInternalMessagesKey,
+}
+
+pub enum IterResult<'a> {
+    Value(&'a [u8]),
+    Skip,
+    End,
+}
 
 pub struct ShardIterator {
-    pub(crate) shard_ident: ShardIdent,
-    shard_range: ShardRange,
+    range: Range,
     receiver: ShardIdent,
-    pub(crate) iterator: OwnedIterator,
+    iterator: OwnedIterator,
+    current_position: Option<InternalMessageKey>,
 }
 
 impl ShardIterator {
     pub fn new(
         shard_ident: ShardIdent,
-        shard_range: ShardRange,
+        from: InternalMessageKey,
+        to: InternalMessageKey,
         receiver: ShardIdent,
-        iterator: OwnedIterator,
+        mut iterator: OwnedIterator,
     ) -> Self {
-        let mut iterator = iterator;
-        match shard_range.from.clone() {
-            None => iterator.seek_to_first(),
-            Some(range_from) => {
-                iterator.seek(ShardsInternalMessagesKey {
-                    shard_ident,
-                    lt: range_from.lt,
-                    hash: range_from.hash,
-                });
-            }
-        }
-        Self {
+        iterator.seek(ShardsInternalMessagesKey::new(
             shard_ident,
-            shard_range: shard_range.clone(),
+            from.clone().into(),
+        ));
+
+        Self {
+            range: Range {
+                from: ShardsInternalMessagesKey::new(shard_ident, from.clone().into()),
+                to: ShardsInternalMessagesKey::new(shard_ident, to.into()),
+            },
             receiver,
-            // current_key: shard_range.from.clone(),
             iterator,
-            // saved_position: None,
-            // read_until: None,
+            current_position: None,
         }
     }
 
-    pub(crate) fn next_message(&mut self) -> Option<(ShardsInternalMessagesKey, Cell)> {
-        let from_range = self.shard_range.clone().from.unwrap_or_default();
-        let from = ShardsInternalMessagesKey {
-            shard_ident: self.shard_ident,
-            lt: from_range.lt,
-            hash: from_range.hash,
-        };
-
-        let to_range = self.shard_range.to.clone().unwrap_or(InternalMessageKey {
-            lt: u64::MAX,
-            hash: HashBytes::default(),
-        });
-
-        let to = ShardsInternalMessagesKey {
-            shard_ident: self.shard_ident,
-            lt: to_range.lt,
-            hash: to_range.hash,
-        };
-
-        let _receiver = self.receiver.clone();
-        while let Some((key, value)) = self.load_next_message() {
-            // let _dest_workchain = value[0] as i8;
-            // let _dest_address = HashBytes::from_slice(&value[1..33]);
-
-            if key <= from {
-                self.iterator.next();
-                continue;
-            }
-
-            if key > to {
-                return None;
-            }
-
-            let cell = Boc::decode(&value[33..]).expect("failed to load cell");
-            return Some((key, cell));
-
-            // TODO check receiver here
-
-            // if dest_workchain as i32 == receiver.workchain()
-            //     && receiver.contains_account(&dest_address)
-            // {
-            //     let cell = Boc::decode(&value[33..]).expect("failed to load cell");
-            //     return Some((key, cell));
-            // } else {
-            //     self.read_until = Some(InternalMessageKey {
-            //         lt: key.lt,
-            //         hash: key.hash,
-            //     });
-            //     self.iterator.next();
-            // }
-        }
-        None
+    pub fn shift_position(&mut self) {
+        self.iterator.next();
     }
 
-    fn load_next_message(&mut self) -> Option<(ShardsInternalMessagesKey, &[u8])> {
-        if let (Some(key), Some(value)) = (self.iterator.key(), self.iterator.value()) {
+    pub fn current_position(&self) -> Option<InternalMessageKey> {
+        self.current_position.clone()
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Result<IterResult<'_>> {
+        if let Some(key) = self.iterator.key() {
             let key = ShardsInternalMessagesKey::from(key);
 
-            if key.shard_ident != self.shard_ident {
-                return None;
+            if key <= self.range.from {
+                return Ok(IterResult::Skip);
             }
 
-            return Some((key, value));
+            if key > self.range.to {
+                return Ok(IterResult::End);
+            }
+
+            self.current_position = Some(key.internal_message_key.clone().into());
+
+            let value = self.iterator.value().context("Failed to get value")?;
+            let dest_workchain = value[0] as i32;
+            let dest_prefix = u64::from_be_bytes(
+                value[1..9]
+                    .try_into()
+                    .context("Failed to deserialize destination prefix")?,
+            );
+            let short_addr = ShortAddr::new(dest_workchain, dest_prefix);
+
+            return if self.receiver.contains_address(&short_addr) {
+                Ok(IterResult::Value(&value[9..]))
+            } else {
+                Ok(IterResult::Skip)
+            };
         }
-        None
+        Ok(IterResult::End)
     }
 }

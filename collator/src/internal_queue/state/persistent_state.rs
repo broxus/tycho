@@ -1,10 +1,12 @@
+use std::collections::BTreeMap;
+
 use everscale_types::models::ShardIdent;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 use weedb::OwnedSnapshot;
 
-use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator, StateIteratorImpl};
-use crate::internal_queue::types::InternalMessageKey;
+use crate::internal_queue::state::state_iterator::{StateIterator, StateIteratorImpl};
+use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
 
 // CONFIG
 
@@ -14,10 +16,11 @@ pub struct PersistentStateConfig {
 
 // FACTORY
 
-impl<F, R> PersistentStateFactory for F
+impl<F, R, V> PersistentStateFactory<V> for F
 where
     F: Fn() -> R,
-    R: PersistentState,
+    R: PersistentState<V>,
+    V: InternalMessageValue,
 {
     type PersistentState = R;
 
@@ -36,7 +39,7 @@ impl PersistentStateImplFactory {
     }
 }
 
-impl PersistentStateFactory for PersistentStateImplFactory {
+impl<V: InternalMessageValue> PersistentStateFactory<V> for PersistentStateImplFactory {
     type PersistentState = PersistentStateStdImpl;
 
     fn create(&self) -> Self::PersistentState {
@@ -44,8 +47,8 @@ impl PersistentStateFactory for PersistentStateImplFactory {
     }
 }
 
-pub trait PersistentStateFactory {
-    type PersistentState: LocalPersistentState;
+pub trait PersistentStateFactory<V: InternalMessageValue> {
+    type PersistentState: LocalPersistentState<V>;
 
     fn create(&self) -> Self::PersistentState;
 }
@@ -53,21 +56,15 @@ pub trait PersistentStateFactory {
 // TRAIT
 
 #[trait_variant::make(PersistentState: Send)]
-pub trait LocalPersistentState {
+pub trait LocalPersistentState<V: InternalMessageValue> {
     fn snapshot(&self) -> OwnedSnapshot;
-    fn state(&self);
-    // fn add_messages(
-    //     &self,
-    //     shard: ShardIdent,
-    //     messages: Vec<(u64, HashBytes, i8, HashBytes, Vec<u8>)>,
-    // ) -> anyhow::Result<i32>;
 
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, ShardRange>,
-    ) -> Box<dyn StateIterator>;
+        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+    ) -> Box<dyn StateIterator<V>>;
 
     fn delete_messages(&self, shard: ShardIdent, key: InternalMessageKey) -> anyhow::Result<()>;
 }
@@ -84,36 +81,38 @@ impl PersistentStateStdImpl {
     }
 }
 
-impl PersistentState for PersistentStateStdImpl {
+impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
     fn snapshot(&self) -> OwnedSnapshot {
         self.storage.internal_queue_storage().snapshot()
-    }
-
-    fn state(&self) {
-        self.storage
-            .internal_queue_storage()
-            .print_cf_sizes()
-            .unwrap();
     }
 
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, ShardRange>,
-    ) -> Box<dyn StateIterator> {
+        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+    ) -> Box<dyn StateIterator<V>> {
+        let mut shard_iters = BTreeMap::new();
         let shards = ranges.keys().cloned().collect::<Vec<_>>();
-        let iter = self
-            .storage
-            .internal_queue_storage()
-            .build_iterator(&snapshot, shards);
+        for shard in shards {
+            let iter = self
+                .storage
+                .internal_queue_storage()
+                .build_iterator_persistent(snapshot);
+            shard_iters.insert(shard, iter);
+        }
 
-        Box::new(StateIteratorImpl::new(iter, receiver, ranges.clone()))
+        Box::new(StateIteratorImpl::new(
+            shard_iters,
+            receiver,
+            ranges.clone(),
+        ))
     }
 
-    fn delete_messages(&self, shard: ShardIdent, key: InternalMessageKey) -> anyhow::Result<()> {
+    fn delete_messages(&self, shard: ShardIdent, until: InternalMessageKey) -> anyhow::Result<()> {
+        let from = InternalMessageKey::default();
         self.storage
             .internal_queue_storage()
-            .delete_messages(shard, (key.lt, key.hash))
+            .delete_messages(shard, from.into(), until.into())
     }
 }

@@ -9,16 +9,16 @@ use tycho_util::FastHashMap;
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
 use super::types::{ProcessedUptoInfoStuff, WorkingState};
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
-use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
+use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 
-pub(super) struct QueueIteratorAdapter {
+pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     shard_id: ShardIdent,
     /// internals mq adapter
-    mq_adapter: Arc<dyn MessageQueueAdapter>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
     /// current internals mq iterator
-    iterator_opt: Option<Box<dyn QueueIterator>>,
+    iterator_opt: Option<Box<dyn QueueIterator<V>>>,
     /// there is no more existing internals in mq iterator
     no_pending_existing_internals: bool,
     /// there is no more new messages in mq iterator
@@ -32,10 +32,10 @@ pub(super) struct QueueIteratorAdapter {
     init_iterator_total_elapsed: Duration,
 }
 
-impl QueueIteratorAdapter {
+impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     pub fn new(
         shard_id: ShardIdent,
-        mq_adapter: Arc<dyn MessageQueueAdapter>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
         current_positions_opt: Option<FastHashMap<ShardIdent, InternalMessageKey>>,
     ) -> Self {
         Self {
@@ -53,13 +53,30 @@ impl QueueIteratorAdapter {
     pub fn release(
         mut self,
         check_pending_internals: bool,
-    ) -> Result<(FastHashMap<ShardIdent, InternalMessageKey>, bool, QueueDiff)> {
+    ) -> Result<(
+        FastHashMap<ShardIdent, InternalMessageKey>,
+        bool,
+        QueueDiff<V>,
+    )> {
+        let current_position = self.iterator().current_position();
+
+        for (shard_id, key) in current_position {
+            if let Some(current_key) = self.current_positions.get(&shard_id) {
+                if &key > current_key {
+                    self.current_positions.insert(shard_id, key);
+                }
+            } else {
+                self.current_positions.insert(shard_id, key);
+            }
+        }
+
         let mut has_pending_internals = self.iterator().has_new_messages_for_current_shard();
         if !has_pending_internals && !self.no_pending_existing_internals && check_pending_internals
         {
             has_pending_internals = self.iterator().next(false)?.is_some();
         }
         let full_diff = self.iterator().extract_full_diff();
+
         Ok((
             self.current_positions,
             has_pending_internals,
@@ -78,7 +95,7 @@ impl QueueIteratorAdapter {
         self.iterator_opt.is_none()
     }
 
-    pub fn iterator(&mut self) -> &mut Box<dyn QueueIterator> {
+    pub fn iterator(&mut self) -> &mut Box<dyn QueueIterator<V>> {
         self.iterator_opt
             .as_mut()
             .expect("`iterator_opt` should be initialized first")
@@ -96,8 +113,8 @@ impl QueueIteratorAdapter {
         let timer = std::time::Instant::now();
 
         // get current ranges
-        let mut ranges_from = FastHashMap::<_, InternalMessageKey>::default();
-        let mut ranges_to = FastHashMap::<_, InternalMessageKey>::default();
+        let mut ranges_from = FastHashMap::default();
+        let mut ranges_to = FastHashMap::default();
         let mut ranges_fully_read = true;
         for (shard_id, int_processed_upto) in processed_upto.internals.iter() {
             if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
@@ -130,9 +147,7 @@ impl QueueIteratorAdapter {
                     from.hash = curren_position.hash;
                 }
                 let to = ranges_to.get(shard_id).unwrap();
-                if from != to {
-                    ranges_fully_read = false;
-                }
+                ranges_fully_read = from == to;
             }
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "try_init_next_range_iterator: ranges updated from current position, ranges_fully_read={}, \
@@ -158,7 +173,7 @@ impl QueueIteratorAdapter {
             let mc_shard_id = ShardIdent::new_full(-1);
             ranges_from.entry(mc_shard_id).or_insert_with(|| {
                 ranges_updated = true;
-                InternalMessageKey::with_lt_and_min_hash(0)
+                InternalMessageKey::default()
             });
             let mc_read_to = ranges_to.entry(mc_shard_id).or_insert_with(|| {
                 ranges_updated = true;
@@ -184,7 +199,7 @@ impl QueueIteratorAdapter {
                 // add default shardchain range if not exist
                 ranges_from.entry(shard_id).or_insert_with(|| {
                     ranges_updated = true;
-                    InternalMessageKey::with_lt_and_min_hash(0)
+                    InternalMessageKey::default()
                 });
                 let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
                     ranges_updated = true;
@@ -263,21 +278,14 @@ impl QueueIteratorAdapter {
         Ok(res)
     }
 
-    pub fn next_existing_message(&mut self) -> Result<Option<IterItem>> {
+    pub fn next_existing_message(&mut self) -> Result<Option<IterItem<V>>> {
         if self.no_pending_existing_internals {
             Ok(None)
         } else {
             match self.iterator_opt.as_mut().unwrap().next(false)? {
-                Some(int_msg) => {
-                    let message_key = int_msg.message_with_source.message.key();
-                    self.current_positions
-                        .insert(int_msg.message_with_source.shard_id, message_key);
-
-                    Ok(Some(int_msg))
-                }
+                Some(int_msg) => Ok(Some(int_msg)),
                 None => {
                     self.no_pending_existing_internals = true;
-
                     Ok(None)
                 }
             }
@@ -304,7 +312,7 @@ impl QueueIteratorAdapter {
         }
     }
 
-    pub fn next_new_message(&mut self) -> Result<Option<IterItem>> {
+    pub fn next_new_message(&mut self) -> Result<Option<IterItem<V>>> {
         // fill messages groups from iterator until the first group filled
         // or current new messages read window finished
         if self.no_pending_new_messages {
@@ -312,12 +320,12 @@ impl QueueIteratorAdapter {
         } else {
             match self.iterator_opt.as_mut().unwrap().next_new()? {
                 Some(int_msg) => {
-                    let message_key = int_msg.message_with_source.message.key();
+                    let message_key = int_msg.item.message.key();
 
                     self.no_pending_new_messages = message_key == self.new_messages_read_to;
 
                     self.current_positions
-                        .insert(int_msg.message_with_source.shard_id, message_key);
+                        .insert(int_msg.item.source, message_key);
 
                     Ok(Some(int_msg))
                 }

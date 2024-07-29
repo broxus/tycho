@@ -7,48 +7,45 @@ use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
-use crate::internal_queue::state::state_iterator::{IterRange, MessageWithSource, ShardRange};
+use crate::internal_queue::state::state_iterator::{IterRange, MessageExt};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff, QueueFullDiff};
+use crate::internal_queue::types::{
+    InternalMessageKey, InternalMessageValue, QueueDiff, QueueFullDiff,
+};
 
-pub trait QueueIterator: Send {
+pub trait QueueIterator<V: InternalMessageValue>: Send {
     /// Get next message
-    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>>;
+    fn next(&mut self, with_new: bool) -> Result<Option<IterItem<V>>>;
     /// Get next only new message
-    fn next_new(&mut self) -> Result<Option<IterItem>>;
+    fn next_new(&mut self) -> Result<Option<IterItem<V>>>;
     /// Returns true if there are new messages to current shard
     fn has_new_messages_for_current_shard(&self) -> bool;
-    fn update_last_read_message(
-        &mut self,
-        source_shard: ShardIdent,
-        message_key: &InternalMessageKey,
-    );
-    fn process_new_messages(&mut self) -> Result<Option<IterItem>>;
+    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey>;
+    fn process_new_messages(&mut self) -> Result<Option<IterItem<V>>>;
     /// Extract diff from iterator
-    fn extract_full_diff(&mut self) -> QueueFullDiff;
+    fn extract_full_diff(&mut self) -> QueueFullDiff<V>;
     /// Take diff from iterator
-    fn take_diff(&self) -> QueueDiff;
+    fn take_diff(&self) -> QueueDiff<V>;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
     /// Add new message to iterator
-    fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()>;
+    fn add_message(&mut self, key: InternalMessageKey, message: V) -> Result<()>;
     /// Set iterator new messages buffer from full diff
-    fn set_new_messages_from_full_diff(&mut self, full_diff: QueueFullDiff);
+    fn set_new_messages_from_full_diff(&mut self, full_diff: QueueFullDiff<V>);
 }
 
-pub struct QueueIteratorImpl {
+pub struct QueueIteratorImpl<V: InternalMessageValue> {
     for_shard: ShardIdent,
-    messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
-    new_messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
-    snapshot_manager: StatesIteratorsManager,
+    messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
+    new_messages: BTreeMap<InternalMessageKey, Arc<V>>,
+    snapshot_manager: StatesIteratorsManager<V>,
     last_processed_message: FastHashMap<ShardIdent, InternalMessageKey>,
-    read_position: BTreeMap<ShardIdent, InternalMessageKey>,
 }
 
-impl QueueIteratorImpl {
+impl<V: InternalMessageValue> QueueIteratorImpl<V> {
     pub fn new(
-        snapshot_manager: StatesIteratorsManager,
+        snapshot_manager: StatesIteratorsManager<V>,
         for_shard: ShardIdent,
     ) -> Result<Self, QueueError> {
         let messages_for_current_shard = BinaryHeap::default();
@@ -59,42 +56,32 @@ impl QueueIteratorImpl {
             new_messages: Default::default(),
             snapshot_manager,
             last_processed_message: Default::default(),
-            read_position: Default::default(),
         })
     }
 }
 
-pub struct IterItem {
-    pub message_with_source: Arc<MessageWithSource>,
+pub struct IterItem<V: InternalMessageValue> {
+    pub item: MessageExt<V>,
     pub is_new: bool,
 }
 
 fn update_shard_range(
-    touched_shards: &mut FastHashMap<ShardIdent, ShardRange>,
+    touched_shards: &mut FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
     shard_id: ShardIdent,
-    from: Option<InternalMessageKey>,
-    to: Option<InternalMessageKey>,
+    from: InternalMessageKey,
+    to: InternalMessageKey,
 ) {
-    touched_shards
-        .entry(shard_id)
-        .or_insert_with(|| ShardRange { shard_id, from, to });
+    touched_shards.entry(shard_id).or_insert_with(|| (from, to));
 }
 
-impl QueueIterator for QueueIteratorImpl {
-    fn next(&mut self, with_new: bool) -> Result<Option<IterItem>> {
+impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
+    fn next(&mut self, with_new: bool) -> Result<Option<IterItem<V>>> {
         // Process the next message from the snapshot manager
-        while let Some(next_message) = self.snapshot_manager.next()? {
-            self.update_last_read_message(next_message.shard_id, &next_message.message.key());
-
-            if self
-                .for_shard
-                .contains_address(&next_message.message.info.dst)
-            {
-                return Ok(Some(IterItem {
-                    message_with_source: next_message.clone(),
-                    is_new: false,
-                }));
-            }
+        if let Some(next_message) = self.snapshot_manager.next()? {
+            return Ok(Some(IterItem {
+                item: next_message,
+                is_new: false,
+            }));
         }
 
         // Process the new messages if required
@@ -105,7 +92,7 @@ impl QueueIterator for QueueIteratorImpl {
         Ok(None)
     }
 
-    fn next_new(&mut self) -> Result<Option<IterItem>> {
+    fn next_new(&mut self) -> Result<Option<IterItem<V>>> {
         // Process the new messages if required
         self.process_new_messages()
     }
@@ -114,43 +101,31 @@ impl QueueIterator for QueueIteratorImpl {
         !self.messages_for_current_shard.is_empty()
     }
 
-    // Function to update the read position
-    fn update_last_read_message(
-        &mut self,
-        source_shard: ShardIdent,
-        message_key: &InternalMessageKey,
-    ) {
-        self.read_position
-            .entry(source_shard)
-            .and_modify(|e| {
-                if message_key > e {
-                    *e = message_key.clone();
-                }
-            })
-            .or_insert(message_key.clone());
+    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+        self.snapshot_manager.current_position()
     }
 
     // Function to process the new messages
-    fn process_new_messages(&mut self) -> Result<Option<IterItem>> {
+    fn process_new_messages(&mut self) -> Result<Option<IterItem<V>>> {
         if let Some(next_message) = self.messages_for_current_shard.pop() {
             // remove message from new_messages
             self.new_messages.remove(&next_message.0.message.key());
 
             return Ok(Some(IterItem {
-                message_with_source: next_message.0.clone(),
+                item: next_message.0,
                 is_new: true,
             }));
         }
         Ok(None)
     }
 
-    fn extract_full_diff(&mut self) -> QueueFullDiff {
+    fn extract_full_diff(&mut self) -> QueueFullDiff<V> {
         tracing::trace!(
             target: crate::tracing_targets::MQ,
             "Extracting diff from iterator. New messages count: {}",
             self.new_messages.len());
 
-        let mut diff = QueueDiff::default();
+        let mut diff = QueueDiff::new();
 
         // fill processed_upto
         for (shard_id, message_key) in self.last_processed_message.iter() {
@@ -174,13 +149,13 @@ impl QueueIterator for QueueIteratorImpl {
         full_diff
     }
 
-    fn take_diff(&self) -> QueueDiff {
+    fn take_diff(&self) -> QueueDiff<V> {
         tracing::trace!(
             target: crate::tracing_targets::MQ,
             "Taking diff from iterator. New messages count: {}",
             self.new_messages.len());
 
-        let mut diff = QueueDiff::default();
+        let mut diff = QueueDiff::new();
 
         // actually we update last processed message via commit()
         // during the execution, so we can just use value as is
@@ -191,57 +166,6 @@ impl QueueIterator for QueueIteratorImpl {
         }
 
         diff.messages = self.new_messages.clone();
-
-        // let mut read_position = self.read_position.clone();
-
-        // for processed_last_message in self.last_processed_message.iter() {
-        //     if !read_position.contains_key(&processed_last_message.0) {
-        //         read_position.insert(
-        //             processed_last_message.0.clone(),
-        //             processed_last_message.1.clone(),
-        //         );
-        //     }
-        // }
-
-        // for (shard_id, last_read_key) in read_position.iter() {
-        //     let last_read_message_for_current_shard = self
-        //         .last_read_message_for_current_shard
-        //         .get(&shard_id)
-        //         .cloned();
-        //     let processed_last_message = self.last_processed_message.get(&shard_id).cloned();
-
-        //     match (last_read_message_for_current_shard, processed_last_message) {
-        //         (Some(read_last_message), Some(processed_last_message)) => {
-        //             if read_last_message == processed_last_message {
-        //                 // processed all read messages
-        //                 diff.processed_upto
-        //                     .insert(*shard_id, read_last_message.clone());
-        //             } else {
-        //                 // processed greater than read or lower
-        //                 diff.processed_upto
-        //                     .insert(*shard_id, processed_last_message);
-        //             }
-        //         }
-        //         (Some(_read_last_message), None) => {
-        //             // read last message but no one processed. try again next time
-        //             // diff.processed_upto
-        //             //     .insert(*shard_id, read_last_message.clone());
-        //         }
-        //         (None, Some(processed_last_message)) => {
-        //             // no old messages read, but some new processed
-        //             diff.processed_upto
-        //                 .insert(*shard_id, processed_last_message.clone());
-        //         }
-        //         (None, None) => {
-        //             // no old messages read, no new processed
-        //             diff.processed_upto.insert(*shard_id, last_read_key.clone());
-        //         }
-        //     }
-        // }
-
-        // for message in self.new_messages.values() {
-        //     diff.messages.insert(message.key(), message.clone());
-        // }
 
         diff
     }
@@ -261,17 +185,18 @@ impl QueueIterator for QueueIteratorImpl {
         Ok(())
     }
 
-    fn add_message(&mut self, message: Arc<EnqueuedMessage>) -> Result<()> {
-        self.new_messages.insert(message.key(), message.clone());
-        if self.for_shard.contains_address(&message.info.dst) {
-            let message_with_source = MessageWithSource::new(self.for_shard, message);
+    fn add_message(&mut self, key: InternalMessageKey, message: V) -> Result<()> {
+        let message = Arc::new(message);
+        self.new_messages.insert(key, message.clone());
+        if self.for_shard.contains_address(message.destination()) {
+            let message_with_source = MessageExt::new(self.for_shard, message);
             self.messages_for_current_shard
-                .push(Reverse(Arc::new(message_with_source)));
+                .push(Reverse(message_with_source));
         };
         Ok(())
     }
 
-    fn set_new_messages_from_full_diff(&mut self, mut full_diff: QueueFullDiff) {
+    fn set_new_messages_from_full_diff(&mut self, mut full_diff: QueueFullDiff<V>) {
         std::mem::swap(&mut self.new_messages, &mut full_diff.diff.messages);
         std::mem::swap(
             &mut self.messages_for_current_shard,
@@ -296,7 +221,7 @@ impl QueueIteratorExt {
     pub fn collect_ranges(
         shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
         shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
-    ) -> FastHashMap<ShardIdent, ShardRange> {
+    ) -> FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)> {
         let mut shards_with_ranges = FastHashMap::default();
         for from in shards_from {
             for to in &shards_to {
@@ -320,7 +245,7 @@ impl QueueIteratorExt {
     }
 
     pub fn traverse_and_collect_ranges(
-        touched_shards: &mut FastHashMap<ShardIdent, ShardRange>,
+        touched_shards: &mut FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
         from_range: &IterRange,
         to_range: &IterRange,
     ) {
@@ -330,8 +255,8 @@ impl QueueIteratorExt {
             update_shard_range(
                 touched_shards,
                 from_range.shard_id,
-                Some(from_range.key.clone()),
-                Some(to_range.key.clone()),
+                from_range.key.clone(),
+                to_range.key.clone(),
             );
         } else if from_range.shard_id.is_parent_of(&to_range.shard_id)
             || from_range.shard_id.is_child_of(&to_range.shard_id)
@@ -339,14 +264,14 @@ impl QueueIteratorExt {
             update_shard_range(
                 touched_shards,
                 from_range.shard_id,
-                Some(from_range.key.clone()),
-                None,
+                from_range.key.clone(),
+                InternalMessageKey::MAX,
             );
             update_shard_range(
                 touched_shards,
                 to_range.shard_id,
-                None,
-                Some(to_range.key.clone()),
+                InternalMessageKey::default(),
+                to_range.key.clone(),
             );
         }
 
@@ -355,14 +280,14 @@ impl QueueIteratorExt {
             update_shard_range(
                 touched_shards,
                 from_range.shard_id,
-                Some(from_range.key.clone()),
-                None,
+                from_range.key.clone(),
+                InternalMessageKey::MAX,
             );
             update_shard_range(
                 touched_shards,
                 to_range.shard_id,
-                None,
-                Some(to_range.key.clone()),
+                InternalMessageKey::default(),
+                to_range.key.clone(),
             );
 
             let mut current_shard = if from_range.shard_id.is_ancestor_of(&to_range.shard_id) {
@@ -373,7 +298,12 @@ impl QueueIteratorExt {
 
             while current_shard != common_ancestor {
                 if let Some(parent_shard) = current_shard.merge() {
-                    update_shard_range(touched_shards, parent_shard, None, None);
+                    update_shard_range(
+                        touched_shards,
+                        parent_shard,
+                        InternalMessageKey::default(),
+                        InternalMessageKey::MAX,
+                    );
                     current_shard = parent_shard;
                 } else {
                     break;
