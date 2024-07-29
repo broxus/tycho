@@ -37,7 +37,8 @@ impl BlockHandle {
                 id: *id,
                 meta,
                 block_data_lock: Default::default(),
-                proof_data_block: Default::default(),
+                proof_data_lock: Default::default(),
+                state_lock: Default::default(),
                 cache,
             }),
         }
@@ -65,7 +66,12 @@ impl BlockHandle {
 
     #[inline]
     pub fn proof_data_lock(&self) -> &RwLock<()> {
-        &self.inner.proof_data_block
+        &self.inner.proof_data_lock
+    }
+
+    #[inline]
+    pub fn state_lock(&self) -> &RwLock<()> {
+        &self.inner.state_lock
     }
 
     pub fn has_proof_or_link(&self, is_link: &mut bool) -> bool {
@@ -123,7 +129,8 @@ pub struct Inner {
     id: BlockId,
     meta: BlockMeta,
     block_data_lock: RwLock<()>,
-    proof_data_block: RwLock<()>,
+    proof_data_lock: RwLock<()>,
+    state_lock: RwLock<()>,
     cache: Arc<BlockHandleCache>,
 }
 
