@@ -22,7 +22,7 @@ use super::types::{
     ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
@@ -41,7 +41,7 @@ pub(super) struct ExecutionManager {
     /// flag indicates that should process new messages
     process_new_messages: bool,
     /// internal mq adapter
-    mq_adapter: Arc<dyn MessageQueueAdapter>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     /// current read positions of internals mq iterator
     /// when it is not finished
     current_iterator_positions: FastHashMap<ShardIdent, InternalMessageKey>,
@@ -72,7 +72,7 @@ impl ExecutionManager {
     /// constructor
     pub fn new(
         shard_id: ShardIdent,
-        mq_adapter: Arc<dyn MessageQueueAdapter>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         messages_buffer_limit: usize,
         group_limit: usize,
         group_vert_size: usize,
@@ -114,7 +114,7 @@ impl ExecutionManager {
         !self.message_groups.is_empty()
     }
 
-    pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter {
+    pub fn create_iterator_adapter(&mut self) -> QueueIteratorAdapter<EnqueuedMessage> {
         self.process_ext_messages = false;
         self.process_new_messages = false;
 
@@ -131,10 +131,10 @@ impl ExecutionManager {
         )
     }
 
-    pub fn release_iterator_adapter(
+    pub fn _release_iterator_adapter(
         &mut self,
-        mq_iterator_adapter: QueueIteratorAdapter,
-    ) -> Result<(bool, QueueDiff)> {
+        mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
+    ) -> Result<(bool, QueueDiff<EnqueuedMessage>)> {
         let has_pending_messages_in_buffer = self.has_pending_messages_in_buffer();
         let (current_positions, has_pending_internals, diff) =
             mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;
@@ -166,7 +166,7 @@ impl ExecutionManager {
         &mut self,
         collator: &mut CollatorStdImpl,
         collation_data: &mut BlockCollationData,
-        mq_iterator_adapter: &mut QueueIteratorAdapter,
+        mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
         max_new_message_key_to_current_shard: InternalMessageKey,
         working_state: &WorkingState,
     ) -> Result<Option<MessageGroup>> {
@@ -203,12 +203,12 @@ impl ExecutionManager {
 
                 let timer_add_to_groups = std::time::Instant::now();
                 self.message_groups.add_message(Box::new(ParsedMessage {
-                    info: MsgInfo::Int(int_msg.message_with_source.message.info.clone()),
+                    info: MsgInfo::Int(int_msg.item.message.info.clone()),
                     dst_in_current_shard: true,
-                    cell: int_msg.message_with_source.message.cell.clone(),
+                    cell: int_msg.item.message.cell.clone(),
                     special_origin: None,
                     dequeued: Some(Dequeued {
-                        same_shard: int_msg.message_with_source.shard_id == self.shard_id,
+                        same_shard: int_msg.item.source == self.shard_id,
                     }),
                 }));
                 add_to_groups_elapsed += timer_add_to_groups.elapsed();
@@ -393,9 +393,9 @@ impl ExecutionManager {
 
                 let timer_add_to_groups = std::time::Instant::now();
                 self.message_groups.add_message(Box::new(ParsedMessage {
-                    info: MsgInfo::Int(int_msg.message_with_source.message.info.clone()),
+                    info: MsgInfo::Int(int_msg.item.message.info.clone()),
                     dst_in_current_shard: true,
-                    cell: int_msg.message_with_source.message.cell.clone(),
+                    cell: int_msg.item.message.cell.clone(),
                     special_origin: None,
                     dequeued: None,
                 }));
@@ -935,7 +935,7 @@ pub(super) fn update_internals_processed_upto(
         Some(InternalsProcessedUptoStuff {
             processed_to_msg: match processed_to_opt {
                 Some(Force(to_key) | IfHigher(to_key)) => to_key,
-                _ => InternalMessageKey::with_lt_and_min_hash(0),
+                _ => InternalMessageKey::default(),
             },
             read_to_msg: match read_to_opt {
                 Some(Force(to_key) | IfHigher(to_key)) => to_key,

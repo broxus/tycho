@@ -24,7 +24,7 @@ use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
-use crate::internal_queue::types::InternalMessageKey;
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
 use crate::types::{BlockCollationResult, McData, TopBlockDescription};
@@ -136,7 +136,7 @@ impl CollatorStdImpl {
             collation_data.processed_upto.externals,
         );
 
-        // show intenals proccessed upto
+        // show internals processed upto
         collation_data
             .processed_upto
             .internals
@@ -265,10 +265,12 @@ impl CollatorStdImpl {
 
                             collation_data.inserted_new_msgs_to_iterator += 1;
 
-                            // TODO: Reduce size of parameters
+                            let enqueued_message =
+                                EnqueuedMessage::from((int_msg_info, new_message.cell));
+
                             self.mq_adapter.add_message_to_iterator(
                                 mq_iterator_adapter.iterator(),
-                                (int_msg_info, new_message.cell),
+                                enqueued_message,
                             )?;
                         }
 
@@ -366,6 +368,7 @@ impl CollatorStdImpl {
                     "tycho_do_collate_apply_queue_diff_time",
                     &labels,
                 );
+                // TODO: should panic if result is error
                 mq_adapter.apply_diff(diff, block_id_short).await?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
@@ -536,7 +539,7 @@ impl CollatorStdImpl {
             collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals,
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals
         );
 
         assert_eq!(
