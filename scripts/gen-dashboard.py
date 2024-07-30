@@ -26,6 +26,13 @@ from dashboard_builder import (
     expr_operator,
 )
 
+# todo: do something with this metrics
+# tycho_core_last_mc_block_applied
+# tycho_core_last_mc_block_utime
+# tycho_core_last_sc_block_applied
+# tycho_core_last_sc_block_seqno
+# tycho_core_last_sc_block_utime
+
 
 def heatmap_color_warm() -> HeatmapColor:
     return HeatmapColor()
@@ -242,6 +249,12 @@ def core_bc() -> RowPanel:
         create_heatmap_quantile_panel(
             "tycho_bc_out_msg_acc_ratio",
             "Out message/Account ratio per block",
+            quantile="0.999",
+        ),
+        # todo: pie chart?
+        create_heatmap_quantile_panel(
+            "tycho_bc_software_version",
+            "Software version per block",
             quantile="0.999",
         ),
     ]
@@ -464,6 +477,9 @@ def core_block_strider() -> RowPanel:
             "tycho_core_metrics_subscriber_handle_block_time",
             "Time to handle block by MetricsSubscriber",
         ),
+        create_heatmap_panel(
+            "tycho_core_check_block_proof_time", "Check block proof time"
+        ),
     ]
     return create_row("block strider: Core Metrics", metrics)
 
@@ -499,8 +515,7 @@ def storage() -> RowPanel:
                 target(
                     expr_operator(
                         Expr(
-                            metric="tycho_do_collate_block_seqno",
-                            label_selectors=['workchain="-1"'],
+                            metric="tycho_core_last_mc_block_seqno",
                         ),
                         "- on(instance, job)",
                         Expr("tycho_gc_states_seqno"),
@@ -511,8 +526,17 @@ def storage() -> RowPanel:
             unit="Blocks",
             title="GC lag",
         ),
+        create_heatmap_panel(
+            "tycho_storage_move_into_archive_time", "Time to move into archive"
+        ),
         create_gauge_panel(
             "tycho_storage_cells_tree_cache_size", "Cells tree cache size"
+        ),
+        create_counter_panel(
+            "tycho_compaction_keeps", "Number of not deleted cells during compaction"
+        ),
+        create_counter_panel(
+            "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
     ]
     return create_row("Storage", metrics)
@@ -830,6 +854,18 @@ def collator_time_metrics() -> RowPanel:
             "Collation flow overhead",
             labels=['workchain=~"$workchain"'],
         ),
+        create_heatmap_panel(
+            "tycho_collator_adapter_handle_state_time", "Handle state"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_create_merkle_update_time", "Create Merkle update"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_prepare_block_proof_time", "Prepare block proof"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_save_block_proof_time", "Save block proof"
+        ),
     ]
     return create_row("collator: Time diffs", metrics)
 
@@ -1064,6 +1100,10 @@ def validator() -> RowPanel:
         create_gauge_panel(
             "tycho_validator_cache_slots", "Number of currently active cache slots"
         ),
+        create_counter_panel(
+            "tycho_validator_invalid_signatures_cached_total",
+            "Number of cached invalid signatures",
+        ),
     ]
     return create_row("Validator", metrics)
 
@@ -1250,9 +1290,10 @@ def mempool_components() -> RowPanel:
 def collator_execution_manager() -> RowPanel:
     metrics = [
         create_heatmap_panel(
-            "tycho_collator_execute_ordinary_time",
-            "Execute ordinary time",
-            yaxis(UNITS.SECONDS),
+            "tycho_collator_execute_ordinary_time", "Execute ordinary time"
+        ),
+        create_heatmap_panel(
+            "tycho_collator_execute_ticktock_time", "Execute ticktock time"
         ),
     ]
     return create_row("collator: Execution Manager", metrics)
