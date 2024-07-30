@@ -1420,10 +1420,8 @@ where
 
                     // Block was previously received from bc and doesn't need to be validated further
                     let container = existing.value_mut();
-                    if let Some(entry) = container.entry.as_mut() {
-                        if let Some(block_container_entry) = block_container.entry {
-                            entry.candidate = block_container_entry.candidate;
-                        }
+                    if let Some(block_container_entry) = block_container.entry {
+                        container.entry = Some(block_container_entry);
                     }
                     container.prev_blocks_keys = block_container.prev_blocks_keys;
                     container.top_shard_blocks_keys = block_container.top_shard_blocks_keys;
