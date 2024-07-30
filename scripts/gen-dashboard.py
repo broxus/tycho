@@ -538,6 +538,9 @@ def storage() -> RowPanel:
         create_counter_panel(
             "tycho_compaction_removes", "Number of deleted cells during compaction"
         ),
+        create_counter_panel(
+            "tycho_storage_store_state_collisions", "Number of store state collisions",
+        ),
     ]
     return create_row("Storage", metrics)
 

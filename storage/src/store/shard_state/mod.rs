@@ -105,6 +105,7 @@ impl ShardStateStorage {
 
         // Double check if the state is already stored
         if handle.meta().has_state() {
+            metrics::counter!("tycho_storage_store_state_collisions").increment(1);
             return Ok(false);
         }
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
