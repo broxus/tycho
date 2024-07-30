@@ -8,11 +8,10 @@ on:
     branches:
       - master
     paths:
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "**.rs"
 jobs:
-
   # test:
   #   name: Test Suite
   #   runs-on: ubuntu-latest
@@ -55,6 +54,18 @@ jobs:
         with:
           command: fmt
           args: --all -- --check
+  metrics:
+    name: Metrics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: setup python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: check dashboard
+        run: python scripts/metrics_check.py
 
   # clippy:
   #   name: Clippy
