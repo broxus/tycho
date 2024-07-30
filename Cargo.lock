@@ -3374,15 +3374,14 @@ name = "tycho-control"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "clap",
  "everscale-types",
  "futures-util",
  "serde",
  "tarpc",
+ "thiserror",
  "tokio",
  "tracing",
  "tycho-core",
- "tycho-storage",
 ]
 
 [[package]]
@@ -3544,6 +3543,7 @@ dependencies = [
  "futures-util",
  "humantime",
  "metrics",
+ "pin-project-lite",
  "rand",
  "rayon",
  "serde",

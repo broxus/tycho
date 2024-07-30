@@ -1,31 +1,41 @@
-use everscale_types::models::BlockId;
+use futures_util::StreamExt;
+use tokio::net::ToSocketAddrs;
+
+pub use self::client::ControlClient;
+pub use self::error::{ClientError, ServerResult};
+pub use self::server::ControlServer;
 
 mod client;
+mod error;
 mod server;
 
-pub use client::*;
-pub use server::{ControlServerImpl, ControlServerListener};
+pub async fn serve<A, S>(addr: A, server: S) -> std::io::Result<()>
+where
+    A: ToSocketAddrs,
+    S: ControlServer + Clone + Send + 'static,
+{
+    use tarpc::server::{self, Channel};
+    use tarpc::tokio_serde::formats::Bincode;
 
-#[tarpc::service]
-pub trait ControlServer {
-    /// Ping a node. Should return an i + 1 response.
-    async fn ping(i: u32) -> u32;
+    let mut listener = tarpc::serde_transport::tcp::listen(&addr, Bincode::default).await?;
+    tracing::info!(listen_addr = %listener.local_addr(), "control server started");
 
-    /// Triggers GC for specified mc_block_id
-    async fn trigger_gc(trigger: ManualTriggerValue, seqno: Option<u32>, distance: Option<u32>);
+    listener.config_mut().max_frame_length(usize::MAX);
+    listener
+        // Ignore accept errors.
+        .filter_map(|r| futures_util::future::ready(r.ok()))
+        .map(server::BaseChannel::with_defaults)
+        .map(move |channel| {
+            channel
+                .execute(server.clone().serve())
+                .for_each(|x| async move {
+                    tokio::spawn(x);
+                })
+        })
+        // Max 1 channel.
+        .buffer_unordered(1)
+        .for_each(|_| async {})
+        .await;
 
-    /// Sets profiler state to targeted value. Return bool result indicates if state was changed
-    async fn trigger_memory_profiler(set: bool) -> bool;
-
-    /// Get block bytes
-    async fn get_block(block_id: BlockId) -> Option<Vec<u8>>;
-
-    /// Get proof bytes
-    async fn get_block_proof(block_id: BlockId) -> Option<(Vec<u8>, bool)>;
-
-    /// Get archive id
-    async fn get_archive_info(mc_seqno: u32) -> Option<u32>;
-
-    /// Download archive into file
-    async fn get_archive_slice(id: u32, limit: u32, offset: u64) -> Option<Vec<u8>>;
+    Ok(())
 }
