@@ -101,7 +101,7 @@ impl ShardStateStorage {
         }
 
         let _gc_lock = self.gc_lock.lock().await;
-        let _state_lock = handle.state_lock().write().await;
+        let _state_lock = handle.state_lock().lock().await;
 
         // Double check if the state is already stored
         if handle.meta().has_state() {

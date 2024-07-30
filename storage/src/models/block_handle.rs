@@ -1,7 +1,7 @@
 use std::sync::{Arc, Weak};
 
 use everscale_types::models::*;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tycho_util::FastDashMap;
 
 use super::BlockMeta;
@@ -70,7 +70,7 @@ impl BlockHandle {
     }
 
     #[inline]
-    pub fn state_lock(&self) -> &RwLock<()> {
+    pub fn state_lock(&self) -> &Mutex<()> {
         &self.inner.state_lock
     }
 
@@ -128,9 +128,9 @@ unsafe impl arc_swap::RefCnt for BlockHandle {
 pub struct Inner {
     id: BlockId,
     meta: BlockMeta,
+    state_lock: Mutex<()>,
     block_data_lock: RwLock<()>,
     proof_data_lock: RwLock<()>,
-    state_lock: RwLock<()>,
     cache: Arc<BlockHandleCache>,
 }
 
