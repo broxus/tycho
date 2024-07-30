@@ -8,15 +8,24 @@ use everscale_types::models::BlockId;
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
-use tycho_storage::{BlockHandle, BlocksGcType, Storage};
+use tycho_storage::{BlocksGcType, Storage};
+use tycho_util::futures::SleepOrPending;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ManualGcTrigger {
+    /// Triggers GC for the specified MC block seqno.
+    Exact(u32),
+    /// Triggers GC for the MC block seqno relative to the latest MC block.
+    Distance(u32),
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -25,33 +34,40 @@ pub struct GcSubscriber {
 }
 
 impl GcSubscriber {
-    pub fn new(storage: Storage, manual_gc_sender: broadcast::Sender<ManualGcTrigger>) -> Self {
+    pub fn new(storage: Storage) -> Self {
         let last_key_block_seqno = storage
             .block_handle_storage()
             .find_last_key_block()
             .map_or(0, |handle| handle.id().seqno);
 
-        let (trigger_tx, trigger_rx) = watch::channel(None::<GcTrigger>);
+        let (tick_tx, tick_rx) = watch::channel(None::<Tick>);
 
-        let blocks_gc = tokio::spawn(Self::blocks_gc(
-            manual_gc_sender.subscribe(),
-            trigger_rx.clone(),
-            storage.clone(),
-        ));
-        let states_gc = tokio::spawn(Self::states_gc(
-            manual_gc_sender.subscribe(),
-            trigger_rx,
-            storage.clone(),
-        ));
+        let (archives_gc_trigger, archives_gc_rx) = watch::channel(None::<ManualGcTrigger>);
         let archives_gc = tokio::spawn(Self::archives_gc(
-            manual_gc_sender.subscribe(),
+            tick_rx.clone(),
+            archives_gc_rx,
             storage.clone(),
         ));
+
+        let (blocks_gc_trigger, blocks_gc_rx) = watch::channel(None::<ManualGcTrigger>);
+        let blocks_gc = tokio::spawn(Self::blocks_gc(
+            tick_rx.clone(),
+            blocks_gc_rx,
+            storage.clone(),
+        ));
+
+        let (states_gc_trigger, states_gc_rx) = watch::channel(None::<ManualGcTrigger>);
+        let states_gc = tokio::spawn(Self::states_gc(tick_rx, states_gc_rx, storage.clone()));
 
         Self {
             inner: Arc::new(Inner {
-                trigger_tx,
+                tick_tx,
                 last_key_block_seqno: AtomicU32::new(last_key_block_seqno),
+
+                archives_gc_trigger,
+                blocks_gc_trigger,
+                states_gc_trigger,
+
                 handle_block_task: blocks_gc.abort_handle(),
                 handle_state_task: states_gc.abort_handle(),
                 archives_handle: archives_gc.abort_handle(),
@@ -59,7 +75,19 @@ impl GcSubscriber {
         }
     }
 
-    pub fn handle(&self, is_key_block: bool, block: &BlockStuff) {
+    pub fn trigger_archives_gc(&self, trigger: ManualGcTrigger) {
+        self.inner.archives_gc_trigger.send_replace(Some(trigger));
+    }
+
+    pub fn trigger_blocks_gc(&self, trigger: ManualGcTrigger) {
+        self.inner.blocks_gc_trigger.send_replace(Some(trigger));
+    }
+
+    pub fn trigger_states_gc(&self, trigger: ManualGcTrigger) {
+        self.inner.states_gc_trigger.send_replace(Some(trigger));
+    }
+
+    fn handle_impl(&self, is_key_block: bool, block: &BlockStuff) {
         if !block.id().is_masterchain() {
             return;
         }
@@ -70,17 +98,14 @@ impl GcSubscriber {
                 .store(block.id().seqno, Ordering::Relaxed);
         }
 
-        self.inner.trigger_tx.send_replace(Some(GcTrigger {
+        self.inner.tick_tx.send_replace(Some(Tick {
             last_key_block_seqno: self.inner.last_key_block_seqno.load(Ordering::Relaxed),
             mc_block_id: *block.id(),
         }));
     }
 
     #[tracing::instrument(skip_all)]
-    async fn archives_gc(
-        mut manual_gc_trigger: broadcast::Receiver<ManualGcTrigger>,
-        storage: Storage,
-    ) {
+    async fn archives_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: Storage) {
         let Some(config) = storage.config().archives_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -91,113 +116,76 @@ impl GcSubscriber {
         }
 
         let persistent_state_keeper = storage.runtime_storage().persistent_state_keeper();
+        let mut last_known_pss_seqno = 0;
 
-        enum HandleSource {
-            PersistentStateKeeper { handle: BlockHandle },
-            ManualSelection { seqno: u32, distance: u32 },
-        }
+        let compute_offset = |gen_utime: u32| -> Duration {
+            let created_at = std::time::UNIX_EPOCH + Duration::from_secs(gen_utime as _);
+            (created_at + config.persistent_state_offset)
+                .duration_since(std::time::SystemTime::now())
+                .unwrap_or_default()
+        };
 
-        let mut source: Option<HandleSource> = None;
+        'outer: loop {
+            // Wait for a target seqno
+            let target_seqno = 'seqno: {
+                let wait_for_state_fut = async {
+                    loop {
+                        let mut new_state_found = pin!(persistent_state_keeper.new_state_found());
+                        let Some(pss_handle) = persistent_state_keeper.current() else {
+                            continue;
+                        };
 
-        loop {
-            let mut new_state_found = pin!(persistent_state_keeper.new_state_found());
-
-            tokio::select! {
-                _ = &mut new_state_found => {
-                    if let Some(handle) = persistent_state_keeper.current() {
-                        source = Some(HandleSource::PersistentStateKeeper {handle});
-                    } else {
-                        continue;
-                    };
-                },
-                tr = manual_gc_trigger.recv() => {
-                    match tr {
-                        Ok(ManualGcTrigger::Archives {ty}) => {
-                            tracing::debug!("Archives GC manual trigger received {:?}", &ty);
-                            if let Ok(Some((seqno, distance))) = Self::find_mc_seqno_by_trigger_type(ty, storage.clone()).await {
-                                source = Some(HandleSource::ManualSelection {seqno, distance});
-                            } else {
-                                continue;
-                            };
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to read manual gv trigger broadcast {e:?}");
+                        if pss_handle.id().seqno <= last_known_pss_seqno {
+                            // Wait for the new state
+                            new_state_found.await;
                             continue;
                         }
-                        _ => continue,
+
+                        // Wait until it's safe to remove the archives.
+                        let time_to_wait = compute_offset(pss_handle.meta().gen_utime());
+                        tokio::select! {
+                            _ = tokio::time::sleep(time_to_wait) => break pss_handle.id().seqno,
+                            _ = &mut new_state_found => continue,
+                        }
+                    }
+                };
+
+                tokio::select! {
+                    // Wait for a timepoint until the reset persistent state
+                    seqno = wait_for_state_fut => {
+                        last_known_pss_seqno = seqno;
+                        break 'seqno seqno
+                    },
+                    // Or handle the manual trigger
+                    trigger = manual_rx.changed() => {
+                        if trigger.is_err() {
+                            break 'outer;
+                        }
                     }
                 }
-            }
 
-            let seqno = match source {
-                Some(HandleSource::PersistentStateKeeper { handle }) => {
-                    // Compute the wait duration until the safe time point
-                    let time_to_wait = {
-                        let gen_utime = handle.meta().gen_utime();
-                        let created_at =
-                            std::time::UNIX_EPOCH + Duration::from_secs(gen_utime as _);
-                        (created_at + config.persistent_state_offset)
-                            .duration_since(std::time::SystemTime::now())
-                            .unwrap_or_default()
-                    };
+                let (Some(tick), Some(trigger)) = (
+                    tick_rx.borrow_and_update().clone(),
+                    manual_rx.borrow_and_update().clone(),
+                ) else {
+                    continue 'outer;
+                };
 
-                    tokio::select! {
-                        _ = tokio::time::sleep(time_to_wait) => handle.id().seqno,
-                        _ = &mut new_state_found => continue,
-                    }
-                }
-                Some(HandleSource::ManualSelection { seqno, distance }) => {
-                    tracing::info!(target: "gc-subscriber", "Manual seqno selection...");
-                    seqno.saturating_sub(distance)
-                }
-                _ => continue,
+                tick.adjust(trigger)
             };
 
-            tracing::debug!("Archives GC calculated target seqno {}", seqno);
             if let Err(e) = storage
                 .block_storage()
-                .remove_outdated_archives(seqno)
+                .remove_outdated_archives(target_seqno)
                 .await
             {
                 tracing::error!("failed to remove outdated archives: {e:?}");
             }
         }
     }
-    async fn find_mc_seqno_by_trigger_type(
-        ty: TriggerType,
-        storage: Storage,
-    ) -> Result<Option<(u32, u32)>> {
-        match ty {
-            TriggerType::Distance(d) => match storage.node_state().load_last_mc_block_id() {
-                Some(last) => Ok(storage
-                    .block_handle_storage()
-                    .load_handle(&last)
-                    .map(|x| (x.id().seqno, d))),
-                None => Ok(None),
-            },
-            TriggerType::McSeqno(mc_seqno) => {
-                return match storage.node_state().load_last_mc_block_id() {
-                    Some(block) => {
-                        let state = storage.shard_state_storage().load_state(&block).await?;
-                        let Some((_, mc_block_ref)) =
-                            state.state_extra()?.prev_blocks.get(mc_seqno)?
-                        else {
-                            anyhow::bail!("Failed to find mc block ref")
-                        };
-                        Ok(Some((mc_block_ref.block_ref.seqno, 0)))
-                    }
-                    _ => Ok(None),
-                }
-            }
-        }
-    }
 
     #[tracing::instrument(skip_all)]
-    async fn blocks_gc(
-        mut manual_gc_trigger: broadcast::Receiver<ManualGcTrigger>,
-        mut trigger_rx: TriggerRx,
-        storage: Storage,
-    ) {
+    async fn blocks_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: Storage) {
         let Some(config) = storage.config().blocks_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -210,133 +198,99 @@ impl GcSubscriber {
         let block_handles = storage.block_handle_storage();
 
         let mut last_tiggered_at = None::<Instant>;
+        let mut sleep_until = None::<Instant>;
         let mut known_key_block_seqno = 0;
 
-        loop {
-            let source = tokio::select! {
-                _ = trigger_rx.changed() => {
-                    let data = trigger_rx.borrow_and_update().clone();
-                    GcTriggerSource::Automatic {data}
-                }
-                Ok(data) = manual_gc_trigger.recv() => {
-                    tracing::debug!("Blocks GC received manual trigger for {:?}", &data);
-                    let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
-                    GcTriggerSource::Manual {data, last_known_mc_seqno}
-                }
-                else => {
-                    tracing::warn!("Failed to read determine gc trigger source");
-                    continue;
-                }
+        // Wait for the tick or manual trigger or exit the loop if any of the channels are closed
+        while let Some(source) = wait_with_sleep(&mut tick_rx, &mut manual_rx, sleep_until).await {
+            sleep_until = None;
+
+            let Some(tick) = tick_rx.borrow_and_update().clone() else {
+                continue;
             };
+            tracing::debug!(?tick);
+
+            // NOTE: Track the last mc block seqno since we cannot rely on the broadcasted block.
+            // It may be updated faster than the iteration of the GC manager.
+            let has_new_key_block = tick.last_key_block_seqno > known_key_block_seqno;
+            known_key_block_seqno = tick.last_key_block_seqno;
 
             let target_seqno = match (source, config.ty) {
-                (
-                    GcTriggerSource::Manual {
-                        data:
-                            ManualGcTrigger::Blocks {
-                                ty: TriggerType::Distance(d),
-                            },
-                        last_known_mc_seqno: Some(mc_seqno),
-                    },
-                    _,
-                ) => match mc_seqno.checked_sub(d) {
-                    None | Some(0) => continue,
-                    Some(seqno) => seqno,
-                },
-                (
-                    GcTriggerSource::Manual {
-                        data:
-                            ManualGcTrigger::Blocks {
-                                ty: TriggerType::McSeqno(mc_seqno),
-                            },
-                        ..
-                    },
-                    _,
-                ) => mc_seqno,
-                (GcTriggerSource::Manual { data, .. }, _) => {
-                    tracing::info!("Block GC ignoring {data:?}");
-                    continue;
+                (GcSource::Manual, _) => {
+                    let Some(trigger) = manual_rx.borrow_and_update().clone() else {
+                        continue;
+                    };
+
+                    // Compute the target masterchain block seqno
+                    let target_seqno = tick.adjust(trigger);
+                    if target_seqno == 0 {
+                        continue;
+                    }
+
+                    // Don't debounce manual triggers, but update the last trigger time
+                    last_tiggered_at = Some(Instant::now());
+                    target_seqno
                 }
                 (
-                    GcTriggerSource::Automatic {
-                        data: Some(trigger),
+                    GcSource::Schedule,
+                    BlocksGcType::BeforeSafeDistance {
+                        safe_distance,
+                        min_interval,
                     },
-                    config_type,
                 ) => {
-                    tracing::debug!(?trigger);
-                    // NOTE: Track the last mc block seqno since we cannot rely on the broadcasted block.
-                    // It may be updated faster than the iteration of the GC manager.
-                    let has_new_key_block = trigger.last_key_block_seqno > known_key_block_seqno;
-                    known_key_block_seqno = trigger.last_key_block_seqno;
+                    // Compute the target masterchain block seqno
+                    let target_seqno = match tick.mc_block_id.seqno.checked_sub(safe_distance) {
+                        // Skip GC for the first N blocks
+                        None | Some(0) => continue,
+                        Some(seqno) => seqno,
+                    };
 
-                    match config_type {
-                        BlocksGcType::BeforeSafeDistance {
-                            safe_distance,
-                            min_interval,
-                        } => {
-                            // Compute the target masterchain block seqno
-                            let target_seqno =
-                                match trigger.mc_block_id.seqno.checked_sub(safe_distance) {
-                                    // Skip GC for the first N blocks
-                                    None | Some(0) => continue,
-                                    Some(seqno) => seqno,
-                                };
-
-                            // Debounce GC
-                            if let Some(last) = last_tiggered_at {
-                                if last.elapsed() < min_interval {
-                                    // Sleep until the desired interval
-                                    // AND continue to wait for the next trigger
-                                    tokio::time::sleep_until((last + min_interval).into()).await;
-                                    continue;
-                                }
-                            }
-
-                            target_seqno
+                    // Debounce GC
+                    if let Some(last) = last_tiggered_at {
+                        if last.elapsed() < min_interval {
+                            // Sleep until the desired interval
+                            // AND continue to wait for the next trigger
+                            sleep_until = Some(last + min_interval);
+                            continue;
                         }
-                        BlocksGcType::BeforePreviousKeyBlock => {
-                            if !has_new_key_block {
-                                continue;
-                            }
+                    }
 
-                            // Find a key block before the last key block from the trigger
-                            let target_seqno = trigger.last_key_block_seqno;
-                            match block_handles.find_prev_key_block(target_seqno) {
-                                Some(handle) => handle.id().seqno,
-                                None => {
-                                    tracing::warn!(target_seqno, "previous key block not found");
-                                    continue;
-                                }
-                            }
-                        }
-                        BlocksGcType::BeforePreviousPersistentState => {
-                            if !has_new_key_block {
-                                continue;
-                            }
+                    // NOTE: You should update this in other branches as well,
+                    // if we want to debounce other types of GC.
+                    last_tiggered_at = Some(Instant::now());
+                    target_seqno
+                }
+                (GcSource::Schedule, BlocksGcType::BeforePreviousKeyBlock) => {
+                    if !has_new_key_block {
+                        continue;
+                    }
 
-                            // Find a persistent block before the last key block from the trigger
-                            let target_seqno = trigger.last_key_block_seqno;
-                            match block_handles.find_prev_persistent_key_block(target_seqno) {
-                                Some(handle) => handle.id().seqno,
-                                None => {
-                                    tracing::warn!(
-                                        target_seqno,
-                                        "previous persistent block not found"
-                                    );
-                                    continue;
-                                }
-                            }
+                    // Find a key block before the last key block from the trigger
+                    let target_seqno = tick.last_key_block_seqno;
+                    match block_handles.find_prev_key_block(target_seqno) {
+                        Some(handle) => handle.id().seqno,
+                        None => {
+                            tracing::warn!(target_seqno, "previous key block not found");
+                            continue;
                         }
                     }
                 }
-                (GcTriggerSource::Automatic { data: None }, _) => continue,
+                (GcSource::Schedule, BlocksGcType::BeforePreviousPersistentState) => {
+                    if !has_new_key_block {
+                        continue;
+                    }
+
+                    // Find a persistent block before the last key block from the trigger
+                    let target_seqno = tick.last_key_block_seqno;
+                    match block_handles.find_prev_persistent_key_block(target_seqno) {
+                        Some(handle) => handle.id().seqno,
+                        None => {
+                            tracing::warn!(target_seqno, "previous persistent block not found");
+                            continue;
+                        }
+                    }
+                }
             };
-
-            // NOTE: You should update this in other branches as well,
-            // if we want to debounce other types of GC.
-            last_tiggered_at = Some(Instant::now());
-
-            tracing::debug!("Blocks GC calculated target seqno {}", target_seqno);
 
             if let Err(e) = storage
                 .block_storage()
@@ -349,12 +303,7 @@ impl GcSubscriber {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn states_gc(
-        mut manual_gc_trigger: broadcast::Receiver<ManualGcTrigger>,
-        mut trigger_rx: TriggerRx,
-        storage: Storage,
-    ) {
-        use tokio::time;
+    async fn states_gc(mut tick_rx: TickRx, mut manual_rx: ManualTriggerRx, storage: Storage) {
         let Some(config) = storage.config().states_gc else {
             tracing::warn!("manager disabled");
             return;
@@ -364,72 +313,51 @@ impl GcSubscriber {
             tracing::info!("manager stopped");
         }
 
-        let mut interval = time::interval(config.interval);
-        let mut last_triggered_at = None;
+        let mut last_triggered_at = None::<Instant>;
+        let mut sleep_until = None::<Instant>;
 
-        loop {
-            // either the interval has ticked or a new trigger has arrived
-            let trigger_source = tokio::select! {
-                _ = interval.tick() => {
-                    let data = trigger_rx.borrow_and_update().clone();
-                    GcTriggerSource::Automatic {data}
-                },
-                Ok(data) = manual_gc_trigger.recv() => {
-                    tracing::debug!("Archives GC manual trigger received {:?}", &data);
-                    let last_known_mc_seqno = trigger_rx.borrow_and_update().clone().map(|x| x.mc_block_id.seqno);
-                    GcTriggerSource::Manual {data, last_known_mc_seqno}
-                }
-                Ok(_) = trigger_rx.changed() => {
-                    let data = trigger_rx.borrow_and_update().clone();
-                    GcTriggerSource::Automatic {data}
-                },
-                else => break,
+        while let Some(source) = wait_with_sleep(&mut tick_rx, &mut manual_rx, sleep_until).await {
+            sleep_until = None;
+
+            let Some(tick) = tick_rx.borrow_and_update().clone() else {
+                continue;
             };
+            tracing::debug!(?tick);
 
-            tracing::debug!(?trigger_source);
+            let now = Instant::now();
 
-            match trigger_source {
-                GcTriggerSource::Automatic { .. } => {
-                    let now = Instant::now();
-
+            // Compute the target masterchain block seqno
+            let target_seqno = match source {
+                // NOTE: Interval is ignored for manual triggers
+                GcSource::Manual => {
+                    let Some(trigger) = manual_rx.borrow_and_update().clone() else {
+                        continue;
+                    };
+                    tick.adjust(trigger)
+                }
+                GcSource::Schedule => {
+                    // Make sure to sleep between the ticks
                     if let Some(last) = last_triggered_at {
-                        let next_gc: Instant = last + config.interval;
+                        let next_gc = last + config.interval;
                         if next_gc > now {
-                            time::sleep_until(next_gc.into()).await;
+                            sleep_until = Some(next_gc);
+                            continue;
                         }
                     } else if config.random_offset {
                         let offset = rand::thread_rng().gen_range(Duration::ZERO..config.interval);
-                        time::sleep(offset).await;
-                    }
-                }
-                _ => (),
-            }
-
-            last_triggered_at = Some(Instant::now());
-
-            let target_seqno = match trigger_source {
-                GcTriggerSource::Manual { data, .. } => match data {
-                    ManualGcTrigger::States { ty } => {
-                        let Ok(Some((seqno, distance))) =
-                            Self::find_mc_seqno_by_trigger_type(ty, storage.clone()).await
-                        else {
-                            tracing::error!("Failed to determine target seqno");
-                            continue;
-                        };
-                        seqno.saturating_sub(distance)
-                    }
-                    _ => {
-                        tracing::debug!("Ignoring other types of GC");
+                        sleep_until = Some(now + offset);
                         continue;
                     }
-                },
-                GcTriggerSource::Automatic { data } => {
-                    let Some(data) = data else {
-                        continue;
-                    };
-                    data.mc_block_id.seqno
+
+                    tick.mc_block_id.seqno
                 }
             };
+
+            if target_seqno == 0 {
+                continue;
+            }
+
+            last_triggered_at = Some(now);
 
             let _hist = HistogramGuard::begin("tycho_gc_states_time");
             if let Err(e) = storage
@@ -439,14 +367,19 @@ impl GcSubscriber {
             {
                 tracing::error!("failed to remove outdated states: {e:?}");
             }
+
             metrics::gauge!("tycho_gc_states_seqno").set(target_seqno as f64);
         }
     }
 }
 
 struct Inner {
-    trigger_tx: TriggerTx,
+    tick_tx: TickTx,
     last_key_block_seqno: AtomicU32,
+
+    archives_gc_trigger: ManualTriggerTx,
+    blocks_gc_trigger: ManualTriggerTx,
+    states_gc_trigger: ManualTriggerTx,
 
     handle_block_task: AbortHandle,
     handle_state_task: AbortHandle,
@@ -462,43 +395,58 @@ impl Drop for Inner {
 }
 
 #[derive(Debug, Clone)]
-enum GcTriggerSource {
-    Automatic {
-        data: Option<GcTrigger>,
-    },
-    Manual {
-        data: ManualGcTrigger,
-        last_known_mc_seqno: Option<u32>,
-    },
+enum GcSource {
+    Schedule,
+    Manual,
 }
 
 #[derive(Debug, Clone)]
-pub struct GcTrigger {
+struct Tick {
     pub mc_block_id: BlockId,
     pub last_key_block_seqno: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TriggerType {
-    McSeqno(u32),
-    Distance(u32),
+impl Tick {
+    fn adjust(&self, trigger: ManualGcTrigger) -> u32 {
+        match trigger {
+            ManualGcTrigger::Exact(seqno) => seqno,
+            ManualGcTrigger::Distance(distance) => self.mc_block_id.seqno.saturating_sub(distance),
+        }
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ManualGcTrigger {
-    Archives { ty: TriggerType },
-    Blocks { ty: TriggerType },
-    States { ty: TriggerType },
-}
+type TickTx = watch::Sender<Option<Tick>>;
+type TickRx = watch::Receiver<Option<Tick>>;
 
-pub type TriggerTx = watch::Sender<Option<GcTrigger>>;
-pub type TriggerRx = watch::Receiver<Option<GcTrigger>>;
+type ManualTriggerTx = watch::Sender<Option<ManualGcTrigger>>;
+type ManualTriggerRx = watch::Receiver<Option<ManualGcTrigger>>;
+
+async fn wait_with_sleep(
+    tick_rx: &mut TickRx,
+    manual_rx: &mut ManualTriggerRx,
+    sleep_until: Option<Instant>,
+) -> Option<GcSource> {
+    tokio::select! {
+        _ = SleepOrPending::from(sleep_until) => return Some(GcSource::Schedule),
+        changed = tick_rx.changed() => {
+            if changed.is_ok() {
+                return Some(GcSource::Schedule);
+            }
+        },
+        trigger = manual_rx.changed() => {
+            if trigger.is_ok() {
+                return Some(GcSource::Manual);
+            }
+        },
+    }
+    None
+}
 
 impl StateSubscriber for GcSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.handle(cx.is_key_block, &cx.block);
+        self.handle_impl(cx.is_key_block, &cx.block);
         futures_util::future::ready(Ok(()))
     }
 }
@@ -517,7 +465,7 @@ impl BlockSubscriber for GcSubscriber {
         cx: &'a BlockSubscriberContext,
         _: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        self.handle(cx.is_key_block, &cx.block);
+        self.handle_impl(cx.is_key_block, &cx.block);
         futures_util::future::ready(Ok(()))
     }
 }

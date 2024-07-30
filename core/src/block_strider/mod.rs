@@ -26,7 +26,7 @@ pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
     BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber,
     ManualGcTrigger, MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt, TriggerType,
+    StateSubscriberExt,
 };
 
 mod provider;
