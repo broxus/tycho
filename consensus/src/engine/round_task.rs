@@ -16,7 +16,8 @@ use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
     PeerSchedule, Responder,
 };
-use crate::models::{ConsensusRound, Link, Point, Round};
+use crate::models::{Link, Point, Round};
+use crate::outer_round::{Consensus, OuterRound};
 
 struct RoundTaskState {
     peer_schedule: PeerSchedule,
@@ -41,7 +42,7 @@ impl RoundTaskReady {
         dispatcher: &Dispatcher,
         peer_schedule: &PeerSchedule,
         store: &MempoolStore,
-        consensus_round: &ConsensusRound,
+        consensus_round: &OuterRound<Consensus>,
         responder: Responder,
         input_buffer: InputBuffer,
     ) -> Self {

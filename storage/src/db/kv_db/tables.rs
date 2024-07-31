@@ -520,13 +520,11 @@ impl ColumnFamilyOptions<Caches> for Points {
 }
 
 /// Stores mempool point flags
-/// - Key: `round: u32, digest: [u8; 32]`
+/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
 /// - Value: [`crate::models::PointFlags`]
 pub struct PointFlags;
 
-impl PointFlags {
-    pub const KEY_LEN: usize = Points::KEY_LEN;
-}
+impl PointFlags {}
 
 impl ColumnFamily for PointFlags {
     const NAME: &'static str = "point_flags";

@@ -16,7 +16,8 @@ use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
-use crate::models::{ConsensusRound, Point, UnixTime};
+use crate::models::{Point, UnixTime};
+use crate::outer_round::{Consensus, OuterRound};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -24,7 +25,7 @@ pub struct Engine {
     committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
     peer_schedule: PeerSchedule,
     store: MempoolStore,
-    consensus_round: ConsensusRound,
+    consensus_round: OuterRound<Consensus>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
 }
@@ -38,14 +39,14 @@ impl Engine {
         committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
         input_buffer: InputBuffer,
     ) -> Self {
-        let consensus_round = ConsensusRound::new();
+        let consensus_round = OuterRound::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
 
         let responder = Responder::default();
         let (dispatcher, overlay) = Dispatcher::new(dht_client, overlay_service, responder.clone());
         let peer_schedule = PeerSchedule::new(key_pair, overlay);
 
-        let store = MempoolStore::new(mempool_storage.clone());
+        let store = MempoolStore::new(mempool_storage.clone(), consensus_round.receiver());
         let round_task = RoundTaskReady::new(
             &dispatcher,
             &peer_schedule,

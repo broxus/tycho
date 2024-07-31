@@ -35,6 +35,12 @@ impl MempoolConfig {
     /// hard limit on point payload (excessive will be postponed)
     pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
 
+    /// For how long to keep history in storage after the last consensus round.
+    /// Therefore, defines the max mempool sync depth: any node must respond
+    /// with points it used as dependencies if the distance between
+    /// the last consensus round and requested point's round lay within this value.
+    pub const PERSISTED_HISTORY_ROUNDS: u16 = if cfg!(feature = "test") { 50 } else { 6_300 };
+
     // == Configs above must be globally same for consensus to run
     // ========
     // == Configs below affects performance and may differ across nodes,
@@ -71,6 +77,11 @@ impl MempoolConfig {
     /// Notice that reliable peers respond immediately with points they already have
     /// validated successfully, or return `None`.
     pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(25);
+
+    /// How often to mark stored data as ready for compaction. Cannot be zero.
+    /// Effectively defines storage duration for the outdated data,
+    /// while the required storage duration is set by [`Self::PERSISTED_HISTORY_ROUNDS`].
+    pub const TOMBSTONE_PERIOD_ROUNDS: u16 = 105;
 }
 
 const _: () = assert!(
@@ -86,4 +97,9 @@ const _: () = assert!(
 const _: () = assert!(
     MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
     "invalid config: genesis round is too low and will make code panic"
+);
+
+const _: () = assert!(
+    MempoolConfig::TOMBSTONE_PERIOD_ROUNDS > 0,
+    "invalid config: tombstone rounds period cannot be zero"
 );
