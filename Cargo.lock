@@ -3374,6 +3374,7 @@ name = "tycho-control"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "async-trait",
  "everscale-types",
  "futures-util",
  "serde",
@@ -3382,6 +3383,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tycho-core",
+ "tycho-storage",
+ "tycho-util",
 ]
 
 [[package]]

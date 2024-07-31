@@ -6,10 +6,14 @@ use tokio::net::ToSocketAddrs;
 
 pub use self::client::ControlClient;
 pub use self::error::{ClientError, ServerResult};
+pub use self::server::impls::*;
 pub use self::server::{
-    ArchiveInfoRequest, ArchiveInfoResponse, ArchiveSliceRequest, ArchiveSliceResponse,
-    BlockProofRequest, BlockProofResponse, BlockRequest, BlockResponse, ControlServer,
+    ArchiveInfo, ArchiveInfoRequest, ArchiveInfoResponse, ArchiveSliceRequest,
+    ArchiveSliceResponse, BlockProofRequest, BlockProofResponse, BlockRequest, BlockResponse,
+    ControlServer,
 };
+
+pub type Context = tarpc::context::Context;
 
 mod client;
 mod error;
@@ -30,7 +34,7 @@ impl ControlEndpoint {
         let mut listener = tarpc::serde_transport::tcp::listen(&addr, Bincode::default).await?;
         listener.config_mut().max_frame_length(usize::MAX);
 
-        let inner = listener
+        let inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = listener
             // Ignore accept errors.
             .filter_map(|r| futures_util::future::ready(r.ok()))
             .map(tarpc::server::BaseChannel::with_defaults)
@@ -55,12 +59,12 @@ macro_rules! impl_serve {
         impl $crate::ControlServerExt for $ident {
             fn execute_all<T>(
                 self,
-                channel: $crate::RawChannel<T>,
+                channel: $crate::__internal::RawChannel<T>,
             ) -> impl ::std::future::Future<Output = ()> + Send
             where
                 T: tarpc::Transport<
-                        $crate::__internal::tarpc::Response<RawResponse>,
-                        $crate::__internal::tarpc::ClientMessage<RawRequest>,
+                        $crate::__internal::tarpc::Response<$crate::__internal::RawResponse>,
+                        $crate::__internal::tarpc::ClientMessage<$crate::__internal::RawRequest>,
                     > + Send
                     + 'static,
             {
@@ -77,18 +81,20 @@ macro_rules! impl_serve {
 }
 
 pub trait ControlServerExt: ControlServer + Clone + Send + 'static {
-    fn execute_all<T>(self, channel: RawChannel<T>) -> impl Future<Output = ()> + Send
+    fn execute_all<T>(self, channel: __internal::RawChannel<T>) -> impl Future<Output = ()> + Send
     where
-        T: tarpc::Transport<tarpc::Response<RawResponse>, tarpc::ClientMessage<RawRequest>>
-            + Send
+        T: tarpc::Transport<
+                tarpc::Response<__internal::RawResponse>,
+                tarpc::ClientMessage<__internal::RawRequest>,
+            > + Send
             + 'static;
 }
-
-type RawChannel<T> = tarpc::server::BaseChannel<RawRequest, RawResponse, T>;
-type RawRequest = crate::server::ControlServerRequest;
-type RawResponse = crate::server::ControlServerResponse;
 
 #[doc(hidden)]
 pub mod __internal {
     pub use {futures_util, tarpc, tokio};
+
+    pub type RawChannel<T> = tarpc::server::BaseChannel<RawRequest, RawResponse, T>;
+    pub type RawRequest = crate::server::ControlServerRequest;
+    pub type RawResponse = crate::server::ControlServerResponse;
 }
