@@ -370,104 +370,128 @@ impl BlockchainRpcClient {
         mc_seqno: u32,
         output: &mut (dyn Write + Send),
     ) -> Result<usize, Error> {
-        const CHUNK_SIZE: u32 = 5 << 20; // 5 MB
+        const PARALLEL_REQUESTS: usize = 10;
+        const PACKET_OFFSET: usize = 256; // 32 bytes for the overlay id and some more for TL stuff
 
-        // TODO: Iterate through all known (or unknown) neighbours
-        const NEIGHBOUR_COUNT: usize = 10;
-        let neighbours = self
-            .overlay_client()
-            .neighbours()
-            .choose_multiple(NEIGHBOUR_COUNT)
-            .await;
+        let frame_size = self.inner.overlay_client.network().max_frame_size();
+        let chunk_size = std::cmp::min(frame_size, BigBytes::MAX_SIZE)
+            .saturating_sub(PACKET_OFFSET)
+            .try_into()
+            .unwrap_or(u32::MAX);
 
-        // Find a neighbour which has the requested archive
-        let (neighbour, archive_id, archive_size) = 'info: {
-            let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+        let (neighbour, archive_id, archive_size) =
+            find_peer_with_archive(self.overlay_client().clone(), mc_seqno).await?;
 
-            let mut futures = FuturesUnordered::new();
-            for neighbour in neighbours {
-                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
-            }
-
-            let mut err = None;
-            while let Some(info) = futures.next().await {
-                let (handle, info) = match info {
-                    Ok(res) => res.split(),
-                    Err(e) => {
-                        err = Some(e);
-                        continue;
-                    }
-                };
-
-                match info {
-                    ArchiveInfo::Found { id, size } => break 'info (handle.accept(), id, size),
-                    ArchiveInfo::NotFound => continue,
-                }
-            }
-
-            return match err {
-                None => Err(Error::Internal(anyhow::anyhow!(
-                    "no neighbour has the requested archive",
-                ))),
-                Some(err) => Err(err),
-            };
-        };
-
-        tracing::debug!(peer_id = %neighbour.peer_id(), archive_id, "archive found. {archive_size} bytes");
+        tracing::info!(peer_id = %neighbour.peer_id(), archive_id, "archive found. {archive_size} bytes");
 
         let mut verifier = ArchiveVerifier::default();
 
-        // TODO: add retry count to interrupt infinite loop
-        let mut offset = 0;
-        loop {
-            let req = Request::from_tl(rpc::GetArchiveSlice {
-                archive_id,
-                offset,
-                limit: CHUNK_SIZE,
-            });
+        tracing::debug!("size {}, chunk size {}", archive_size, chunk_size);
 
-            let res = self
-                .overlay_client()
-                .query_raw::<Data>(neighbour.clone(), req)
-                .await;
-
-            match res {
-                Ok(res) => {
-                    let chunk = &res.data().data;
-
-                    tracing::debug!(
-                        downloaded = %bytesize::ByteSize::b(offset + chunk.len() as u64),
-                        "got archive chunk"
-                    );
-
-                    verifier.write_verify(chunk).map_err(|e| {
-                        Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))
-                    })?;
-
-                    let is_last = chunk.len() < CHUNK_SIZE as usize;
-                    if is_last {
-                        verifier.final_check().map_err(|e| {
-                            Error::Internal(anyhow::anyhow!("Received invalid archive: {e}"))
-                        })?;
-                    }
-
-                    output.write_all(chunk).map_err(|e| {
-                        Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
-                    })?;
-
-                    offset += chunk.len() as u64;
-
-                    if is_last {
-                        return Ok(offset as usize);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(
+        let mut stream = futures_util::stream::iter((0..archive_size).step_by(chunk_size as usize))
+            .map(|offset| {
+                tracing::debug!("downloading archive chunk at offset {}", offset);
+                let neighbour = neighbour.clone();
+                let overlay_client = self.overlay_client().clone();
+                JoinTask::new(download_archive_inner(
+                    Request::from_tl(rpc::GetArchiveSlice {
                         archive_id,
                         offset,
-                        "Failed to download archive slice: {e:?}",
-                    );
-                }
+                        limit: chunk_size,
+                    }),
+                    overlay_client,
+                    neighbour,
+                ))
+            })
+            .buffered(PARALLEL_REQUESTS);
+
+        let mut downloaded: u64 = 0;
+
+        let mut stream = std::pin::pin!(stream);
+        while let Some(chunk) = stream.next().await {
+            downloaded += chunk.len() as u64;
+
+            tracing::debug!(
+                downloaded = %bytesize::ByteSize::b(downloaded),
+                "got archive chunk"
+            );
+            verifier.write_verify(&chunk).map_err(|e| {
+                Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))
+            })?;
+
+            output.write_all(&chunk).map_err(|e| {
+                Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
+            })?;
+        }
+
+        verifier
+            .final_check()
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Received invalid archive: {e}")))?;
+        output
+            .flush()
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to flush archive: {e}")))?;
+
+        Ok(downloaded as usize)
+    }
+}
+
+async fn find_peer_with_archive(
+    client: PublicOverlayClient,
+    mc_seqno: u32,
+) -> Result<(Neighbour, u64, u64), Error> {
+    // TODO: Iterate through all known (or unknown) neighbours
+    const NEIGHBOUR_COUNT: usize = 10;
+    let neighbours = client.neighbours().choose_multiple(NEIGHBOUR_COUNT).await;
+
+    let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+
+    let mut futures = FuturesUnordered::new();
+    for neighbour in neighbours {
+        futures.push(client.query_raw(neighbour, req.clone()));
+    }
+
+    let mut err = None;
+    while let Some(info) = futures.next().await {
+        let (handle, info) = match info {
+            Ok(res) => res.split(),
+            Err(e) => {
+                err = Some(e);
+                continue;
+            }
+        };
+
+        match info {
+            ArchiveInfo::Found { id, size } => return Ok((handle.accept(), id, size)),
+            ArchiveInfo::NotFound => continue,
+        }
+    }
+
+    match err {
+        None => Err(Error::Internal(anyhow::anyhow!(
+            "no neighbour has the requested archive",
+        ))),
+        Some(err) => Err(err),
+    }
+}
+
+async fn download_archive_inner(
+    req: Request,
+    overlay_client: PublicOverlayClient,
+    neighbour: Neighbour,
+) -> Bytes {
+    // todo: backoff + peer change after some time
+    // todo: maybe download from multiple peers?
+    loop {
+        let res = overlay_client
+            .query_raw::<Data>(neighbour.clone(), req.clone())
+            .await;
+        match res {
+            Ok(arch) => {
+                let (_, data) = arch.accept();
+                return data.data;
+            }
+            Err(e) => {
+                tracing::error!("Failed to download archive slice: {e}");
             }
         }
     }
