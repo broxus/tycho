@@ -67,10 +67,7 @@ impl ControlClient {
         }
     }
 
-    pub async fn get_block_proof(
-        &self,
-        block_id: &BlockId,
-    ) -> ClientResult<Option<(Vec<u8>, bool)>> {
+    pub async fn get_block_proof(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
         let req = BlockProofRequest {
             block_id: *block_id,
         };
@@ -80,18 +77,18 @@ impl ControlClient {
             .get_block_proof(context::current(), req)
             .await??
         {
-            BlockProofResponse::Found { data, is_link } => Ok(Some((data, is_link))),
+            BlockProofResponse::Found { data } => Ok(Some(data)),
             BlockProofResponse::NotFound => Ok(None),
         }
     }
 
-    pub async fn find_archive(&self, mc_seqno: u32) -> ClientResult<Option<u32>> {
+    pub async fn find_archive(&self, mc_seqno: u32) -> ClientResult<Option<ArchiveInfo>> {
         match self
             .inner
             .get_archive_info(context::current(), ArchiveInfoRequest { mc_seqno })
             .await??
         {
-            ArchiveInfoResponse::Found { id } => Ok(Some(id)),
+            ArchiveInfoResponse::Found(info) => Ok(Some(info)),
             ArchiveInfoResponse::NotFound => Ok(None),
         }
     }

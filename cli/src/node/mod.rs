@@ -25,7 +25,7 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
-use tycho_control::{ControlServerImpl, ControlServerListener};
+use tycho_control::{ControlEndpoint, ControlServerStdImpl, ControlServerStdImplConfig};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
@@ -316,6 +316,7 @@ pub struct Node {
     state_tracker: MinRefMcStateTracker,
 
     rpc_config: Option<RpcConfig>,
+    control_config: Option<ControlServerStdImplConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     collation_config: CollationConfig,
@@ -442,6 +443,7 @@ impl Node {
             blockchain_rpc_client,
             state_tracker,
             rpc_config: node_config.rpc,
+            control_config: node_config.control,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
@@ -581,6 +583,27 @@ impl Node {
 
         tracing::info!("collator started");
 
+        let gc_subscriber = GcSubscriber::new(self.storage.clone());
+
+        // Create RPC
+        if let Some(config) = &self.control_config {
+            // TODO: Add memory profiler
+            let server = ControlServerStdImpl::builder()
+                .with_gc_subscriber(gc_subscriber.clone())
+                .with_storage(self.storage.clone())
+                .build();
+
+            let endpoint = ControlEndpoint::bind(config.listen_addr, server)
+                .await
+                .wrap_err("failed to setup control server endpoint")?;
+
+            tracing::info!(listen_addr = %config.listen_addr, "control server started");
+            tokio::task::spawn(async move {
+                endpoint.serve().await;
+                tracing::info!("control server stopped");
+            });
+        }
+
         // Create block strider
         let blockchain_block_provider = BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
@@ -601,8 +624,6 @@ impl Node {
         let _archive_block_provider =
             ArchiveBlockProvider::new(self.blockchain_rpc_client.clone(), self.storage.clone());
 
-        let control_server = ControlServerImpl::new(self.storage.clone());
-
         let block_strider = BlockStrider::builder()
             .with_provider((
                 (blockchain_block_provider, storage_block_provider),
@@ -618,26 +639,9 @@ impl Node {
                     ),
                     (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
-                    .chain(GcSubscriber::new(
-                        self.storage.clone(),
-                        control_server.manual_gc_trigger(),
-                    )),
+                    .chain(gc_subscriber),
             )
             .build();
-
-        tokio::spawn(async move {
-            if let Err(e) = ControlServerListener::serve(
-                SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::LOCALHOST,
-                    self.control_server.port,
-                )),
-                control_server.clone(),
-            )
-            .await
-            {
-                tracing::error!("Failed to start control server. {e:?}");
-            }
-        });
 
         // Run block strider
         tracing::info!("block strider started");
