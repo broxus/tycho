@@ -164,10 +164,9 @@ impl GcSubscriber {
                     }
                 }
 
-                let (Some(tick), Some(trigger)) = (
-                    tick_rx.borrow_and_update().clone(),
-                    manual_rx.borrow_and_update().clone(),
-                ) else {
+                let (Some(tick), Some(trigger)) =
+                    (*tick_rx.borrow_and_update(), *manual_rx.borrow_and_update())
+                else {
                     continue 'outer;
                 };
 
@@ -205,7 +204,7 @@ impl GcSubscriber {
         while let Some(source) = wait_with_sleep(&mut tick_rx, &mut manual_rx, sleep_until).await {
             sleep_until = None;
 
-            let Some(tick) = tick_rx.borrow_and_update().clone() else {
+            let Some(tick) = *tick_rx.borrow_and_update() else {
                 continue;
             };
             tracing::debug!(?tick);
@@ -217,7 +216,7 @@ impl GcSubscriber {
 
             let target_seqno = match (source, config.ty) {
                 (GcSource::Manual, _) => {
-                    let Some(trigger) = manual_rx.borrow_and_update().clone() else {
+                    let Some(trigger) = *manual_rx.borrow_and_update() else {
                         continue;
                     };
 
@@ -319,7 +318,7 @@ impl GcSubscriber {
         while let Some(source) = wait_with_sleep(&mut tick_rx, &mut manual_rx, sleep_until).await {
             sleep_until = None;
 
-            let Some(tick) = tick_rx.borrow_and_update().clone() else {
+            let Some(tick) = *tick_rx.borrow_and_update() else {
                 continue;
             };
             tracing::debug!(?tick);
@@ -330,7 +329,7 @@ impl GcSubscriber {
             let target_seqno = match source {
                 // NOTE: Interval is ignored for manual triggers
                 GcSource::Manual => {
-                    let Some(trigger) = manual_rx.borrow_and_update().clone() else {
+                    let Some(trigger) = *manual_rx.borrow_and_update() else {
                         continue;
                     };
                     tick.adjust(trigger)
@@ -400,7 +399,7 @@ enum GcSource {
     Manual,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Tick {
     pub mc_block_id: BlockId,
     pub last_key_block_seqno: u32,
