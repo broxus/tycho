@@ -55,7 +55,7 @@ libc = "0.2"
 metrics = "0.23"
 metrics-exporter-prometheus = "0.15"
 moka = { version = "0.12", features = ["sync"] }
-parking_lot = { version = "0.12.1", features = ["send_guard"] }
+parking_lot = { version = "0.12.1" }
 parking_lot_core = "0.9.9"
 pin-project-lite = "0.2"
 pkcs8 = "0.10"
