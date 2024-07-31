@@ -694,6 +694,8 @@ impl RpcStorage {
         // Find the new code hash
         let new_code_hash = 'code_hash: {
             if !remove {
+                metrics::counter!("tycho_storage_rpc_state_accounts_requests").increment(1);
+
                 if let Some((_, account)) = accounts.get(account)? {
                     break 'code_hash extract_code_hash(&account)?;
                 }
