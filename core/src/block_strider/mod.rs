@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use everscale_types::models::{BlockId, PrevBlockRef};
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::Future;
@@ -141,7 +141,7 @@ where
         let mut next_master_fut =
             JoinTask::new(self.fetch_next_master_block(&self.state.load_last_mc_block_id()));
 
-        while let Some(next) = next_master_fut.await {
+        while let Some(next) = next_master_fut.await.transpose()? {
             // NOTE: Start fetching the next master block in parallel to the processing of the current one
             next_master_fut = JoinTask::new(self.fetch_next_master_block(next.id()));
 
@@ -300,7 +300,7 @@ where
     fn fetch_next_master_block(
         &self,
         prev_block_id: &BlockId,
-    ) -> impl Future<Output = Option<BlockStuffAug>> + Send + 'static {
+    ) -> impl Future<Output = OptionalBlockStuff> + Send + 'static {
         let _histogram = HistogramGuard::begin("tycho_core_download_mc_block_time");
 
         tracing::debug!(%prev_block_id, "fetching next master block");
@@ -308,33 +308,21 @@ where
         let provider = self.provider.clone();
         let prev_block_id = *prev_block_id;
         async move {
-            loop {
-                match provider.get_next_block(&prev_block_id).await? {
-                    Ok(block) => break Some(block),
-                    Err(e) => {
-                        tracing::error!(?prev_block_id, "error while fetching master block: {e:?}");
-                        // TODO: backoff
-
-                        // NOTE: Give some time to breathe to tokio
-                        tokio::task::yield_now().await;
-                    }
-                }
-            }
+            let res = provider.get_next_block(&prev_block_id).await?;
+            Some(res.with_context(|| {
+                format!("BUGGY PROVIDER. failed to fetch master block: {prev_block_id}")
+            }))
         }
     }
 
     async fn fetch_block(&self, block_id: &BlockId) -> Result<BlockStuffAug> {
-        loop {
-            match self.provider.get_block(block_id).await {
-                Some(Ok(block)) => break Ok(block),
-                Some(Err(e)) => {
-                    tracing::error!("error while fetching block: {e:?}");
-                    tokio::task::yield_now().await;
-                    // TODO: backoff
-                }
-                None => {
-                    anyhow::bail!("block not found: {block_id}")
-                }
+        match self.provider.get_block(block_id).await {
+            Some(Ok(block)) => Ok(block),
+            Some(Err(e)) => {
+                anyhow::bail!("BUGGY PROVIDER. failed to fetch block {block_id}: {e:?}")
+            }
+            None => {
+                anyhow::bail!("BUGGY PROVIDER. block not found: {block_id}")
             }
         }
     }
