@@ -1,41 +1,94 @@
-use futures_util::StreamExt;
+use std::future::Future;
+
+use futures_util::future::BoxFuture;
+use futures_util::{FutureExt, StreamExt};
 use tokio::net::ToSocketAddrs;
 
 pub use self::client::ControlClient;
 pub use self::error::{ClientError, ServerResult};
-pub use self::server::ControlServer;
+pub use self::server::{
+    ArchiveInfoRequest, ArchiveInfoResponse, ArchiveSliceRequest, ArchiveSliceResponse,
+    BlockProofRequest, BlockProofResponse, BlockRequest, BlockResponse, ControlServer,
+};
 
 mod client;
 mod error;
 mod server;
 
-pub async fn serve<A, S>(addr: A, server: S) -> std::io::Result<()>
-where
-    A: ToSocketAddrs,
-    S: ControlServer + Clone + Send + 'static,
-{
-    use tarpc::server::{self, Channel};
-    use tarpc::tokio_serde::formats::Bincode;
+pub struct ControlEndpoint {
+    inner: BoxFuture<'static, ()>,
+}
 
-    let mut listener = tarpc::serde_transport::tcp::listen(&addr, Bincode::default).await?;
-    tracing::info!(listen_addr = %listener.local_addr(), "control server started");
+impl ControlEndpoint {
+    pub async fn bind<A, S>(addr: A, server: S) -> std::io::Result<Self>
+    where
+        A: ToSocketAddrs,
+        S: ControlServerExt,
+    {
+        use tarpc::tokio_serde::formats::Bincode;
 
-    listener.config_mut().max_frame_length(usize::MAX);
-    listener
-        // Ignore accept errors.
-        .filter_map(|r| futures_util::future::ready(r.ok()))
-        .map(server::BaseChannel::with_defaults)
-        .map(move |channel| {
-            channel
-                .execute(server.clone().serve())
-                .for_each(|x| async move {
-                    tokio::spawn(x);
+        let mut listener = tarpc::serde_transport::tcp::listen(&addr, Bincode::default).await?;
+        listener.config_mut().max_frame_length(usize::MAX);
+
+        let inner = listener
+            // Ignore accept errors.
+            .filter_map(|r| futures_util::future::ready(r.ok()))
+            .map(tarpc::server::BaseChannel::with_defaults)
+            .map(move |channel| server.clone().execute_all(channel))
+            // Max 1 channel.
+            .buffer_unordered(1)
+            .for_each(|_| async {})
+            .boxed();
+
+        Ok(Self { inner })
+    }
+
+    pub async fn serve(self) {
+        self.inner.await;
+    }
+}
+
+// FIXME: Remove when https://github.com/google/tarpc/pull/448 is merged.
+#[macro_export]
+macro_rules! impl_serve {
+    ($ident:ident) => {
+        impl $crate::ControlServerExt for $ident {
+            fn execute_all<T>(
+                self,
+                channel: $crate::RawChannel<T>,
+            ) -> impl ::std::future::Future<Output = ()> + Send
+            where
+                T: tarpc::Transport<
+                        $crate::__internal::tarpc::Response<RawResponse>,
+                        $crate::__internal::tarpc::ClientMessage<RawRequest>,
+                    > + Send
+                    + 'static,
+            {
+                use $crate::__internal::futures_util::{future, StreamExt};
+                use $crate::__internal::tarpc::server::Channel;
+
+                channel.execute(self.serve()).for_each(|t| {
+                    $crate::__internal::tokio::spawn(t);
+                    future::ready(())
                 })
-        })
-        // Max 1 channel.
-        .buffer_unordered(1)
-        .for_each(|_| async {})
-        .await;
+            }
+        }
+    };
+}
 
-    Ok(())
+pub trait ControlServerExt: ControlServer + Clone + Send + 'static {
+    fn execute_all<T>(self, channel: RawChannel<T>) -> impl Future<Output = ()> + Send
+    where
+        T: tarpc::Transport<tarpc::Response<RawResponse>, tarpc::ClientMessage<RawRequest>>
+            + Send
+            + 'static;
+}
+
+type RawChannel<T> = tarpc::server::BaseChannel<RawRequest, RawResponse, T>;
+type RawRequest = crate::server::ControlServerRequest;
+type RawResponse = crate::server::ControlServerResponse;
+
+#[doc(hidden)]
+pub mod __internal {
+    pub use {futures_util, tarpc, tokio};
 }

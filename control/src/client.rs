@@ -1,4 +1,3 @@
-use anyhow::Result;
 use everscale_types::models::BlockId;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
