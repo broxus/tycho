@@ -13,8 +13,7 @@ use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
 use tycho_rpc::RpcConfig;
 use tycho_storage::StorageConfig;
-
-use crate::util::logger::LoggerConfig;
+use tycho_util::cli::LoggerConfig;
 
 #[derive(Debug, Deserialize)]
 pub struct NodeKeys {
