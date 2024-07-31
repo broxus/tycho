@@ -45,9 +45,7 @@ tikv-jemallocator = { workspace = true, features = [
 tikv-jemalloc-ctl = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
 tracing = { workspace = true }
-tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
-tracing-stackdriver = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
@@ -56,7 +54,7 @@ tycho-core = { workspace = true }
 tycho-network = { workspace = true }
 tycho-rpc = { workspace = true }
 tycho-storage = { workspace = true }
-tycho-util = { workspace = true }
+tycho-util = { workspace = true, features = ["cli"] }
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }

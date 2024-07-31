@@ -3146,8 +3146,6 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tracing",
- "tracing-appender",
- "tracing-stackdriver",
  "tracing-subscriber",
  "tycho-block-util",
  "tycho-collator",
@@ -3390,6 +3388,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "humantime",
+ "libc",
  "metrics",
  "rand",
  "rayon",
@@ -3400,6 +3399,8 @@ dependencies = [
  "tl-proto",
  "tokio",
  "tracing",
+ "tracing-appender",
+ "tracing-stackdriver",
  "tracing-subscriber",
 ]
 

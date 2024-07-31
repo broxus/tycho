@@ -39,13 +39,13 @@ use tycho_network::{
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
+use tycho_util::cli::{LoggerConfig, LoggerTargets};
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::spawn_allocator_metrics_loop;
 use crate::util::error::ResultExt;
-use crate::util::logger::{LoggerConfig, LoggerTargets};
 use crate::util::signal;
 
 mod config;

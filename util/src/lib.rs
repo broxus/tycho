@@ -50,6 +50,9 @@ mod util {
     pub(crate) mod wake_list;
 }
 
+#[cfg(feature = "cli")]
+pub mod cli;
+
 pub use dashmap::mapref::entry::Entry as DashMapEntry;
 
 pub type FastDashMap<K, V> = dashmap::DashMap<K, V, ahash::RandomState>;

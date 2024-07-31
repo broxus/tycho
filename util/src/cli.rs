@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -9,25 +10,13 @@ use tracing_appender::rolling::Rotation;
 use tracing_subscriber::filter::Directive;
 use tracing_subscriber::{fmt, Layer};
 
-pub fn is_systemd_child() -> bool {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::getppid() == 1
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
-}
-
 pub struct LoggerTargets {
     directives: Vec<Directive>,
 }
 
 impl LoggerTargets {
     pub fn load_from<P: AsRef<Path>>(path: P) -> Result<Self> {
-        tycho_util::serde_helpers::load_json_from_file(path)
+        crate::serde_helpers::load_json_from_file(path)
     }
 
     pub fn build_subscriber(&self) -> tracing_subscriber::filter::EnvFilter {
@@ -117,6 +106,8 @@ impl LoggerStderrOutput {
     {
         if is_systemd_child() {
             fmt::layer().without_time().with_ansi(false).boxed()
+        } else if !std::io::stdout().is_terminal() {
+            fmt::layer().with_ansi(false).boxed()
         } else {
             fmt::layer().boxed()
         }
@@ -163,4 +154,16 @@ fn log_file_prefix() -> String {
 
 fn max_log_files() -> NonZeroUsize {
     NonZeroUsize::new(25).unwrap()
+}
+
+pub fn is_systemd_child() -> bool {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::getppid() == 1
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }

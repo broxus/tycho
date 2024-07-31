@@ -16,6 +16,7 @@ castaway = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }
 humantime = { workspace = true }
+libc = { workspace = true, optional = true }
 metrics = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
@@ -26,13 +27,17 @@ thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["time", "sync", "rt"] }
 tracing = { workspace = true }
+
+tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
+tracing-stackdriver = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["time", "sync", "rt-multi-thread", "macros"] }
 
 [features]
 test = ["dep:tracing-subscriber"]
+cli = ["dep:tracing-appender", "dep:tracing-subscriber", "dep:tracing-stackdriver", "dep:libc"]
 
 [lints]
 workspace = true
