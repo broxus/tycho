@@ -13,6 +13,36 @@ use tycho_util::futures::JoinTask;
 
 use crate::util::signal;
 
+#[derive(Subcommand)]
+pub enum CmdControl {
+    Ping(CmdPing),
+    FindArchive(CmdFindArchive),
+    DumpArchive(CmdDumpArchive),
+    DumpBlock(CmdDumpBlock),
+    DumpProof(CmdDumpProof),
+    GcArchives(CmdGcArchives),
+    GcBlocks(CmdGcBlocks),
+    GcStates(CmdGcStates),
+    #[clap(subcommand)]
+    MemProfiler(CmdMemProfiler),
+}
+
+impl CmdControl {
+    pub fn run(self) -> Result<()> {
+        match self {
+            Self::Ping(cmd) => cmd.run(),
+            Self::FindArchive(cmd) => cmd.run(),
+            Self::DumpArchive(cmd) => cmd.run(),
+            Self::DumpBlock(cmd) => cmd.run(),
+            Self::DumpProof(cmd) => cmd.run(),
+            Self::GcArchives(cmd) => cmd.run(),
+            Self::GcBlocks(cmd) => cmd.run(),
+            Self::GcStates(cmd) => cmd.run(),
+            Self::MemProfiler(cmd) => cmd.run(),
+        }
+    }
+}
+
 /// Ping the control server.
 #[derive(Parser)]
 pub struct CmdPing {

@@ -10,7 +10,7 @@ use tycho_core::block_strider::ManualGcTrigger;
 use tycho_util::futures::JoinTask;
 
 use crate::error::{ClientError, ClientResult};
-use crate::server::*;
+use crate::proto::*;
 
 pub struct ControlClient {
     inner: ControlServerClient,
