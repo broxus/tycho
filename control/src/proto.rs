@@ -4,15 +4,6 @@ use tycho_core::block_strider::ManualGcTrigger;
 
 use crate::error::ServerResult;
 
-pub mod impls {
-    pub use self::std_impl::{
-        ControlServerStdBuilder, ControlServerStdImpl, ControlServerStdImplConfig, MemoryProfiler,
-        StubMemoryProfiler,
-    };
-
-    mod std_impl;
-}
-
 #[tarpc::service]
 pub trait ControlServer {
     /// Ping a node. Returns node timestamp in milliseconds.

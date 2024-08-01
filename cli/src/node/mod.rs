@@ -22,7 +22,7 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
-use tycho_control::{ControlEndpoint, ControlServerStdImpl, ControlServerStdImplConfig};
+use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
@@ -44,13 +44,14 @@ use tycho_util::cli::{LoggerConfig, LoggerTargets};
 use tycho_util::futures::JoinTask;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
+pub use self::control::CmdControl;
 #[cfg(feature = "jemalloc")]
 use crate::util::alloc::{spawn_allocator_metrics_loop, JemallocMemoryProfiler};
 use crate::util::error::ResultExt;
 use crate::util::signal;
 
 mod config;
-pub mod control;
+mod control;
 
 const SERVICE_NAME: &str = "tycho-node";
 
@@ -292,7 +293,7 @@ pub struct Node {
     state_tracker: MinRefMcStateTracker,
 
     rpc_config: Option<RpcConfig>,
-    control_config: Option<ControlServerStdImplConfig>,
+    control_config: Option<ControlServerConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     collation_config: CollationConfig,
@@ -557,10 +558,10 @@ impl Node {
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
 
         // Create RPC
+        // NOTE: This variable is used as a guard to abort the server future on drop.
         let _control_state = if let Some(config) = &self.control_config {
-            // TODO: Add memory profiler
             let server = {
-                let mut builder = ControlServerStdImpl::builder()
+                let mut builder = ControlServer::builder()
                     .with_gc_subscriber(gc_subscriber.clone())
                     .with_storage(self.storage.clone());
 
@@ -572,7 +573,7 @@ impl Node {
                 builder.build()
             };
 
-            let endpoint = ControlEndpoint::bind(&config.socket_path, server)
+            let endpoint = ControlEndpoint::bind(config, server)
                 .await
                 .wrap_err("failed to setup control server endpoint")?;
 

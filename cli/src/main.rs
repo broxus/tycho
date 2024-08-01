@@ -72,31 +72,15 @@ impl Cmd {
 #[derive(Subcommand)]
 enum NodeCmd {
     Run(node::CmdRun),
-    Ping(node::control::CmdPing),
-    FindArchive(node::control::CmdFindArchive),
-    DumpArchive(node::control::CmdDumpArchive),
-    DumpBlock(node::control::CmdDumpBlock),
-    DumpProof(node::control::CmdDumpProof),
-    GcArchives(node::control::CmdGcArchives),
-    GcBlocks(node::control::CmdGcBlocks),
-    GcStates(node::control::CmdGcStates),
-    #[clap(subcommand)]
-    MemProfiler(node::control::CmdMemProfiler),
+    #[clap(flatten)]
+    Control(node::CmdControl),
 }
 
 impl NodeCmd {
     fn run(self) -> Result<()> {
         match self {
             Self::Run(cmd) => cmd.run(),
-            Self::Ping(cmd) => cmd.run(),
-            Self::FindArchive(cmd) => cmd.run(),
-            Self::DumpArchive(cmd) => cmd.run(),
-            Self::DumpBlock(cmd) => cmd.run(),
-            Self::DumpProof(cmd) => cmd.run(),
-            Self::GcArchives(cmd) => cmd.run(),
-            Self::GcBlocks(cmd) => cmd.run(),
-            Self::GcStates(cmd) => cmd.run(),
-            Self::MemProfiler(cmd) => cmd.run(),
+            Self::Control(cmd) => cmd.run(),
         }
     }
 }
