@@ -68,9 +68,9 @@ impl GcSubscriber {
                 blocks_gc_trigger,
                 states_gc_trigger,
 
-                handle_block_task: blocks_gc.abort_handle(),
-                handle_state_task: states_gc.abort_handle(),
-                archives_handle: archives_gc.abort_handle(),
+                archive_gc_handle: archives_gc.abort_handle(),
+                blocks_gc_handle: blocks_gc.abort_handle(),
+                states_gc_handle: states_gc.abort_handle(),
             }),
         }
     }
@@ -132,6 +132,8 @@ impl GcSubscriber {
                     loop {
                         let mut new_state_found = pin!(persistent_state_keeper.new_state_found());
                         let Some(pss_handle) = persistent_state_keeper.current() else {
+                            // Wait for the new state
+                            new_state_found.await;
                             continue;
                         };
 
@@ -380,16 +382,16 @@ struct Inner {
     blocks_gc_trigger: ManualTriggerTx,
     states_gc_trigger: ManualTriggerTx,
 
-    handle_block_task: AbortHandle,
-    handle_state_task: AbortHandle,
-    archives_handle: AbortHandle,
+    blocks_gc_handle: AbortHandle,
+    states_gc_handle: AbortHandle,
+    archive_gc_handle: AbortHandle,
 }
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        self.handle_block_task.abort();
-        self.handle_state_task.abort();
-        self.archives_handle.abort();
+        self.blocks_gc_handle.abort();
+        self.states_gc_handle.abort();
+        self.archive_gc_handle.abort();
     }
 }
 

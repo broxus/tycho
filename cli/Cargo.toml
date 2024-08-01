@@ -32,6 +32,7 @@ metrics-exporter-prometheus = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
@@ -55,7 +56,7 @@ tycho-network = { workspace = true }
 tycho-rpc = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true, features = ["cli"] }
-tycho-control = {workspace = true}
+tycho-control = { workspace = true }
 
 [dev-dependencies]
 tycho-collator = { workspace = true, features = ["test"] }

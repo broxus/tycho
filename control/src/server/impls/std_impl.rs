@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -15,17 +15,16 @@ use crate::server::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ControlServerStdImplConfig {
-    /// TCP socket address to listen for incoming control connections.
+    /// Unix socket path to listen for incoming control connections.
     ///
-    /// Default: `127.0.0.1:9000`
-    // TODO: Replace with unix socket
-    pub listen_addr: SocketAddr,
+    /// Default: `/var/venom/data/tycho.sock`
+    pub socket_path: PathBuf,
 }
 
 impl Default for ControlServerStdImplConfig {
     fn default() -> Self {
         Self {
-            listen_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9000)),
+            socket_path: crate::DEFAULT_SOCKET_PATH.into(),
         }
     }
 }

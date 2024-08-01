@@ -1,6 +1,5 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,8 +9,6 @@ use clap::Parser;
 use everscale_crypto::ed25519;
 use everscale_types::models::*;
 use futures_util::future::BoxFuture;
-use tokio::sync::{mpsc, watch};
-use tracing_subscriber::Layer;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
 use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
@@ -44,6 +41,7 @@ use tycho_network::{
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
 use tycho_util::cli::{LoggerConfig, LoggerTargets};
+use tycho_util::futures::JoinTask;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
 use crate::util::alloc::memory_profiler;
@@ -53,6 +51,7 @@ use crate::util::error::ResultExt;
 use crate::util::signal;
 
 mod config;
+pub mod control;
 
 const SERVICE_NAME: &str = "tycho-node";
 
@@ -137,21 +136,8 @@ impl CmdRun {
             init_metrics(metrics_config)?;
         }
 
-        let memory_profiler_state = Arc::new(AtomicBool::new(false));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
-
-        let cs = ControlServerInfo {
-            port: node_config.control_server_port,
-            memory_profile_state: memory_profiler_state.clone(),
-            memory_profiler_trigger: tx,
-        };
-
         #[cfg(feature = "jemalloc")]
-        tokio::spawn(memory_profiler(
-            node_config.profiling.profiling_dir.clone(),
-            rx,
-            memory_profiler_state.clone(),
-        ));
+        tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
 
         let node = {
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
@@ -163,7 +149,7 @@ impl CmdRun {
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
 
-            Node::new(socket_addr, keys, node_config, global_config, cs)?
+            Node::new(socket_addr, keys, node_config, global_config)?
         };
 
         node.wait_for_neighbours().await;
@@ -295,12 +281,6 @@ async fn resolve_public_ip(ip: Option<IpAddr>) -> Result<IpAddr> {
     }
 }
 
-pub struct ControlServerInfo {
-    port: u16,
-    memory_profile_state: Arc<AtomicBool>,
-    memory_profiler_trigger: mpsc::UnboundedSender<bool>,
-}
-
 pub struct Node {
     keypair: Arc<ed25519::KeyPair>,
 
@@ -321,8 +301,6 @@ pub struct Node {
 
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
-
-    control_server: ControlServerInfo,
 }
 
 impl Node {
@@ -331,8 +309,6 @@ impl Node {
         keys: NodeKeys,
         node_config: NodeConfig,
         global_config: GlobalConfig,
-
-        control_server_info: ControlServerInfo,
     ) -> Result<Self> {
         // Setup network
         let keypair = Arc::new(ed25519::KeyPair::from(&keys.as_secret()));
@@ -447,7 +423,6 @@ impl Node {
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
-            control_server: control_server_info,
         })
     }
 
@@ -586,23 +561,28 @@ impl Node {
         let gc_subscriber = GcSubscriber::new(self.storage.clone());
 
         // Create RPC
-        if let Some(config) = &self.control_config {
+        let _control_state = if let Some(config) = &self.control_config {
             // TODO: Add memory profiler
             let server = ControlServerStdImpl::builder()
                 .with_gc_subscriber(gc_subscriber.clone())
                 .with_storage(self.storage.clone())
                 .build();
 
-            let endpoint = ControlEndpoint::bind(config.listen_addr, server)
+            let endpoint = ControlEndpoint::bind(&config.socket_path, server)
                 .await
                 .wrap_err("failed to setup control server endpoint")?;
 
-            tracing::info!(listen_addr = %config.listen_addr, "control server started");
-            tokio::task::spawn(async move {
+            tracing::info!(socket_path = %config.socket_path.display(), "control server started");
+            Some(JoinTask::new(async move {
+                scopeguard::defer! {
+                    tracing::info!("control server stopped");
+                }
+
                 endpoint.serve().await;
-                tracing::info!("control server stopped");
-            });
-        }
+            }))
+        } else {
+            None
+        };
 
         // Create block strider
         let blockchain_block_provider = BlockchainBlockProvider::new(

@@ -86,7 +86,7 @@ tarpc = { version = "0.34", features = [
     "serde1",
     "serde-transport",
     "serde-transport-bincode",
-    "tcp",
+    "unix",
 ] }
 tempfile = "3.10"
 thiserror = "1.0"

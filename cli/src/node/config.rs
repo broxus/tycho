@@ -101,7 +101,7 @@ impl Default for NodeConfig {
             collator: CollationConfig::default(),
             validator: ValidatorStdImplConfig::default(),
             rpc: Some(RpcConfig::default()),
-            control: Some(ControlServerStdImplConfig::default()),
+            control: None,
             metrics: Some(MetricsConfig::default()),
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),

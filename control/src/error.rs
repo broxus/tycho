@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
+    #[error("client failed: {0}")]
+    ClientFailed(#[from] anyhow::Error),
     #[error("RPC failed: {0}")]
     RpcFailed(#[from] tarpc::client::RpcError),
     #[error("server responded with an error: {0}")]

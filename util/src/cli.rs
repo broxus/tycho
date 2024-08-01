@@ -100,6 +100,7 @@ impl LoggerOutput {
 pub struct LoggerStderrOutput;
 
 impl LoggerStderrOutput {
+    #[allow(clippy::unused_self)]
     pub fn as_layer<S>(&self) -> Box<dyn Layer<S> + Send + Sync + 'static>
     where
         S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
