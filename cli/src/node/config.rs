@@ -44,9 +44,6 @@ pub struct NodeConfig {
     /// Default: 0.0.0.0
     pub local_ip: IpAddr,
 
-    /// Default 13000,
-    pub control_server_port: u16,
-
     /// Default: 30000.
     pub port: u16,
 
@@ -89,7 +86,6 @@ impl Default for NodeConfig {
             public_ip: None,
             local_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 30000,
-            control_server_port: 13000,
             network: NetworkConfig::default(),
             dht: DhtConfig::default(),
             peer_resolver: PeerResolverConfig::default(),
