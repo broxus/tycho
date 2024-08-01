@@ -44,9 +44,8 @@ use tycho_util::cli::{LoggerConfig, LoggerTargets};
 use tycho_util::futures::JoinTask;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
-use crate::util::alloc::memory_profiler;
 #[cfg(feature = "jemalloc")]
-use crate::util::alloc::spawn_allocator_metrics_loop;
+use crate::util::alloc::{spawn_allocator_metrics_loop, JemallocMemoryProfiler};
 use crate::util::error::ResultExt;
 use crate::util::signal;
 
@@ -135,9 +134,6 @@ impl CmdRun {
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
         }
-
-        #[cfg(feature = "jemalloc")]
-        tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
 
         let node = {
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
@@ -563,10 +559,18 @@ impl Node {
         // Create RPC
         let _control_state = if let Some(config) = &self.control_config {
             // TODO: Add memory profiler
-            let server = ControlServerStdImpl::builder()
-                .with_gc_subscriber(gc_subscriber.clone())
-                .with_storage(self.storage.clone())
-                .build();
+            let server = {
+                let mut builder = ControlServerStdImpl::builder()
+                    .with_gc_subscriber(gc_subscriber.clone())
+                    .with_storage(self.storage.clone());
+
+                #[cfg(feature = "jemalloc")]
+                if let Some(profiler) = JemallocMemoryProfiler::connect() {
+                    builder = builder.with_memory_profiler(Arc::new(profiler));
+                }
+
+                builder.build()
+            };
 
             let endpoint = ControlEndpoint::bind(&config.socket_path, server)
                 .await

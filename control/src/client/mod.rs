@@ -62,6 +62,13 @@ impl ControlClient {
             .map_err(Into::into)
     }
 
+    pub async fn dump_memory_profiler(&self) -> ClientResult<Vec<u8>> {
+        self.inner
+            .dump_memory_profiler(context::current())
+            .await?
+            .map_err(Into::into)
+    }
+
     pub async fn get_block(&self, block_id: &BlockId) -> ClientResult<Option<Vec<u8>>> {
         let req = BlockRequest {
             block_id: *block_id,
