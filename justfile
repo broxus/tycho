@@ -102,6 +102,7 @@ gen_network n: build_debug
         NODE_CONFIG=$(echo "$NODE_CONFIG" | jq ".port = $PORT | .storage.root_dir = \"$TEMP_DIR/db${i}\"")
         NODE_CONFIG=$(echo "$NODE_CONFIG" | jq "if .rpc.listen_addr? then .rpc.listen_addr = \"0.0.0.0:$RPC_PORT\" else . end")
         NODE_CONFIG=$(echo "$NODE_CONFIG" | jq "if .metrics.listen_addr? then .metrics.listen_addr = \"0.0.0.0:$METRICS_PORT\" else . end")
+        NODE_CONFIG=$(echo "$NODE_CONFIG" | jq "if .control.socket_path? then .control.socket_path = \"$TEMP_DIR/control-${i}.sock\" else . end")
         echo "$NODE_CONFIG" > "$TEMP_DIR/config${i}.json"
     done
 

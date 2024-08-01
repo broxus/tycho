@@ -94,5 +94,5 @@ pub struct ArchiveSliceRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveSliceResponse {
-    data: Vec<u8>,
+    pub data: Vec<u8>,
 }

@@ -1,8 +1,8 @@
 use std::future::Future;
+use std::path::Path;
 
 use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
-use tokio::net::ToSocketAddrs;
 
 pub use self::client::ControlClient;
 pub use self::error::{ClientError, ServerResult};
@@ -19,22 +19,25 @@ mod client;
 mod error;
 mod server;
 
+// TODO: Change the path to a more general setup.
+pub const DEFAULT_SOCKET_PATH: &str = "/var/venom/data/tycho.sock";
+
 pub struct ControlEndpoint {
     inner: BoxFuture<'static, ()>,
 }
 
 impl ControlEndpoint {
-    pub async fn bind<A, S>(addr: A, server: S) -> std::io::Result<Self>
+    pub async fn bind<P, S>(path: P, server: S) -> std::io::Result<Self>
     where
-        A: ToSocketAddrs,
+        P: AsRef<Path>,
         S: ControlServerExt,
     {
         use tarpc::tokio_serde::formats::Bincode;
 
-        let mut listener = tarpc::serde_transport::tcp::listen(&addr, Bincode::default).await?;
+        let mut listener = tarpc::serde_transport::unix::listen(path, Bincode::default).await?;
         listener.config_mut().max_frame_length(usize::MAX);
 
-        let inner: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = listener
+        let inner = listener
             // Ignore accept errors.
             .filter_map(|r| futures_util::future::ready(r.ok()))
             .map(tarpc::server::BaseChannel::with_defaults)

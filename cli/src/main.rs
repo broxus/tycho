@@ -5,10 +5,8 @@ use std::sync::OnceLock;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tycho_control::*;
 
 mod tools {
-    pub mod control;
     pub mod gen_account;
     pub mod gen_dht;
     pub mod gen_key;
@@ -59,8 +57,6 @@ enum Cmd {
     Node(NodeCmd),
     #[clap(subcommand)]
     Tool(ToolCmd),
-    #[clap(subcommand)]
-    Control(ControlServerCmd),
 }
 
 impl Cmd {
@@ -68,7 +64,6 @@ impl Cmd {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
-            Cmd::Control(cmd) => cmd.run(),
         }
     }
 }
@@ -77,18 +72,21 @@ impl Cmd {
 #[derive(Subcommand)]
 enum NodeCmd {
     Run(node::CmdRun),
+    Ping(node::control::CmdPing),
 }
 
 impl NodeCmd {
     fn run(self) -> Result<()> {
         match self {
             NodeCmd::Run(cmd) => cmd.run(),
+            NodeCmd::Ping(cmd) => cmd.run(),
         }
     }
 }
 
 /// A collection of tools
 #[derive(Subcommand)]
+#[allow(clippy::enum_variant_names)]
 enum ToolCmd {
     GenDht(tools::gen_dht::Cmd),
     GenKey(tools::gen_key::Cmd),
@@ -104,39 +102,6 @@ impl ToolCmd {
             ToolCmd::GenZerostate(cmd) => cmd.run(),
             ToolCmd::GenAccount(cmd) => cmd.run(),
         }
-    }
-}
-
-#[derive(Subcommand)]
-pub enum ControlServerCmd {
-    Ping(PingCmd),
-    TriggerGc(TriggerGcCmd),
-    SwitchMemoryProfiler(SwitchMemoryProfilerCmd),
-    DumpBlock(DumpBlock),
-    DumpBlockProof(DumpBlock),
-    FindArchive(FindArchiveCmd),
-    DumpArchive(DumpArchiveCmd),
-}
-
-impl ControlServerCmd {
-    pub(crate) fn run(self) -> anyhow::Result<()> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-
-        rt.block_on(async move {
-            match self {
-                Self::Ping(cmd) => cmd.run().await,
-                Self::TriggerGc(cmd) => cmd.run().await,
-                Self::SwitchMemoryProfiler(cmd) => cmd.run().await,
-                Self::DumpBlock(cmd) => cmd.dump_block().await,
-                Self::DumpBlockProof(cmd) => cmd.dump_block_proof().await,
-                Self::FindArchive(cmd) => cmd.run().await,
-                Self::DumpArchive(cmd) => cmd.run().await,
-            }
-        });
-
-        Ok(())
     }
 }
 

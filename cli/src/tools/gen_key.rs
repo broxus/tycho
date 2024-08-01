@@ -10,6 +10,7 @@ use crate::util::parse_secret_key;
 pub struct Cmd {
     /// secret key (reads from stdin if only flag is provided)
     #[clap(long)]
+    #[allow(clippy::option_option)]
     key: Option<Option<String>>,
 
     /// expect a raw key input (32 bytes)

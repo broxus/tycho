@@ -1,10 +1,15 @@
+use std::path::Path;
+
 use everscale_types::models::BlockId;
+use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
-use tokio::net::ToSocketAddrs;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tracing::Instrument;
 use tycho_core::block_strider::ManualGcTrigger;
+use tycho_util::futures::JoinTask;
 
-use crate::error::ClientResult;
+use crate::error::{ClientError, ClientResult};
 use crate::server::*;
 
 pub struct ControlClient {
@@ -12,8 +17,8 @@ pub struct ControlClient {
 }
 
 impl ControlClient {
-    pub async fn connect<T: ToSocketAddrs>(addr: T) -> std::io::Result<Self> {
-        let mut connect = tarpc::serde_transport::tcp::connect(addr, Bincode::default);
+    pub async fn connect<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
+        let mut connect = tarpc::serde_transport::unix::connect(path, Bincode::default);
         connect.config_mut().max_frame_length(usize::MAX);
         let transport = connect.await?;
 
@@ -91,5 +96,47 @@ impl ControlClient {
             ArchiveInfoResponse::Found(info) => Ok(Some(info)),
             ArchiveInfoResponse::NotFound => Ok(None),
         }
+    }
+
+    pub async fn download_archive<T>(&self, info: ArchiveInfo, target: &mut T) -> ClientResult<()>
+    where
+        T: AsyncWrite + Unpin,
+    {
+        const CHUNK_SIZE: u64 = 16 << 20; // 16 MB
+        const PARALLEL_CHUNKS: usize = 10;
+
+        let chunk_num = (info.size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let mut chunks = futures_util::stream::iter(0..chunk_num)
+            .map(|chunk| {
+                let req = ArchiveSliceRequest {
+                    archive_id: info.id,
+                    limit: CHUNK_SIZE as u32,
+                    offset: chunk * CHUNK_SIZE,
+                };
+
+                let span = tracing::debug_span!("get_archive_slice", ?req);
+
+                let client = self.inner.clone();
+                JoinTask::new(
+                    async move {
+                        tracing::debug!("started");
+                        let res = client.get_archive_slice(context::current(), req).await;
+                        tracing::debug!("finished");
+                        res
+                    }
+                    .instrument(span),
+                )
+            })
+            .buffered(PARALLEL_CHUNKS);
+
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk??;
+            target
+                .write_all(&chunk.data)
+                .await
+                .map_err(|e| ClientError::ClientFailed(e.into()))?;
+        }
+
+        Ok(())
     }
 }
