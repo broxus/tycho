@@ -173,10 +173,10 @@ impl BlockchainRpcClient {
     pub async fn get_key_block_proof(
         &self,
         block_id: &BlockId,
-    ) -> Result<QueryResponse<Data>, Error> {
+    ) -> Result<QueryResponse<KeyBlockProof>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, Data>(&rpc::GetKeyBlockProof {
+            .query::<_, KeyBlockProof>(&rpc::GetKeyBlockProof {
                 block_id: *block_id,
             })
             .await?;

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
 pub mod signature_ref {
@@ -95,5 +96,79 @@ impl<const N: usize> VecWithMaxLen<N> {
         }
 
         Ok(items)
+    }
+}
+
+pub struct BigBytes<const MAX_SIZE: usize>;
+
+impl<const MAX_SIZE: usize> BigBytes<MAX_SIZE> {
+    pub const MAX_SIZE: usize = MAX_SIZE;
+
+    pub const fn size_hint(bytes: &Bytes) -> usize {
+        let len = bytes.len();
+        4 + len + Self::compute_padding(len)
+    }
+
+    pub fn write<P: TlPacket>(bytes: &Bytes, packet: &mut P) {
+        const PADDING: [u8; 3] = [0; 3];
+
+        let len = bytes.len();
+        packet.write_u32(len as u32);
+        packet.write_raw_slice(&bytes);
+        if len % 4 != 0 {
+            packet.write_raw_slice(&PADDING[0..4 - len % 4]);
+        }
+    }
+
+    pub fn read(packet: &[u8], offset: &mut usize) -> TlResult<Bytes> {
+        let len = u32::read_from(packet, offset)? as usize;
+        if len > Self::MAX_SIZE {
+            return Err(tl_proto::TlError::InvalidData);
+        }
+        let padding = Self::compute_padding(len);
+
+        if offset.saturating_add(len + padding) > packet.len() {
+            return Err(tl_proto::TlError::UnexpectedEof);
+        }
+
+        let bytes = Bytes::copy_from_slice(&packet[*offset..*offset + len]);
+        *offset += len + padding;
+
+        Ok(bytes)
+    }
+
+    const fn compute_padding(len: usize) -> usize {
+        (4 - len % 4) % 4
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[test]
+    fn big_bytes() {
+        type BigEnough = BigBytes<{ 100 << 20 }>;
+
+        // For each padding
+        for i in 0..4 {
+            let big_bytes = Bytes::from(vec![123; 1000 + i]);
+
+            let mut serialized = Vec::new();
+            BigEnough::write(&big_bytes, &mut serialized);
+
+            // Must be aligned by 4
+            assert_eq!(serialized.len() % 4, 0);
+
+            let mut offset = 0;
+            let deserialized = BigEnough::read(&serialized, &mut offset).unwrap();
+            // Must be equal
+            assert_eq!(big_bytes, deserialized);
+
+            // Must consume all bytes
+            assert_eq!(offset, serialized.len());
+        }
     }
 }

@@ -12,6 +12,7 @@ license.workspace = true
 # crates.io deps
 ahash = { workspace = true }
 anyhow = { workspace = true }
+bytes = { workspace = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
 futures-util = { workspace = true }

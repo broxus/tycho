@@ -18,7 +18,7 @@ use tycho_util::FastHashMap;
 
 use super::{StarterInner, ZerostateProvider};
 use crate::blockchain_rpc::BlockchainRpcClient;
-use crate::proto::blockchain::BlockFull;
+use crate::proto::blockchain::{BlockFull, KeyBlockProof};
 
 impl StarterInner {
     #[tracing::instrument(skip_all)]
@@ -562,7 +562,7 @@ impl StarterInner {
                             }
                         }
                     }
-                    BlockFull::Empty => {
+                    BlockFull::NotFound => {
                         tracing::warn!(%block_id, "block not found");
                         handle.reject();
                     }
@@ -625,13 +625,18 @@ async fn download_block_proof_task(
         let res = rpc_client.get_key_block_proof(&block_id).await;
 
         match res {
-            Ok(res) => {
+            Ok(res) => 'validate: {
                 let (handle, data) = res.split();
+                let KeyBlockProof::Found { proof: data } = data else {
+                    tracing::debug!(%block_id, "block proof not found");
+                    handle.accept();
+                    break 'validate;
+                };
 
-                match BlockProofStuff::deserialize(&block_id, &data.data, false) {
+                match BlockProofStuff::deserialize(&block_id, &data, false) {
                     Ok(proof) => {
                         handle.accept();
-                        return proof.with_archive_data(data.data.into());
+                        return WithArchiveData::new(proof, data);
                     }
                     Err(e) => {
                         tracing::error!(%block_id, "failed to deserialize block proof: {e}");
@@ -641,11 +646,11 @@ async fn download_block_proof_task(
             }
             Err(e) => {
                 tracing::warn!(%block_id, "failed to download block proof: {e:?}");
-
-                // TODO: Backoff
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
+
+        // TODO: Backoff
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

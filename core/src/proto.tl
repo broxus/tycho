@@ -1,3 +1,7 @@
+---types---
+
+bigBytes ? = BigBytes;
+
 // Overlay
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -62,11 +66,22 @@ blockchain.keyBlockIds block_ids:(vector blockchain.blockId) incomplete:Bool = b
 * @param block          block data raw
 * @param is_link        block proof link flag
 */
-blockchain.blockFull.found block_id:blockchain.blockId proof:bytes block:bytes is_link:Bool = blockchain.BlockFull;
+blockchain.blockFull.found block_id:blockchain.blockId proof:bytes block:bigBytes is_link:Bool = blockchain.BlockFull;
 /**
-* A response for getting empty block
+* Block not found
 */
-blockchain.blockFull.empty = blockchain.BlockFull;
+blockchain.blockFull.notFound = blockchain.BlockFull;
+
+/**
+* A response for getting a key block proof
+*
+* @param proof          block proof data
+*/
+blockchain.keyBlockProof.found proof:bytes = blockchain.KeyBlockProof;
+/**
+* Key block proof not found
+*/
+blockchain.keyBlockProof.notFound = blockchain.KeyBlockProof;
 
 /**
 * A successul response for the 'getArchiveInfo' query
@@ -143,7 +158,7 @@ blockchain.getNextBlockFull
 */
 blockchain.getKeyBlockProof
     block_id:blockchain.blockId
-    = overlay.Response blockchain.Data;
+    = overlay.Response blockchain.KeyBlockProof;
 
 /**
 * Get archive info

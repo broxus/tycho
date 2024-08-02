@@ -45,7 +45,6 @@ mod tl_block_id {
 }
 
 mod tl_block_id_vec {
-
     use everscale_types::models::BlockId;
     use tl_proto::{TlError, TlPacket, TlRead, TlResult};
 

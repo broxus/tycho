@@ -386,7 +386,7 @@ impl<B> Inner<B> {
                         is_link,
                     }
                 }
-                _ => BlockFull::Empty,
+                _ => BlockFull::NotFound,
             };
 
             Ok::<_, anyhow::Error>(block)
@@ -414,7 +414,7 @@ impl<B> Inner<B> {
                 Some(handle) if handle.meta().has_next1() => block_connection_storage
                     .load_connection(&req.prev_block_id, BlockConnection::Next1)
                     .context("connection not found")?,
-                _ => return Ok(BlockFull::Empty),
+                _ => return Ok(BlockFull::NotFound),
             };
 
             let mut is_link = false;
@@ -432,7 +432,7 @@ impl<B> Inner<B> {
                         is_link,
                     }
                 }
-                _ => BlockFull::Empty,
+                _ => BlockFull::NotFound,
             };
 
             Ok::<_, anyhow::Error>(block)
@@ -450,23 +450,22 @@ impl<B> Inner<B> {
     async fn handle_get_key_block_proof(
         &self,
         req: &rpc::GetKeyBlockProof,
-    ) -> overlay::Response<Data> {
+    ) -> overlay::Response<KeyBlockProof> {
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
         let get_key_block_proof = async {
             match block_handle_storage.load_handle(&req.block_id) {
                 Some(handle) if handle.meta().has_proof() => {
-                    block_storage.load_block_proof_raw(&handle, false).await
+                    let data = block_storage.load_block_proof_raw(&handle, false).await?;
+                    Ok::<_, anyhow::Error>(KeyBlockProof::Found { proof: data.into() })
                 }
-                _ => anyhow::bail!("proof not found"),
+                _ => Ok(KeyBlockProof::NotFound),
             }
         };
 
         match get_key_block_proof.await {
-            Ok(key_block_proof) => overlay::Response::Ok(Data {
-                data: key_block_proof.into(),
-            }),
+            Ok(key_block_proof) => overlay::Response::Ok(key_block_proof),
             Err(e) => {
                 tracing::warn!("get_key_block_proof failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
