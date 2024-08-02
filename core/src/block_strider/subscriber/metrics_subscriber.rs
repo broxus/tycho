@@ -1,7 +1,9 @@
 use anyhow::Result;
 use everscale_types::models::{AccountStatus, ComputePhase, InMsg, MsgInfo, OutMsg, TxInfo};
+use futures_util::future::{BoxFuture, FutureExt};
 use tycho_block_util::block::BlockStuff;
 use tycho_util::metrics::HistogramGuard;
+use tycho_util::sync::rayon_run;
 
 use crate::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
@@ -14,7 +16,7 @@ impl BlockSubscriber for MetricsSubscriber {
     type Prepared = ();
 
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
-    type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+    type HandleBlockFut<'a> = BoxFuture<'static, Result<()>>;
 
     fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
         futures_util::future::ready(Ok(()))
@@ -25,27 +27,36 @@ impl BlockSubscriber for MetricsSubscriber {
         cx: &BlockSubscriberContext,
         _: Self::Prepared,
     ) -> Self::HandleBlockFut<'_> {
-        if let Err(e) = handle_block(&cx.block) {
-            tracing::error!("failed to handle block: {e:?}");
-        }
-        futures_util::future::ready(Ok(()))
+        handle_block_fut(cx.block.clone())
     }
 }
 
 impl StateSubscriber for MetricsSubscriber {
-    type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
+    type HandleStateFut<'a> = BoxFuture<'static, Result<()>>;
 
     fn handle_state(&self, cx: &StateSubscriberContext) -> Self::HandleStateFut<'_> {
-        if let Err(e) = handle_block(&cx.block) {
-            tracing::error!("failed to handle block: {e:?}");
-        }
-        futures_util::future::ready(Ok(()))
+        handle_block_fut(cx.block.clone())
     }
 }
 
-fn handle_block(block: &BlockStuff) -> Result<()> {
-    let _histogram = HistogramGuard::begin("tycho_core_metrics_subscriber_handle_block_time");
+fn handle_block_fut(block: BlockStuff) -> BoxFuture<'static, Result<()>> {
+    let histogram = HistogramGuard::begin("tycho_core_metrics_subscriber_handle_block_time");
 
+    rayon_run(move || {
+        // NOTE: Move histogram into the closure to ensure it's dropped
+        // after the block is handled. We started recording it earlier
+        // to also include the time spent on `rayon_run` overhead.
+        let _histogram = histogram;
+
+        if let Err(e) = handle_block(&block) {
+            tracing::error!("failed to handle block: {e:?}");
+        }
+        Ok(())
+    })
+    .boxed()
+}
+
+fn handle_block(block: &BlockStuff) -> Result<()> {
     let block_id = block.id();
     let info = block.as_ref().load_info()?;
     let extra = block.as_ref().load_extra()?;
