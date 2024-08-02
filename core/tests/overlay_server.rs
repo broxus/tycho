@@ -233,14 +233,14 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert_eq!(response.data(), &BlockFull::Empty);
+        assert_eq!(response.data(), &BlockFull::NotFound);
     }
 
     let result = client.get_next_block_full(&BlockId::default()).await;
     assert!(result.is_ok());
 
     if let Ok(response) = &result {
-        assert_eq!(response.data(), &BlockFull::Empty);
+        assert_eq!(response.data(), &BlockFull::NotFound);
     }
 
     let result = client.get_next_key_block_ids(&BlockId::default(), 10).await;

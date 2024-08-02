@@ -1,7 +1,10 @@
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
+use tycho_util::tl;
 
-use crate::proto::{tl_big_bytes, tl_block_id, tl_block_id_vec};
+use crate::proto::{tl_block_id, tl_block_id_vec};
+
+pub type BigBytes = tl::BigBytes<{ 100 << 20 }>; // 100 MB
 
 /// Data for computing a public overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -14,6 +17,7 @@ pub struct OverlayIdData {
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
 #[tl(boxed, id = "blockchain.data", scheme = "proto.tl")]
 pub struct Data {
+    #[tl(with = "BigBytes")]
     pub data: Bytes,
 }
 
@@ -33,12 +37,21 @@ pub enum BlockFull {
         #[tl(with = "tl_block_id")]
         block_id: everscale_types::models::BlockId,
         proof: Bytes,
-        #[tl(with = "tl_big_bytes")]
+        #[tl(with = "BigBytes")]
         block: Bytes,
         is_link: bool,
     },
-    #[tl(id = "blockchain.blockFull.empty")]
-    Empty,
+    #[tl(id = "blockchain.blockFull.notFound")]
+    NotFound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
+#[tl(boxed, scheme = "proto.tl")]
+pub enum KeyBlockProof {
+    #[tl(id = "blockchain.keyBlockProof.found")]
+    Found { proof: Bytes },
+    #[tl(id = "blockchain.keyBlockProof.notFound")]
+    NotFound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
