@@ -20,6 +20,7 @@ anyhow = { workspace = true }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true, features = ["serde"] }
+bytesize = { workspace = true }
 castaway = { workspace = true }
 dashmap = { workspace = true }
 ed25519 = { workspace = true, features = ["alloc", "pkcs8"] }

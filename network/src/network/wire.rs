@@ -11,9 +11,7 @@ use crate::types::{Direction, Request, Response, Version};
 pub(crate) fn make_codec(config: &NetworkConfig) -> LengthDelimitedCodec {
     let mut builder = LengthDelimitedCodec::builder();
 
-    if let Some(max_frame_size) = config.max_frame_size {
-        builder.max_frame_length(max_frame_size);
-    }
+    builder.max_frame_length(config.max_frame_size.0 as usize);
 
     builder.length_field_length(4).big_endian().new_codec()
 }
