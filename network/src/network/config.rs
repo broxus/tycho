@@ -28,8 +28,8 @@ pub struct NetworkConfig {
     #[serde(with = "serde_helpers::humantime")]
     pub connectivity_check_interval: Duration,
 
-    /// Default: yes.
-    pub max_frame_size: Option<usize>,
+    /// Default: 8 MiB.
+    pub max_frame_size: bytesize::ByteSize,
 
     /// Default: 10 seconds.
     #[serde(with = "serde_helpers::humantime")]
@@ -72,7 +72,7 @@ impl Default for NetworkConfig {
             quic: None,
             connection_manager_channel_capacity: 128,
             connectivity_check_interval: Duration::from_millis(5000),
-            max_frame_size: None,
+            max_frame_size: bytesize::ByteSize::mib(8),
             connect_timeout: Duration::from_secs(10),
             connection_backoff: Duration::from_secs(10),
             max_connection_backoff: Duration::from_secs(60),

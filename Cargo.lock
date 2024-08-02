@@ -3369,6 +3369,7 @@ dependencies = [
  "arc-swap",
  "base64",
  "bytes",
+ "bytesize",
  "castaway",
  "clap",
  "dashmap",

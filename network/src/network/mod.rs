@@ -247,6 +247,11 @@ impl Network {
     pub fn downgrade(this: &Self) -> WeakNetwork {
         WeakNetwork(Arc::downgrade(&this.0))
     }
+
+    /// returns the maximum size which can be potentially sent in a single frame
+    pub fn max_frame_size(&self) -> usize {
+        self.0.config.max_frame_size.0 as usize
+    }
 }
 
 struct NetworkInner {
