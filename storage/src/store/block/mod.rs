@@ -550,11 +550,11 @@ impl BlockStorage {
         }
     }
 
-    pub fn get_archive_size(&self, id: u32) -> Result<Option<usize>> {
-        match self.db.archives.get(id.to_be_bytes())? {
-            Some(slice) => Ok(Some(slice.len())),
-            None => Ok(None),
-        }
+    pub fn get_archive_size(&self, id: Option<u32>) -> Result<Option<usize>> {
+        id.and_then(|id| self.db.archives.get(id.to_be_bytes()).ok())
+            .flatten()
+            .map(|slice| slice.len())
+            .map_or(Ok(None), |size| Ok(Some(size)))
     }
 
     /// Loads an archive slice.
@@ -736,18 +736,12 @@ impl BlockStorage {
             return mc_seqno;
         }
 
-        let mut archive_id = mc_seqno - mc_seqno % ARCHIVE_SLICE_SIZE;
-
         let prev_id = {
             let latest_archives = self.archive_ids.read();
             latest_archives.range(..=mc_seqno).next_back().cloned()
         };
 
-        if let Some(prev_id) = prev_id {
-            if archive_id < prev_id {
-                archive_id = prev_id;
-            }
-        }
+        let mut archive_id = prev_id.unwrap_or_default();
 
         // TODO: A single condition `prev_id.is_none()` might be enough,
         // but what if we started right in the middle of the archive?
@@ -912,7 +906,6 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 }
 
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-pub const ARCHIVE_SLICE_SIZE: u32 = 20_000;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
