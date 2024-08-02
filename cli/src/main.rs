@@ -6,14 +6,11 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use crate::tools::storage_cli::StorageCmd;
-
 mod tools {
     pub mod gen_account;
     pub mod gen_dht;
     pub mod gen_key;
     pub mod gen_zerostate;
-    pub mod storage_cli;
 }
 
 mod node;
@@ -58,11 +55,8 @@ impl App {
 enum Cmd {
     #[clap(subcommand)]
     Node(NodeCmd),
-
     #[clap(subcommand)]
     Tool(ToolCmd),
-    #[clap(subcommand)]
-    Storage(StorageCmd),
 }
 
 impl Cmd {
@@ -70,7 +64,6 @@ impl Cmd {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
-            Cmd::Storage(cmd) => cmd.run(),
         }
     }
 }
@@ -79,18 +72,22 @@ impl Cmd {
 #[derive(Subcommand)]
 enum NodeCmd {
     Run(node::CmdRun),
+    #[clap(flatten)]
+    Control(node::CmdControl),
 }
 
 impl NodeCmd {
     fn run(self) -> Result<()> {
         match self {
-            NodeCmd::Run(cmd) => cmd.run(),
+            Self::Run(cmd) => cmd.run(),
+            Self::Control(cmd) => cmd.run(),
         }
     }
 }
 
 /// A collection of tools
 #[derive(Subcommand)]
+#[allow(clippy::enum_variant_names)]
 enum ToolCmd {
     GenDht(tools::gen_dht::Cmd),
     GenKey(tools::gen_key::Cmd),

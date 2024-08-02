@@ -22,6 +22,7 @@ use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::{
     Validator, ValidatorNetworkContext, ValidatorStdImpl, ValidatorStdImplConfig,
 };
+use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
     BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
@@ -40,15 +41,17 @@ use tycho_network::{
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
 use tycho_util::cli::{LoggerConfig, LoggerTargets};
+use tycho_util::futures::JoinTask;
 
 use self::config::{MetricsConfig, NodeConfig, NodeKeys};
-use crate::util::alloc::memory_profiler;
+pub use self::control::CmdControl;
 #[cfg(feature = "jemalloc")]
-use crate::util::alloc::spawn_allocator_metrics_loop;
+use crate::util::alloc::{spawn_allocator_metrics_loop, JemallocMemoryProfiler};
 use crate::util::error::ResultExt;
 use crate::util::signal;
 
 mod config;
+mod control;
 
 const SERVICE_NAME: &str = "tycho-node";
 
@@ -132,9 +135,6 @@ impl CmdRun {
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
         }
-
-        #[cfg(feature = "jemalloc")]
-        tokio::spawn(memory_profiler(node_config.profiling.profiling_dir.clone()));
 
         let node = {
             let global_config = GlobalConfig::from_file(self.global_config.unwrap())
@@ -293,6 +293,7 @@ pub struct Node {
     state_tracker: MinRefMcStateTracker,
 
     rpc_config: Option<RpcConfig>,
+    control_config: Option<ControlServerConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
 
     collation_config: CollationConfig,
@@ -415,6 +416,7 @@ impl Node {
             blockchain_rpc_client,
             state_tracker,
             rpc_config: node_config.rpc,
+            control_config: node_config.control,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
@@ -553,6 +555,40 @@ impl Node {
 
         tracing::info!("collator started");
 
+        let gc_subscriber = GcSubscriber::new(self.storage.clone());
+
+        // Create RPC
+        // NOTE: This variable is used as a guard to abort the server future on drop.
+        let _control_state = if let Some(config) = &self.control_config {
+            let server = {
+                let mut builder = ControlServer::builder()
+                    .with_gc_subscriber(gc_subscriber.clone())
+                    .with_storage(self.storage.clone());
+
+                #[cfg(feature = "jemalloc")]
+                if let Some(profiler) = JemallocMemoryProfiler::connect() {
+                    builder = builder.with_memory_profiler(Arc::new(profiler));
+                }
+
+                builder.build()
+            };
+
+            let endpoint = ControlEndpoint::bind(config, server)
+                .await
+                .wrap_err("failed to setup control server endpoint")?;
+
+            tracing::info!(socket_path = %config.socket_path.display(), "control server started");
+            Some(JoinTask::new(async move {
+                scopeguard::defer! {
+                    tracing::info!("control server stopped");
+                }
+
+                endpoint.serve().await;
+            }))
+        } else {
+            None
+        };
+
         // Create block strider
         let blockchain_block_provider = BlockchainBlockProvider::new(
             self.blockchain_rpc_client.clone(),
@@ -588,7 +624,7 @@ impl Node {
                     ),
                     (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
-                    .chain(GcSubscriber::new(self.storage.clone())),
+                    .chain(gc_subscriber),
             )
             .build();
 

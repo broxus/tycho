@@ -580,7 +580,11 @@ impl BlockStorage {
         mc_seqno: u32,
         max_blocks_per_batch: Option<usize>,
     ) -> Result<()> {
-        tracing::info!("started blocks GC");
+        if mc_seqno == 0 {
+            return Ok(());
+        }
+
+        tracing::info!("started blocks GC for mc_block {mc_seqno}");
 
         let block = self
             .find_mc_block_data(mc_seqno)

@@ -1,6 +1,6 @@
 use std::ffi::{c_char, CString};
 use std::os::unix::prelude::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub use tikv_jemalloc_ctl::Error;
 use tikv_jemalloc_ctl::{epoch, stats};
@@ -39,7 +39,7 @@ pub fn spawn_allocator_metrics_loop() {
     });
 }
 
-pub fn fetch_stats() -> Result<JemallocStats, Error> {
+fn fetch_stats() -> Result<JemallocStats, Error> {
     // Stats are cached. Need to advance epoch to refresh.
     epoch::advance()?;
 
@@ -68,81 +68,78 @@ pub struct JemallocStats {
     pub fragmentation: u64,
 }
 
-pub async fn memory_profiler(profiling_dir: PathBuf) {
-    use tokio::signal::unix;
+#[derive(Clone)]
+pub struct JemallocMemoryProfiler {
+    inner: Arc<Inner>,
+}
 
-    if std::env::var("MALLOC_CONF").is_err() {
-        tracing::warn!(
-            "MALLOC_CONF is not set, memory profiler is disabled. \
-            set MALLOC_CONF=prof:true to enable"
-        );
-        return;
+impl JemallocMemoryProfiler {
+    pub fn connect() -> Option<Self> {
+        if std::env::var("MALLOC_CONF").is_err() {
+            tracing::warn!(
+                "MALLOC_CONF is not set, memory profiler is disabled. \
+                set MALLOC_CONF=prof:true to enable"
+            );
+            return None;
+        }
+
+        let Ok::<bool, _>(active) = (unsafe { tikv_jemalloc_ctl::raw::read(PROF_ACTIVE) }) else {
+            tracing::error!("failed to read memory profiler state");
+            return None;
+        };
+
+        Some(Self {
+            inner: Arc::new(Inner {
+                active: tokio::sync::Mutex::new(active),
+            }),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl tycho_control::MemoryProfiler for JemallocMemoryProfiler {
+    async fn set_enabled(&self, enabled: bool) -> bool {
+        let mut state = self.inner.active.lock().await;
+        match unsafe { tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, enabled) } {
+            Ok(was_enabled) => {
+                *state = enabled;
+                was_enabled != enabled
+            }
+            Err(e) => {
+                tracing::error!("failed to update memory profiler state: {e:?}");
+                false
+            }
+        }
     }
 
-    let signal = unix::SignalKind::user_defined1();
-    let mut stream = unix::signal(signal).expect("failed to create signal stream");
+    async fn dump(&self) -> anyhow::Result<Vec<u8>> {
+        let state = self.inner.active.lock().await;
+        anyhow::ensure!(*state, "memory profiler is not active");
 
-    if let Err(e) = std::fs::create_dir_all(&profiling_dir) {
-        tracing::error!(
-            path = %profiling_dir.display(),
-            "failed to create profiling directory: {e:?}"
-        );
-        return;
-    }
+        // TODO: Revisit this. What if the system deletes this temp file?
+        let temp_file = tempfile::NamedTempFile::new()?;
 
-    let mut is_active = false;
-    while stream.recv().await.is_some() {
-        tracing::info!("memory profiler signal received");
-        if !is_active {
-            tracing::info!("activating memory profiler");
-            if let Err(e) = profiler_start() {
-                tracing::error!("failed to activate memory profiler: {e:?}");
-                continue;
-            }
-        } else {
-            let invocation_time = chrono::Local::now();
-            let filename = format!("{}.dump", invocation_time.format("%Y-%m-%d_%H-%M-%S"));
-            let path = profiling_dir.join(filename);
-            if let Err(e) = profiler_dump(&path) {
-                tracing::error!(path = %path.display(), "failed to dump prof: {e:?}");
-            }
-            if let Err(e) = profiler_stop() {
-                tracing::error!("failed to deactivate memory profiler: {e:?}");
-                continue;
+        let path = temp_file.path();
+        {
+            let mut bytes = CString::new(path.as_os_str().as_bytes())
+                .unwrap()
+                .into_bytes_with_nul();
+
+            let ptr = bytes.as_mut_ptr().cast::<c_char>();
+            if let Err(e) = unsafe { tikv_jemalloc_ctl::raw::write(PROF_DUMP, ptr) } {
+                anyhow::bail!("failed to dump jemalloc profiling data: {e:?}");
             }
         }
 
-        is_active = !is_active;
+        tracing::info!(path = %path.display(), "saved the jemalloc profiling dump");
+
+        let data = tokio::fs::read(path).await?;
+        Ok(data)
     }
 }
 
-fn profiler_start() -> Result<(), Error> {
-    tracing::info!("starting jemalloc profiler");
-    unsafe { tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, true)? };
-    Ok(())
-}
-
-fn profiler_stop() -> Result<(), Error> {
-    tracing::info!("stopping jemalloc profiler");
-    unsafe { tikv_jemalloc_ctl::raw::update(PROF_ACTIVE, false)? };
-    Ok(())
-}
-
-/// Dump the profile to the `path`.
-fn profiler_dump<P>(path: P) -> Result<(), Error>
-where
-    P: AsRef<Path>,
-{
-    let path = path.as_ref();
-    let mut bytes = CString::new(path.as_os_str().as_bytes())
-        .unwrap()
-        .into_bytes_with_nul();
-
-    let ptr = bytes.as_mut_ptr().cast::<c_char>();
-    unsafe { tikv_jemalloc_ctl::raw::write(PROF_DUMP, ptr)? };
-
-    tracing::info!(path = %path.display(), "saved the jemalloc profiling dump");
-    Ok(())
+struct Inner {
+    active: tokio::sync::Mutex<bool>,
 }
 
 const PROF_ACTIVE: &[u8] = b"prof.active\0";

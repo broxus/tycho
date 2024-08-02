@@ -7,6 +7,7 @@ use everscale_types::cell::HashBytes;
 use serde::{Deserialize, Serialize};
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::ValidatorStdImplConfig;
+use tycho_control::ControlServerConfig;
 use tycho_core::block_strider::BlockchainBlockProviderConfig;
 use tycho_core::blockchain_rpc::BlockchainRpcServiceConfig;
 use tycho_core::overlay_client::PublicOverlayClientConfig;
@@ -68,6 +69,8 @@ pub struct NodeConfig {
 
     pub rpc: Option<RpcConfig>,
 
+    pub control: Option<ControlServerConfig>,
+
     pub metrics: Option<MetricsConfig>,
 
     pub threads: ThreadPoolConfig,
@@ -94,6 +97,7 @@ impl Default for NodeConfig {
             collator: CollationConfig::default(),
             validator: ValidatorStdImplConfig::default(),
             rpc: Some(RpcConfig::default()),
+            control: None,
             metrics: Some(MetricsConfig::default()),
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),

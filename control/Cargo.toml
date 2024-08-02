@@ -1,0 +1,26 @@
+[package]
+name = "tycho-control"
+description = "Node control server."
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# crates.io deps
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+everscale-types = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+tarpc = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# local deps
+tycho-core = { workspace = true }
+tycho-storage = { workspace = true }
+tycho-util = { workspace = true }

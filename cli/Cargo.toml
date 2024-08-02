@@ -19,7 +19,6 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
-chrono = { workspace = true, optional = true }
 clap = { workspace = true }
 everscale-crypto = { workspace = true }
 everscale-types = { workspace = true }
@@ -32,10 +31,11 @@ metrics-exporter-prometheus = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
+scopeguard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_path_to_error = { workspace = true }
-sha2 = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true, features = [
     "unprefixed_malloc_on_supported_platforms",
@@ -43,13 +43,14 @@ tikv-jemallocator = { workspace = true, features = [
     "profiling",
 ], optional = true }
 tikv-jemalloc-ctl = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "fs"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # local deps
 tycho-block-util = { workspace = true }
 tycho-collator = { workspace = true }
+tycho-control = { workspace = true }
 tycho-core = { workspace = true }
 tycho-network = { workspace = true }
 tycho-rpc = { workspace = true }
@@ -66,7 +67,7 @@ rustc_version = { workspace = true }
 
 [features]
 default = ["jemalloc"]
-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:metrics", "dep:chrono"]
+jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl", "dep:metrics"]
 deadlock-detection = ["parking_lot/deadlock_detection"]
 
 [lints]
