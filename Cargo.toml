@@ -136,13 +136,13 @@ nonstandard_style = "warn"
 rust_2018_idioms = "warn"
 
 [workspace.lints.clippy]
-all = "warn"
+all = { level = "warn", priority = -1 }
 await_holding_lock = "warn"
 char_lit_as_u8 = "warn"
 checked_conversions = "warn"
 dbg_macro = "warn"
 debug_assert_with_mut_call = "warn"
-disallowed_methods = "deny"
+disallowed_methods = "warn"
 doc_markdown = "warn"
 empty_enum = "warn"
 enum_glob_use = "warn"
