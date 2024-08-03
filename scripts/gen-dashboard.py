@@ -207,8 +207,10 @@ def create_heatmap_quantile_panel(
     )
 
 
-def create_row(name, metrics) -> RowPanel:
-    layout = Layout(name)
+def create_row(
+    name: str, metrics, repeat: str | None = None, collapsed=True
+) -> RowPanel:
+    layout = Layout(name, repeat=repeat, collapsed=collapsed)
     for i in range(0, len(metrics), 2):
         chunk = metrics[i : i + 2]
         layout.row(chunk)
@@ -295,6 +297,28 @@ def net_traffic() -> RowPanel:
         ),
     ]
     return create_row("network: Traffic", metrics)
+
+
+def core_blockchain_rpc() -> RowPanel:
+    methods = [
+        "getNextKeyBlockIds",
+        "getBlockFull",
+        "getNextBlockFull",
+        "getKeyBlockProof",
+        "getArchiveInfo",
+        "getArchiveSlice",
+        "getPersistentStateInfo",
+        "getPersistentStatePart",
+    ]
+    metrics = [
+        create_heatmap_panel(
+            "tycho_blockchain_rpc_method_time",
+            f"Blockchain RPC {method} time",
+            labels=[f'method="{method}"'],
+        )
+        for method in methods
+    ]
+    return create_row("blockchain: RPC", metrics)
 
 
 def net_conn_manager() -> RowPanel:
@@ -1388,6 +1412,7 @@ dashboard = Dashboard(
     panels=[
         core_bc(),
         core_block_strider(),
+        core_blockchain_rpc(),
         storage(),
         collator_params_metrics(),
         block_metrics(),

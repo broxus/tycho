@@ -1,10 +1,8 @@
 use std::sync::{Arc, Weak};
 
-use anyhow::Result;
-use bytes::Buf;
 use everscale_types::models::ShardIdent;
 use tracing::Instrument;
-use tycho_network::{PeerId, Response, Service, ServiceRequest};
+use tycho_network::{try_handle_prefix, PeerId, Response, Service, ServiceRequest};
 use tycho_util::futures::BoxFutureOrNoop;
 
 use crate::tracing_targets;
@@ -121,14 +119,4 @@ where
     fn on_datagram(&self, _: ServiceRequest) -> Self::OnDatagramFuture {
         futures_util::future::ready(())
     }
-}
-
-fn try_handle_prefix(req: &ServiceRequest) -> Result<(u32, &[u8]), tl_proto::TlError> {
-    let body = req.as_ref();
-    if body.len() < 4 {
-        return Err(tl_proto::TlError::UnexpectedEof);
-    }
-
-    let constructor = std::convert::identity(body).get_u32_le();
-    Ok((constructor, body))
 }

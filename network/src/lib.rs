@@ -25,7 +25,9 @@ pub use self::overlay::{
     PublicOverlay, PublicOverlayBuilder, PublicOverlayEntries, PublicOverlayEntriesReadGuard,
     PublicOverlayEntryData,
 };
-pub use self::util::{check_peer_signature, NetworkExt, Routable, Router, RouterBuilder};
+pub use self::util::{
+    check_peer_signature, try_handle_prefix, NetworkExt, Routable, Router, RouterBuilder,
+};
 
 mod dht;
 mod network;

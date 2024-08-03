@@ -5,13 +5,16 @@ use bytes::{Buf, Bytes};
 use bytesize::ByteSize;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
-use tycho_network::{InboundRequestMeta, Response, Service, ServiceRequest};
+use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
 use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
+use tycho_util::metrics::HistogramGuard;
 
 use crate::blockchain_rpc::{BAD_REQUEST_ERROR_CODE, INTERNAL_ERROR_CODE, NOT_FOUND_ERROR_CODE};
 use crate::proto::blockchain::*;
 use crate::proto::overlay;
+
+const RPC_METHOD_TIMINGS_METRIC: &str = "tycho_blockchain_rpc_method_time";
 
 pub trait BroadcastListener: Send + Sync + 'static {
     type HandleMessageFut<'a>: Future<Output = ()> + Send + 'a;
@@ -324,6 +327,9 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetNextKeyBlockIds,
     ) -> overlay::Response<KeyBlockIds> {
+        let label = [("method", "getNextKeyBlockIds")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
         let block_handle_storage = self.storage().block_handle_storage();
 
         let limit = std::cmp::min(req.max_size as usize, self.config.max_key_blocks_list_len);
@@ -367,6 +373,9 @@ impl<B> Inner<B> {
     }
 
     async fn handle_get_block_full(&self, req: &rpc::GetBlockFull) -> overlay::Response<BlockFull> {
+        let label = [("method", "getBlockFull")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
@@ -405,6 +414,9 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetNextBlockFull,
     ) -> overlay::Response<BlockFull> {
+        let label = [("method", "getNextBlockFull")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
         let block_handle_storage = self.storage().block_handle_storage();
         let block_connection_storage = self.storage().block_connection_storage();
         let block_storage = self.storage().block_storage();
@@ -451,6 +463,9 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetKeyBlockProof,
     ) -> overlay::Response<KeyBlockProof> {
+        let label = [("method", "getKeyBlockProof")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
         let block_handle_storage = self.storage().block_handle_storage();
         let block_storage = self.storage().block_storage();
 
@@ -479,6 +494,9 @@ impl<B> Inner<B> {
     ) -> overlay::Response<ArchiveInfo> {
         let mc_seqno = req.mc_seqno;
         let node_state = self.storage.node_state();
+
+        let label = [("method", "getArchiveInfo")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
         match node_state.load_last_mc_block_id() {
             Some(last_applied_mc_block) => {
@@ -510,6 +528,9 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetArchiveSlice,
     ) -> overlay::Response<Data> {
+        let label = [("method", "getArchiveSlice")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
         let block_storage = self.storage.block_storage();
 
         let get_archive_slice = || {
@@ -539,6 +560,9 @@ impl<B> Inner<B> {
         &self,
         req: &rpc::GetPersistentStateInfo,
     ) -> overlay::Response<PersistentStateInfo> {
+        let label = [("method", "getPersistentStateInfo")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
+
         let persistent_state_storage = self.storage().persistent_state_storage();
 
         let res = 'res: {
@@ -560,6 +584,9 @@ impl<B> Inner<B> {
         req: &rpc::GetPersistentStatePart,
     ) -> overlay::Response<Data> {
         const PART_MAX_SIZE: u64 = ByteSize::mib(2).as_u64();
+
+        let label = [("method", "getPersistentStatePart")];
+        let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
         let persistent_state_storage = self.storage().persistent_state_storage();
 
@@ -588,14 +615,4 @@ impl<B> Inner<B> {
             }
         }
     }
-}
-
-fn try_handle_prefix(req: &ServiceRequest) -> Result<(u32, &[u8]), tl_proto::TlError> {
-    let body = req.as_ref();
-    if body.len() < 4 {
-        return Err(tl_proto::TlError::UnexpectedEof);
-    }
-
-    let constructor = std::convert::identity(body).get_u32_le();
-    Ok((constructor, body))
 }
