@@ -1,8 +1,11 @@
+use bytes::Buf;
+
 pub use self::router::{Routable, Router, RouterBuilder};
 #[cfg(test)]
 pub use self::test::make_peer_info_stub;
 pub use self::traits::NetworkExt;
 use crate::types::PeerId;
+use crate::ServiceRequest;
 
 mod router;
 mod traits;
@@ -49,4 +52,14 @@ where
         return false;
     };
     public_key.verify(data, signature)
+}
+
+pub fn try_handle_prefix(req: &ServiceRequest) -> Result<(u32, &[u8]), tl_proto::TlError> {
+    let body = req.as_ref();
+    if body.len() < 4 {
+        return Err(tl_proto::TlError::UnexpectedEof);
+    }
+
+    let constructor = std::convert::identity(body).get_u32_le();
+    Ok((constructor, body))
 }
