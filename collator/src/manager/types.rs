@@ -41,6 +41,7 @@ impl BlockCandidateEntry {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum SendSyncStatus {
     NotReady,
     Ready,
@@ -53,21 +54,21 @@ pub struct BlockCandidateContainer {
     key: BlockCacheKey,
     block_id: BlockId,
     /// Current block candidate entry with signatures
-    entry: Option<BlockCandidateEntry>,
+    pub entry: Option<BlockCandidateEntry>,
     /// True when the candidate became valid due to the applied validation result.
     /// Updates by `set_validation_result()`
-    is_valid: bool,
+    pub is_valid: bool,
     /// * `NotReady` - is not ready to send to sync (no master block or it is not validated)
     /// * `Ready` - is ready to send to sync (containing master block validated and all including shard blocks too)
     /// * `Sending` - block candidate extracted for sending to sync
     /// * `Sent` - block cadidate is already sent to sync
     pub send_sync_status: SendSyncStatus,
     /// Hash ids of 1 or 2 (in case of merge) previous blocks in the shard or master chain
-    prev_blocks_keys: Vec<BlockCacheKey>,
+    pub prev_blocks_keys: Vec<BlockCacheKey>,
     /// Hash ids of all top shard blocks of corresponding shard chains, included in current block.
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without a master.
-    top_shard_blocks_keys: Vec<BlockCacheKey>,
+    pub top_shard_blocks_keys: Vec<BlockCacheKey>,
     /// Hash id of master block that includes current shard block in his subgraph
     pub containing_mc_block: Option<BlockCacheKey>,
 }
@@ -134,9 +135,8 @@ impl BlockCandidateContainer {
                 if already_synced {
                     // already synced block is valid and won't be sent to sync again
                     self.send_sync_status = SendSyncStatus::Synced;
-                } else if self.block_id().is_masterchain() {
-                    // master block is ready for sync when validated
-                    // but shard blocks should wait for master block
+                } else {
+                    // block is ready for sync when validated
                     self.send_sync_status = SendSyncStatus::Ready;
                 }
             }
@@ -151,20 +151,40 @@ impl BlockCandidateContainer {
         &self.top_shard_blocks_keys
     }
 
-    pub fn extract_entry_for_sending(&mut self) -> Result<BlockCandidateEntry> {
-        let entry = std::mem::take(&mut self.entry).ok_or_else(|| {
-            anyhow!(
-                "Block ({}) entry already extracted from cache for sending to sync",
-                self.block_id.as_short_id(),
-            )
-        })?;
-        self.send_sync_status = SendSyncStatus::Sending;
-        Ok(entry)
+    pub fn extract_entry_for_sending(&mut self) -> Result<Option<BlockCandidateToSend>> {
+        let entry_opt = match self.send_sync_status {
+            SendSyncStatus::NotReady => {
+                bail!(
+                    "Block is not ready for sync: ({})",
+                    self.block_id.as_short_id()
+                );
+            }
+            SendSyncStatus::Ready => {
+                let entry = std::mem::take(&mut self.entry).ok_or_else(|| {
+                    anyhow!(
+                        "Block ({}) entry already extracted from cache for sending to sync",
+                        self.block_id.as_short_id(),
+                    )
+                })?;
+                self.send_sync_status = SendSyncStatus::Sending;
+                Some(entry)
+            }
+            SendSyncStatus::Sending => {
+                // Already extracted and sending now
+                return Ok(None);
+            }
+            SendSyncStatus::Sent | SendSyncStatus::Synced => None,
+        };
+        Ok(Some(BlockCandidateToSend {
+            key: self.key,
+            entry: entry_opt,
+            send_sync_status: self.send_sync_status,
+        }))
     }
 
     pub fn restore_entry(
         &mut self,
-        entry: BlockCandidateEntry,
+        entry_opt: Option<BlockCandidateEntry>,
         send_sync_status: SendSyncStatus,
     ) -> Result<()> {
         // if block was not sent or synced then return cache entry status to Ready
@@ -182,7 +202,7 @@ impl BlockCandidateContainer {
                 self.block_id.as_short_id(),
             )
         } else {
-            self.entry = Some(entry);
+            self.entry = entry_opt;
             self.send_sync_status = new_send_sync_status;
         }
         Ok(())
@@ -195,14 +215,34 @@ impl BlockCandidateContainer {
             .ok_or_else(|| anyhow!("`entry` was extracted"))?;
         Ok(entry.candidate.block.as_ref())
     }
+
+    pub fn create_synced_from_bc(block_id: BlockId) -> Self {
+        Self {
+            key: block_id.as_short_id(),
+            block_id,
+            is_valid: true,
+            send_sync_status: SendSyncStatus::Synced,
+            entry: None,
+            containing_mc_block: None,
+            prev_blocks_keys: vec![],
+            top_shard_blocks_keys: vec![],
+        }
+    }
 }
 
 pub struct BlockCandidateToSend {
-    pub entry: BlockCandidateEntry,
+    pub key: BlockCacheKey,
+    pub entry: Option<BlockCandidateEntry>,
     pub send_sync_status: SendSyncStatus,
 }
 
-pub struct McBlockSubgraphToSend {
+pub(super) struct McBlockSubgraphToSend {
     pub mc_block: BlockCandidateToSend,
     pub shard_blocks: Vec<BlockCandidateToSend>,
+}
+
+pub(super) enum McBlockSubgraphExtract {
+    Extracted(McBlockSubgraphToSend),
+    NotFullValid,
+    AlreadyExtracted,
 }

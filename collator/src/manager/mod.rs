@@ -1,5 +1,5 @@
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::btree_map::{self};
+use std::collections::{hash_map, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,11 +11,11 @@ use parking_lot::{Mutex, RwLock};
 use tycho_block_util::block::ValidatorSubsetInfo;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
+use tycho_util::{DashMapEntry, FastDashMap, FastHashMap, FastHashSet};
 
 use self::types::{
     BlockCacheKey, BlockCandidateContainer, BlockCandidateToSend, BlocksCache, ChainTimesSyncState,
-    McBlockSubgraphToSend, SendSyncStatus,
+    McBlockSubgraphExtract, McBlockSubgraphToSend, SendSyncStatus,
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
@@ -89,6 +89,8 @@ where
     /// id of last master block collated by ourselves
     last_collated_mc_block_id: Mutex<Option<BlockId>>,
 
+    last_synced_blocks: FastDashMap<ShardIdent, u32>,
+
     chain_times_sync_state: Mutex<ChainTimesSyncState>,
 
     #[cfg(any(test, feature = "test"))]
@@ -127,13 +129,10 @@ where
         //      and validated by ourself. Will use this info for faster validation further:
         //      will consider that just collated block is already validated if it have the
         //      same root hash and file hash
-        if state.block_id().is_masterchain() {
-            let mc_data = McData::load_from_state(state)?;
-            self.spawn_task(method_to_async_closure!(process_mc_block_from_bc, mc_data))
-                .await
-        } else {
-            Ok(())
-        }
+        let state = state.clone();
+        self.spawn_task(method_to_async_closure!(process_block_from_bc, state))
+            .await?;
+        Ok(())
     }
 }
 
@@ -229,6 +228,7 @@ where
 
             last_processed_mc_block_id: Default::default(),
             last_collated_mc_block_id: Default::default(),
+            last_synced_blocks: Default::default(),
             chain_times_sync_state: Default::default(),
 
             #[cfg(any(test, feature = "test"))]
@@ -296,33 +296,66 @@ where
         Ok(())
     }
 
-    /// Process new master block from blockchain:
-    /// 1. Load block state
-    /// 2. Notify mempool about new master block
-    /// 3. Enqueue collation sessions refresh task
-    pub async fn process_mc_block_from_bc(&self, mc_data: Arc<McData>) -> Result<()> {
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Processing master block ({})", mc_data.block_id.as_short_id(),
-        );
+    /// Process new block from blockchain:
+    /// 1. Notify mempool about new master block if it is masterchain block
+    /// 2. Save block in cache with status Synced
+    /// 3. Stop validation if needed
+    /// 4. Refresh collation sessions if it is masterchain block
+    pub async fn process_block_from_bc(&self, state: ShardStateStuff) -> Result<()> {
+        let block_id = state.block_id();
+        if block_id.is_masterchain() {
+            // check if block from bc is newer than the last synced
+            {
+                if let Some(last_synced_block_from_bc) =
+                    self.last_synced_blocks.get(&block_id.shard)
+                {
+                    if *last_synced_block_from_bc.value() >= block_id.seqno {
+                        return Ok(());
+                    }
+                }
+                self.last_synced_blocks
+                    .insert(block_id.shard, block_id.seqno);
+            }
 
-        // check if we should skip this master block from the blockchain
-        // because it is not far ahead of last collated by ourselves
-        if !self.check_should_process_mc_block_from_bc(&mc_data.block_id) {
-            return Ok(());
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Store mc block ({}) received from blockchain ...",
+                block_id.as_short_id()
+            );
+
+            let stop_validation = self.store_mc_block_from_bc_in_cache(*block_id);
+
+            // INFO: this does not work because we are collating own blcok anyway and this update causes an issue
+            // let mc_block_chain_time =
+            //     state.state().gen_utime as u64 * 1000 + state.state().gen_utime_ms as u64;
+            // self.renew_mc_block_latest_chain_time(mc_block_chain_time);
+
+            // check if we should skip this master block from the blockchain
+            // because it is not far ahead of last collated by ourselves
+            if !self.check_should_process_mc_block_from_bc(&block_id) {
+                return Ok(());
+            }
+            // when state received execute master block processing routines
+            let mpool_adapter = self.mpool_adapter.clone();
+
+            tracing::info!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Processing requested mc state for block ({}) received from blockchain ...",
+                block_id.as_short_id()
+            );
+
+            Self::notify_mempool_about_mc_block(mpool_adapter, block_id).await?;
+
+            if stop_validation {
+                let short_id = block_id.as_short_id();
+                self.validator.cancel_validation(&short_id)?;
+                // Need to do validation routine
+                self.process_valid_master_block(&block_id).await?;
+            }
+
+            let mc_data = McData::load_from_state(&state)?;
+            self.refresh_collation_sessions(mc_data).await?;
         }
-
-        // when state received execute master block processing routines
-        let mpool_adapter = self.mpool_adapter.clone();
-
-        tracing::info!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Processing requested mc state for block ({})...",
-            mc_data.block_id.as_short_id()
-        );
-
-        Self::notify_mempool_about_mc_block(mpool_adapter, &mc_data.block_id).await?;
-
-        self.refresh_collation_sessions(mc_data).await?;
 
         Ok(())
     }
@@ -411,23 +444,31 @@ where
         }
     }
 
-    /// Returns: (seqno delta from other, true - if equal)
+    /// Returns: (seqno delta from other, true - if equal).
+    /// If `other_mc_block_id_opt` is none, returns : (0, false)
     fn compare_mc_block_with(
         mc_block_id: &BlockId,
         other_mc_block_id_opt: Option<&BlockId>,
     ) -> (i32, bool) {
-        // TODO: consider block shard?
         let (seqno_delta, is_equal) = match other_mc_block_id_opt {
-            None => (0, false),
+            None => {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "other mc block is None: current {} other ({:?}): is_equal = false, seqno_delta = 0",
+                    mc_block_id.as_short_id(),
+                    other_mc_block_id_opt.map(|b| b.as_short_id()),
+                );
+                (0, false)
+            }
             Some(other_mc_block_id) => (
                 mc_block_id.seqno as i32 - other_mc_block_id.seqno as i32,
                 mc_block_id == other_mc_block_id,
             ),
         };
         if seqno_delta < 0 || is_equal {
-            tracing::info!(
+            tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
-                "mc block ({}) is NOT AHEAD of other ({:?}): is_equal = {}, seqno_delta = {}",
+                "mc block is NOT AHEAD of other: current {} other ({:?}): is_equal = {}, seqno_delta = {}",
                 mc_block_id.as_short_id(),
                 other_mc_block_id_opt.map(|b| b.as_short_id()),
                 is_equal, seqno_delta,
@@ -450,7 +491,6 @@ where
         }
 
         // here we will wait for last applied master block then process it
-        // TODO: otherwise we can just request to resend last applied master block via `[StateNodeListener::on_mc_block_event()]`
         tracing::info!(
             target: tracing_targets::COLLATION_MANAGER,
             "Requesting last applied mc block to activate collation sessions...",
@@ -469,9 +509,10 @@ where
             .state_node_adapter
             .load_state(&last_mc_block_id)
             .await?;
+
         let mc_data = McData::load_from_state(&state)?;
 
-        self.process_mc_block_from_bc(mc_data).await
+        self.refresh_collation_sessions(mc_data).await
     }
 
     /// Get shards info from the master state,
@@ -500,7 +541,7 @@ where
         //      notably ahead of last collated by ourselves
         //
         //      So we will:
-        //      1. Check if we should process master block from the blockchain in `process_mc_block_from_bc`
+        //      1. Check if we should process master block from the blockchain in `process_block_from_bc`
         //      2. Skip refreshing sessions if this master was processed by any chance
 
         // do not re-process this master block if it is lower then last processed or equal to it
@@ -569,7 +610,7 @@ where
             for shard_info in new_shards_info {
                 missed_shards_ids.remove(&shard_info.0);
                 match active_collation_sessions_guard.entry(shard_info.0) {
-                    Entry::Occupied(entry) => {
+                    hash_map::Entry::Occupied(entry) => {
                         let existing_session = entry.get().clone();
                         if existing_session.seqno() >= new_session_seqno {
                             sessions_to_keep.insert(shard_info.0, existing_session);
@@ -580,7 +621,7 @@ where
                             entry.remove();
                         }
                     }
-                    Entry::Vacant(_) => {
+                    hash_map::Entry::Vacant(_) => {
                         sessions_to_start.push(shard_info);
                     }
                 }
@@ -727,12 +768,15 @@ where
 
                 let session_id = new_session_info.seqno();
 
-                self.validator.add_session(AddSession {
-                    shard_ident: shard_id,
-                    session_id,
-                    start_block_seqno: prev_seqno + 1,
-                    validators: &new_session_info.collators().validators,
-                })?;
+                // need to add session only for masterchain blocks, shard block are not being validated
+                if shard_id.is_masterchain() {
+                    self.validator.add_session(AddSession {
+                        shard_ident: shard_id,
+                        session_id,
+                        start_block_seqno: prev_seqno + 1,
+                        validators: &new_session_info.collators().validators,
+                    })?;
+                }
             } else {
                 tracing::info!(
                     target: tracing_targets::COLLATION_MANAGER,
@@ -853,35 +897,45 @@ where
             "Saving block candidate to cache...",
         );
 
-        self.store_candidate(collation_result.candidate)?;
+        let block_already_received_from_blockchain =
+            self.store_candidate(collation_result.candidate)?;
 
-        // send validation task to validator
-        // we need to send session info with the collators list to the validator
-        // to understand whom we must ask for signatures
-        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-            "Enqueueing block candidate validation...",
-        );
+        if block_id.is_masterchain() {
+            if block_already_received_from_blockchain {
+                self.process_valid_master_block(&block_id).await?;
+            } else {
+                // we don't need to validate shard blocks
+                // send validation task to validator
+                // we need to send session info with the collators list to the validator
+                // to understand whom we must ask for signatures
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "Enqueueing block candidate validation...",
+                );
 
-        let validator = self.validator.clone();
-        let session_seqno = session_info.seqno();
-        let dispatcher = self.dispatcher.clone();
-        tokio::spawn(async move {
-            // TODO: Fail collation instead of panicking?
-            let status = validator.validate(session_seqno, &block_id).await.unwrap();
+                let validator = self.validator.clone();
+                let session_seqno = session_info.seqno();
+                let dispatcher = self.dispatcher.clone();
+                tokio::spawn(async move {
+                    // TODO: Fail collation instead of panicking?
+                    let status = validator.validate(session_seqno, &block_id).await.unwrap();
 
-            _ = dispatcher
-                .spawn_task(method_to_async_closure!(
-                    process_validated_block,
-                    block_id,
-                    status
-                ))
-                .await;
-        });
+                    _ = dispatcher
+                        .spawn_task(method_to_async_closure!(
+                            process_validated_master_block,
+                            block_id,
+                            status
+                        ))
+                        .await;
+                });
 
-        debug_assert_eq!(
-            block_id.is_masterchain(),
-            collation_result.mc_data.is_some(),
-        );
+                debug_assert_eq!(
+                    block_id.is_masterchain(),
+                    collation_result.mc_data.is_some(),
+                );
+            }
+        } else {
+            self.process_valid_shard_block(&block_id).await?;
+        }
 
         // when candidate is master
         if let Some(mc_data) = collation_result.mc_data {
@@ -998,6 +1052,14 @@ where
             self.enqueue_try_collate(&shard_id).await?;
         }
         Ok(())
+    }
+
+    fn renew_mc_block_latest_chain_time(&self, chain_time: u64) {
+        let mut chain_times_guard = self.chain_times_sync_state.lock();
+
+        if chain_times_guard.mc_block_latest_chain_time < chain_time {
+            chain_times_guard.mc_block_latest_chain_time = chain_time;
+        }
     }
 
     /// 1. Store last collated chain time by shards
@@ -1121,7 +1183,7 @@ where
         (should_collate_mc_block, None)
     }
 
-    /// Find top shard blocks in cacche for the next master block collation
+    /// Find top shard blocks in cache for the next master block collation
     fn detect_top_shard_blocks_info_for_mc_block(
         &self,
         _next_mc_block_chain_time: u64,
@@ -1136,7 +1198,7 @@ where
             .filter_map(|shard_cache| shard_cache.value().last_key_value().map(|(_, v)| *v.key()))
             .collect::<VecDeque<BlockCacheKey>>();
 
-        let mut result = HashMap::new();
+        let mut result: HashMap<ShardIdent, TopBlockDescription> = HashMap::new();
         while let Some(prev_shard_block_key) = prev_shard_blocks_keys.pop_front() {
             let shard_cache = self
                 .blocks_cache
@@ -1155,24 +1217,30 @@ where
                     let fees_collected = value_flow.fees_collected.clone();
                     let funds_created = value_flow.created.clone();
 
-                    let top_block = result.entry(shard_block_container.key().shard).or_insert(
-                        TopBlockDescription {
-                            block_id: *shard_block_container.block_id(),
-                            block_info: block.load_info()?,
-                            value_flow,
-                            proof_funds: ProofFunds::default(),
-                            creators: vec![],
-                        },
-                    );
-                    top_block
-                        .proof_funds
-                        .fees_collected
-                        .checked_add(&fees_collected)?;
-                    top_block
-                        .proof_funds
-                        .funds_created
-                        .checked_add(&funds_created)?;
-                    top_block.creators.push(creator);
+                    match result.entry(shard_block_container.key().shard) {
+                        hash_map::Entry::Occupied(mut occupied) => {
+                            occupied
+                                .get_mut()
+                                .proof_funds
+                                .fees_collected
+                                .checked_add(&fees_collected)?;
+                            occupied
+                                .get_mut()
+                                .proof_funds
+                                .funds_created
+                                .checked_add(&funds_created)?;
+                            occupied.get_mut().creators.push(creator);
+                        }
+                        hash_map::Entry::Vacant(vacant) => {
+                            vacant.insert(TopBlockDescription {
+                                block_id: *shard_block_container.block_id(),
+                                block_info: block.load_info()?,
+                                value_flow,
+                                proof_funds: ProofFunds::default(),
+                                creators: vec![],
+                            });
+                        }
+                    };
 
                     shard_block_container
                         .prev_blocks_keys()
@@ -1191,7 +1259,7 @@ where
         Ok(result.into_values().collect())
     }
 
-    /// (TODO) Enqueue master block collation task. Will determine top shard blocks for this collation
+    /// Enqueue master block collation task. Will determine top shard blocks for this collation
     async fn enqueue_mc_block_collation(
         &self,
         next_mc_block_chain_time: u64,
@@ -1263,7 +1331,7 @@ where
     /// 2. Update block in cache with validation info
     /// 2. Execute processing for master or shard block
     #[tracing::instrument(skip_all, fields(block_id = %block_id.as_short_id()))]
-    pub async fn process_validated_block(
+    pub async fn process_validated_master_block(
         &self,
         block_id: BlockId,
         status: ValidationStatus,
@@ -1283,7 +1351,7 @@ where
             "Saving block validation result to cache...",
         );
         // update block in cache with signatures info
-        let updated = self.store_block_validation_result(block_id, status);
+        let updated = self.store_master_block_validation_result(block_id, status);
         if !updated {
             tracing::debug!(
                 target: tracing_targets::COLLATION_MANAGER,
@@ -1293,23 +1361,20 @@ where
         }
 
         // process valid block
-        if block_id.shard.is_masterchain() {
-            self.process_valid_master_block(&block_id).await?;
-        } else {
-            self.process_valid_shard_block(&block_id).await?;
-        }
+        self.process_valid_master_block(&block_id).await?;
 
         Ok(())
     }
 
-    /// Store block in a cache structure that allow to append signatures
-    fn store_candidate(&self, candidate: Box<BlockCandidate>) -> Result<()> {
+    /// Store block in a cache structure that allow to append signatures, returning if block is already stored in cache
+    fn store_candidate(&self, candidate: Box<BlockCandidate>) -> Result<bool> {
         // TODO: in future we may store to cache a block received from blockchain before,
         //      then it will exist in cache when we try to store collated candidate
         //      but the `root_hash` may differ, so we have to handle such a case
 
+        let mut already_stored = false;
         let block_id = *candidate.block.id();
-        let block_container = BlockCandidateContainer::new(candidate);
+        let mut block_container = BlockCandidateContainer::new(candidate);
         if block_id.shard.is_masterchain() {
             // traverse through including shard blocks and update their link to the containing master block
             let mut prev_shard_blocks_keys = block_container
@@ -1336,16 +1401,35 @@ where
                 }
             }
 
-            // save block to cache
-            if let Some(_existing) = self
-                .blocks_cache
-                .master
-                .insert(*block_container.key(), block_container)
-            {
-                bail!(
-                    "Should not collate the same master block ({}) again!",
-                    block_id,
-                );
+            if let Some(mut existing) = self.blocks_cache.master.get_mut(block_container.key()) {
+                if existing.send_sync_status == SendSyncStatus::Synced {
+                    assert_eq!(
+                        existing.block_id().root_hash,
+                        block_container.block_id().root_hash,
+                        "Block received from bc root hash mismatch with collated one"
+                    );
+                    // TODO: check block_id file hash ?
+
+                    // Block was previously received from bc and doesn't need to be validated further
+                    let container = existing.value_mut();
+                    if let Some(block_container_entry) = block_container.entry {
+                        container.entry = Some(block_container_entry);
+                    }
+                    container.prev_blocks_keys = block_container.prev_blocks_keys;
+                    container.top_shard_blocks_keys = block_container.top_shard_blocks_keys;
+                    container.containing_mc_block = block_container.containing_mc_block;
+                    already_stored = true;
+                } else {
+                    bail!(
+                        "Should not collate the same master block ({}) again!",
+                        block_id,
+                    );
+                }
+            } else {
+                // save block to cache
+                self.blocks_cache
+                    .master
+                    .insert(*block_container.key(), block_container);
             }
         } else {
             let mut shard_cache = self
@@ -1353,21 +1437,76 @@ where
                 .shards
                 .entry(block_container.key().shard)
                 .or_default();
-            if let Some(_existing) =
-                shard_cache.insert(block_container.key().seqno, block_container)
-            {
-                bail!(
-                    "Should not collate the same shard block ({}) again!",
-                    block_id,
-                );
+
+            match shard_cache.entry(block_container.key().seqno) {
+                btree_map::Entry::Occupied(_) => {
+                    bail!(
+                        "Should not collate the same shard block ({}) again!",
+                        block_id,
+                    );
+                }
+                btree_map::Entry::Vacant(vacant) => {
+                    block_container.send_sync_status = SendSyncStatus::Ready;
+                    block_container.is_valid = true;
+                    vacant.insert(block_container);
+                }
             }
         }
 
-        Ok(())
+        Ok(already_stored)
     }
 
-    /// Find block candidate in cache, append signatures info and return updated
-    fn store_block_validation_result(
+    /// Store mc block received from bc in a cache
+    fn store_mc_block_from_bc_in_cache(&self, block_id: BlockId) -> bool {
+        let block_container = BlockCandidateContainer::create_synced_from_bc(block_id);
+        let mut stop_validation = false;
+        // save block to cache
+        match self.blocks_cache.master.entry(*block_container.key()) {
+            DashMapEntry::Occupied(mut occupied) => {
+                assert_eq!(
+                    occupied.get().block_id().root_hash,
+                    block_container.block_id().root_hash,
+                    "Block received from bc root hash mismatch with collated one"
+                );
+
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "On apply block from bc, stored mc block in cache has status {:?}",
+                    occupied.get().send_sync_status
+                );
+
+                match occupied.get().send_sync_status {
+                    SendSyncStatus::NotReady => {
+                        // Validation process started, need to stop it
+                        stop_validation = true;
+                        // No need to send to sync
+                        let exiting = occupied.get_mut();
+                        exiting.is_valid = true;
+                        exiting.send_sync_status = SendSyncStatus::Synced;
+                    }
+                    SendSyncStatus::Ready => {
+                        // No need to send to sync
+                        let exiting = occupied.get_mut();
+                        exiting.send_sync_status = SendSyncStatus::Synced;
+                    }
+                    SendSyncStatus::Sending | SendSyncStatus::Sent | SendSyncStatus::Synced => {
+                        // Already synced - do nothing
+                    }
+                }
+            }
+            DashMapEntry::Vacant(vacant) => {
+                tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                    "On apply block from bc, there is no stored mc block in cache",
+                );
+
+                vacant.insert(block_container);
+            }
+        }
+
+        stop_validation
+    }
+
+    /// Find master block candidate in cache, append signatures info and return updated
+    fn store_master_block_validation_result(
         &self,
         block_id: BlockId,
         validation_result: ValidationStatus,
@@ -1377,19 +1516,12 @@ where
             ValidationStatus::Complete(signatures) => (true, false, signatures),
         };
 
-        if block_id.is_masterchain() {
-            if let Some(mut block_container) =
-                self.blocks_cache.master.get_mut(&block_id.as_short_id())
-            {
-                block_container.set_validation_result(is_valid, already_synced, signatures);
-                return true;
-            }
-        } else if let Some(mut shard_cache) = self.blocks_cache.shards.get_mut(&block_id.shard) {
-            if let Some(block_container) = shard_cache.get_mut(&block_id.seqno) {
-                block_container.set_validation_result(is_valid, already_synced, signatures);
-                return true;
-            }
+        if let Some(mut block_container) = self.blocks_cache.master.get_mut(&block_id.as_short_id())
+        {
+            block_container.set_validation_result(is_valid, already_synced, signatures);
+            return true;
         }
+
         false
     }
 
@@ -1420,9 +1552,9 @@ where
     fn extract_mc_block_subgraph_if_valid(
         &self,
         block_id: &BlockId,
-    ) -> Result<Option<McBlockSubgraphToSend>> {
+    ) -> Result<McBlockSubgraphExtract> {
         // 1. Find current master block
-        let (mc_block_container_key, mc_block_candidate_to_send, mut prev_shard_blocks_keys) = {
+        let (mc_block_container_key, mc_block_to_send, mut prev_shard_blocks_keys) = {
             let mut mc_block_container = self
                 .blocks_cache
                 .master
@@ -1434,10 +1566,12 @@ where
                     )
                 })?;
             if !mc_block_container.is_valid() {
-                return Ok(None);
+                return Ok(McBlockSubgraphExtract::NotFullValid);
             }
 
-            let mc_block_candidate_to_send = mc_block_container.extract_entry_for_sending()?;
+            let Some(mc_block_to_send) = mc_block_container.extract_entry_for_sending()? else {
+                return Ok(McBlockSubgraphExtract::AlreadyExtracted);
+            };
 
             let prev_shard_blocks_keys = mc_block_container
                 .top_shard_blocks_keys()
@@ -1447,16 +1581,13 @@ where
 
             (
                 *mc_block_container.key(),
-                mc_block_candidate_to_send,
+                mc_block_to_send,
                 prev_shard_blocks_keys,
             )
         };
 
         let mut subgraph = McBlockSubgraphToSend {
-            mc_block: BlockCandidateToSend {
-                entry: mc_block_candidate_to_send,
-                send_sync_status: SendSyncStatus::Sending,
-            },
+            mc_block: mc_block_to_send,
             shard_blocks: vec![],
         };
 
@@ -1480,10 +1611,9 @@ where
                         not_all_blocks_valid = true;
                         break;
                     }
-                    subgraph.shard_blocks.push(BlockCandidateToSend {
-                        entry: shard_block_container.extract_entry_for_sending()?,
-                        send_sync_status: SendSyncStatus::Sending,
-                    });
+                    subgraph
+                        .shard_blocks
+                        .push(shard_block_container.extract_entry_for_sending()?.unwrap());
                     shard_block_container
                         .prev_blocks_keys()
                         .iter()
@@ -1497,7 +1627,7 @@ where
             let mut blocks_to_restore = vec![subgraph.mc_block];
             blocks_to_restore.append(&mut subgraph.shard_blocks);
             self.restore_blocks_in_cache(blocks_to_restore)?;
-            return Ok(None);
+            return Ok(McBlockSubgraphExtract::NotFullValid);
         }
 
         tracing::debug!(
@@ -1507,11 +1637,11 @@ where
             subgraph
             .shard_blocks
             .iter()
-            .map(|sb| sb.entry.key.to_string())
+            .map(|sb| sb.key.to_string())
             .collect::<Vec<_>>().as_slice(),
         );
 
-        Ok(Some(subgraph))
+        Ok(McBlockSubgraphExtract::Extracted(subgraph))
     }
 
     /// Remove block entries from cache and compact cache
@@ -1549,7 +1679,7 @@ where
     fn restore_blocks_in_cache(&self, blocks_to_restore: Vec<BlockCandidateToSend>) -> Result<()> {
         let _tracing_blocks_descr = blocks_to_restore
             .iter()
-            .map(|b| b.entry.key.to_string())
+            .map(|b| b.key.to_string())
             .collect::<Vec<_>>();
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -1558,30 +1688,24 @@ where
         );
         for block in blocks_to_restore {
             // find block in cache
-            if block.entry.key.shard.is_masterchain() {
+            if block.key.shard.is_masterchain() {
                 let mut block_container = self
                     .blocks_cache
                     .master
-                    .get_mut(&block.entry.key)
-                    .ok_or_else(|| {
-                        anyhow!("Master block ({}) not found in cache!", block.entry.key)
-                    })?;
+                    .get_mut(&block.key)
+                    .ok_or_else(|| anyhow!("Master block ({}) not found in cache!", block.key))?;
                 block_container.restore_entry(block.entry, block.send_sync_status)?;
             } else {
                 let mut shard_cache = self
                     .blocks_cache
                     .shards
-                    .get_mut(&block.entry.key.shard)
+                    .get_mut(&block.key.shard)
                     .ok_or_else(|| {
-                        anyhow!(
-                            "Shard blocks map ({}) not found in cache!",
-                            block.entry.key.shard
-                        )
+                        anyhow!("Shard blocks map ({}) not found in cache!", block.key.shard)
                     })?;
-                let block_container =
-                    shard_cache.get_mut(&block.entry.key.seqno).ok_or_else(|| {
-                        anyhow!("Shard block ({}) not found in cache!", block.entry.key)
-                    })?;
+                let block_container = shard_cache
+                    .get_mut(&block.key.seqno)
+                    .ok_or_else(|| anyhow!("Shard block ({}) not found in cache!", block.key))?;
                 block_container.restore_entry(block.entry, block.send_sync_status)?;
             };
         }
@@ -1610,29 +1734,39 @@ where
         let mut sync_elapsed = Default::default();
 
         // extract master block with all shard blocks if valid, and process them
-        if let Some(mc_block_subgraph) = self.extract_mc_block_subgraph_if_valid(block_id)? {
-            extract_elapsed = histogram_extract.finish();
-            let timer = std::time::Instant::now();
+        match self.extract_mc_block_subgraph_if_valid(block_id)? {
+            McBlockSubgraphExtract::Extracted(mc_block_subgraph) => {
+                extract_elapsed = histogram_extract.finish();
+                let timer = std::time::Instant::now();
 
-            let mut blocks_to_send = mc_block_subgraph.shard_blocks;
-            blocks_to_send.reverse();
-            blocks_to_send.push(mc_block_subgraph.mc_block);
+                let mut blocks_to_send = mc_block_subgraph.shard_blocks;
+                blocks_to_send.reverse();
+                blocks_to_send.push(mc_block_subgraph.mc_block);
 
-            // send all shard and master blocks
-            self.send_blocks_to_sync(
-                self.mq_adapter.clone(),
-                self.state_node_adapter.clone(),
-                blocks_to_send,
-            )
-            .await?;
+                // send all shard and master blocks
+                self.send_blocks_to_sync(
+                    self.mq_adapter.clone(),
+                    self.state_node_adapter.clone(),
+                    blocks_to_send,
+                )
+                .await?;
 
-            sync_elapsed = timer.elapsed();
-        } else {
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Master block ({}) subgraph is not full valid. Will wait until all included shard blocks been validated",
-                block_id.as_short_id(),
-            );
+                sync_elapsed = timer.elapsed();
+            }
+            McBlockSubgraphExtract::NotFullValid => {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Master block ({}) subgraph is not full valid. Will wait until all included shard blocks been validated",
+                    block_id.as_short_id(),
+                );
+            }
+            McBlockSubgraphExtract::AlreadyExtracted => {
+                tracing::debug!(
+                    target: tracing_targets::COLLATION_MANAGER,
+                    "Master block ({}) subgraph is already extracted for sending",
+                    block_id.as_short_id(),
+                );
+            }
         }
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1690,7 +1824,7 @@ where
 
         let _tracing_blocks_to_send_descr = blocks_to_send
             .iter()
-            .map(|b| b.entry.key.to_string())
+            .map(|b| b.key.to_string())
             .collect::<Vec<_>>();
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -1710,7 +1844,8 @@ where
                 SendSyncStatus::Sent | SendSyncStatus::Synced => sent_blocks.push(block_to_send),
                 _ => {
                     let timer = std::time::Instant::now();
-                    let block_for_sync = block_to_send.entry.as_block_for_sync();
+                    let block_entry = block_to_send.entry.as_ref().unwrap();
+                    let block_for_sync = block_entry.as_block_for_sync();
                     build_stuff_for_sync_elapsed += timer.elapsed();
 
                     let timer = std::time::Instant::now();
@@ -1719,7 +1854,7 @@ where
                         tracing::warn!(
                             target: tracing_targets::COLLATION_MANAGER,
                             "Block ({}) sync: was not accepted. err: {:?}",
-                            block_to_send.entry.candidate.block.id().as_short_id(),
+                            block_entry.candidate.block.id().as_short_id(),
                             err,
                         );
                         should_restore_blocks_in_cache = true;
@@ -1728,9 +1863,11 @@ where
                         tracing::debug!(
                             target: tracing_targets::COLLATION_MANAGER,
                             "Block ({}) sync: was successfully sent to sync",
-                            block_to_send.entry.candidate.block.id().as_short_id(),
+                            block_entry.candidate.block.id().as_short_id(),
                         );
                         block_to_send.send_sync_status = SendSyncStatus::Sent;
+                        self.last_synced_blocks
+                            .insert(block_to_send.key.shard, block_to_send.key.seqno);
                         sent_blocks.push(block_to_send);
                     }
 
@@ -1747,13 +1884,11 @@ where
             for sent_block in sent_blocks.iter() {
                 // TODO: handle if diff does not exist
 
-                let block_id_short = sent_block.entry.candidate.block.id().as_short_id();
-
-                if let Err(err) = mq_adapter.commit_diff(&block_id_short).await {
+                if let Err(err) = mq_adapter.commit_diff(&sent_block.key).await {
                     tracing::warn!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block ({}) sync: error committing message queue diff: {:?}",
-                        block_id_short,
+                        sent_block.key,
                         err,
                     );
                     should_restore_blocks_in_cache = true;
@@ -1762,14 +1897,14 @@ where
                     tracing::debug!(
                         target: tracing_targets::COLLATION_MANAGER,
                         "Block ({}) sync: message queue diff was committed",
-                        block_id_short,
+                        sent_block.key,
                     );
                 }
             }
 
             // do not clenup blocks if msg queue diffs commit was unsuccessful
             if !should_restore_blocks_in_cache {
-                let sent_blocks_keys = sent_blocks.iter().map(|b| b.entry.key).collect::<Vec<_>>();
+                let sent_blocks_keys = sent_blocks.iter().map(|b| b.key).collect::<Vec<_>>();
                 let _tracing_sent_blocks_descr = sent_blocks_keys
                     .iter()
                     .map(|key| key.to_string())
