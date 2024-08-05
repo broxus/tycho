@@ -65,7 +65,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: check dashboard
-        run: python scripts/metrics_check.py
+        run: python scripts/check-metrics.py
 
   # clippy:
   #   name: Clippy

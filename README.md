@@ -35,7 +35,7 @@ just fmt
 just init_zerostate_config
 # Generate node config sub (with optional --force flag):
 just init_node_config
-# Generate a local network of 3 nodes:
+# Generate a local network of 3 nodes (with optional --force flag):
 just gen_network 3
 
 # Start nodes in separate terminals or spawn them with `&`:
@@ -43,6 +43,12 @@ just node 1
 just node 2
 just node 3
 ```
+
+> [!NOTE]
+> By default the `dev` profile is used. Use this env to specify a different profile:
+> ```bash
+> export TYCHO_BUILD_PROFILE=release
+> ```
 
 ## Prebuilt RocksDB
 
