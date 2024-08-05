@@ -208,7 +208,7 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::ArchiveInfoResponse::NotFound);
         };
 
-        let Some(size) = blocks.get_archive_size(Some(id))? else {
+        let Some(size) = blocks.get_archive_size(id)? else {
             return Ok(proto::ArchiveInfoResponse::NotFound);
         };
 
