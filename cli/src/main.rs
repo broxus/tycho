@@ -72,6 +72,7 @@ impl Cmd {
 #[derive(Subcommand)]
 enum NodeCmd {
     Run(node::CmdRun),
+    InitConfig(node::CmdInitConfig),
     #[clap(flatten)]
     Control(node::CmdControl),
 }
@@ -80,6 +81,7 @@ impl NodeCmd {
     fn run(self) -> Result<()> {
         match self {
             Self::Run(cmd) => cmd.run(),
+            Self::InitConfig(cmd) => cmd.run(),
             Self::Control(cmd) => cmd.run(),
         }
     }

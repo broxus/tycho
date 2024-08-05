@@ -55,32 +55,43 @@ mod control;
 
 const SERVICE_NAME: &str = "tycho-node";
 
-/// Run a Tycho node.
+/// Generate a default node config.
 #[derive(Parser)]
-pub struct CmdRun {
-    /// dump the template of the zero state config
-    #[clap(
-        short = 'i',
-        long,
-        conflicts_with_all = ["config", "global_config", "keys", "logger_config", "import_zerostate"]
-    )]
-    init_config: Option<PathBuf>,
+pub struct CmdInitConfig {
+    /// path to the output file
+    output: PathBuf,
 
     /// overwrite the existing config
     #[clap(short, long)]
     force: bool,
+}
 
+impl CmdInitConfig {
+    pub fn run(self) -> Result<()> {
+        if self.output.exists() && !self.force {
+            anyhow::bail!("config file already exists, use --force to overwrite");
+        }
+
+        NodeConfig::default()
+            .save_to_file(self.output)
+            .wrap_err("failed to save node config")
+    }
+}
+
+/// Run a Tycho node.
+#[derive(Parser)]
+pub struct CmdRun {
     /// path to the node config
-    #[clap(long, required_unless_present = "init_config")]
-    config: Option<PathBuf>,
+    #[clap(long)]
+    config: PathBuf,
 
     /// path to the global config
-    #[clap(long, required_unless_present = "init_config")]
-    global_config: Option<PathBuf>,
+    #[clap(long)]
+    global_config: PathBuf,
 
     /// path to the node keys
-    #[clap(long, required_unless_present = "init_config")]
-    keys: Option<PathBuf>,
+    #[clap(long)]
+    keys: PathBuf,
 
     /// path to the logger config
     #[clap(long)]
@@ -93,14 +104,8 @@ pub struct CmdRun {
 
 impl CmdRun {
     pub fn run(self) -> Result<()> {
-        if let Some(init_config_path) = self.init_config {
-            return NodeConfig::default()
-                .save_to_file(init_config_path)
-                .wrap_err("failed to save node config");
-        }
-
-        let node_config = NodeConfig::from_file(self.config.as_ref().unwrap())
-            .wrap_err("failed to load node config")?;
+        let node_config =
+            NodeConfig::from_file(&self.config).wrap_err("failed to load node config")?;
 
         rayon::ThreadPoolBuilder::new()
             .stack_size(8 * 1024 * 1024)
@@ -137,11 +142,10 @@ impl CmdRun {
         }
 
         let node = {
-            let global_config = GlobalConfig::from_file(self.global_config.unwrap())
+            let global_config = GlobalConfig::from_file(self.global_config)
                 .wrap_err("failed to load global config")?;
 
-            let keys =
-                NodeKeys::from_file(self.keys.unwrap()).wrap_err("failed to load node keys")?;
+            let keys = NodeKeys::from_file(self.keys).wrap_err("failed to load node keys")?;
 
             let public_ip = resolve_public_ip(node_config.public_ip).await?;
             let socket_addr = SocketAddr::new(public_ip, node_config.port);
