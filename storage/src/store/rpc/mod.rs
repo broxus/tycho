@@ -245,8 +245,11 @@ impl RpcStorage {
 
                 for entry in accounts.iter() {
                     let (id, (_, account)) = entry?;
-                    let Some(code_hash) = extract_code_hash(&account)? else {
-                        continue;
+
+                    let code_hash = match extract_code_hash(&account)? {
+                        ExtractedCodeHash::Exact(Some(code_hash)) => code_hash,
+                        ExtractedCodeHash::Exact(None) => continue,
+                        ExtractedCodeHash::Skip => anyhow::bail!("code in account state is pruned"),
                     };
 
                     non_empty_batch |= true;
@@ -671,6 +674,19 @@ impl RpcStorage {
         remove: bool,
         write_batch: &mut rocksdb::WriteBatch,
     ) -> Result<()> {
+        // Find the new code hash
+        let new_code_hash = 'code_hash: {
+            if !remove {
+                if let Some((_, account)) = accounts.get(account)? {
+                    match extract_code_hash(&account)? {
+                        ExtractedCodeHash::Exact(hash) => break 'code_hash hash,
+                        ExtractedCodeHash::Skip => return Ok(()),
+                    }
+                }
+            }
+            None
+        };
+
         // Prepare column families
         let code_hashes_cf = &db.code_hashes.cf();
         let code_hashes_by_address_cf = &db.code_hashes_by_address.cf();
@@ -684,16 +700,6 @@ impl RpcStorage {
         let old_code_hash = db
             .code_hashes_by_address
             .get(code_hashes_by_address_id.as_slice())?;
-
-        // Find the new code hash
-        let new_code_hash = 'code_hash: {
-            if !remove {
-                if let Some((_, account)) = accounts.get(account)? {
-                    break 'code_hash extract_code_hash(&account)?;
-                }
-            }
-            None
-        };
 
         if remove && old_code_hash.is_none()
             || matches!(
@@ -880,15 +886,29 @@ where
     }
 }
 
-fn extract_code_hash(account: &ShardAccount) -> Result<Option<HashBytes>> {
+enum ExtractedCodeHash {
+    Exact(Option<HashBytes>),
+    Skip,
+}
+
+fn extract_code_hash(account: &ShardAccount) -> Result<ExtractedCodeHash> {
+    if account.account.inner().descriptor().is_pruned_branch() {
+        return Ok(ExtractedCodeHash::Skip);
+    }
+
     if let Some(account) = account.load_account()? {
         if let AccountState::Active(state_init) = &account.state {
             if let Some(code) = &state_init.code {
-                return Ok(Some(*code.repr_hash()));
+                if code.descriptor().is_pruned_branch() {
+                    return Ok(ExtractedCodeHash::Skip);
+                }
+
+                return Ok(ExtractedCodeHash::Exact(Some(*code.repr_hash())));
             }
         }
     }
-    Ok(None)
+
+    Ok(ExtractedCodeHash::Exact(None))
 }
 
 fn split_shard(

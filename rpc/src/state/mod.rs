@@ -204,10 +204,10 @@ impl RpcState {
 }
 
 impl StateSubscriber for RpcState {
-    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+    type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        Box::pin(async { self.inner.update_accounts_cache(&cx.block, &cx.state) })
+        futures_util::future::ready(self.inner.update_accounts_cache(&cx.block, &cx.state))
     }
 }
 

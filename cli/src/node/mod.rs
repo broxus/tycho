@@ -621,6 +621,7 @@ impl Node {
             .with_state(strider_state)
             .with_block_subscriber(
                 (
+                    rpc_state.clone(),
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
