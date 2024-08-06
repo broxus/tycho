@@ -354,6 +354,9 @@ impl CollatorStdImpl {
             collated_file_hash: HashBytes::ZERO,
             chain_time: (new_block_info.gen_utime as u64 * 1000)
                 + new_block_info.gen_utime_ms as u64,
+            fees_collected: value_flow.fees_collected,
+            funds_created: value_flow.created,
+            created_by: collation_data.created_by,
         });
 
         let total_elapsed = histogram.finish();

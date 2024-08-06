@@ -161,6 +161,9 @@ pub struct BlockCandidate {
     pub collated_data: Vec<u8>,
     pub collated_file_hash: HashBytes,
     pub chain_time: u64,
+    pub fees_collected: CurrencyCollection,
+    pub funds_created: CurrencyCollection,
+    pub created_by: HashBytes,
 }
 
 #[derive(Default, Clone)]
