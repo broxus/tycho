@@ -207,7 +207,7 @@ impl StateSubscriber for RpcState {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        Box::pin(self.inner.update(&cx.block, Some(&cx.state)))
+        Box::pin(async { self.inner.update_accounts_cache(&cx.block, &cx.state) })
     }
 }
 
@@ -226,7 +226,7 @@ impl BlockSubscriber for RpcState {
         cx: &'a BlockSubscriberContext,
         _: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        Box::pin(self.inner.update(&cx.block, None))
+        Box::pin(self.inner.update(&cx.block))
     }
 }
 
@@ -359,7 +359,7 @@ impl Inner {
         }
     }
 
-    async fn update(&self, block: &BlockStuff, state: Option<&ShardStateStuff>) -> Result<()> {
+    async fn update(&self, block: &BlockStuff) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_rpc_state_update_time");
 
         let is_masterchain = block.id().is_masterchain();
@@ -367,13 +367,14 @@ impl Inner {
             self.update_mc_block_cache(block)?;
         }
 
-        let accounts = if let Some(state) = state {
-            Some(self.update_accounts_cache(block, state)?)
-        } else {
-            None
-        };
-
         if let Some(rpc_storage) = self.storage.rpc_storage() {
+            let merkle_update = block.block().state_update.load()?;
+            let state = merkle_update
+                .new
+                .virtualize()
+                .parse::<ShardStateUnsplit>()?;
+
+            let accounts = state.load_accounts()?.dict().clone();
             rpc_storage.update(block.clone(), accounts).await?;
 
             if is_masterchain {
@@ -448,11 +449,9 @@ impl Inner {
         }
     }
 
-    fn update_accounts_cache(
-        &self,
-        block: &BlockStuff,
-        state: &ShardStateStuff,
-    ) -> Result<ShardAccountsDict> {
+    fn update_accounts_cache(&self, block: &BlockStuff, state: &ShardStateStuff) -> Result<()> {
+        let _histogram = HistogramGuard::begin("tycho_rpc_state_update_accounts_cache_time");
+
         let shard = block.id().shard;
 
         // TODO: Get `gen_utime` from somewhere else.
@@ -461,7 +460,7 @@ impl Inner {
         let accounts = state.state().load_accounts()?.dict().clone();
 
         let cached = CachedAccounts {
-            accounts: accounts.clone(),
+            accounts,
             mc_ref_hanlde: state.ref_mc_state_handle().clone(),
             gen_utime: block_info.gen_utime,
         };
@@ -514,7 +513,7 @@ impl Inner {
             }
         }
 
-        Ok(accounts)
+        Ok(())
     }
 }
 
@@ -637,4 +636,134 @@ pub enum RpcStateError {
     NotSupported,
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
+}
+
+#[cfg(test)]
+mod test {
+    use std::str::FromStr;
+
+    use anyhow::Result;
+    use everscale_types::boc::Boc;
+    use everscale_types::models::{Block, BlockId};
+    use everscale_types::prelude::HashBytes;
+    use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+    use tycho_core::block_strider::{BlockSubscriber, BlockSubscriberContext};
+    use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
+    use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
+    use tycho_network::{
+        service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
+        Response, ServiceExt, ServiceRequest,
+    };
+    use tycho_storage::{Storage, StorageConfig};
+    use tycho_util::project_root;
+
+    use crate::{RpcConfig, RpcState};
+
+    fn echo_service() -> BoxCloneService<ServiceRequest, Response> {
+        let handle = |request: ServiceRequest| async move {
+            tracing::trace!("received: {}", request.body.escape_ascii());
+            let response = Response {
+                version: Default::default(),
+                body: request.body,
+            };
+            Some(response)
+        };
+        service_query_fn(handle).boxed_clone()
+    }
+
+    fn make_network(service_name: &str) -> Result<Network> {
+        Network::builder()
+            .with_config(NetworkConfig::default())
+            .with_random_private_key()
+            .with_service_name(service_name)
+            .build("127.0.0.1:0", echo_service())
+    }
+
+    fn get_block() -> BlockStuffAug {
+        let block_data = include_bytes!("../../../core/tests/data/block.bin");
+
+        let root = Boc::decode(block_data).unwrap();
+        let block = root.parse::<Block>().unwrap();
+
+        let block_id = BlockId {
+            root_hash: *root.repr_hash(),
+            ..Default::default()
+        };
+
+        BlockStuff::from_block_and_root(&block_id, block, root)
+            .with_archive_data(block_data.as_slice())
+    }
+
+    #[tokio::test]
+    async fn rcp_state_handle_block() -> Result<()> {
+        tycho_util::test::init_logger("rcp_state_handle_block", "debug");
+
+        let project_root = project_root()?.join(".scratch");
+        let integration_test_path = project_root.join("integration_tests");
+        let current_test_path = integration_test_path.join("rcp_state_handle_block");
+        std::fs::remove_dir_all(&current_test_path).ok();
+        std::fs::create_dir_all(&current_test_path)?;
+
+        let config = RpcConfig::default();
+
+        let storage = Storage::builder()
+            .with_config(StorageConfig::new_potato(
+                current_test_path.join("db").as_path(),
+            ))
+            .with_rpc_storage(true)
+            .build()?;
+
+        let network = make_network("tycho")?;
+
+        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
+            BlockchainRpcService::builder()
+                .with_storage(storage.clone())
+                .without_broadcast_listener()
+                .build(),
+        );
+
+        let blockchain_rpc_client = BlockchainRpcClient::builder()
+            .with_public_overlay_client(PublicOverlayClient::new(
+                network,
+                public_overlay,
+                PublicOverlayClientConfig::default(),
+            ))
+            .build();
+
+        let rpc_state = RpcState::builder()
+            .with_config(config)
+            .with_storage(storage)
+            .with_blockchain_rpc_client(blockchain_rpc_client)
+            .build();
+
+        let block = get_block();
+
+        let ctx = BlockSubscriberContext {
+            mc_block_id: BlockId::default(),
+            is_key_block: false,
+            block: block.data,
+            archive_data: block.archive_data,
+        };
+
+        rpc_state.handle_block(&ctx, ()).await?;
+
+        let account = HashBytes::from_str(
+            "d7ce76fcf11423e3eb332e72c5f10e4b2cd45a8f356161c930e391e4023784d3",
+        )?;
+
+        let new_code_hash = HashBytes::from_str(
+            "d66d198766abdbe1253f3415826c946c371f5112552408625aeb0b31e0ef2df3",
+        )?;
+
+        let account_by_code_hash = rpc_state
+            .get_accounts_by_code_hash(&new_code_hash, None)?
+            .last()
+            .unwrap();
+
+        assert_eq!(account, account_by_code_hash.address);
+
+        Ok(())
+    }
+
+    static PUBLIC_OVERLAY_ID: OverlayId = OverlayId([1; 32]);
 }

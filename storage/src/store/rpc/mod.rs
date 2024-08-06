@@ -526,11 +526,7 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
-    pub async fn update(
-        &self,
-        block: BlockStuff,
-        accounts: Option<ShardAccountsDict>,
-    ) -> Result<()> {
+    pub async fn update(&self, block: BlockStuff, accounts: ShardAccountsDict) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -569,7 +565,7 @@ impl RpcStorage {
                 tx_key[1..33].copy_from_slice(account.as_slice());
 
                 // Flag to update code hash
-                let mut has_special_actions = accounts.is_none(); // skip updates if no state provided
+                let mut has_special_actions = false;
                 let mut was_active = false;
                 let mut is_active = false;
 
@@ -625,32 +621,30 @@ impl RpcStorage {
                 }
 
                 // Update code hash
-                if let Some(accounts) = &accounts {
-                    let update = if is_active && (!was_active || has_special_actions) {
-                        // Account is active after this block and this is either a new account,
-                        // or it was an existing account which possibly changed its code.
-                        // Update: just store the code hash.
-                        Some(false)
-                    } else if was_active && !is_active {
-                        // Account was active before this block and is not active after the block.
-                        // Update: remove the code hash.
-                        Some(true)
-                    } else {
-                        // No update for other cases
-                        None
-                    };
+                let update = if is_active && (!was_active || has_special_actions) {
+                    // Account is active after this block and this is either a new account,
+                    // or it was an existing account which possibly changed its code.
+                    // Update: just store the code hash.
+                    Some(false)
+                } else if was_active && !is_active {
+                    // Account was active before this block and is not active after the block.
+                    // Update: remove the code hash.
+                    Some(true)
+                } else {
+                    // No update for other cases
+                    None
+                };
 
-                    // Apply the update if any
-                    if let Some(remove) = update {
-                        Self::update_code_hash(
-                            &db,
-                            workchain,
-                            &account,
-                            accounts,
-                            remove,
-                            &mut write_batch,
-                        )?;
-                    }
+                // Apply the update if any
+                if let Some(remove) = update {
+                    Self::update_code_hash(
+                        &db,
+                        workchain,
+                        &account,
+                        &accounts,
+                        remove,
+                        &mut write_batch,
+                    )?;
                 }
             }
 
@@ -694,8 +688,6 @@ impl RpcStorage {
         // Find the new code hash
         let new_code_hash = 'code_hash: {
             if !remove {
-                metrics::counter!("tycho_storage_rpc_state_accounts_requests").increment(1);
-
                 if let Some((_, account)) = accounts.get(account)? {
                     break 'code_hash extract_code_hash(&account)?;
                 }
