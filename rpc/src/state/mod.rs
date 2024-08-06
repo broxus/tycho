@@ -106,6 +106,18 @@ impl RpcState {
         }
     }
 
+    pub fn state_subscriber(&self) -> RpcStateSubscriber {
+        RpcStateSubscriber {
+            inner: self.inner.clone(),
+        }
+    }
+
+    pub fn block_subscriber(&self) -> RpcBlockSubscriber {
+        RpcBlockSubscriber {
+            inner: self.inner.clone(),
+        }
+    }
+
     pub async fn init(&self, mc_block_id: &BlockId) -> Result<()> {
         self.inner.init(mc_block_id).await
     }
@@ -203,7 +215,11 @@ impl RpcState {
     }
 }
 
-impl StateSubscriber for RpcState {
+pub struct RpcStateSubscriber {
+    inner: Arc<Inner>,
+}
+
+impl StateSubscriber for RpcStateSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
@@ -211,7 +227,11 @@ impl StateSubscriber for RpcState {
     }
 }
 
-impl BlockSubscriber for RpcState {
+pub struct RpcBlockSubscriber {
+    inner: Arc<Inner>,
+}
+
+impl BlockSubscriber for RpcBlockSubscriber {
     type Prepared = ();
 
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
@@ -745,7 +765,7 @@ mod test {
             archive_data: block.archive_data,
         };
 
-        rpc_state.handle_block(&ctx, ()).await?;
+        rpc_state.block_subscriber().handle_block(&ctx, ()).await?;
 
         let account = HashBytes::from_str(
             "d7ce76fcf11423e3eb332e72c5f10e4b2cd45a8f356161c930e391e4023784d3",

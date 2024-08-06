@@ -481,7 +481,7 @@ impl Node {
         );
 
         // Create RPC
-        let rpc_state = if let Some(config) = &self.rpc_config {
+        let (rpc_state_subscriber, rpc_block_subscriber) = if let Some(config) = &self.rpc_config {
             let rpc_state = RpcState::builder()
                 .with_config(config.clone())
                 .with_storage(self.storage.clone())
@@ -503,9 +503,12 @@ impl Node {
                 tracing::info!("RPC server stopped");
             });
 
-            Some(rpc_state)
+            (
+                Some(rpc_state.state_subscriber()),
+                Some(rpc_state.block_subscriber()),
+            )
         } else {
-            None
+            (None, None)
         };
 
         // Create collator
@@ -621,11 +624,11 @@ impl Node {
             .with_state(strider_state)
             .with_block_subscriber(
                 (
-                    rpc_state.clone(),
+                    rpc_block_subscriber,
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
-                        (collator_state_subscriber, rpc_state),
+                        (collator_state_subscriber, rpc_state_subscriber),
                     ),
                     (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                 )
