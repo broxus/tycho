@@ -24,7 +24,7 @@ use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
     BlockCandidate, BlockCollationResult, CollationConfig, CollationSessionId,
-    CollationSessionInfo, McData, ProofFunds, TopBlockDescription,
+    CollationSessionInfo, McData, TopBlockDescription,
 };
 use crate::utils::async_dispatcher::{AsyncDispatcher, STANDARD_ASYNC_DISPATCHER_BUFFER_SIZE};
 use crate::utils::schedule_async_action;
@@ -1189,74 +1189,23 @@ where
         _next_mc_block_chain_time: u64,
         _trigger_shard_block_id_opt: Option<BlockId>,
     ) -> Result<Vec<TopBlockDescription>> {
-        // TODO: make real implementation (see comments in `enqueue_mc_block_collation``)
-
-        let mut prev_shard_blocks_keys = self
-            .blocks_cache
-            .shards
-            .iter()
-            .filter_map(|shard_cache| shard_cache.value().last_key_value().map(|(_, v)| *v.key()))
-            .collect::<VecDeque<BlockCacheKey>>();
-
-        let mut result: HashMap<ShardIdent, TopBlockDescription> = HashMap::new();
-        while let Some(prev_shard_block_key) = prev_shard_blocks_keys.pop_front() {
-            let shard_cache = self
-                .blocks_cache
-                .shards
-                .get(&prev_shard_block_key.shard)
-                .ok_or_else(|| {
-                    anyhow!("Shard block ({}) not found in cache!", prev_shard_block_key)
-                })?;
-            if let Some(shard_block_container) = shard_cache.get(&prev_shard_block_key.seqno) {
-                // if shard block is not included in any master block
-                if shard_block_container.containing_mc_block.is_none() {
-                    let block = shard_block_container.get_block()?;
-                    let value_flow = block.load_value_flow()?;
-                    let block_extra = block.load_extra()?;
-                    let creator = block_extra.created_by;
-                    let fees_collected = value_flow.fees_collected.clone();
-                    let funds_created = value_flow.created.clone();
-
-                    match result.entry(shard_block_container.key().shard) {
-                        hash_map::Entry::Occupied(mut occupied) => {
-                            occupied
-                                .get_mut()
-                                .proof_funds
-                                .fees_collected
-                                .checked_add(&fees_collected)?;
-                            occupied
-                                .get_mut()
-                                .proof_funds
-                                .funds_created
-                                .checked_add(&funds_created)?;
-                            occupied.get_mut().creators.push(creator);
-                        }
-                        hash_map::Entry::Vacant(vacant) => {
-                            vacant.insert(TopBlockDescription {
-                                block_id: *shard_block_container.block_id(),
-                                block_info: block.load_info()?,
-                                value_flow,
-                                proof_funds: ProofFunds::default(),
-                                creators: vec![],
-                            });
-                        }
-                    };
-
-                    shard_block_container
-                        .prev_blocks_keys()
-                        .iter()
-                        .cloned()
-                        .for_each(|sub_prev| prev_shard_blocks_keys.push_back(sub_prev));
+        let mut result = vec![];
+        for mut shard_cache in self.blocks_cache.shards.iter_mut() {
+            let cache = shard_cache.value_mut();
+            if let Some((_, container)) = cache.blocks.last_key_value() {
+                if container.containing_mc_block.is_none() {
+                    result.push(TopBlockDescription {
+                        block_id: *container.block_id(),
+                        block_info: container.get_block()?.load_info()?,
+                        value_flow: std::mem::take(&mut cache.value_flow),
+                        proof_funds: std::mem::take(&mut cache.proof_funds),
+                        creators: std::mem::take(&mut cache.creators),
+                    });
                 }
             }
         }
 
-        // STUB: when we work with only one shard we can just get the last shard block
-        //      because collator manager will try run master block collation before
-        //      before processing any next candidate from the shard collator
-        //      because of dispatcher tasks queue
-
-        Ok(result.into_values().collect())
+        Ok(result)
     }
 
     /// Enqueue master block collation task. Will determine top shard blocks for this collation
@@ -1388,7 +1337,9 @@ where
                     .shards
                     .get_mut(&prev_shard_block_key.shard)
                 {
-                    if let Some(shard_block) = shard_cache.get_mut(&prev_shard_block_key.seqno) {
+                    if let Some(shard_block) =
+                        shard_cache.blocks.get_mut(&prev_shard_block_key.seqno)
+                    {
                         if shard_block.containing_mc_block.is_none() {
                             shard_block.containing_mc_block = Some(*block_container.key());
                             shard_block
@@ -1438,7 +1389,7 @@ where
                 .entry(block_container.key().shard)
                 .or_default();
 
-            match shard_cache.entry(block_container.key().seqno) {
+            let aggregate = match shard_cache.blocks.entry(block_container.key().seqno) {
                 btree_map::Entry::Occupied(_) => {
                     bail!(
                         "Should not collate the same shard block ({}) again!",
@@ -1448,8 +1399,28 @@ where
                 btree_map::Entry::Vacant(vacant) => {
                     block_container.send_sync_status = SendSyncStatus::Ready;
                     block_container.is_valid = true;
+                    let aggregate = block_container.entry.as_ref().map(|e| {
+                        (
+                            e.candidate.fees_collected.clone(),
+                            e.candidate.funds_created.clone(),
+                            e.candidate.created_by,
+                        )
+                    });
                     vacant.insert(block_container);
+                    aggregate
                 }
+            };
+
+            if let Some((fees_collected, funds_created, created_by)) = aggregate {
+                shard_cache
+                    .proof_funds
+                    .fees_collected
+                    .checked_add(&fees_collected)?;
+                shard_cache
+                    .proof_funds
+                    .funds_created
+                    .checked_add(&funds_created)?;
+                shard_cache.creators.push(created_by);
             }
         }
 
@@ -1531,6 +1502,7 @@ where
         if let Some(shard_cache) = self.blocks_cache.shards.get(&shard_block_id.shard) {
             if let Some(mc_block_key) = shard_cache
                 .value()
+                .blocks
                 .get(&shard_block_id.seqno)
                 .and_then(|sbc| sbc.containing_mc_block)
             {
@@ -1602,7 +1574,9 @@ where
                 .ok_or_else(|| {
                     anyhow!("Shard block ({}) not found in cache!", prev_shard_block_key)
                 })?;
-            if let Some(shard_block_container) = shard_cache.get_mut(&prev_shard_block_key.seqno) {
+            if let Some(shard_block_container) =
+                shard_cache.blocks.get_mut(&prev_shard_block_key.seqno)
+            {
                 // if shard block included in current master block subgraph
                 if matches!(shard_block_container.containing_mc_block, Some(containing_mc_block_key) if containing_mc_block_key == mc_block_container_key)
                 {
@@ -1660,7 +1634,7 @@ where
                 self.blocks_cache.master.remove(block_key);
             } else if let Some(mut shard_cache) = self.blocks_cache.shards.get_mut(&block_key.shard)
             {
-                shard_cache.remove(&block_key.seqno);
+                shard_cache.blocks.remove(&block_key.seqno);
             }
         }
         tracing::debug!(
@@ -1704,6 +1678,7 @@ where
                         anyhow!("Shard blocks map ({}) not found in cache!", block.key.shard)
                     })?;
                 let block_container = shard_cache
+                    .blocks
                     .get_mut(&block.key.seqno)
                     .ok_or_else(|| anyhow!("Shard block ({}) not found in cache!", block.key))?;
                 block_container.restore_entry(block.entry, block.send_sync_status)?;

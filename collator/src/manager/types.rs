@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent};
+use everscale_types::cell::HashBytes;
+use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, ValueFlow};
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync};
+use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync, ProofFunds};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -20,7 +21,15 @@ pub(super) struct ChainTimesSyncState {
 #[derive(Default)]
 pub(super) struct BlocksCache {
     pub master: FastDashMap<BlockCacheKey, BlockCandidateContainer>,
-    pub shards: FastDashMap<ShardIdent, BTreeMap<BlockSeqno, BlockCandidateContainer>>,
+    pub shards: FastDashMap<ShardIdent, ShardBlocksCache>,
+}
+
+#[derive(Default)]
+pub(super) struct ShardBlocksCache {
+    pub blocks: BTreeMap<BlockSeqno, BlockCandidateContainer>,
+    pub value_flow: ValueFlow,
+    pub proof_funds: ProofFunds,
+    pub creators: Vec<HashBytes>,
 }
 
 pub struct BlockCandidateEntry {
