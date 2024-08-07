@@ -118,20 +118,37 @@ where
     CF: CollatorFactory,
     V: Validator,
 {
-    async fn on_block_accepted(&self, _block_id: &BlockId) -> Result<()> {
+    async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
+        let state = state.clone();
+        self.spawn_task(method_to_async_closure!(
+            try_detect_top_processed_to_anchor_and_notify_mempool,
+            state
+        ))
+        .await?;
+
         // TODO: remove accepted block from cache
         // STUB: do nothing, currently we remove block from cache when it sent to state node
+
         Ok(())
     }
 
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
-        // TODO: should store block info from blockchain if it was not already collated
-        //      and validated by ourself. Will use this info for faster validation further:
-        //      will consider that just collated block is already validated if it have the
-        //      same root hash and file hash
-        let state = state.clone();
-        self.spawn_task(method_to_async_closure!(process_block_from_bc, state))
-            .await?;
+        // TODO: should use received block info to cancel and prevent it collation
+
+        let state_cloned = state.clone();
+        self.spawn_task(method_to_async_closure!(
+            try_detect_top_processed_to_anchor_and_notify_mempool,
+            state_cloned
+        ))
+        .await?;
+
+        let state_cloned = state.clone();
+        self.spawn_task(method_to_async_closure!(
+            process_block_from_bc,
+            state_cloned
+        ))
+        .await?;
+
         Ok(())
     }
 }
@@ -293,6 +310,46 @@ where
     /// jusct sync blcoks from blockchain
     pub async fn process_new_anchor_from_mempool(&self, _anchor: Arc<MempoolAnchor>) -> Result<()> {
         // TODO: make real implementation, currently does nothing
+        Ok(())
+    }
+
+    /// Tries to determine top anchor that was processed to
+    /// by info from received state and notify mempool
+    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
+    async fn try_detect_top_processed_to_anchor_and_notify_mempool(
+        &self,
+        state: ShardStateStuff,
+    ) -> Result<()> {
+        let block_id = *state.block_id();
+
+        // will make this only for master blocks
+        if !block_id.is_masterchain() {
+            return Ok(());
+        }
+
+        if let Some(externals_processed_upto) = state.state().processed_upto.load()?.externals {
+            // get top processed to anchor id for master block
+            let mut min_top_anchor_id = externals_processed_upto.processed_to.0;
+
+            // read from shard descriptions to get min
+            for item in state.shards()?.iter() {
+                let (_, shard_descr) = item?;
+                if shard_descr.top_sc_block_updated {
+                    min_top_anchor_id =
+                        min_top_anchor_id.min(shard_descr.ext_processed_to_anchor_id);
+                }
+            }
+
+            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                mc_processed_to_anchor_id = externals_processed_upto.processed_to.0,
+                "detected min_top_anchor_id={}, will notify mempool",
+                min_top_anchor_id,
+            );
+            self.mpool_adapter
+                .handle_top_processed_to_anchor(min_top_anchor_id)
+                .await?;
+        }
+
         Ok(())
     }
 
@@ -1194,9 +1251,11 @@ where
             let cache = shard_cache.value_mut();
             if let Some((_, container)) = cache.blocks.last_key_value() {
                 if container.containing_mc_block.is_none() {
+                    let entry = container.entry()?;
                     result.push(TopBlockDescription {
                         block_id: *container.block_id(),
-                        block_info: container.get_block()?.load_info()?,
+                        block_info: entry.candidate.block.load_info()?,
+                        ext_processed_to_anchor_id: entry.candidate.ext_processed_upto_anchor_id,
                         value_flow: std::mem::take(&mut cache.value_flow),
                         proof_funds: std::mem::take(&mut cache.proof_funds),
                         creators: std::mem::take(&mut cache.creators),

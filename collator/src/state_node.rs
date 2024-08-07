@@ -40,9 +40,9 @@ where
 
 #[async_trait]
 pub trait StateNodeEventListener: Send + Sync {
-    /// When our collated block was accepted and applied in state node
-    async fn on_block_accepted(&self, block_id: &BlockId) -> Result<()>;
-    /// When new applied block was received from blockchain
+    /// When our collated block was accepted and applied
+    async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()>;
+    /// When new block was received and applied from blockchain
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()>;
 }
 
@@ -233,7 +233,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                         HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
 
                     tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
-                    self.listener.on_block_accepted(&block_id).await?;
+                    self.listener.on_block_accepted(state).await?;
                 }
             }
         }

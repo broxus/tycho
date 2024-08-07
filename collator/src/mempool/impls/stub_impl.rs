@@ -245,6 +245,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         }
     }
 
+    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
+        Ok(())
+    }
+
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
         let mut anchors_cache = self.anchors_cache.write();
         anchors_cache.retain(|anchor_id, _| anchor_id >= &before_anchor_id);

@@ -73,6 +73,11 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     /// (TODO) ? Should return Error if mempool does not reply fro a long timeout
     async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>>;
 
+    /// Process top processed to anchor reported by collation manager.
+    /// Will manage mempool sync depth.
+    /// Mempool should be ready to return this anchor and all next after it.
+    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()>;
+
     /// Clean cache from all anchors that before specified.
     /// We can do this for anchors that processed in blocks
     /// which included in signed master - we do not need them anymore

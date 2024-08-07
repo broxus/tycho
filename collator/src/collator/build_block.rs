@@ -354,6 +354,12 @@ impl CollatorStdImpl {
             collated_file_hash: HashBytes::ZERO,
             chain_time: (new_block_info.gen_utime as u64 * 1000)
                 + new_block_info.gen_utime_ms as u64,
+            ext_processed_upto_anchor_id: collation_data
+                .processed_upto
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to.0)
+                .unwrap_or_default(),
             fees_collected: value_flow.fees_collected,
             funds_created: value_flow.created,
             created_by: collation_data.created_by,
