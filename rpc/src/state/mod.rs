@@ -106,16 +106,14 @@ impl RpcState {
         }
     }
 
-    pub fn state_subscriber(&self) -> RpcStateSubscriber {
-        RpcStateSubscriber {
+    pub fn split(self) -> (RpcBlockSubscriber, RpcStateSubscriber) {
+        let block_subscriber = RpcBlockSubscriber {
             inner: self.inner.clone(),
-        }
-    }
+        };
 
-    pub fn block_subscriber(&self) -> RpcBlockSubscriber {
-        RpcBlockSubscriber {
-            inner: self.inner.clone(),
-        }
+        let state_subscriber = RpcStateSubscriber { inner: self.inner };
+
+        (block_subscriber, state_subscriber)
     }
 
     pub async fn init(&self, mc_block_id: &BlockId) -> Result<()> {
