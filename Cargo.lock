@@ -3426,6 +3426,7 @@ dependencies = [
  "tracing",
  "tycho-block-util",
  "tycho-core",
+ "tycho-network",
  "tycho-storage",
  "tycho-util",
 ]

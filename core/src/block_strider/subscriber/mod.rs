@@ -38,6 +38,37 @@ pub trait BlockSubscriber: Send + Sync + 'static {
     ) -> Self::HandleBlockFut<'a>;
 }
 
+impl<T: BlockSubscriber> BlockSubscriber for Option<T> {
+    type Prepared = Option<T::Prepared>;
+
+    type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
+    type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+
+    #[inline]
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        match self {
+            Some(subscriber) => Box::pin(async move {
+                <T as BlockSubscriber>::prepare_block(subscriber, cx)
+                    .await
+                    .map(Some)
+            }),
+            None => Box::pin(future::ready(Ok(None))),
+        }
+    }
+
+    fn handle_block<'a>(
+        &'a self,
+        cx: &'a BlockSubscriberContext,
+        prepared: Self::Prepared,
+    ) -> Self::HandleBlockFut<'a> {
+        let (Some(subscriber), Some(prepared)) = (self, prepared) else {
+            return Box::pin(future::ready(Ok(())));
+        };
+
+        Box::pin(subscriber.handle_block(cx, prepared))
+    }
+}
+
 impl<T: BlockSubscriber> BlockSubscriber for Box<T> {
     type Prepared = T::Prepared;
 

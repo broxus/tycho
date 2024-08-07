@@ -572,6 +572,9 @@ def jrpc() -> RowPanel:
             "tycho_rpc_state_update_time", "Time to update RPC state on block"
         ),
         create_heatmap_panel(
+            "tycho_rpc_state_update_accounts_cache_time", "Time to update RPC accounts cache on state"
+        ),
+        create_heatmap_panel(
             "tycho_storage_rpc_prepare_batch_time",
             "Time to prepare RPC storage update batch",
         ),

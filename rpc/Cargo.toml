@@ -32,6 +32,10 @@ tycho-core = { workspace = true }
 tycho-storage = { workspace = true }
 tycho-util = { workspace = true }
 
+[dev-dependencies]
+tycho-network = { workspace = true }
+tycho-util = { workspace = true, features = ["test"] }
+
 [features]
 default = []
 compression = ["tower-http/compression-gzip"]

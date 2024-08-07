@@ -245,8 +245,11 @@ impl RpcStorage {
 
                 for entry in accounts.iter() {
                     let (id, (_, account)) = entry?;
-                    let Some(code_hash) = extract_code_hash(&account)? else {
-                        continue;
+
+                    let code_hash = match extract_code_hash(&account)? {
+                        ExtractedCodeHash::Exact(Some(code_hash)) => code_hash,
+                        ExtractedCodeHash::Exact(None) => continue,
+                        ExtractedCodeHash::Skip => anyhow::bail!("code in account state is pruned"),
                     };
 
                     non_empty_batch |= true;
@@ -526,11 +529,7 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
-    pub async fn update(
-        &self,
-        block: BlockStuff,
-        accounts: Option<ShardAccountsDict>,
-    ) -> Result<()> {
+    pub async fn update(&self, block: BlockStuff, accounts: ShardAccountsDict) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -569,7 +568,7 @@ impl RpcStorage {
                 tx_key[1..33].copy_from_slice(account.as_slice());
 
                 // Flag to update code hash
-                let mut has_special_actions = accounts.is_none(); // skip updates if no state provided
+                let mut has_special_actions = false;
                 let mut was_active = false;
                 let mut is_active = false;
 
@@ -625,32 +624,30 @@ impl RpcStorage {
                 }
 
                 // Update code hash
-                if let Some(accounts) = &accounts {
-                    let update = if is_active && (!was_active || has_special_actions) {
-                        // Account is active after this block and this is either a new account,
-                        // or it was an existing account which possibly changed its code.
-                        // Update: just store the code hash.
-                        Some(false)
-                    } else if was_active && !is_active {
-                        // Account was active before this block and is not active after the block.
-                        // Update: remove the code hash.
-                        Some(true)
-                    } else {
-                        // No update for other cases
-                        None
-                    };
+                let update = if is_active && (!was_active || has_special_actions) {
+                    // Account is active after this block and this is either a new account,
+                    // or it was an existing account which possibly changed its code.
+                    // Update: just store the code hash.
+                    Some(false)
+                } else if was_active && !is_active {
+                    // Account was active before this block and is not active after the block.
+                    // Update: remove the code hash.
+                    Some(true)
+                } else {
+                    // No update for other cases
+                    None
+                };
 
-                    // Apply the update if any
-                    if let Some(remove) = update {
-                        Self::update_code_hash(
-                            &db,
-                            workchain,
-                            &account,
-                            accounts,
-                            remove,
-                            &mut write_batch,
-                        )?;
-                    }
+                // Apply the update if any
+                if let Some(remove) = update {
+                    Self::update_code_hash(
+                        &db,
+                        workchain,
+                        &account,
+                        &accounts,
+                        remove,
+                        &mut write_batch,
+                    )?;
                 }
             }
 
@@ -677,6 +674,19 @@ impl RpcStorage {
         remove: bool,
         write_batch: &mut rocksdb::WriteBatch,
     ) -> Result<()> {
+        // Find the new code hash
+        let new_code_hash = 'code_hash: {
+            if !remove {
+                if let Some((_, account)) = accounts.get(account)? {
+                    match extract_code_hash(&account)? {
+                        ExtractedCodeHash::Exact(hash) => break 'code_hash hash,
+                        ExtractedCodeHash::Skip => return Ok(()),
+                    }
+                }
+            }
+            None
+        };
+
         // Prepare column families
         let code_hashes_cf = &db.code_hashes.cf();
         let code_hashes_by_address_cf = &db.code_hashes_by_address.cf();
@@ -690,16 +700,6 @@ impl RpcStorage {
         let old_code_hash = db
             .code_hashes_by_address
             .get(code_hashes_by_address_id.as_slice())?;
-
-        // Find the new code hash
-        let new_code_hash = 'code_hash: {
-            if !remove {
-                if let Some((_, account)) = accounts.get(account)? {
-                    break 'code_hash extract_code_hash(&account)?;
-                }
-            }
-            None
-        };
 
         if remove && old_code_hash.is_none()
             || matches!(
@@ -886,15 +886,29 @@ where
     }
 }
 
-fn extract_code_hash(account: &ShardAccount) -> Result<Option<HashBytes>> {
+enum ExtractedCodeHash {
+    Exact(Option<HashBytes>),
+    Skip,
+}
+
+fn extract_code_hash(account: &ShardAccount) -> Result<ExtractedCodeHash> {
+    if account.account.inner().descriptor().is_pruned_branch() {
+        return Ok(ExtractedCodeHash::Skip);
+    }
+
     if let Some(account) = account.load_account()? {
         if let AccountState::Active(state_init) = &account.state {
             if let Some(code) = &state_init.code {
-                return Ok(Some(*code.repr_hash()));
+                if code.descriptor().is_pruned_branch() {
+                    return Ok(ExtractedCodeHash::Skip);
+                }
+
+                return Ok(ExtractedCodeHash::Exact(Some(*code.repr_hash())));
             }
         }
     }
-    Ok(None)
+
+    Ok(ExtractedCodeHash::Exact(None))
 }
 
 fn split_shard(
