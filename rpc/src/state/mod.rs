@@ -774,7 +774,10 @@ mod test {
             archive_data: block.archive_data,
         };
 
-        rpc_state.block_subscriber().handle_block(&ctx, ()).await?;
+        let (block_subscriber, _) = rpc_state.clone().split();
+        let prepared = block_subscriber.prepare_block(&ctx).await?;
+
+        block_subscriber.handle_block(&ctx, prepared).await?;
 
         let account = HashBytes::from_str(
             "d7ce76fcf11423e3eb332e72c5f10e4b2cd45a8f356161c930e391e4023784d3",
