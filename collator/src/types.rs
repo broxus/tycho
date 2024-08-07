@@ -36,7 +36,7 @@ impl Default for CollationConfig {
             max_mc_block_delta_from_bc_to_await_own: 2,
 
             max_uncommitted_chain_length: 31,
-            gas_used_to_import_next_anchor: 148_000_000u64,
+            gas_used_to_import_next_anchor: 250_000_000u64,
 
             msgs_exec_params: MsgsExecutionParams::default(),
         }
@@ -78,9 +78,9 @@ pub struct MsgsExecutionParams {
 impl Default for MsgsExecutionParams {
     fn default() -> Self {
         Self {
-            buffer_limit: 10000,
+            buffer_limit: 20000,
             group_limit: 100,
-            group_vert_size: 5,
+            group_vert_size: 10,
         }
     }
 }
