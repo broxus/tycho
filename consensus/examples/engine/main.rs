@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use clap::Parser;
 use everscale_crypto::ed25519::{KeyPair, SecretKey};
+use futures_util::future::FutureExt;
 use parking_lot::deadlock;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tycho_consensus::test_utils::*;
 use tycho_consensus::{Engine, InputBufferStub};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId};
@@ -57,26 +58,14 @@ impl Cli {
         } else {
             logger::spans("engine", "info,tycho_consensus=info,tycho_network=info")
         };
-        match std::env::var("RUST_BACKTRACE") {
-            Ok(value) => {
-                tracing::info!("`RUST_BACKTRACE={value}` found in environment")
-            }
-            Err(_) => {
-                std::env::set_var("RUST_BACKTRACE", "1");
-                tracing::info!("`RUST_BACKTRACE` is not found in environment, set to `1`")
-            }
-        }
         check_parking_lot();
         heart_beat(self.duration);
-        let handles = make_network(self);
-        for handle in handles {
-            handle.join().unwrap();
-        }
+        make_network(self);
         Ok(())
     }
 }
 
-fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
+fn make_network(cli: Cli) {
     let keys = (0..cli.nodes.get())
         .map(|_| SecretKey::generate(&mut rand::thread_rng()))
         .map(|secret| (secret, Arc::new(KeyPair::from(&secret))))
@@ -104,8 +93,10 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
         .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()], None)))
         .collect::<Vec<_>>();
 
+    let run_guard = RunGuard::new();
     let mut anchor_consumer = AnchorConsumer::default();
     let mut handles = vec![];
+
     for (((secret_key, key_pair), bind_address), peer_id) in keys
         .into_iter()
         .zip(bind_addresses.into_iter())
@@ -113,17 +104,16 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
     {
         let all_peers = all_peers.clone();
         let peer_info = peer_info.clone();
+        let run_guard = run_guard.clone();
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
         let collator_round = anchor_consumer.collator_round().clone();
         anchor_consumer.add(peer_id, committed_rx);
-
         let handle = std::thread::Builder::new()
             .name(format!("engine-{peer_id:.4}"))
             .spawn(move || {
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
                     .worker_threads(cli.workers_per_node.get())
-                    // .thread_name(format!("tokio-{}", peer_id.alt()))
                     .thread_name_fn(move || {
                         static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
                         let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
@@ -152,7 +142,7 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
                                     .expect("add peer to dht client");
                             }
                         }
-                        let (mock_storage, _tmp_dir) = Storage::new_temp().unwrap();
+                        let (mock_storage, _tmp_dir) = Storage::new_temp().expect("new storage");
                         let mut engine = Engine::new(
                             key_pair,
                             &dht_client,
@@ -164,25 +154,42 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
                         );
                         engine.init_with_genesis(&all_peers).await;
                         tracing::info!("created engine {}", dht_client.network().peer_id());
-                        engine.run().await;
+                        tokio::try_join!(
+                            engine.run().map(|_| Err::<(), ()>(())),
+                            run_guard.until_any_dropped()
+                        )
+                        .ok();
                     });
-            })
-            .unwrap();
+            });
         handles.push(handle);
     }
-    handles.push(
-        std::thread::Builder::new()
-            .name("anchor-consumer".to_string())
-            .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .worker_threads(1)
-                    .build()
-                    .expect("new tokio runtime")
-                    .block_on(anchor_consumer.check())
-            })
-            .unwrap(),
-    );
-    handles
+
+    let handle = std::thread::Builder::new()
+        .name("anchor-consumer".to_string())
+        .spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .worker_threads(1)
+                .build()
+                .expect("new tokio runtime")
+                .block_on(async {
+                    tokio::try_join!(
+                        anchor_consumer.check().map(|_| Err::<(), ()>(())),
+                        run_guard.until_any_dropped()
+                    )
+                    .ok();
+                });
+        });
+    handles.push(handle);
+    for handle in handles {
+        match handle {
+            Ok(handle) => _ = handle.join(),
+            Err(_ignored) => {} // from std::thread::spawn()
+        }
+    }
+    // for all panic hooks
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+    std::io::stdout().flush().ok();
 }
 
 fn check_parking_lot() {
@@ -198,8 +205,7 @@ fn check_parking_lot() {
         for (i, threads) in deadlocks.iter().enumerate() {
             tracing::error!("Deadlock #{}", i);
             for t in threads {
-                tracing::error!("Thread Id {:#?}", t.thread_id());
-                tracing::error!("{:#?}", t.backtrace());
+                tracing::error!("Thread Id {:#?}: {:#?}", t.thread_id(), t.backtrace());
             }
         }
     });
@@ -212,7 +218,7 @@ fn heart_beat(duration: Option<Duration>) {
             std::thread::sleep(Duration::from_secs(1));
             tracing::info!("heart beat");
             if let Some(duration) = duration {
-                if start.elapsed().as_secs() >= duration.as_secs() {
+                if start.elapsed() >= duration {
                     tracing::info!(
                         "test stopped after {}",
                         humantime::format_duration(start.elapsed())
@@ -225,4 +231,25 @@ fn heart_beat(duration: Option<Duration>) {
             }
         }
     });
+}
+#[derive(Clone)]
+struct RunGuard {
+    notify: Arc<Notify>,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.notify.notify_waiters();
+    }
+}
+
+impl RunGuard {
+    pub fn new() -> Self {
+        let notify = Arc::new(Notify::new());
+        Self { notify }
+    }
+    pub async fn until_any_dropped(self) -> Result<(), ()> {
+        self.notify.notified().await;
+        Err(())
+    }
 }

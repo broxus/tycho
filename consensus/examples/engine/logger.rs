@@ -1,5 +1,8 @@
 #![allow(clippy::exit)]
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 use tracing_flame::FlameLayer;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::Layer;
@@ -22,14 +25,18 @@ pub fn spans(test_name: &str, filter: &str) {
 
     tracing::info!("{test_name}");
 
-    std::panic::set_hook(Box::new(|info| {
-        use std::io::Write;
-        let backtrace = std::backtrace::Backtrace::capture();
+    let first_panic = Arc::new(Mutex::new(true));
 
-        tracing::error!("{info}\n{backtrace}");
-        std::io::stderr().flush().ok();
-        std::io::stdout().flush().ok();
-        std::process::exit(1);
+    std::panic::set_hook(Box::new(move |info| {
+        let mut guard = first_panic.lock();
+        if *guard {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!("root panic: {info}\n{backtrace}");
+            *guard = false;
+        }
+        drop(guard);
+        tracing::error!("induced panic: {info}");
+        // flush at the end of main thread, after all threads are joined
     }));
 }
 
@@ -37,7 +44,7 @@ pub fn flame(test_name: &str) {
     std::fs::remove_dir_all("./.temp").ok();
     std::fs::create_dir_all("./.temp")
         .expect("failed to create temp dir for `tracing-flame` output");
-    let (flame_layer, guard) = FlameLayer::with_file("./.temp/tracing.folded").unwrap();
+    let (flame_layer, flame_guard) = FlameLayer::with_file("./.temp/tracing.folded").unwrap();
 
     tracing_subscriber::registry()
         .with(Layer::default())
@@ -46,16 +53,20 @@ pub fn flame(test_name: &str) {
 
     tracing::info!("{test_name}");
 
-    std::panic::set_hook(Box::new(move |info| {
-        use std::io::Write;
-        let backtrace = std::backtrace::Backtrace::capture();
+    let first_panic = Arc::new(Mutex::new(true));
 
-        if let Err(err) = guard.flush() {
-            tracing::error!("flame layer not flushed: {err}");
+    std::panic::set_hook(Box::new(move |info| {
+        let mut guard = first_panic.lock();
+        if *guard {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!("root panic: {info}\n{backtrace}");
+            if let Err(err) = flame_guard.flush() {
+                tracing::error!("flame layer not flushed: {err}");
+            }
+            *guard = false;
         }
-        tracing::error!("{info}\n{backtrace}");
-        std::io::stderr().flush().ok();
-        std::io::stdout().flush().ok();
-        std::process::exit(1);
+        drop(guard);
+        tracing::error!("induced panic: {info}");
+        // flush at the end of main thread, after all threads are joined
     }));
 }
