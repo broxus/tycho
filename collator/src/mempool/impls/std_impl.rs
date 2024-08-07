@@ -223,6 +223,11 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         }
     }
 
+    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
+        // TODO: make real implementation, currently does nothing
+        Ok(())
+    }
+
     async fn clear_anchors_cache(&self, before_anchor_id: MempoolAnchorId) -> Result<()> {
         let mut anchors_cache_rw = self.anchors.write();
 

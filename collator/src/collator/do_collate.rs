@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{hash_map, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1153,6 +1153,7 @@ impl CollatorStdImpl {
         for TopBlockDescription {
             block_id,
             block_info,
+            ext_processed_to_anchor_id,
             value_flow,
             proof_funds,
             creators,
@@ -1161,6 +1162,7 @@ impl CollatorStdImpl {
             let mut shard_descr = Box::new(ShardDescription::from_block_info(
                 block_id,
                 &block_info,
+                ext_processed_to_anchor_id,
                 &value_flow,
             ));
             shard_descr.reg_mc_seqno = collation_data_builder.block_id_short.seqno;
@@ -1213,11 +1215,31 @@ impl CollatorStdImpl {
 
     pub fn update_shard_block_info(
         &self,
-        shardes: &mut FastHashMap<ShardIdent, Box<ShardDescription>>,
+        shards: &mut FastHashMap<ShardIdent, Box<ShardDescription>>,
         shard_id: ShardIdent,
-        shard_description: Box<ShardDescription>,
+        mut shard_description: Box<ShardDescription>,
     ) -> Result<()> {
-        shardes.insert(shard_id, shard_description);
+        match shards.entry(shard_id) {
+            hash_map::Entry::Vacant(entry) => {
+                // if shard was not present before consider top shard block was changed
+                shard_description.top_sc_block_updated = true;
+                entry.insert(shard_description);
+            }
+            hash_map::Entry::Occupied(mut entry) => {
+                // set flag if top shard block seqno changed
+                let prev_shard_descr = entry.get();
+                shard_description.top_sc_block_updated =
+                    prev_shard_descr.seqno != shard_description.seqno;
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    %shard_id,
+                    shard_description.top_sc_block_updated,
+                    "prev_seqno={}, new_seqno={}",
+                    prev_shard_descr.seqno,
+                    shard_description.seqno,
+                );
+                entry.insert(shard_description);
+            }
+        }
         Ok(())
     }
 

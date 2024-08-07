@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, bail, Result};
 use everscale_types::cell::HashBytes;
-use everscale_types::models::{Block, BlockId, BlockIdShort, ShardIdent, ValueFlow};
+use everscale_types::models::{BlockId, BlockIdShort, ShardIdent, ValueFlow};
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -217,12 +217,10 @@ impl BlockCandidateContainer {
         Ok(())
     }
 
-    pub fn get_block(&self) -> Result<&Block> {
-        let entry = self
-            .entry
+    pub fn entry(&self) -> Result<&BlockCandidateEntry> {
+        self.entry
             .as_ref()
-            .ok_or_else(|| anyhow!("`entry` was extracted"))?;
-        Ok(entry.candidate.block.as_ref())
+            .ok_or_else(|| anyhow!("`entry` was extracted"))
     }
 
     pub fn create_synced_from_bc(block_id: BlockId) -> Self {

@@ -857,6 +857,7 @@ pub trait ShardDescriptionExt {
     fn from_block_info(
         block_id: BlockId,
         block_info: &BlockInfo,
+        ext_processed_to_anchor_id: u32,
         value_flow: &ValueFlow,
     ) -> ShardDescription;
 }
@@ -865,6 +866,7 @@ impl ShardDescriptionExt for ShardDescription {
     fn from_block_info(
         block_id: BlockId,
         block_info: &BlockInfo,
+        ext_processed_to_anchor_id: u32,
         value_flow: &ValueFlow,
     ) -> ShardDescription {
         ShardDescription {
@@ -880,8 +882,8 @@ impl ShardDescriptionExt for ShardDescription {
             want_merge: block_info.want_merge,
             nx_cc_updated: false, // TODO: by t-node, needs to review
             next_catchain_seqno: block_info.gen_catchain_seqno,
-            ext_processed_to_anchor_id: 0, // TODO
-            top_sc_block_updated: false,   // TODO
+            ext_processed_to_anchor_id,
+            top_sc_block_updated: false,
             min_ref_mc_seqno: block_info.min_ref_mc_seqno,
             gen_utime: block_info.gen_utime,
             split_merge_at: None, // TODO: check if we really should not use it here
