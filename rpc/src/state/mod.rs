@@ -230,21 +230,32 @@ pub struct RpcBlockSubscriber {
 }
 
 impl BlockSubscriber for RpcBlockSubscriber {
-    type Prepared = ();
+    type Prepared = JoinHandle<Result<()>>;
 
-    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
+    type PrepareBlockFut<'a> = futures_util::future::Ready<Result<Self::Prepared>>;
     type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
 
-    fn prepare_block<'a>(&'a self, _: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
-        futures_util::future::ready(Ok(()))
+    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+        let handle = tokio::task::spawn({
+            let inner = self.inner.clone();
+            let block = cx.block.clone();
+            async move { inner.update(&block).await }
+        });
+
+        futures_util::future::ready(Ok(handle))
     }
 
     fn handle_block<'a>(
         &'a self,
-        cx: &'a BlockSubscriberContext,
-        _: Self::Prepared,
+        _: &'a BlockSubscriberContext,
+        prepared: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        Box::pin(self.inner.update(&cx.block))
+        Box::pin(async {
+            match prepared.await {
+                Ok(res) => res,
+                Err(e) => Err(e.into()),
+            }
+        })
     }
 }
 
