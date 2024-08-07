@@ -624,13 +624,15 @@ impl Node {
             .with_state(strider_state)
             .with_block_subscriber(
                 (
-                    rpc_block_subscriber,
                     ShardStateApplier::new(
                         self.state_tracker.clone(),
                         self.storage.clone(),
                         (collator_state_subscriber, rpc_state_subscriber),
                     ),
-                    (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
+                    (
+                        rpc_block_subscriber,
+                        (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
+                    ),
                 )
                     .chain(gc_subscriber),
             )
