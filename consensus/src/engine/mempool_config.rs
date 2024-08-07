@@ -27,7 +27,7 @@ impl MempoolConfig {
         now - Self::MAX_OUTDATED..=now + Self::CLOCK_SKEW
     }
 
-    /// the least amount of [Round]s that are kept in [`Dag`](crate::dag::Dag)
+    /// hard limit (in rounds) on anchor history length
     pub const COMMIT_DEPTH: u8 = 20;
 
     pub const GENESIS_ROUND: Round = Round(1);
@@ -35,11 +35,16 @@ impl MempoolConfig {
     /// hard limit on point payload (excessive will be postponed)
     pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
 
-    /// For how long to keep history in storage after the last consensus round.
-    /// Therefore, defines the max mempool sync depth: any node must respond
-    /// with points it used as dependencies if the distance between
-    /// the last consensus round and requested point's round lay within this value.
-    pub const PERSISTED_HISTORY_ROUNDS: u16 = if cfg!(feature = "test") { 50 } else { 6_300 };
+    /// External messages are deduplicated within a fixed depth for each anchor.
+    /// Zero turns off deduplication.
+    pub const DEDUPLICATE_ROUNDS: u16 = 140;
+
+    /// The max expected distance (in rounds) between two anchor triggers. Defines both:
+    /// * max acceptable distance between consensus and the top known block,
+    ///   before local mempool enters silent mode (stops to produce points).
+    /// * max amount of rounds (behind peer's last commit, defined by an anchor trigger in points)
+    ///   a peer must respond with valid points if it directly referenced them
+    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 20 } else { 210 };
 
     // == Configs above must be globally same for consensus to run
     // ========
@@ -78,11 +83,26 @@ impl MempoolConfig {
     /// validated successfully, or return `None`.
     pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(25);
 
-    /// How often to mark stored data as ready for compaction. Cannot be zero.
-    /// Effectively defines storage duration for the outdated data,
-    /// while the required storage duration is set by [`Self::PERSISTED_HISTORY_ROUNDS`].
-    pub const TOMBSTONE_PERIOD_ROUNDS: u16 = 105;
+    /// Max distance (in rounds) behind consensus at which local mempool
+    /// in silent mode (see [`Self::MAX_ANCHOR_DISTANCE`])
+    /// is supposed to keep collation-ready history
+    /// (see [`Self::DEDUPLICATE_ROUNDS`] and [`Self::COMMIT_DEPTH`])
+    pub const ACCEPTABLE_COLLATOR_LAG: u16 = 1_050 - Self::MAX_ANCHOR_DISTANCE;
+
+    /// How often (in rounds) try to flush and delete obsolete data. Cannot be zero.
+    /// Also affects WAL file size (more often flushes create more small files).
+    pub const CLEAN_ROCKS_PERIOD: u16 = if cfg!(feature = "test") { 10 } else { 105 };
 }
+
+const _: () = assert!(
+    MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
+    "invalid config: genesis round is too low and will make code panic"
+);
+
+const _: () = assert!(
+    MempoolConfig::MAX_ANCHOR_DISTANCE >= MempoolConfig::COMMIT_DEPTH as u16,
+    "invalid config: max acceptable anchor distance cannot not be less than commit depth"
+);
 
 const _: () = assert!(
     MempoolConfig::ROUNDS_LAG_BEFORE_SYNC >= MempoolConfig::COMMIT_DEPTH,
@@ -95,11 +115,6 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
-    "invalid config: genesis round is too low and will make code panic"
-);
-
-const _: () = assert!(
-    MempoolConfig::TOMBSTONE_PERIOD_ROUNDS > 0,
-    "invalid config: tombstone rounds period cannot be zero"
+    MempoolConfig::CLEAN_ROCKS_PERIOD > 0,
+    "invalid config: rocks db clean period cannot be zero rounds"
 );

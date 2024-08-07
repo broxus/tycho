@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -46,7 +46,7 @@ impl Broadcaster {
         point: &Point,
         peer_schedule: &PeerSchedule,
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
-        collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
+        collector_signal: watch::Receiver<CollectorSignal>,
     ) -> LastOwnPoint {
         let (signers, mut bcast_peers, peer_updates) = {
             let guard = peer_schedule.read();
@@ -104,7 +104,7 @@ struct BroadcasterTask {
     point_digest: Digest,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
-    collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
+    collector_signal: watch::Receiver<CollectorSignal>,
 
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
@@ -126,7 +126,7 @@ struct BroadcasterTask {
 
 impl BroadcasterTask {
     /// returns evidence for broadcast point
-    pub async fn run(&mut self, bcast_peers: FastHashSet<PeerId>) {
+    async fn run(&mut self, bcast_peers: FastHashSet<PeerId>) {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -156,8 +156,9 @@ impl BroadcasterTask {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event that may cause immediate completion
-                Some(collector_signal) = self.collector_signal.recv() => {
-                    if self.should_finish(collector_signal) {
+                Ok(()) = self.collector_signal.changed() => {
+                    let signal = *self.collector_signal.borrow_and_update();
+                    if self.should_finish(signal) {
                         break;
                     }
                 }

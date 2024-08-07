@@ -304,10 +304,9 @@ impl BroadcastFilterInner {
             "advance round"
         );
 
-        self.by_round.retain(|round, _| {
-            top_round < *round
-                && round.0 <= top_round.0 + MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32
-        });
+        let limit = (top_round.0).saturating_add(MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32);
+        self.by_round
+            .retain(|round, _| top_round < *round && round.0 <= limit);
     }
 
     fn send_validating(

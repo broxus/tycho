@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{iter, panic};
 
-use tokio::sync::{mpsc, oneshot};
+use futures_util::{future, TryFutureExt};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 use tycho_util::sync::rayon_run;
@@ -13,16 +14,18 @@ use crate::effects::{
 };
 use crate::engine::input_buffer::InputBuffer;
 use crate::intercom::{
-    BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, Dispatcher, Downloader,
-    PeerSchedule, Responder,
+    BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
+    Downloader, PeerSchedule, Responder,
 };
 use crate::models::{Link, Point, Round};
-use crate::outer_round::{Consensus, OuterRound};
+use crate::outer_round::{Collator, Consensus, OuterRound};
+use crate::MempoolConfig;
 
 struct RoundTaskState {
     peer_schedule: PeerSchedule,
     store: MempoolStore,
     responder: Responder,
+    collator_round: OuterRound<Collator>,
     input_buffer: InputBuffer,
     broadcast_filter: BroadcastFilter,
     downloader: Downloader,
@@ -43,6 +46,7 @@ impl RoundTaskReady {
         peer_schedule: &PeerSchedule,
         store: &MempoolStore,
         consensus_round: &OuterRound<Consensus>,
+        collator_round: OuterRound<Collator>,
         responder: Responder,
         input_buffer: InputBuffer,
     ) -> Self {
@@ -60,6 +64,7 @@ impl RoundTaskReady {
                 peer_schedule: peer_schedule.clone(),
                 store: store.clone(),
                 responder,
+                collator_round,
                 input_buffer,
                 broadcast_filter,
                 downloader: Downloader::new(dispatcher, peer_schedule),
@@ -82,40 +87,74 @@ impl RoundTaskReady {
         round_effects: &Effects<EngineContext>,
     ) -> RoundTaskRunning {
         let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
-        // let this channel unbounded - there won't be many items, but every of them is essential
-        let (collector_signal_tx, mut collector_signal_rx) = mpsc::unbounded_channel();
+        let (collector_signal_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry);
         let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
 
         let own_point_fut = if prev_round_ok {
+            let not_silent_since = Round(
+                (current_dag_round.round().0) // latest reliably detected consensus round
+                    .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32),
+            );
+            let wait_collator_ready = if self.state.collator_round.get() >= not_silent_since {
+                future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
+            } else {
+                // must cancel on collector finish/err signal
+                let mut collator_round = self.state.collator_round.receiver();
+                let mut collector_signal_rx = collector_signal_rx.clone();
+                future::Either::Left(tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            collated = collator_round.next() => if collated >= not_silent_since {
+                                break true; // ready to produce point: collator synced enough
+                            },
+                            Ok(()) = collector_signal_rx.changed() => {
+                                let signal = *collector_signal_rx.borrow_and_update();
+                                match signal {
+                                    CollectorSignal::Finish | CollectorSignal::Err => break false,
+                                    CollectorSignal::Retry => {}
+                                };
+                            }
+                        }
+                    }
+                }))
+            };
+
             let current_dag_round = current_dag_round.clone();
             let input_buffer = self.state.input_buffer.clone();
             let last_own_point = self.last_own_point.clone();
             let store = self.state.store.clone();
-            futures_util::future::Either::Right(
-                rayon_run(move || {
-                    let task_start_time = Instant::now();
-                    Producer::new_point(
-                        &current_dag_round,
-                        last_own_point.as_deref(),
-                        &input_buffer,
-                    )
-                    .inspect(|own_point| {
-                        let state = current_dag_round.insert_exact_sign(
-                            own_point,
-                            current_dag_round.key_pair(),
-                            &store,
-                        );
-                        own_point_state_tx.send(state).ok();
-                        metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
-                            .record(task_start_time.elapsed());
-                    })
-                    // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
+            let task = wait_collator_ready
+                .and_then(|is_ready_to_produce| {
+                    if is_ready_to_produce {
+                        future::Either::Right(rayon_run(move || {
+                            let task_start_time = Instant::now();
+                            let point_opt = Producer::new_point(
+                                &current_dag_round,
+                                last_own_point.as_deref(),
+                                &input_buffer,
+                            );
+                            if let Some(own_point) = point_opt.as_ref() {
+                                let state = current_dag_round.insert_exact_sign(
+                                    own_point,
+                                    current_dag_round.key_pair(),
+                                    &store,
+                                );
+                                own_point_state_tx.send(state).ok();
+                                metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
+                                    .record(task_start_time.elapsed());
+                            };
+                            Ok(point_opt)
+                            // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
+                        }))
+                    } else {
+                        future::Either::Left(future::ready(Ok(None)))
+                    }
                 })
-                .instrument(round_effects.span().clone()),
-            )
+                .instrument(round_effects.span().clone());
+            future::Either::Right(task)
         } else {
             drop(own_point_state_tx);
-            futures_util::future::Either::Left(futures_util::future::ready(None::<Point>))
+            future::Either::Left(future::ready(Ok(None::<Point>)))
         };
 
         let broadcaster_run = tokio::spawn({
@@ -126,7 +165,7 @@ impl RoundTaskReady {
             let downloader = self.state.downloader.clone();
             let store = self.state.store.clone();
             async move {
-                let own_point = own_point_fut.await;
+                let own_point = own_point_fut.await.expect("cannot be cancelled");
                 round_effects.own_point(own_point.as_ref());
 
                 if let Some(own_point) = own_point {
@@ -151,7 +190,7 @@ impl RoundTaskReady {
                     self_check.await.expect("verify own produced point");
                     (broadcaster, Some(new_last_own_point))
                 } else {
-                    collector_signal_rx.close();
+                    // drop(collector_signal_rx); // goes out of scope
                     bcaster_ready_tx.send(BroadcasterSignal::Ok).ok();
                     (broadcaster, None)
                 }

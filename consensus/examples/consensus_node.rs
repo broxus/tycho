@@ -134,22 +134,26 @@ impl CmdRun {
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
-        let (mock_storage, _tmp_dir) = Storage::new_temp().unwrap();
+        let (mock_storage, _tmp_dir) = Storage::new_temp()?;
+
+        let mut anchor_consumer = AnchorConsumer::default();
+        anchor_consumer.add(local_id, committed_rx);
+
         let mut engine = Engine::new(
             key_pair.clone(),
             &dht_client,
             &overlay,
             mock_storage.mempool_storage(),
             committed_tx,
+            anchor_consumer.collator_round(),
             InputBufferStub::new(
                 NonZeroUsize::new(100).unwrap(),
                 NonZeroUsize::new(5).unwrap(),
             ),
         );
-        engine.init_with_genesis(&all_peers).await;
-        let mut anchor_consumer = AnchorConsumer::default();
-        anchor_consumer.add(local_id, committed_rx);
+
         tokio::spawn(anchor_consumer.drain());
+        engine.init_with_genesis(&all_peers).await;
 
         tracing::info!(
             local_id = %dht_client.network().peer_id(),

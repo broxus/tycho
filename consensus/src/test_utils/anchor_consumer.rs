@@ -8,6 +8,7 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::models::{PointId, Round};
+use crate::outer_round::{Collator, OuterRound};
 use crate::Point;
 
 #[derive(Default)]
@@ -17,6 +18,9 @@ pub struct AnchorConsumer {
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
     history: FastHashMap<Round, Vec<PointId>>,
+    // simulates feedback from collator, as if anchor committed by all peers
+    // is immediately confirmed by a top known block
+    collator_round: OuterRound<Collator>,
 }
 
 impl AnchorConsumer {
@@ -25,13 +29,18 @@ impl AnchorConsumer {
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
 
+    pub fn collator_round(&self) -> &OuterRound<Collator> {
+        &self.collator_round
+    }
+
     pub async fn drain(mut self) {
         loop {
-            _ = self
+            let (_, (anchor, _)) = self
                 .streams
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
+            self.collator_round.set_max(anchor.body().location.round);
         }
     }
 
@@ -123,9 +132,11 @@ impl AnchorConsumer {
                 }
             });
 
+            common_anchors.sort_unstable();
             tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
-            tracing::debug!("Refs hashmap ken: {}", self.history.len());
-            if !common_anchors.is_empty() {
+            tracing::trace!("History hashmap len: {}", self.history.len());
+            if let Some(top_common_anchor) = common_anchors.last() {
+                self.collator_round.set_max_raw(*top_common_anchor);
                 tracing::info!(
                     "all nodes committed anchors for rounds {:?}",
                     common_anchors

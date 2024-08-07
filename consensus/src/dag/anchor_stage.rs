@@ -6,6 +6,8 @@ use tycho_network::PeerId;
 use crate::intercom::PeerSchedule;
 use crate::models::Round;
 
+pub const WAVE_ROUNDS: u32 = 4;
+
 #[derive(Debug)]
 pub enum AnchorStage {
     /// if anchor is locally committed then it must be marked as used (and vice versa)
@@ -16,8 +18,7 @@ pub enum AnchorStage {
 
 impl AnchorStage {
     pub fn of(round: Round, peer_schedule: &PeerSchedule) -> Option<Self> {
-        const WAVE_SIZE: u32 = 4;
-        let anchor_candidate_round = (round.0 / WAVE_SIZE) * WAVE_SIZE + 1;
+        let anchor_candidate_round = (round.0 / WAVE_ROUNDS) * WAVE_ROUNDS + 1;
 
         let [leader_peers, current_peers] = peer_schedule
             .atomic()
@@ -36,7 +37,7 @@ impl AnchorStage {
         if !current_peers.contains(leader) {
             return None;
         };
-        match round.0 % WAVE_SIZE {
+        match round.0 % WAVE_ROUNDS {
             // 0 is a leaderless support round (that actually follows every leader point chain)
             // 1 is an anchor candidate (surprisingly, nothing special about this point)
             0 | 1 => None,

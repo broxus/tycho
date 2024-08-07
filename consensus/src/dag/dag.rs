@@ -8,7 +8,7 @@ use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
 
-use crate::dag::anchor_stage::AnchorStage;
+use crate::dag::anchor_stage::{AnchorStage, WAVE_ROUNDS};
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
@@ -84,10 +84,16 @@ impl Dag {
         top
     }
 
-    fn drop_tail(&mut self, anchor_at: Round) {
-        if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
-            self.rounds.retain(|k, _| k.0 >= tail);
-        };
+    fn drop_tail_before_commit(&mut self, anchor_at: Round) {
+        let tail = (anchor_at.0).saturating_sub(MempoolConfig::COMMIT_DEPTH as u32);
+        self.rounds.retain(|k, _| k.0 >= tail);
+    }
+
+    fn drop_tail_after_commit(&mut self, anchor_at: Round) {
+        let tail = (anchor_at.0)
+            .saturating_add(WAVE_ROUNDS) // next anchor round
+            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32);
+        self.rounds.retain(|k, _| k.0 >= tail);
     }
 
     /// result is in historical order
@@ -139,8 +145,8 @@ impl Dag {
 
         for (_, (anchor, anchor_round, proof_round, trigger_round)) in anchors {
             // Note every next "little anchor candidate that could" must have at least full dag depth
-            // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
-            self.drop_tail(anchor_round.round());
+            // in case previous anchor was triggered directly - rounds are already dropped
+            self.drop_tail_before_commit(anchor_round.round());
             let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.point, anchor_round)
             else {
                 break; // will continue at the next call
@@ -170,6 +176,10 @@ impl Dag {
                 })
                 .collect::<Vec<_>>();
             ordered.push((anchor.point, committed));
+        }
+        if let Some((last_anchor, _)) = ordered.last() {
+            // drop rounds that we'll never need again to free some memory
+            self.drop_tail_after_commit(last_anchor.body().location.round);
         }
         ordered
     }

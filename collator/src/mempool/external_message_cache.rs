@@ -11,8 +11,8 @@ pub struct ExternalMessageCache {
     // must remove outdated (threshold elapsed) from the low end of an ordered map,
     // and also remove hashes from the other map
     round_to_hashes: BTreeMap<u32, FastHashSet<HashBytes>>,
-    // every insert of a hash resets its threshold to 0
-    round_threshold: u16,
+    // inclusive amount of rounds to keep; every insert of a hash resets its threshold to 0
+    round_threshold: MempoolAnchorId,
 }
 
 impl ExternalMessageCache {
@@ -20,7 +20,7 @@ impl ExternalMessageCache {
         Self {
             hash_max_round: FastHashMap::default(),
             round_to_hashes: BTreeMap::default(),
-            round_threshold,
+            round_threshold: round_threshold as MempoolAnchorId,
         }
     }
 
@@ -49,7 +49,9 @@ impl ExternalMessageCache {
                         }
                     }
                 }
-                false
+                // in case an outdated value was stored - act as if it was already removed;
+                // this allows to clean the cache no matter before or after the check
+                old_round < anchor_round.saturating_sub(self.round_threshold)
             } else {
                 // branch: not cached, i.e. first insert since threshold passed
                 true
@@ -61,7 +63,7 @@ impl ExternalMessageCache {
     }
 
     pub fn clean(&mut self, anchor_round: MempoolAnchorId) {
-        let bottom_round = anchor_round.saturating_sub(self.round_threshold as MempoolAnchorId);
+        let bottom_round = anchor_round.saturating_sub(self.round_threshold);
         while let Some(round_to_hashes) = self.round_to_hashes.first_entry() {
             if *round_to_hashes.key() < bottom_round {
                 for hash in round_to_hashes.get() {

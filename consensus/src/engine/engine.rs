@@ -17,7 +17,7 @@ use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
 use crate::models::{Point, UnixTime};
-use crate::outer_round::{Consensus, OuterRound};
+use crate::outer_round::{Collator, Commit, Consensus, OuterRound};
 use crate::LogFlavor;
 
 pub struct Engine {
@@ -26,6 +26,7 @@ pub struct Engine {
     peer_schedule: PeerSchedule,
     store: MempoolStore,
     consensus_round: OuterRound<Consensus>,
+    commit_round: OuterRound<Commit>,
     round_task: RoundTaskReady,
     effects: Effects<ChainedRoundsContext>,
 }
@@ -37,21 +38,29 @@ impl Engine {
         overlay_service: &OverlayService,
         mempool_storage: &MempoolStorage,
         committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
+        collator_round: &OuterRound<Collator>,
         input_buffer: InputBuffer,
     ) -> Self {
         let consensus_round = OuterRound::default();
+        let commit_round = OuterRound::default();
         let effects = Effects::<ChainedRoundsContext>::new(consensus_round.get());
 
         let responder = Responder::default();
         let (dispatcher, overlay) = Dispatcher::new(dht_client, overlay_service, responder.clone());
         let peer_schedule = PeerSchedule::new(key_pair, overlay);
 
-        let store = MempoolStore::new(mempool_storage.clone(), consensus_round.receiver());
+        let store = MempoolStore::new(
+            mempool_storage.clone(),
+            consensus_round.receiver(),
+            commit_round.receiver(),
+            collator_round.receiver(),
+        );
         let round_task = RoundTaskReady::new(
             &dispatcher,
             &peer_schedule,
             &store,
             &consensus_round,
+            collator_round.clone(),
             responder,
             input_buffer,
         );
@@ -67,6 +76,7 @@ impl Engine {
             peer_schedule,
             store,
             consensus_round,
+            commit_round,
             round_task,
             effects,
         }
@@ -190,6 +200,7 @@ impl Engine {
                 let mut dag = self.dag;
                 let next_dag_round = next_dag_round.clone();
                 let committed_tx = self.committed.clone();
+                let commit_round = self.commit_round.clone();
                 let round_effects = round_effects.clone();
                 move || {
                     let task_start = Instant::now();
@@ -200,7 +211,11 @@ impl Engine {
                     round_effects.commit_metrics(&committed);
                     round_effects.log_committed(&committed);
 
-                    if !committed.is_empty() {
+                    if let Some(last_anchor_round) = committed
+                        .last()
+                        .map(|(ancor, _)| ancor.body().location.round)
+                    {
+                        commit_round.set_max(last_anchor_round);
                         for points in committed {
                             committed_tx
                                 .send(points) // not recoverable

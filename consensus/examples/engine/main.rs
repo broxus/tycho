@@ -114,6 +114,7 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
         let all_peers = all_peers.clone();
         let peer_info = peer_info.clone();
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+        let collator_round = anchor_consumer.collator_round().clone();
         anchor_consumer.add(peer_id, committed_rx);
 
         let handle = std::thread::Builder::new()
@@ -158,6 +159,7 @@ fn make_network(cli: Cli) -> Vec<std::thread::JoinHandle<()>> {
                             &overlay_service,
                             mock_storage.mempool_storage(),
                             committed_tx.clone(),
+                            &collator_round,
                             InputBufferStub::new(cli.points_in_step, cli.steps_until_full),
                         );
                         engine.init_with_genesis(&all_peers).await;

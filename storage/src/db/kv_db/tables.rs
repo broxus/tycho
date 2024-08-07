@@ -514,8 +514,13 @@ impl ColumnFamily for Points {
 
 impl ColumnFamilyOptions<Caches> for Points {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+        optimize_for_point_lookup(opts, caches);
+        remove_wal_asap(opts);
+
+        opts.set_enable_blob_files(true);
+        opts.set_enable_blob_gc(false); // manual
+        opts.set_min_blob_size(DEFAULT_MIN_BLOB_SIZE);
+        opts.set_blob_compression_type(DBCompressionType::None);
     }
 }
 
@@ -532,8 +537,9 @@ impl ColumnFamily for PointFlags {
 
 impl ColumnFamilyOptions<Caches> for PointFlags {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
         optimize_for_point_lookup(opts, caches);
+        remove_wal_asap(opts);
+
         opts.set_merge_operator_associative("point_flags_merge", crate::models::PointFlags::merge);
     }
 }
@@ -551,4 +557,10 @@ fn with_blob_db(opts: &mut Options, min_value_size: u64) {
 
     opts.set_min_blob_size(min_value_size);
     opts.set_blob_compression_type(DBCompressionType::Zstd);
+}
+
+fn remove_wal_asap(opts: &mut Options) {
+    // https://github.com/facebook/rocksdb/blob/5.10.fb/include/rocksdb/options.h#L554-L565
+    opts.set_wal_size_limit_mb(0);
+    opts.set_wal_ttl_seconds(0);
 }

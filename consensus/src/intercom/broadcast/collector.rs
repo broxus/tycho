@@ -4,7 +4,7 @@ use ahash::HashSetExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
@@ -17,10 +17,10 @@ use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
 
 /// collector may run without broadcaster, as if broadcaster signalled Ok
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum CollectorSignal {
-    Finish,
-    Err,
+    Finish, // must be sent last
+    Err,    // must be sent last
     Retry,
 }
 
@@ -53,7 +53,7 @@ impl Collector {
         effects: Effects<CollectorContext>,
         next_dag_round: DagRound, // r+1
         own_point_state: oneshot::Receiver<InclusionState>,
-        collector_signal: mpsc::UnboundedSender<CollectorSignal>,
+        collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Round {
         let span_guard = effects.span().clone().entered();
@@ -138,7 +138,7 @@ struct CollectorTask {
     /// anyway should rewrite signing mechanics - look for comments inside [`DagRound`::`add_exact`]
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
     /// Receiver may be closed (bcaster finished), so do not require `Ok` on send
-    collector_signal: mpsc::UnboundedSender<CollectorSignal>,
+    collector_signal: watch::Sender<CollectorSignal>,
     is_bcaster_ready_ok: bool,
 }
 
@@ -185,7 +185,7 @@ impl CollectorTask {
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
                         if let Err(round) = self.match_filtered(consensus_event) {
-                            _ = self.collector_signal.send(CollectorSignal::Err);
+                            _ = self.collector_signal.send(CollectorSignal::Err); // last signal
                             return Err(round)
                         }
                     },
@@ -225,7 +225,7 @@ impl CollectorTask {
             self.includes_ready.len() >= self.current_round.peer_count().majority();
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         if result {
-            _ = self.collector_signal.send(CollectorSignal::Finish);
+            _ = self.collector_signal.send(CollectorSignal::Finish); // last signal
         }
         tracing::debug!(
             parent: self.effects.span(),
@@ -254,7 +254,7 @@ impl CollectorTask {
                     parent: self.effects.span(),
                     "Collector was left behind while broadcast filter advanced ?"
                 );
-                _ = self.collector_signal.send(CollectorSignal::Err);
+                _ = self.collector_signal.send(CollectorSignal::Err); // last signal
                 Some(Err(point_round))
             }
             cmp::Ordering::Equal => {

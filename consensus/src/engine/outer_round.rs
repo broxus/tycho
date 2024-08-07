@@ -9,6 +9,24 @@ use crate::models::Round;
 // at usages of `.clone()` if `T` is not `Clone`, thus needed only for `PhantomData<T>`
 pub trait Source: Clone {}
 
+/// Round is defined in the local collator by a top known block,
+/// i.e. a block with the greatest `seq_no`
+/// that obtained 2/3+1 signatures and is kept in local storage,
+/// but which state update is not necessarily applied.
+///
+/// ### Atomic-style usage
+/// Allows the collator to put local mempool into silent mode:
+/// with the start of a new round it will keep collecting and signing broadcasts,
+/// downloading and uploading dependencies, validating and committing points,
+/// but creation and broadcast of new points is forbidden.
+///
+/// ### Channel-style usage
+/// Collator signals mempool to exit silent mode immediately and keep producing new points.
+/// Also used to clean storage.
+#[derive(Clone)]
+pub struct Collator;
+impl Source for Collator {}
+
 /// Allows a node to drive consensus by collected dependencies with
 /// [`Collector`](crate::intercom::Collector)
 /// or follow it from broadcasts received by
@@ -22,11 +40,17 @@ pub trait Source: Clone {}
 /// changes current dag round and takes some (little) time to respawn `Collector` and other tasks.
 ///
 /// ### Channel-style usage
-/// Allows to clean storage with its own pace, repeating it as soon as both:
-/// previous task completed and consensus round advanced.
+/// To clean storage.
 #[derive(Clone)]
 pub struct Consensus;
 impl Source for Consensus {}
+
+/// ### Channel-style usage
+/// Allows to clean storage with its own pace, repeating it as soon as both:
+/// previous task completed and a new anchor was committed.
+#[derive(Clone)]
+pub struct Commit;
+impl Source for Commit {}
 
 #[derive(Clone)]
 pub struct OuterRound<T: Source> {
