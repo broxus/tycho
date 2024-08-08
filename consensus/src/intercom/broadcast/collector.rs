@@ -239,7 +239,7 @@ impl CollectorTask {
 
     fn jump_up(&mut self, state: InclusionState) -> Option<Result<(), Round>> {
         // its ok to discard invalid state from `next_includes` queue
-        let point_round = state.point()?.valid()?.point.body().location.round;
+        let point_round = state.point()?.valid()?.point.body().round;
         // will be signed on the next round
         self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;
@@ -304,23 +304,23 @@ impl CollectorTask {
                 }
             }
             ConsensusEvent::Validating { point_id, task } => {
-                if point_id.location.round > self.next_dag_round.round() {
+                if point_id.round > self.next_dag_round.round() {
                     let _guard = self.effects.span().enter();
                     panic!(
                         "Coding error: broadcast filter advanced \
                          while collector left behind; Validating {:?}",
                         point_id.alt()
                     )
-                } else if point_id.location.round == self.next_dag_round.round() {
+                } else if point_id.round == self.next_dag_round.round() {
                     self.next_includes.push(task);
-                } else if point_id.location.round == self.current_round.round() {
+                } else if point_id.round == self.current_round.round() {
                     self.includes.push(task);
                 } // else maybe other's dependency, but too old to be included
                 tracing::debug!(
                     parent: self.effects.span(),
                     event = display("Validating"),
-                    author = display(point_id.location.author.alt()),
-                    round = point_id.location.round.0,
+                    author = display(point_id.author.alt()),
+                    round = point_id.round.0,
                     digest = display(point_id.digest.alt()),
                     "from bcast filter",
                 );
@@ -347,11 +347,10 @@ impl CollectorTask {
             None => false,
         };
         let point_signed = state.signed().map_or(false, |result| result.is_ok());
-        let point_included =
-            match point_signed && dag_point.location().round == self.current_round.round() {
-                true => self.includes_ready.insert(dag_point.location().author),
-                false => self.includes_ready.contains(&dag_point.location().author),
-            };
+        let point_included = match point_signed && dag_point.round() == self.current_round.round() {
+            true => self.includes_ready.insert(dag_point.author()),
+            false => self.includes_ready.contains(&dag_point.author()),
+        };
         let level = if dag_point.trusted().is_some() {
             tracing::Level::TRACE
         } else {
@@ -361,8 +360,8 @@ impl CollectorTask {
             parent: self.effects.span(),
             level,
             result = display(dag_point.alt()),
-            author = display(dag_point.location().author.alt()),
-            round = dag_point.location().round.0,
+            author = display(dag_point.author().alt()),
+            round = dag_point.round().0,
             digest = display(dag_point.digest().alt()),
             signed = signed,
             point_signed = point_signed,

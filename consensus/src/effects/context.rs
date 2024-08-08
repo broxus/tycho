@@ -100,8 +100,8 @@ impl Effects<DownloadContext> {
         parent.new_child(parent.ctx().into(), || {
             tracing::error_span!(
                 "download",
-                author = display(point_id.location.author.alt()),
-                round = point_id.location.round.0,
+                author = display(point_id.author.alt()),
+                round = point_id.round.0,
                 digest = display(point_id.digest.alt()),
             )
         })
@@ -132,8 +132,8 @@ impl Effects<ValidateContext> {
         parent.new_child(parent.ctx().into(), || {
             tracing::error_span!(
                 "validate",
-                author = display(point.body().location.author.alt()),
-                round = point.body().location.round.0,
+                author = display(point.body().author.alt()),
+                round = point.body().round.0,
                 digest = display(point.digest().alt()),
             )
         })

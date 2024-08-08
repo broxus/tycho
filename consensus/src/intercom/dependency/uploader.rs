@@ -17,10 +17,10 @@ impl Uploader {
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> PointByIdResponse {
-        if point_id.location.round > top_dag_round.round() {
+        if point_id.round > top_dag_round.round() {
             PointByIdResponse::TryLater
         } else {
-            match top_dag_round.scan(point_id.location.round) {
+            match top_dag_round.scan(point_id.round) {
                 Some(dag_round) => {
                     Self::from_dag(peer_id, point_id, top_dag_round, &dag_round, effects)
                 }
@@ -38,7 +38,7 @@ impl Uploader {
         effects: &Effects<EngineContext>,
     ) -> PointByIdResponse {
         let found = dag_round
-            .view(&point_id.location.author, |loc| {
+            .view(&point_id.author, |loc| {
                 loc.versions().get(&point_id.digest).cloned()
             })
             .flatten();
@@ -55,7 +55,7 @@ impl Uploader {
                 // and don't trust newer consensus signatures
                 tracing::Level::ERROR
             }
-        } else if point_id.location.round >= top_dag_round.round().prev() {
+        } else if point_id.round >= top_dag_round.round().prev() {
             // peer is from future round, we lag behind consensus and can see it from other logs
             tracing::Level::TRACE
         } else {
@@ -69,8 +69,8 @@ impl Uploader {
             task_found = task_found,
             ready = ready.as_ref().map(|dag_point| display(dag_point.alt())),
             peer = display(peer_id.alt()),
-            author = display(point_id.location.author.alt()),
-            round = point_id.location.round.0,
+            author = display(point_id.author.alt()),
+            round = point_id.round.0,
             digest = display(point_id.digest.alt()),
             "upload",
         );
@@ -89,9 +89,9 @@ impl Uploader {
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> PointByIdResponse {
-        let flags = store.get_flags(point_id.location.round, &point_id.digest);
+        let flags = store.get_flags(point_id.round, &point_id.digest);
         let point_opt = if flags.is_valid || flags.is_certified {
-            store.get_point(point_id.location.round, &point_id.digest)
+            store.get_point(point_id.round, &point_id.digest)
         } else {
             None
         };
@@ -102,8 +102,8 @@ impl Uploader {
             valid = flags.is_valid,
             certified = flags.is_certified,
             peer = display(peer_id.alt()),
-            author = display(point_id.location.author.alt()),
-            round = point_id.location.round.0,
+            author = display(point_id.author.alt()),
+            round = point_id.round.0,
             digest = display(point_id.digest.alt()),
             "upload",
         );

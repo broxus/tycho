@@ -15,7 +15,7 @@ use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Link, LinkField, Location, PeerCount, Point, ValidPoint};
+use crate::models::{DagPoint, Digest, Link, LinkField, PeerCount, Point, ValidPoint};
 
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
@@ -66,7 +66,7 @@ impl Verifier {
         // it cannot be validated against AnchorStage (as it knows nothing about genesis)
         // and cannot contain dependencies
         assert!(
-            point.body().location.round > MempoolConfig::GENESIS_ROUND,
+            point.body().round > MempoolConfig::GENESIS_ROUND,
             "Coding error: can only validate points older than genesis"
         );
         let Some(r_0) = r_0.upgrade() else {
@@ -75,7 +75,7 @@ impl Verifier {
             return ValidateContext::validated(dag_point);
         };
         assert_eq!(
-            point.body().location.round,
+            point.body().round,
             r_0.round(),
             "Coding error: dag round mismatches point round"
         );
@@ -137,7 +137,7 @@ impl Verifier {
 
         let mut is_unique_in_loc_fut = std::pin::pin!(Self::is_unique_in_loc(
             &point,
-            Self::versions_except(&r_0, &point.body().location.author, Some(point.digest()))
+            Self::versions_except(&r_0, &point.body().author, Some(point.digest()))
                 .into_iter()
                 .collect()
         )
@@ -151,7 +151,7 @@ impl Verifier {
                 // do not extend listed dependencies as they may become trusted by consensus
                 .chain(Self::versions_except(
                     &r_1,
-                    &point.body().location.author,
+                    &point.body().author,
                     point.body().proof.as_ref().map(|p| &p.digest),
                 ))
                 .collect()
@@ -262,14 +262,12 @@ impl Verifier {
             }
             // leader must link to own point while others must not
             Some(AnchorStage::Proof { leader, .. }) => {
-                (leader == point.body().location.author)
-                    == (point.body().anchor_proof == Link::ToSelf)
+                (leader == point.body().author) == (point.body().anchor_proof == Link::ToSelf)
             }
             Some(AnchorStage::Trigger { leader, .. }) => {
-                (leader == point.body().location.author)
-                    == (point.body().anchor_trigger == Link::ToSelf)
+                (leader == point.body().author) == (point.body().anchor_trigger == Link::ToSelf)
             }
-        }) || point.body().location.round == MempoolConfig::GENESIS_ROUND
+        }) || point.body().round == MempoolConfig::GENESIS_ROUND
     }
 
     /// the only method that scans the DAG deeper than 2 rounds
@@ -284,7 +282,7 @@ impl Verifier {
     ) -> bool {
         let linked_id = point.anchor_id(link_field);
 
-        let Some(round) = dag_round.scan(linked_id.location.round) else {
+        let Some(round) = dag_round.scan(linked_id.round) else {
             // too old indirect reference does not invalidate the point,
             // because its direct dependencies ('link through') will be validated anyway
             return true;
@@ -299,7 +297,7 @@ impl Verifier {
         match (round.anchor_stage(), link_field) {
             (Some(AnchorStage::Proof { leader, .. }), LinkField::Proof)
             | (Some(AnchorStage::Trigger { leader, .. }), LinkField::Trigger)
-                if leader == linked_id.location.author => {}
+                if leader == linked_id.author => {}
             _ => {
                 // link does not match round's leader, prescribed by AnchorStage
                 return false;
@@ -318,9 +316,9 @@ impl Verifier {
             Link::Indirect { .. } => {
                 // actually no need to check indirect dependencies, but let's reinsure while we can
                 dependencies.push(round.add_dependency_exact(
-                    &linked_id.location.author,
+                    &linked_id.author,
                     &linked_id.digest,
-                    &point.body().location.author,
+                    &point.body().author,
                     downloader,
                     store,
                     effects,
@@ -381,7 +379,7 @@ impl Verifier {
             let shared = dag_round.add_dependency_exact(
                 author,
                 digest,
-                &point.body().location.author,
+                &point.body().author,
                 downloader,
                 store,
                 effects,
@@ -390,7 +388,7 @@ impl Verifier {
             // it's sufficient to check only author to get prev (proven) point from well-formed one:
             // * includes map contains same author at most once - and it matches proven point
             // * witness map cannot contain same author
-            if author == point.body().location.author {
+            if author == point.body().author {
                 *proven_vertex_dep = Some(shared.clone());
             }
 
@@ -402,15 +400,16 @@ impl Verifier {
         point: &Point,
         mut other_versions: FuturesUnordered<DagPointFuture>,
     ) -> bool {
-        let current_loc = Location {
-            round: point.body().location.round,
-            author: point.body().location.author,
-        };
         while let Some(dag_point) = other_versions.next().await {
             assert_eq!(
-                dag_point.location(),
-                &current_loc,
-                "this method checks only points at the same location"
+                dag_point.author(),
+                point.body().author,
+                "this method checks only points by the same author"
+            );
+            assert_eq!(
+                dag_point.round(),
+                point.body().round,
+                "this method checks only points at the same round"
             );
             assert_ne!(
                 dag_point.digest(),
@@ -436,10 +435,7 @@ impl Verifier {
     async fn is_valid(point: &Point, mut deps_and_prev: FuturesUnordered<DagPointFuture>) -> bool {
         // point is well-formed if we got here, so point.proof matches point.includes
         let proven_vertex = point.body().proof.as_ref().map(|p| &p.digest);
-        let prev_loc = Location {
-            round: point.body().location.round.prev(),
-            author: point.body().location.author,
-        };
+        let prev_loc = (point.body().round.prev(), point.body().author);
 
         // Indirect dependencies may be evicted from memory and not participate in this check,
         // but validity of direct dependencies ('links through') ensures inclusion chain is valid.
@@ -452,7 +448,7 @@ impl Verifier {
         let anchor_proof_link_id = point.anchor_link_id(LinkField::Proof);
 
         while let Some(dag_point) = deps_and_prev.next().await {
-            if dag_point.location() == &prev_loc {
+            if (dag_point.round(), dag_point.author()) == prev_loc {
                 match proven_vertex {
                     Some(proven_vertex) if proven_vertex == dag_point.digest() => {
                         #[allow(clippy::match_same_arms)]
@@ -493,10 +489,8 @@ impl Verifier {
             } else {
                 match dag_point {
                     DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                        if valid.point.anchor_round(LinkField::Trigger)
-                            > anchor_trigger_id.location.round
-                            || valid.point.anchor_round(LinkField::Proof)
-                                > anchor_proof_id.location.round
+                        if valid.point.anchor_round(LinkField::Trigger) > anchor_trigger_id.round
+                            || valid.point.anchor_round(LinkField::Proof) > anchor_proof_id.round
                         {
                             // did not actualize the chain
                             return false;
@@ -538,16 +532,16 @@ impl Verifier {
             includes_peers /* @ r-1 */ ,
             proof_peers /* @ r+0 */
         ] = peer_schedule.atomic().peers_for_array([
-                point.body().location.round.prev().prev(),
-                point.body().location.round.prev(),
-                point.body().location.round,
+                point.body().round.prev().prev(),
+                point.body().round.prev(),
+                point.body().round,
             ]);
         for peer_id in point.body().witness.keys() {
             if !witness_peers.contains(peer_id) {
                 return false;
             }
         }
-        let peer_count = if point.body().location.round.prev() == MempoolConfig::GENESIS_ROUND {
+        let peer_count = if point.body().round.prev() == MempoolConfig::GENESIS_ROUND {
             PeerCount::GENESIS
         } else {
             match PeerCount::try_from(proof_peers.len()) {
@@ -590,13 +584,13 @@ impl Verifier {
         proven: &Point, // @ r-1
     ) -> bool {
         assert_eq!(
-            point.body().location.author,
-            proven.body().location.author,
+            point.body().author,
+            proven.body().author,
             "Coding error: mismatched authors of proof and its vertex"
         );
         assert_eq!(
-            point.body().location.round.prev(),
-            proven.body().location.round,
+            point.body().round.prev(),
+            proven.body().round,
             "Coding error: mismatched rounds of proof and its vertex"
         );
         let proof = point

@@ -1,7 +1,10 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::models::point::{Digest, Location, Point, PointId};
+use tycho_network::PeerId;
+
+use crate::models::point::{Digest, Point, PointId};
+use crate::models::Round;
 
 #[derive(Clone, Debug)]
 pub struct ValidPoint {
@@ -35,10 +38,8 @@ pub enum DagPoint {
 
 impl DagPoint {
     pub fn into_valid(self) -> Option<ValidPoint> {
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => Some(valid),
-            Self::Suspicious(valid) => Some(valid),
+            Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
             _ => None,
         }
     }
@@ -51,10 +52,8 @@ impl DagPoint {
     }
 
     pub fn valid(&self) -> Option<&'_ ValidPoint> {
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => Some(valid),
-            Self::Suspicious(valid) => Some(valid),
+            Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
             _ => None,
         }
     }
@@ -66,21 +65,25 @@ impl DagPoint {
         }
     }
 
-    pub fn location(&self) -> &'_ Location {
-        #[allow(clippy::match_same_arms)]
+    pub fn author(&self) -> PeerId {
         match self {
-            Self::Trusted(valid) => &valid.point.body().location,
-            Self::Suspicious(valid) => &valid.point.body().location,
-            Self::Invalid(point) => &point.body().location,
-            Self::NotExists(id) => &id.location,
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.body().author,
+            Self::Invalid(point) => point.body().author,
+            Self::NotExists(id) => id.author,
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        match self {
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.body().round,
+            Self::Invalid(point) => point.body().round,
+            Self::NotExists(id) => id.round,
         }
     }
 
     pub fn digest(&self) -> &'_ Digest {
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => valid.point.digest(),
-            Self::Suspicious(valid) => valid.point.digest(),
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.digest(),
             Self::Invalid(point) => point.digest(),
             Self::NotExists(id) => &id.digest,
         }

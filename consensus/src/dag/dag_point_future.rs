@@ -14,7 +14,7 @@ use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::Downloader;
-use crate::models::{DagPoint, Digest, Location, PointId};
+use crate::models::{DagPoint, Digest, PointId};
 use crate::Point;
 
 #[derive(Clone)]
@@ -62,7 +62,7 @@ impl DagPointFuture {
         if let Some(valid) = dag_point.valid() {
             store.insert_point(&valid.point);
             store.set_flags(
-                valid.point.body().location.round,
+                valid.point.body().round,
                 valid.point.digest(),
                 &PointFlags {
                     is_valid: true,
@@ -120,7 +120,7 @@ impl DagPointFuture {
                 ..Default::default()
             };
             tokio::task::spawn_blocking(move || {
-                store.set_flags(point_id.location.round, &point_id.digest, &flags);
+                store.set_flags(point_id.round, &point_id.digest, &flags);
             })
             .await
             .expect("db set point flags");
@@ -150,10 +150,8 @@ impl DagPointFuture {
         let certified = Arc::new(OnceTake::new(certified_tx));
         let certified_clone = certified.clone();
         let point_id = PointId {
-            location: Location {
-                author: *author,
-                round: point_dag_round.round(),
-            },
+            author: *author,
+            round: point_dag_round.round(),
             digest: digest.clone(),
         };
         let point_dag_round = point_dag_round.downgrade();
@@ -204,7 +202,7 @@ impl DagPointFuture {
                         ..Default::default()
                     };
                     tokio::task::spawn_blocking(move || {
-                        store.set_flags(point_id.location.round, &point_id.digest, &flags);
+                        store.set_flags(point_id.round, &point_id.digest, &flags);
                     })
                     .await
                     .expect("db set point flags");

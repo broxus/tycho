@@ -103,7 +103,7 @@ impl Engine {
             // finished epoch
             guard.set_next_start(MempoolConfig::GENESIS_ROUND, &peer_schedule);
             guard.set_next_peers(
-                &[crate::test_utils::genesis_point_id().location.author],
+                &[crate::test_utils::genesis_point_id().author],
                 &peer_schedule,
                 false,
             );
@@ -209,9 +209,8 @@ impl Engine {
                     round_effects.commit_metrics(&committed);
                     round_effects.log_committed(&committed);
 
-                    if let Some(last_anchor_round) = committed
-                        .last()
-                        .map(|(ancor, _)| ancor.body().location.round)
+                    if let Some(last_anchor_round) =
+                        committed.last().map(|(ancor, _)| ancor.body().round)
                     {
                         commit_round.set_max(last_anchor_round);
                         for points in committed {
@@ -252,7 +251,7 @@ impl Effects<EngineContext> {
 
         if let Some((first_anchor, _)) = committed.first() {
             metrics::gauge!("tycho_mempool_commit_latency_rounds")
-                .set(self.depth(first_anchor.body().location.round));
+                .set(self.depth(first_anchor.body().round));
         }
         if let Some((last_anchor, _)) = committed.last() {
             let now = UnixTime::now().as_u64();

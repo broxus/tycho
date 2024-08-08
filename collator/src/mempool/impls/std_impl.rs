@@ -89,7 +89,7 @@ impl MempoolAdapterStdImpl {
     async fn handle_anchors_task(self: Arc<Self>, mut rx: UnboundedReceiver<(Point, Vec<Point>)>) {
         let mut cache = ExternalMessageCache::new(MempoolConfig::DEDUPLICATE_ROUNDS);
         while let Some((anchor, points)) = rx.recv().await {
-            let anchor_id: MempoolAnchorId = anchor.body().location.round.0;
+            let anchor_id: MempoolAnchorId = anchor.body().round.0;
             let mut messages = Vec::new();
             let mut total_messages = 0;
             let mut total_bytes = 0;
@@ -134,7 +134,7 @@ impl MempoolAdapterStdImpl {
                 }
             }
 
-            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body().location.round.0);
+            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body().round.0);
             metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
             metrics::counter!("tycho_mempool_externals_bytes_total").increment(messages_bytes as _);
             metrics::counter!("tycho_mempool_duplicates_count_total")
@@ -154,7 +154,7 @@ impl MempoolAdapterStdImpl {
             self.add_anchor(Arc::new(MempoolAnchor {
                 id: anchor_id,
                 chain_time: anchor.body().time.as_u64(),
-                author: anchor.body().location.author,
+                author: anchor.body().author,
                 externals: messages,
             }));
 

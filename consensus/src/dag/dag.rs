@@ -13,7 +13,7 @@ use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{Digest, LinkField, Location, Point, PointId, Round, ValidPoint};
+use crate::models::{Digest, LinkField, Point, PointId, Round, ValidPoint};
 
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
@@ -117,8 +117,8 @@ impl Dag {
         let _span = if let Some((latest_trigger, _)) = trigger_stack.first() {
             tracing::error_span!(
                 "commit trigger",
-                author = display(&latest_trigger.body().location.author.alt()),
-                round = latest_trigger.body().location.round.0,
+                author = display(&latest_trigger.body().author.alt()),
+                round = latest_trigger.body().round.0,
                 digest = display(&latest_trigger.digest().alt()),
             )
             .entered()
@@ -179,7 +179,7 @@ impl Dag {
         }
         if let Some((last_anchor, _)) = ordered.last() {
             // drop rounds that we'll never need again to free some memory
-            self.drop_tail_after_commit(last_anchor.body().location.round);
+            self.drop_tail_after_commit(last_anchor.body().round);
         }
         ordered
     }
@@ -239,7 +239,7 @@ impl Dag {
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         assert_eq!(
-            trigger.body().location.round,
+            trigger.body().round,
             trigger_round.round(),
             "trigger round does not match trigger point"
         );
@@ -253,20 +253,20 @@ impl Dag {
         let mut trigger_round = Some(trigger_round); // use only as a part of matching triplet
         loop {
             assert_eq!(
-                proof_id.location.round,
+                proof_id.round,
                 proof_round.round(),
                 "anchor proof id round does not match"
             );
-            if proof_id.location.round == bottom_proof_round {
+            if proof_id.round == bottom_proof_round {
                 break;
             }
             let Some(proof) =
-                Self::ready_valid_point(&proof_round, &proof_id.location.author, &proof_id.digest)
+                Self::ready_valid_point(&proof_round, &proof_id.author, &proof_id.digest)
             else {
                 break;
             };
             assert_eq!(
-                proof.point.body().location.round,
+                proof.point.body().round,
                 proof_round.round(),
                 "anchor proof round does not match"
             );
@@ -278,7 +278,7 @@ impl Dag {
                 panic!("anchor proof round is not expected, validation is broken")
             };
             assert_eq!(
-                proof.point.body().location.author,
+                proof.point.body().author,
                 leader,
                 "anchor proof author does not match prescribed by round"
             );
@@ -309,7 +309,7 @@ impl Dag {
             };
 
             proof_id = anchor.point.anchor_id(LinkField::Proof);
-            let next_proof_round = anchor_round.scan(proof_id.location.round);
+            let next_proof_round = anchor_round.scan(proof_id.round);
 
             // safety net: as rounds are traversed from oldest to newest,
             // trigger can be met only at first time its candidate round is met;
@@ -349,7 +349,7 @@ impl Dag {
         }
         assert_eq!(
             current_round.round(),
-            anchor.body().location.round,
+            anchor.body().round,
             "passed anchor round does not match anchor point's round"
         );
         let history_limit = Round(
@@ -423,10 +423,8 @@ impl Dag {
             })
             .unwrap_or_else(|msg| {
                 let point_id = PointId {
-                    location: Location {
-                        round: dag_round.round(),
-                        author: *author,
-                    },
+                    author: *author,
+                    round: dag_round.round(),
                     digest: digest.clone(),
                 };
                 panic!("{msg}: {:?}", point_id.alt())

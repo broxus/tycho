@@ -66,8 +66,8 @@ impl Downloader {
         // request point from its signers (any depender is among them as point is already verified)
         let (undone_peers, author_state, updates) = {
             let guard = self.inner.peer_schedule.read();
-            let undone_peers = guard.data.peers_state_for(point_id.location.round.next());
-            let author_state = guard.data.peer_state(&point_id.location.author);
+            let undone_peers = guard.data.peers_state_for(point_id.round.next());
+            let author_state = guard.data.peer_state(&point_id.author);
             (undone_peers.clone(), author_state, guard.updates())
         };
         let peer_count = PeerCount::try_from(undone_peers.len())
@@ -77,7 +77,7 @@ impl Downloader {
             // query author no matter if it is scheduled for the next round or not;
             // it won't affect 2F reliable `NotFound`s to break the task with `DagPoint::NotExists`:
             // author is a depender for its point, so its `NotFound` response is not reliable
-            .chain(iter::once((&point_id.location.author, &author_state)))
+            .chain(iter::once((&point_id.author, &author_state)))
             .map(|(peer_id, state)| {
                 let status = PeerStatus {
                     state: *state,
@@ -306,8 +306,8 @@ impl DownloadTask {
                 self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
-                    author = display(point.body().location.author.alt()),
-                    round = point.body().location.round.0,
+                    author = display(point.body().author.alt()),
+                    round = point.body().round.0,
                     digest = display(point.digest().alt()),
                     "returned wrong point",
                 );
@@ -401,6 +401,6 @@ impl Effects<DownloadContext> {
 
         // FIXME not guaranteed to show the latest value as rounds advance, but better than nothing
         metrics::gauge!("tycho_mempool_download_depth_rounds")
-            .set(self.download_max_depth(point_id.location.round));
+            .set(self.download_max_depth(point_id.round));
     }
 }

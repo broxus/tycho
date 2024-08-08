@@ -65,7 +65,7 @@ impl DagRound {
 
     pub fn genesis(genesis: &Point, peer_schedule: &PeerSchedule) -> Self {
         let locations = FastDashMap::with_capacity_and_hasher(1, Default::default());
-        let round = genesis.body().location.round;
+        let round = genesis.body().round;
         Self(Arc::new(DagRoundInner {
             round,
             peer_count: PeerCount::GENESIS,
@@ -135,12 +135,12 @@ impl DagRound {
     ) -> Option<BoxFuture<'static, InclusionState>> {
         let _guard = effects.span().enter();
         assert_eq!(
-            point.body().location.round,
+            point.body().round,
             self.round(),
             "Coding error: point round does not match dag round"
         );
         let digest = point.digest();
-        self.edit(&point.body().location.author, |loc| {
+        self.edit(&point.body().author, |loc| {
             let result_state = loc.state().clone();
             loc.init_or_modify(
                 digest,
@@ -188,7 +188,7 @@ impl DagRound {
         store: &MempoolStore,
     ) -> InclusionState {
         let state = self.insert_exact(
-            &point.body().location.author,
+            &point.body().author,
             &DagPoint::Trusted(ValidPoint::new(point.clone())),
             store,
         );
@@ -223,7 +223,7 @@ impl DagRound {
         store: &MempoolStore,
     ) -> InclusionState {
         assert_eq!(
-            dag_point.location().round,
+            dag_point.round(),
             self.round(),
             "Coding error: dag round mismatches point round on insert"
         );

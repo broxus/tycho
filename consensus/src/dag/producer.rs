@@ -5,8 +5,8 @@ use tycho_network::PeerId;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::models::{
-    Digest, Link, LinkField, Location, PeerCount, Point, PointBody, PrevPoint, Round, Signature,
-    Through, UnixTime,
+    Digest, Link, LinkField, PeerCount, Point, PointBody, PrevPoint, Round, Signature, Through,
+    UnixTime,
 };
 use crate::{InputBuffer, MempoolConfig};
 
@@ -80,7 +80,7 @@ impl Producer {
 
         let includes = includes
             .into_iter()
-            .map(|point| (point.body().location.author, point.digest().clone()))
+            .map(|point| (point.body().author, point.digest().clone()))
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
@@ -91,14 +91,12 @@ impl Producer {
 
         let witness = witness
             .into_iter()
-            .map(|point| (point.body().location.author, point.digest().clone()))
+            .map(|point| (point.body().author, point.digest().clone()))
             .collect::<BTreeMap<_, _>>();
 
         Some(Point::new(key_pair, PointBody {
-            location: Location {
-                round: current_round.round(),
-                author: local_id,
-            },
+            author: local_id,
+            round: current_round.round(),
             time,
             payload,
             proof: prev_point,
@@ -166,14 +164,14 @@ impl Producer {
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        if point.body().location.round == current_round.round().prev()
+        if point.body().round == current_round.round().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
-            Link::Direct(Through::Includes(point.body().location.author))
+            Link::Direct(Through::Includes(point.body().author))
         } else {
             Link::Indirect {
                 to: point.anchor_id(link_field),
-                path: Through::Includes(point.body().location.author),
+                path: Through::Includes(point.body().author),
             }
         }
     }
@@ -186,7 +184,7 @@ impl Producer {
     ) {
         let link_round = match link {
             Link::ToSelf | Link::Direct(_) => return,
-            Link::Indirect { to, .. } => to.location.round,
+            Link::Indirect { to, .. } => to.round,
         };
 
         let Some(point) = witness
@@ -197,14 +195,14 @@ impl Producer {
             return;
         };
 
-        if point.body().location.round == current_round.prev().prev()
+        if point.body().round == current_round.prev().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(point.body().location.author));
+            *link = Link::Direct(Through::Witness(point.body().author));
         } else {
             *link = Link::Indirect {
                 to: point.anchor_id(link_field),
-                path: Through::Witness(point.body().location.author),
+                path: Through::Witness(point.body().author),
             };
         }
     }
@@ -243,7 +241,7 @@ impl Producer {
 
                 let point = through
                     .iter()
-                    .find(|point| point.body().location.author == peer_id)
+                    .find(|point| point.body().author == peer_id)
                     .expect("path to anchor proof should exist in new point dependencies");
 
                 let anchor_time = point.body().anchor_time;

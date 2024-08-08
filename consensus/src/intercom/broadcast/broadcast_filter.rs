@@ -14,7 +14,7 @@ use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Location, PeerCount, Point, PointId, Round};
+use crate::models::{DagPoint, Digest, PeerCount, Point, PointId, Round};
 use crate::outer_round::{Consensus, OuterRound};
 
 #[derive(Clone)]
@@ -123,7 +123,8 @@ impl BroadcastFilterInner {
         // for any node @ r+0, its DAG always contains [r-DAG_DEPTH-N; r+1] rounds, where N>=2
 
         let PointId {
-            location: Location { round, author },
+            author,
+            round,
             digest,
         } = point.id();
 
@@ -155,7 +156,7 @@ impl BroadcastFilterInner {
             // if round < top_dag_round.round().prev() {
             //     return; // will not be certified; look Signer's response `TooOldRound`
             // }
-            let Some(point_round) = top_dag_round.scan(point.body().location.round) else {
+            let Some(point_round) = top_dag_round.scan(point.body().round) else {
                 // tracing::warn!("DAG is too shallow", round = round.0);
                 return; // cannot process anyway
             };

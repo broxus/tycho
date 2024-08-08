@@ -143,15 +143,10 @@ impl Display for UnixTime {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub struct Location {
-    pub round: Round,
-    pub author: PeerId,
-}
-
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct PointId {
-    pub location: Location,
+    pub author: PeerId,
+    pub round: Round,
     pub digest: Digest,
 }
 
@@ -192,7 +187,8 @@ pub enum Link {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct PointBody {
-    pub location: Location, // let it be @ r+0
+    pub author: PeerId,
+    pub round: Round, // let it be @ r+0
     pub time: UnixTime,
     pub payload: Vec<Bytes>,
     /// by the same author
@@ -254,7 +250,7 @@ impl Debug for Point {
 impl Point {
     pub fn new(local_keypair: &KeyPair, point_body: PointBody) -> Self {
         assert_eq!(
-            point_body.location.author,
+            point_body.author,
             PeerId::from(local_keypair.public_key),
             "produced point author must match local key pair"
         );
@@ -320,17 +316,18 @@ impl Point {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct PointInner {
-    body: PointBody,
     // hash of the point's body (includes author peer id)
     digest: Digest,
     // author's signature for the digest
     signature: Signature,
+    body: PointBody,
 }
 
 impl PointInner {
     fn id(&self) -> PointId {
         PointId {
-            location: self.body.location,
+            author: self.body.author,
+            round: self.body.round,
             digest: self.digest.clone(),
         }
     }
@@ -338,24 +335,21 @@ impl PointInner {
     fn prev_id(&self) -> Option<PointId> {
         let digest = self.body.proof.as_ref().map(|p| &p.digest)?;
         Some(PointId {
-            location: Location {
-                round: self.body.location.round.prev(),
-                author: self.body.location.author,
-            },
+            author: self.body.author,
+            round: self.body.round.prev(),
             digest: digest.clone(),
         })
     }
 
     fn is_integrity_ok(&self) -> bool {
-        self.signature
-            .verifies(&self.body.location.author, &self.digest)
+        self.signature.verifies(&self.body.author, &self.digest)
             && self.digest == Digest::new(&self.body)
     }
 
     fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
-        let author = &self.body.location.author;
-        let is_special_ok = match self.body.location.round {
+        let author = &self.body.author;
+        let is_special_ok = match self.body.round {
             MempoolConfig::GENESIS_ROUND => {
                 self.body.includes.is_empty()
                     && self.body.witness.is_empty()
@@ -383,7 +377,7 @@ impl PointInner {
             // in contrast, evidence must contain only signatures of others
             && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
             // also cannot witness own point
-            && !self.body.witness.contains_key(&self.body.location.author)
+            && !self.body.witness.contains_key(&self.body.author)
             && self.is_link_well_formed(LinkField::Proof)
             && self.is_link_well_formed(LinkField::Trigger)
             && self.body.time >= self.body.anchor_time
@@ -406,17 +400,11 @@ impl PointInner {
             Link::Indirect {
                 path: Through::Includes(peer),
                 to,
-            } => {
-                self.body.includes.contains_key(peer)
-                    && to.location.round.next() < self.body.location.round
-            }
+            } => self.body.includes.contains_key(peer) && to.round.next() < self.body.round,
             Link::Indirect {
                 path: Through::Witness(peer),
                 to,
-            } => {
-                self.body.witness.contains_key(peer)
-                    && to.location.round.next().next() < self.body.location.round
-            }
+            } => self.body.witness.contains_key(peer) && to.round.next().next() < self.body.round,
         }
     }
 
@@ -429,10 +417,10 @@ impl PointInner {
 
     fn anchor_round(&self, link_field: LinkField) -> Round {
         match self.anchor_link(link_field) {
-            Link::ToSelf => self.body.location.round,
-            Link::Direct(Through::Includes(_)) => self.body.location.round.prev(),
-            Link::Direct(Through::Witness(_)) => self.body.location.round.prev().prev(),
-            Link::Indirect { to, .. } => to.location.round,
+            Link::ToSelf => self.body.round,
+            Link::Direct(Through::Includes(_)) => self.body.round.prev(),
+            Link::Direct(Through::Witness(_)) => self.body.round.prev().prev(),
+            Link::Indirect { to, .. } => to.round,
         }
     }
 
@@ -444,27 +432,26 @@ impl PointInner {
     }
 
     fn anchor_link_id(&self, link_field: LinkField) -> PointId {
-        let (digest, location) = match self.anchor_link(link_field) {
+        let (digest, author, round) = match self.anchor_link(link_field) {
             Link::ToSelf => return self.id(),
             Link::Direct(Through::Includes(peer))
             | Link::Indirect {
                 path: Through::Includes(peer),
                 ..
-            } => (self.body.includes.get(peer), Location {
-                author: *peer,
-                round: self.body.location.round.prev(),
-            }),
+            } => (self.body.includes.get(peer), *peer, self.body.round.prev()),
             Link::Direct(Through::Witness(peer))
             | Link::Indirect {
                 path: Through::Witness(peer),
                 ..
-            } => (self.body.witness.get(peer), Location {
-                author: *peer,
-                round: self.body.location.round.prev().prev(),
-            }),
+            } => (
+                self.body.witness.get(peer),
+                *peer,
+                self.body.round.prev().prev(),
+            ),
         };
         PointId {
-            location,
+            author,
+            round,
             digest: digest
                 .expect("Coding error: usage of ill-formed point")
                 .clone(),
@@ -509,10 +496,8 @@ mod tests {
         }
 
         PointBody {
-            location: Location {
-                round: Round(thread_rng().next_u32()),
-                author: PeerId::from(key_pair.public_key),
-            },
+            author: PeerId::from(key_pair.public_key),
+            round: Round(thread_rng().next_u32()),
             time: UnixTime::now(),
             payload,
             proof: None,
