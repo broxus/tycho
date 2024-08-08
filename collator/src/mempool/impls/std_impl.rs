@@ -70,10 +70,10 @@ impl MempoolAdapterStdImpl {
             self.externals_rx.clone(),
         );
 
+        if use_genesis {
+            engine.init_with_genesis(&peers);
+        }
         tokio::spawn(async move {
-            if use_genesis {
-                engine.init_with_genesis(&peers).await;
-            }
             engine.run().await;
         });
 

@@ -4,9 +4,8 @@ use std::{iter, panic};
 
 use futures_util::{future, TryFutureExt};
 use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tracing::Instrument;
-use tycho_util::sync::rayon_run;
 
 use crate::dag::{DagRound, InclusionState, LastOwnPoint, Producer, Verifier, WeakDagRound};
 use crate::effects::{
@@ -126,7 +125,7 @@ impl RoundTaskReady {
             let task = wait_collator_ready
                 .and_then(|is_ready_to_produce| {
                     if is_ready_to_produce {
-                        future::Either::Right(rayon_run(move || {
+                        future::Either::Right(tokio::task::spawn_blocking(move || {
                             let task_start_time = Instant::now();
                             let point_opt = Producer::new_point(
                                 &current_dag_round,
@@ -143,7 +142,7 @@ impl RoundTaskReady {
                                 metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
                                     .record(task_start_time.elapsed());
                             };
-                            Ok(point_opt)
+                            point_opt
                             // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
                         }))
                     } else {
@@ -278,7 +277,7 @@ pub struct RoundTaskRunning {
 }
 
 impl RoundTaskRunning {
-    pub async fn until_ready(mut self) -> (RoundTaskReady, Round) {
+    pub async fn until_ready(mut self) -> Result<(RoundTaskReady, Round), JoinError> {
         match tokio::try_join!(self.collector_run, self.broadcaster_run) {
             Ok(((collector, next_round), (broadcaster, new_last_own_point))) => {
                 // do not reset to None, Producer decides whether to use old value or not
@@ -292,10 +291,9 @@ impl RoundTaskRunning {
                     broadcaster,
                     last_own_point: self.last_own_point,
                 };
-                (ready, next_round)
+                Ok((ready, next_round))
             }
-            Err(error) if error.is_panic() => panic::resume_unwind(error.into_panic()),
-            Err(_) => unreachable!("engine round tasks must not be cancelled"),
+            Err(join_error) => Err(join_error),
         }
     }
 }

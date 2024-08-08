@@ -153,7 +153,7 @@ impl CmdRun {
         );
 
         tokio::spawn(anchor_consumer.drain());
-        engine.init_with_genesis(&all_peers).await;
+        engine.init_with_genesis(&all_peers);
 
         tracing::info!(
             local_id = %dht_client.network().peer_id(),

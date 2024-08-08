@@ -152,7 +152,7 @@ fn make_network(cli: Cli) {
                             &collator_round,
                             InputBufferStub::new(cli.points_in_step, cli.steps_until_full),
                         );
-                        engine.init_with_genesis(&all_peers).await;
+                        engine.init_with_genesis(&all_peers);
                         tracing::info!("created engine {}", dht_client.network().peer_id());
                         tokio::try_join!(
                             engine.run().map(|_| Err::<(), ()>(())),

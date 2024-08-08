@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures_util::stream::FuturesUnordered;
-use futures_util::StreamExt;
+use futures_util::{future, StreamExt};
 use tokio::sync::oneshot;
 use tracing::Instrument;
 use tycho_network::PeerId;
@@ -125,8 +125,8 @@ impl Verifier {
         );
 
         let mut signatures_fut = std::pin::pin!(match point.body().proof.as_ref() {
-            None => futures_util::future::Either::Left(futures_util::future::ready(true)),
-            Some(proof) => futures_util::future::Either::Right(
+            None => future::Either::Left(future::ready(true)),
+            Some(proof) => future::Either::Right(
                 rayon_run({
                     let proof = proof.clone();
                     move || proof.signatures_match()

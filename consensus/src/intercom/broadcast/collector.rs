@@ -3,7 +3,7 @@ use std::{cmp, mem};
 use ahash::HashSetExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, StreamExt};
+use futures_util::{future, FutureExt, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
@@ -43,7 +43,7 @@ impl Collector {
         self.next_round = next_round;
         self.next_includes = Some(
             next_includes
-                .map(|a| futures_util::future::ready(a).boxed())
+                .map(|a| future::ready(a).boxed())
                 .collect::<FuturesUnordered<_>>(),
         );
     }
@@ -241,8 +241,7 @@ impl CollectorTask {
         // its ok to discard invalid state from `next_includes` queue
         let point_round = state.point()?.valid()?.point.body().location.round;
         // will be signed on the next round
-        self.next_includes
-            .push(futures_util::future::ready(state).boxed());
+        self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;
         let result = match point_round.cmp(&self.next_dag_round.round()) {
             cmp::Ordering::Less => {

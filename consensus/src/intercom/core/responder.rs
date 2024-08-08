@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwapOption;
+use futures_util::future;
 use tycho_network::{Response, Service, ServiceRequest};
 
 use crate::dag::DagRound;
@@ -45,23 +46,23 @@ impl Responder {
 
 impl Service<ServiceRequest> for Responder {
     type QueryResponse = Response;
-    type OnQueryFuture = futures_util::future::Ready<Option<Self::QueryResponse>>;
-    type OnMessageFuture = futures_util::future::Ready<()>;
-    type OnDatagramFuture = futures_util::future::Ready<()>;
+    type OnQueryFuture = future::Ready<Option<Self::QueryResponse>>;
+    type OnMessageFuture = future::Ready<()>;
+    type OnDatagramFuture = future::Ready<()>;
 
     #[inline]
     fn on_query(&self, req: ServiceRequest) -> Self::OnQueryFuture {
-        futures_util::future::ready(self.handle_query(&req))
+        future::ready(self.handle_query(&req))
     }
 
     #[inline]
     fn on_message(&self, _req: ServiceRequest) -> Self::OnMessageFuture {
-        futures_util::future::ready(())
+        future::ready(())
     }
 
     #[inline]
     fn on_datagram(&self, _req: ServiceRequest) -> Self::OnDatagramFuture {
-        futures_util::future::ready(())
+        future::ready(())
     }
 }
 

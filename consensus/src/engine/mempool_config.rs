@@ -16,6 +16,7 @@ impl MempoolConfig {
     /// how far a signed point (by the time in its body)
     /// may be in the future compared with local (wall) time
     const CLOCK_SKEW: UnixTime = UnixTime::from_millis(5 * 1000);
+    // FIXME remove: no matter how old time is in genesis, and later time is inherited from anchors
     /// how long a point from past remains eligible for signature and inclusion;
     /// time in point body is compared with wall time;
     /// if consensus makes no progress for such long, it will need a manual restart from a new genesis

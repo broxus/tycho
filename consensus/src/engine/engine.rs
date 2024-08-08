@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
-use tycho_util::sync::rayon_run;
 
 use crate::dag::{Dag, DagRound};
 use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
@@ -18,7 +17,6 @@ use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
 use crate::models::{Point, UnixTime};
 use crate::outer_round::{Collator, Commit, Consensus, OuterRound};
-use crate::LogFlavor;
 
 pub struct Engine {
     dag: Dag,
@@ -82,7 +80,7 @@ impl Engine {
         }
     }
 
-    pub async fn init_with_genesis(&mut self, current_peers: &[PeerId]) {
+    pub fn init_with_genesis(&mut self, current_peers: &[PeerId]) {
         let genesis = crate::test_utils::genesis();
         let entered_span = tracing::error_span!("init engine with genesis").entered();
         // check only genesis round as it is widely used in point validation.
@@ -196,7 +194,7 @@ impl Engine {
                 )
                 .until_ready();
 
-            let commit_run = rayon_run({
+            let commit_run = tokio::task::spawn_blocking({
                 let mut dag = self.dag;
                 let next_dag_round = next_dag_round.clone();
                 let committed_tx = self.committed.clone();
@@ -228,10 +226,15 @@ impl Engine {
                 }
             });
 
-            let ((round_task, next_round), dag) = tokio::join!(round_task_run, commit_run);
-            self.round_task = round_task;
-            self.consensus_round.set_max(next_round);
-            self.dag = dag;
+            match tokio::try_join!(round_task_run, commit_run) {
+                Ok(((round_task, next_round), dag)) => {
+                    self.round_task = round_task;
+                    self.consensus_round.set_max(next_round);
+                    self.dag = dag;
+                }
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(e) => panic!("mempool engine failed: {e:?}"),
+            }
         }
     }
 }
@@ -264,10 +267,7 @@ impl Effects<EngineContext> {
     }
 
     fn log_committed(&self, committed: &[(Point, Vec<Point>)]) {
-        if !committed.is_empty()
-            && MempoolConfig::LOG_FLAVOR == LogFlavor::Truncated
-            && tracing::enabled!(tracing::Level::DEBUG)
-        {
+        if !committed.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
             let committed = committed
                 .iter()
                 .map(|(anchor, history)| {
