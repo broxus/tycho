@@ -209,9 +209,8 @@ pub struct PointBody {
     pub anchor_time: UnixTime,
 }
 
-/// Just a field accessor
-#[derive(Clone, Copy)]
-pub enum LinkField {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AnchorStageRole {
     Trigger,
     Proof,
 }
@@ -295,21 +294,21 @@ impl Point {
         self.0.is_well_formed()
     }
 
-    pub fn anchor_link(&self, link_field: LinkField) -> &'_ Link {
+    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
         self.0.anchor_link(link_field)
     }
 
-    pub fn anchor_round(&self, link_field: LinkField) -> Round {
+    pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
         self.0.anchor_round(link_field)
     }
 
     /// the final destination of an anchor link
-    pub fn anchor_id(&self, link_field: LinkField) -> PointId {
+    pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
         self.0.anchor_id(link_field)
     }
 
     /// next point in path from `&self` to the anchor
-    pub fn anchor_link_id(&self, link_field: LinkField) -> PointId {
+    pub fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
         self.0.anchor_link_id(link_field)
     }
 }
@@ -378,11 +377,11 @@ impl PointInner {
             && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
             // also cannot witness own point
             && !self.body.witness.contains_key(&self.body.author)
-            && self.is_link_well_formed(LinkField::Proof)
-            && self.is_link_well_formed(LinkField::Trigger)
+            && self.is_link_well_formed(AnchorStageRole::Proof)
+            && self.is_link_well_formed(AnchorStageRole::Trigger)
             && self.body.time >= self.body.anchor_time
             && self.body.payload.iter().fold(0, |acc, x| acc + x.len()) <= MempoolConfig::PAYLOAD_BATCH_BYTES
-            && match (self.anchor_round(LinkField::Proof), self.anchor_round(LinkField::Trigger)) {
+            && match (self.anchor_round(AnchorStageRole::Proof), self.anchor_round(AnchorStageRole::Trigger)) {
                 (x, MempoolConfig::GENESIS_ROUND) => x >= MempoolConfig::GENESIS_ROUND,
                 (MempoolConfig::GENESIS_ROUND, y) => y >= MempoolConfig::GENESIS_ROUND,
                 // equality is impossible due to commit waves do not start every round;
@@ -392,7 +391,7 @@ impl PointInner {
             }
     }
 
-    fn is_link_well_formed(&self, link_field: LinkField) -> bool {
+    fn is_link_well_formed(&self, link_field: AnchorStageRole) -> bool {
         match self.anchor_link(link_field) {
             Link::ToSelf => true,
             Link::Direct(Through::Includes(peer)) => self.body.includes.contains_key(peer),
@@ -408,14 +407,14 @@ impl PointInner {
         }
     }
 
-    fn anchor_link(&self, link_field: LinkField) -> &'_ Link {
+    fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
         match link_field {
-            LinkField::Trigger => &self.body.anchor_trigger,
-            LinkField::Proof => &self.body.anchor_proof,
+            AnchorStageRole::Trigger => &self.body.anchor_trigger,
+            AnchorStageRole::Proof => &self.body.anchor_proof,
         }
     }
 
-    fn anchor_round(&self, link_field: LinkField) -> Round {
+    fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
         match self.anchor_link(link_field) {
             Link::ToSelf => self.body.round,
             Link::Direct(Through::Includes(_)) => self.body.round.prev(),
@@ -424,14 +423,14 @@ impl PointInner {
         }
     }
 
-    fn anchor_id(&self, link_field: LinkField) -> PointId {
+    fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
         match self.anchor_link(link_field) {
             Link::Indirect { to, .. } => to.clone(),
             _direct => self.anchor_link_id(link_field),
         }
     }
 
-    fn anchor_link_id(&self, link_field: LinkField) -> PointId {
+    fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
         let (digest, author, round) = match self.anchor_link(link_field) {
             Link::ToSelf => return self.id(),
             Link::Direct(Through::Includes(peer))

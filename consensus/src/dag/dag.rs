@@ -13,7 +13,7 @@ use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{Digest, LinkField, Point, PointId, Round, ValidPoint};
+use crate::models::{AnchorStageRole, Digest, Point, PointId, Round, ValidPoint};
 
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
@@ -152,16 +152,16 @@ impl Dag {
                 break; // will continue at the next call
             };
             match proof_round.anchor_stage() {
-                Some(AnchorStage::Proof { is_used, .. }) => {
-                    is_used.store(true, Ordering::Relaxed);
+                Some(stage) if stage.role == AnchorStageRole::Proof => {
+                    stage.is_used.store(true, Ordering::Relaxed);
                 }
                 _ => panic!("expected AnchorStage::Proof"),
             };
             // Note a proof may be marked as used while it is fired by a future tigger, which
             //   may be left unmarked at the current run until upcoming points become ready
             match trigger_round.as_ref().map(|tr| tr.anchor_stage()) {
-                Some(Some(AnchorStage::Trigger { is_used, .. })) => {
-                    is_used.store(true, Ordering::Relaxed);
+                Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {
+                    stage.is_used.store(true, Ordering::Relaxed);
                 }
                 Some(_) => panic!("expected AnchorStage::Trigger"),
                 None => {} // anchor triplet without direct trigger (not ready/valid/exists)
@@ -191,7 +191,8 @@ impl Dag {
         loop {
             let prev_dag_round = dag_round.prev().upgrade();
 
-            if let Some(AnchorStage::Trigger {
+            if let Some(AnchorStage {
+                role: AnchorStageRole::Trigger,
                 ref is_used,
                 ref leader,
             }) = dag_round.anchor_stage()
@@ -235,7 +236,7 @@ impl Dag {
     ) {
         assert_eq!(
             trigger.prev_id(),
-            Some(trigger.anchor_id(LinkField::Proof)),
+            Some(trigger.anchor_id(AnchorStageRole::Proof)),
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         assert_eq!(
@@ -270,7 +271,8 @@ impl Dag {
                 proof_round.round(),
                 "anchor proof round does not match"
             );
-            let Some(AnchorStage::Proof {
+            let Some(AnchorStage {
+                role: AnchorStageRole::Proof,
                 ref leader,
                 ref is_used,
             }) = proof_round.anchor_stage()
@@ -308,7 +310,7 @@ impl Dag {
                 break;
             };
 
-            proof_id = anchor.point.anchor_id(LinkField::Proof);
+            proof_id = anchor.point.anchor_id(AnchorStageRole::Proof);
             let next_proof_round = anchor_round.scan(proof_id.round);
 
             // safety net: as rounds are traversed from oldest to newest,

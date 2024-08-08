@@ -2,11 +2,10 @@ use std::collections::BTreeMap;
 
 use tycho_network::PeerId;
 
-use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::DagRound;
 use crate::models::{
-    Digest, Link, LinkField, PeerCount, Point, PointBody, PrevPoint, Round, Signature, Through,
-    UnixTime,
+    AnchorStageRole, Digest, Link, PeerCount, Point, PointBody, PrevPoint, Round, Signature,
+    Through, UnixTime,
 };
 use crate::{InputBuffer, MempoolConfig};
 
@@ -48,31 +47,31 @@ impl Producer {
             });
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
-            Some(AnchorStage::Proof { leader, .. } | AnchorStage::Trigger { leader, .. })
-                if leader == local_id && prev_point.is_none() =>
-            {
-                // wave leader must skip new round if it failed to produce 3 points in a row
-                return None;
-            }
+            // wave leader must skip new round if it failed to produce 3 points in a row
+            Some(stage) if stage.leader == local_id && prev_point.is_none() => return None,
             _ => {}
         };
         let includes = Self::includes(&finished_round);
-        let mut anchor_trigger =
-            Self::link_from_includes(&local_id, current_round, &includes, LinkField::Trigger);
+        let mut anchor_trigger = Self::link_from_includes(
+            &local_id,
+            current_round,
+            &includes,
+            AnchorStageRole::Trigger,
+        );
         let mut anchor_proof =
-            Self::link_from_includes(&local_id, current_round, &includes, LinkField::Proof);
+            Self::link_from_includes(&local_id, current_round, &includes, AnchorStageRole::Proof);
         let witness = Self::witness(&finished_round);
         Self::update_link_from_witness(
             &mut anchor_trigger,
             current_round.round(),
             &witness,
-            LinkField::Trigger,
+            AnchorStageRole::Trigger,
         );
         Self::update_link_from_witness(
             &mut anchor_proof,
             current_round.round(),
             &witness,
-            LinkField::Proof,
+            AnchorStageRole::Proof,
         );
 
         let (time, anchor_time) =
@@ -145,15 +144,10 @@ impl Producer {
         local_id: &PeerId,
         current_round: &DagRound,
         includes: &[Point],
-        link_field: LinkField,
+        link_field: AnchorStageRole,
     ) -> Link {
-        use AnchorStage::{Proof, Trigger};
-
-        match (current_round.anchor_stage(), link_field) {
-            (Some(Trigger { leader, .. }), LinkField::Trigger)
-            | (Some(Proof { leader, .. }), LinkField::Proof)
-                if leader == local_id =>
-            {
+        match current_round.anchor_stage() {
+            Some(stage) if stage.role == link_field && stage.leader == local_id => {
                 return Link::ToSelf;
             }
             _ => {}
@@ -180,7 +174,7 @@ impl Producer {
         link: &mut Link,
         current_round: Round,
         witness: &[Point],
-        link_field: LinkField,
+        link_field: AnchorStageRole,
     ) {
         let link_round = match link {
             Link::ToSelf | Link::Direct(_) => return,

@@ -8,14 +8,13 @@ use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
-use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, Link, LinkField, PeerCount, Point, ValidPoint};
+use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, ValidPoint};
 
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
@@ -86,7 +85,7 @@ impl Verifier {
 
         if !(Self::is_self_links_ok(&point, &r_0)
             && Self::add_anchor_link_if_ok(
-                LinkField::Proof,
+                AnchorStageRole::Proof,
                 &point,
                 &r_0,
                 &downloader,
@@ -95,7 +94,7 @@ impl Verifier {
                 &mut dependencies,
             )
             && Self::add_anchor_link_if_ok(
-                LinkField::Trigger,
+                AnchorStageRole::Trigger,
                 &point,
                 &r_0,
                 &downloader,
@@ -261,18 +260,16 @@ impl Verifier {
                     && point.body().anchor_trigger != Link::ToSelf
             }
             // leader must link to own point while others must not
-            Some(AnchorStage::Proof { leader, .. }) => {
-                (leader == point.body().author) == (point.body().anchor_proof == Link::ToSelf)
-            }
-            Some(AnchorStage::Trigger { leader, .. }) => {
-                (leader == point.body().author) == (point.body().anchor_trigger == Link::ToSelf)
+            Some(stage) => {
+                (stage.leader == point.body().author)
+                    == (point.anchor_link(stage.role) == &Link::ToSelf)
             }
         }) || point.body().round == MempoolConfig::GENESIS_ROUND
     }
 
     /// the only method that scans the DAG deeper than 2 rounds
     fn add_anchor_link_if_ok(
-        link_field: LinkField,
+        link_field: AnchorStageRole,
         point: &Point,        // @ r+0
         dag_round: &DagRound, // start with r+0
         downloader: &Downloader,
@@ -294,10 +291,8 @@ impl Verifier {
             return linked_id == crate::test_utils::genesis_point_id();
         }
 
-        match (round.anchor_stage(), link_field) {
-            (Some(AnchorStage::Proof { leader, .. }), LinkField::Proof)
-            | (Some(AnchorStage::Trigger { leader, .. }), LinkField::Trigger)
-                if leader == linked_id.author => {}
+        match round.anchor_stage() {
+            Some(stage) if stage.role == link_field && stage.leader == linked_id.author => {}
             _ => {
                 // link does not match round's leader, prescribed by AnchorStage
                 return false;
@@ -442,10 +437,10 @@ impl Verifier {
         // If point under validation is so old, that any dependency download fails,
         // it will not be referenced by the current peer anyway, and it's ok to mark it as invalid
         // until the current peer syncs its far outdated DAG (when the lag exceeds `DAG_DEPTH`).
-        let anchor_trigger_id = point.anchor_id(LinkField::Trigger);
-        let anchor_proof_id = point.anchor_id(LinkField::Proof);
-        let anchor_trigger_link_id = point.anchor_link_id(LinkField::Trigger);
-        let anchor_proof_link_id = point.anchor_link_id(LinkField::Proof);
+        let anchor_trigger_id = point.anchor_id(AnchorStageRole::Trigger);
+        let anchor_proof_id = point.anchor_id(AnchorStageRole::Proof);
+        let anchor_trigger_link_id = point.anchor_link_id(AnchorStageRole::Trigger);
+        let anchor_proof_link_id = point.anchor_link_id(AnchorStageRole::Proof);
 
         while let Some(dag_point) = deps_and_prev.next().await {
             if (dag_point.round(), dag_point.author()) == prev_loc {
@@ -489,8 +484,10 @@ impl Verifier {
             } else {
                 match dag_point {
                     DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                        if valid.point.anchor_round(LinkField::Trigger) > anchor_trigger_id.round
-                            || valid.point.anchor_round(LinkField::Proof) > anchor_proof_id.round
+                        if valid.point.anchor_round(AnchorStageRole::Trigger)
+                            > anchor_trigger_id.round
+                            || valid.point.anchor_round(AnchorStageRole::Proof)
+                                > anchor_proof_id.round
                         {
                             // did not actualize the chain
                             return false;
@@ -498,10 +495,11 @@ impl Verifier {
                         let valid_point_id = valid.point.id();
                         if ({
                             valid_point_id == anchor_trigger_link_id
-                                && valid.point.anchor_id(LinkField::Trigger) != anchor_trigger_id
+                                && valid.point.anchor_id(AnchorStageRole::Trigger)
+                                    != anchor_trigger_id
                         }) || ({
                             valid_point_id == anchor_proof_link_id
-                                && valid.point.anchor_id(LinkField::Proof) != anchor_proof_id
+                                && valid.point.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
                         }) {
                             // path does not lead to destination
                             return false;
