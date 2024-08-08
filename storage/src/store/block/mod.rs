@@ -751,6 +751,9 @@ impl BlockStorage {
             archive_id = mc_seqno;
         }
 
+        // NOTE: subtraction is intentional to panic if archive_id > mc_seqno
+        debug_assert!(mc_seqno - archive_id <= ARCHIVE_PACKAGE_SIZE);
+
         archive_id
     }
 
