@@ -138,8 +138,17 @@ impl ArchiveBlockProvider {
 
         loop {
             let mut archive_data = BytesMut::new().writer();
-            client.download_archive(seqno, &mut archive_data).await?;
-            let archive_data = archive_data.into_inner().freeze();
+
+            let archive_data = match client.download_archive(seqno, &mut archive_data).await {
+                Ok(_) => archive_data.into_inner().freeze(),
+                Err(e) => {
+                    tracing::error!(seqno, "failed to download archive: {e}");
+
+                    // TODO: backoff
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
 
             match Archive::new(archive_data) {
                 Ok(archive) => return Ok(archive),

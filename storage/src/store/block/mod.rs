@@ -736,18 +736,12 @@ impl BlockStorage {
             return mc_seqno;
         }
 
-        let mut archive_id = mc_seqno - mc_seqno % ARCHIVE_SLICE_SIZE;
-
         let prev_id = {
             let latest_archives = self.archive_ids.read();
             latest_archives.range(..=mc_seqno).next_back().cloned()
         };
 
-        if let Some(prev_id) = prev_id {
-            if archive_id < prev_id {
-                archive_id = prev_id;
-            }
-        }
+        let mut archive_id = prev_id.unwrap_or_default();
 
         // TODO: A single condition `prev_id.is_none()` might be enough,
         // but what if we started right in the middle of the archive?
@@ -756,6 +750,9 @@ impl BlockStorage {
             self.archive_ids.write().insert(mc_seqno);
             archive_id = mc_seqno;
         }
+
+        // NOTE: subtraction is intentional to panic if archive_id > mc_seqno
+        debug_assert!(mc_seqno - archive_id <= ARCHIVE_PACKAGE_SIZE);
 
         archive_id
     }
@@ -912,7 +909,6 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 }
 
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-pub const ARCHIVE_SLICE_SIZE: u32 = 20_000;
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
