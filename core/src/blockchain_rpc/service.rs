@@ -507,10 +507,7 @@ impl<B> Inner<B> {
                 let block_storage = self.storage().block_storage();
 
                 let id = block_storage.get_archive_id(mc_seqno);
-
-                let size_res = id
-                    .map(|id| block_storage.get_archive_size(id))
-                    .unwrap_or(Ok(None));
+                let size_res = id.map_or(Ok(None), |id| block_storage.get_archive_size(id));
 
                 overlay::Response::Ok(match (id, size_res) {
                     (Some(id), Ok(Some(size))) => ArchiveInfo::Found {
