@@ -169,6 +169,7 @@ impl ValidatorSession {
     )]
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
         let _histogram = HistogramGuard::begin(METRIC_VALIDATE_BLOCK_TIME);
+        tracing::debug!("started");
 
         debug_assert_eq!(self.inner.state.shard_ident, block_id.shard);
 
@@ -297,6 +298,7 @@ impl ValidatorSession {
             total_weight += validator_info.weight;
         }
 
+        tracing::debug!("finished");
         Ok(ValidationStatus::Complete(result))
     }
 
