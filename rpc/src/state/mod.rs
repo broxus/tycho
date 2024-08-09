@@ -677,7 +677,6 @@ mod test {
         Response, ServiceExt, ServiceRequest,
     };
     use tycho_storage::{Storage, StorageConfig};
-    use tycho_util::project_root;
 
     use crate::{RpcConfig, RpcState};
 
@@ -735,20 +734,13 @@ mod test {
     async fn rpc_state_handle_block() -> Result<()> {
         tycho_util::test::init_logger("rpc_state_handle_block", "debug");
 
-        let project_root = project_root()?.join(".scratch");
-        let integration_test_path = project_root.join("integration_tests");
-        let current_test_path = integration_test_path.join("rpc_state_handle_block");
-        std::fs::remove_dir_all(&current_test_path).ok();
-        std::fs::create_dir_all(&current_test_path)?;
-
-        let config = RpcConfig::default();
-
+        let tmp_dir = tempfile::tempdir()?;
         let storage = Storage::builder()
-            .with_config(StorageConfig::new_potato(
-                current_test_path.join("db").as_path(),
-            ))
+            .with_config(StorageConfig::new_potato(tmp_dir.path()))
             .with_rpc_storage(true)
             .build()?;
+
+        let config = RpcConfig::default();
 
         let network = make_network("tycho")?;
 
@@ -809,18 +801,11 @@ mod test {
     async fn rpc_state_handle_empty_block() -> Result<()> {
         tycho_util::test::init_logger("rpc_state_handle_empty_block", "debug");
 
-        let project_root = project_root()?.join(".scratch");
-        let integration_test_path = project_root.join("integration_tests");
-        let current_test_path = integration_test_path.join("rpc_state_handle_empty_block");
-        std::fs::remove_dir_all(&current_test_path).ok();
-        std::fs::create_dir_all(&current_test_path)?;
-
         let config = RpcConfig::default();
 
+        let tmp_dir = tempfile::tempdir()?;
         let storage = Storage::builder()
-            .with_config(StorageConfig::new_potato(
-                current_test_path.join("db").as_path(),
-            ))
+            .with_config(StorageConfig::new_potato(tmp_dir.path()))
             .with_rpc_storage(true)
             .build()?;
 
