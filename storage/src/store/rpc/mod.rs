@@ -529,7 +529,7 @@ impl RpcStorage {
     }
 
     #[tracing::instrument(level = "info", name = "update", skip_all, fields(block_id = %block.id()))]
-    pub async fn update(&self, block: BlockStuff, accounts: ShardAccountsDict) -> Result<()> {
+    pub async fn update(&self, block: BlockStuff) -> Result<()> {
         let Ok(workchain) = i8::try_from(block.id().shard.workchain()) else {
             return Ok(());
         };
@@ -544,8 +544,19 @@ impl RpcStorage {
 
             let _span = span.enter();
 
-            let extra = block.block().load_extra()?;
+            let extra = block.as_ref().load_extra()?;
             let account_blocks = extra.account_blocks.load()?;
+
+            let accounts = if account_blocks.is_empty() {
+                Dict::new()
+            } else {
+                let merkle_update = block.as_ref().state_update.load()?;
+                let state = merkle_update
+                    .new
+                    .virtualize()
+                    .parse::<ShardStateUnsplit>()?;
+                state.load_accounts()?.dict().clone()
+            };
 
             let mut write_batch = rocksdb::WriteBatch::default();
             let tx_cf = &db.transactions.cf();
