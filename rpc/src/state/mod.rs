@@ -397,14 +397,7 @@ impl Inner {
         }
 
         if let Some(rpc_storage) = self.storage.rpc_storage() {
-            let merkle_update = block.block().state_update.load()?;
-            let state = merkle_update
-                .new
-                .virtualize()
-                .parse::<ShardStateUnsplit>()?;
-
-            let accounts = state.load_accounts()?.dict().clone();
-            rpc_storage.update(block.clone(), accounts).await?;
+            rpc_storage.update(block.clone()).await?;
 
             if is_masterchain {
                 // NOTE: Update snapshot only for masterchain because it is handled last
@@ -723,13 +716,28 @@ mod test {
             .with_archive_data(block_data.as_slice())
     }
 
+    fn get_empty_block() -> BlockStuffAug {
+        let block_data = include_bytes!("../../../core/tests/data/real_empty_block.bin");
+
+        let root = Boc::decode(block_data).unwrap();
+        let block = root.parse::<Block>().unwrap();
+
+        let block_id = BlockId {
+            root_hash: *root.repr_hash(),
+            ..Default::default()
+        };
+
+        BlockStuff::from_block_and_root(&block_id, block, root)
+            .with_archive_data(block_data.as_slice())
+    }
+
     #[tokio::test]
-    async fn rcp_state_handle_block() -> Result<()> {
-        tycho_util::test::init_logger("rcp_state_handle_block", "debug");
+    async fn rpc_state_handle_block() -> Result<()> {
+        tycho_util::test::init_logger("rpc_state_handle_block", "debug");
 
         let project_root = project_root()?.join(".scratch");
         let integration_test_path = project_root.join("integration_tests");
-        let current_test_path = integration_test_path.join("rcp_state_handle_block");
+        let current_test_path = integration_test_path.join("rpc_state_handle_block");
         std::fs::remove_dir_all(&current_test_path).ok();
         std::fs::create_dir_all(&current_test_path)?;
 
@@ -793,6 +801,65 @@ mod test {
             .unwrap();
 
         assert_eq!(account, account_by_code_hash.address);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rpc_state_handle_empty_block() -> Result<()> {
+        tycho_util::test::init_logger("rpc_state_handle_empty_block", "debug");
+
+        let project_root = project_root()?.join(".scratch");
+        let integration_test_path = project_root.join("integration_tests");
+        let current_test_path = integration_test_path.join("rpc_state_handle_empty_block");
+        std::fs::remove_dir_all(&current_test_path).ok();
+        std::fs::create_dir_all(&current_test_path)?;
+
+        let config = RpcConfig::default();
+
+        let storage = Storage::builder()
+            .with_config(StorageConfig::new_potato(
+                current_test_path.join("db").as_path(),
+            ))
+            .with_rpc_storage(true)
+            .build()?;
+
+        let network = make_network("tycho")?;
+
+        let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID).build(
+            BlockchainRpcService::builder()
+                .with_storage(storage.clone())
+                .without_broadcast_listener()
+                .build(),
+        );
+
+        let blockchain_rpc_client = BlockchainRpcClient::builder()
+            .with_public_overlay_client(PublicOverlayClient::new(
+                network,
+                public_overlay,
+                PublicOverlayClientConfig::default(),
+            ))
+            .build();
+
+        let rpc_state = RpcState::builder()
+            .with_config(config)
+            .with_storage(storage)
+            .with_blockchain_rpc_client(blockchain_rpc_client)
+            .build();
+
+        let block = get_empty_block();
+
+        let ctx = BlockSubscriberContext {
+            mc_block_id: BlockId::default(),
+            is_key_block: false,
+            block: block.data,
+            archive_data: block.archive_data,
+        };
+
+        let (block_subscriber, _) = rpc_state.clone().split();
+        let prepared = block_subscriber.prepare_block(&ctx).await?;
+
+        block_subscriber.handle_block(&ctx, prepared).await?;
 
         Ok(())
     }
