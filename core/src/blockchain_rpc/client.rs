@@ -1,10 +1,12 @@
 use std::io::Write;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
+use scopeguard::ScopeGuard;
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
@@ -12,7 +14,9 @@ use tycho_storage::Storage;
 use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 
-use crate::overlay_client::{Error, Neighbour, PublicOverlayClient, QueryResponse};
+use crate::overlay_client::{
+    Error, Neighbour, PublicOverlayClient, QueryResponse, QueryResponseHandle,
+};
 use crate::proto::blockchain::*;
 use crate::proto::overlay::BroadcastPrefix;
 
@@ -408,7 +412,11 @@ impl BlockchainRpcClient {
         let mut downloaded: u64 = 0;
 
         let mut stream = std::pin::pin!(stream);
-        while let Some(chunk) = stream.next().await {
+        while let Some((h, chunk)) = stream.next().await.transpose()? {
+            let guard = scopeguard::guard(h, |handle| {
+                handle.reject();
+            });
+
             downloaded += chunk.len() as u64;
 
             tracing::debug!(
@@ -422,6 +430,8 @@ impl BlockchainRpcClient {
             output.write_all(&chunk).map_err(|e| {
                 Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
             })?;
+
+            ScopeGuard::into_inner(guard).accept(); // defuse the guard
         }
 
         verifier
@@ -478,20 +488,28 @@ async fn download_archive_inner(
     req: Request,
     overlay_client: PublicOverlayClient,
     neighbour: Neighbour,
-) -> Bytes {
-    // todo: backoff + peer change after some time
-    // todo: maybe download from multiple peers?
+) -> Result<(QueryResponseHandle, Bytes), Error> {
+    // TODO: move to config?
+    const MAX_RETRIES: usize = 10;
+
+    let mut retries = 0;
     loop {
-        let res = overlay_client
+        match overlay_client
             .query_raw::<Data>(neighbour.clone(), req.clone())
-            .await;
-        match res {
-            Ok(arch) => {
-                let (_, data) = arch.accept();
-                return data.data;
+            .await
+        {
+            Ok(r) => {
+                let (h, res) = r.split();
+                return Ok((h, res.data));
             }
             Err(e) => {
                 tracing::error!("Failed to download archive slice: {e}");
+                retries += 1;
+                if retries >= MAX_RETRIES {
+                    return Err(e);
+                }
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
     }
