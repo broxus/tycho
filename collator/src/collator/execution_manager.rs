@@ -298,7 +298,7 @@ impl ExecutionManager {
             let mut add_to_groups_elapsed = Duration::ZERO;
 
             let mut externals_read_count = 0;
-            while collator.has_pending_externals {
+            loop {
                 let ext_msgs = collator.read_next_externals(
                     3,
                     collation_data,
@@ -326,6 +326,10 @@ impl ExecutionManager {
                     tracing::debug!(target: tracing_targets::COLLATOR,
                         "first message group is full, stop reading externals",
                     );
+                    break;
+                }
+
+                if !collator.has_pending_externals {
                     break;
                 }
             }
