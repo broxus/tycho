@@ -210,7 +210,7 @@ impl Engine {
                     round_effects.log_committed(&committed);
 
                     if let Some(last_anchor_round) =
-                        committed.last().map(|(ancor, _)| ancor.body().round)
+                        committed.last().map(|(ancor, _)| ancor.round())
                     {
                         commit_round.set_max(last_anchor_round);
                         for points in committed {
@@ -251,11 +251,11 @@ impl Effects<EngineContext> {
 
         if let Some((first_anchor, _)) = committed.first() {
             metrics::gauge!("tycho_mempool_commit_latency_rounds")
-                .set(self.depth(first_anchor.body().round));
+                .set(self.depth(first_anchor.round()));
         }
         if let Some((last_anchor, _)) = committed.last() {
             let now = UnixTime::now().as_u64();
-            let anchor_time = last_anchor.body().time.as_u64();
+            let anchor_time = last_anchor.data().time.as_u64();
             let latency = if now >= anchor_time {
                 Duration::from_millis(now - anchor_time).as_secs_f64()
             } else {
@@ -277,7 +277,7 @@ impl Effects<EngineContext> {
                     format!(
                         "anchor {:?} time {} : [ {history} ]",
                         anchor.id().alt(),
-                        anchor.body().time
+                        anchor.data().time
                     )
                 })
                 .join("  ;  ");

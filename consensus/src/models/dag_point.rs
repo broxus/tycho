@@ -67,16 +67,16 @@ impl DagPoint {
 
     pub fn author(&self) -> PeerId {
         match self {
-            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.body().author,
-            Self::Invalid(point) => point.body().author,
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.data().author,
+            Self::Invalid(point) => point.data().author,
             Self::NotExists(id) => id.author,
         }
     }
 
     pub fn round(&self) -> Round {
         match self {
-            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.body().round,
-            Self::Invalid(point) => point.body().round,
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.round(),
+            Self::Invalid(point) => point.round(),
             Self::NotExists(id) => id.round,
         }
     }

@@ -306,8 +306,8 @@ impl DownloadTask {
                 self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
-                    author = display(point.body().author.alt()),
-                    round = point.body().round.0,
+                    author = display(point.data().author.alt()),
+                    round = point.round().0,
                     digest = display(point.digest().alt()),
                     "returned wrong point",
                 );

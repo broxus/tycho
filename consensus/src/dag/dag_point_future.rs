@@ -61,14 +61,10 @@ impl DagPointFuture {
         // do not store invalid: after restart may not load smth or produce equivocation
         if let Some(valid) = dag_point.valid() {
             store.insert_point(&valid.point);
-            store.set_flags(
-                valid.point.body().round,
-                valid.point.digest(),
-                &PointFlags {
-                    is_valid: true,
-                    ..Default::default()
-                },
-            );
+            store.set_flags(valid.point.round(), valid.point.digest(), &PointFlags {
+                is_valid: true,
+                ..Default::default()
+            });
         }
         Self(DagPointFutureType::Local(futures_util::future::ready(
             dag_point.clone(),

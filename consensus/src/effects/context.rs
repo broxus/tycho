@@ -132,8 +132,8 @@ impl Effects<ValidateContext> {
         parent.new_child(parent.ctx().into(), || {
             tracing::error_span!(
                 "validate",
-                author = display(point.body().author.alt()),
-                round = point.body().round.0,
+                author = display(point.data().author.alt()),
+                round = point.round().0,
                 digest = display(point.digest().alt()),
             )
         })

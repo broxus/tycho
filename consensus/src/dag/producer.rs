@@ -4,8 +4,7 @@ use tycho_network::PeerId;
 
 use crate::dag::DagRound;
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, Point, PointBody, PrevPoint, Round, Signature,
-    Through, UnixTime,
+    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, Round, Signature, Through, UnixTime,
 };
 use crate::{InputBuffer, MempoolConfig};
 
@@ -34,21 +33,17 @@ impl Producer {
             current_round.round().0 - last.round.0 < MempoolConfig::COMMIT_DEPTH as u32
                 && last.evidence.len() >= last.signers.reliable_minority()
         }));
-        let prev_point = last_own_point
+        let last_own_point = last_own_point
             // previous round's point needs 2F signatures from peers scheduled for current round
             .filter(|prev| {
                 // Note: prev point is used only once until weak links are implemented
                 current_round.round().prev() == prev.round
                     && prev.evidence.len() >= prev.signers.majority_of_others()
-            })
-            .map(|last| PrevPoint {
-                digest: last.digest.clone(),
-                evidence: last.evidence.clone(),
             });
         let local_id = PeerId::from(key_pair.public_key);
         match current_round.anchor_stage() {
             // wave leader must skip new round if it failed to produce 3 points in a row
-            Some(stage) if stage.leader == local_id && prev_point.is_none() => return None,
+            Some(stage) if stage.leader == local_id && last_own_point.is_none() => return None,
             _ => {}
         };
         let includes = Self::includes(&finished_round);
@@ -75,36 +70,40 @@ impl Producer {
         );
 
         let (time, anchor_time) =
-            Self::get_time(&anchor_proof, prev_point.as_ref(), &includes, &witness);
+            Self::get_time(&anchor_proof, last_own_point, &includes, &witness);
 
         let includes = includes
             .into_iter()
-            .map(|point| (point.body().author, point.digest().clone()))
+            .map(|point| (point.data().author, point.digest().clone()))
             .collect::<BTreeMap<_, _>>();
 
         assert_eq!(
-            prev_point.as_ref().map(|prev| &prev.digest),
+            last_own_point.as_ref().map(|prev| &prev.digest),
             includes.get(&local_id),
             "must include own point if it exists and vice versa"
         );
 
         let witness = witness
             .into_iter()
-            .map(|point| (point.body().author, point.digest().clone()))
+            .map(|point| (point.data().author, point.digest().clone()))
             .collect::<BTreeMap<_, _>>();
 
-        Some(Point::new(key_pair, PointBody {
-            author: local_id,
-            round: current_round.round(),
-            time,
+        Some(Point::new(
+            key_pair,
+            current_round.round(),
+            last_own_point.map(|p| p.evidence.clone()),
             payload,
-            proof: prev_point,
-            includes,
-            witness,
-            anchor_trigger,
-            anchor_proof,
-            anchor_time,
-        }))
+            PointData {
+                author: local_id,
+                time,
+                prev_digest: last_own_point.map(|p| p.digest.clone()),
+                includes,
+                witness,
+                anchor_trigger,
+                anchor_proof,
+                anchor_time,
+            },
+        ))
     }
 
     fn includes(finished_round: &DagRound) -> Vec<Point> {
@@ -158,14 +157,14 @@ impl Producer {
             .max_by_key(|point| point.anchor_round(link_field))
             .expect("non-empty list of includes for own point");
 
-        if point.body().round == current_round.round().prev()
+        if point.round() == current_round.round().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
-            Link::Direct(Through::Includes(point.body().author))
+            Link::Direct(Through::Includes(point.data().author))
         } else {
             Link::Indirect {
                 to: point.anchor_id(link_field),
-                path: Through::Includes(point.body().author),
+                path: Through::Includes(point.data().author),
             }
         }
     }
@@ -189,21 +188,21 @@ impl Producer {
             return;
         };
 
-        if point.body().round == current_round.prev().prev()
+        if point.round() == current_round.prev().prev()
             && point.anchor_link(link_field) == &Link::ToSelf
         {
-            *link = Link::Direct(Through::Witness(point.body().author));
+            *link = Link::Direct(Through::Witness(point.data().author));
         } else {
             *link = Link::Indirect {
                 to: point.anchor_id(link_field),
-                path: Through::Witness(point.body().author),
+                path: Through::Witness(point.data().author),
             };
         }
     }
 
     fn get_time(
         anchor_proof: &Link,
-        prev_point: Option<&PrevPoint>,
+        prev_point: Option<&LastOwnPoint>,
         includes: &[Point],
         witness: &[Point],
     ) -> (UnixTime, UnixTime) {
@@ -214,7 +213,7 @@ impl Producer {
                 .iter()
                 .find(|point| point.digest() == &prev.digest)
                 .map(|point| {
-                    time = point.body().time.max(time);
+                    time = point.data().time.max(time);
                     point
                 })
         });
@@ -223,7 +222,7 @@ impl Producer {
             Link::ToSelf => {
                 let point = prev_point.expect("anchor candidate should exist");
 
-                let anchor_time = point.body().time;
+                let anchor_time = point.data().time;
 
                 (time.max(anchor_time), anchor_time)
             }
@@ -235,10 +234,10 @@ impl Producer {
 
                 let point = through
                     .iter()
-                    .find(|point| point.body().author == peer_id)
+                    .find(|point| point.data().author == peer_id)
                     .expect("path to anchor proof should exist in new point dependencies");
 
-                let anchor_time = point.body().anchor_time;
+                let anchor_time = point.data().anchor_time;
 
                 (time.max(anchor_time), anchor_time)
             }

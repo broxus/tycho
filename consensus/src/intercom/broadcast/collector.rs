@@ -239,7 +239,7 @@ impl CollectorTask {
 
     fn jump_up(&mut self, state: InclusionState) -> Option<Result<(), Round>> {
         // its ok to discard invalid state from `next_includes` queue
-        let point_round = state.point()?.valid()?.point.body().round;
+        let point_round = state.point()?.valid()?.point.round();
         // will be signed on the next round
         self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;

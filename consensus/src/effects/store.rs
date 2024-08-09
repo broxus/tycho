@@ -32,7 +32,7 @@ impl MempoolStore {
 
     pub fn insert_point(&self, point: &Point) {
         let mut key = [0_u8; tables::Points::KEY_LEN];
-        Self::point_key(point.body().round, point.digest(), &mut key);
+        Self::point_key(point.round(), point.digest(), &mut key);
 
         let data = bincode::serialize(point).expect("serialize db point");
         let result = self.inner.db.points.insert(key.as_slice(), data.as_slice());

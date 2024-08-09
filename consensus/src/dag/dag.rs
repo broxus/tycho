@@ -117,8 +117,8 @@ impl Dag {
         let _span = if let Some((latest_trigger, _)) = trigger_stack.first() {
             tracing::error_span!(
                 "commit trigger",
-                author = display(&latest_trigger.body().author.alt()),
-                round = latest_trigger.body().round.0,
+                author = display(&latest_trigger.data().author.alt()),
+                round = latest_trigger.round().0,
                 digest = display(&latest_trigger.digest().alt()),
             )
             .entered()
@@ -179,7 +179,7 @@ impl Dag {
         }
         if let Some((last_anchor, _)) = ordered.last() {
             // drop rounds that we'll never need again to free some memory
-            self.drop_tail_after_commit(last_anchor.body().round);
+            self.drop_tail_after_commit(last_anchor.round());
         }
         ordered
     }
@@ -240,7 +240,7 @@ impl Dag {
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         assert_eq!(
-            trigger.body().round,
+            trigger.round(),
             trigger_round.round(),
             "trigger round does not match trigger point"
         );
@@ -267,7 +267,7 @@ impl Dag {
                 break;
             };
             assert_eq!(
-                proof.point.body().round,
+                proof.point.round(),
                 proof_round.round(),
                 "anchor proof round does not match"
             );
@@ -280,15 +280,15 @@ impl Dag {
                 panic!("anchor proof round is not expected, validation is broken")
             };
             assert_eq!(
-                proof.point.body().author,
+                proof.point.data().author,
                 leader,
                 "anchor proof author does not match prescribed by round"
             );
             if is_used.load(Ordering::Relaxed) {
                 break;
             };
-            let anchor_digest = match &proof.point.body().proof {
-                Some(prev) => &prev.digest,
+            let anchor_digest = match proof.point.data().prev_digest.as_ref() {
+                Some(anchor_digest) => anchor_digest,
                 None => panic!("anchor proof must prove to anchor point, validation is broken"),
             };
             let Some(anchor_round) = proof_round.prev().upgrade() else {
@@ -351,7 +351,7 @@ impl Dag {
         }
         assert_eq!(
             current_round.round(),
-            anchor.body().round,
+            anchor.round(),
             "passed anchor round does not match anchor point's round"
         );
         let history_limit = Round(
@@ -363,8 +363,8 @@ impl Dag {
         );
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
-        extend(&mut r[0], &anchor.body().includes); // points @ r+0
-        extend(&mut r[1], &anchor.body().witness); // points @ r-1
+        extend(&mut r[0], &anchor.data().includes); // points @ r+0
+        extend(&mut r[1], &anchor.data().witness); // points @ r-1
 
         let mut rng = rand_pcg::Pcg64::from_seed(*anchor.digest().inner());
         let mut uncommitted_rev = Vec::new();
@@ -386,8 +386,8 @@ impl Dag {
                     Self::ready_valid_point(&point_round, node, digest)?;
                 // select only uncommitted ones
                 if !global.is_committed.load(Ordering::Relaxed) {
-                    extend(&mut r[1], &global.point.body().includes); // points @ r-1
-                    extend(&mut r[2], &global.point.body().witness); // points @ r-2
+                    extend(&mut r[1], &global.point.data().includes); // points @ r-1
+                    extend(&mut r[2], &global.point.data().witness); // points @ r-2
                     uncommitted_rev.push(global);
                 }
             }

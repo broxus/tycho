@@ -89,15 +89,15 @@ impl MempoolAdapterStdImpl {
     async fn handle_anchors_task(self: Arc<Self>, mut rx: UnboundedReceiver<(Point, Vec<Point>)>) {
         let mut cache = ExternalMessageCache::new(MempoolConfig::DEDUPLICATE_ROUNDS);
         while let Some((anchor, points)) = rx.recv().await {
-            let anchor_id: MempoolAnchorId = anchor.body().round.0;
+            let anchor_id: MempoolAnchorId = anchor.round().0;
             let mut messages = Vec::new();
             let mut total_messages = 0;
             let mut total_bytes = 0;
             let mut messages_bytes = 0;
 
             for point in points.iter() {
-                total_messages += point.body().payload.len();
-                'message: for message in &point.body().payload {
+                total_messages += point.payload().len();
+                'message: for message in point.payload() {
                     total_bytes += message.len();
                     let cell = match Boc::decode(message) {
                         Ok(cell) => cell,
@@ -134,7 +134,7 @@ impl MempoolAdapterStdImpl {
                 }
             }
 
-            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body().round.0);
+            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.round().0);
             metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
             metrics::counter!("tycho_mempool_externals_bytes_total").increment(messages_bytes as _);
             metrics::counter!("tycho_mempool_duplicates_count_total")
@@ -145,7 +145,7 @@ impl MempoolAdapterStdImpl {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 round = anchor_id,
-                time = anchor.body().time.as_u64(),
+                time = anchor.data().time.as_u64(),
                 externals_unique = messages.len(),
                 externals_skipped = total_messages - messages.len(),
                 "new anchor"
@@ -153,8 +153,8 @@ impl MempoolAdapterStdImpl {
 
             self.add_anchor(Arc::new(MempoolAnchor {
                 id: anchor_id,
-                chain_time: anchor.body().time.as_u64(),
-                author: anchor.body().author,
+                chain_time: anchor.data().time.as_u64(),
+                author: anchor.data().author,
                 externals: messages,
             }));
 

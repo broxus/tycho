@@ -1,11 +1,16 @@
-use serde::{Deserialize, Serialize};
+use std::cmp;
+use std::collections::BTreeMap;
 
-use crate::models::{AnchorStageRole, Digest, Link, PointBody, PointId, Round, Signature, Through};
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use tycho_network::PeerId;
+
+use crate::models::{AnchorStageRole, Digest, Link, PointData, Round, Signature, Through};
 use crate::MempoolConfig;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PointInner {
-    // hash of the point's body (includes author peer id)
+    // hash of everything except signature
     pub digest: Digest,
     // author's signature for the digest
     pub signature: Signature,
@@ -13,67 +18,73 @@ pub struct PointInner {
 }
 
 impl PointInner {
-    pub fn id(&self) -> PointId {
-        PointId {
-            author: self.body.author,
-            round: self.body.round,
-            digest: self.digest.clone(),
-        }
-    }
-
-    pub fn prev_id(&self) -> Option<PointId> {
-        let digest = self.body.proof.as_ref().map(|p| &p.digest)?;
-        Some(PointId {
-            author: self.body.author,
-            round: self.body.round.prev(),
-            digest: digest.clone(),
-        })
-    }
-
     pub fn is_integrity_ok(&self) -> bool {
-        self.signature.verifies(&self.body.author, &self.digest)
-            && self.digest == Digest::new(&self.body)
+        self.signature
+            .verifies(&self.body.data.author, &self.digest)
+            && self.digest == self.body.make_digest()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[cfg_attr(test, derive(Clone))]
+pub struct PointBody {
+    pub round: Round, // let it be @ r+0
+    pub data: PointData,
+    /// signatures for [`self.body.prev_digest`] if one exists:
+    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter;
+    /// point author is excluded: everyone must use the proven point to validate its proof
+    pub evidence: Option<BTreeMap<PeerId, Signature>>,
+    pub payload: Vec<Bytes>,
+}
+
+impl PointBody {
+    pub fn make_digest(&self) -> Digest {
+        let bytes = bincode::serialize(self).expect("serialize point body");
+        Digest::new(bytes.as_slice())
     }
 
     pub fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
-        let author = &self.body.author;
-        let is_special_ok = match self.body.round {
-            MempoolConfig::GENESIS_ROUND => {
-                self.body.time == self.body.anchor_time
-                    && self.body.anchor_trigger == Link::ToSelf
-                    && self.body.anchor_proof == Link::ToSelf
-                    && self.body.includes.is_empty()
-                    && self.body.witness.is_empty()
-                    && self.body.proof.is_none()
-                    && self.body.payload.is_empty()
+        let is_special_ok = match self.round.cmp(&MempoolConfig::GENESIS_ROUND) {
+            cmp::Ordering::Equal => {
+                self.data.time == self.data.anchor_time
+                    && self.data.anchor_trigger == Link::ToSelf
+                    && self.data.anchor_proof == Link::ToSelf
+                    && self.data.includes.is_empty()
+                    && self.data.witness.is_empty()
+                    && self.data.prev_digest.is_none()
+                    && self.evidence.is_none()
+                    && self.payload.is_empty()
             }
-            round if round > MempoolConfig::GENESIS_ROUND => {
+            cmp::Ordering::Greater => {
                 // no witness is possible at the round right after genesis;
                 // the other way: we may panic on round.prev().prev() while extracting link's round
-                (round > MempoolConfig::GENESIS_ROUND.next() || self.body.witness.is_empty())
+                (self.round > MempoolConfig::GENESIS_ROUND.next() || self.data.witness.is_empty())
                 // leader must maintain its chain of proofs,
                 // while others must link to previous points (checked at the end of this method);
                 // its decided later (using dag round data) whether current point belongs to leader
-                && !(self.body.anchor_proof == Link::ToSelf && self.body.proof.is_none())
-                && !(self.body.anchor_trigger == Link::ToSelf && self.body.proof.is_none())
+                && !(self.data.anchor_proof == Link::ToSelf && self.data.prev_digest.is_none())
+                && !(self.data.anchor_trigger == Link::ToSelf && self.data.prev_digest.is_none())
             }
-            _ => false,
+
+            cmp::Ordering::Less => false,
         };
         is_special_ok
+            // proof for previous point consists of digest and 2F++ evidences
+            && self.evidence.is_none() == self.data.prev_digest.is_none()
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-            && self.body.proof.as_ref().map(|p| &p.digest) == self.body.includes.get(author)
+            && self.data.prev_digest.as_ref() == self.data.includes.get(&self.data.author)
             // in contrast, evidence must contain only signatures of others
-            && self.body.proof.as_ref().map_or(true, |p| !p.evidence.contains_key(author))
+            && self.evidence.as_ref().map_or(true, |map| !map.contains_key(&self.data.author))
             // also cannot witness own point
-            && !self.body.witness.contains_key(&self.body.author)
+            && !self.data.witness.contains_key(&self.data.author)
             && self.is_link_well_formed(AnchorStageRole::Proof)
             && self.is_link_well_formed(AnchorStageRole::Trigger)
-            && self.body.time >= self.body.anchor_time
-            && MempoolConfig::PAYLOAD_BATCH_BYTES >= self.body.payload.iter().map(|x| x.len()).sum()
+            && self.data.time >= self.data.anchor_time
+            && MempoolConfig::PAYLOAD_BATCH_BYTES >= self.payload.iter().map(|x| x.len()).sum()
             && match (
-                self.anchor_round(AnchorStageRole::Proof),
-                self.anchor_round(AnchorStageRole::Trigger)
+                self.data.anchor_round(AnchorStageRole::Proof, self.round),
+                self.data.anchor_round(AnchorStageRole::Trigger, self.round)
             ) {
                 (x, MempoolConfig::GENESIS_ROUND) => x >= MempoolConfig::GENESIS_ROUND,
                 (MempoolConfig::GENESIS_ROUND, y) => y >= MempoolConfig::GENESIS_ROUND,
@@ -85,68 +96,18 @@ impl PointInner {
     }
 
     pub fn is_link_well_formed(&self, link_field: AnchorStageRole) -> bool {
-        match self.anchor_link(link_field) {
+        match self.data.anchor_link(link_field) {
             Link::ToSelf => true,
-            Link::Direct(Through::Includes(peer)) => self.body.includes.contains_key(peer),
-            Link::Direct(Through::Witness(peer)) => self.body.witness.contains_key(peer),
+            Link::Direct(Through::Includes(peer)) => self.data.includes.contains_key(peer),
+            Link::Direct(Through::Witness(peer)) => self.data.witness.contains_key(peer),
             Link::Indirect {
                 path: Through::Includes(peer),
                 to,
-            } => self.body.includes.contains_key(peer) && to.round.next() < self.body.round,
+            } => self.data.includes.contains_key(peer) && to.round.next() < self.round,
             Link::Indirect {
                 path: Through::Witness(peer),
                 to,
-            } => self.body.witness.contains_key(peer) && to.round.next().next() < self.body.round,
-        }
-    }
-
-    pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
-        match link_field {
-            AnchorStageRole::Trigger => &self.body.anchor_trigger,
-            AnchorStageRole::Proof => &self.body.anchor_proof,
-        }
-    }
-
-    pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
-        match self.anchor_link(link_field) {
-            Link::ToSelf => self.body.round,
-            Link::Direct(Through::Includes(_)) => self.body.round.prev(),
-            Link::Direct(Through::Witness(_)) => self.body.round.prev().prev(),
-            Link::Indirect { to, .. } => to.round,
-        }
-    }
-
-    pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
-        match self.anchor_link(link_field) {
-            Link::Indirect { to, .. } => to.clone(),
-            _direct => self.anchor_link_id(link_field),
-        }
-    }
-
-    pub fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
-        let (digest, author, round) = match self.anchor_link(link_field) {
-            Link::ToSelf => return self.id(),
-            Link::Direct(Through::Includes(peer))
-            | Link::Indirect {
-                path: Through::Includes(peer),
-                ..
-            } => (self.body.includes.get(peer), *peer, self.body.round.prev()),
-            Link::Direct(Through::Witness(peer))
-            | Link::Indirect {
-                path: Through::Witness(peer),
-                ..
-            } => (
-                self.body.witness.get(peer),
-                *peer,
-                self.body.round.prev().prev(),
-            ),
-        };
-        PointId {
-            author,
-            round,
-            digest: digest
-                .expect("Coding error: usage of ill-formed point")
-                .clone(),
+            } => self.data.witness.contains_key(peer) && to.round.next().next() < self.round,
         }
     }
 }

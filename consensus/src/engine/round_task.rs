@@ -309,15 +309,14 @@ impl Effects<EngineContext> {
             .increment(own_point.is_none() as _);
         metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_some() as _);
 
-        let proof = own_point.and_then(|point| point.body().proof.as_ref());
+        let proof = own_point.and_then(|point| point.data().prev_digest.as_ref());
         metrics::counter!("tycho_mempool_points_no_proof_produced").increment(proof.is_none() as _);
 
         metrics::counter!("tycho_mempool_point_payload_count")
-            .increment(own_point.map_or(0, |point| point.body().payload.len() as _));
+            .increment(own_point.map_or(0, |point| point.payload().len() as _));
         let payload_bytes = own_point.map(|point| {
             point
-                .body()
-                .payload
+                .payload()
                 .iter()
                 .fold(0, |acc, bytes| acc + bytes.len()) as _
         });
@@ -329,10 +328,10 @@ impl Effects<EngineContext> {
                 parent: self.span(),
                 digest = display(own_point.digest().alt()),
                 payload_bytes = own_point
-                    .body().payload.iter().map(|bytes| bytes.len()).sum::<usize>(),
-                externals = own_point.body().payload.len(),
-                is_proof = Some(own_point.body().anchor_proof == Link::ToSelf).filter(|x| *x),
-                is_trigger = Some(own_point.body().anchor_trigger == Link::ToSelf).filter(|x| *x),
+                    .payload().iter().map(|bytes| bytes.len()).sum::<usize>(),
+                externals = own_point.payload().len(),
+                is_proof = Some(own_point.data().anchor_proof == Link::ToSelf).filter(|x| *x),
+                is_trigger = Some(own_point.data().anchor_trigger == Link::ToSelf).filter(|x| *x),
                 "produced point"
             ),
             None => tracing::info!(parent: self.span(), "will not produce point"),

@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
-use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::ParallelIterator;
+use rayon::prelude::IntoParallelRefIterator;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tycho_network::PeerId;
 
-use crate::models::point::inner::PointInner;
-use crate::models::{AnchorStageRole, Digest, Link, PointBody, PointId, Round, Signature};
+use crate::models::point::inner::{PointBody, PointInner};
+use crate::models::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
 #[derive(Clone)]
 pub struct Point(Arc<PointInner>);
@@ -34,7 +36,7 @@ impl<'de> Deserialize<'de> for Point {
 impl Debug for Point {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Point")
-            .field("body", self.body())
+            .field("body", self.data())
             .field("digest", self.digest())
             .field("signature", self.signature())
             .finish()
@@ -42,22 +44,30 @@ impl Debug for Point {
 }
 
 impl Point {
-    pub fn new(local_keypair: &KeyPair, point_body: PointBody) -> Self {
+    pub fn new(
+        local_keypair: &KeyPair,
+        round: Round,
+        evidence: Option<BTreeMap<PeerId, Signature>>,
+        payload: Vec<Bytes>,
+        data: PointData,
+    ) -> Self {
         assert_eq!(
-            point_body.author,
+            data.author,
             PeerId::from(local_keypair.public_key),
             "produced point author must match local key pair"
         );
-        let digest = Digest::new(&point_body);
+        let body = PointBody {
+            round,
+            data,
+            evidence,
+            payload,
+        };
+        let digest = body.make_digest();
         Self(Arc::new(PointInner {
-            body: point_body,
             signature: Signature::new(local_keypair, &digest),
             digest,
+            body,
         }))
-    }
-
-    pub fn body(&self) -> &'_ PointBody {
-        &self.0.body
     }
 
     pub fn digest(&self) -> &'_ Digest {
@@ -68,12 +78,43 @@ impl Point {
         &self.0.signature
     }
 
+    pub fn round(&self) -> Round {
+        self.0.body.round
+    }
+
+    pub fn data(&self) -> &PointData {
+        &self.0.body.data
+    }
+
+    pub fn evidence(&self) -> Option<&BTreeMap<PeerId, Signature>> {
+        self.0.body.evidence.as_ref()
+    }
+
+    pub fn payload(&self) -> &Vec<Bytes> {
+        &self.0.body.payload
+    }
+
     pub fn id(&self) -> PointId {
-        self.0.id()
+        PointId {
+            author: self.0.body.data.author,
+            round: self.0.body.round,
+            digest: self.0.digest.clone(),
+        }
     }
 
     pub fn prev_id(&self) -> Option<PointId> {
-        self.0.prev_id()
+        Some(PointId {
+            author: self.0.body.data.author,
+            round: self.0.body.round.prev(),
+            digest: self.0.body.data.prev_digest.as_ref()?.clone(),
+        })
+    }
+
+    pub fn prev_proof(&self) -> Option<PrevPoint> {
+        Some(PrevPoint {
+            digest: self.0.body.data.prev_digest.as_ref()?.clone(),
+            evidence: self.0.body.evidence.as_ref()?.clone(),
+        })
     }
 
     /// Failed integrity means the point may be created by someone else.
@@ -86,36 +127,39 @@ impl Point {
     /// blame author and every dependent point's author
     /// must be checked right after integrity, before any manipulations with the point
     pub fn is_well_formed(&self) -> bool {
-        self.0.is_well_formed()
+        self.0.body.is_well_formed()
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
-        self.0.anchor_link(link_field)
+        self.0.body.data.anchor_link(link_field)
     }
 
     pub fn anchor_round(&self, link_field: AnchorStageRole) -> Round {
-        self.0.anchor_round(link_field)
+        self.0.body.data.anchor_round(link_field, self.0.body.round)
     }
 
     /// the final destination of an anchor link
     pub fn anchor_id(&self, link_field: AnchorStageRole) -> PointId {
-        self.0.anchor_id(link_field)
+        self.0
+            .body
+            .data
+            .anchor_id(link_field, self.0.body.round)
+            .unwrap_or(self.id())
     }
 
     /// next point in path from `&self` to the anchor
     pub fn anchor_link_id(&self, link_field: AnchorStageRole) -> PointId {
-        self.0.anchor_link_id(link_field)
+        self.0
+            .body
+            .data
+            .anchor_link_id(link_field, self.0.body.round)
+            .unwrap_or(self.id())
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Debug)]
 pub struct PrevPoint {
-    // until weak links are supported,
-    // any node may proof its vertex@r-1 with its point@r+0 only
-    // pub round: Round,
     pub digest: Digest,
-    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter;
-    /// point author is excluded: everyone must use the proven point to validate its proof
     pub evidence: BTreeMap<PeerId, Signature>,
 }
 
@@ -155,35 +199,41 @@ mod tests {
 
     fn point_body(key_pair: &KeyPair) -> PointBody {
         let mut payload = Vec::with_capacity(MSG_COUNT);
+        let mut bytes = vec![0; MSG_BYTES];
         for _ in 0..MSG_COUNT {
-            let mut data = vec![0; MSG_BYTES];
-            thread_rng().fill_bytes(data.as_mut_slice());
-            payload.push(Bytes::from(data));
+            thread_rng().fill_bytes(bytes.as_mut_slice());
+            payload.push(Bytes::copy_from_slice(&bytes));
         }
 
         let mut includes = BTreeMap::default();
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
             let peer_id = PeerId::from(key_pair.public_key);
-            let digest = Digest::from(*key_pair.secret_key.nonce());
+            thread_rng().fill_bytes(bytes.as_mut_slice());
+            let digest = Digest::new(&bytes);
             includes.insert(peer_id, digest);
         }
 
         PointBody {
-            author: PeerId::from(key_pair.public_key),
             round: Round(thread_rng().next_u32()),
-            time: UnixTime::now(),
+            data: PointData {
+                author: PeerId::from(key_pair.public_key),
+                time: UnixTime::now(),
+                prev_digest: None,
+                includes,
+                witness: Default::default(),
+                anchor_trigger: Link::ToSelf,
+                anchor_proof: Link::ToSelf,
+                anchor_time: UnixTime::now(),
+            },
+            evidence: None,
             payload,
-            proof: None,
-            includes,
-            witness: Default::default(),
-            anchor_trigger: Link::ToSelf,
-            anchor_proof: Link::ToSelf,
-            anchor_time: UnixTime::now(),
         }
     }
     fn sig_data() -> (Digest, Vec<(PeerId, Signature)>) {
-        let digest = Digest::from([12; 32]);
+        let mut bytes = vec![0; MSG_BYTES];
+        thread_rng().fill_bytes(bytes.as_mut_slice());
+        let digest = Digest::new(&bytes);
         let mut data = Vec::with_capacity(PEERS);
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
@@ -250,14 +300,19 @@ mod tests {
     pub fn check_new_point() {
         let point_key_pair = new_key_pair();
         let point_body = point_body(&point_key_pair);
-        let point = Point::new(&point_key_pair, point_body.clone());
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
 
         let timer = Instant::now();
         let body = bincode::serialize(&point_body).expect("shouldn't happen");
         let bincode_elapsed = timer.elapsed();
 
         let timer = Instant::now();
-        let digest = Digest::new(point.body());
+        let digest = Digest::new(body.as_slice());
         let sha_elapsed = timer.elapsed();
         assert_eq!(&digest, point.digest(), "point digest");
 

@@ -40,7 +40,7 @@ impl AnchorConsumer {
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
-            self.collator_round.set_max(anchor.body().round);
+            self.collator_round.set_max(anchor.round());
         }
     }
 
@@ -53,7 +53,7 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
             let anchor_id = anchor.id();
 
-            let anchor_round = anchor.body().round;
+            let anchor_round = anchor.round();
 
             // get last previous anchor round and check if we don't have previous
             for (prev_anchor_round, committers) in self

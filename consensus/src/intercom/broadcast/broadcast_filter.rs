@@ -156,7 +156,7 @@ impl BroadcastFilterInner {
             // if round < top_dag_round.round().prev() {
             //     return; // will not be certified; look Signer's response `TooOldRound`
             // }
-            let Some(point_round) = top_dag_round.scan(point.body().round) else {
+            let Some(point_round) = top_dag_round.scan(point.round()) else {
                 // tracing::warn!("DAG is too shallow", round = round.0);
                 return; // cannot process anyway
             };

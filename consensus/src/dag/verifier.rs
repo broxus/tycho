@@ -65,7 +65,7 @@ impl Verifier {
         // it cannot be validated against AnchorStage (as it knows nothing about genesis)
         // and cannot contain dependencies
         assert!(
-            point.body().round > MempoolConfig::GENESIS_ROUND,
+            point.round() > MempoolConfig::GENESIS_ROUND,
             "Coding error: can only validate points older than genesis"
         );
         let Some(r_0) = r_0.upgrade() else {
@@ -74,13 +74,13 @@ impl Verifier {
             return ValidateContext::validated(dag_point);
         };
         assert_eq!(
-            point.body().round,
+            point.round(),
             r_0.round(),
             "Coding error: dag round mismatches point round"
         );
 
         let mut dependencies = Vec::with_capacity(
-            point.body().includes.len() + point.body().witness.len() + 2, // +2 for anchor fields
+            point.data().includes.len() + point.data().witness.len() + 2, // +2 for anchor fields
         );
 
         if !(Self::is_self_links_ok(&point, &r_0)
@@ -123,20 +123,16 @@ impl Verifier {
             &mut proven_vertex_dep,
         );
 
-        let mut signatures_fut = std::pin::pin!(match point.body().proof.as_ref() {
+        let mut signatures_fut = std::pin::pin!(match point.prev_proof() {
             None => future::Either::Left(future::ready(true)),
             Some(proof) => future::Either::Right(
-                rayon_run({
-                    let proof = proof.clone();
-                    move || proof.signatures_match()
-                })
-                .instrument(effects.span().clone()),
+                rayon_run(move || proof.signatures_match()).instrument(effects.span().clone()),
             ),
         });
 
         let mut is_unique_in_loc_fut = std::pin::pin!(Self::is_unique_in_loc(
             &point,
-            Self::versions_except(&r_0, &point.body().author, Some(point.digest()))
+            Self::versions_except(&r_0, &point.data().author, Some(point.digest()))
                 .into_iter()
                 .collect()
         )
@@ -150,8 +146,8 @@ impl Verifier {
                 // do not extend listed dependencies as they may become trusted by consensus
                 .chain(Self::versions_except(
                     &r_1,
-                    &point.body().author,
-                    point.body().proof.as_ref().map(|p| &p.digest),
+                    &point.data().author,
+                    point.data().prev_digest.as_ref(),
                 ))
                 .collect()
         )
@@ -256,15 +252,15 @@ impl Verifier {
         (match &dag_round.anchor_stage() {
             // no one may link to self
             None => {
-                point.body().anchor_proof != Link::ToSelf
-                    && point.body().anchor_trigger != Link::ToSelf
+                point.data().anchor_proof != Link::ToSelf
+                    && point.data().anchor_trigger != Link::ToSelf
             }
             // leader must link to own point while others must not
             Some(stage) => {
-                (stage.leader == point.body().author)
+                (stage.leader == point.data().author)
                     == (point.anchor_link(stage.role) == &Link::ToSelf)
             }
-        }) || point.body().round == MempoolConfig::GENESIS_ROUND
+        }) || point.round() == MempoolConfig::GENESIS_ROUND
     }
 
     /// the only method that scans the DAG deeper than 2 rounds
@@ -313,7 +309,7 @@ impl Verifier {
                 dependencies.push(round.add_dependency_exact(
                     &linked_id.author,
                     &linked_id.digest,
-                    &point.body().author,
+                    &point.data().author,
                     downloader,
                     store,
                     effects,
@@ -357,14 +353,14 @@ impl Verifier {
 
         // integrity check passed, so includes contain author's prev point proof
         let includes = point
-            .body()
+            .data()
             .includes
             .iter()
             .map(|(author, digest)| (r_1, author, digest));
 
         let witness = r_2_opt.iter().flat_map(|r_2| {
             point
-                .body()
+                .data()
                 .witness
                 .iter()
                 .map(move |(author, digest)| (r_2, author, digest))
@@ -374,7 +370,7 @@ impl Verifier {
             let shared = dag_round.add_dependency_exact(
                 author,
                 digest,
-                &point.body().author,
+                &point.data().author,
                 downloader,
                 store,
                 effects,
@@ -383,7 +379,7 @@ impl Verifier {
             // it's sufficient to check only author to get prev (proven) point from well-formed one:
             // * includes map contains same author at most once - and it matches proven point
             // * witness map cannot contain same author
-            if author == point.body().author {
+            if author == point.data().author {
                 *proven_vertex_dep = Some(shared.clone());
             }
 
@@ -398,12 +394,12 @@ impl Verifier {
         while let Some(dag_point) = other_versions.next().await {
             assert_eq!(
                 dag_point.author(),
-                point.body().author,
+                point.data().author,
                 "this method checks only points by the same author"
             );
             assert_eq!(
                 dag_point.round(),
-                point.body().round,
+                point.round(),
                 "this method checks only points at the same round"
             );
             assert_ne!(
@@ -429,8 +425,8 @@ impl Verifier {
     /// check only direct dependencies and location for previous point (to jump over round)
     async fn is_valid(point: &Point, mut deps_and_prev: FuturesUnordered<DagPointFuture>) -> bool {
         // point is well-formed if we got here, so point.proof matches point.includes
-        let proven_vertex = point.body().proof.as_ref().map(|p| &p.digest);
-        let prev_loc = (point.body().round.prev(), point.body().author);
+        let proven_vertex = point.data().prev_digest.as_ref();
+        let prev_loc = (point.round().prev(), point.data().author);
 
         // Indirect dependencies may be evicted from memory and not participate in this check,
         // but validity of direct dependencies ('links through') ensures inclusion chain is valid.
@@ -505,7 +501,7 @@ impl Verifier {
                             return false;
                         }
                         if valid_point_id == anchor_proof_link_id
-                            && valid.point.body().anchor_time != point.body().anchor_time
+                            && valid.point.data().anchor_time != point.data().anchor_time
                         {
                             // anchor candidate's time is not inherited from its proof
                             return false;
@@ -530,16 +526,16 @@ impl Verifier {
             includes_peers /* @ r-1 */ ,
             proof_peers /* @ r+0 */
         ] = peer_schedule.atomic().peers_for_array([
-                point.body().round.prev().prev(),
-                point.body().round.prev(),
-                point.body().round,
+                point.round().prev().prev(),
+                point.round().prev(),
+                point.round(),
             ]);
-        for peer_id in point.body().witness.keys() {
+        for peer_id in point.data().witness.keys() {
             if !witness_peers.contains(peer_id) {
                 return false;
             }
         }
-        let peer_count = if point.body().round.prev() == MempoolConfig::GENESIS_ROUND {
+        let peer_count = if point.round().prev() == MempoolConfig::GENESIS_ROUND {
             PeerCount::GENESIS
         } else {
             match PeerCount::try_from(proof_peers.len()) {
@@ -548,15 +544,15 @@ impl Verifier {
                 Err(_) => return false,
             }
         };
-        if point.body().includes.len() < peer_count.majority() {
+        if point.data().includes.len() < peer_count.majority() {
             return false;
         };
-        for peer_id in point.body().includes.keys() {
+        for peer_id in point.data().includes.keys() {
             if !includes_peers.contains(peer_id) {
                 return false;
             }
         }
-        let Some(proven /* @ r-1 */) = &point.body().proof else {
+        let Some(evidence /* @ r-1 */) = point.evidence() else {
             return true;
         };
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
@@ -565,10 +561,10 @@ impl Verifier {
         let Ok(peer_count) = PeerCount::try_from(proof_peers.len()) else {
             return false;
         };
-        if proven.evidence.len() < peer_count.majority_of_others() {
+        if evidence.len() < peer_count.majority_of_others() {
             return false;
         }
-        for (peer_id, _) in proven.evidence.iter() {
+        for (peer_id, _) in evidence.iter() {
             if !proof_peers.contains(peer_id) {
                 return false;
             }
@@ -582,30 +578,30 @@ impl Verifier {
         proven: &Point, // @ r-1
     ) -> bool {
         assert_eq!(
-            point.body().author,
-            proven.body().author,
+            point.data().author,
+            proven.data().author,
             "Coding error: mismatched authors of proof and its vertex"
         );
         assert_eq!(
-            point.body().round.prev(),
-            proven.body().round,
+            point.round().prev(),
+            proven.round(),
             "Coding error: mismatched rounds of proof and its vertex"
         );
-        let proof = point
-            .body()
-            .proof
+        let prev_digest = point
+            .data()
+            .prev_digest
             .as_ref()
             .expect("Coding error: passed point doesn't contain proof for a given vertex");
         assert_eq!(
-            &proof.digest, proven.digest(),
+            prev_digest, proven.digest(),
             "Coding error: mismatched previous point of the same author, must have been checked before"
         );
-        if point.body().time < proven.body().time {
+        if point.data().time < proven.data().time {
             // time must be non-decreasing by the same author
             return false;
         }
-        if point.body().anchor_proof == Link::ToSelf
-            && point.body().anchor_time != proven.body().time
+        if point.data().anchor_proof == Link::ToSelf
+            && point.data().anchor_time != proven.data().time
         {
             // anchor proof must inherit its candidate's time
             return false;

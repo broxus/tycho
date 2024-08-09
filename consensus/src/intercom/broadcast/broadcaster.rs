@@ -53,7 +53,7 @@ impl Broadcaster {
             // `atomic` can be updated only under write lock, so view under read lock is consistent
             let signers = peer_schedule
                 .atomic()
-                .peers_for(point.body().round.next())
+                .peers_for(point.round().next())
                 .clone();
             let bcast_peers = guard.data.broadcast_receivers().clone();
             (signers, bcast_peers, guard.updates())
@@ -82,7 +82,7 @@ impl Broadcaster {
             bcast_current: QueryResponses::default(),
             bcast_outdated,
 
-            sig_request: Dispatcher::signature_request(point.body().round),
+            sig_request: Dispatcher::signature_request(point.round()),
             sig_peers: FastHashSet::default(),
             sig_current: FuturesUnordered::default(),
         };
@@ -92,7 +92,7 @@ impl Broadcaster {
         LastOwnPoint {
             digest: point.digest().clone(),
             evidence: task.signatures.into_iter().collect(),
-            round: point.body().round,
+            round: point.round(),
             signers: signers_count,
         }
     }

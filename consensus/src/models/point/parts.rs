@@ -1,12 +1,9 @@
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Sub};
 
-use bytes::Bytes;
 use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
 use tycho_network::PeerId;
-
-use crate::models::PointBody;
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Digest([u8; 32]);
@@ -30,24 +27,41 @@ impl Debug for Digest {
 }
 
 impl Digest {
-    pub(crate) fn new(point_body: &PointBody) -> Self {
-        let body = bincode::serialize(&point_body).expect("shouldn't happen");
-        Self(blake3::hash(body.as_slice()).into())
+    pub(super) fn new(bytes: &[u8]) -> Self {
+        Self(blake3::hash(bytes).into())
     }
     pub fn inner(&self) -> &'_ [u8; 32] {
         &self.0
     }
 }
 
-#[cfg(test)]
-impl From<[u8; 32]> for Digest {
-    fn from(value: [u8; 32]) -> Self {
-        Self(value)
+#[derive(Clone, PartialEq)]
+pub struct Signature([u8; 64]);
+
+impl Serialize for Signature {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq)]
-pub struct Signature(Bytes);
+impl<'de> Deserialize<'de> for Signature {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let bytes = <&[u8]>::deserialize(deserializer)?;
+        if bytes.len() != 64 {
+            Err(serde::de::Error::invalid_length(bytes.len(), &"64"))
+        } else {
+            let mut target = [0_u8; 64];
+            target.copy_from_slice(bytes);
+            Ok(Signature(target))
+        }
+    }
+}
 
 impl Display for Signature {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -68,18 +82,14 @@ impl Debug for Signature {
 
 impl Signature {
     pub fn new(local_keypair: &KeyPair, digest: &Digest) -> Self {
-        let sig = local_keypair.sign_raw(digest.0.as_slice());
-        Self(Bytes::from(sig.to_vec()))
+        Self(local_keypair.sign_raw(digest.0.as_slice()))
     }
 
     pub fn verifies(&self, signer: &PeerId, digest: &Digest) -> bool {
-        let sig_raw: Result<[u8; 64], _> = self.0.to_vec().try_into();
-        sig_raw
-            .ok()
-            .zip(signer.as_public_key())
-            .map_or(false, |(sig_raw, pub_key)| {
-                pub_key.verify_raw(digest.0.as_slice(), &sig_raw)
-            })
+        match signer.as_public_key() {
+            Some(pub_key) => pub_key.verify_raw(digest.0.as_slice(), &self.0),
+            None => false,
+        }
     }
 }
 
