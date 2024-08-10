@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::mem;
 use std::sync::Arc;
 
@@ -109,7 +108,7 @@ struct BroadcasterTask {
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
     // every connected peer should receive broadcast, but only signer's signatures are accountable
-    signers: Arc<BTreeSet<PeerId>>,
+    signers: Arc<FastHashSet<PeerId>>,
     signers_count: PeerCount,
     // results
     rejections: FastHashSet<PeerId>,
