@@ -4,5 +4,6 @@ pub mod async_queued_dispatcher;
 mod enum_try_into;
 pub mod shard;
 pub mod task_descr;
+pub mod thread_pool;
 
 pub use async_action::*;

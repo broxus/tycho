@@ -413,6 +413,10 @@ impl Node {
         // Setup block strider
         let state_tracker = MinRefMcStateTracker::default();
 
+        // Prepare threads pools
+        tycho_collator::thread_pool::set_num_threads(node_config.threads.executor_threads);
+
+        // Done
         Ok(Self {
             keypair,
             zerostate,
