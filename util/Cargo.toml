@@ -19,7 +19,6 @@ futures-util = { workspace = true }
 humantime = { workspace = true }
 libc = { workspace = true, optional = true }
 metrics = { workspace = true }
-pin-project-lite = { workspace = true }
 rand = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

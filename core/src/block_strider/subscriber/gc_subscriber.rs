@@ -12,7 +12,6 @@ use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_storage::{BlocksGcType, Storage};
-use tycho_util::futures::SleepOrPending;
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
@@ -314,6 +313,9 @@ impl GcSubscriber {
             tracing::info!("manager stopped");
         }
 
+        let mut random_offset = config
+            .random_offset
+            .then(|| rand::thread_rng().gen_range(Duration::ZERO..config.interval));
         let mut last_triggered_at = None::<Instant>;
         let mut sleep_until = None::<Instant>;
 
@@ -344,8 +346,7 @@ impl GcSubscriber {
                             sleep_until = Some(next_gc);
                             continue;
                         }
-                    } else if config.random_offset {
-                        let offset = rand::thread_rng().gen_range(Duration::ZERO..config.interval);
+                    } else if let Some(offset) = random_offset.take() {
                         sleep_until = Some(now + offset);
                         continue;
                     }
@@ -427,20 +428,27 @@ async fn wait_with_sleep(
     manual_rx: &mut ManualTriggerRx,
     sleep_until: Option<Instant>,
 ) -> Option<GcSource> {
+    use futures_util::future::Either;
+
+    let fut = match sleep_until {
+        // Ignore all ticks if we need to sleep
+        Some(deadline) => Either::Left(async move {
+            tokio::time::sleep_until(deadline.into()).await;
+            Some(GcSource::Schedule)
+        }),
+        // Wait for the tick otherwise
+        None => Either::Right(async {
+            let res = tick_rx.changed().await;
+            res.is_ok().then_some(GcSource::Schedule)
+        }),
+    };
+
     tokio::select! {
-        _ = SleepOrPending::from(sleep_until) => return Some(GcSource::Schedule),
-        changed = tick_rx.changed() => {
-            if changed.is_ok() {
-                return Some(GcSource::Schedule);
-            }
-        },
+        res = fut => res,
         trigger = manual_rx.changed() => {
-            if trigger.is_ok() {
-                return Some(GcSource::Manual);
-            }
+            trigger.is_ok().then_some(GcSource::Manual)
         },
     }
-    None
 }
 
 impl StateSubscriber for GcSubscriber {

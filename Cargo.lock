@@ -3495,7 +3495,6 @@ dependencies = [
  "humantime",
  "libc",
  "metrics",
- "pin-project-lite",
  "rand",
  "rayon",
  "serde",
