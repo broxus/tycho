@@ -14,10 +14,11 @@ use everscale_types::models::{
     Transaction, ValueFlow,
 };
 use tycho_block_util::state::ShardStateStuff;
+use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::types::InternalMessageKey;
-use crate::mempool::MempoolAnchor;
+use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::{McData, ProofFunds};
 
 // В текущем коллаторе перед коллацией блока импортируется:
@@ -634,6 +635,27 @@ pub(super) struct CachedMempoolAnchor {
     pub anchor: Arc<MempoolAnchor>,
     /// Has externals for current shard of collator
     pub has_externals: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AnchorInfo {
+    pub id: MempoolAnchorId,
+    pub ct: u64,
+    pub all_exts_count: usize,
+    pub our_exts_count: usize,
+    pub author: PeerId,
+}
+
+impl AnchorInfo {
+    pub fn from_anchor(anchor: Arc<MempoolAnchor>, our_exts_count: usize) -> AnchorInfo {
+        Self {
+            id: anchor.id,
+            ct: anchor.chain_time,
+            all_exts_count: anchor.externals.len(),
+            our_exts_count,
+            author: anchor.author,
+        }
+    }
 }
 
 pub(super) type AccountId = HashBytes;

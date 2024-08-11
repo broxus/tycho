@@ -1304,9 +1304,7 @@ where
             trigger_block_id_opt,
         )?;
 
-        mc_collator
-            .equeue_do_collate(next_mc_block_chain_time, top_shard_blocks_info)
-            .await?;
+        mc_collator.equeue_do_collate(top_shard_blocks_info).await?;
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Master block collation enqueued: (block_id={} ct={})",

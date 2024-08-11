@@ -17,7 +17,8 @@ use tycho_util::FastHashMap;
 
 use super::execution_manager::{ExecutionManager, MessagesExecutor};
 use super::types::{
-    BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin, WorkingState,
+    AnchorInfo, BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin,
+    WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
@@ -33,11 +34,17 @@ use crate::types::{BlockCollationResult, McData, TopBlockDescription};
 pub(super) mod tests;
 
 impl CollatorStdImpl {
-    #[tracing::instrument(parent =  None, skip_all, fields(block_id = %self.next_block_id_short, ct = next_chain_time))]
+    #[tracing::instrument(
+        parent =  None,
+        skip_all,
+        fields(
+            block_id = %self.next_block_id_short,
+            ct = self.last_imported_anchor.as_ref().map(|a| a.ct).unwrap_or_default()
+        )
+    )]
     pub(super) async fn do_collate(
         &mut self,
         working_state: WorkingState,
-        next_chain_time: u64,
         top_shard_blocks_info: Option<Vec<TopBlockDescription>>,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -61,6 +68,10 @@ impl CollatorStdImpl {
             }),
         );
 
+        let last_imported_anchor = self.last_imported_anchor.as_ref().unwrap();
+        let next_chain_time = last_imported_anchor.ct;
+        let created_by = HashBytes(last_imported_anchor.author.0);
+
         // generate seed from the chain_time from the anchor
         let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
         let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
@@ -80,11 +91,6 @@ impl CollatorStdImpl {
             block_limits
         );
 
-        // TODO: get from anchor
-        let created_by = self
-            .last_imported_anchor_author
-            .map(|a| HashBytes(a.0))
-            .unwrap_or_default();
         let mut collation_data_builder = BlockCollationDataBuilder::new(
             block_id_short,
             rand_seed,
@@ -587,6 +593,7 @@ impl CollatorStdImpl {
         let (res, has_pending_externals) = Self::read_next_externals_impl(
             &self.shard_id,
             &mut self.anchors_cache,
+            self.last_imported_anchor.as_ref(),
             count,
             collation_data,
             continue_from_read_to,
@@ -598,6 +605,7 @@ impl CollatorStdImpl {
     fn read_next_externals_impl(
         shard_id: &ShardIdent,
         anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
+        last_imported_anchor_opt: Option<&AnchorInfo>,
         count: usize,
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
@@ -636,6 +644,7 @@ impl CollatorStdImpl {
         let mut ext_messages = vec![];
         let mut has_pending_externals_in_last_read_anchor = false;
 
+        let mut anchors_cache_fully_read = false;
         let mut next_idx = 0;
         loop {
             tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -650,6 +659,7 @@ impl CollatorStdImpl {
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "no next entry in anchors cache",
                     );
+                    anchors_cache_fully_read = true;
                     break;
                 }
             };
@@ -794,6 +804,15 @@ impl CollatorStdImpl {
         );
 
         // update read up to info
+        if last_read_anchor_opt.is_none() || anchors_cache_fully_read {
+            if let Some(last_imported_anchor) = last_imported_anchor_opt {
+                last_read_anchor_opt = Some(last_imported_anchor.id);
+                msgs_read_offset_in_last_anchor = last_imported_anchor.all_exts_count as u64;
+                if read_from_anchor_opt.is_none() {
+                    read_from_anchor_opt = Some(last_imported_anchor.id);
+                }
+            }
+        }
         if let Some(last_read_anchor) = last_read_anchor_opt {
             if let Some(externals_upto) = collation_data.processed_upto.externals.as_mut() {
                 externals_upto.read_to = (last_read_anchor, msgs_read_offset_in_last_anchor);
@@ -1230,7 +1249,7 @@ impl CollatorStdImpl {
                 let prev_shard_descr = entry.get();
                 shard_description.top_sc_block_updated =
                     prev_shard_descr.seqno != shard_description.seqno;
-                tracing::debug!(target: tracing_targets::COLLATOR,
+                tracing::trace!(target: tracing_targets::COLLATOR,
                     %shard_id,
                     shard_description.top_sc_block_updated,
                     "prev_seqno={}, new_seqno={}",
