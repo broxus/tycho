@@ -7,11 +7,12 @@ use everscale_types::models::ShardIdent;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
-use super::types::{ProcessedUptoInfoStuff, WorkingState};
+use super::types::WorkingState;
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
 use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
+use crate::types::ProcessedUptoInfoStuff;
 
 pub(super) struct QueueIteratorAdapter {
     shard_id: ShardIdent,

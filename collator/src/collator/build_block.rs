@@ -340,6 +340,8 @@ impl CollatorStdImpl {
                 shards: extra.shards,
                 config: extra.config,
                 validator_info: extra.validator_info,
+
+                processed_upto: collation_data.processed_upto.clone(),
             })
         });
 

@@ -7,11 +7,10 @@ use everscale_types::cell::{Cell, HashBytes, UsageTree, UsageTreeMode};
 use everscale_types::dict::Dict;
 use everscale_types::models::{
     Account, AccountState, BlockId, BlockIdShort, BlockInfo, BlockLimits, BlockParamLimits,
-    BlockRef, CurrencyCollection, ExtInMsgInfo, ExternalsProcessedUpto, HashUpdate, ImportFees,
-    InMsg, IntMsgInfo, InternalsProcessedUpto, Lazy, LibDescr, MsgInfo, OptionalAccount, OutMsg,
-    PrevBlockRef, ProcessedUptoInfo, ShardAccount, ShardAccounts, ShardDescription,
-    ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib, SpecialFlags, StateInit,
-    Transaction, ValueFlow,
+    BlockRef, CurrencyCollection, ExtInMsgInfo, HashUpdate, ImportFees, InMsg, IntMsgInfo, Lazy,
+    LibDescr, MsgInfo, OptionalAccount, OutMsg, PrevBlockRef, ShardAccount, ShardAccounts,
+    ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib,
+    SpecialFlags, StateInit, Transaction, ValueFlow,
 };
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
@@ -19,7 +18,7 @@ use tycho_util::FastHashMap;
 
 use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
-use crate::types::{McData, ProofFunds};
+use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 
 // В текущем коллаторе перед коллацией блока импортируется:
 // - предыдущий мастер стейт
@@ -516,81 +515,6 @@ pub struct PreparedOutMsg {
     pub out_msg: Lazy<OutMsg>,
     pub exported_value: CurrencyCollection,
     pub new_tx: Option<Lazy<Transaction>>,
-}
-
-/// Processed up to info for externals and internals.
-#[derive(Debug, Default, Clone)]
-pub(super) struct ProcessedUptoInfoStuff {
-    /// Externals processed up to point and range
-    pub externals: Option<ExternalsProcessedUpto>,
-    /// Internals processed up to points and ranges by shards
-    pub internals: BTreeMap<ShardIdent, InternalsProcessedUptoStuff>,
-    /// Offset of processed messages from buffer.
-    /// Will be `!=0` if there were unprocessed messages in buffer from prev collation.
-    pub processed_offset: u32,
-}
-
-impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
-    type Error = everscale_types::error::Error;
-
-    fn try_from(value: ProcessedUptoInfo) -> std::result::Result<Self, Self::Error> {
-        let mut res = Self {
-            processed_offset: value.processed_offset,
-            externals: value.externals,
-            ..Default::default()
-        };
-        for item in value.internals.iter() {
-            let (shard_id_full, int_upto_info) = item?;
-            res.internals.insert(
-                ShardIdent::try_from(shard_id_full)?,
-                InternalsProcessedUptoStuff {
-                    processed_to_msg: int_upto_info.processed_to_msg.into(),
-                    read_to_msg: int_upto_info.read_to_msg.into(),
-                },
-            );
-        }
-        Ok(res)
-    }
-}
-
-impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
-    type Error = everscale_types::error::Error;
-
-    fn try_from(value: ProcessedUptoInfoStuff) -> std::result::Result<Self, Self::Error> {
-        let mut res = Self {
-            processed_offset: value.processed_offset,
-            externals: value.externals,
-            ..Default::default()
-        };
-        for (shard_id, int_upto_info) in value.internals {
-            res.internals.set(
-                ShardIdentFull::from(shard_id),
-                InternalsProcessedUpto::from(int_upto_info),
-            )?;
-        }
-        Ok(res)
-    }
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct InternalsProcessedUptoStuff {
-    /// Internals processed up to message (LT, Hash).
-    /// All internals upto this point
-    /// already processed during previous blocks collations.
-    ///
-    /// Needs to read internals from this point to reproduce buffer state from prev collation.
-    pub processed_to_msg: InternalMessageKey,
-    /// Needs to read internals to this point (LT, Hash) to reproduce buffer state from prev collation.
-    pub read_to_msg: InternalMessageKey,
-}
-
-impl From<InternalsProcessedUptoStuff> for InternalsProcessedUpto {
-    fn from(value: InternalsProcessedUptoStuff) -> Self {
-        Self {
-            processed_to_msg: value.processed_to_msg.into_tuple(),
-            read_to_msg: value.read_to_msg.into_tuple(),
-        }
-    }
 }
 
 impl BlockCollationData {

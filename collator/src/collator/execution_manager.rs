@@ -18,14 +18,14 @@ use tycho_util::FastHashMap;
 
 use super::mq_iterator_adapter::QueueIteratorAdapter;
 use super::types::{
-    AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, InternalsProcessedUptoStuff,
-    MessageGroup, MessageGroups, ParsedMessage, ProcessedUptoInfoStuff, ShardAccountStuff,
-    WorkingState,
+    AccountId, BlockCollationData, Dequeued, DisplayMessageGroup, MessageGroup, MessageGroups,
+    ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::internal_queue::types::{InternalMessageKey, QueueDiff};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
+use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
 
 /// Execution manager
 pub(super) struct ExecutionManager {
