@@ -83,7 +83,7 @@ impl ArchiveBlockProvider {
             (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
         };
 
-        match this.proof_checker.check_proof(block, proof, true).await {
+        match this.proof_checker.check_proof(&block, &proof, true).await {
             // Stop using archives if the block is recent enough
             Ok(meta) if is_block_recent(&meta) => {
                 tracing::info!(%block_id, "archive block provider finished");
@@ -119,7 +119,7 @@ impl ArchiveBlockProvider {
             return Some(Err(ArchiveError::OutOfRange.into()));
         };
 
-        if let Err(e) = this.proof_checker.check_proof(block, proof, true).await {
+        if let Err(e) = this.proof_checker.check_proof(&block, &proof, true).await {
             return Some(Err(e));
         }
 
