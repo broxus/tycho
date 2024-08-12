@@ -121,7 +121,7 @@ where
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
         let state = state.clone();
         self.spawn_task(method_to_async_closure!(
-            try_detect_top_processed_to_anchor_and_notify_mempool,
+            detect_top_processed_to_anchor_and_notify_mempool,
             state
         ))
         .await?;
@@ -137,7 +137,7 @@ where
 
         let state_cloned = state.clone();
         self.spawn_task(method_to_async_closure!(
-            try_detect_top_processed_to_anchor_and_notify_mempool,
+            detect_top_processed_to_anchor_and_notify_mempool,
             state_cloned
         ))
         .await?;
@@ -316,7 +316,7 @@ where
     /// Tries to determine top anchor that was processed to
     /// by info from received state and notify mempool
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    async fn try_detect_top_processed_to_anchor_and_notify_mempool(
+    async fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
         state: ShardStateStuff,
     ) -> Result<()> {
@@ -327,9 +327,12 @@ where
             return Ok(());
         }
 
+        let mut min_top_anchor_id = 0;
+        let mut mc_processed_to_anchor_id = None;
         if let Some(externals_processed_upto) = state.state().processed_upto.load()?.externals {
             // get top processed to anchor id for master block
-            let mut min_top_anchor_id = externals_processed_upto.processed_to.0;
+            mc_processed_to_anchor_id = Some(externals_processed_upto.processed_to.0);
+            min_top_anchor_id = externals_processed_upto.processed_to.0;
 
             // read from shard descriptions to get min
             for item in state.shards()?.iter() {
@@ -339,16 +342,17 @@ where
                         min_top_anchor_id.min(shard_descr.ext_processed_to_anchor_id);
                 }
             }
-
-            tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                mc_processed_to_anchor_id = externals_processed_upto.processed_to.0,
-                "detected min_top_anchor_id={}, will notify mempool",
-                min_top_anchor_id,
-            );
-            self.mpool_adapter
-                .handle_top_processed_to_anchor(min_top_anchor_id)
-                .await?;
         }
+
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            mc_processed_to_anchor_id,
+            "detected min_top_anchor_id={}, will notify mempool",
+            min_top_anchor_id,
+        );
+
+        self.mpool_adapter
+            .handle_top_processed_to_anchor(min_top_anchor_id)
+            .await?;
 
         Ok(())
     }
