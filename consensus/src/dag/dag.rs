@@ -342,6 +342,14 @@ impl Dag {
             anchor.body().location.round,
             "passed anchor round does not match anchor point's round"
         );
+        let history_limit = Round(
+            current_round
+                .round()
+                .0
+                .saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
+                .max(MempoolConfig::GENESIS_ROUND.0),
+        );
+
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
         extend(&mut r[0], &anchor.body().includes); // points @ r+0
         extend(&mut r[1], &anchor.body().witness); // points @ r-1
@@ -352,7 +360,7 @@ impl Dag {
         while let Some(point_round /* r+0 */) = current_round
             .prev()
             .upgrade()
-            .filter(|_| !r.iter().all(BTreeMap::is_empty))
+            .filter(|dag_round| dag_round.round() >= history_limit)
         {
             // take points @ r+0, shuffle deterministically with anchor digest as a seed
             let mut sorted = mem::take(&mut r[0]).into_iter().collect::<Vec<_>>();
@@ -374,6 +382,11 @@ impl Dag {
             current_round = point_round; // r+0 is a new r+1
             r.rotate_left(1); // [empty r_0, r-1, r-2] => [r-1 as r+0, r-2 as r-1, empty as r-2]
         }
+        assert_eq!(
+            current_round.round(),
+            history_limit,
+            "dag doesn't contain full anchor history"
+        );
         Some(uncommitted_rev)
     }
 
