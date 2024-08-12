@@ -519,7 +519,7 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR, "{:?}", self.stats);
 
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Created and sent block candidate: time_diff={}, \
+            "collated_block_id={}, time_diff={}, \
             collation_time={}, elapsed_from_prev_block={}, overhead={}, \
             start_lt={}, end_lt={}, exec_count={}, \
             exec_ext={}, exec_int={}, exec_new_int={}, \
@@ -528,7 +528,7 @@ impl CollatorStdImpl {
             in_msgs={}, out_msgs={}, \
             read_ext_msgs={}, read_int_msgs={}, \
             read_new_msgs_from_iterator={}, inserted_new_msgs_to_iterator={} has_pending_internals={}",
-            block_time_diff,
+            block_id, block_time_diff,
             total_elapsed.as_millis(), elapsed_from_prev_block.as_millis(), collation_mngmnt_overhead.as_millis(),
             collation_data.start_lt, collation_data.next_lt, collation_data.execute_count_all,
             collation_data.execute_count_ext, collation_data.execute_count_int, collation_data.execute_count_new_int,
