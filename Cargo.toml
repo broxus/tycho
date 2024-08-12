@@ -209,7 +209,14 @@ verbose_file_reads = "warn"
 zero_sized_map_values = "warn"
 
 [profile.release]
+lto = "thin"
+codegen-units = 1
 debug = true
+
+[profile.release_check]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
 
 [profile.dev.package.hex]
 opt-level = 3
