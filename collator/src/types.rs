@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,8 @@ use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::{serde_helpers, FastHashMap};
+
+use crate::internal_queue::types::InternalMessageKey;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -92,6 +95,81 @@ pub struct BlockCollationResult {
     pub has_pending_internals: bool,
 }
 
+/// Processed up to info for externals and internals.
+#[derive(Debug, Default, Clone)]
+pub struct ProcessedUptoInfoStuff {
+    /// Externals processed up to point and range
+    pub externals: Option<ExternalsProcessedUpto>,
+    /// Internals processed up to points and ranges by shards
+    pub internals: BTreeMap<ShardIdent, InternalsProcessedUptoStuff>,
+    /// Offset of processed messages from buffer.
+    /// Will be `!=0` if there were unprocessed messages in buffer from prev collation.
+    pub processed_offset: u32,
+}
+
+impl TryFrom<ProcessedUptoInfo> for ProcessedUptoInfoStuff {
+    type Error = everscale_types::error::Error;
+
+    fn try_from(value: ProcessedUptoInfo) -> std::result::Result<Self, Self::Error> {
+        let mut res = Self {
+            processed_offset: value.processed_offset,
+            externals: value.externals,
+            ..Default::default()
+        };
+        for item in value.internals.iter() {
+            let (shard_id_full, int_upto_info) = item?;
+            res.internals.insert(
+                ShardIdent::try_from(shard_id_full)?,
+                InternalsProcessedUptoStuff {
+                    processed_to_msg: int_upto_info.processed_to_msg.into(),
+                    read_to_msg: int_upto_info.read_to_msg.into(),
+                },
+            );
+        }
+        Ok(res)
+    }
+}
+
+impl TryFrom<ProcessedUptoInfoStuff> for ProcessedUptoInfo {
+    type Error = everscale_types::error::Error;
+
+    fn try_from(value: ProcessedUptoInfoStuff) -> std::result::Result<Self, Self::Error> {
+        let mut res = Self {
+            processed_offset: value.processed_offset,
+            externals: value.externals,
+            ..Default::default()
+        };
+        for (shard_id, int_upto_info) in value.internals {
+            res.internals.set(
+                ShardIdentFull::from(shard_id),
+                InternalsProcessedUpto::from(int_upto_info),
+            )?;
+        }
+        Ok(res)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalsProcessedUptoStuff {
+    /// Internals processed up to message (LT, Hash).
+    /// All internals upto this point
+    /// already processed during previous blocks collations.
+    ///
+    /// Needs to read internals from this point to reproduce buffer state from prev collation.
+    pub processed_to_msg: InternalMessageKey,
+    /// Needs to read internals to this point (LT, Hash) to reproduce buffer state from prev collation.
+    pub read_to_msg: InternalMessageKey,
+}
+
+impl From<InternalsProcessedUptoStuff> for InternalsProcessedUpto {
+    fn from(value: InternalsProcessedUptoStuff) -> Self {
+        Self {
+            processed_to_msg: value.processed_to_msg.into_tuple(),
+            read_to_msg: value.read_to_msg.into_tuple(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct McData {
     pub global_id: i32,
@@ -107,6 +185,8 @@ pub struct McData {
     pub shards: ShardHashes,
     pub config: BlockchainConfig,
     pub validator_info: ValidatorInfo,
+
+    pub processed_upto: ProcessedUptoInfoStuff,
 }
 
 impl McData {
@@ -136,6 +216,8 @@ impl McData {
             shards: extra.shards.clone(),
             config: extra.config.clone(),
             validator_info: extra.validator_info,
+
+            processed_upto: state.processed_upto.load()?.try_into()?,
         }))
     }
 

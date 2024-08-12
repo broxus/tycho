@@ -307,22 +307,57 @@ impl CollatorStdImpl {
 
         let working_state = Self::build_and_validate_working_state(mc_data, prev_states)?;
 
-        if let Some(processed_upto_anchor_id) = working_state
-            .prev_shard_data
-            .processed_upto()
-            .externals
-            .as_ref()
-            .map(|upto| upto.processed_to)
-        {
+        // define processed to anchor info
+        // try get from mc data
+        let mut mc_ext_processed_to_opt = None;
+        if !self.shard_id.is_masterchain() {
+            if let Some(processed_to) = working_state
+                .mc_data
+                .processed_upto
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to)
+            {
+                // TODO: consider split/merge
+
+                // find top shard block seqno for current shard from mc data
+                let mut top_sc_block_seqno_from_mc_data = 0;
+                for item in working_state.mc_data.shards.iter() {
+                    let (shard_id, shard_descr) = item?;
+                    if self.shard_id == shard_id {
+                        top_sc_block_seqno_from_mc_data = shard_descr.seqno;
+                        break;
+                    }
+                }
+                // get mc data processed to info if prev shard block is eq to top
+                let sc_prev_seqno = self.next_block_id_short.seqno - 1;
+                if sc_prev_seqno == top_sc_block_seqno_from_mc_data {
+                    mc_ext_processed_to_opt = Some(processed_to);
+                }
+            }
+        }
+
+        // try get from prev data
+        let ext_processed_to_opt = match mc_ext_processed_to_opt {
+            None => working_state
+                .prev_shard_data
+                .processed_upto()
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to),
+            val => val,
+        };
+
+        // import anchors
+        if let Some(ext_processed_to) = ext_processed_to_opt {
             tracing::info!(target: tracing_targets::COLLATOR,
-                "Collator (block_id={}): init: import anchors from processed upto anchor id {} offset {} ...",
+                "Collator (block_id={}): init: import anchors from processed to anchor ({:?}) ...",
                 self.next_block_id_short,
-                processed_upto_anchor_id.0,
-                processed_upto_anchor_id.1,
+                ext_processed_to,
             );
             self.import_anchors_on_init(
-                processed_upto_anchor_id.0,
-                processed_upto_anchor_id.1 as usize,
+                ext_processed_to.0,
+                ext_processed_to.1 as _,
                 working_state.prev_shard_data.gen_chain_time(),
             )
             .await?;
@@ -506,13 +541,13 @@ impl CollatorStdImpl {
         Ok((next_anchor, has_externals))
     }
 
-    /// 1. Get anchor from `externals_processed_upto`
+    /// 1. Get `processed_to` anchor from
     /// 2. Get next anchors until `last_block_chain_time`
     /// 3. Store anchors in cache
     async fn import_anchors_on_init(
         &mut self,
-        processed_upto_anchor_id: u32,
-        processed_upto_offset: usize,
+        processed_to_anchor_id: u32,
+        processed_to_msgs_offset: usize,
         last_block_chain_time: u64,
     ) -> Result<()> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
@@ -521,14 +556,14 @@ impl CollatorStdImpl {
 
         let mut next_anchor = self
             .mpool_adapter
-            .get_anchor_by_id(processed_upto_anchor_id)
+            .get_anchor_by_id(processed_to_anchor_id)
             .await?
             .unwrap();
 
         let mut anchors_info: Vec<AnchorInfo> = vec![];
 
         let mut our_exts_count =
-            next_anchor.count_externals_for(&self.shard_id, processed_upto_offset);
+            next_anchor.count_externals_for(&self.shard_id, processed_to_msgs_offset);
         let has_externals = our_exts_count > 0;
         if has_externals {
             self.has_pending_externals = true;
@@ -567,13 +602,13 @@ impl CollatorStdImpl {
             anchors_info.push(last_imported_anchor.clone());
         }
 
+        self.last_imported_anchor = Some(last_imported_anchor);
+
         let imported_count: usize = anchors_info.iter().map(|a| a.our_exts_count).sum();
         metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
             .increment(imported_count as u64);
         metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
             .increment(imported_count as f64);
-
-        self.last_imported_anchor = Some(last_imported_anchor);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             elapsed = timer.elapsed().as_millis(),
