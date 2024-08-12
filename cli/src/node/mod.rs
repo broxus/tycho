@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,10 +25,11 @@ use tycho_collator::validator::{
 };
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, BlockProvider, BlockStrider, BlockSubscriber, BlockSubscriberExt,
-    BlockchainBlockProvider, BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber,
-    MetricsSubscriber, OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter,
-    StateSubscriber, StateSubscriberContext, StorageBlockProvider,
+    ArchiveBlockProvider, BlockProvider, BlockProviderExt, BlockStrider, BlockSubscriber,
+    BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
+    FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
+    PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
+    StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -545,9 +547,13 @@ impl Node {
             vec![],
         );
 
+        let collator_active = Arc::new(AtomicBool::new(false));
         let collator_state_subscriber = CollatorStateSubscriber {
+            collator_active: collator_active.clone(),
             adapter: collation_manager.state_node_adapter().clone(),
         };
+
+        let activate_collator = ActivateCollator { collator_active };
 
         // Explicitly handle the initial state
         collator_state_subscriber
@@ -615,10 +621,10 @@ impl Node {
             ArchiveBlockProvider::new(self.blockchain_rpc_client.clone(), self.storage.clone());
 
         let block_strider = BlockStrider::builder()
-            .with_provider((
+            .with_provider(activate_collator.chain((
                 (blockchain_block_provider, storage_block_provider),
                 collator_block_provider,
-            ))
+            )))
             .with_state(strider_state)
             .with_block_subscriber(
                 (
@@ -645,7 +651,26 @@ impl Node {
     }
 }
 
+struct ActivateCollator {
+    collator_active: Arc<AtomicBool>,
+}
+
+impl BlockProvider for ActivateCollator {
+    type GetNextBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+    type GetBlockFut<'a> = futures_util::future::Ready<OptionalBlockStuff>;
+
+    fn get_next_block<'a>(&'a self, _: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        self.collator_active.store(true, Ordering::Release);
+        futures_util::future::ready(None)
+    }
+
+    fn get_block<'a>(&'a self, _: &'a BlockId) -> Self::GetBlockFut<'a> {
+        futures_util::future::ready(None)
+    }
+}
+
 struct CollatorStateSubscriber {
+    collator_active: Arc<AtomicBool>,
     adapter: Arc<dyn StateNodeAdapter>,
 }
 
@@ -653,7 +678,11 @@ impl StateSubscriber for CollatorStateSubscriber {
     type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        self.adapter.handle_state(&cx.state)
+        if self.collator_active.load(Ordering::Acquire) {
+            self.adapter.handle_state(&cx.state)
+        } else {
+            Box::pin(async move { Ok(()) })
+        }
     }
 }
 
