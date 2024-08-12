@@ -880,7 +880,8 @@ impl ShardDescriptionExt for ShardDescription {
             want_merge: block_info.want_merge,
             nx_cc_updated: false, // TODO: by t-node, needs to review
             next_catchain_seqno: block_info.gen_catchain_seqno,
-            next_validator_shard: block_info.shard.prefix(), /* eq to `shard_prefix_with_tag` in old node */
+            ext_processed_to_anchor_id: 0, // TODO
+            top_sc_block_updated: false, // TODO
             min_ref_mc_seqno: block_info.min_ref_mc_seqno,
             gen_utime: block_info.gen_utime,
             split_merge_at: None, // TODO: check if we really should not use it here

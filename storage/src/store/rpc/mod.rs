@@ -946,7 +946,7 @@ fn split_shard(
         };
 
         let (left_accounts, right_accounts) = {
-            builder.rewind(builder.bit_len()).unwrap();
+            builder.rewind(builder.size_bits()).unwrap();
             let prefix_len = shard.prefix_len();
             if prefix_len > 0 {
                 builder.store_uint(shard.prefix() >> (64 - prefix_len), prefix_len)?;

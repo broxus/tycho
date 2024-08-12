@@ -376,7 +376,7 @@ impl GiverBuilder {
                     .take()
                     .expect("giver state must contain data");
                 let mut prev_data = prev_data.as_slice()?;
-                prev_data.advance(256, 0)?;
+                prev_data.skip_first(256, 0)?;
 
                 data.store_slice(prev_data)?;
 
