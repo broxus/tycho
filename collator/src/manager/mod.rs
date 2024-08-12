@@ -573,6 +573,9 @@ where
 
         let mc_data = McData::load_from_state(&state)?;
 
+        self.detect_top_processed_to_anchor_and_notify_mempool(state)
+            .await?;
+
         self.refresh_collation_sessions(mc_data).await
     }
 
