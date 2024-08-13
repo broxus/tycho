@@ -881,7 +881,7 @@ impl ShardDescriptionExt for ShardDescription {
             nx_cc_updated: false, // TODO: by t-node, needs to review
             next_catchain_seqno: block_info.gen_catchain_seqno,
             ext_processed_to_anchor_id: 0, // TODO
-            top_sc_block_updated: false, // TODO
+            top_sc_block_updated: false,   // TODO
             min_ref_mc_seqno: block_info.min_ref_mc_seqno,
             gen_utime: block_info.gen_utime,
             split_merge_at: None, // TODO: check if we really should not use it here

@@ -149,6 +149,8 @@ impl RpcState {
     }
 
     pub async fn broadcast_external_message(&self, message: &[u8]) {
+        metrics::counter!("tycho_rpc_broadcast_external_message_tx_bytes_total")
+            .increment(message.len() as u64);
         self.inner
             .blockchain_rpc_client
             .broadcast_external_message(message)
