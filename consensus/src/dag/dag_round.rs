@@ -170,9 +170,7 @@ impl DagRound {
     ) -> DagPointFuture {
         let future = self.edit(author, |loc| {
             loc.get_or_init(digest, |state| {
-                DagPointFuture::new_download(
-                    self, author, digest, state, downloader, store, effects,
-                )
+                DagPointFuture::new_load(self, author, digest, state, downloader, store, effects)
             })
             .clone()
         });
