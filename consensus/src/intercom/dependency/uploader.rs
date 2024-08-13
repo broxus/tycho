@@ -9,6 +9,12 @@ use crate::models::PointId;
 
 pub struct Uploader;
 
+enum SearchStatus {
+    TryLater,
+    None,
+    Found,
+}
+
 impl Uploader {
     pub fn find(
         peer_id: &PeerId,
@@ -18,25 +24,30 @@ impl Uploader {
         effects: &Effects<EngineContext>,
     ) -> PointByIdResponse {
         if point_id.round > top_dag_round.round() {
-            PointByIdResponse::TryLater
-        } else {
-            match top_dag_round.scan(point_id.round) {
-                Some(dag_round) => {
-                    Self::from_dag(peer_id, point_id, top_dag_round, &dag_round, effects)
-                }
-                None => Self::from_store(peer_id, point_id, store, effects),
-                // Fixme return serialized as bytes from DB!
+            // TODO add logs
+            return PointByIdResponse::TryLater;
+        };
+        let status = top_dag_round
+            .scan(point_id.round)
+            .and_then(|dag_round| Self::from_dag(peer_id, point_id, &dag_round, effects))
+            .or(Self::from_store(peer_id, point_id, store, effects));
+        match status {
+            Some(SearchStatus::None) | None => PointByIdResponse::Defined(None),
+            // Fixme return serialized as bytes from DB!
+            // TODO add error logs if not found in DB while must have been
+            Some(SearchStatus::Found) => {
+                PointByIdResponse::Defined(store.get_point(point_id.round, &point_id.digest))
             }
+            Some(SearchStatus::TryLater) => PointByIdResponse::TryLater,
         }
     }
 
     fn from_dag(
         peer_id: &PeerId,
         point_id: &PointId,
-        top_dag_round: &DagRound,
         dag_round: &DagRound,
         effects: &Effects<EngineContext>,
-    ) -> PointByIdResponse {
+    ) -> Option<SearchStatus> {
         let found = dag_round
             .view(&point_id.author, |loc| {
                 loc.versions().get(&point_id.digest).cloned()
@@ -55,9 +66,6 @@ impl Uploader {
                 // and don't trust newer consensus signatures
                 tracing::Level::ERROR
             }
-        } else if point_id.round >= top_dag_round.round().prev() {
-            // peer is from future round, we lag behind consensus and can see it from other logs
-            tracing::Level::TRACE
         } else {
             // we have the round, but not the point - it is very weakly included into global DAG
             tracing::Level::DEBUG
@@ -65,7 +73,7 @@ impl Uploader {
         dyn_event!(
             parent: effects.span(),
             level,
-            from = display("cache"),
+            from = display("dag"),
             task_found = task_found,
             ready = ready.as_ref().map(|dag_point| display(dag_point.alt())),
             peer = display(peer_id.alt()),
@@ -76,10 +84,14 @@ impl Uploader {
         );
         match ready {
             Some(dag_point) => {
-                PointByIdResponse::Defined(dag_point.into_trusted().map(|valid| valid.point))
+                if dag_point.trusted().is_some() {
+                    Some(SearchStatus::Found)
+                } else {
+                    Some(SearchStatus::None)
+                }
             }
-            None if task_found => PointByIdResponse::TryLater,
-            None => PointByIdResponse::Defined(None),
+            None if task_found => Some(SearchStatus::TryLater),
+            None => None,
         }
     }
 
@@ -88,18 +100,17 @@ impl Uploader {
         point_id: &PointId,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
-    ) -> PointByIdResponse {
+    ) -> Option<SearchStatus> {
         let flags = store.get_flags(point_id.round, &point_id.digest);
-        let point_opt = if flags.is_valid || flags.is_certified {
-            store.get_point(point_id.round, &point_id.digest)
+        let result = if flags.is_trusted || flags.is_certified {
+            Some(SearchStatus::Found)
         } else {
             None
         };
         tracing::debug!(
             parent: effects.span(),
             from = display("store"),
-            found = point_opt.is_some(),
-            valid = flags.is_valid,
+            trusted = flags.is_trusted,
             certified = flags.is_certified,
             peer = display(peer_id.alt()),
             author = display(point_id.author.alt()),
@@ -107,6 +118,6 @@ impl Uploader {
             digest = display(point_id.digest.alt()),
             "upload",
         );
-        PointByIdResponse::Defined(point_opt)
+        result
     }
 }
