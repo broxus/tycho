@@ -162,8 +162,8 @@ impl BroadcastFilterInner {
             };
             match verified {
                 Ok(()) => self.send_validating(&point_round, point, downloader, store, effects),
-                Err(invalid @ DagPoint::Invalid(_)) => {
-                    point_round.insert_invalid_exact(sender, &invalid, store);
+                Err(DagPoint::Invalid(_)) => {
+                    point_round.insert_invalid_exact(sender, &point, store);
                 }
                 Err(_not_exists) => {} // FIXME separate failed downloads from broken signatures
             };

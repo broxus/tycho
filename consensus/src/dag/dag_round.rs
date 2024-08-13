@@ -12,7 +12,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, PeerCount, Point, Round, ValidPoint};
+use crate::models::{Digest, PeerCount, Point, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -187,11 +187,7 @@ impl DagRound {
         key_pair: Option<&KeyPair>,
         store: &MempoolStore,
     ) -> InclusionState {
-        let state = self.insert_exact(
-            &point.data().author,
-            &DagPoint::Trusted(ValidPoint::new(point.clone())),
-            store,
-        );
+        let state = self.insert_exact(&point.data().author, point, true, store);
         if let Some(signable) = state.signable() {
             signable.sign(self.round(), key_pair, MempoolConfig::sign_time_range());
         }
@@ -203,34 +199,26 @@ impl DagRound {
         state
     }
 
-    pub fn insert_invalid_exact(
-        &self,
-        sender: &PeerId,
-        dag_point: &DagPoint,
-        store: &MempoolStore,
-    ) {
-        assert!(
-            dag_point.valid().is_none(),
-            "Coding error: failed to insert valid point as invalid"
-        );
-        self.insert_exact(sender, dag_point, store);
+    pub fn insert_invalid_exact(&self, sender: &PeerId, point: &Point, store: &MempoolStore) {
+        self.insert_exact(sender, point, false, store);
     }
 
     fn insert_exact(
         &self,
         sender: &PeerId,
-        dag_point: &DagPoint,
+        point: &Point,
+        is_valid: bool,
         store: &MempoolStore,
     ) -> InclusionState {
         assert_eq!(
-            dag_point.round(),
+            point.round(),
             self.round(),
             "Coding error: dag round mismatches point round on insert"
         );
         self.edit(sender, |loc| {
             let _ready = loc.init_or_modify(
-                dag_point.digest(),
-                |state| DagPointFuture::new_local(dag_point, state, store),
+                point.digest(),
+                |state| DagPointFuture::new_local(point, is_valid, state, store),
                 |_fut| {},
             );
             loc.state().clone()

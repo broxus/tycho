@@ -3,8 +3,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures_util::FutureExt;
+use futures_util::{future, FutureExt};
 use tokio::sync::{mpsc, oneshot};
+use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_storage::PointFlags;
 use tycho_util::futures::{JoinTask, Shared};
@@ -14,7 +15,7 @@ use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::Downloader;
-use crate::models::{DagPoint, Digest, PointId};
+use crate::models::{DagPoint, Digest, PointId, PointInfo, ValidPoint};
 use crate::Point;
 
 #[derive(Clone)]
@@ -52,23 +53,33 @@ enum DagPointFutureType {
         dependents: mpsc::UnboundedSender<PeerId>,
         verified: Arc<OnceTake<oneshot::Sender<Point>>>,
     },
-    Local(futures_util::future::Ready<DagPoint>),
+    Local(future::Ready<DagPoint>),
 }
 
 impl DagPointFuture {
-    pub fn new_local(dag_point: &DagPoint, state: &InclusionState, store: &MempoolStore) -> Self {
-        state.init(dag_point);
-        // do not store invalid: after restart may not load smth or produce equivocation
-        if let Some(valid) = dag_point.valid() {
-            store.insert_point(&valid.point);
-            store.set_flags(valid.point.round(), valid.point.digest(), &PointFlags {
+    pub fn new_local(
+        point: &Point,
+        is_valid: bool,
+        state: &InclusionState,
+        store: &MempoolStore,
+    ) -> Self {
+        // local - do not store invalid: after restart may not load smth or produce equivocation
+        // others - do not store ill-formed or with invalid signature
+        if is_valid {
+            let flags = PointFlags {
                 is_valid: true,
                 ..Default::default()
-            });
+            };
+            store.insert_point(point, Some(&flags));
         }
-        Self(DagPointFutureType::Local(futures_util::future::ready(
-            dag_point.clone(),
-        )))
+        let info = PointInfo::from(point);
+        let dag_point = if is_valid {
+            DagPoint::Trusted(ValidPoint::new(info))
+        } else {
+            DagPoint::Invalid(info)
+        };
+        state.init(&dag_point); // only after persisted
+        Self(DagPointFutureType::Local(future::ready(dag_point)))
     }
 
     pub fn new_broadcast(
@@ -81,6 +92,7 @@ impl DagPointFuture {
     ) -> Self {
         let downloader = downloader.clone();
         let effects = Effects::<ValidateContext>::new(effects, point);
+        let span = effects.span().clone();
         let point_dag_round = point_dag_round.downgrade();
         let point = point.clone();
         let state = state.clone();
@@ -93,7 +105,7 @@ impl DagPointFuture {
             let stored_fut = tokio::task::spawn_blocking({
                 let verified = point.clone();
                 let store = store.clone();
-                move || store.insert_point(&verified)
+                move || store.insert_point(&verified, None)
             });
             let validated_fut = Verifier::validate(
                 point,
@@ -107,11 +119,12 @@ impl DagPointFuture {
             let dag_point = match tokio::join!(stored_fut, validated_fut) {
                 (Ok(_), validated) => validated,
                 (Err(err), _) if err.is_panic() => std::panic::resume_unwind(err.into_panic()),
-                (Err(_), _) => panic!("store point was cancelled"),
+                (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
             let flags = PointFlags {
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
+                is_trusted: dag_point.trusted().is_some(),
                 is_certified: certified_clone.is_taken(),
                 ..Default::default()
             };
@@ -124,7 +137,7 @@ impl DagPointFuture {
             dag_point
         };
         DagPointFuture(DagPointFutureType::Broadcast {
-            task: Shared::new(JoinTask::new(task)),
+            task: Shared::new(JoinTask::new(task.instrument(span))),
             certified,
         })
     }
@@ -232,7 +245,7 @@ impl DagPointFuture {
         }
     }
 
-    pub fn make_certified(&self) {
+    pub fn mark_certified(&self) {
         // every vertex is certified by definition,
         // but also every vertex dependency is certified transitively
         if let DagPointFutureType::Broadcast { certified, .. }
