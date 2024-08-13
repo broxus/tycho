@@ -4,10 +4,10 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{future, StreamExt};
 use tokio::sync::oneshot;
 use tracing::Instrument;
-use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
+use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
 use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
@@ -29,19 +29,23 @@ use crate::{dyn_event, PointInfo};
 
 pub struct Verifier;
 
+#[derive(Debug)]
+pub enum VerifyError {
+    BadSig,
+    IllFormed,
+}
+
 // If any round exceeds dag depth, the arg point @ r+0 is considered valid by itself.
 // Any point @ r+0 will be committed, only if it has valid proof @ r+1
 // included into valid anchor chain, i.e. validated by consensus.
-
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
-    pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), DagPoint> {
+    pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
         let _task_duration = HistogramGuard::begin(ValidateContext::VERIFY_DURATION);
-        let result = if !(point.is_integrity_ok() && point.is_well_formed()) {
-            Err(DagPoint::NotExists(Arc::new(point.id()))) // cannot use point body
-        } else if !Self::is_list_of_signers_ok(point, peer_schedule) {
-            // point links, etc. will not be used
-            Err(DagPoint::Invalid((point).into()))
+        let result = if !point.is_integrity_ok() {
+            Err(VerifyError::BadSig)
+        } else if !(point.is_well_formed() && Self::is_list_of_signers_ok(point, peer_schedule)) {
+            Err(VerifyError::IllFormed)
         } else {
             Ok(())
         };
@@ -103,7 +107,7 @@ impl Verifier {
                 &mut dependencies,
             ))
         {
-            return ValidateContext::validated(DagPoint::Invalid((&point).into()));
+            return ValidateContext::validated(DagPoint::IllFormed(Arc::new(point.id())));
         }
 
         let Some(r_1) = r_0.prev().upgrade() else {
@@ -132,9 +136,10 @@ impl Verifier {
 
         let mut is_unique_in_loc_fut = std::pin::pin!(Self::is_unique_in_loc(
             &point,
-            Self::versions_except(&r_0, &point.data().author, Some(point.digest()))
-                .into_iter()
-                .collect()
+            r_0.view(&point.data().author, |loc| {
+                let other_versions = Self::versions_except(loc, Some(point.digest()));
+                (loc.bad_sig_in_broadcast, other_versions)
+            })
         )
         .instrument(effects.span().clone()));
 
@@ -144,11 +149,15 @@ impl Verifier {
                 .iter()
                 .cloned()
                 // do not extend listed dependencies as they may become trusted by consensus
-                .chain(Self::versions_except(
-                    &r_1,
-                    &point.data().author,
-                    point.data().prev_digest.as_ref(),
-                ))
+                .chain(
+                    // peer has to jump over a round if it had some invalid point in prev loc
+                    r_1.view(&point.data().author, |loc| {
+                        // do not add same prev_digest twice - it is added as one of 'includes'
+                        Self::versions_except(loc, point.data().prev_digest.as_ref())
+                    })
+                    .into_iter()
+                    .flatten()
+                )
                 .collect()
         )
         .instrument(effects.span().clone()));
@@ -320,21 +329,14 @@ impl Verifier {
         true
     }
 
-    fn versions_except(
-        dag_round: &DagRound,
-        author: &PeerId,
-        except: Option<&Digest>,
-    ) -> Vec<DagPointFuture> {
+    fn versions_except(dag_location: &DagLocation, except: Option<&Digest>) -> Vec<DagPointFuture> {
         // this is a synchronization point as whole closure runs under DashMap's lock
-        dag_round
-            .view(author, |loc| {
-                loc.versions()
-                    .iter()
-                    .filter(|(digest, _)| except.map_or(true, |except| except != *digest))
-                    .map(|(_, shared)| shared.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        dag_location
+            .versions()
+            .iter()
+            .filter(|(digest, _)| except.map_or(true, |except| except != *digest))
+            .map(|(_, shared)| shared.clone())
+            .collect::<Vec<_>>()
     }
 
     fn gather_deps(
@@ -389,8 +391,14 @@ impl Verifier {
 
     async fn is_unique_in_loc(
         point: &Point,
-        other_versions: FuturesUnordered<DagPointFuture>,
+        loc_data: Option<(bool, Vec<DagPointFuture>)>,
     ) -> bool {
+        let Some((broadcasted_bad_sig, other_versions)) = loc_data else {
+            return true;
+        };
+        if broadcasted_bad_sig {
+            return false;
+        };
         let mut other_versions = other_versions.into_iter().collect::<FuturesUnordered<_>>();
         while let Some(dag_point) = other_versions.next().await {
             assert_eq!(
@@ -409,25 +417,26 @@ impl Verifier {
                 "impossible to validate the same point multiple times concurrently"
             );
             match dag_point {
-                DagPoint::Trusted(_) | DagPoint::Suspicious(_) | DagPoint::Invalid(_) => {
+                DagPoint::Trusted(_)
+                | DagPoint::Suspicious(_)
+                | DagPoint::Invalid(_)
+                | DagPoint::IllFormed(_) => {
                     return false;
                 }
-                DagPoint::NotExists(_) => {
-                    // FIXME separate failed downloads from broken signatures
-                    // failed download is ok here (it's other point's dependency),
-                    // but a broken sig makes this point suspicious
-                    // only if it was received from the author, otherwise ignore
+                DagPoint::NotFound(_) => {
+                    // failed download is ok here:
+                    // it's other point's dependency, that really may not exist
                 }
             }
         }
         true
     }
 
-    /// check only direct dependencies and location for previous point (to jump over round)
+    /// check only direct dependencies and location for previous point (let it jump over round)
     async fn is_valid(point: &Point, mut deps_and_prev: FuturesUnordered<DagPointFuture>) -> bool {
         // point is well-formed if we got here, so point.proof matches point.includes
-        let proven_vertex = point.data().prev_digest.as_ref();
-        let prev_loc = (point.round().prev(), point.data().author);
+        let prev_digest_in_point = point.data().prev_digest.as_ref();
+        let prev_round = point.round().prev();
 
         // Indirect dependencies may be evicted from memory and not participate in this check,
         // but validity of direct dependencies ('links through') ensures inclusion chain is valid.
@@ -440,40 +449,41 @@ impl Verifier {
         let anchor_proof_link_id = point.anchor_link_id(AnchorStageRole::Proof);
 
         while let Some(dag_point) = deps_and_prev.next().await {
-            if (dag_point.round(), dag_point.author()) == prev_loc {
-                match proven_vertex {
-                    Some(proven_vertex) if proven_vertex == dag_point.digest() => {
-                        #[allow(clippy::match_same_arms)]
+            if dag_point.round() == prev_round && dag_point.author() == point.data().author {
+                match prev_digest_in_point {
+                    Some(prev_digest_in_point) if prev_digest_in_point == dag_point.digest() => {
                         match dag_point {
                             DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
                                 if !Self::is_proof_ok(point, &valid.info) {
                                     return false;
                                 } // else ok continue
                             }
-                            DagPoint::Invalid(_) => {
-                                // author must have jumped over current point's round
+                            DagPoint::Invalid(_)
+                            | DagPoint::IllFormed(_)
+                            | DagPoint::NotFound(_) => {
+                                // author must have skipped current point's round
+                                // to clear its bad history
                                 return false;
-                            }
-                            DagPoint::NotExists(_) => {
-                                return false;
-                                // FIXME separate failed downloads from broken signatures
-                                // failed download invalidates the current point,
-                                // but a broken sig requires a jump over round
-                                // only if it was received from the author, otherwise ignore
                             }
                         }
                     }
                     Some(_) | None => {
+                        #[allow(clippy::match_same_arms)]
                         match dag_point {
-                            DagPoint::NotExists(_equivocated_or_unlinked) => {
-                                // FIXME separate failed downloads from broken signatures
-                                // failed download is ok here (it's other point's dependency),
-                                // but a broken sig requires a jump over round
-                                // only if it was received from the author, otherwise ignore
-                            }
-                            _equivocated_or_unlinked => {
-                                // author must have jumped over current point's round
+                            DagPoint::Trusted(_) | DagPoint::Suspicious(_) => {
+                                // Some: point must have named _this_ point in `prev_digest`
+                                // None: point must have filled `prev_digest` and `includes`
                                 return false;
+                            }
+                            DagPoint::Invalid(_) | DagPoint::IllFormed(_) => {
+                                // Some: point must have named _this_ point in `prev_digest`,
+                                //       just to be invalid for an invalid dependency
+                                // None: author must have skipped current point's round
+                                return false;
+                            }
+                            DagPoint::NotFound(_) => {
+                                // failed download is ok for both Some and None:
+                                // it's other point's dependency, that really may not exist
                             }
                         }
                     }
@@ -508,7 +518,7 @@ impl Verifier {
                             return false;
                         }
                     }
-                    DagPoint::NotExists(_) | DagPoint::Invalid(_) => {
+                    DagPoint::Invalid(_) | DagPoint::IllFormed(_) | DagPoint::NotFound(_) => {
                         return false; // just invalid dependency
                     }
                 }
@@ -614,29 +624,34 @@ impl Verifier {
 impl ValidateContext {
     const VERIFY_DURATION: &'static str = "tycho_mempool_verifier_verify_time";
     const VALIDATE_DURATION: &'static str = "tycho_mempool_verifier_validate_time";
+    const KIND: &'static str = "kind";
 
-    const ALL_LABELS: [(&'static str, &'static str); 3] = [
-        ("kind", "not_exists"),
-        ("kind", "invalid"),
-        ("kind", "suspicious"),
+    const VERIFY_LABELS: [(&'static str, &'static str); 2] =
+        [(Self::KIND, "bad_sig"), (Self::KIND, "ill_formed")];
+
+    const VALIDATE_LABELS: [(&'static str, &'static str); 4] = [
+        (Self::KIND, "not_found"),
+        (Self::KIND, "ill_formed"),
+        (Self::KIND, "invalid"),
+        (Self::KIND, "suspicious"),
     ];
 
-    fn verified(result: &Result<(), DagPoint>) {
+    fn verified(result: &Result<(), VerifyError>) {
         let (labels, count) = match result {
-            Err(DagPoint::NotExists(_)) => (&Self::ALL_LABELS[0..=0], 1),
-            Err(DagPoint::Invalid(_)) => (&Self::ALL_LABELS[1..=1], 1),
-            Ok(_) => (&Self::ALL_LABELS[0..=1], 0),
-            _ => unreachable!("unexpected"),
+            Err(VerifyError::BadSig) => (&Self::VERIFY_LABELS[0..=0], 1),
+            Err(VerifyError::IllFormed) => (&Self::VERIFY_LABELS[1..=1], 1),
+            Ok(_) => (&Self::VERIFY_LABELS[..], 0),
         };
         metrics::counter!("tycho_mempool_verifier_verify", labels).increment(count);
     }
 
     fn validated(result: DagPoint) -> DagPoint {
         let (labels, count) = match result {
-            DagPoint::NotExists(_) => (&Self::ALL_LABELS[0..=0], 1),
-            DagPoint::Invalid(_) => (&Self::ALL_LABELS[1..=1], 1),
-            DagPoint::Suspicious(_) => (&Self::ALL_LABELS[2..=2], 1),
-            DagPoint::Trusted(_) => (&Self::ALL_LABELS[..], 0),
+            DagPoint::NotFound(_) => (&Self::VALIDATE_LABELS[0..=0], 1),
+            DagPoint::IllFormed(_) => (&Self::VALIDATE_LABELS[1..=1], 1),
+            DagPoint::Invalid(_) => (&Self::VALIDATE_LABELS[2..=2], 1),
+            DagPoint::Suspicious(_) => (&Self::VALIDATE_LABELS[3..=3], 1),
+            DagPoint::Trusted(_) => (&Self::VALIDATE_LABELS[..], 0),
         };
         metrics::counter!("tycho_mempool_verifier_validate", labels).increment(count);
         result

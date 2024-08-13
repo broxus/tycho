@@ -239,13 +239,9 @@ impl RoundTaskReady {
         effects: Effects<EngineContext>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
-            if let Err(dag_point) = Verifier::verify(&point, &peer_schedule) {
+            if let Err(err) = Verifier::verify(&point, &peer_schedule) {
                 let _guard = effects.span().enter();
-                panic!(
-                    "Failed to verify own point: {} {:?}",
-                    dag_point.alt(),
-                    point.id().alt()
-                )
+                panic!("Failed to verify own point: {err:?} {:?}", point.id().alt())
             }
             let (_, do_not_certify_tx) = oneshot::channel();
             let dag_point = Verifier::validate(

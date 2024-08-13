@@ -22,6 +22,11 @@ impl ValidPoint {
 }
 
 #[derive(Clone, Debug)]
+/// cases with point hash or signature mismatch are not represented in enum;
+/// at most we are able to use [`crate::dag::DagRound::set_bad_sig_in_broadcast`],
+/// but any bad signatures from third party nodes:
+/// * in download response - makes sender not reliable
+/// * in dependency graph - cannot be used, most likely will not be downloaded, i.e. `NotExist`
 pub enum DagPoint {
     /// valid without demur, needed to blame equivocation or graph connectivity violations
     Trusted(ValidPoint),
@@ -29,11 +34,15 @@ pub enum DagPoint {
     /// we do not sign such a point, but others may include it without consequences;
     /// consensus will decide whether to sign its proof or not; we shall ban the author anyway
     Suspicious(ValidPoint),
+    /// dependency issues;
     /// invalidates dependent point; needed to blame equivocation
     Invalid(PointInfo),
-    /// point hash or signature mismatch, not well-formed, download failed - i.e. unusable point;
+    /// not well-formed, unusable point;
     /// invalidates dependent point; blame author of dependent point
-    NotExists(Arc<PointId>),
+    IllFormed(Arc<PointId>),
+    /// download failed despite multiple retries;
+    /// invalidates dependent point; blame author of dependent point
+    NotFound(Arc<PointId>),
 }
 
 impl DagPoint {
@@ -62,7 +71,7 @@ impl DagPoint {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.data().author,
             Self::Invalid(info) => info.data().author,
-            Self::NotExists(id) => id.author,
+            Self::IllFormed(id) | Self::NotFound(id) => id.author,
         }
     }
 
@@ -70,7 +79,7 @@ impl DagPoint {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.round(),
             Self::Invalid(info) => info.round(),
-            Self::NotExists(id) => id.round,
+            Self::IllFormed(id) | Self::NotFound(id) => id.round,
         }
     }
 
@@ -78,7 +87,7 @@ impl DagPoint {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.digest(),
             Self::Invalid(info) => info.digest(),
-            Self::NotExists(id) => &id.digest,
+            Self::IllFormed(id) | Self::NotFound(id) => &id.digest,
         }
     }
 }

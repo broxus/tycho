@@ -13,7 +13,7 @@ use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::Verifier;
+use crate::dag::{Verifier, VerifyError};
 use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
@@ -24,6 +24,13 @@ use crate::Point;
 #[derive(Clone)]
 pub struct Downloader {
     inner: Arc<DownloaderInner>,
+}
+
+pub enum DownloadResult {
+    NotFound,
+    Verified(Point),
+    #[allow(dead_code)]
+    IllFormed(Point),
 }
 
 struct DownloaderInner {
@@ -59,7 +66,7 @@ impl Downloader {
         dependers: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
-    ) -> Option<Point> {
+    ) -> DownloadResult {
         let _task_duration = HistogramGuard::begin(DownloadContext::TASK_DURATION);
         effects.meter_start(point_id);
         let span_guard = effects.span().enter();
@@ -75,7 +82,7 @@ impl Downloader {
         let undone_peers = undone_peers
             .iter()
             // query author no matter if it is scheduled for the next round or not;
-            // it won't affect 2F reliable `NotFound`s to break the task with `DagPoint::NotExists`:
+            // it won't affect 2F reliable `None` responses to break the task with `DagPoint::NotFound`:
             // author is a depender for its point, so its `NotFound` response is not reliable
             .chain(iter::once((&point_id.author, &author_state)))
             .map(|(peer_id, state)| {
@@ -141,7 +148,10 @@ struct DownloadTask {
 impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
-    pub async fn run(&mut self, mut verified_broadcast: oneshot::Receiver<Point>) -> Option<Point> {
+    pub async fn run(
+        &mut self,
+        mut verified_broadcast: oneshot::Receiver<Point>,
+    ) -> DownloadResult {
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         self.interval
             .set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -149,16 +159,16 @@ impl DownloadTask {
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                Ok(point) = &mut verified_broadcast => break Some(point),
+                Ok(point) = &mut verified_broadcast => break DownloadResult::Verified(point),
                 Some(depender) = self.dependers.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update),
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
-                        Some(point) => break Some(point),
+                        Some(found) => break found,
                         None => if self.shall_continue() {
                             continue
                         } else {
-                            break None;
+                            break DownloadResult::NotFound;
                         }
                     },
                 // most rare arm to make progress despite slow responding peers
@@ -246,7 +256,7 @@ impl DownloadTask {
         &mut self,
         peer_id: &PeerId,
         result: anyhow::Result<PointByIdResponse>,
-    ) -> Option<Point> {
+    ) -> Option<DownloadResult> {
         let defined_response =
             match result {
                 Ok(PointByIdResponse::Defined(response)) => response,
@@ -315,21 +325,18 @@ impl DownloadTask {
             }
             Some(point) => {
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
-                    Err(dag_point) => {
+                    Err(error @ VerifyError::BadSig) => {
                         // reliable peer won't return unverifiable point
                         self.unreliable_peers = self.unreliable_peers.saturating_add(1);
-                        assert!(
-                            dag_point.valid().is_none(),
-                            "Coding error: verify() cannot result into a valid point"
-                        );
                         tracing::error!(
-                            result = display(dag_point.alt()),
+                            result = debug(error),
                             peer = display(peer_id.alt()),
                             "downloaded",
                         );
                         None
                     }
-                    Ok(()) => Some(point), // breaks loop
+                    Err(VerifyError::IllFormed) => Some(DownloadResult::IllFormed(point)),
+                    Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                 }
             }
         }
@@ -340,7 +347,7 @@ impl DownloadTask {
         //     panic!("too many unreliable peers: {}", self.unreliable_peers)
         // } else
         if self.reliably_not_found as usize >= self.peer_count.majority_of_others() {
-            // the only normal case to resolve into `NotExists`
+            // the only normal case to resolve into `NotFound`
             tracing::warn!(
                 unreliable = self.unreliable_peers,
                 "not downloaded from majority",

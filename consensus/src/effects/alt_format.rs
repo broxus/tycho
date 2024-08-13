@@ -70,7 +70,8 @@ impl Display for AltFmt<'_, DagPoint> {
             DagPoint::Trusted(_) => "Trusted",
             DagPoint::Suspicious(_) => "Suspicious",
             DagPoint::Invalid(_) => "Invalid",
-            DagPoint::NotExists(_) => "NotExists",
+            DagPoint::IllFormed(_) => "IllFormed",
+            DagPoint::NotFound(_) => "NotFound",
         })
     }
 }

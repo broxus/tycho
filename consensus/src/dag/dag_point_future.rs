@@ -14,7 +14,7 @@ use tycho_util::sync::OnceTake;
 use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
-use crate::intercom::Downloader;
+use crate::intercom::{DownloadResult, Downloader};
 use crate::models::{DagPoint, Digest, PointId, PointInfo, ValidPoint};
 use crate::Point;
 
@@ -33,7 +33,7 @@ impl Future for DagPointFuture {
                     Poll::Pending => Poll::Pending,
                 }
             }
-            DagPointFutureType::Local(ready) => ready.poll_unpin(cx),
+            DagPointFutureType::Ready(ready) => ready.poll_unpin(cx),
         }
     }
 }
@@ -54,33 +54,31 @@ enum DagPointFutureType {
         dependents: mpsc::UnboundedSender<PeerId>,
         verified: Arc<OnceTake<oneshot::Sender<Point>>>,
     },
-    Local(future::Ready<DagPoint>),
+    Ready(future::Ready<DagPoint>),
 }
 
 impl DagPointFuture {
-    pub fn new_local(
-        point: &Point,
-        is_valid: bool,
-        state: &InclusionState,
-        store: &MempoolStore,
-    ) -> Self {
-        // local - do not store invalid: after restart may not load smth or produce equivocation
-        // others - do not store ill-formed or with invalid signature
-        if is_valid {
-            let flags = PointFlags {
-                is_valid: true,
-                ..Default::default()
-            };
-            store.insert_point(point, Some(&flags));
-        }
-        let info = PointInfo::from(point);
-        let dag_point = if is_valid {
-            DagPoint::Trusted(ValidPoint::new(info))
-        } else {
-            DagPoint::Invalid(info)
+    /// locally created points are assumed to be valid, checked prior insertion if needed;
+    /// for points of others - there are all other methods
+    pub fn new_local_trusted(point: &Point, state: &InclusionState, store: &MempoolStore) -> Self {
+        let flags = PointFlags {
+            is_valid: true,
+            ..Default::default()
         };
+        store.insert_point(point, Some(&flags));
+        let dag_point = DagPoint::Trusted(ValidPoint::new(PointInfo::from(point)));
         state.init(&dag_point); // only after persisted
-        Self(DagPointFutureType::Local(future::ready(dag_point)))
+        Self(DagPointFutureType::Ready(future::ready(dag_point)))
+    }
+
+    pub fn new_invalid(dag_point: DagPoint, state: &InclusionState, _store: &MempoolStore) -> Self {
+        assert!(
+            dag_point.valid().is_none(),
+            "point must be invalid, but it is valid"
+        );
+        // TODO separate table? maybe use flags to load invalids only from flags?
+        state.init(&dag_point);
+        Self(DagPointFutureType::Ready(future::ready(dag_point)))
     }
 
     pub fn new_broadcast(
@@ -206,8 +204,13 @@ impl DagPointFuture {
                             Effects::<DownloadContext>::new(&effects, &point_id),
                         )
                         .await;
-                    let Some(verified) = downloaded else {
-                        return DagPoint::NotExists(Arc::new(point_id));
+                    let verified = match downloaded {
+                        DownloadResult::Verified(point) => point,
+                        DownloadResult::IllFormed(_) => {
+                            // TODO use separate store for invalid points, as it has valid sig
+                            return DagPoint::IllFormed(Arc::new(point_id));
+                        }
+                        DownloadResult::NotFound => return DagPoint::NotFound(Arc::new(point_id)),
                     };
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();

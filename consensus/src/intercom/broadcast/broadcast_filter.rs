@@ -8,13 +8,13 @@ use tycho_network::PeerId;
 use tycho_util::FastDashMap;
 
 use super::dto::ConsensusEvent;
-use crate::dag::{DagRound, Verifier};
+use crate::dag::{DagRound, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, PeerCount, Point, PointId, Round};
+use crate::models::{Digest, PeerCount, Point, PointId, Round};
 use crate::outer_round::{Consensus, OuterRound};
 
 #[derive(Clone)]
@@ -137,17 +137,18 @@ impl BroadcastFilterInner {
                 digest = display(digest.alt()),
                 "sender is not author"
             );
-            Err(DagPoint::NotExists(Arc::new(point.id())))
+            Err(None)
         } else {
-            Verifier::verify(point, &self.peer_schedule).inspect_err(|dag_point| {
+            Verifier::verify(point, &self.peer_schedule).map_err(|err| {
                 tracing::error!(
                     parent: effects.span(),
-                    result = display(dag_point.alt()),
+                    result = debug(&err),
                     author = display(author.alt()),
                     round = round.0,
                     digest = display(digest.alt()),
                     "verified"
                 );
+                Some(err)
             })
         };
 
@@ -162,10 +163,13 @@ impl BroadcastFilterInner {
             };
             match verified {
                 Ok(()) => self.send_validating(&point_round, point, downloader, store, effects),
-                Err(DagPoint::Invalid(_)) => {
-                    point_round.insert_invalid_exact(sender, &point, store);
+                Err(Some(VerifyError::IllFormed)) => {
+                    point_round.insert_ill_formed_exact(point, store);
                 }
-                Err(_not_exists) => {} // FIXME separate failed downloads from broken signatures
+                Err(Some(VerifyError::BadSig)) => {
+                    point_round.set_bad_sig_in_broadcast(&author);
+                }
+                Err(None) => {} // should ban sender
             };
             return;
         } // else: either consensus moved forward without us,

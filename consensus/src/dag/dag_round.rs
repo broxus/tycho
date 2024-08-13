@@ -12,7 +12,7 @@ use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, Round};
+use crate::models::{DagPoint, Digest, PeerCount, Point, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -158,7 +158,7 @@ impl DagRound {
     }
 
     /// notice: `round` must exactly match point's round,
-    /// otherwise dependency will resolve to [`DagPoint::NotExists`]
+    /// otherwise dependency will resolve to [`DagPoint::NotFound`]
     pub fn add_dependency_exact(
         &self,
         author: &PeerId,
@@ -185,7 +185,19 @@ impl DagRound {
         key_pair: Option<&KeyPair>,
         store: &MempoolStore,
     ) -> InclusionState {
-        let state = self.insert_exact(&point.data().author, point, true, store);
+        assert_eq!(
+            point.round(),
+            self.round(),
+            "Coding error: dag round mismatches point round on insert"
+        );
+        let state = self.edit(&point.data().author, |loc| {
+            let _ready = loc.init_or_modify(
+                point.digest(),
+                |state| DagPointFuture::new_local_trusted(point, state, store),
+                |_fut| {},
+            );
+            loc.state().clone()
+        });
         if let Some(signable) = state.signable() {
             signable.sign(self.round(), key_pair, MempoolConfig::sign_time_range());
         }
@@ -197,30 +209,19 @@ impl DagRound {
         state
     }
 
-    pub fn insert_invalid_exact(&self, sender: &PeerId, point: &Point, store: &MempoolStore) {
-        self.insert_exact(sender, point, false, store);
-    }
-
-    fn insert_exact(
-        &self,
-        sender: &PeerId,
-        point: &Point,
-        is_valid: bool,
-        store: &MempoolStore,
-    ) -> InclusionState {
-        assert_eq!(
-            point.round(),
-            self.round(),
-            "Coding error: dag round mismatches point round on insert"
-        );
-        self.edit(sender, |loc| {
+    pub fn insert_ill_formed_exact(&self, point: &Point, store: &MempoolStore) {
+        let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
+        self.edit(&point.data().author, |loc| {
             let _ready = loc.init_or_modify(
                 point.digest(),
-                |state| DagPointFuture::new_local(point, is_valid, state, store),
+                |state| DagPointFuture::new_invalid(dag_point, state, store),
                 |_fut| {},
             );
-            loc.state().clone()
-        })
+        });
+    }
+
+    pub fn set_bad_sig_in_broadcast(&self, author: &PeerId) {
+        self.edit(author, |loc| loc.bad_sig_in_broadcast = true);
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {
