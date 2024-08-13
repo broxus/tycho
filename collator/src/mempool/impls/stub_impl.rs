@@ -35,9 +35,9 @@ impl MempoolAdapterStubImpl {
 
     pub fn with_externals_from_dir(
         listener: Arc<dyn MempoolEventListener>,
-        dir_path: &Path,
+        dir_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        Self::with_generator(listener, |a| {
+        Self::with_generator(listener, move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
