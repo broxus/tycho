@@ -20,9 +20,6 @@ pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option
     peer_info
 }
 
-// TODO receive configured services from general node,
-//  move current setup to tests as it provides acceptable timing
-// This dependencies should be passed from validator module to init mempool
 pub fn from_validator<T: ToSocket>(
     bind_address: T,
     secret_key: &SecretKey,

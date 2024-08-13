@@ -3,19 +3,19 @@ use std::sync::Arc;
 
 use tycho_network::PeerId;
 
-use crate::models::point::{Digest, Point, PointId};
-use crate::models::Round;
+use crate::models::point::{Digest, PointId};
+use crate::models::{PointInfo, Round};
 
 #[derive(Clone, Debug)]
 pub struct ValidPoint {
-    pub point: Point,
+    pub info: PointInfo,
     pub is_committed: Arc<AtomicBool>,
 }
 
 impl ValidPoint {
-    pub fn new(point: Point) -> Self {
+    pub fn new(info: PointInfo) -> Self {
         Self {
-            point,
+            info,
             is_committed: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -30,7 +30,7 @@ pub enum DagPoint {
     /// consensus will decide whether to sign its proof or not; we shall ban the author anyway
     Suspicious(ValidPoint),
     /// invalidates dependent point; needed to blame equivocation
-    Invalid(Point),
+    Invalid(PointInfo),
     /// point hash or signature mismatch, not well-formed, download failed - i.e. unusable point;
     /// invalidates dependent point; blame author of dependent point
     NotExists(Arc<PointId>),
@@ -40,13 +40,6 @@ impl DagPoint {
     pub fn into_valid(self) -> Option<ValidPoint> {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
-            _ => None,
-        }
-    }
-
-    pub fn into_trusted(self) -> Option<ValidPoint> {
-        match self {
-            Self::Trusted(valid) => Some(valid),
             _ => None,
         }
     }
@@ -67,24 +60,24 @@ impl DagPoint {
 
     pub fn author(&self) -> PeerId {
         match self {
-            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.data().author,
-            Self::Invalid(point) => point.data().author,
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.data().author,
+            Self::Invalid(info) => info.data().author,
             Self::NotExists(id) => id.author,
         }
     }
 
     pub fn round(&self) -> Round {
         match self {
-            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.round(),
-            Self::Invalid(point) => point.round(),
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.round(),
+            Self::Invalid(info) => info.round(),
             Self::NotExists(id) => id.round,
         }
     }
 
     pub fn digest(&self) -> &'_ Digest {
         match self {
-            Self::Trusted(valid) | Self::Suspicious(valid) => valid.point.digest(),
-            Self::Invalid(point) => point.digest(),
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.digest(),
+            Self::Invalid(info) => info.digest(),
             Self::NotExists(id) => &id.digest,
         }
     }

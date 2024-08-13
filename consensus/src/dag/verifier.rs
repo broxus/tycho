@@ -10,11 +10,11 @@ use tycho_util::sync::rayon_run;
 
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
-use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, ValidPoint};
+use crate::{dyn_event, PointInfo};
 
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
@@ -41,7 +41,7 @@ impl Verifier {
             Err(DagPoint::NotExists(Arc::new(point.id()))) // cannot use point body
         } else if !Self::is_list_of_signers_ok(point, peer_schedule) {
             // point links, etc. will not be used
-            Err(DagPoint::Invalid(point.clone()))
+            Err(DagPoint::Invalid((point).into()))
         } else {
             Ok(())
         };
@@ -70,7 +70,7 @@ impl Verifier {
         );
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot (in)validate point, no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new(point.clone()));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new((&point).into()));
             return ValidateContext::validated(dag_point);
         };
         assert_eq!(
@@ -103,12 +103,12 @@ impl Verifier {
                 &mut dependencies,
             ))
         {
-            return ValidateContext::validated(DagPoint::Invalid(point.clone()));
+            return ValidateContext::validated(DagPoint::Invalid((&point).into()));
         }
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot (in)validate point's 'includes', no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new(point.clone()));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new((&point).into()));
             return ValidateContext::validated(dag_point);
         };
 
@@ -175,7 +175,7 @@ impl Verifier {
                     certified = Some(recv_result.is_ok()); // oneshot cannot be lagged, only closed
                     if recv_result.is_ok() {
                         for shared in &dependencies {
-                            shared.make_certified();
+                            shared.mark_certified();
                         }
                     }
                 },
@@ -184,7 +184,7 @@ impl Verifier {
                     if is_sig_ok {
                         // it's a noop if the point doesn't have a proof in its body
                         if let Some(vertex) = &proven_vertex_dep {
-                            vertex.make_certified();
+                            vertex.mark_certified();
                         }
                     } else {
                         break;
@@ -208,19 +208,19 @@ impl Verifier {
                 // here "trust consensus" call chain resolves;
                 // ignore other flags, though it looks like a race condition:
                 // follow majority's decision now, otherwise will follow it via sync
-                DagPoint::Trusted(ValidPoint::new(point.clone())),
+                DagPoint::Trusted(ValidPoint::new((&point).into())),
                 tracing::Level::INFO,
             ),
             (false, Some(true), Some(true), Some(true)) => (
-                DagPoint::Trusted(ValidPoint::new(point.clone())),
+                DagPoint::Trusted(ValidPoint::new((&point).into())),
                 tracing::Level::TRACE,
             ),
             (false, Some(true), Some(true), Some(false)) => (
-                DagPoint::Suspicious(ValidPoint::new(point.clone())),
+                DagPoint::Suspicious(ValidPoint::new((&point).into())),
                 tracing::Level::WARN,
             ),
             (false, Some(false), _, _) | (false, _, Some(false), _) => {
-                (DagPoint::Invalid(point.clone()), tracing::Level::ERROR)
+                (DagPoint::Invalid((&point).into()), tracing::Level::ERROR)
             }
             (false, _, _, _) => {
                 let _guard = effects.span().enter();
@@ -389,8 +389,9 @@ impl Verifier {
 
     async fn is_unique_in_loc(
         point: &Point,
-        mut other_versions: FuturesUnordered<DagPointFuture>,
+        other_versions: FuturesUnordered<DagPointFuture>,
     ) -> bool {
+        let mut other_versions = other_versions.into_iter().collect::<FuturesUnordered<_>>();
         while let Some(dag_point) = other_versions.next().await {
             assert_eq!(
                 dag_point.author(),
@@ -445,7 +446,7 @@ impl Verifier {
                         #[allow(clippy::match_same_arms)]
                         match dag_point {
                             DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                                if !Self::is_proof_ok(point, &valid.point) {
+                                if !Self::is_proof_ok(point, &valid.info) {
                                     return false;
                                 } // else ok continue
                             }
@@ -480,28 +481,28 @@ impl Verifier {
             } else {
                 match dag_point {
                     DagPoint::Trusted(valid) | DagPoint::Suspicious(valid) => {
-                        if valid.point.anchor_round(AnchorStageRole::Trigger)
+                        if valid.info.anchor_round(AnchorStageRole::Trigger)
                             > anchor_trigger_id.round
-                            || valid.point.anchor_round(AnchorStageRole::Proof)
+                            || valid.info.anchor_round(AnchorStageRole::Proof)
                                 > anchor_proof_id.round
                         {
                             // did not actualize the chain
                             return false;
                         }
-                        let valid_point_id = valid.point.id();
+                        let valid_point_id = valid.info.id();
                         if ({
                             valid_point_id == anchor_trigger_link_id
-                                && valid.point.anchor_id(AnchorStageRole::Trigger)
+                                && valid.info.anchor_id(AnchorStageRole::Trigger)
                                     != anchor_trigger_id
                         }) || ({
                             valid_point_id == anchor_proof_link_id
-                                && valid.point.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
+                                && valid.info.anchor_id(AnchorStageRole::Proof) != anchor_proof_id
                         }) {
                             // path does not lead to destination
                             return false;
                         }
                         if valid_point_id == anchor_proof_link_id
-                            && valid.point.data().anchor_time != point.data().anchor_time
+                            && valid.info.data().anchor_time != point.data().anchor_time
                         {
                             // anchor candidate's time is not inherited from its proof
                             return false;
@@ -574,8 +575,8 @@ impl Verifier {
 
     /// blame author and every dependent point's author
     fn is_proof_ok(
-        point: &Point,  // @ r+0
-        proven: &Point, // @ r-1
+        point: &Point,      // @ r+0
+        proven: &PointInfo, // @ r-1
     ) -> bool {
         assert_eq!(
             point.data().author,

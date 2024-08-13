@@ -6,7 +6,7 @@ use crate::dag::DagRound;
 use crate::models::{
     AnchorStageRole, Digest, Link, PeerCount, Point, PointData, Round, Signature, Through, UnixTime,
 };
-use crate::{InputBuffer, MempoolConfig};
+use crate::{InputBuffer, MempoolConfig, PointInfo};
 
 pub struct LastOwnPoint {
     pub digest: Digest,
@@ -106,7 +106,7 @@ impl Producer {
         ))
     }
 
-    fn includes(finished_round: &DagRound) -> Vec<Point> {
+    fn includes(finished_round: &DagRound) -> Vec<PointInfo> {
         let includes = finished_round
             .select(|(_, loc)| {
                 loc.state()
@@ -116,7 +116,7 @@ impl Producer {
                     //   but whether was a point already included or not (just in order not to
                     //   include it twice); repeating inclusions are suboptimal but still correct
                     .filter(|_| loc.state().signed().map_or(true, |r| r.is_ok()))
-                    .map(|dag_point| dag_point.point.clone())
+                    .map(|dag_point| dag_point.info.clone())
             })
             .collect::<Vec<_>>();
         assert!(
@@ -126,13 +126,13 @@ impl Producer {
         includes
     }
 
-    fn witness(finished_round: &DagRound) -> Vec<Point> {
+    fn witness(finished_round: &DagRound) -> Vec<PointInfo> {
         match finished_round.prev().upgrade() {
             Some(witness_round) => witness_round
                 .select(|(_, loc)| {
                     loc.state()
                         .signed_point(finished_round.round())
-                        .map(|valid| valid.point.clone())
+                        .map(|valid| valid.info.clone())
                 })
                 .collect(),
             None => vec![],
@@ -142,7 +142,7 @@ impl Producer {
     fn link_from_includes(
         local_id: &PeerId,
         current_round: &DagRound,
-        includes: &[Point],
+        includes: &[PointInfo],
         link_field: AnchorStageRole,
     ) -> Link {
         match current_round.anchor_stage() {
@@ -172,7 +172,7 @@ impl Producer {
     fn update_link_from_witness(
         link: &mut Link,
         current_round: Round,
-        witness: &[Point],
+        witness: &[PointInfo],
         link_field: AnchorStageRole,
     ) {
         let link_round = match link {
@@ -203,8 +203,8 @@ impl Producer {
     fn get_time(
         anchor_proof: &Link,
         prev_point: Option<&LastOwnPoint>,
-        includes: &[Point],
-        witness: &[Point],
+        includes: &[PointInfo],
+        witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
         let mut time = UnixTime::now();
 

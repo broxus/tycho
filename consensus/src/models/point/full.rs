@@ -185,11 +185,12 @@ mod tests {
     use tycho_util::sync::rayon_run;
 
     use super::*;
-    use crate::models::UnixTime;
+    use crate::models::{Through, UnixTime};
+    use crate::PointInfo;
 
     const PEERS: usize = 100;
-    const MSG_COUNT: usize = 1000;
-    const MSG_BYTES: usize = 2 * 1000;
+    const MSG_COUNT: usize = 120;
+    const MSG_BYTES: usize = 64 * 100;
 
     fn new_key_pair() -> KeyPair {
         let mut secret_bytes: [u8; 32] = [0; 32];
@@ -205,13 +206,16 @@ mod tests {
             payload.push(Bytes::copy_from_slice(&bytes));
         }
 
+        let prev_digest = Digest::new(&[42]);
         let mut includes = BTreeMap::default();
+        let mut evidence = BTreeMap::default();
         for _ in 0..PEERS {
             let key_pair = new_key_pair();
             let peer_id = PeerId::from(key_pair.public_key);
             thread_rng().fill_bytes(bytes.as_mut_slice());
             let digest = Digest::new(&bytes);
             includes.insert(peer_id, digest);
+            evidence.insert(peer_id, Signature::new(&key_pair, &prev_digest));
         }
 
         PointBody {
@@ -219,14 +223,24 @@ mod tests {
             data: PointData {
                 author: PeerId::from(key_pair.public_key),
                 time: UnixTime::now(),
-                prev_digest: None,
+                prev_digest: Some(prev_digest),
                 includes,
-                witness: Default::default(),
-                anchor_trigger: Link::ToSelf,
-                anchor_proof: Link::ToSelf,
+                witness: BTreeMap::from([
+                    (PeerId([1; 32]), Digest::new(&[1])),
+                    (PeerId([2; 32]), Digest::new(&[2])),
+                ]),
+                anchor_trigger: Link::Direct(Through::Witness(PeerId([1; 32]))),
+                anchor_proof: Link::Indirect {
+                    to: PointId {
+                        author: PeerId([122; 32]),
+                        round: Round(852),
+                        digest: Digest::new(&[2]),
+                    },
+                    path: Through::Witness(PeerId([2; 32])),
+                },
                 anchor_time: UnixTime::now(),
             },
-            evidence: None,
+            evidence: Some(evidence),
             payload,
         }
     }
@@ -242,6 +256,32 @@ mod tests {
             data.push((peer_id, sig));
         }
         (digest, data)
+    }
+
+    #[test]
+    pub fn check_serialize() {
+        let point_key_pair = new_key_pair();
+        let point_body = point_body(&point_key_pair);
+        let digest = point_body.make_digest();
+        let point = Point(Arc::new(PointInner {
+            signature: Signature::new(&point_key_pair, &digest),
+            digest,
+            body: point_body.clone(),
+        }));
+        let info = PointInfo::from(&point);
+        let ser_info = bincode::serialize(&info).expect("serialize point");
+        let ser_ref =
+            bincode::serialize(&PointInfo::serializable_from(&point)).expect("serialize point");
+
+        assert_eq!(
+            info,
+            bincode::deserialize::<PointInfo>(&ser_ref).expect("deserialize point info from ref"),
+        );
+        assert_eq!(
+            Digest::new(&ser_info),
+            Digest::new(&ser_ref),
+            "compare serialized bytes"
+        );
     }
 
     #[test]

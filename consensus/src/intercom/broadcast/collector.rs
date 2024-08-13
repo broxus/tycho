@@ -239,7 +239,7 @@ impl CollectorTask {
 
     fn jump_up(&mut self, state: InclusionState) -> Option<Result<(), Round>> {
         // its ok to discard invalid state from `next_includes` queue
-        let point_round = state.point()?.valid()?.point.round();
+        let point_round = state.point()?.valid()?.info.round();
         // will be signed on the next round
         self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;
@@ -330,9 +330,7 @@ impl CollectorTask {
     }
 
     // FIXME not so great: some signature requests will be retried,
-    //  just because this futures were not polled. Use global 'current dag round' round
-    //  and sign inside shared join task in dag location,
-    //  do not return location from DagLocation::add_validate(point)
+    //  just because this futures were not polled. Refactor `InclusionState`
     fn on_inclusion_validated(&mut self, state: &InclusionState) {
         let Some(dag_point) = state.point() else {
             let _guard = self.effects.span().enter();

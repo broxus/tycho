@@ -13,7 +13,7 @@ use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{AnchorStageRole, Digest, Point, PointId, Round, ValidPoint};
+use crate::models::{AnchorStageRole, Digest, Point, PointId, PointInfo, Round, ValidPoint};
 
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
@@ -97,7 +97,7 @@ impl Dag {
     }
 
     /// result is in historical order
-    pub fn commit(&mut self, next_dag_round: DagRound) -> Vec<(Point, Vec<Point>)> {
+    pub fn commit(&mut self, next_dag_round: DagRound) -> Vec<(PointInfo, Vec<Point>)> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -111,7 +111,6 @@ impl Dag {
         // * in anchor history: cancels current commit and the latter anchor chain
 
         let mut ordered = Vec::new();
-
         // take all ready triggers, skipping not ready ones
         let mut trigger_stack = Self::trigger_stack(next_dag_round);
         let _span = if let Some((latest_trigger, _)) = trigger_stack.first() {
@@ -147,7 +146,7 @@ impl Dag {
             // Note every next "little anchor candidate that could" must have at least full dag depth
             // in case previous anchor was triggered directly - rounds are already dropped
             self.drop_tail_before_commit(anchor_round.round());
-            let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.point, anchor_round)
+            let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.info, anchor_round)
             else {
                 break; // will continue at the next call
             };
@@ -167,15 +166,17 @@ impl Dag {
                 None => {} // anchor triplet without direct trigger (not ready/valid/exists)
             };
             // Note every iteration marks committed points before next uncommitted are gathered
-            let committed = uncommitted_rev
+            let _committed = uncommitted_rev
                 .into_iter()
                 .rev() // return historical order
                 .map(|valid| {
                     valid.is_committed.store(true, Ordering::Relaxed);
-                    valid.point
+                    valid.info
                 })
                 .collect::<Vec<_>>();
-            ordered.push((anchor.point, committed));
+            // FIXME
+            // ordered.push((anchor.info, committed));
+            ordered.push((anchor.info, vec![]));
         }
         if let Some((last_anchor, _)) = ordered.last() {
             // drop rounds that we'll never need again to free some memory
@@ -186,7 +187,7 @@ impl Dag {
 
     /// not yet used commit triggers in reverse order (newest in front and oldest in back);
     /// use with `vec::pop()`
-    fn trigger_stack(mut dag_round: DagRound) -> Vec<(Point, DagRound)> {
+    fn trigger_stack(mut dag_round: DagRound) -> Vec<(PointInfo, DagRound)> {
         let mut latest_trigger = Vec::new();
         loop {
             let prev_dag_round = dag_round.prev().upgrade();
@@ -212,7 +213,7 @@ impl Dag {
                     })
                     .flatten()
                 {
-                    latest_trigger.push((valid.point, dag_round.clone()));
+                    latest_trigger.push((valid.info, dag_round.clone()));
                 };
             };
 
@@ -229,7 +230,7 @@ impl Dag {
     /// return order: newest (in depth) to oldest (on top); use with `vec.pop()`
     /// return values: anchor round, anchor point, anchor round, proof round, direct trigger round
     fn anchor_stack(
-        trigger: &Point,
+        trigger: &PointInfo,
         trigger_round: DagRound,
         bottom_proof_round: Round,
         result: &mut BTreeMap<Round, (ValidPoint, DagRound, DagRound, Option<DagRound>)>,
@@ -267,7 +268,7 @@ impl Dag {
                 break;
             };
             assert_eq!(
-                proof.point.round(),
+                proof.info.round(),
                 proof_round.round(),
                 "anchor proof round does not match"
             );
@@ -280,14 +281,14 @@ impl Dag {
                 panic!("anchor proof round is not expected, validation is broken")
             };
             assert_eq!(
-                proof.point.data().author,
+                proof.info.data().author,
                 leader,
                 "anchor proof author does not match prescribed by round"
             );
             if is_used.load(Ordering::Relaxed) {
                 break;
             };
-            let anchor_digest = match proof.point.data().prev_digest.as_ref() {
+            let anchor_digest = match proof.info.data().prev_digest.as_ref() {
                 Some(anchor_digest) => anchor_digest,
                 None => panic!("anchor proof must prove to anchor point, validation is broken"),
             };
@@ -310,7 +311,7 @@ impl Dag {
                 break;
             };
 
-            proof_id = anchor.point.anchor_id(AnchorStageRole::Proof);
+            proof_id = anchor.info.anchor_id(AnchorStageRole::Proof);
             let next_proof_round = anchor_round.scan(proof_id.round);
 
             // safety net: as rounds are traversed from oldest to newest,
@@ -337,7 +338,7 @@ impl Dag {
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
     fn gather_uncommitted_rev(
-        anchor: &Point,              // @ r+1
+        anchor: &PointInfo,          // @ r+1
         mut current_round: DagRound, // r+1
     ) -> Option<Vec<ValidPoint>> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
@@ -386,8 +387,8 @@ impl Dag {
                     Self::ready_valid_point(&point_round, node, digest)?;
                 // select only uncommitted ones
                 if !global.is_committed.load(Ordering::Relaxed) {
-                    extend(&mut r[1], &global.point.data().includes); // points @ r-1
-                    extend(&mut r[2], &global.point.data().witness); // points @ r-2
+                    extend(&mut r[1], &global.info.data().includes); // points @ r-1
+                    extend(&mut r[2], &global.info.data().witness); // points @ r-2
                     uncommitted_rev.push(global);
                 }
             }

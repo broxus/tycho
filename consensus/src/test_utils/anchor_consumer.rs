@@ -9,11 +9,11 @@ use tycho_util::FastHashMap;
 use crate::effects::AltFormat;
 use crate::models::{PointId, Round};
 use crate::outer_round::{Collator, OuterRound};
-use crate::Point;
+use crate::{Point, PointInfo};
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<(Point, Vec<Point>)>>,
+    streams: StreamMap<PeerId, UnboundedReceiverStream<(PointInfo, Vec<Point>)>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
@@ -24,7 +24,11 @@ pub struct AnchorConsumer {
 }
 
 impl AnchorConsumer {
-    pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<(Point, Vec<Point>)>) {
+    pub fn add(
+        &mut self,
+        committer: PeerId,
+        committed: UnboundedReceiver<(PointInfo, Vec<Point>)>,
+    ) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
     }

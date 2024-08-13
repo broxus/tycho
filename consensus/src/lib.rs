@@ -1,5 +1,5 @@
 pub use engine::*;
-pub use models::Point;
+pub use models::{Point, PointInfo};
 
 pub(crate) mod dag;
 pub(crate) mod effects;

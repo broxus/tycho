@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::outer_round::{Collator, OuterRound};
-use tycho_consensus::{InputBuffer, InputBufferImpl, MempoolConfig, Point};
+use tycho_consensus::{InputBuffer, InputBufferImpl, MempoolConfig, Point, PointInfo};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_storage::MempoolStorage;
 
@@ -86,7 +86,10 @@ impl MempoolAdapterStdImpl {
         self.externals_tx.send(message).ok();
     }
 
-    async fn handle_anchors_task(self: Arc<Self>, mut rx: UnboundedReceiver<(Point, Vec<Point>)>) {
+    async fn handle_anchors_task(
+        self: Arc<Self>,
+        mut rx: UnboundedReceiver<(PointInfo, Vec<Point>)>,
+    ) {
         let mut cache = ExternalMessageCache::new(MempoolConfig::DEDUPLICATE_ROUNDS);
         while let Some((anchor, points)) = rx.recv().await {
             let anchor_id: MempoolAnchorId = anchor.round().0;

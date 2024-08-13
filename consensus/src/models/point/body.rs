@@ -13,6 +13,7 @@ pub struct PointId {
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct PointData {
     pub author: PeerId,
     pub time: UnixTime,
@@ -34,6 +35,34 @@ pub struct PointData {
     pub anchor_proof: Link,
     /// time of previous anchor candidate, linked through its proof
     pub anchor_time: UnixTime,
+}
+
+#[derive(Serialize)]
+/// Note: fields and their order must be the same with [`PointData`]
+pub(crate) struct PointDataRef<'a> {
+    author: &'a PeerId,
+    time: &'a UnixTime,
+    prev_digest: Option<&'a Digest>,
+    includes: &'a BTreeMap<PeerId, Digest>,
+    witness: &'a BTreeMap<PeerId, Digest>,
+    anchor_trigger: &'a Link,
+    anchor_proof: &'a Link,
+    anchor_time: &'a UnixTime,
+}
+
+impl<'a> From<&'a PointData> for PointDataRef<'a> {
+    fn from(data: &'a PointData) -> Self {
+        Self {
+            author: &data.author,
+            time: &data.time,
+            prev_digest: data.prev_digest.as_ref(),
+            includes: &data.includes,
+            witness: &data.witness,
+            anchor_trigger: &data.anchor_trigger,
+            anchor_proof: &data.anchor_proof,
+            anchor_time: &data.anchor_time,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]

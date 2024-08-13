@@ -136,15 +136,15 @@ impl Signable {
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if time_range.contains(&valid.point.data().time) {
+            if time_range.contains(&valid.info.data().time) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {
                         at,
-                        with: Signature::new(key_pair, valid.point.digest()),
+                        with: Signature::new(key_pair, valid.info.digest()),
                     })
                 });
-            } else if &valid.point.data().time < time_range.start() {
+            } else if &valid.info.data().time < time_range.start() {
                 self.reject();
             } // else decide later
         } else {

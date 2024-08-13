@@ -15,12 +15,12 @@ use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
-use crate::models::{Point, UnixTime};
+use crate::models::{Point, PointInfo, UnixTime};
 use crate::outer_round::{Collator, Commit, Consensus, OuterRound};
 
 pub struct Engine {
     dag: Dag,
-    committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
+    committed: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
     peer_schedule: PeerSchedule,
     store: MempoolStore,
     consensus_round: OuterRound<Consensus>,
@@ -35,7 +35,7 @@ impl Engine {
         dht_client: &DhtClient,
         overlay_service: &OverlayService,
         mempool_storage: &MempoolStorage,
-        committed: mpsc::UnboundedSender<(Point, Vec<Point>)>,
+        committed: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
         collator_round: &OuterRound<Collator>,
         input_buffer: InputBuffer,
     ) -> Self {
@@ -246,7 +246,7 @@ impl EngineContext {
 }
 
 impl Effects<EngineContext> {
-    fn commit_metrics(&self, committed: &[(Point, Vec<Point>)]) {
+    fn commit_metrics(&self, committed: &[(PointInfo, Vec<Point>)]) {
         metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
 
         if let Some((first_anchor, _)) = committed.first() {
@@ -265,7 +265,7 @@ impl Effects<EngineContext> {
         }
     }
 
-    fn log_committed(&self, committed: &[(Point, Vec<Point>)]) {
+    fn log_committed(&self, committed: &[(PointInfo, Vec<Point>)]) {
         if !committed.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
             let committed = committed
                 .iter()

@@ -6,13 +6,23 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::models::point::*;
 
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct PointInfo(Arc<PointInfoInner>);
 
 #[derive(Serialize, Deserialize)]
+#[cfg_attr(test, derive(PartialEq))]
 struct PointInfoInner {
     round: Round,
     digest: Digest,
     data: PointData,
+}
+
+#[derive(Serialize)]
+/// Note: fields and their order must be the same with [`PointInfoInner`]
+pub struct PointInfoRef<'a> {
+    round: Round,
+    digest: &'a Digest,
+    data: PointDataRef<'a>,
 }
 
 impl Serialize for PointInfo {
@@ -82,6 +92,14 @@ impl PointInfo {
             round: self.0.round.prev(),
             digest: self.0.data.prev_digest.as_ref()?.clone(),
         })
+    }
+
+    pub fn serializable_from(point: &Point) -> PointInfoRef<'_> {
+        PointInfoRef {
+            round: point.round(),
+            digest: point.digest(),
+            data: PointDataRef::from(point.data()),
+        }
     }
 
     pub fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
