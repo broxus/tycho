@@ -225,11 +225,9 @@ impl proto::ControlServer for ControlServer {
     ) -> ServerResult<proto::ArchiveSliceResponse> {
         let blocks = self.inner.storage.block_storage();
 
-        let Some(data) =
-            blocks.get_archive_slice(req.archive_id, req.offset as usize, req.limit as usize)?
-        else {
-            return Err(anyhow::anyhow!("archive not found").into());
-        };
+        let data = blocks
+            .get_archive_slice(req.archive_id, req.offset as usize, req.limit as usize)
+            .await?;
 
         Ok(proto::ArchiveSliceResponse { data })
     }

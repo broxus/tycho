@@ -535,21 +535,20 @@ impl<B> Inner<B> {
 
         let block_storage = self.storage.block_storage();
 
-        let get_archive_slice = || {
+        let get_archive_slice = || async {
             // TODO: Add a range check for the `limit` field
-            let Some(archive_slice) = block_storage.get_archive_slice(
-                req.archive_id as u32,
-                req.offset as usize,
-                req.limit as usize,
-            )?
-            else {
-                anyhow::bail!("archive not found");
-            };
+            let archive_slice = block_storage
+                .get_archive_slice(
+                    req.archive_id as u32,
+                    req.offset as usize,
+                    req.limit as usize,
+                )
+                .await?;
 
             Ok::<_, anyhow::Error>(archive_slice)
         };
 
-        match get_archive_slice() {
+        match get_archive_slice().await {
             Ok(data) => overlay::Response::Ok(Data { data: data.into() }),
             Err(e) => {
                 tracing::warn!("get_archive_slice failed: {e:?}");

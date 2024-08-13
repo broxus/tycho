@@ -378,7 +378,7 @@ impl BlockchainRpcClient {
         const PACKET_OFFSET: usize = 256; // 32 bytes for the overlay id and some more for TL stuff
 
         let frame_size = self.inner.overlay_client.network().max_frame_size();
-        let chunk_size = std::cmp::min(frame_size, BigBytes::MAX_SIZE)
+        let chunk_size = std::cmp::min(frame_size, tycho_storage::ARCHIVE_CHUNK_SIZE)
             .saturating_sub(PACKET_OFFSET)
             .try_into()
             .unwrap_or(u32::MAX);

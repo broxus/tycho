@@ -232,4 +232,6 @@ pub enum ArchiveReaderError {
     UnexpectedEntryEof,
     #[error("too small initial batch")]
     TooSmallInitialBatch,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
 }
