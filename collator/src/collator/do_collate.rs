@@ -180,6 +180,25 @@ impl CollatorStdImpl {
 
         let prepare_elapsed = prepare_histogram.finish();
 
+        let processed_offset = working_state
+            .prev_shard_data
+            .processed_upto()
+            .processed_offset;
+
+        tracing::trace!(target: tracing_targets::COLLATOR, "processed offset from prev shard data processed upto: {}", processed_offset);
+
+        while exec_manager.get_message_groups_offset() != processed_offset {
+            exec_manager
+                .get_next_message_group(
+                    self,
+                    &mut collation_data,
+                    &mut mq_iterator_adapter,
+                    InternalMessageKey::default(),
+                    &working_state,
+                )
+                .await?;
+        }
+
         // execute tick transaction and special transactions (mint, recover)
         let execute_tick_elapsed;
         if is_masterchain {

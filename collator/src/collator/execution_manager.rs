@@ -110,6 +110,10 @@ impl ExecutionManager {
         self.current_iterator_positions = positions;
     }
 
+    pub fn get_message_groups_offset(&self) -> u32 {
+        self.message_groups.offset()
+    }
+
     pub fn has_pending_messages_in_buffer(&self) -> bool {
         !self.message_groups.is_empty()
     }
