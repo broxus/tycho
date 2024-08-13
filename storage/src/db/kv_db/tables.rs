@@ -504,10 +504,6 @@ impl ColumnFamilyOptions<Caches> for CodeHashesByAddress {
 /// - Value: `Point`
 pub struct Points;
 
-impl Points {
-    pub const KEY_LEN: usize = 4 + 32;
-}
-
 impl ColumnFamily for Points {
     const NAME: &'static str = "points";
 }
@@ -516,6 +512,7 @@ impl ColumnFamilyOptions<Caches> for Points {
     fn options(opts: &mut Options, caches: &mut Caches) {
         optimize_for_point_lookup(opts, caches);
         remove_wal_asap(opts);
+        opts.set_disable_auto_compactions(true);
 
         opts.set_enable_blob_files(true);
         opts.set_enable_blob_gc(false); // manual
@@ -524,23 +521,41 @@ impl ColumnFamilyOptions<Caches> for Points {
     }
 }
 
-/// Stores mempool point flags
-/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
-/// - Value: [`crate::models::PointFlags`]
-pub struct PointFlags;
+/// Stores truncated mempool point data
+/// - Key: `round: u32, digest: [u8; 32]`
+/// - Value: `PointInfo`
+pub struct PointsInfo;
 
-impl PointFlags {}
-
-impl ColumnFamily for PointFlags {
-    const NAME: &'static str = "point_flags";
+impl ColumnFamily for PointsInfo {
+    const NAME: &'static str = "points_info";
 }
 
-impl ColumnFamilyOptions<Caches> for PointFlags {
+impl ColumnFamilyOptions<Caches> for PointsInfo {
     fn options(opts: &mut Options, caches: &mut Caches) {
         optimize_for_point_lookup(opts, caches);
         remove_wal_asap(opts);
+        opts.set_disable_auto_compactions(true);
+    }
+}
 
-        opts.set_merge_operator_associative("point_flags_merge", crate::models::PointFlags::merge);
+/// Stores mempool point flags
+/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
+/// - Value: [`crate::models::PointFlags`]
+pub struct PointsFlags;
+
+impl PointsFlags {}
+
+impl ColumnFamily for PointsFlags {
+    const NAME: &'static str = "points_flags";
+}
+
+impl ColumnFamilyOptions<Caches> for PointsFlags {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        optimize_for_point_lookup(opts, caches);
+        remove_wal_asap(opts);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_merge_operator_associative("points_flags_merge", crate::models::PointFlags::merge);
     }
 }
 

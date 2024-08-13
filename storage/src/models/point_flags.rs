@@ -8,6 +8,7 @@ pub struct PointFlags {
     // certified points are validated too
     pub is_validated: bool, // need to distinguish not-yet-validated from invalid
     pub is_valid: bool,     // a point may be validated as invalid but certified afterward
+    pub is_trusted: bool,   // locally decided as not equivocated (cannot change decision)
     pub is_certified: bool, // some points won't be marked because they are already validated
     pub is_committed: bool, // payload only
     pub is_used: bool,      // either anchor proof or trigger
@@ -17,9 +18,10 @@ pub struct PointFlags {
 enum PointFlagsMasks {
     Validated = 0b_1 << 7,
     Valid = 0b_1 << 6,
-    Certified = 0b_1 << 5,
-    Committed = 0b_1 << 4,
-    Used = 0b_1 << 3,
+    Trusted = 0b_1 << 5,
+    Certified = 0b_1 << 4,
+    Committed = 0b_1 << 3,
+    Used = 0b_1 << 2,
 }
 
 impl PointFlags {
@@ -34,6 +36,9 @@ impl PointFlags {
         }
         if self.is_valid {
             result |= PointFlagsMasks::Valid as u8;
+        }
+        if self.is_trusted {
+            result |= PointFlagsMasks::Trusted as u8;
         }
         if self.is_certified {
             result |= PointFlagsMasks::Certified as u8;
@@ -56,8 +61,9 @@ impl PointFlags {
         );
         let stored = stored[0];
         PointFlags {
-            is_validated: PointFlagsMasks::Validated as u8 & stored > 0,
+            is_validated: (PointFlagsMasks::Validated as u8 & stored) > 0,
             is_valid: (PointFlagsMasks::Valid as u8 & stored) > 0,
+            is_trusted: (PointFlagsMasks::Trusted as u8 & stored) > 0,
             is_certified: (PointFlagsMasks::Certified as u8 & stored) > 0,
             is_committed: (PointFlagsMasks::Committed as u8 & stored) > 0,
             is_used: (PointFlagsMasks::Used as u8 & stored) > 0,
