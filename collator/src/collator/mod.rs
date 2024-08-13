@@ -628,6 +628,16 @@ impl CollatorStdImpl {
             return Ok(has_internals);
         }
 
+        if working_state
+            .prev_shard_data
+            .processed_upto()
+            .processed_offset
+            > 0
+        {
+            working_state.has_pending_internals = Some(true);
+            return Ok(true);
+        }
+
         let has_pending_messages_in_buffer = self
             .exec_manager
             .as_ref()
