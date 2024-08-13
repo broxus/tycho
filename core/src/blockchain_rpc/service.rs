@@ -292,6 +292,8 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                 }
 
                 let inner = self.inner.clone();
+                metrics::counter!("tycho_rpc_broadcast_external_message_rx_bytes_total")
+                    .increment(req.body.len() as u64);
                 BoxFutureOrNoop::future(async move {
                     inner
                         .broadcast_listener

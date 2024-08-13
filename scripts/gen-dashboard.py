@@ -295,6 +295,16 @@ def net_traffic() -> RowPanel:
             legend_format=legend_format,
             by_labels=by_labels,
         ),
+        create_counter_panel(
+            "tycho_rpc_broadcast_external_message_tx_bytes_total",
+            "RPC broadcast external message traffic sent",
+            UNITS.BYTES_SEC_IEC,
+        ),
+        create_counter_panel(
+            "tycho_rpc_broadcast_external_message_rx_bytes_total",
+            "RPC broadcast external message traffic received",
+            UNITS.BYTES_SEC_IEC,
+        ),
     ]
     return create_row("network: Traffic", metrics)
 
@@ -572,7 +582,8 @@ def jrpc() -> RowPanel:
             "tycho_rpc_state_update_time", "Time to update RPC state on block"
         ),
         create_heatmap_panel(
-            "tycho_rpc_state_update_accounts_cache_time", "Time to update RPC accounts cache on state"
+            "tycho_rpc_state_update_accounts_cache_time",
+            "Time to update RPC accounts cache on state",
         ),
         create_heatmap_panel(
             "tycho_storage_rpc_prepare_batch_time",
