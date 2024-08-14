@@ -110,7 +110,7 @@ impl ExecutionManager {
         self.current_iterator_positions = positions;
     }
 
-    pub fn get_message_groups_offset(&self) -> u32 {
+    pub fn message_groups_offset(&self) -> u32 {
         self.message_groups.offset()
     }
 
