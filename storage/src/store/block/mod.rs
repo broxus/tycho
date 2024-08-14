@@ -17,6 +17,7 @@ use tycho_block_util::archive::{
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
 };
+use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
@@ -36,6 +37,8 @@ pub struct BlockStorage {
 }
 
 impl BlockStorage {
+    // === Init stuff ===
+
     pub fn new(
         db: BaseDb,
         block_handle_storage: Arc<BlockHandleStorage>,
@@ -98,6 +101,8 @@ impl BlockStorage {
         );
     }
 
+    // === Subscription stuff ===
+
     pub async fn wait_for_block(&self, block_id: &BlockId) -> Result<BlockStuffAug> {
         let block_handle_storage = &self.block_handle_storage;
 
@@ -132,6 +137,8 @@ impl BlockStorage {
         self.wait_for_block(&block_id).await
     }
 
+    // === Block data ===
+
     pub async fn store_block_data(
         &self,
         block: &BlockStuff,
@@ -148,7 +155,7 @@ impl BlockStorage {
             .block_handle_storage
             .create_or_load_handle(block_id, meta_data);
 
-        let archive_id = ArchiveEntryId::Block(block_id);
+        let archive_id = ArchiveEntryId::block(block_id);
         let mut updated = false;
         if !handle.meta().has_data() {
             let data = archive_data.as_new_archive_data()?;
@@ -183,7 +190,7 @@ impl BlockStorage {
         if !handle.meta().has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
-        self.get_data(handle, &ArchiveEntryId::Block(handle.id()))
+        self.get_data(handle, &ArchiveEntryId::block(handle.id()))
             .await
     }
 
@@ -194,7 +201,7 @@ impl BlockStorage {
         if !handle.meta().has_data() {
             return Err(BlockStorageError::BlockDataNotFound.into());
         }
-        self.get_data_ref(handle, &ArchiveEntryId::Block(handle.id()))
+        self.get_data_ref(handle, &ArchiveEntryId::block(handle.id()))
             .await
     }
 
@@ -209,9 +216,9 @@ impl BlockStorage {
         };
 
         let mut readopts = package_entries.new_read_config();
-        readopts.set_iterate_lower_bound(ArchiveEntryId::Block(bound).to_vec().as_slice());
+        readopts.set_iterate_lower_bound(ArchiveEntryId::block(bound).to_vec().as_slice());
         bound.seqno += 1;
-        readopts.set_iterate_upper_bound(ArchiveEntryId::Block(bound).to_vec().as_slice());
+        readopts.set_iterate_upper_bound(ArchiveEntryId::block(bound).to_vec().as_slice());
 
         let mut iter = self
             .db
@@ -233,50 +240,36 @@ impl BlockStorage {
         }
     }
 
+    // === Block proof ===
+
     pub async fn store_block_proof(
         &self,
         proof: &BlockProofStuffAug,
-        handle: BlockProofHandle,
+        handle: MaybeExistingHandle,
     ) -> Result<StoreBlockResult> {
         let block_id = proof.id();
-        if matches!(&handle, BlockProofHandle::Existing(handle) if handle.id() != block_id) {
+        if matches!(&handle, MaybeExistingHandle::Existing(handle) if handle.id() != block_id) {
             return Err(BlockStorageError::BlockHandleIdMismatch.into());
         }
 
         let (handle, status) = match handle {
-            BlockProofHandle::Existing(handle) => (handle, HandleCreationStatus::Fetched),
-            BlockProofHandle::New(meta_data) => self
+            MaybeExistingHandle::Existing(handle) => (handle, HandleCreationStatus::Fetched),
+            MaybeExistingHandle::New(meta_data) => self
                 .block_handle_storage
                 .create_or_load_handle(block_id, meta_data),
         };
 
         let mut updated = false;
-        if proof.is_link() {
-            let archive_id = ArchiveEntryId::ProofLink(block_id);
-            if !handle.meta().has_proof_link() {
-                let data = proof.as_new_archive_data()?;
+        let archive_id = ArchiveEntryId::proof(block_id);
+        if !handle.meta().has_proof() {
+            let data = proof.as_new_archive_data()?;
 
-                let _lock = handle.proof_data_lock().write().await;
-                if !handle.meta().has_proof_link() {
-                    self.add_data(&archive_id, data)?;
-                    if handle.meta().set_has_proof_link() {
-                        self.block_handle_storage.store_handle(&handle);
-                        updated = true;
-                    }
-                }
-            }
-        } else {
-            let archive_id = ArchiveEntryId::Proof(block_id);
+            let _lock = handle.proof_data_lock().write().await;
             if !handle.meta().has_proof() {
-                let data = proof.as_new_archive_data()?;
-
-                let _lock = handle.proof_data_lock().write().await;
-                if !handle.meta().has_proof() {
-                    self.add_data(&archive_id, data)?;
-                    if handle.meta().set_has_proof() {
-                        self.block_handle_storage.store_handle(&handle);
-                        updated = true;
-                    }
+                self.add_data(&archive_id, data)?;
+                if handle.meta().set_has_proof() {
+                    self.block_handle_storage.store_handle(&handle);
+                    updated = true;
                 }
             }
         }
@@ -288,62 +281,99 @@ impl BlockStorage {
         })
     }
 
-    pub async fn load_block_proof(
-        &self,
-        handle: &BlockHandle,
-        is_link: bool,
-    ) -> Result<BlockProofStuff> {
-        let raw_proof = self.load_block_proof_raw_ref(handle, is_link).await?;
-        BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref(), is_link)
+    pub async fn load_block_proof(&self, handle: &BlockHandle) -> Result<BlockProofStuff> {
+        let raw_proof = self.load_block_proof_raw_ref(handle).await?;
+        BlockProofStuff::deserialize(handle.id(), raw_proof.as_ref())
     }
 
-    pub async fn load_block_proof_raw(
-        &self,
-        handle: &BlockHandle,
-        is_link: bool,
-    ) -> Result<Vec<u8>> {
-        let (archive_id, exists) = if is_link {
-            (
-                ArchiveEntryId::ProofLink(handle.id()),
-                handle.meta().has_proof_link(),
-            )
-        } else {
-            (
-                ArchiveEntryId::Proof(handle.id()),
-                handle.meta().has_proof(),
-            )
-        };
-
-        if !exists {
+    pub async fn load_block_proof_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
+        if !handle.meta().has_proof() {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
 
-        self.get_data(handle, &archive_id).await
+        self.get_data(handle, &ArchiveEntryId::proof(handle.id()))
+            .await
     }
 
     pub async fn load_block_proof_raw_ref<'a>(
         &'a self,
         handle: &'a BlockHandle,
-        is_link: bool,
     ) -> Result<impl AsRef<[u8]> + 'a> {
-        let (archive_id, exists) = if is_link {
-            (
-                ArchiveEntryId::ProofLink(handle.id()),
-                handle.meta().has_proof_link(),
-            )
-        } else {
-            (
-                ArchiveEntryId::Proof(handle.id()),
-                handle.meta().has_proof(),
-            )
-        };
-
-        if !exists {
+        if !handle.meta().has_proof() {
             return Err(BlockStorageError::BlockProofNotFound.into());
         }
 
-        self.get_data_ref(handle, &archive_id).await
+        self.get_data_ref(handle, &ArchiveEntryId::proof(handle.id()))
+            .await
     }
+
+    // === Queue diff ===
+
+    pub async fn store_queue_diff(
+        &self,
+        queue_diff: &QueueDiffStuffAug,
+        handle: MaybeExistingHandle,
+    ) -> Result<StoreBlockResult> {
+        let block_id = queue_diff.block_id();
+        if matches!(&handle, MaybeExistingHandle::Existing(handle) if handle.id() != block_id) {
+            return Err(BlockStorageError::BlockHandleIdMismatch.into());
+        }
+
+        let (handle, status) = match handle {
+            MaybeExistingHandle::Existing(handle) => (handle, HandleCreationStatus::Fetched),
+            MaybeExistingHandle::New(meta_data) => self
+                .block_handle_storage
+                .create_or_load_handle(block_id, meta_data),
+        };
+
+        let mut updated = false;
+        let archive_id = ArchiveEntryId::queue_diff(block_id);
+        if !handle.meta().has_queue_diff() {
+            let data = queue_diff.as_new_archive_data()?;
+
+            let _lock = handle.queue_diff_data_lock().write().await;
+            if !handle.meta().has_queue_diff() {
+                self.add_data(&archive_id, data)?;
+                if handle.meta().set_has_queue_diff() {
+                    self.block_handle_storage.store_handle(&handle);
+                    updated = true;
+                }
+            }
+        }
+
+        Ok(StoreBlockResult {
+            handle,
+            updated,
+            new: status == HandleCreationStatus::Created,
+        })
+    }
+
+    pub async fn load_queue_diff(&self, handle: &BlockHandle) -> Result<QueueDiffStuff> {
+        let raw_diff = self.load_queue_raw_ref(handle).await?;
+        QueueDiffStuff::deserialize(handle.id(), raw_diff.as_ref())
+    }
+
+    pub async fn load_queue_diff_raw(&self, handle: &BlockHandle) -> Result<Vec<u8>> {
+        if !handle.meta().has_queue_diff() {
+            return Err(BlockStorageError::QueueDiffNotFound.into());
+        }
+
+        self.get_data(handle, &ArchiveEntryId::queue_diff(handle.id()))
+            .await
+    }
+
+    pub async fn load_queue_raw_ref<'a>(
+        &'a self,
+        handle: &'a BlockHandle,
+    ) -> Result<impl AsRef<[u8]> + 'a> {
+        if !handle.meta().has_queue_diff() {
+            return Err(BlockStorageError::QueueDiffNotFound.into());
+        }
+        self.get_data_ref(handle, &ArchiveEntryId::queue_diff(handle.id()))
+            .await
+    }
+
+    // === Archive stuff ===
 
     /// Loads data and proof for the block and appends them to the corresponding archive.
     pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
@@ -359,14 +389,10 @@ impl BlockStorage {
         // Prepare data
         let block_id = handle.id();
 
-        let has_data = handle.meta().has_data();
-        let mut is_link = false;
-        let has_proof = handle.has_proof_or_link(&mut is_link);
-
-        let block_data = if has_data {
+        let block_data = if handle.meta().has_data() {
             let lock = handle.block_data_lock().write().await;
 
-            let entry_id = ArchiveEntryId::Block(block_id);
+            let entry_id = ArchiveEntryId::proof(block_id);
             let data = self.make_archive_segment(&entry_id)?;
 
             Some((lock, data))
@@ -374,14 +400,21 @@ impl BlockStorage {
             None
         };
 
-        let block_proof_data = if has_proof {
+        let block_proof_data = if handle.meta().has_proof() {
             let lock = handle.proof_data_lock().write().await;
 
-            let entry_id = if is_link {
-                ArchiveEntryId::ProofLink(block_id)
-            } else {
-                ArchiveEntryId::Proof(block_id)
-            };
+            let entry_id = ArchiveEntryId::proof(block_id);
+            let data = self.make_archive_segment(&entry_id)?;
+
+            Some((lock, data))
+        } else {
+            None
+        };
+
+        let queue_diff_data = if handle.meta().has_queue_diff() {
+            let lock = handle.queue_diff_data_lock().write().await;
+
+            let entry_id = ArchiveEntryId::queue_diff(block_id);
             let data = self.make_archive_segment(&entry_id)?;
 
             Some((lock, data))
@@ -407,7 +440,12 @@ impl BlockStorage {
         if let Some((_, data)) = &block_proof_data {
             batch.merge_cf(&storage_cf, archive_id_bytes, data);
         }
-        // 3. Update block handle meta
+        // 3. Append archive segment with queue diff data
+        if let Some((_, data)) = &queue_diff_data {
+            batch.merge_cf(&storage_cf, archive_id_bytes, data);
+        }
+
+        // 4. Update block handle meta
         if handle.meta().set_is_archived() {
             batch.put_cf(
                 &handle_cf,
@@ -429,7 +467,6 @@ impl BlockStorage {
     pub fn move_into_archive_with_data(
         &self,
         handle: &BlockHandle,
-        is_link: bool,
         block_data: &[u8],
         block_proof_data: &[u8],
     ) -> Result<()> {
@@ -455,19 +492,14 @@ impl BlockStorage {
         batch.merge_cf(
             &archives_cf,
             archive_id_bytes,
-            make_archive_entry(&ArchiveEntryId::Block(handle.id()).filename(), block_data),
+            make_archive_entry(&ArchiveEntryId::proof(handle.id()).filename(), block_data),
         );
 
         batch.merge_cf(
             &archives_cf,
             archive_id_bytes,
             make_archive_entry(
-                &if is_link {
-                    ArchiveEntryId::ProofLink(block_id)
-                } else {
-                    ArchiveEntryId::Proof(block_id)
-                }
-                .filename(),
+                &ArchiveEntryId::proof(block_id).filename(),
                 block_proof_data,
             ),
         );
@@ -574,6 +606,8 @@ impl BlockStorage {
         }
     }
 
+    // === GC stuff ===
+
     #[tracing::instrument(skip_all, fields(mc_seqno))]
     pub async fn remove_outdated_blocks(
         &self,
@@ -675,6 +709,8 @@ impl BlockStorage {
         Ok(())
     }
 
+    // === Internal ===
+
     fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
     where
         I: Borrow<BlockId> + Hash,
@@ -694,12 +730,13 @@ impl BlockStorage {
     where
         I: Borrow<BlockId> + Hash,
     {
-        let _lock = match &id {
-            ArchiveEntryId::Block(_) => handle.block_data_lock().read().await,
-            ArchiveEntryId::Proof(_) | ArchiveEntryId::ProofLink(_) => {
-                handle.proof_data_lock().read().await
-            }
-        };
+        let _lock = match id.kind {
+            ArchiveEntryIdKind::Block => handle.block_data_lock(),
+            ArchiveEntryIdKind::Proof => handle.proof_data_lock(),
+            ArchiveEntryIdKind::QueueDiff => handle.queue_diff_data_lock(),
+        }
+        .read()
+        .await;
 
         match self.db.package_entries.get(id.to_vec())? {
             Some(a) => Ok(a.to_vec()),
@@ -715,12 +752,13 @@ impl BlockStorage {
     where
         I: Borrow<BlockId> + Hash,
     {
-        let lock = match id {
-            ArchiveEntryId::Block(_) => handle.block_data_lock().read().await,
-            ArchiveEntryId::Proof(_) | ArchiveEntryId::ProofLink(_) => {
-                handle.proof_data_lock().read().await
-            }
-        };
+        let lock = match id.kind {
+            ArchiveEntryIdKind::Block => handle.block_data_lock(),
+            ArchiveEntryIdKind::Proof => handle.proof_data_lock(),
+            ArchiveEntryIdKind::QueueDiff => handle.queue_diff_data_lock(),
+        }
+        .read()
+        .await;
 
         match self.db.package_entries.get(id.to_vec())? {
             Some(data) => Ok(BlockContentsLock { _lock: lock, data }),
@@ -769,18 +807,18 @@ impl BlockStorage {
 }
 
 #[derive(Clone)]
-pub enum BlockProofHandle {
+pub enum MaybeExistingHandle {
     Existing(BlockHandle),
     New(BlockMetaData),
 }
 
-impl From<BlockHandle> for BlockProofHandle {
+impl From<BlockHandle> for MaybeExistingHandle {
     fn from(handle: BlockHandle) -> Self {
         Self::Existing(handle)
     }
 }
 
-impl From<BlockMetaData> for BlockProofHandle {
+impl From<BlockMetaData> for MaybeExistingHandle {
     fn from(meta_data: BlockMetaData) -> Self {
         Self::New(meta_data)
     }
@@ -916,6 +954,8 @@ enum BlockStorageError {
     BlockDataNotFound,
     #[error("Block proof not found")]
     BlockProofNotFound,
+    #[error("Queue diff not found")]
+    QueueDiffNotFound,
     #[error("Block handle id mismatch")]
     BlockHandleIdMismatch,
     #[error("Invalid block data")]

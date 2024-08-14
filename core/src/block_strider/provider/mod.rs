@@ -11,8 +11,9 @@ use tycho_block_util::block::{
     check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockProofStuffAug,
     BlockStuff, BlockStuffAug,
 };
+use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockMetaData, BlockProofHandle, Storage};
+use tycho_storage::{BlockMetaData, MaybeExistingHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
 
 pub use self::archive_provider::ArchiveBlockProvider;
@@ -166,6 +167,8 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for (T1, T2) {
     }
 }
 
+// TODO: Rename to something better since it checks proofs queue diffs now,
+//       and I don't want to parse block info twice to check queue diff separately.
 pub struct ProofChecker {
     storage: Storage,
     cached_zerostate: ArcSwapAny<Option<ShardStateStuff>>,
@@ -185,6 +188,7 @@ impl ProofChecker {
         &self,
         block: &BlockStuff,
         proof: &BlockProofStuffAug,
+        queue_diff: &QueueDiffStuffAug,
         store_proof_on_success: bool,
     ) -> Result<BlockMetaData> {
         // TODO: Add labels with shard?
@@ -207,77 +211,76 @@ impl ProofChecker {
             mc_ref_seqno: is_masterchain.then(|| block.id().seqno),
         };
 
-        if !is_masterchain {
-            if store_proof_on_success {
-                // Store proof link
-                self.storage
-                    .block_storage()
-                    .store_block_proof(proof, BlockProofHandle::New(meta))
-                    .await?;
-            }
-            return Ok(meta);
-        }
+        let block_storage = self.storage.block_storage();
 
-        let block_handles = self.storage.block_handle_storage();
-        let handle = block_handles
-            .load_key_block_handle(virt_block_info.prev_key_block_seqno)
-            .context("failed to load prev key block handle")?;
+        // TODO: Check `queue_diff` using data from `virt_block` or `virt_block_info`
 
-        if handle.id().seqno == 0 {
-            let zerostate = 'zerostate: {
-                if let Some(zerostate) = self.cached_zerostate.load_full() {
-                    break 'zerostate zerostate;
-                }
+        if is_masterchain {
+            let block_handles = self.storage.block_handle_storage();
+            let handle = block_handles
+                .load_key_block_handle(virt_block_info.prev_key_block_seqno)
+                .context("failed to load prev key block handle")?;
 
-                let shard_states = self.storage.shard_state_storage();
-                let zerostate = shard_states
-                    .load_state(handle.id())
-                    .await
-                    .context("failed to load mc zerostate")?;
-
-                self.cached_zerostate.store(Some(zerostate.clone()));
-
-                zerostate
-            };
-
-            check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)?;
-        } else {
-            let prev_key_block_proof = 'prev_proof: {
-                if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
-                    if &prev_proof.as_ref().proof_for == handle.id() {
-                        break 'prev_proof prev_proof;
+            if handle.id().seqno == 0 {
+                let zerostate = 'zerostate: {
+                    if let Some(zerostate) = self.cached_zerostate.load_full() {
+                        break 'zerostate zerostate;
                     }
-                }
 
-                let blocks = self.storage.block_storage();
-                let prev_key_block_proof = blocks
-                    .load_block_proof(&handle, false)
-                    .await
-                    .context("failed to load prev key block proof")?;
+                    let shard_states = self.storage.shard_state_storage();
+                    let zerostate = shard_states
+                        .load_state(handle.id())
+                        .await
+                        .context("failed to load mc zerostate")?;
 
-                // NOTE: Assume that there is only one masterchain block using this cache.
-                // Otherwise, it will be overwritten every time. Maybe use `rcu`.
-                self.cached_prev_key_block_proof
-                    .store(Some(prev_key_block_proof.clone()));
+                    self.cached_zerostate.store(Some(zerostate.clone()));
 
-                prev_key_block_proof
-            };
+                    zerostate
+                };
 
-            check_with_prev_key_block_proof(
-                proof,
-                &prev_key_block_proof,
-                &virt_block,
-                &virt_block_info,
-            )?;
+                check_with_master_state(proof, &zerostate, &virt_block, &virt_block_info)?;
+            } else {
+                let prev_key_block_proof = 'prev_proof: {
+                    if let Some(prev_proof) = self.cached_prev_key_block_proof.load_full() {
+                        if &prev_proof.as_ref().proof_for == handle.id() {
+                            break 'prev_proof prev_proof;
+                        }
+                    }
+
+                    let prev_key_block_proof = block_storage
+                        .load_block_proof(&handle)
+                        .await
+                        .context("failed to load prev key block proof")?;
+
+                    // NOTE: Assume that there is only one masterchain block using this cache.
+                    // Otherwise, it will be overwritten every time. Maybe use `rcu`.
+                    self.cached_prev_key_block_proof
+                        .store(Some(prev_key_block_proof.clone()));
+
+                    prev_key_block_proof
+                };
+
+                check_with_prev_key_block_proof(
+                    proof,
+                    &prev_key_block_proof,
+                    &virt_block,
+                    &virt_block_info,
+                )?;
+            }
         }
 
         if store_proof_on_success {
             // Store proof
-            self.storage
-                .block_storage()
-                .store_block_proof(proof, BlockProofHandle::New(meta))
+            let res = block_storage
+                .store_block_proof(proof, MaybeExistingHandle::New(meta))
+                .await?;
+
+            // Store queue diff
+            block_storage
+                .store_queue_diff(queue_diff, res.handle.into())
                 .await?;
         }
+
         Ok(meta)
     }
 }

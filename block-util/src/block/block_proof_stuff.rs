@@ -18,18 +18,13 @@ pub struct BlockProofStuff {
 }
 
 impl BlockProofStuff {
-    pub fn from_proof(proof: Box<BlockProof>, is_link: bool) -> Result<Self> {
-        anyhow::ensure!(
-            proof.proof_for.is_masterchain() || is_link,
-            "non-masterchain blocks cannot have full proofs",
-        );
-
-        Ok(Self {
-            inner: Arc::new(Inner { proof, is_link }),
-        })
+    pub fn from_proof(proof: Box<BlockProof>) -> Self {
+        Self {
+            inner: Arc::new(Inner { proof }),
+        }
     }
 
-    pub fn deserialize(block_id: &BlockId, data: &[u8], is_link: bool) -> Result<Self> {
+    pub fn deserialize(block_id: &BlockId, data: &[u8]) -> Result<Self> {
         let proof = BocRepr::decode::<Box<BlockProof>, _>(data)?;
 
         anyhow::ensure!(
@@ -38,13 +33,8 @@ impl BlockProofStuff {
             proof.proof_for,
         );
 
-        anyhow::ensure!(
-            block_id.is_masterchain() || is_link,
-            "non-masterchain blocks cannot have full proofs",
-        );
-
         Ok(Self {
-            inner: Arc::new(Inner { proof, is_link }),
+            inner: Arc::new(Inner { proof }),
         })
     }
 
@@ -61,7 +51,7 @@ impl BlockProofStuff {
     }
 
     pub fn is_link(&self) -> bool {
-        self.inner.is_link
+        self.inner.proof.proof_for.is_masterchain()
     }
 
     pub fn virtualize_block_root(&self) -> Result<&DynCell> {
@@ -95,7 +85,7 @@ impl BlockProofStuff {
 
     pub fn check_with_master_state(&self, master_state: &ShardStateStuff) -> Result<()> {
         anyhow::ensure!(
-            !self.inner.is_link,
+            !self.is_link(),
             "cannot check proof link using master state"
         );
 
@@ -105,7 +95,7 @@ impl BlockProofStuff {
     }
 
     pub fn check_proof_link(&self) -> Result<()> {
-        anyhow::ensure!(self.inner.is_link, "cannot check full proof as link");
+        anyhow::ensure!(self.is_link(), "cannot check full proof as link");
 
         self.pre_check_block_proof()?;
         Ok(())
@@ -367,7 +357,6 @@ unsafe impl arc_swap::RefCnt for BlockProofStuff {
 #[doc(hidden)]
 pub struct Inner {
     proof: Box<BlockProof>,
-    is_link: bool,
 }
 
 pub fn check_with_prev_key_block_proof(
