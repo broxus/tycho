@@ -10,8 +10,9 @@ use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, KEY_BLOCK_UTIME_STEP,
 };
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockHandle, BlockMetaData, BlockProofHandle, KeyBlocksDirection, Storage};
+use tycho_storage::{BlockHandle, BlockMetaData, KeyBlocksDirection, MaybeExistingHandle, Storage};
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
@@ -91,7 +92,7 @@ impl StarterInner {
             let proof = self
                 .storage
                 .block_storage()
-                .load_block_proof(&handle, false)
+                .load_block_proof(&handle)
                 .await?;
 
             InitBlock::KeyBlock {
@@ -174,7 +175,7 @@ impl StarterInner {
                         let handle = self
                             .storage
                             .block_storage()
-                            .store_block_proof(&proof, BlockProofHandle::New(meta))
+                            .store_block_proof(&proof, MaybeExistingHandle::New(meta))
                             .await?
                             .handle;
 
@@ -507,7 +508,7 @@ impl StarterInner {
             let blockchain_rpc_client = &self.blockchain_rpc_client;
 
             // TODO: add retry count to interrupt infinite loop
-            let (block, proof, meta_data) = loop {
+            let (block, proof, diff, meta_data) = loop {
                 let (handle, block_full) =
                     match blockchain_rpc_client.get_block_full(block_id).await {
                         Ok(res) => res.split(),
@@ -520,12 +521,13 @@ impl StarterInner {
                         }
                     };
 
+                // TODO: Use `ProofChecker` instead
                 match block_full {
                     BlockFull::Found {
                         block_id,
                         block: block_data,
                         proof: proof_data,
-                        is_link,
+                        queue_diff: queue_diff_data,
                     } => {
                         let block = match BlockStuff::deserialize_checked(&block_id, &block_data) {
                             Ok(block) => WithArchiveData::new(block, block_data),
@@ -536,11 +538,7 @@ impl StarterInner {
                             }
                         };
 
-                        let proof = match BlockProofStuff::deserialize(
-                            &block_id,
-                            &proof_data,
-                            is_link,
-                        ) {
+                        let proof = match BlockProofStuff::deserialize(&block_id, &proof_data) {
                             Ok(proof) => WithArchiveData::new(proof, proof_data),
                             Err(e) => {
                                 tracing::error!(%block_id, "failed to deserialize block proof: {e}");
@@ -549,9 +547,18 @@ impl StarterInner {
                             }
                         };
 
+                        let diff = match QueueDiffStuff::deserialize(&block_id, &queue_diff_data) {
+                            Ok(diff) => WithArchiveData::new(diff, queue_diff_data),
+                            Err(e) => {
+                                tracing::error!(%block_id, "failed to deserialize queue diff: {e}");
+                                handle.reject();
+                                continue;
+                            }
+                        };
+
                         match proof.pre_check_block_proof() {
                             Ok((_, block_info)) => {
-                                break (block, proof, BlockMetaData {
+                                break (block, proof, diff, BlockMetaData {
                                     is_key_block: block_info.key_block,
                                     gen_utime: block_info.gen_utime,
                                     mc_ref_seqno: Some(mc_seqno),
@@ -579,6 +586,13 @@ impl StarterInner {
             if !handle.meta().has_proof() {
                 handle = block_storage
                     .store_block_proof(&proof, handle.into())
+                    .await?
+                    .handle;
+            }
+
+            if !handle.meta().has_queue_diff() {
+                handle = block_storage
+                    .store_queue_diff(&diff, handle.into())
                     .await?
                     .handle;
             }
@@ -615,7 +629,7 @@ async fn download_block_proof_task(
 
     // Check whether block proof is already stored locally
     if let Some(handle) = block_handle_storage.load_handle(&block_id) {
-        if let Ok(proof) = block_storage.load_block_proof(&handle, false).await {
+        if let Ok(proof) = block_storage.load_block_proof(&handle).await {
             return WithArchiveData::loaded(proof);
         }
     }
@@ -633,7 +647,7 @@ async fn download_block_proof_task(
                     break 'validate;
                 };
 
-                match BlockProofStuff::deserialize(&block_id, &data, false) {
+                match BlockProofStuff::deserialize(&block_id, &data) {
                     Ok(proof) => {
                         handle.accept();
                         return WithArchiveData::new(proof, data);

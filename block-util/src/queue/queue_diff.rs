@@ -6,7 +6,10 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tl_proto::TlRead;
 
+use crate::archive::WithArchiveData;
 use crate::queue::proto::QueueDiff;
+
+pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
 
 #[derive(Clone)]
 #[repr(transparent)]
