@@ -1,5 +1,6 @@
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 
+use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::{StreamExt, StreamMap};
@@ -8,7 +9,7 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::models::{PointId, Round};
-use crate::Point;
+use crate::{MempoolConfig, Point};
 
 #[derive(Default)]
 pub struct AnchorConsumer {
@@ -36,6 +37,7 @@ impl AnchorConsumer {
     }
 
     pub async fn check(mut self) {
+        let mut next_expected_history_round = MempoolConfig::GENESIS_ROUND;
         loop {
             let (peer_id, (anchor, history)) = self
                 .streams
@@ -113,15 +115,36 @@ impl AnchorConsumer {
             }
 
             let mut common_anchors = vec![];
-            self.anchors.retain(|key, value| {
+            let mut common_history = vec![];
+            self.anchors.retain(|anchor_round, value| {
                 if value.len() == self.streams.len() {
-                    self.history.remove(key);
-                    common_anchors.push(key.0);
+                    let history = self
+                        .history
+                        .remove(anchor_round)
+                        .expect("anchor must have history");
+                    assert!(!history.is_empty(), "anchor history cannot be empty");
+                    common_anchors.push(anchor_round.0);
+                    common_history.extend(history);
                     false
                 } else {
                     true
                 }
             });
+
+            let minmax_history_round = common_history
+                .iter()
+                .map(|point_id| point_id.location.round)
+                .minmax()
+                .into_option();
+
+            if let Some((min, max)) = minmax_history_round {
+                assert!(
+                    next_expected_history_round >= min,
+                    "anchor history must be contiguous; has a gap between \
+                     expected {next_expected_history_round:?} and new oldest {min:?}",
+                );
+                next_expected_history_round = max.next();
+            }
 
             tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
             tracing::debug!("Refs hashmap ken: {}", self.history.len());

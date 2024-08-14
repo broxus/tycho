@@ -160,7 +160,7 @@ impl Engine {
                     top_dag_round.round().0,
                 );
                 metrics::counter!(EngineContext::ROUNDS_SKIP)
-                    .increment((consensus_round.0 - top_dag_round.round().0) as _); // safe
+                    .absolute((consensus_round.0 - top_dag_round.round().0) as _); // safe
 
                 // `true` if we collected enough dependencies and (optionally) signatures,
                 // so `next_dag_round` from the previous loop is the current now

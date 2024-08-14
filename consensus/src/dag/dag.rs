@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::convert::identity;
 use std::sync::atomic::Ordering;
-use std::{array, mem};
+use std::{array, cmp, mem};
 
 use futures_util::FutureExt;
 use rand::prelude::SliceRandom;
@@ -106,8 +106,31 @@ impl Dag {
 
         let mut ordered = Vec::new();
 
+        // to skip unusable anchor proofs and triggers; inclusive for proofs, exclusive for triggers
+        let Some(mut oldest_proof_round) = self
+            .rounds
+            .iter()
+            .skip({
+                let (first, _) = self.rounds.first_key_value().expect("DAG cannot be empty");
+                // +1 to skip either proof round or a trigger right above the needed depth
+                match MempoolConfig::GENESIS_ROUND.cmp(first) {
+                    // cannot commit anchors with to shallow history
+                    cmp::Ordering::Less => MempoolConfig::COMMIT_DEPTH as usize + 1,
+                    // commit right after genesis, do not wait for full depth
+                    cmp::Ordering::Equal => 1,
+                    cmp::Ordering::Greater => {
+                        panic!("genesis round can be only at the beginning of DAG")
+                    }
+                }
+            })
+            .find_map(|(round, dag_round)| dag_round.anchor_stage().map(|_| *round))
+        else {
+            // nothing to commit yet
+            return ordered; // empty
+        };
+
         // take all ready triggers, skipping not ready ones
-        let mut trigger_stack = Self::trigger_stack(next_dag_round);
+        let mut trigger_stack = Self::trigger_stack(next_dag_round, oldest_proof_round);
         let _span = if let Some((latest_trigger, _)) = trigger_stack.first() {
             tracing::error_span!(
                 "commit trigger",
@@ -121,19 +144,24 @@ impl Dag {
         };
 
         let mut anchors = BTreeMap::new(); // sorted and unique
-        let mut bottom_proof_round = MempoolConfig::GENESIS_ROUND;
+
         // traverse from oldest to newest;
         // ignore non-ready triggers as chain may be restored without them
+        // if chain is broken - take the prefix until first gap
         while let Some((trigger, trigger_round)) = trigger_stack.pop() {
-            Self::anchor_stack(
+            let contiguity = Self::anchor_stack(
                 &trigger,
                 trigger_round.clone(),
-                bottom_proof_round,
+                oldest_proof_round,
                 &mut anchors,
             );
+            if contiguity.is_none() {
+                // some dag point future is not yet resolved
+                break;
+            }
             if let Some((_, _, last_proof_round, _)) = anchors.values().last() {
-                // should not traverse deeper than last proof
-                bottom_proof_round = last_proof_round.round();
+                // no reason to traverse deeper than last proof
+                oldest_proof_round = last_proof_round.round();
             }
         }
 
@@ -176,7 +204,7 @@ impl Dag {
 
     /// not yet used commit triggers in reverse order (newest in front and oldest in back);
     /// use with `vec::pop()`
-    fn trigger_stack(mut dag_round: DagRound) -> Vec<(Point, DagRound)> {
+    fn trigger_stack(mut dag_round: DagRound, oldest_proof_round: Round) -> Vec<(Point, DagRound)> {
         let mut latest_trigger = Vec::new();
         loop {
             let prev_dag_round = dag_round.prev().upgrade();
@@ -206,7 +234,7 @@ impl Dag {
             };
 
             match prev_dag_round {
-                Some(prev_dag_round) if prev_dag_round.round() > MempoolConfig::GENESIS_ROUND => {
+                Some(prev_dag_round) if prev_dag_round.round() > oldest_proof_round => {
                     dag_round = prev_dag_round;
                 }
                 _ => break,
@@ -215,14 +243,13 @@ impl Dag {
         latest_trigger
     }
 
-    /// return order: newest (in depth) to oldest (on top); use with `vec.pop()`
     /// return values: anchor round, anchor point, anchor round, proof round, direct trigger round
     fn anchor_stack(
         trigger: &Point,
         trigger_round: DagRound,
-        bottom_proof_round: Round,
+        oldest_proof_round: Round,
         result: &mut BTreeMap<Round, (ValidPoint, DagRound, DagRound, Option<DagRound>)>,
-    ) {
+    ) -> Option<()> {
         assert_eq!(
             trigger.prev_id(),
             Some(trigger.anchor_id(LinkField::Proof)),
@@ -236,10 +263,7 @@ impl Dag {
         let mut proof_id = trigger
             .prev_id()
             .expect("validation broken: anchor trigger with empty proof field");
-        let mut proof_round = trigger_round
-            .prev()
-            .upgrade()
-            .expect("anchor proof round not in DAG while a point from it was received");
+        let mut proof_round = trigger_round.prev().upgrade().expect("cannot be weak");
         let mut trigger_round = Some(trigger_round); // use only as a part of matching triplet
         loop {
             assert_eq!(
@@ -247,14 +271,8 @@ impl Dag {
                 proof_round.round(),
                 "anchor proof id round does not match"
             );
-            if proof_id.location.round == bottom_proof_round {
-                break;
-            }
-            let Some(proof) =
-                Self::ready_valid_point(&proof_round, &proof_id.location.author, &proof_id.digest)
-            else {
-                break;
-            };
+            let proof =
+                Self::ready_valid_point(&proof_round, &proof_id.location.author, &proof_id.digest)?;
             assert_eq!(
                 proof.point.body().location.round,
                 proof_round.round(),
@@ -273,30 +291,20 @@ impl Dag {
                 "anchor proof author does not match prescribed by round"
             );
             if is_used.load(Ordering::Relaxed) {
-                break;
+                break Some(());
             };
             let anchor_digest = match &proof.point.body().proof {
                 Some(prev) => &prev.digest,
-                None => panic!("anchor proof must prove to anchor point, validation is broken"),
+                None => panic!("anchor proof must prove to anchor point, verify() is broken"),
             };
-            let Some(anchor_round) = proof_round.prev().upgrade() else {
-                break;
-            };
-            let Some(anchor) = anchor_round
-                .view(leader, |loc| {
-                    loc.versions()
-                        .get(anchor_digest)
-                        .expect("anchor proof is not linked to anchor, validation broken")
-                        .clone()
-                        .now_or_never() // pass this option to statement result
-                        .map(|dag_point| {
-                            dag_point.into_valid().expect("anchor point must be valid")
-                        })
-                })
-                .expect("leader location not found in dag round for anchor")
-            else {
-                break;
-            };
+            let anchor_round = proof_round.prev().upgrade().expect("cannot be weak");
+            let anchor = anchor_round.view(leader, |loc| {
+                loc.versions()
+                    .get(anchor_digest)
+                    .cloned()
+                    .and_then(|shared| shared.now_or_never())
+                    .map(|dag_point| dag_point.into_valid().expect("anchor point must be valid"))
+            })??;
 
             proof_id = anchor.point.anchor_id(LinkField::Proof);
             let next_proof_round = anchor_round.scan(proof_id.location.round);
@@ -314,8 +322,10 @@ impl Dag {
             ));
 
             match next_proof_round {
-                Some(next_proof_round) => proof_round = next_proof_round,
-                None => break,
+                Some(next_proof_round) if next_proof_round.round() >= oldest_proof_round => {
+                    proof_round = next_proof_round;
+                }
+                _ => break Some(()),
             };
         }
     }
