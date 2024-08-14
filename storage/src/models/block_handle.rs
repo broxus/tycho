@@ -38,6 +38,7 @@ impl BlockHandle {
                 meta,
                 block_data_lock: Default::default(),
                 proof_data_block: Default::default(),
+                queue_diff_data_lock: Default::default(),
                 cache,
             }),
         }
@@ -68,13 +69,15 @@ impl BlockHandle {
         &self.inner.proof_data_block
     }
 
-    pub fn has_proof_or_link(&self, is_link: &mut bool) -> bool {
-        *is_link = !self.inner.id.shard.is_masterchain();
-        if *is_link {
-            self.inner.meta.has_proof_link()
-        } else {
-            self.inner.meta.has_proof()
-        }
+    #[inline]
+    pub fn queue_diff_data_lock(&self) -> &RwLock<()> {
+        &self.inner.queue_diff_data_lock
+    }
+
+    pub fn has_all_parts(&self) -> bool {
+        // TODO: Load once?
+        let meta = self.meta();
+        meta.has_data() && meta.has_proof() && meta.has_queue_diff()
     }
 
     pub fn mc_ref_seqno(&self) -> u32 {
@@ -124,6 +127,7 @@ pub struct Inner {
     meta: BlockMeta,
     block_data_lock: RwLock<()>,
     proof_data_block: RwLock<()>,
+    queue_diff_data_lock: RwLock<()>,
     cache: Arc<BlockHandleCache>,
 }
 

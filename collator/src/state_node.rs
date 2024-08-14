@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_storage::{BlockHandle, BlockMetaData, BlockProofHandle, Storage};
+use tycho_storage::{BlockHandle, BlockMetaData, MaybeExistingHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -290,8 +290,7 @@ impl StateNodeAdapterStdImpl {
             prepare_block_proof(&block.block_stuff_aug.data, &block.signatures)
                 .context("failed to prepare block proof")?;
 
-        let is_link = !proof.proof_for.is_masterchain();
-        let block_proof_stuff = BlockProofStuff::from_proof(proof, is_link)?;
+        let block_proof_stuff = BlockProofStuff::from_proof(proof);
 
         let proof_boc = BocRepr::encode_rayon(block_proof_stuff.as_ref())?;
         let archive_data = block_proof_stuff.with_archive_data(proof_boc);
@@ -301,7 +300,7 @@ impl StateNodeAdapterStdImpl {
             .block_storage()
             .store_block_proof(
                 &archive_data,
-                BlockProofHandle::New(BlockMetaData {
+                MaybeExistingHandle::New(BlockMetaData {
                     is_key_block: block_info.key_block,
                     gen_utime: block_info.gen_utime,
                     mc_ref_seqno: None,

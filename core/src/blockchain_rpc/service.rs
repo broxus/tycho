@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use bytes::{Buf, Bytes};
 use bytesize::ByteSize;
+use everscale_types::models::BlockId;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
@@ -378,32 +379,7 @@ impl<B> Inner<B> {
         let label = [("method", "getBlockFull")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
-        let block_handle_storage = self.storage().block_handle_storage();
-        let block_storage = self.storage().block_storage();
-
-        let get_block_full = async {
-            let mut is_link = false;
-            let block = match block_handle_storage.load_handle(&req.block_id) {
-                Some(handle)
-                    if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) =>
-                {
-                    let block = block_storage.load_block_data_raw(&handle).await?;
-                    let proof = block_storage.load_block_proof_raw(&handle, is_link).await?;
-
-                    BlockFull::Found {
-                        block_id: req.block_id,
-                        proof: proof.into(),
-                        block: block.into(),
-                        is_link,
-                    }
-                }
-                _ => BlockFull::NotFound,
-            };
-
-            Ok::<_, anyhow::Error>(block)
-        };
-
-        match get_block_full.await {
+        match self.get_block_full(&req.block_id).await {
             Ok(block_full) => overlay::Response::Ok(block_full),
             Err(e) => {
                 tracing::warn!("get_block_full failed: {e:?}");
@@ -421,7 +397,6 @@ impl<B> Inner<B> {
 
         let block_handle_storage = self.storage().block_handle_storage();
         let block_connection_storage = self.storage().block_connection_storage();
-        let block_storage = self.storage().block_storage();
 
         let get_next_block_full = async {
             let next_block_id = match block_handle_storage.load_handle(&req.prev_block_id) {
@@ -431,25 +406,7 @@ impl<B> Inner<B> {
                 _ => return Ok(BlockFull::NotFound),
             };
 
-            let mut is_link = false;
-            let block = match block_handle_storage.load_handle(&next_block_id) {
-                Some(handle)
-                    if handle.meta().has_data() && handle.has_proof_or_link(&mut is_link) =>
-                {
-                    let block = block_storage.load_block_data_raw(&handle).await?;
-                    let proof = block_storage.load_block_proof_raw(&handle, is_link).await?;
-
-                    BlockFull::Found {
-                        block_id: next_block_id,
-                        proof: proof.into(),
-                        block: block.into(),
-                        is_link,
-                    }
-                }
-                _ => BlockFull::NotFound,
-            };
-
-            Ok::<_, anyhow::Error>(block)
+            self.get_block_full(&next_block_id).await
         };
 
         match get_next_block_full.await {
@@ -474,7 +431,7 @@ impl<B> Inner<B> {
         let get_key_block_proof = async {
             match block_handle_storage.load_handle(&req.block_id) {
                 Some(handle) if handle.meta().has_proof() => {
-                    let data = block_storage.load_block_proof_raw(&handle, false).await?;
+                    let data = block_storage.load_block_proof_raw(&handle).await?;
                     Ok::<_, anyhow::Error>(KeyBlockProof::Found { proof: data.into() })
                 }
                 _ => Ok(KeyBlockProof::NotFound),
@@ -611,5 +568,30 @@ impl<B> Inner<B> {
                 overlay::Response::Err(NOT_FOUND_ERROR_CODE)
             }
         }
+    }
+}
+
+impl<B> Inner<B> {
+    async fn get_block_full(&self, block_id: &BlockId) -> anyhow::Result<BlockFull> {
+        let block_handle_storage = self.storage().block_handle_storage();
+        let block_storage = self.storage().block_storage();
+
+        Ok(match block_handle_storage.load_handle(block_id) {
+            Some(handle) if handle.has_all_parts() => {
+                let (block, proof, queue_diff) = tokio::join!(
+                    block_storage.load_block_data_raw(&handle),
+                    block_storage.load_block_proof_raw(&handle),
+                    block_storage.load_block_proof_raw(&handle)
+                );
+
+                BlockFull::Found {
+                    block_id: *block_id,
+                    block: block?.into(),
+                    proof: proof?.into(),
+                    queue_diff: queue_diff?.into(),
+                }
+            }
+            _ => BlockFull::NotFound,
+        })
     }
 }

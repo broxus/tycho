@@ -641,10 +641,7 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     };
 
     // Load block proof
-    let block_proof = storage
-        .block_storage()
-        .load_block_proof(&handle, false)
-        .await?;
+    let block_proof = storage.block_storage().load_block_proof(&handle).await?;
 
     // Read `start_lt` from virtual block info
     let (virt_block, _) = block_proof.virtualize_block()?;
