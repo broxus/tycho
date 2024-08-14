@@ -18,6 +18,7 @@ hex = { workspace = true }
 parking_lot = { workspace = true }
 smallvec = { workspace = true }
 thiserror = { workspace = true }
+tl-proto = { workspace = true }
 
 # local deps
 tycho-util = { workspace = true }
