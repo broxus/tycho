@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use everscale_types::models::*;
-use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
+use tl_proto::{TlRead, TlWrite};
 
 /// Data for computing a private overlay id.
 #[derive(Debug, Clone, PartialEq, Eq, TlRead, TlWrite)]
@@ -9,7 +9,7 @@ use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 pub struct OverlayIdData {
     pub zerostate_root_hash: [u8; 32],
     pub zerostate_file_hash: [u8; 32],
-    #[tl(with = "tl_shard_ident")]
+    #[tl(with = "tycho_block_util::tl::shard_ident")]
     pub shard_ident: ShardIdent,
     /// Timestamp of the corresponding validator set.
     pub session_id: u32,
@@ -41,26 +41,5 @@ pub mod rpc {
         pub block_seqno: u32,
         #[tl(with = "tycho_util::tl::signature_ref")]
         pub signature: &'tl [u8; 64],
-    }
-}
-
-mod tl_shard_ident {
-    use super::*;
-
-    pub const fn size_hint(_: &ShardIdent) -> usize {
-        12
-    }
-
-    #[inline]
-    pub fn write<P: TlPacket>(shard_ident: &ShardIdent, packet: &mut P) {
-        shard_ident.workchain().write_to(packet);
-        shard_ident.prefix().write_to(packet);
-    }
-
-    #[inline]
-    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<ShardIdent> {
-        let workchain = i32::read_from(data, offset)?;
-        let prefix = u64::read_from(data, offset)?;
-        ShardIdent::new(workchain, prefix).ok_or(TlError::InvalidData)
     }
 }
