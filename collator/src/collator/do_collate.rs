@@ -178,26 +178,31 @@ impl CollatorStdImpl {
         // create iterator adapter
         let mut mq_iterator_adapter = exec_manager.create_iterator_adapter();
 
-        let prepare_elapsed = prepare_histogram.finish();
+        // refill messages buffer and skip groups upto offset (on node restart)
+        if !exec_manager.has_pending_messages_in_buffer()
+            && collation_data.processed_upto.processed_offset > 0
+        {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                prev_processed_offset = collation_data.processed_upto.processed_offset,
+                "refill messages buffer and skip groups upto",
+            );
 
-        let processed_offset = working_state
-            .prev_shard_data
-            .processed_upto()
-            .processed_offset;
-
-        tracing::trace!(target: tracing_targets::COLLATOR, "processed offset from prev shard data processed upto: {}", processed_offset);
-
-        while exec_manager.get_message_groups_offset() != processed_offset {
-            exec_manager
-                .get_next_message_group(
-                    self,
-                    &mut collation_data,
-                    &mut mq_iterator_adapter,
-                    InternalMessageKey::default(),
-                    &working_state,
-                )
-                .await?;
+            while exec_manager.message_groups_offset()
+                < collation_data.processed_upto.processed_offset
+            {
+                exec_manager
+                    .get_next_message_group(
+                        self,
+                        &mut collation_data,
+                        &mut mq_iterator_adapter,
+                        InternalMessageKey::default(),
+                        &working_state,
+                    )
+                    .await?;
+            }
         }
+
+        let prepare_elapsed = prepare_histogram.finish();
 
         // execute tick transaction and special transactions (mint, recover)
         let execute_tick_elapsed;
