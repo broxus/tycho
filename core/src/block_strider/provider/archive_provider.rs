@@ -105,15 +105,16 @@ impl ArchiveBlockProvider {
             }
         };
 
-        let (block, proof) = match (
-            archive.get_block_by_id(&block_id),
-            archive.get_proof_by_id(&block_id),
-        ) {
-            (Ok(block), Ok(proof)) => (block, proof),
-            (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+        let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
+            Ok(entry) => entry,
+            Err(e) => return Some(Err(e.into())),
         };
 
-        match this.proof_checker.check_proof(&block, &proof, true).await {
+        match this
+            .proof_checker
+            .check_proof(&block, &proof, &diff, true)
+            .await
+        {
             // Stop using archives if the block is recent enough
             Ok(meta) if is_block_recent(&meta) => {
                 tracing::info!(%block_id, "archive block provider finished");
@@ -128,20 +129,20 @@ impl ArchiveBlockProvider {
         let this = self.inner.as_ref();
 
         let mut archive = this.last_known_archive.load_full();
-        let (block, proof) = 'found: {
+        let (block, proof, diff) = 'found: {
             let mut fallback = Some(&this.prev_known_archive);
 
             while let Some(a) = &archive {
-                match (a.get_block_by_id(block_id), a.get_proof_by_id(block_id)) {
+                match a.get_entry_by_id(block_id) {
                     // Successfully found the block and proof
-                    (Ok(block), Ok(proof)) => break 'found (block, proof),
+                    Ok(entry) => break 'found entry,
                     // Block not found in the archive so try the fallback archive
-                    (Err(ArchiveError::OutOfRange), _) | (_, Err(ArchiveError::OutOfRange)) => {
+                    Err(ArchiveError::OutOfRange) => {
                         archive = fallback.take().and_then(ArcSwapAny::load_full);
                         continue;
                     }
                     // Treat other errors as terminal
-                    (Err(e), _) | (_, Err(e)) => return Some(Err(e.into())),
+                    Err(e) => return Some(Err(e.into())),
                 }
             }
 
@@ -149,7 +150,11 @@ impl ArchiveBlockProvider {
             return Some(Err(ArchiveError::OutOfRange.into()));
         };
 
-        if let Err(e) = this.proof_checker.check_proof(&block, &proof, true).await {
+        if let Err(e) = this
+            .proof_checker
+            .check_proof(&block, &proof, &diff, true)
+            .await
+        {
             return Some(Err(e));
         }
 

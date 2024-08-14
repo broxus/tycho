@@ -62,11 +62,17 @@ blockchain.keyBlockIds block_ids:(vector blockchain.blockId) incomplete:Bool = b
 * A response for getting full block info
 *
 * @param block_id       block id
-* @param proof          block proof raw
 * @param block          block data raw
-* @param is_link        block proof link flag
+* @param proof          block proof raw
+* @param queue_diff     queue diff raw
 */
-blockchain.blockFull.found block_id:blockchain.blockId proof:bytes block:bigBytes is_link:Bool = blockchain.BlockFull;
+blockchain.blockFull.found
+    block_id:blockchain.blockId
+    block:bigBytes
+    proof:bytes
+    queue_diff:bytes
+    = blockchain.BlockFull;
+
 /**
 * Block not found
 */

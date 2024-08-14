@@ -38,10 +38,10 @@ pub enum BlockFull {
     Found {
         #[tl(with = "tl_block_id")]
         block_id: everscale_types::models::BlockId,
-        proof: Bytes,
         #[tl(with = "BigBytes")]
         block: Bytes,
-        is_link: bool,
+        proof: Bytes,
+        queue_diff: Bytes,
     },
     #[tl(id = "blockchain.blockFull.notFound")]
     NotFound,

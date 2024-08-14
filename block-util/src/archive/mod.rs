@@ -8,6 +8,7 @@ use tycho_util::FastHashMap;
 pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
 use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
+use crate::queue::{QueueDiffStuff, QueueDiffStuffAug};
 
 mod entry_id;
 mod reader;
@@ -36,32 +37,45 @@ impl Archive {
 
         for entry_data in reader {
             let entry = entry_data?;
-            match ArchiveEntryId::from_filename(entry.name)? {
-                ArchiveEntryId::Block(id) => {
-                    if id.shard.is_masterchain() {
-                        res.mc_block_ids.insert(id.seqno, id);
-                    }
+            let header = ArchiveEntryId::from_filename(entry.name)?;
 
-                    let parsed = res.blocks.entry(id).or_default();
+            let id = &header.block_id;
+            if id.is_masterchain() {
+                res.mc_block_ids.insert(id.seqno, *id);
+            }
+
+            let parsed = res.blocks.entry(*id).or_default();
+
+            match header.kind {
+                ArchiveEntryIdKind::Block => {
                     anyhow::ensure!(parsed.block.is_none(), "duplicate block data for: {id}");
                     parsed.block = Some(data.slice_ref(entry.data));
                 }
-                ArchiveEntryId::Proof(id) => {
-                    res.mc_block_ids.insert(id.seqno, id);
-
-                    let parsed = res.blocks.entry(id).or_default();
+                ArchiveEntryIdKind::Proof => {
                     anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
-                    parsed.proof = Some((data.slice_ref(entry.data), false));
+                    parsed.proof = Some(data.slice_ref(entry.data));
                 }
-                ArchiveEntryId::ProofLink(id) => {
-                    let parsed = res.blocks.entry(id).or_default();
-                    anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
-                    parsed.proof = Some((data.slice_ref(entry.data), true));
+                ArchiveEntryIdKind::QueueDiff => {
+                    anyhow::ensure!(parsed.proof.is_none(), "duplicate queue diff for: {id}");
+                    parsed.queue_diff = Some(data.slice_ref(entry.data));
                 }
             }
         }
 
         Ok(res)
+    }
+
+    // TODO: Make async
+    pub fn get_entry_by_id(
+        &self,
+        id: &BlockId,
+    ) -> Result<(BlockStuffAug, BlockProofStuffAug, QueueDiffStuffAug), ArchiveError> {
+        // TODO: Rayon go brr
+        let block = self.get_block_by_id(id)?;
+        let proof = self.get_proof_by_id(id)?;
+        let queue_diff = self.get_queue_diff_by_id(id)?;
+
+        Ok((block, proof, queue_diff))
     }
 
     pub fn get_block_by_id(&self, id: &BlockId) -> Result<BlockStuffAug, ArchiveError> {
@@ -82,9 +96,21 @@ impl Archive {
             .proof
             .as_ref()
             .ok_or(ArchiveError::BlockNotFound)
-            .and_then(|(data, is_link)| {
-                let proof = BlockProofStuff::deserialize(id, data, *is_link)?;
+            .and_then(|data| {
+                let proof = BlockProofStuff::deserialize(id, data)?;
                 Ok(WithArchiveData::new::<Bytes>(proof, data.clone()))
+            })
+    }
+
+    pub fn get_queue_diff_by_id(&self, id: &BlockId) -> Result<QueueDiffStuffAug, ArchiveError> {
+        let entry = self.blocks.get(id).ok_or(ArchiveError::OutOfRange)?;
+        entry
+            .queue_diff
+            .as_ref()
+            .ok_or(ArchiveError::BlockNotFound)
+            .and_then(|data| {
+                let diff = QueueDiffStuff::deserialize(id, data)?;
+                Ok(WithArchiveData::new::<Bytes>(diff, data.clone()))
             })
     }
 }
@@ -92,7 +118,8 @@ impl Archive {
 #[derive(Default)]
 pub struct ArchiveDataEntry {
     pub block: Option<Bytes>,
-    pub proof: Option<(Bytes, bool)>,
+    pub proof: Option<Bytes>,
+    pub queue_diff: Option<Bytes>,
 }
 
 #[derive(Clone)]

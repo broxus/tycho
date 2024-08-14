@@ -193,8 +193,7 @@ impl proto::ControlServer for ControlServer {
             return Ok(proto::BlockProofResponse::NotFound);
         };
 
-        let is_link = !req.block_id.is_masterchain();
-        let data = blocks.load_block_proof_raw(&handle, is_link).await?;
+        let data = blocks.load_block_proof_raw(&handle).await?;
         Ok(proto::BlockProofResponse::Found { data })
     }
 

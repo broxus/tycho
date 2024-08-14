@@ -81,12 +81,12 @@ impl BlockMeta {
         self.test_flag(BLOCK_META_FLAG_HAS_PROOF)
     }
 
-    pub fn set_has_proof_link(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_PROOF_LINK)
+    pub fn set_has_queue_diff(&self) -> bool {
+        self.set_flag(BLOCK_META_FLAG_HAS_QUEUE_DIFF)
     }
 
-    pub fn has_proof_link(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_PROOF_LINK)
+    pub fn has_queue_diff(&self) -> bool {
+        self.test_flag(BLOCK_META_FLAG_HAS_QUEUE_DIFF)
     }
 
     pub fn set_has_state(&self) -> bool {
@@ -229,8 +229,8 @@ impl BriefBlockMeta {
 
 const BLOCK_META_FLAG_HAS_DATA: u64 = 1 << 32;
 const BLOCK_META_FLAG_HAS_PROOF: u64 = 1 << (32 + 1);
-const BLOCK_META_FLAG_HAS_PROOF_LINK: u64 = 1 << (32 + 2);
-// skip flag 3 (processed by external listener)
+const BLOCK_META_FLAG_HAS_QUEUE_DIFF: u64 = 1 << (32 + 2);
+
 const BLOCK_META_FLAG_HAS_STATE: u64 = 1 << (32 + 4);
 const BLOCK_META_FLAG_HAS_PERSISTENT_STATE: u64 = 1 << (32 + 5);
 const BLOCK_META_FLAG_HAS_NEXT_1: u64 = 1 << (32 + 6);
@@ -244,7 +244,7 @@ const BLOCK_META_FLAG_MOVING_TO_ARCHIVE: u64 = 1 << (32 + 12);
 const BLOCK_META_FLAG_MOVED_TO_ARCHIVE: u64 = 1 << (32 + 13);
 
 const CLEAR_DATA_MASK: u64 =
-    !(BLOCK_META_FLAG_HAS_DATA | BLOCK_META_FLAG_HAS_PROOF | BLOCK_META_FLAG_HAS_PROOF_LINK);
+    !(BLOCK_META_FLAG_HAS_DATA | BLOCK_META_FLAG_HAS_PROOF | BLOCK_META_FLAG_HAS_QUEUE_DIFF);
 
 #[cfg(test)]
 mod tests {
