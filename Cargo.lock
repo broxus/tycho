@@ -3212,6 +3212,7 @@ dependencies = [
  "rand",
  "smallvec",
  "thiserror",
+ "tl-proto",
  "tycho-util",
 ]
 
