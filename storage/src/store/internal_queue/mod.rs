@@ -208,4 +208,39 @@ impl InternalQueueStorage {
 
         Ok(())
     }
+
+    pub fn print_column_families_row_count(&self) -> Result<()> {
+        let column_families = vec![
+            (
+                self.db.shards_internal_messages.cf(),
+                "shards_internal_messages".to_string(),
+            ),
+            (
+                self.db.shards_internal_messages_session.cf(),
+                "shards_internal_messages_session".to_string(),
+            ), // Add other column families here as needed
+        ];
+
+        for cf in column_families {
+            let mut read_opts = ReadOptions::default();
+            let snapshot = self.snapshot();
+            read_opts.set_snapshot(&snapshot);
+
+            let iter = self.db.rocksdb().raw_iterator_cf_opt(&cf.0, read_opts);
+            let mut count: u64 = 0;
+
+            let mut iter = iter;
+            iter.seek_to_first();
+            while iter.valid() {
+                if iter.key().is_some() {
+                    count += 1;
+                }
+                iter.next();
+            }
+
+            tracing::info!(target: "local_debug", "CF: {:?}, count: {}", cf.1, count);
+        }
+
+        Ok(())
+    }
 }

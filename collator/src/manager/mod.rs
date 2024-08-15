@@ -120,10 +120,17 @@ where
     V: Validator,
 {
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
-        let state = state.clone();
+        let state_cloned = state.clone();
         self.spawn_task(method_to_async_closure!(
             detect_top_processed_to_anchor_and_notify_mempool,
-            state
+            state_cloned
+        ))
+        .await?;
+
+        let state_cloned = state.clone();
+        self.spawn_task(method_to_async_closure!(
+            commit_block_queue_diff,
+            state_cloned
         ))
         .await?;
 
@@ -354,6 +361,58 @@ where
         self.mpool_adapter
             .handle_top_processed_to_anchor(min_top_anchor_id)
             .await?;
+
+        Ok(())
+    }
+
+    /// Tries to determine top anchor that was processed to
+    /// by info from received state and notify mempool
+    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
+    async fn commit_block_queue_diff(&self, state: ShardStateStuff) -> Result<()> {
+        let block_short_id = state.block_id().as_short_id();
+
+        if !block_short_id.shard.is_masterchain() {
+            return Ok(());
+        }
+
+        let mut mc_shards = vec![];
+
+        for item in state.shards()?.iter() {
+            let (shard_ident, shard_descr) = item?;
+            if shard_descr.top_sc_block_updated {
+                if !shard_ident.is_masterchain() {
+                    mc_shards.push(BlockIdShort::from((shard_ident, shard_descr.seqno)));
+                } else {
+                    tracing::info!(target: "local_debug", "masterchain shard block detected: {shard_ident:?} {block_short_id:?}");
+                }
+            } else {
+                tracing::info!(target: "local_debug", "shard block not updated: {shard_ident:?} {block_short_id:?}");
+            }
+        }
+
+        if let Err(err) = self
+            .mq_adapter
+            .commit_diff(&block_short_id, mc_shards)
+            .await
+        {
+            tracing::warn!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Block ({}) sync: error committing message queue diff: {:?}",
+                block_short_id,
+                err,
+            );
+            bail!(
+                "Block ({}) sync: error committing message queue diff: {:?}",
+                block_short_id,
+                err
+            );
+        }
+
+        tracing::debug!(
+            target: tracing_targets::COLLATION_MANAGER,
+            "Block ({}) sync: message queue diff was committed",
+            block_short_id,
+        );
 
         Ok(())
     }
@@ -1924,22 +1983,22 @@ where
             for sent_block in sent_blocks.iter() {
                 // TODO: handle if diff does not exist
 
-                if let Err(err) = mq_adapter.commit_diff(&sent_block.key).await {
-                    tracing::warn!(
-                        target: tracing_targets::COLLATION_MANAGER,
-                        "Block ({}) sync: error committing message queue diff: {:?}",
-                        sent_block.key,
-                        err,
-                    );
-                    should_restore_blocks_in_cache = true;
-                    break;
-                } else {
-                    tracing::debug!(
-                        target: tracing_targets::COLLATION_MANAGER,
-                        "Block ({}) sync: message queue diff was committed",
-                        sent_block.key,
-                    );
-                }
+                // if let Err(err) = mq_adapter.commit_diff(&sent_block.key, &sent_block.entry.map(|entry| entry.candidate.top_shard_blocks_ids.as_slice())).await {
+                //     tracing::warn!(
+                //         target: tracing_targets::COLLATION_MANAGER,
+                //         "Block ({}) sync: error committing message queue diff: {:?}",
+                //         sent_block.key,
+                //         err,
+                //     );
+                //     should_restore_blocks_in_cache = true;
+                //     break;
+                // } else {
+                //     tracing::debug!(
+                //         target: tracing_targets::COLLATION_MANAGER,
+                //         "Block ({}) sync: message queue diff was committed",
+                //         sent_block.key,
+                //     );
+                // }
             }
 
             // do not clenup blocks if msg queue diffs commit was unsuccessful

@@ -68,6 +68,7 @@ pub trait LocalPersistentState<V: InternalMessageValue> {
     ) -> Box<dyn StateIterator<V>>;
 
     fn delete_messages(&self, shard: ShardIdent, key: InternalMessageKey) -> anyhow::Result<()>;
+    fn print_state(&self);
 }
 
 // IMPLEMENTATION
@@ -83,6 +84,13 @@ impl PersistentStateStdImpl {
 }
 
 impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
+    fn print_state(&self) {
+        self.storage
+            .internal_queue_storage()
+            .print_column_families_row_count()
+            .unwrap();
+    }
+
     fn snapshot(&self) -> OwnedSnapshot {
         self.storage.internal_queue_storage().snapshot()
     }
