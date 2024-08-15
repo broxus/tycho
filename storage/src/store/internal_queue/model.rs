@@ -50,7 +50,7 @@ impl StoredValue for ShardsInternalMessagesKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct InternalMessageKey {
     pub lt: u64,
     pub hash: HashBytes,

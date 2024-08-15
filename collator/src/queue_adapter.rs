@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_util::FastHashMap;
 
@@ -38,8 +38,8 @@ where
     ) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
-    async fn commit_diff(&self, diff_id: &BlockIdShort, mc_shards: Vec<BlockIdShort>)
-        -> Result<()>;
+
+    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
@@ -110,15 +110,10 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         Ok(())
     }
 
-    #[instrument(skip(self), fields(%diff_id))]
-    async fn commit_diff(
-        &self,
-        diff_id: &BlockIdShort,
-        mc_shards: Vec<BlockIdShort>,
-    ) -> Result<()> {
+    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
         let time = std::time::Instant::now();
 
-        self.queue.commit_diff(diff_id, mc_shards).await?;
+        self.queue.commit_diff(mc_top_blocks).await?;
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
             elapsed = ?time.elapsed(),

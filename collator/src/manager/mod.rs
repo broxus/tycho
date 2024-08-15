@@ -375,38 +375,30 @@ where
             return Ok(());
         }
 
-        let mut mc_shards = vec![];
+        let histogram =
+            HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
+
+        let mut top_blocks = vec![];
 
         for item in state.shards()?.iter() {
             let (shard_ident, shard_descr) = item?;
-            if shard_descr.top_sc_block_updated {
-                if !shard_ident.is_masterchain() {
-                    mc_shards.push(BlockIdShort::from((shard_ident, shard_descr.seqno)));
-                } else {
-                    tracing::info!(target: "local_debug", "masterchain shard block detected: {shard_ident:?} {block_short_id:?}");
-                }
-            } else {
-                tracing::info!(target: "local_debug", "shard block not updated: {shard_ident:?} {block_short_id:?}");
-            }
+            top_blocks.push((
+                BlockIdShort::from((shard_ident, shard_descr.seqno)),
+                shard_descr.top_sc_block_updated,
+            ));
         }
 
-        if let Err(err) = self
-            .mq_adapter
-            .commit_diff(&block_short_id, mc_shards)
-            .await
-        {
-            tracing::warn!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Block ({}) sync: error committing message queue diff: {:?}",
-                block_short_id,
-                err,
-            );
+        top_blocks.push((block_short_id, true));
+
+        if let Err(err) = self.mq_adapter.commit_diff(top_blocks).await {
             bail!(
                 "Block ({}) sync: error committing message queue diff: {:?}",
                 block_short_id,
                 err
             );
         }
+
+        histogram.finish();
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
@@ -1843,12 +1835,8 @@ where
                 blocks_to_send.push(mc_block_subgraph.mc_block);
 
                 // send all shard and master blocks
-                self.send_blocks_to_sync(
-                    self.mq_adapter.clone(),
-                    self.state_node_adapter.clone(),
-                    blocks_to_send,
-                )
-                .await?;
+                self.send_blocks_to_sync(self.state_node_adapter.clone(), blocks_to_send)
+                    .await?;
 
                 sync_elapsed = timer.elapsed();
             }
@@ -1914,7 +1902,6 @@ where
     /// 5. Return `Error` if it seems to be unrecoverable
     async fn send_blocks_to_sync(
         &self,
-        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         mut blocks_to_send: Vec<BlockCandidateToSend>,
     ) -> Result<()> {
@@ -1975,48 +1962,18 @@ where
             }
         }
 
-        let mut commit_diffs_elapsed = Default::default();
         if !should_restore_blocks_in_cache {
-            let histogram =
-                HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
-            // commit queue diffs for each block
-            for sent_block in sent_blocks.iter() {
-                // TODO: handle if diff does not exist
-
-                // if let Err(err) = mq_adapter.commit_diff(&sent_block.key, &sent_block.entry.map(|entry| entry.candidate.top_shard_blocks_ids.as_slice())).await {
-                //     tracing::warn!(
-                //         target: tracing_targets::COLLATION_MANAGER,
-                //         "Block ({}) sync: error committing message queue diff: {:?}",
-                //         sent_block.key,
-                //         err,
-                //     );
-                //     should_restore_blocks_in_cache = true;
-                //     break;
-                // } else {
-                //     tracing::debug!(
-                //         target: tracing_targets::COLLATION_MANAGER,
-                //         "Block ({}) sync: message queue diff was committed",
-                //         sent_block.key,
-                //     );
-                // }
-            }
-
-            // do not clenup blocks if msg queue diffs commit was unsuccessful
-            if !should_restore_blocks_in_cache {
-                let sent_blocks_keys = sent_blocks.iter().map(|b| b.key).collect::<Vec<_>>();
-                let _tracing_sent_blocks_descr = sent_blocks_keys
-                    .iter()
-                    .map(|key| key.to_string())
-                    .collect::<Vec<_>>();
-                tracing::debug!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "All blocks were successfully sent to sync. Will cleanup them from cache: {:?}",
-                    _tracing_sent_blocks_descr.as_slice(),
-                );
-                self.cleanup_blocks_from_cache(sent_blocks_keys)?;
-            }
-
-            commit_diffs_elapsed = histogram.finish();
+            let sent_blocks_keys = sent_blocks.iter().map(|b| b.key).collect::<Vec<_>>();
+            let _tracing_sent_blocks_descr = sent_blocks_keys
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>();
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "All blocks were successfully sent to sync. Will cleanup them from cache: {:?}",
+                _tracing_sent_blocks_descr.as_slice(),
+            );
+            self.cleanup_blocks_from_cache(sent_blocks_keys)?;
         }
 
         if should_restore_blocks_in_cache {
@@ -2038,7 +1995,6 @@ where
             total = histogram.finish().as_millis(),
             build_stuff_for_sync = build_stuff_for_sync_elapsed.as_millis(),
             sync = sync_stuff_elapsed.as_millis(),
-            commit_diffs = commit_diffs_elapsed.as_millis(),
             "send_blocks_to_sync timings",
         );
 

@@ -392,7 +392,7 @@ impl CollatorStdImpl {
                     "tycho_do_collate_apply_queue_diff_time",
                     &labels,
                 );
-                // TODO: should panic if result is error
+
                 mq_adapter.apply_diff(diff, block_id_short).await?;
                 let apply_queue_diff_elapsed = histogram.finish();
 

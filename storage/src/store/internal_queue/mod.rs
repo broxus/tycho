@@ -2,6 +2,7 @@ use std::u64;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
+use tycho_util::FastHashMap;
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
 
@@ -146,100 +147,63 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn commit(
-        &self,
-        source_shard: ShardIdent,
-        from: InternalMessageKey,
-        to: InternalMessageKey,
-    ) -> Result<()> {
+    pub fn commit(&self, ranges: FastHashMap<ShardIdent, InternalMessageKey>) -> Result<()> {
         let snapshot = self.snapshot();
-        let from = ShardsInternalMessagesKey {
-            shard_ident: source_shard,
-            internal_message_key: from,
-        };
-        let to = ShardsInternalMessagesKey {
-            shard_ident: source_shard,
-            internal_message_key: to,
-        };
-
         let mut batch = WriteBatch::default();
-        let mut readopts = self.db.shards_internal_messages_session.new_read_config();
-        readopts.set_snapshot(&snapshot);
 
-        let internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
-        let internal_messages_cf = self.db.shards_internal_messages.cf();
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&internal_messages_session_cf, readopts);
-
-        iter.seek(from.to_vec().as_slice());
-
-        while iter.valid() {
-            let (mut key, value) = match (iter.key(), iter.value()) {
-                (Some(key), Some(value)) => (key, value),
-                _ => break,
+        for range in ranges {
+            let from = ShardsInternalMessagesKey {
+                shard_ident: range.0,
+                internal_message_key: InternalMessageKey::default(),
+            };
+            let to = ShardsInternalMessagesKey {
+                shard_ident: range.0,
+                internal_message_key: range.1,
             };
 
-            let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
+            let mut readopts = self.db.shards_internal_messages_session.new_read_config();
+            readopts.set_snapshot(&snapshot);
 
-            if current_position > to || current_position < from {
-                break;
+            let internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
+            let internal_messages_cf = self.db.shards_internal_messages.cf();
+            let mut iter = self
+                .db
+                .rocksdb()
+                .raw_iterator_cf_opt(&internal_messages_session_cf, readopts);
+
+            iter.seek(from.to_vec().as_slice());
+
+            while iter.valid() {
+                let (mut key, value) = match (iter.key(), iter.value()) {
+                    (Some(key), Some(value)) => (key, value),
+                    _ => break,
+                };
+
+                let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
+
+                if current_position > to || current_position < from {
+                    break;
+                }
+
+                let dest_workchain = value[0] as i8;
+                let dest_prefix = u64::from_be_bytes(value[1..9].try_into().unwrap());
+                let cell_bytes = &value[9..];
+
+                batch.delete_cf(&internal_messages_session_cf, &current_position.to_vec());
+                Self::insert_message(
+                    &mut batch,
+                    internal_messages_cf,
+                    current_position,
+                    dest_workchain,
+                    dest_prefix,
+                    cell_bytes,
+                )?;
+
+                iter.next();
             }
-
-            let dest_workchain = value[0] as i8;
-            let dest_prefix = u64::from_be_bytes(value[1..9].try_into().unwrap());
-            let cell_bytes = &value[9..];
-
-            batch.delete_cf(&internal_messages_session_cf, &current_position.to_vec());
-            Self::insert_message(
-                &mut batch,
-                internal_messages_cf,
-                current_position,
-                dest_workchain,
-                dest_prefix,
-                cell_bytes,
-            )?;
-
-            iter.next();
         }
 
         self.db.rocksdb().write(batch)?;
-
-        Ok(())
-    }
-
-    pub fn print_column_families_row_count(&self) -> Result<()> {
-        let column_families = vec![
-            (
-                self.db.shards_internal_messages.cf(),
-                "shards_internal_messages".to_string(),
-            ),
-            (
-                self.db.shards_internal_messages_session.cf(),
-                "shards_internal_messages_session".to_string(),
-            ), // Add other column families here as needed
-        ];
-
-        for cf in column_families {
-            let mut read_opts = ReadOptions::default();
-            let snapshot = self.snapshot();
-            read_opts.set_snapshot(&snapshot);
-
-            let iter = self.db.rocksdb().raw_iterator_cf_opt(&cf.0, read_opts);
-            let mut count: u64 = 0;
-
-            let mut iter = iter;
-            iter.seek_to_first();
-            while iter.valid() {
-                if iter.key().is_some() {
-                    count += 1;
-                }
-                iter.next();
-            }
-
-            tracing::info!(target: "local_debug", "CF: {:?}, count: {}", cf.1, count);
-        }
 
         Ok(())
     }

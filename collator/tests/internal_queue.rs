@@ -84,6 +84,7 @@ async fn test_queue() -> anyhow::Result<()> {
             storage: storage.clone(),
         },
         persistent_state_factory: PersistentStateImplFactory { storage },
+        gc_queue_buffer_size: 100,
     };
 
     let queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, StoredObject> =
@@ -128,7 +129,12 @@ async fn test_queue() -> anyhow::Result<()> {
     }
 
     queue.apply_diff(diff, block).await?;
-    queue.commit_diff(&block).await?;
+
+    let mut top_blocks = vec![];
+
+    top_blocks.push((block, true));
+
+    queue.commit_diff(top_blocks).await?;
 
     let block2 = BlockIdShort {
         shard: ShardIdent::new_full(1),
@@ -170,8 +176,12 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
+    let mut top_blocks = vec![];
+
+    top_blocks.push((block2, true));
+
     queue.apply_diff(diff, block2).await?;
-    queue.commit_diff(&block2).await?;
+    queue.commit_diff(top_blocks).await?;
 
     let mut ranges = FastHashMap::default();
     ranges.insert(

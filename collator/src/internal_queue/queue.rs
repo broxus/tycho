@@ -1,29 +1,40 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use everscale_types::models::{BlockIdShort, ShardIdent};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, Semaphore};
+use tokio::task;
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::persistent_state::{
-    LocalPersistentState, PersistentState, PersistentStateConfig, PersistentStateFactory,
-    PersistentStateImplFactory, PersistentStateStdImpl,
+    PersistentState, PersistentStateFactory, PersistentStateImplFactory, PersistentStateStdImpl,
 };
 use crate::internal_queue::state::session_state::{
-    SessionState, SessionStateConfig, SessionStateFactory, SessionStateImplFactory,
-    SessionStateStdImpl,
+    SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::types::{
     InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
 };
+use crate::tracing_targets;
+
 // FACTORY
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
-    pub persistent_state_config: PersistentStateConfig,
-    pub session_state_config: SessionStateConfig,
+    pub gc_queue_buffer_size: usize,
 }
 
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            gc_queue_buffer_size: 100,
+        }
+    }
+}
 pub trait QueueFactory<V: InternalMessageValue> {
     type Queue: Queue<V>;
 
@@ -45,6 +56,7 @@ where
 pub struct QueueFactoryStdImpl {
     pub session_state_factory: SessionStateImplFactory,
     pub persistent_state_factory: PersistentStateImplFactory,
+    pub gc_queue_buffer_size: usize,
 }
 
 // TRAIT
@@ -64,11 +76,8 @@ where
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError>;
-    async fn commit_diff(
-        &self,
-        diff_id: &BlockIdShort,
-        mc_shards: Vec<BlockIdShort>,
-    ) -> Result<(), QueueError>;
+    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>)
+        -> Result<(), QueueError>;
 }
 
 // IMPLEMENTATION
@@ -87,6 +96,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
             session_state: Arc::new(session_state),
             persistent_state: Arc::new(persistent_state),
             diffs: Default::default(),
+            gc: GCQueue::new(self.gc_queue_buffer_size),
         }
     }
 }
@@ -99,13 +109,14 @@ where
 {
     session_state: Arc<S>,
     persistent_state: Arc<P>,
-    diffs: FastDashMap<BlockIdShort, QueueDiffWithMessages<V>>,
+    diffs: FastDashMap<ShardIdent, BTreeMap<u32, QueueDiffWithMessages<V>>>,
+    gc: GCQueue<V>,
 }
 
 impl<S, P, V> Queue<V> for QueueImpl<S, P, V>
 where
     S: SessionState<V> + Send + Sync,
-    P: PersistentState<V> + Send + Sync,
+    P: PersistentState<V> + Send + Sync + 'static,
     V: InternalMessageValue + Send + Sync,
 {
     async fn iterator(
@@ -127,89 +138,167 @@ where
         mut diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
-        tracing::info!(target: "local_debug", "apply diff {block_id_short:?}");
+        if self.diffs.contains_key(&block_id_short.shard) {
+            let shard_diffs = self.diffs.get_mut(&block_id_short.shard).unwrap();
+            if shard_diffs.contains_key(&block_id_short.seqno) {
+                panic!("Duplicate diff for block_id_short: {:?}", block_id_short)
+            }
+        }
+
         if !diff.messages.is_empty() {
             self.session_state
                 .add_messages(block_id_short.shard, &diff.messages)?;
-            diff.exclude_data();
+            diff.exclude_last_key();
         }
-        self.diffs.insert(block_id_short, diff);
+
+        let mut diffs = self.diffs.entry(block_id_short.shard).or_default();
+
+        diffs.insert(block_id_short.seqno, diff);
+
         Ok(())
     }
 
     async fn commit_diff(
         &self,
-        diff_id: &BlockIdShort,
-        mc_top_shard_blocks: Vec<BlockIdShort>,
+        mc_top_blocks: Vec<(BlockIdShort, bool)>,
     ) -> Result<(), QueueError> {
-        tracing::info!(target: "local_debug", "mc shards {mc_top_shard_blocks:?}");
-        let diffs_count = self.diffs.len();
-        tracing::info!(target: "local_debug", "state before commit {diff_id:?}. mc shards len {}. diffs_count: {diffs_count}", mc_top_shard_blocks.len());
-        let mut diffs = vec![];
+        let mut diffs_for_commit = vec![];
+        let mut shards_to_commit = FastHashMap::default();
+        let mut gc_ranges = FastHashMap::default();
 
-        let diff = self
-            .diffs
-            .remove(diff_id)
-            .ok_or(anyhow!("masterchain block diff not found {diff_id:?}"))?
-            .1;
+        for (block_id_short, top_shard_block_changed) in mc_top_blocks.iter() {
+            let mut diffs_to_remove = vec![];
+            let prev_shard_diffs = self.diffs.get_mut(&block_id_short.shard);
 
-        diffs.push(diff);
+            if let Some(mut shard_diffs) = prev_shard_diffs {
+                shard_diffs
+                    .range(..=block_id_short.seqno)
+                    .for_each(|(block_seqno, shard_diff)| {
+                        // find last key to commit for each shard
+                        diffs_for_commit.push(*block_id_short);
+                        let last_key = shard_diff.last_key.clone().unwrap_or_default();
 
-        for shard_block_id in mc_top_shard_blocks {
-            // let shard_block_diff = self.diffs.remove(&shard_block_id).ok_or(anyhow!("shard block diff not found {shard_block_id:?}"))?.1;
-            let shard_block_diff = self.diffs.remove(&shard_block_id);
-            if let Some(shard_block_diff) = shard_block_diff {
-                diffs.push(shard_block_diff.1);
-            }
-            // diffs.push(shard_block_diff);
-        }
+                        let current_last_key = shards_to_commit
+                            .entry(block_id_short.shard)
+                            .or_insert_with(|| last_key.clone());
 
-        let mut min_keys: FastHashMap<ShardIdent, InternalMessageKey> = FastHashMap::default();
+                        if last_key > *current_last_key {
+                            *current_last_key = last_key;
+                        }
 
-        for diff in diffs.iter() {
-            for (shard, key) in diff.processed_upto.iter() {
-                if let Some(min_key) = min_keys.get_mut(shard) {
-                    if key < min_key {
-                        *min_key = key.clone();
-                    }
-                } else {
-                    min_keys.insert(shard.clone(), key.clone());
+                        // find min processed_upto for each shard for GC
+                        if *block_seqno == block_id_short.seqno && *top_shard_block_changed {
+                            for processed_upto in shard_diff.processed_upto.iter() {
+                                let last_key = gc_ranges
+                                    .entry(*processed_upto.0)
+                                    .or_insert_with(|| processed_upto.1.clone());
+
+                                if processed_upto.1 < last_key {
+                                    *last_key = processed_upto.1.clone();
+                                }
+                            }
+                        }
+
+                        diffs_to_remove.push(*block_seqno);
+                    });
+
+                for seqno in diffs_to_remove {
+                    shard_diffs.remove(&seqno);
                 }
             }
-
-            let first_key = Some(InternalMessageKey::default());
-            let last_key = diff.keys.last();
-
-            if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
-                self.session_state
-                    .commit_messages(diff_id.shard, &first_key, last_key)?;
-            }
         }
 
-        tracing::info!(target: "local_debug", "state before gc");
-        self.persistent_state.print_state();
+        self.session_state.commit_messages(&shards_to_commit)?;
 
-        for (shard, key) in min_keys.iter() {
-            self.persistent_state
-                .delete_messages(shard.clone(), key.clone())?;
+        let uncommitted_diffs_count: usize = self.diffs.iter().map(|r| r.value().len()).sum();
+        metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
+            .increment(uncommitted_diffs_count as u64);
+
+        for (shard, end_key) in gc_ranges.iter() {
+            let job = GCJob {
+                shard: *shard,
+                end_key: end_key.clone(),
+                persistent_state: self.persistent_state.clone(),
+            };
+            self.gc.enqueue(job).await;
         }
-
-        let diffs_count = self.diffs.len();
-
-        tracing::info!(target: "local_debug", "state after gc. diffs_count {diffs_count}");
-        self.persistent_state.print_state();
 
         Ok(())
     }
 }
 
-#[derive(Default)]
-struct DiffBuffer<V: InternalMessageValue> {
-    diffs: FastDashMap<BlockIdShort, QueueDiffWithMessages<V>>,
+#[derive(Clone)]
+pub struct GCQueue<V: InternalMessageValue> {
+    sender: mpsc::Sender<GCJob<V>>,
+    buffer_size: usize,
 }
 
-impl<V: InternalMessageValue> DiffBuffer<V> {
-    pub fn insert(&mut self, block_id_short: BlockIdShort, diff: QueueDiffWithMessages<V>) {
-        self.diffs.insert(block_id_short, diff);
+impl<V: InternalMessageValue> GCQueue<V> {
+    pub fn new(buffer_size: usize) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<GCJob<V>>(buffer_size);
+        let semaphore = Arc::new(Semaphore::new(1));
+
+        // Spawn the worker thread
+        task::spawn({
+            let semaphore = semaphore.clone();
+            let cloned_sender = sender.clone();
+            async move {
+                while let Some(job) = receiver.recv().await {
+                    job.run(semaphore.clone()).await;
+
+                    let current_queue_size = buffer_size - cloned_sender.capacity();
+
+                    metrics::counter!("tycho_internal_queue_gc_current_queue_size")
+                        .increment(current_queue_size as u64);
+                }
+            }
+        });
+
+        GCQueue {
+            sender,
+            buffer_size,
+        }
+    }
+
+    pub async fn enqueue(&self, job: GCJob<V>) {
+        self.sender.send(job).await.unwrap();
+
+        let current_queue_size = self.buffer_size - self.sender.capacity();
+
+        metrics::counter!("tycho_internal_queue_gc_current_queue_size")
+            .increment(current_queue_size as u64);
+    }
+}
+
+pub struct GCJob<V: InternalMessageValue> {
+    shard: ShardIdent,
+    end_key: InternalMessageKey,
+    persistent_state: Arc<dyn PersistentState<V> + Send + Sync>,
+}
+
+impl<V: InternalMessageValue> GCJob<V> {
+    pub async fn run(&self, semaphore: Arc<Semaphore>) {
+        let shard = self.shard;
+        let end_key = self.end_key.clone();
+        let persistent_state = self.persistent_state.clone();
+
+        let _permit = semaphore
+            .acquire_owned()
+            .await
+            .expect("Failed to acquire semaphore");
+
+        let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time");
+        let cloned_end_key = end_key.clone();
+        task::spawn_blocking(move || {
+            if let Err(e) = persistent_state.delete_messages(shard, cloned_end_key) {
+                tracing::error!(target: tracing_targets::MQ, "Failed to delete messages: {e:?}");
+            }
+        })
+        .await
+        .expect("Failed to spawn blocking task");
+        histogram.finish();
+
+        let labels = [("shard", shard.to_string())];
+        metrics::gauge!("tycho_internal_queue_processed_upto", &labels).set(end_key.lt as f64);
     }
 }
