@@ -9,7 +9,9 @@ use tycho_util::FastHashMap;
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
 use super::types::WorkingState;
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue, QueueDiff};
+use crate::internal_queue::types::{
+    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::ProcessedUptoInfoStuff;
@@ -56,7 +58,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     ) -> Result<(
         FastHashMap<ShardIdent, InternalMessageKey>,
         bool,
-        QueueDiff<V>,
+        QueueDiffWithMessages<V>,
     )> {
         let current_position = self.iterator().current_position();
 

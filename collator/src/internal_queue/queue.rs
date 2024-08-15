@@ -14,7 +14,9 @@ use crate::internal_queue::state::session_state::{
     SessionStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::StateIterator;
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue, QueueDiff};
+use crate::internal_queue::types::{
+    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
+};
 // FACTORY
 
 pub struct QueueConfig {
@@ -59,7 +61,7 @@ where
     ) -> Vec<Box<dyn StateIterator<V>>>;
     async fn apply_diff(
         &self,
-        diff: QueueDiff<V>,
+        diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError>;
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError>;
@@ -93,7 +95,7 @@ where
 {
     session_state: Arc<S>,
     persistent_state: Arc<P>,
-    diffs: FastDashMap<BlockIdShort, QueueDiff<V>>,
+    diffs: FastDashMap<BlockIdShort, QueueDiffWithMessages<V>>,
 }
 
 impl<S, P, V> Queue<V> for QueueImpl<S, P, V>
@@ -118,7 +120,7 @@ where
 
     async fn apply_diff(
         &self,
-        mut diff: QueueDiff<V>,
+        mut diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
         if !diff.messages.is_empty() {

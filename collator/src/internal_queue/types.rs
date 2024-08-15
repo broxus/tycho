@@ -10,13 +10,13 @@ use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, ShardIdent}
 use super::state::state_iterator::MessageExt;
 
 #[derive(Default, Debug, Clone)]
-pub struct QueueDiff<V: InternalMessageValue> {
+pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<InternalMessageKey, Arc<V>>,
     pub processed_upto: BTreeMap<ShardIdent, InternalMessageKey>,
     pub keys: Vec<InternalMessageKey>,
 }
 
-impl<V: InternalMessageValue> QueueDiff<V> {
+impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
     pub fn new() -> Self {
         Self {
             messages: BTreeMap::new(),
@@ -32,7 +32,7 @@ impl<V: InternalMessageValue> QueueDiff<V> {
 }
 
 pub struct QueueFullDiff<V: InternalMessageValue> {
-    pub diff: QueueDiff<V>,
+    pub diff: QueueDiffWithMessages<V>,
     pub messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
 }
 

@@ -9,7 +9,9 @@ use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
 use crate::internal_queue::state::session_state::SessionStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue, QueueDiff};
+use crate::internal_queue::types::{
+    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
+};
 use crate::tracing_targets;
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
@@ -29,7 +31,11 @@ where
         shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&self, diff: QueueDiff<V>, block_id_short: BlockIdShort) -> Result<()>;
+    async fn apply_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+    ) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<()>;
@@ -82,7 +88,11 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     }
 
     #[instrument(skip_all, fields(%block_id_short))]
-    async fn apply_diff(&self, diff: QueueDiff<V>, block_id_short: BlockIdShort) -> Result<()> {
+    async fn apply_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+    ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_upto = diff.processed_upto.clone();

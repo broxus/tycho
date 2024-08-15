@@ -10,7 +10,7 @@ use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageExt};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{
-    InternalMessageKey, InternalMessageValue, QueueDiff, QueueFullDiff,
+    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
 };
 
 pub trait QueueIterator<V: InternalMessageValue>: Send {
@@ -25,7 +25,7 @@ pub trait QueueIterator<V: InternalMessageValue>: Send {
     /// Extract diff from iterator
     fn extract_full_diff(&mut self) -> QueueFullDiff<V>;
     /// Take diff from iterator
-    fn take_diff(&self) -> QueueDiff<V>;
+    fn take_diff(&self) -> QueueDiffWithMessages<V>;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
     fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
@@ -125,7 +125,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
             "Extracting diff from iterator. New messages count: {}",
             self.new_messages.len());
 
-        let mut diff = QueueDiff::new();
+        let mut diff = QueueDiffWithMessages::new();
 
         // fill processed_upto
         for (shard_id, message_key) in self.last_processed_message.iter() {
@@ -149,13 +149,13 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         full_diff
     }
 
-    fn take_diff(&self) -> QueueDiff<V> {
+    fn take_diff(&self) -> QueueDiffWithMessages<V> {
         tracing::trace!(
             target: crate::tracing_targets::MQ,
             "Taking diff from iterator. New messages count: {}",
             self.new_messages.len());
 
-        let mut diff = QueueDiff::new();
+        let mut diff = QueueDiffWithMessages::new();
 
         // actually we update last processed message via commit()
         // during the execution, so we can just use value as is

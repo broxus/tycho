@@ -22,7 +22,7 @@ use super::types::{
     ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
@@ -138,7 +138,7 @@ impl ExecutionManager {
     pub fn _release_iterator_adapter(
         &mut self,
         mq_iterator_adapter: QueueIteratorAdapter<EnqueuedMessage>,
-    ) -> Result<(bool, QueueDiff<EnqueuedMessage>)> {
+    ) -> Result<(bool, QueueDiffWithMessages<EnqueuedMessage>)> {
         let has_pending_messages_in_buffer = self.has_pending_messages_in_buffer();
         let (current_positions, has_pending_internals, diff) =
             mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;

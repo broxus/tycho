@@ -12,7 +12,9 @@ use tycho_collator::internal_queue::state::session_state::{
     SessionStateImplFactory, SessionStateStdImpl,
 };
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use tycho_collator::internal_queue::types::{InternalMessageKey, InternalMessageValue, QueueDiff};
+use tycho_collator::internal_queue::types::{
+    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
+};
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
 
@@ -90,7 +92,7 @@ async fn test_queue() -> anyhow::Result<()> {
         shard: ShardIdent::new_full(0),
         seqno: 0,
     };
-    let mut diff = QueueDiff::new();
+    let mut diff = QueueDiffWithMessages::new();
 
     let stored_objects = vec![
         create_stored_object(
@@ -133,7 +135,7 @@ async fn test_queue() -> anyhow::Result<()> {
         seqno: 1,
     };
 
-    let mut diff = QueueDiff::new();
+    let mut diff = QueueDiffWithMessages::new();
 
     let stored_objects2 = vec![
         create_stored_object(
