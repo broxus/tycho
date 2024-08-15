@@ -308,15 +308,20 @@ async fn overlay_server_blocks() -> Result<()> {
                         ..
                     } => {
                         let block = BlockStuff::deserialize_checked(block_id, block)?;
-                        assert_eq!(block.as_ref(), archive_data.block.unwrap().as_ref());
+
+                        let archive_block = BlockStuff::deserialize_checked(
+                            &block_id,
+                            archive_data.block.unwrap().as_ref(),
+                        )?;
+                        assert_eq!(block.as_ref(), archive_block.block());
 
                         let proof = BlockProofStuff::deserialize(block_id, proof, false)?;
-                        let archive_proof = archive_data.proof.unwrap();
-                        assert_eq!(
-                            proof.as_ref().proof_for,
-                            archive_proof.data.as_ref().proof_for
-                        );
-                        assert_eq!(proof.as_ref().root, archive_proof.data.as_ref().root);
+
+                        let (proof_data, is_link) = archive_data.proof.unwrap();
+                        let archive_proof =
+                            BlockProofStuff::deserialize(block_id, proof_data.as_ref(), is_link)?;
+                        assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
+                        assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
                     }
                     _ => anyhow::bail!("block not found"),
                 }

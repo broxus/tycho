@@ -718,7 +718,7 @@ mod test {
     }
 
     fn get_empty_block() -> BlockStuffAug {
-        let block_data = include_bytes!("../../../core/tests/data/real_empty_block.bin");
+        let block_data = include_bytes!("../../../core/tests/data/empty_block.bin");
 
         let root = Boc::decode(block_data).unwrap();
         let block = root.parse::<Block>().unwrap();

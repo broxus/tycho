@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
+use tycho_block_util::block::BlockStuff;
 use tycho_core::block_strider::{BlockProvider, BlockchainBlockProvider, StorageBlockProvider};
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
@@ -26,9 +27,11 @@ async fn storage_block_strider() -> anyhow::Result<()> {
 
             if let Some(block) = block {
                 let block = block?;
-
                 assert_eq!(&block_id, block.id());
-                assert_eq!(data.block.unwrap().as_ref(), block.block());
+
+                let archive_block =
+                    BlockStuff::deserialize_checked(&block_id, data.block.unwrap().as_ref())?;
+                assert_eq!(archive_block.block(), block.block());
             }
         }
     }
@@ -120,17 +123,17 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
     let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
 
     let archive = common::storage::get_archive()?;
-    for (block_id, data) in archive.blocks {
-        if block_id.shard.is_masterchain() {
-            let block = provider.get_block(&block_id).await;
-            assert!(block.is_some());
+    for block_id in archive.mc_block_ids.values() {
+        let block = provider.get_block(&block_id).await;
+        assert!(block.is_some());
 
-            if let Some(block) = block {
-                let block = block?;
+        if let Some(block) = block {
+            let block = block?;
+            assert_eq!(block_id, block.id());
 
-                assert_eq!(&block_id, block.id());
-                assert_eq!(data.block.unwrap().as_ref(), block.block());
-            }
+            let archive_block =
+                BlockStuff::deserialize_checked(&block_id, block.as_new_archive_data()?);
+            assert_eq!(archive_block?.block(), block.block());
         }
     }
 

@@ -72,8 +72,7 @@ impl Archive {
             .ok_or(ArchiveError::BlockNotFound)
             .and_then(|data| {
                 let block = BlockStuff::deserialize_checked(id, data)?;
-                let archive_data = Bytes::copy_from_slice(data);
-                Ok(WithArchiveData::new::<Bytes>(block, archive_data))
+                Ok(WithArchiveData::new::<Bytes>(block, data.clone()))
             })
     }
 
@@ -85,8 +84,7 @@ impl Archive {
             .ok_or(ArchiveError::BlockNotFound)
             .and_then(|(data, is_link)| {
                 let proof = BlockProofStuff::deserialize(id, data, *is_link)?;
-                let archive_data = Bytes::copy_from_slice(data);
-                Ok(WithArchiveData::new::<Bytes>(proof, archive_data))
+                Ok(WithArchiveData::new::<Bytes>(proof, data.clone()))
             })
     }
 }
