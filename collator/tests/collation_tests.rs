@@ -103,23 +103,13 @@ async fn test_collation_process_on_stubs() {
 
     tracing::info!("Trying to start CollationManager");
 
-    let queue_config = QueueConfig {
-        persistent_state_config: PersistentStateConfig {
-            storage: storage.clone(),
-        },
-        session_state_config: SessionStateConfig {
-            storage: storage.clone(),
-        },
-    };
-
-    let session_state_factory =
-        SessionStateImplFactory::new(queue_config.persistent_state_config.storage.clone());
-    let persistent_state_factory =
-        PersistentStateImplFactory::new(queue_config.persistent_state_config.storage);
+    let session_state_factory = SessionStateImplFactory::new(storage.clone());
+    let persistent_state_factory = PersistentStateImplFactory::new(storage.clone());
 
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory,
         persistent_state_factory,
+        gc_queue_buffer_size: 100,
     };
     let queue = queue_factory.create();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);

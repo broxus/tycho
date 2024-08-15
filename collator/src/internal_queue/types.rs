@@ -13,7 +13,7 @@ use super::state::state_iterator::MessageExt;
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<InternalMessageKey, Arc<V>>,
     pub processed_upto: BTreeMap<ShardIdent, InternalMessageKey>,
-    pub keys: Vec<InternalMessageKey>,
+    pub last_key: Option<InternalMessageKey>,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -21,12 +21,12 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
         Self {
             messages: BTreeMap::new(),
             processed_upto: BTreeMap::new(),
-            keys: Vec::new(),
+            last_key: None,
         }
     }
 
-    pub fn exclude_data(&mut self) {
-        self.keys = self.messages.keys().cloned().collect();
+    pub fn exclude_last_key(&mut self) {
+        self.last_key = self.messages.last_key_value().map(|(key, _)| key.clone());
         self.messages.clear();
     }
 }

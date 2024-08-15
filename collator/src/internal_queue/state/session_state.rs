@@ -76,12 +76,7 @@ pub trait LocalSessionState<V: InternalMessageValue> {
         ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
     ) -> Box<dyn StateIterator<V>>;
 
-    fn commit_messages(
-        &self,
-        shard: ShardIdent,
-        from: &InternalMessageKey,
-        to: &InternalMessageKey,
-    ) -> Result<()>;
+    fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, InternalMessageKey>) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -147,14 +142,11 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
         Box::new(StateIteratorImpl::new(shard_iters_with_ranges, receiver))
     }
 
-    fn commit_messages(
-        &self,
-        shard: ShardIdent,
-        from: &InternalMessageKey,
-        to: &InternalMessageKey,
-    ) -> Result<()> {
-        self.storage
-            .internal_queue_storage()
-            .commit(shard, from.clone().into(), to.clone().into())
+    fn commit_messages(&self, ranges: &FastHashMap<ShardIdent, InternalMessageKey>) -> Result<()> {
+        let ranges = ranges
+            .iter()
+            .map(|(shard, key)| (*shard, key.clone().into()))
+            .collect::<FastHashMap<_, _>>();
+        self.storage.internal_queue_storage().commit(ranges)
     }
 }

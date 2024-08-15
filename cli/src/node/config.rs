@@ -5,6 +5,7 @@ use anyhow::Result;
 use everscale_crypto::ed25519;
 use everscale_types::cell::HashBytes;
 use serde::{Deserialize, Serialize};
+use tycho_collator::internal_queue::queue::QueueConfig;
 use tycho_collator::types::CollationConfig;
 use tycho_collator::validator::ValidatorStdImplConfig;
 use tycho_control::ControlServerConfig;
@@ -78,6 +79,8 @@ pub struct NodeConfig {
     pub profiling: MemoryProfilingConfig,
 
     pub logger: LoggerConfig,
+
+    pub internal_queue_config: QueueConfig,
 }
 
 impl Default for NodeConfig {
@@ -102,6 +105,7 @@ impl Default for NodeConfig {
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),
             logger: Default::default(),
+            internal_queue_config: QueueConfig::default(),
         }
     }
 }

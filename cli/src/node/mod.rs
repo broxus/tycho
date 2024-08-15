@@ -12,7 +12,7 @@ use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::collator::CollatorStdImplFactory;
-use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
+use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
 use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
 use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
@@ -304,6 +304,7 @@ pub struct Node {
 
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
+    internal_queue_config: QueueConfig,
 }
 
 impl Node {
@@ -426,6 +427,7 @@ impl Node {
             blockchain_block_provider_config: node_config.blockchain_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
+            internal_queue_config: node_config.internal_queue_config,
         })
     }
 
@@ -520,6 +522,7 @@ impl Node {
         let queue_factory = QueueFactoryStdImpl {
             session_state_factory,
             persistent_state_factory,
+            gc_queue_buffer_size: self.internal_queue_config.gc_queue_buffer_size,
         };
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);

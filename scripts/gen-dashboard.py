@@ -1,6 +1,17 @@
 import sys
 from typing import Union, List, Literal
 
+from dashboard_builder import (
+    Layout,
+    timeseries_panel,
+    target,
+    template,
+    Expr,
+    expr_sum_rate,
+    heatmap_panel,
+    yaxis,
+    expr_operator,
+)
 from grafanalib import formatunits as UNITS, _gen
 from grafanalib.core import (
     Dashboard,
@@ -14,17 +25,6 @@ from grafanalib.core import (
     GRAPH_TOOLTIP_MODE_SHARED_CROSSHAIR,
 )
 
-from dashboard_builder import (
-    Layout,
-    timeseries_panel,
-    target,
-    template,
-    Expr,
-    expr_sum_rate,
-    heatmap_panel,
-    yaxis,
-    expr_operator,
-)
 
 # todo: do something with this metrics
 # tycho_core_last_mc_block_applied
@@ -60,6 +60,7 @@ def create_gauge_panel(
     title: str,
     unit_format=UNITS.NUMBER_FORMAT,
     labels=[],
+    legend_format: str | None = None,
 ) -> Panel:
     if isinstance(expr, str):
         expr = [Expr(metric=expr, label_selectors=labels)]
@@ -73,7 +74,9 @@ def create_gauge_panel(
             "expr must be a string, a list of strings, or a list of Expr objects."
         )
 
-    legend_format = generate_legend_format(labels)
+    if legend_format is None:
+        legend_format = generate_legend_format(labels)
+
     targets = [target(e, legend_format=legend_format) for e in expr]
 
     return timeseries_panel(
@@ -855,12 +858,8 @@ def collator_message_metrics() -> RowPanel:
 
 
 def collator_queue_metrics() -> RowPanel:
+    legend_format = "{{instance}} - {{shard}}"
     metrics = [
-        create_gauge_panel(
-            "tycho_session_iterator_messages_all",
-            "Number of internals in the iterator",
-            labels=['workchain=~"$workchain"'],
-        ),
         create_gauge_panel(
             "tycho_do_collate_int_msgs_queue_calc", "Calculated Internal queue len"
         ),
@@ -870,6 +869,18 @@ def collator_queue_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_do_collate_int_dequeue_count", "Dequeued int msgs count"
         ),
+        create_gauge_panel(
+            "tycho_internal_queue_processed_upto",
+            "Queue clean until",
+            legend_format=legend_format,
+        ),
+        create_counter_panel(
+            "tycho_internal_queue_gc_current_queue_size", "GC queue size"
+        ),
+        create_counter_panel(
+            "tycho_internal_queue_uncommitted_diffs_count", "Uncommited diffs"
+        ),
+        create_heatmap_panel("tycho_internal_queue_gc_time", "GC run time"),
     ]
     return create_row("collator: Queue Metrics", metrics)
 
