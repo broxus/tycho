@@ -14,6 +14,7 @@ use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
 ///
 /// Note methods encapsulate mutability to preserve this invariant, a bit less panics
 #[derive(Default)]
+#[cfg_attr(feature = "test", derive(Clone))]
 pub struct DagLocation {
     // one of the points at current location
     // was proven by the next point of a node;

@@ -92,6 +92,11 @@ impl DagRound {
         self.0.anchor_stage.as_ref()
     }
 
+    #[cfg(feature = "test")]
+    pub fn locations(&self) -> &FastDashMap<PeerId, DagLocation> {
+        &self.0.locations
+    }
+
     fn edit<F, R>(&self, author: &PeerId, edit: F) -> R
     where
         F: FnOnce(&mut DagLocation) -> R,

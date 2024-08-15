@@ -40,7 +40,7 @@ impl Verifier {
         let _task_duration = HistogramGuard::begin(ValidateContext::VERIFY_DURATION);
         let result = if !point.is_integrity_ok() {
             Err(DagPoint::NotExists(Arc::new(point.id()))) // cannot use point body
-        } else if !(point.is_well_formed() && Self::is_list_of_signers_ok(point, peer_schedule)) {
+        } else if !(point.is_well_formed() && Self::is_peer_usage_ok(point, peer_schedule)) {
             // point links, etc. will not be used
             Err(DagPoint::Invalid(point.clone()))
         } else {
@@ -521,10 +521,14 @@ impl Verifier {
     }
 
     /// blame author and every dependent point's author
-    fn is_list_of_signers_ok(
+    fn is_peer_usage_ok(
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
     ) -> bool {
+        if point.body().location.round == MempoolConfig::GENESIS_ROUND {
+            // `is_well_formed()` ensured that genesis has empty includes, witness and evidence
+            return true;
+        }
         let [
             witness_peers/* @ r-2 */ ,
             includes_peers /* @ r-1 */ ,

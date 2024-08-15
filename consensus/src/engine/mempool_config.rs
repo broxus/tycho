@@ -28,6 +28,7 @@ impl MempoolConfig {
     }
 
     /// the least amount of [Round]s that are kept in [`Dag`](crate::dag::Dag)
+    /// includes anchor candidate round, though it is committed at the next attempt
     pub const COMMIT_DEPTH: u8 = 20;
 
     pub const GENESIS_ROUND: Round = Round(1);

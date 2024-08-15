@@ -102,11 +102,6 @@ impl Engine {
             crate::test_utils::genesis_point_id(),
             "genesis point id does not match one from config"
         );
-        assert!(
-            genesis.is_integrity_ok(),
-            "genesis point does not pass integrity check"
-        );
-        assert!(genesis.is_well_formed(), "genesis point is not well formed");
         // finished epoch
         {
             let mut guard = self.peer_schedule.write();
@@ -119,11 +114,12 @@ impl Engine {
             );
             guard.rotate(&peer_schedule);
             // current epoch
-            guard.set_next_start(genesis.body().location.round.next(), &peer_schedule);
+            guard.set_next_start(MempoolConfig::GENESIS_ROUND.next(), &peer_schedule);
             // start updater only after peers are populated into schedule
             guard.set_next_peers(next_peers, &peer_schedule, true);
             guard.rotate(&peer_schedule);
         }
+        Verifier::verify(&genesis, &self.peer_schedule).expect("genesis failed to verify");
 
         let current_dag_round = DagRound::genesis(&genesis, &self.peer_schedule);
         let next_dag_round = current_dag_round.next(&self.peer_schedule);
@@ -269,14 +265,13 @@ impl Engine {
 
             let commit_run = rayon_run({
                 let mut dag = self.dag;
-                let next_dag_round = next_dag_round.clone();
                 let committed_tx = self.committed.clone();
                 let round_effects = round_effects.clone();
                 move || {
                     let task_start = Instant::now();
                     let _guard = round_effects.span().enter();
 
-                    let committed = dag.commit(next_dag_round);
+                    let committed = dag.commit();
 
                     round_effects.commit_metrics(&committed);
                     round_effects.log_committed(&committed);

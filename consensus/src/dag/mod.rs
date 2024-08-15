@@ -1,3 +1,5 @@
+#[cfg(feature = "test")]
+pub use anchor_stage::*;
 pub use dag::*;
 pub use dag_location::InclusionState;
 pub use dag_round::*;
