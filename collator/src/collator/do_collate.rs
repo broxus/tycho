@@ -1,4 +1,4 @@
-use std::collections::{hash_map, VecDeque};
+use std::collections::{hash_map, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1191,38 +1191,49 @@ impl CollatorStdImpl {
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
+        // TODO: consider split/merge logic
+
         tracing::trace!(target: tracing_targets::COLLATOR,
             "import_new_shard_top_blocks_for_masterchain()",
         );
 
-        let gen_utime = collation_data_builder.gen_utime;
-        for TopBlockDescription {
-            block_id,
-            block_info,
-            ext_processed_to_anchor_id,
-            value_flow,
-            proof_funds,
-            creators,
-        } in top_shard_blocks_info
-        {
-            let mut shard_descr = Box::new(ShardDescription::from_block_info(
+        // convert to map for merging
+        let top_shard_blocks_info_map = top_shard_blocks_info
+            .into_iter()
+            .map(|info| (info.block_id.shard, info))
+            .collect::<HashMap<_, _>>();
+
+        // update existing shard descriptions for which top blocks were not changed
+        for (shard_id, prev_shard_descr) in collation_data_builder.shards_mut()? {
+            if !top_shard_blocks_info_map.contains_key(shard_id) {
+                prev_shard_descr.top_sc_block_updated = false;
+            }
+        }
+
+        // update other shard descriptions from top blocks
+        for (shard_id, top_block_descr) in top_shard_blocks_info_map {
+            let TopBlockDescription {
+                block_id,
+                block_info,
+                ext_processed_to_anchor_id,
+                value_flow,
+                proof_funds,
+                creators,
+            } = top_block_descr;
+
+            let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
                 block_id,
                 &block_info,
                 ext_processed_to_anchor_id,
                 &value_flow,
             ));
-            shard_descr.reg_mc_seqno = collation_data_builder.block_id_short.seqno;
+            new_shard_descr.reg_mc_seqno = collation_data_builder.block_id_short.seqno;
 
-            collation_data_builder.update_shards_max_end_lt(shard_descr.end_lt);
-
-            let shard_id = block_id.shard;
-
-            collation_data_builder.top_shard_blocks_ids.push(block_id);
-
-            if shard_descr.gen_utime > gen_utime {
+            // run checks
+            if new_shard_descr.gen_utime > collation_data_builder.gen_utime {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "ShardTopBlockDescr for {} skipped: it claims to be generated at {} while it is still {}",
-                    shard_id, shard_descr.gen_utime, gen_utime,
+                    "ShardTopBlockDescr for {} skipped: it generated at {}, but master block should be generated at {}",
+                    shard_id, new_shard_descr.gen_utime, collation_data_builder.gen_utime,
                 );
                 continue;
             }
@@ -1238,12 +1249,25 @@ impl CollatorStdImpl {
             // TODO: Check may update shard block info
             // TODO: Implement merge algorithm in future
 
-            self.update_shard_block_info(
-                collation_data_builder.shards_mut()?,
-                shard_id,
-                shard_descr,
-            )?;
+            // update shards and collation data
+            collation_data_builder.update_shards_max_end_lt(new_shard_descr.end_lt);
 
+            match collation_data_builder.shards_mut()?.entry(shard_id) {
+                hash_map::Entry::Vacant(entry) => {
+                    // if shard was not present before consider top shard block was changed
+                    new_shard_descr.top_sc_block_updated = true;
+                    entry.insert(new_shard_descr);
+                }
+                hash_map::Entry::Occupied(mut entry) => {
+                    // set flag if top shard block seqno changed
+                    let prev_shard_descr = entry.get();
+                    new_shard_descr.top_sc_block_updated =
+                        prev_shard_descr.seqno != new_shard_descr.seqno;
+                    entry.insert(new_shard_descr);
+                }
+            }
+
+            collation_data_builder.top_shard_blocks_ids.push(block_id);
             collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
             collation_data_builder.register_shard_block_creators(creators)?;
         }
@@ -1256,36 +1280,6 @@ impl CollatorStdImpl {
             .checked_add(&shard_fees.fees)?;
         collation_data_builder.value_flow.fees_imported = shard_fees.fees;
 
-        Ok(())
-    }
-
-    pub fn update_shard_block_info(
-        &self,
-        shards: &mut FastHashMap<ShardIdent, Box<ShardDescription>>,
-        shard_id: ShardIdent,
-        mut shard_description: Box<ShardDescription>,
-    ) -> Result<()> {
-        match shards.entry(shard_id) {
-            hash_map::Entry::Vacant(entry) => {
-                // if shard was not present before consider top shard block was changed
-                shard_description.top_sc_block_updated = true;
-                entry.insert(shard_description);
-            }
-            hash_map::Entry::Occupied(mut entry) => {
-                // set flag if top shard block seqno changed
-                let prev_shard_descr = entry.get();
-                shard_description.top_sc_block_updated =
-                    prev_shard_descr.seqno != shard_description.seqno;
-                tracing::trace!(target: tracing_targets::COLLATOR,
-                    %shard_id,
-                    shard_description.top_sc_block_updated,
-                    "prev_seqno={}, new_seqno={}",
-                    prev_shard_descr.seqno,
-                    shard_description.seqno,
-                );
-                entry.insert(shard_description);
-            }
-        }
         Ok(())
     }
 
