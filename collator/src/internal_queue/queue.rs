@@ -6,8 +6,8 @@ use tycho_util::{FastDashMap, FastHashMap};
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::persistent_state::{
-    PersistentState, PersistentStateConfig, PersistentStateFactory, PersistentStateImplFactory,
-    PersistentStateStdImpl,
+    LocalPersistentState, PersistentState, PersistentStateConfig, PersistentStateFactory,
+    PersistentStateImplFactory, PersistentStateStdImpl,
 };
 use crate::internal_queue::state::session_state::{
     SessionState, SessionStateConfig, SessionStateFactory, SessionStateImplFactory,
@@ -64,7 +64,11 @@ where
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError>;
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError>;
+    async fn commit_diff(
+        &self,
+        diff_id: &BlockIdShort,
+        mc_shards: Vec<BlockIdShort>,
+    ) -> Result<(), QueueError>;
 }
 
 // IMPLEMENTATION
@@ -123,6 +127,7 @@ where
         mut diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
     ) -> Result<(), QueueError> {
+        tracing::info!(target: "local_debug", "apply diff {block_id_short:?}");
         if !diff.messages.is_empty() {
             self.session_state
                 .add_messages(block_id_short.shard, &diff.messages)?;
@@ -132,64 +137,79 @@ where
         Ok(())
     }
 
-    async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<(), QueueError> {
+    async fn commit_diff(
+        &self,
+        diff_id: &BlockIdShort,
+        mc_top_shard_blocks: Vec<BlockIdShort>,
+    ) -> Result<(), QueueError> {
+        tracing::info!(target: "local_debug", "mc shards {mc_top_shard_blocks:?}");
+        let diffs_count = self.diffs.len();
+        tracing::info!(target: "local_debug", "state before commit {diff_id:?}. mc shards len {}. diffs_count: {diffs_count}", mc_top_shard_blocks.len());
+        let mut diffs = vec![];
+
         let diff = self
             .diffs
             .remove(diff_id)
-            .ok_or(anyhow!("diff not found"))?
+            .ok_or(anyhow!("masterchain block diff not found {diff_id:?}"))?
             .1;
 
-        let first_key = Some(InternalMessageKey::default());
-        let last_key = diff.keys.last();
+        diffs.push(diff);
 
-        if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
-            self.session_state
-                .commit_messages(diff_id.shard, &first_key, last_key)?;
+        for shard_block_id in mc_top_shard_blocks {
+            // let shard_block_diff = self.diffs.remove(&shard_block_id).ok_or(anyhow!("shard block diff not found {shard_block_id:?}"))?.1;
+            let shard_block_diff = self.diffs.remove(&shard_block_id);
+            if let Some(shard_block_diff) = shard_block_diff {
+                diffs.push(shard_block_diff.1);
+            }
+            // diffs.push(shard_block_diff);
         }
 
-        // gc
+        let mut min_keys: FastHashMap<ShardIdent, InternalMessageKey> = FastHashMap::default();
+
+        for diff in diffs.iter() {
+            for (shard, key) in diff.processed_upto.iter() {
+                if let Some(min_key) = min_keys.get_mut(shard) {
+                    if key < min_key {
+                        *min_key = key.clone();
+                    }
+                } else {
+                    min_keys.insert(shard.clone(), key.clone());
+                }
+            }
+
+            let first_key = Some(InternalMessageKey::default());
+            let last_key = diff.keys.last();
+
+            if let (Some(first_key), Some(last_key)) = (first_key, last_key) {
+                self.session_state
+                    .commit_messages(diff_id.shard, &first_key, last_key)?;
+            }
+        }
+
+        tracing::info!(target: "local_debug", "state before gc");
+        self.persistent_state.print_state();
+
+        for (shard, key) in min_keys.iter() {
+            self.persistent_state
+                .delete_messages(shard.clone(), key.clone())?;
+        }
+
+        let diffs_count = self.diffs.len();
+
+        tracing::info!(target: "local_debug", "state after gc. diffs_count {diffs_count}");
+        self.persistent_state.print_state();
+
         Ok(())
-        // {
-        //     let mut processed_uptos_lock = self.processed_uptos.lock().await;
-        //     processed_uptos_lock.insert(for_shard, diff.processed_upto.clone());
-        //
-        //     let mut min_uptos: HashMap<ShardIdent, InternalMessageKey> = HashMap::default();
-        //     let mut shard_count: HashMap<ShardIdent, usize> = HashMap::default();
-        //
-        //     if for_shard.is_masterchain() {
-        //         let total_shards = processed_uptos_lock.len();
-        //
-        //         for (_, processed_upto) in processed_uptos_lock.iter() {
-        //             for (processed_in_shard, key) in processed_upto.iter() {
-        //                 if let Some(min_key) = min_uptos.get_mut(processed_in_shard) {
-        //                     if key < min_key {
-        //                         *min_key = key.clone();
-        //                     }
-        //                 } else {
-        //                     min_uptos.insert(processed_in_shard.clone(), key.clone());
-        //                 }
-        //                 *shard_count.entry(processed_in_shard.clone()).or_insert(0) += 1;
-        //             }
-        //         }
-        //
-        //         for (shard, key) in min_uptos.iter() {
-        //             if let Some(count) = shard_count.get(shard) {
-        //                 if *count == total_shards {
-        //                     let persistent_state = self.persistent_state.clone();
-        //                     let shard_clone = shard.clone();
-        //                     let key_clone = key.clone();
-        //                     tokio::spawn(async move {
-        //                         persistent_state
-        //                             .delete_messages(shard_clone, key_clone)
-        //                             .unwrap();
-        //                     });
-        //                 }
-        //             }
-        //         }
-        //
-        //         processed_uptos_lock.clear();
-        //     }
-        //     Ok(())
-        // }
+    }
+}
+
+#[derive(Default)]
+struct DiffBuffer<V: InternalMessageValue> {
+    diffs: FastDashMap<BlockIdShort, QueueDiffWithMessages<V>>,
+}
+
+impl<V: InternalMessageValue> DiffBuffer<V> {
+    pub fn insert(&mut self, block_id_short: BlockIdShort, diff: QueueDiffWithMessages<V>) {
+        self.diffs.insert(block_id_short, diff);
     }
 }
