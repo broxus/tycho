@@ -7,9 +7,81 @@ use everscale_types::prelude::*;
 use tl_proto::TlRead;
 
 use crate::archive::WithArchiveData;
-use crate::queue::proto::QueueDiff;
+use crate::queue::proto::{QueueDiff, QueueKey};
 
 pub type QueueDiffStuffAug = WithArchiveData<QueueDiffStuff>;
+
+pub struct QueueDiffStuffBuilder {
+    inner: Arc<Inner>,
+}
+
+impl QueueDiffStuffBuilder {
+    pub fn serialize(mut self) -> SerializedQueueDiff {
+        let data = tl_proto::serialize(&self.inner.diff);
+        self.inner_mut().diff.hash = QueueDiff::compute_hash(&data);
+
+        SerializedQueueDiff {
+            inner: self.inner,
+            data,
+        }
+    }
+
+    // TODO: Use iterator of `(ShardIdent, QueueKey)`?
+    pub fn with_processed_upto<'a, I>(mut self, processed_upto: I) -> Self
+    where
+        I: IntoIterator<Item = (ShardIdent, u64, &'a HashBytes)>,
+    {
+        self.inner_mut().diff.processed_upto = processed_upto
+            .into_iter()
+            .map(|(shard_ident, lt, hash)| (shard_ident, QueueKey { lt, hash: *hash }))
+            .collect();
+        self
+    }
+
+    pub fn with_messages<'a, I>(
+        mut self,
+        min_message: &QueueKey,
+        max_message: &QueueKey,
+        hashes: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = &'a HashBytes>,
+    {
+        let inner = self.inner_mut();
+        inner.diff.min_message = *min_message;
+        inner.diff.max_message = *max_message;
+        inner.diff.messages = hashes.into_iter().copied().collect();
+        self
+    }
+
+    fn inner_mut(&mut self) -> &mut Inner {
+        Arc::get_mut(&mut self.inner).expect("inner is not shared")
+    }
+}
+
+pub struct SerializedQueueDiff {
+    inner: Arc<Inner>,
+    data: Vec<u8>,
+}
+
+impl SerializedQueueDiff {
+    pub fn build(mut self, block_id: &BlockId) -> QueueDiffStuffAug {
+        let inner = self.inner_mut();
+        debug_assert_eq!(inner.diff.shard_ident, block_id.shard);
+        debug_assert_eq!(inner.diff.seqno, block_id.seqno);
+        inner.block_id = *block_id;
+
+        QueueDiffStuffAug::new(QueueDiffStuff { inner: self.inner }, self.data)
+    }
+
+    pub fn hash(&self) -> &HashBytes {
+        &self.inner.diff.hash
+    }
+
+    fn inner_mut(&mut self) -> &mut Inner {
+        Arc::get_mut(&mut self.inner).expect("inner is not shared")
+    }
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -18,6 +90,28 @@ pub struct QueueDiffStuff {
 }
 
 impl QueueDiffStuff {
+    pub fn builder(
+        shard_ident: ShardIdent,
+        seqno: u32,
+        prev_hash: &HashBytes,
+    ) -> QueueDiffStuffBuilder {
+        QueueDiffStuffBuilder {
+            inner: Arc::new(Inner {
+                block_id: BlockId::default(),
+                diff: QueueDiff {
+                    hash: HashBytes::ZERO,
+                    prev_hash: *prev_hash,
+                    shard_ident,
+                    seqno,
+                    processed_upto: Default::default(),
+                    min_message: Default::default(),
+                    max_message: Default::default(),
+                    messages: Default::default(),
+                },
+            }),
+        }
+    }
+
     pub fn deserialize(block_id: &BlockId, data: &[u8]) -> Result<Self> {
         let mut offset = 0;
         let mut diff = QueueDiff::read_from(data, &mut offset)?;
@@ -237,6 +331,14 @@ mod tests {
                     shard_ident: ShardIdent::BASECHAIN,
                     seqno: 1,
                     processed_upto: Default::default(),
+                    min_message: QueueKey {
+                        lt: 0,
+                        hash: message_hashes[0],
+                    },
+                    max_message: QueueKey {
+                        lt: 9,
+                        hash: message_hashes[9],
+                    },
                     messages: message_hashes.clone(),
                 },
             }),

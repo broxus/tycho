@@ -10,16 +10,20 @@ block.shardIdent
     = block.ShardIdent;
 
 /**
+* @param    message logical time
+* @param    message hash
+*/
+block.queueKey lt:long hash:int256 = block.QueueKey;
+
+/**
 * Lower bound of work.
 *
 * @param shard_ident    shard identifier
-* @param lt             processed upto this message logical time
-* @param hash           processed upto this message hash
+* @param bound          processed upto this bound
 */
 block.shardProcessedUpto
     shard_ident:block.shardIdent
-    lt:long
-    hash:int256
+    bound:block.queueKey
     = block.ShardProcessedUpto;
 
 /**
@@ -29,13 +33,17 @@ block.shardProcessedUpto
 * @param shard_ident            shard identifier of the corresponding block
 * @param seqno                  seqno of the corresponding block
 * @param processed_upto         collator boundaries (sorted ASC by unique `shard_ident`)
+* @param min_message            min message queue key
+* @param max_message            max message queue key
 * @param messages               list of message hashes (sorted ASC)
 */
 block.queueDiff
     prev_queue_diff_hash:int256
     shard_ident:block.shardIdent
     seqno:int
-    processed_upto:(vector block.ShardProcessedUpto)
+    processed_upto:(vector block.shardProcessedUpto)
+    min_message:block.queueKey
+    max_message:block.queueKey
     messages:(vector int256)
     = block.QueueDiff;
 
