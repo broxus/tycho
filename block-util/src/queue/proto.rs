@@ -17,7 +17,9 @@ pub struct QueueDiff {
     pub prev_hash: HashBytes,
     pub shard_ident: ShardIdent,
     pub seqno: u32,
-    pub processed_upto: BTreeMap<ShardIdent, ShardProcessedUpto>,
+    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub min_message: QueueKey,
+    pub max_message: QueueKey,
     pub messages: Vec<HashBytes>,
 }
 
@@ -46,6 +48,7 @@ impl TlWrite for QueueDiff {
             + tl::shard_ident::SIZE_HINT
             + 4
             + processed_upto_map::size_hint(&self.processed_upto)
+            + 2 * QueueKey::SIZE_HINT
             + messages_list::size_hint(&self.messages)
     }
 
@@ -58,6 +61,8 @@ impl TlWrite for QueueDiff {
         tl::shard_ident::write(&self.shard_ident, packet);
         packet.write_u32(self.seqno);
         processed_upto_map::write(&self.processed_upto, packet);
+        self.min_message.write_to(packet);
+        self.max_message.write_to(packet);
         messages_list::write(&self.messages, packet);
     }
 }
@@ -78,8 +83,14 @@ impl<'tl> TlRead<'tl> for QueueDiff {
             shard_ident: tl::shard_ident::read(data, offset)?,
             seqno: u32::read_from(data, offset)?,
             processed_upto: processed_upto_map::read(data, offset)?,
+            min_message: QueueKey::read_from(data, offset)?,
+            max_message: QueueKey::read_from(data, offset)?,
             messages: messages_list::read(data, offset)?,
         };
+
+        if result.max_message < result.min_message {
+            return Err(tl_proto::TlError::InvalidData);
+        }
 
         // Compute the hash of the diff
         result.hash = Self::compute_hash(&data[offset_before..*offset]);
@@ -99,13 +110,16 @@ pub struct QueueState {
     pub queue_diffs: Vec<QueueDiff>,
 }
 
-/// Lower bound of work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, TlWrite, TlRead)]
-#[tl(boxed, id = "block.shardProcessedUpto", scheme = "proto.tl")]
-pub struct ShardProcessedUpto {
+/// Queue key.
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TlWrite, TlRead)]
+pub struct QueueKey {
     pub lt: u64,
     #[tl(with = "tl::hash_bytes")]
     pub hash: HashBytes,
+}
+
+impl QueueKey {
+    const SIZE_HINT: usize = 8 + 32;
 }
 
 mod processed_upto_map {
@@ -116,13 +130,13 @@ mod processed_upto_map {
     /// We assume that the number of processed shards is limited.
     const MAX_SIZE: usize = 1000;
 
-    pub fn size_hint(items: &BTreeMap<ShardIdent, ShardProcessedUpto>) -> usize {
-        const PER_ITEM: usize = tl::shard_ident::SIZE_HINT + (4 + 8 + 32);
+    pub fn size_hint(items: &BTreeMap<ShardIdent, QueueKey>) -> usize {
+        const PER_ITEM: usize = tl::shard_ident::SIZE_HINT + QueueKey::SIZE_HINT;
 
         4 + items.len() * PER_ITEM
     }
 
-    pub fn write<P: TlPacket>(items: &BTreeMap<ShardIdent, ShardProcessedUpto>, packet: &mut P) {
+    pub fn write<P: TlPacket>(items: &BTreeMap<ShardIdent, QueueKey>, packet: &mut P) {
         packet.write_u32(items.len() as u32);
 
         for (shard_ident, processed_upto) in items {
@@ -131,10 +145,7 @@ mod processed_upto_map {
         }
     }
 
-    pub fn read(
-        data: &[u8],
-        offset: &mut usize,
-    ) -> TlResult<BTreeMap<ShardIdent, ShardProcessedUpto>> {
+    pub fn read(data: &[u8], offset: &mut usize) -> TlResult<BTreeMap<ShardIdent, QueueKey>> {
         let len = u32::read_from(data, offset)? as usize;
         if len > MAX_SIZE {
             return Err(tl_proto::TlError::InvalidData);
@@ -154,7 +165,7 @@ mod processed_upto_map {
             prev_shard = Some(shard_ident);
 
             // Read the rest of the entry.
-            items.insert(shard_ident, ShardProcessedUpto::read_from(data, offset)?);
+            items.insert(shard_ident, QueueKey::read_from(data, offset)?);
         }
 
         Ok(items)
@@ -284,15 +295,23 @@ mod tests {
             shard_ident: ShardIdent::MASTERCHAIN,
             seqno: 123,
             processed_upto: BTreeMap::from([
-                (ShardIdent::MASTERCHAIN, ShardProcessedUpto {
+                (ShardIdent::MASTERCHAIN, QueueKey {
                     lt: 1,
                     hash: HashBytes::from([0x11; 32]),
                 }),
-                (ShardIdent::BASECHAIN, ShardProcessedUpto {
+                (ShardIdent::BASECHAIN, QueueKey {
                     lt: 123123,
                     hash: HashBytes::from([0x22; 32]),
                 }),
             ]),
+            min_message: QueueKey {
+                lt: 1,
+                hash: HashBytes::from([0x11; 32]),
+            },
+            max_message: QueueKey {
+                lt: 123,
+                hash: HashBytes::from([0x22; 32]),
+            },
             messages: vec![
                 HashBytes::from([0x01; 32]),
                 HashBytes::from([0x02; 32]),
@@ -322,15 +341,23 @@ mod tests {
                 shard_ident: ShardIdent::MASTERCHAIN,
                 seqno,
                 processed_upto: BTreeMap::from([
-                    (ShardIdent::MASTERCHAIN, ShardProcessedUpto {
+                    (ShardIdent::MASTERCHAIN, QueueKey {
                         lt: 10 * seqno as u64,
                         hash: HashBytes::from([seqno as u8; 32]),
                     }),
-                    (ShardIdent::BASECHAIN, ShardProcessedUpto {
+                    (ShardIdent::BASECHAIN, QueueKey {
                         lt: 123123 * seqno as u64,
                         hash: HashBytes::from([seqno as u8 * 2; 32]),
                     }),
                 ]),
+                min_message: QueueKey {
+                    lt: 1,
+                    hash: HashBytes::from([0x11; 32]),
+                },
+                max_message: QueueKey {
+                    lt: 123,
+                    hash: HashBytes::from([0x22; 32]),
+                },
                 messages: vec![
                     HashBytes::from([0x01; 32]),
                     HashBytes::from([0x02; 32]),
