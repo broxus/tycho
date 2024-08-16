@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use execution_manager::ExecutionManager;
-use futures_util::future::{BoxFuture, Future};
+use futures_util::future::Future;
 use mq_iterator_adapter::QueueIteratorAdapter;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuardWithLabels;
@@ -21,8 +22,8 @@ use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
 use crate::types::{
-    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo, McData,
-    TopBlockDescription,
+    BlockCollationResult, CollationConfig, CollationSessionId, CollationSessionInfo,
+    DisplayBlockIdsSlice, McData, TopBlockDescription,
 };
 use crate::utils::async_queued_dispatcher::{
     AsyncQueuedDispatcher, STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE,
@@ -166,7 +167,6 @@ pub struct CollatorStdImpl {
     config: Arc<CollationConfig>,
     collation_session: Arc<CollationSessionInfo>,
 
-    dispatcher: AsyncQueuedDispatcher<Self>,
     listener: Arc<dyn CollatorEventListener>,
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     exec_manager: Option<ExecutionManager>,
@@ -232,7 +232,6 @@ impl CollatorStdImpl {
             next_block_id_short,
             config,
             collation_session,
-            dispatcher: dispatcher.clone(),
             listener,
             mq_adapter,
             exec_manager: Some(exec_manager),
@@ -264,7 +263,7 @@ impl CollatorStdImpl {
         // sending to the receiver here cannot return Error because it is guaranteed not closed or dropped
         dispatcher
             .enqueue_task(method_to_queued_async_closure!(
-                init,
+                init_collator,
                 prev_blocks_ids,
                 mc_data,
                 working_state_tx
@@ -283,30 +282,28 @@ impl CollatorStdImpl {
     }
 
     // Initialize collator working state then run collation
-    async fn init(
+    #[tracing::instrument(skip_all, fields(block_id = %self.next_block_id_short))]
+    async fn init_collator(
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
         working_state_tx: oneshot::Sender<Result<WorkingState>>,
     ) -> Result<()> {
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): initializing...", self.next_block_id_short,
-        );
+        tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
         // init working state
 
         // load states and prev queue diff hash
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): init: loading initial shard state...", self.next_block_id_short,
+            prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
+            "loading initial states...",
         );
         let (prev_states, prev_queue_diff_hashes) =
             Self::load_init_states_and_diffs(self.state_node_adapter.clone(), prev_blocks_ids)
                 .await?;
 
         // build, validate and set working state
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): init: building working state...", self.next_block_id_short,
-        );
+        tracing::info!(target: tracing_targets::COLLATOR, "building working state...");
 
         let working_state =
             Self::build_and_validate_working_state(mc_data, prev_states, prev_queue_diff_hashes)?;
@@ -355,8 +352,7 @@ impl CollatorStdImpl {
         // import anchors
         if let Some(ext_processed_to) = ext_processed_to_opt {
             tracing::info!(target: tracing_targets::COLLATOR,
-                "Collator (block_id={}): init: import anchors from processed to anchor ({:?}) ...",
-                self.next_block_id_short,
+                "import anchors from processed to anchor {:?}",
                 ext_processed_to,
             );
             self.import_anchors_on_init(
@@ -371,19 +367,11 @@ impl CollatorStdImpl {
 
         self.timer = std::time::Instant::now();
 
-        // TODO: collate right now instead of queuing
+        tracing::info!(target: tracing_targets::COLLATOR, "init finished");
 
-        // enqueue collation attempt of next block
-        self.dispatcher
-            .enqueue_task(method_to_queued_async_closure!(try_collate,))
-            .await?;
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): init: collation attempt enqueued", self.next_block_id_short,
-        );
-
-        tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): init: finished", self.next_block_id_short,
-        );
+        // trying to collate next block
+        tracing::info!(target: tracing_targets::COLLATOR, "trying to collate next block after init...");
+        self.try_collate().await?;
 
         Ok(())
     }
@@ -439,6 +427,7 @@ impl CollatorStdImpl {
         let load_state_fut: JoinTask<Result<Vec<ShardStateStuff>>> = JoinTask::new({
             let state_node_adapter = state_node_adapter.clone();
             let prev_blocks_ids = prev_blocks_ids.clone();
+            let span = tracing::Span::current();
             async move {
                 let mut prev_states = vec![];
                 for prev_block_id in prev_blocks_ids {
@@ -453,22 +442,27 @@ impl CollatorStdImpl {
                 }
                 Ok(prev_states)
             }
+            .instrument(span)
         });
 
-        let prev_hash_fut: JoinTask<Result<Vec<HashBytes>>> = JoinTask::new(async move {
-            let mut prev_hashes = vec![];
-            for prev_block_id in prev_blocks_ids {
-                // request state for prev block and wait for response
-                if let Some(diff) = state_node_adapter.load_diff(&prev_block_id).await? {
-                    tracing::info!(
-                        target: tracing_targets::COLLATOR,
-                        "To init working state loaded prev shard state for prev_block_id {}",
-                        prev_block_id.as_short_id(),
-                    );
-                    prev_hashes.push(*diff.diff_hash());
+        let prev_hash_fut: JoinTask<Result<Vec<HashBytes>>> = JoinTask::new({
+            let span = tracing::Span::current();
+            async move {
+                let mut prev_hashes = vec![];
+                for prev_block_id in prev_blocks_ids {
+                    // request state for prev block and wait for response
+                    if let Some(diff) = state_node_adapter.load_diff(&prev_block_id).await? {
+                        tracing::info!(
+                            target: tracing_targets::COLLATOR,
+                            "To init working state loaded prev shard state for prev_block_id {}",
+                            prev_block_id.as_short_id(),
+                        );
+                        prev_hashes.push(*diff.diff_hash());
+                    }
                 }
+                Ok(prev_hashes)
             }
-            Ok(prev_hashes)
+            .instrument(span)
         });
 
         let (prev_states, prev_hash) =
@@ -635,8 +629,7 @@ impl CollatorStdImpl {
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             elapsed = timer.elapsed().as_millis(),
-            "Collator (block_id={}): init: imported anchors on init: {:?}",
-            self.next_block_id_short,
+            "imported anchors on init: {:?}",
             anchors_info.as_slice()
         );
 
@@ -708,12 +701,7 @@ impl CollatorStdImpl {
         self.try_collate_next_shard_block_impl(working_state).await
     }
 
-    fn try_collate(&mut self) -> BoxFuture<'_, Result<()>> {
-        // NOTE: Prevents recursive future creation
-        Box::pin(async move { self.try_collate_impl().await })
-    }
-
-    async fn try_collate_impl(&mut self) -> Result<()> {
+    async fn try_collate(&mut self) -> Result<()> {
         let working_state = self.working_state.wait().await?;
 
         if self.shard_id.is_masterchain() {
@@ -735,7 +723,7 @@ impl CollatorStdImpl {
     /// Run collation if there are internals,
     /// otherwise import next anchor and notify it to manager
     /// that will route next collation steps
-    #[tracing::instrument(name = "try_collate_next_master_block", skip_all, fields(block_id = %self.next_block_id_short))]
+    #[tracing::instrument(parent = None, name = "try_collate_next_master_block", skip_all, fields(block_id = %self.next_block_id_short))]
     async fn try_collate_next_master_block_impl(
         &mut self,
         mut working_state: WorkingState,
@@ -786,7 +774,7 @@ impl CollatorStdImpl {
     /// If it has externals then run collation,
     /// otherwise return empty anchor to manager
     /// that will route next collation steps
-    #[tracing::instrument(name = "try_collate_next_shard_block", skip_all, fields(block_id = %self.next_block_id_short))]
+    #[tracing::instrument(parent = None, name = "try_collate_next_shard_block", skip_all, fields(block_id = %self.next_block_id_short))]
     async fn try_collate_next_shard_block_impl(
         &mut self,
         mut working_state: WorkingState,

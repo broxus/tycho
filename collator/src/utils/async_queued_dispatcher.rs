@@ -60,7 +60,6 @@ where
                     "Task #{} ({}): executing...", task_id, &task_descr,
                 );
                 let future = func(worker);
-                let future = Box::pin(future);
                 let (updated_worker, res) = future.await;
                 tracing::trace!(
                     target: tracing_targets::ASYNC_QUEUE_DISPATCHER,

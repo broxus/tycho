@@ -384,3 +384,36 @@ impl Addr for ShortAddr {
         self.prefix
     }
 }
+
+pub(super) struct DisplayBlockIdsSlice<'a>(pub &'a [BlockId]);
+
+impl std::fmt::Debug for DisplayBlockIdsSlice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for DisplayBlockIdsSlice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for block_id in self.0 {
+            l.entry(&block_id.as_short_id().to_string());
+        }
+        l.finish()
+    }
+}
+
+pub(super) struct DisplayBlockIdsList(pub Vec<BlockId>);
+
+impl std::fmt::Debug for DisplayBlockIdsList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for DisplayBlockIdsList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let slice = self.0.as_slice();
+        std::fmt::Display::fmt(&DisplayBlockIdsSlice(slice), f)
+    }
+}

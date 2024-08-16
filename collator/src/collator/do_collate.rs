@@ -28,7 +28,7 @@ use crate::collator::types::{
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
-use crate::types::{BlockCollationResult, McData, TopBlockDescription};
+use crate::types::{BlockCollationResult, DisplayBlockIdsList, McData, TopBlockDescription};
 
 #[cfg(test)]
 #[path = "tests/do_collate_tests.rs"]
@@ -62,11 +62,9 @@ impl CollatorStdImpl {
 
         tracing::info!(target: tracing_targets::COLLATOR,
             "Start collating block: top_shard_blocks_ids: {:?}",
-            top_shard_blocks_info.as_ref().map(|v| {
-                v.iter()
-                    .map(|TopBlockDescription { block_id, .. }| block_id.as_short_id().to_string())
-                    .collect::<Vec<_>>()
-            }),
+            top_shard_blocks_info.as_ref().map(|v| DisplayBlockIdsList(
+                v.iter().map(|i| i.block_id).collect::<Vec<_>>()
+            )),
         );
 
         let last_imported_anchor = self.last_imported_anchor.as_ref().unwrap();
