@@ -5,7 +5,7 @@ use everscale_crypto::ed25519::KeyPair;
 use serde::{Deserialize, Serialize};
 use tycho_network::PeerId;
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
 
 impl Display for Digest {

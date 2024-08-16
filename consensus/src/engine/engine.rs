@@ -130,6 +130,16 @@ impl Engine {
     }
 
     pub async fn run(mut self) -> ! {
+        let (committed_info_tx, committed_info_rx) =
+            mpsc::unbounded_channel::<(PointInfo, Vec<PointInfo>)>();
+
+        tokio::spawn({
+            let store = self.store.clone();
+            let committed_full_rx = self.committed;
+            let commit_round = self.commit_round;
+            Self::expand_commit(store, committed_info_rx, committed_full_rx, commit_round)
+        });
+
         loop {
             let _round_duration = HistogramGuard::begin(EngineContext::ROUND_DURATION);
             let (prev_round_ok, current_dag_round, round_effects) = {
@@ -191,8 +201,7 @@ impl Engine {
 
             let commit_run = tokio::task::spawn_blocking({
                 let mut dag = self.dag;
-                let committed_tx = self.committed.clone();
-                let commit_round = self.commit_round.clone();
+                let committed_info_tx = committed_info_tx.clone();
                 let round_effects = round_effects.clone();
                 move || {
                     let task_start = Instant::now();
@@ -203,14 +212,11 @@ impl Engine {
                     round_effects.commit_metrics(&committed);
                     round_effects.log_committed(&committed);
 
-                    if let Some(last_anchor_round) =
-                        committed.last().map(|(ancor, _)| ancor.round())
-                    {
-                        commit_round.set_max(last_anchor_round);
+                    if !committed.is_empty() {
                         for points in committed {
-                            committed_tx
+                            committed_info_tx
                                 .send(points) // not recoverable
-                                .expect("Failed to send anchor commit message tp mpsc channel");
+                                .expect("Failed to send anchor history info to mpsc channel");
                         }
                         metrics::histogram!(EngineContext::COMMIT_DURATION)
                             .record(task_start.elapsed());
@@ -230,6 +236,25 @@ impl Engine {
             }
         }
     }
+
+    async fn expand_commit(
+        store: MempoolStore,
+        mut collapsed: mpsc::UnboundedReceiver<(PointInfo, Vec<PointInfo>)>,
+        expanded: mpsc::UnboundedSender<(PointInfo, Vec<Point>)>,
+        commit_round: OuterRound<Commit>,
+    ) -> ! {
+        while let Some((anchor, history)) = collapsed.recv().await {
+            let store = store.clone();
+            let task = tokio::task::spawn_blocking(move || store.expand_anchor_history(&history));
+            let history = task.await.expect("expand anchor history task failed");
+            let round = anchor.round();
+            expanded
+                .send((anchor, history))
+                .expect("Failed to send anchor history to mpsc channel");
+            commit_round.set_max(round);
+        }
+        panic!("engine commit info channel closed")
+    }
 }
 
 impl EngineContext {
@@ -240,7 +265,7 @@ impl EngineContext {
 }
 
 impl Effects<EngineContext> {
-    fn commit_metrics(&self, committed: &[(PointInfo, Vec<Point>)]) {
+    fn commit_metrics(&self, committed: &[(PointInfo, Vec<PointInfo>)]) {
         metrics::counter!("tycho_mempool_commit_anchors").increment(committed.len() as _);
 
         if let Some((first_anchor, _)) = committed.first() {
@@ -259,7 +284,7 @@ impl Effects<EngineContext> {
         }
     }
 
-    fn log_committed(&self, committed: &[(PointInfo, Vec<Point>)]) {
+    fn log_committed(&self, committed: &[(PointInfo, Vec<PointInfo>)]) {
         if !committed.is_empty() && tracing::enabled!(tracing::Level::DEBUG) {
             let committed = committed
                 .iter()

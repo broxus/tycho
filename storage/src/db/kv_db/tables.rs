@@ -511,7 +511,6 @@ impl ColumnFamily for Points {
 impl ColumnFamilyOptions<Caches> for Points {
     fn options(opts: &mut Options, caches: &mut Caches) {
         optimize_for_point_lookup(opts, caches);
-        remove_wal_asap(opts);
         opts.set_disable_auto_compactions(true);
 
         opts.set_enable_blob_files(true);
@@ -533,7 +532,6 @@ impl ColumnFamily for PointsInfo {
 impl ColumnFamilyOptions<Caches> for PointsInfo {
     fn options(opts: &mut Options, caches: &mut Caches) {
         optimize_for_point_lookup(opts, caches);
-        remove_wal_asap(opts);
         opts.set_disable_auto_compactions(true);
     }
 }
@@ -552,7 +550,6 @@ impl ColumnFamily for PointsFlags {
 impl ColumnFamilyOptions<Caches> for PointsFlags {
     fn options(opts: &mut Options, caches: &mut Caches) {
         optimize_for_point_lookup(opts, caches);
-        remove_wal_asap(opts);
         opts.set_disable_auto_compactions(true);
 
         opts.set_merge_operator_associative("points_flags_merge", crate::models::PointFlags::merge);
@@ -572,10 +569,4 @@ fn with_blob_db(opts: &mut Options, min_value_size: u64) {
 
     opts.set_min_blob_size(min_value_size);
     opts.set_blob_compression_type(DBCompressionType::Zstd);
-}
-
-fn remove_wal_asap(opts: &mut Options) {
-    // https://github.com/facebook/rocksdb/blob/5.10.fb/include/rocksdb/options.h#L554-L565
-    opts.set_wal_size_limit_mb(0);
-    opts.set_wal_ttl_seconds(0);
 }

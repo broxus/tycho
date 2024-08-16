@@ -13,7 +13,7 @@ use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{AnchorStageRole, Digest, Point, PointId, PointInfo, Round, ValidPoint};
+use crate::models::{AnchorStageRole, Digest, PointId, PointInfo, Round, ValidPoint};
 
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
@@ -103,12 +103,12 @@ impl Dag {
         self.rounds.retain(|k, _| k.0 >= tail);
     }
 
-    pub fn commit(&mut self) -> Vec<(PointInfo, Vec<Point>)> {
+    pub fn commit(&mut self) -> Vec<(PointInfo, Vec<PointInfo>)> {
         self.commit_up_to(self.top())
     }
 
     /// result is in historical order
-    fn commit_up_to(&mut self, up_to: DagRound) -> Vec<(PointInfo, Vec<Point>)> {
+    fn commit_up_to(&mut self, up_to: DagRound) -> Vec<(PointInfo, Vec<PointInfo>)> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -196,7 +196,7 @@ impl Dag {
                 None => {} // anchor triplet without direct trigger (not ready/valid/exists)
             };
             // Note every iteration marks committed points before next uncommitted are gathered
-            let _committed = uncommitted_rev
+            let committed = uncommitted_rev
                 .into_iter()
                 .rev() // return historical order
                 .map(|valid| {
@@ -204,9 +204,7 @@ impl Dag {
                     valid.info
                 })
                 .collect::<Vec<_>>();
-            // FIXME
-            // ordered.push((anchor.info, committed));
-            ordered.push((anchor.info, vec![]));
+            ordered.push((anchor.info, committed));
         }
         if let Some((last_anchor, _)) = ordered.last() {
             // drop rounds that we'll never need again to free some memory
@@ -479,13 +477,13 @@ mod test {
     use crate::dag::Dag;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
     use crate::models::{AnchorStageRole, Round};
-    use crate::{test_utils, Point, PointInfo};
+    use crate::{test_utils, PointInfo};
 
     const PEER_COUNT: usize = 3;
 
     #[tokio::test]
     async fn test_commit_with_gap() {
-        let stub_store = MempoolStore::new_stub();
+        let stub_store = MempoolStore::no_read_stub();
 
         let genesis = test_utils::genesis();
         let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
@@ -613,7 +611,7 @@ mod test {
         }
     }
 
-    fn commit(dag: &mut Dag, up_to: Option<Round>) -> Vec<(PointInfo, Vec<Point>)> {
+    fn commit(dag: &mut Dag, up_to: Option<Round>) -> Vec<(PointInfo, Vec<PointInfo>)> {
         let committed = if let Some(up_to) = up_to {
             let up_to = dag.rounds.get(&up_to).unwrap().clone();
             dag.commit_up_to(up_to)

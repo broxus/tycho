@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use ahash::HashMapExt;
 use tycho_storage::{MempoolStorage, PointFlags};
+use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::models::{Digest, PointInfo, Round};
 use crate::outer_round::{Collator, Commit, Consensus, OuterRoundRecv};
@@ -19,6 +21,8 @@ trait MempoolStoreImpl: Send + Sync {
     fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo>;
 
     fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags;
+
+    fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point>;
 }
 
 impl MempoolStore {
@@ -39,7 +43,7 @@ impl MempoolStore {
     }
 
     #[cfg(feature = "test")]
-    pub fn new_stub() -> Self {
+    pub fn no_read_stub() -> Self {
         Self(Arc::new(()))
     }
 
@@ -61,6 +65,10 @@ impl MempoolStore {
 
     pub fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags {
         self.0.get_flags(round, digest)
+    }
+
+    pub fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point> {
+        self.0.expand_anchor_history(history)
     }
 
     fn clean_task(
@@ -133,7 +141,7 @@ impl MempoolStore {
     fn clean(inner: &MempoolStorage, least_to_keep: Round) {
         let zero = [0_u8; MempoolStorage::KEY_LEN];
         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
-        up_to_exclusive[..4].copy_from_slice(&least_to_keep.0.to_be_bytes()[..]);
+        fill_prefix(least_to_keep, &mut up_to_exclusive);
 
         let db = inner.db.rocksdb();
         let points_cf = inner.db.points.cf();
@@ -145,7 +153,7 @@ impl MempoolStore {
         // * then delete info, as it leaves points usable only for upload
         // * at last delete points safely
 
-        let mut batch = MempoolStorage::new_batch();
+        let mut batch = MempoolStorage::write_batch();
         batch.delete_range_cf(&flags_cf, zero.as_slice(), up_to_exclusive.as_slice());
         batch.delete_range_cf(&info_cf, zero.as_slice(), up_to_exclusive.as_slice());
         batch.delete_range_cf(&points_cf, zero.as_slice(), up_to_exclusive.as_slice());
@@ -160,8 +168,11 @@ impl MempoolStore {
 }
 
 fn fill_key(round: Round, digest: &Digest, key: &mut [u8; MempoolStorage::KEY_LEN]) {
-    key[..4].copy_from_slice(&round.0.to_be_bytes()[..]);
+    fill_prefix(round, key);
     key[4..].copy_from_slice(&digest.inner()[..]);
+}
+fn fill_prefix(round: Round, key: &mut [u8; MempoolStorage::KEY_LEN]) {
+    key[..4].copy_from_slice(&round.0.to_be_bytes()[..]);
 }
 
 impl MempoolStoreImpl for MempoolStorage {
@@ -181,7 +192,7 @@ impl MempoolStoreImpl for MempoolStorage {
         // transaction not needed as there is no concurrent puts for the same key,
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, flags are written from random places, but only via `merge_cf()`
-        let mut batch = MempoolStorage::new_batch();
+        let mut batch = MempoolStorage::write_batch();
         batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
         batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
 
@@ -233,6 +244,65 @@ impl MempoolStoreImpl for MempoolStorage {
         let found = table.get(key.as_slice()).expect("db get point flags");
         found.as_deref().map(PointFlags::decode).unwrap_or_default()
     }
+
+    fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point> {
+        let mut buf = [0_u8; MempoolStorage::KEY_LEN];
+        let mut keys = history
+            .iter()
+            .map(|info| {
+                fill_key(info.round(), info.digest(), &mut buf);
+                buf.to_vec()
+            })
+            .collect::<FastHashSet<Vec<u8>>>();
+        buf.fill(0);
+
+        let mut opt = MempoolStorage::read_options();
+        opt.set_async_io(true);
+
+        let first = history.first().expect("anchor history mut not be empty");
+        fill_prefix(first.round(), &mut buf);
+        opt.set_iterate_lower_bound(buf);
+
+        let last = history.last().expect("anchor history mut not be empty");
+        fill_prefix(last.round().next(), &mut buf);
+        opt.set_iterate_upper_bound(buf);
+
+        let db = self.db.rocksdb();
+        let points_cf = self.db.points.cf();
+
+        let mut found = FastHashMap::with_capacity(history.len());
+        let mut iter = db.raw_iterator_cf_opt(&points_cf, opt);
+        iter.seek_to_first();
+
+        while iter.valid() {
+            if keys.remove(iter.key().expect("history iter invalidated on key")) {
+                let bytes = iter.value().expect("history iter invalidated on value");
+                let point = bincode::deserialize::<Point>(bytes).expect("deserialize point");
+                let key = (point.round(), point.digest().clone());
+                assert!(
+                    found.insert(key, point).is_none(),
+                    "iter read non-unique point"
+                );
+            }
+            if keys.is_empty() {
+                break;
+            }
+            iter.next();
+        }
+        iter.status().expect("anchor history iter is not ok");
+
+        let mut result = Vec::with_capacity(history.len());
+        for info in history {
+            let key = (info.round(), info.digest().clone());
+            let point = found
+                .remove(&key)
+                .expect("key was searched in db but was not found");
+            result.push(point);
+        }
+        assert_eq!(result.len(), history.len(), "stored point key collision");
+
+        result
+    }
 }
 
 #[cfg(feature = "test")]
@@ -242,14 +312,18 @@ impl MempoolStoreImpl for () {
     fn set_flags(&self, _: Round, _: &Digest, _: &PointFlags) {}
 
     fn get_point(&self, _: Round, _: &Digest) -> Option<Point> {
-        None
+        panic!("should not be used in tests")
     }
 
     fn get_info(&self, _: Round, _: &Digest) -> Option<PointInfo> {
-        None
+        panic!("should not be used in tests")
     }
 
     fn get_flags(&self, _: Round, _: &Digest) -> PointFlags {
-        PointFlags::default()
+        panic!("should not be used in tests")
+    }
+
+    fn expand_anchor_history(&self, _: &[PointInfo]) -> Vec<Point> {
+        panic!("should not be used in tests")
     }
 }

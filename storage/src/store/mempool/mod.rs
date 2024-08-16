@@ -1,4 +1,4 @@
-use weedb::rocksdb::WriteBatch;
+use weedb::rocksdb::{ReadOptions, WriteBatch};
 
 use crate::MempoolDb;
 
@@ -13,7 +13,11 @@ impl MempoolStorage {
         Self { db }
     }
 
-    pub fn new_batch() -> WriteBatch {
+    pub fn write_batch() -> WriteBatch {
         WriteBatch::default()
+    }
+
+    pub fn read_options() -> ReadOptions {
+        ReadOptions::default()
     }
 }
