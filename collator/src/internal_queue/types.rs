@@ -6,6 +6,7 @@ use anyhow::{bail, Context};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
 use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, ShardIdent};
+use tycho_block_util::queue::QueueKey;
 
 use super::state::state_iterator::MessageExt;
 
@@ -80,7 +81,7 @@ impl Ord for EnqueuedMessage {
     }
 }
 
-#[derive(Default, Debug, Ord, Eq, PartialEq, PartialOrd, Hash, Clone)]
+#[derive(Default, Debug, Ord, Eq, PartialEq, PartialOrd, Hash, Clone, Copy)]
 pub struct InternalMessageKey {
     pub lt: u64,
     pub hash: HashBytes,
@@ -96,6 +97,13 @@ impl InternalMessageKey {
         Self {
             lt,
             hash: HashBytes([255; 32]),
+        }
+    }
+
+    pub fn with_lt_and_min_hash(lt: u64) -> Self {
+        Self {
+            lt,
+            hash: HashBytes([0; 32]),
         }
     }
 
@@ -135,6 +143,15 @@ impl EnqueuedMessage {
 impl From<InternalMessageKey> for tycho_storage::model::InternalMessageKey {
     fn from(key: InternalMessageKey) -> Self {
         tycho_storage::model::InternalMessageKey {
+            lt: key.lt,
+            hash: key.hash,
+        }
+    }
+}
+
+impl From<InternalMessageKey> for QueueKey {
+    fn from(key: InternalMessageKey) -> Self {
+        QueueKey {
             lt: key.lt,
             hash: key.hash,
         }

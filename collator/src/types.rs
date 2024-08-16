@@ -8,6 +8,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
+use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::{serde_helpers, FastHashMap};
@@ -247,6 +248,7 @@ pub struct BlockCandidate {
     pub fees_collected: CurrencyCollection,
     pub funds_created: CurrencyCollection,
     pub created_by: HashBytes,
+    pub queue_diff_aug: QueueDiffStuffAug,
 }
 
 #[derive(Default, Clone)]
@@ -292,6 +294,7 @@ pub struct BlockStuffForSync {
     pub signatures: FastHashMap<PeerId, ArcSignature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
+    pub queue_diff_aug: QueueDiffStuffAug,
 }
 
 /// (`ShardIdent`, seqno)
