@@ -9,6 +9,8 @@ use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
+use tycho_block_util::queue::QueueDiff;
+use tycho_block_util::queue::ShardProcessedUpto;
 use tycho_storage::BlockMetaData;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -368,52 +370,67 @@ impl CollatorStdImpl {
             execute_tock_elapsed = Duration::ZERO;
         }
 
-        // start async update queue task
-        let update_queue_task = JoinTask::<Result<_>>::new({
-            let has_pending_messages_in_buffer = exec_manager.has_pending_messages_in_buffer();
-            let mq_adapter = self.mq_adapter.clone();
-            let labels = labels.clone();
-            async move {
-                // get queue diff and check for pending internals
-                let histogram_create_queue_diff = HistogramGuard::begin_with_labels(
-                    "tycho_do_collate_create_queue_diff_time",
-                    &labels,
-                );
-                let (current_positions, has_pending_internals, diff) =
-                    mq_iterator_adapter.release(!has_pending_messages_in_buffer)?;
-                let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
+        // get queue diff and check for pending internals
+        let histogram_create_queue_diff =
+            HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
 
-                let has_pending_messages = has_pending_messages_in_buffer || has_pending_internals;
+        let (current_positions, has_pending_internals, diff) =
+            mq_iterator_adapter.release(!exec_manager.has_pending_messages_in_buffer())?;
 
-                let diff_messages_len = diff.messages.len();
+        let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
 
-                // apply queue diff
-                let histogram = HistogramGuard::begin_with_labels(
-                    "tycho_do_collate_apply_queue_diff_time",
-                    &labels,
-                );
-                // TODO: should panic if result is error
-                mq_adapter.apply_diff(diff, block_id_short).await?;
-                let apply_queue_diff_elapsed = histogram.finish();
+        let diff_messages_len = diff.messages.len();
+        let has_pending_internals =
+            exec_manager.has_pending_messages_in_buffer() || has_pending_internals;
 
-                Ok((
-                    current_positions,
-                    has_pending_messages,
+        let mut queue_diff = QueueDiff {
+            hash: HashBytes::ZERO,
+            prev_hash: HashBytes::ZERO, // TODO: fill!
+            shard_ident: self.shard_id,
+            seqno: self.next_block_id_short.seqno,
+            processed_upto: diff
+                .processed_upto
+                .iter()
+                .map(|(k, v)| {
                     (
-                        diff_messages_len,
-                        create_queue_diff_elapsed,
-                        apply_queue_diff_elapsed,
-                    ),
-                ))
-            }
-        });
+                        *k,
+                        ShardProcessedUpto {
+                            lt: v.lt,
+                            hash: v.hash,
+                        },
+                    )
+                })
+                .collect(),
+            messages: diff.messages.iter().map(|(k, _)| k.hash).collect(),
+        };
+
+        queue_diff.recompute_hash();
+
+        // start async update queue task
+        let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
+            JoinTask::<Result<_>>::new({
+                let mq_adapter = self.mq_adapter.clone();
+                let labels = labels.clone();
+                async move {
+                    // apply queue diff
+                    let histogram = HistogramGuard::begin_with_labels(
+                        "tycho_do_collate_apply_queue_diff_time",
+                        &labels,
+                    );
+                    // TODO: should panic if result is error
+                    mq_adapter.apply_diff(diff, block_id_short).await?;
+                    let apply_queue_diff_elapsed = histogram.finish();
+
+                    Ok(apply_queue_diff_elapsed)
+                }
+            });
 
         // build block candidate and new state
         let finalize_block_timer = std::time::Instant::now();
         // TODO: Move into rayon
         tokio::task::yield_now().await;
         let finalized = tokio::task::block_in_place(|| {
-            self.finalize_block(&mut collation_data, executor, &working_state)
+            self.finalize_block(&mut collation_data, executor, &working_state, queue_diff)
         })?;
         tokio::task::yield_now().await;
         let finalize_block_elapsed = finalize_block_timer.elapsed();
@@ -443,11 +460,7 @@ impl CollatorStdImpl {
         });
 
         // resolve update queue task
-        let (
-            current_positions,
-            has_pending_internals, // FIXME: rename into has_pending_messages everywhere
-            (diff_messages_len, create_queue_diff_elapsed, apply_queue_diff_elapsed),
-        ) = update_queue_task.await?;
+        let apply_queue_diff_elapsed = update_queue_task.await?;
         exec_manager.set_current_iterator_positions(current_positions);
 
         // return updated exec manager into collator
@@ -1406,11 +1419,14 @@ fn new_transaction(
                 });
                 let exported_value = out_msg.compute_exported_value()?;
 
-                collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
-                    out_msg: Lazy::new(&out_msg)?,
-                    exported_value,
-                    new_tx: None,
-                });
+                collation_data.out_msgs.insert(
+                    in_msg_hash,
+                    PreparedOutMsg {
+                        out_msg: Lazy::new(&out_msg)?,
+                        exported_value,
+                        new_tx: None,
+                    },
+                );
             }
             collation_data.int_dequeue_count += 1;
 
@@ -1450,11 +1466,14 @@ fn new_transaction(
             });
             let exported_value = out_msg.compute_exported_value()?;
 
-            collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
-                out_msg: Lazy::new(&out_msg)?,
-                exported_value,
-                new_tx: None,
-            });
+            collation_data.out_msgs.insert(
+                in_msg_hash,
+                PreparedOutMsg {
+                    out_msg: Lazy::new(&out_msg)?,
+                    exported_value,
+                    new_tx: None,
+                },
+            );
             collation_data.int_enqueue_count -= 1;
 
             in_msg
@@ -1467,10 +1486,13 @@ fn new_transaction(
         }
     };
 
-    collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
-        in_msg,
-        import_fees,
-    });
+    collation_data.in_msgs.insert(
+        in_msg_hash,
+        PreparedInMsg {
+            in_msg,
+            import_fees,
+        },
+    );
 
     let mut out_messages = vec![];
 
@@ -1508,13 +1530,14 @@ fn new_transaction(
                     transaction: executor_output.transaction.clone(),
                 });
 
-                collation_data
-                    .out_msgs
-                    .insert(out_msg_hash, PreparedOutMsg {
+                collation_data.out_msgs.insert(
+                    out_msg_hash,
+                    PreparedOutMsg {
                         out_msg: Lazy::new(&out_msg)?,
                         exported_value: out_msg.compute_exported_value()?,
                         new_tx: Some(executor_output.transaction.clone()),
-                    });
+                    },
+                );
 
                 out_messages.push(Box::new(ParsedMessage {
                     info: out_msg_info,
@@ -1530,13 +1553,14 @@ fn new_transaction(
                     transaction: executor_output.transaction.clone(),
                 });
 
-                collation_data
-                    .out_msgs
-                    .insert(out_msg_hash, PreparedOutMsg {
+                collation_data.out_msgs.insert(
+                    out_msg_hash,
+                    PreparedOutMsg {
                         out_msg: Lazy::new(&out_msg)?,
                         exported_value: out_msg.compute_exported_value()?,
                         new_tx: None,
-                    });
+                    },
+                );
             }
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be an output"),
         }

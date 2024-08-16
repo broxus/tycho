@@ -247,6 +247,7 @@ pub struct BlockCandidate {
     pub fees_collected: CurrencyCollection,
     pub funds_created: CurrencyCollection,
     pub created_by: HashBytes,
+    pub queue_diff: Vec<u8>,
 }
 
 #[derive(Default, Clone)]

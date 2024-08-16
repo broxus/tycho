@@ -12,6 +12,7 @@ use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
+use tycho_block_util::queue::QueueDiff;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::MessagesExecutor;
@@ -33,6 +34,7 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         executor: MessagesExecutor,
         working_state: &WorkingState,
+        queue_diff: QueueDiff,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -297,7 +299,9 @@ impl CollatorStdImpl {
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
                 // do not use out msgs queue updates
-                out_msg_queue_updates: None,
+                out_msg_queue_updates: OutMsgQueueUpdates {
+                    diff_hash: queue_diff.hash,
+                },
                 extra: Lazy::new(&new_block_extra)?,
             };
 
@@ -365,6 +369,7 @@ impl CollatorStdImpl {
             fees_collected: value_flow.fees_collected,
             funds_created: value_flow.created,
             created_by: collation_data.created_by,
+            queue_diff: tl_proto::serialize(&queue_diff),
         });
 
         let total_elapsed = histogram.finish();
@@ -636,23 +641,48 @@ impl CollatorStdImpl {
                 0
             };
 
-            block_create_stats.set(creator, CreatorStats {
-                mc_blocks: BlockCounters {
-                    updated_at: collation_data.gen_utime,
-                    total: total_mc,
-                    cnt2048: total_mc,
-                    cnt65536: total_mc,
+            block_create_stats.set(
+                creator,
+                CreatorStats {
+                    mc_blocks: BlockCounters {
+                        updated_at: collation_data.gen_utime,
+                        total: total_mc,
+                        cnt2048: total_mc,
+                        cnt65536: total_mc,
+                    },
+                    shard_blocks: BlockCounters {
+                        updated_at: collation_data.gen_utime,
+                        total: *count,
+                        cnt2048: shard_scaled,
+                        cnt65536: shard_scaled,
+                    },
                 },
-                shard_blocks: BlockCounters {
-                    updated_at: collation_data.gen_utime,
-                    total: *count,
-                    cnt2048: shard_scaled,
-                    cnt65536: shard_scaled,
-                },
-            })?;
+            )?;
         }
         if !mc_updated {
-            block_create_stats.set(collation_data.created_by, CreatorStats {
+            block_create_stats.set(
+                collation_data.created_by,
+                CreatorStats {
+                    mc_blocks: BlockCounters {
+                        updated_at: collation_data.gen_utime,
+                        total: 1,
+                        cnt2048: 1,
+                        cnt65536: 1,
+                    },
+                    shard_blocks: BlockCounters {
+                        updated_at: collation_data.gen_utime,
+                        total: 0,
+                        cnt2048: 0,
+                        cnt65536: 0,
+                    },
+                },
+            )?;
+        }
+
+        let default_shard_blocks_count = collation_data.block_create_count.values().sum();
+        block_create_stats.set(
+            HashBytes::default(),
+            CreatorStats {
                 mc_blocks: BlockCounters {
                     updated_at: collation_data.gen_utime,
                     total: 1,
@@ -661,28 +691,12 @@ impl CollatorStdImpl {
                 },
                 shard_blocks: BlockCounters {
                     updated_at: collation_data.gen_utime,
-                    total: 0,
-                    cnt2048: 0,
-                    cnt65536: 0,
+                    total: default_shard_blocks_count,
+                    cnt2048: default_shard_blocks_count << 32,
+                    cnt65536: default_shard_blocks_count << 32,
                 },
-            })?;
-        }
-
-        let default_shard_blocks_count = collation_data.block_create_count.values().sum();
-        block_create_stats.set(HashBytes::default(), CreatorStats {
-            mc_blocks: BlockCounters {
-                updated_at: collation_data.gen_utime,
-                total: 1,
-                cnt2048: 1,
-                cnt65536: 1,
             },
-            shard_blocks: BlockCounters {
-                updated_at: collation_data.gen_utime,
-                total: default_shard_blocks_count,
-                cnt2048: default_shard_blocks_count << 32,
-                cnt65536: default_shard_blocks_count << 32,
-            },
-        })?;
+        )?;
         // TODO: prune CreatorStats https://github.com/ton-blockchain/ton/blob/master/validator/impl/collator.cpp#L4191
         Ok(())
     }
