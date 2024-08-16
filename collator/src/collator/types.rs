@@ -117,10 +117,14 @@ pub(super) struct PrevData {
     _underload_history: u64,
 
     processed_upto: ProcessedUptoInfoStuff,
+    prev_queue_diff_hash: Option<HashBytes>,
 }
 
 impl PrevData {
-    pub fn build(prev_states: Vec<ShardStateStuff>) -> Result<(Box<Self>, UsageTree)> {
+    pub fn build(
+        prev_states: Vec<ShardStateStuff>,
+        prev_queue_diff_hashes: Vec<HashBytes>,
+    ) -> Result<(Box<Self>, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
         //  Collator::prepare_data()
@@ -163,6 +167,7 @@ impl PrevData {
             _underload_history: underload_history,
 
             processed_upto: processed_upto_info.try_into()?,
+            prev_queue_diff_hash: prev_queue_diff_hashes.first().copied(),
         });
 
         Ok((prev_data, usage_tree))
@@ -236,6 +241,9 @@ impl PrevData {
 
     pub fn processed_upto(&self) -> &ProcessedUptoInfoStuff {
         &self.processed_upto
+    }
+    pub fn prev_queue_diff_hash(&self) -> &Option<HashBytes> {
+        &self.prev_queue_diff_hash
     }
 }
 

@@ -1,5 +1,7 @@
 pub use self::proto::{QueueDiff, QueueKey, QueueState};
-pub use self::queue_diff::{QueueDiffMessagesIter, QueueDiffStuff, QueueDiffStuffAug};
+pub use self::queue_diff::{
+    QueueDiffMessagesIter, QueueDiffStuff, QueueDiffStuffAug, SerializedQueueDiff,
+};
 pub use self::queue_state::QueueStateStuff;
 
 mod proto;

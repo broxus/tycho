@@ -9,6 +9,7 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use tokio::sync::broadcast;
 use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_storage::{BlockHandle, BlockMetaData, MaybeExistingHandle, Storage};
@@ -73,6 +74,8 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn wait_for_block_next(&self, block_id: &BlockId) -> Option<Result<BlockStuffAug>>;
     /// Handle state after block was applied
     async fn handle_state(&self, state: &ShardStateStuff) -> Result<()>;
+    /// Loqd queue diff
+    async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>>;
 }
 
 pub struct StateNodeAdapterStdImpl {
@@ -245,6 +248,16 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         }
 
         Ok(())
+    }
+
+    async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>> {
+        let handle_storage = self.storage.block_handle_storage();
+        let block_storage = self.storage.block_storage();
+
+        let Some(handle) = handle_storage.load_handle(block_id) else {
+            return Ok(None);
+        };
+        block_storage.load_queue_diff(&handle).await.map(Some)
     }
 }
 

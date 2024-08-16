@@ -51,6 +51,7 @@ impl QueueDiffStuffBuilder {
         inner.diff.min_message = *min_message;
         inner.diff.max_message = *max_message;
         inner.diff.messages = hashes.into_iter().copied().collect();
+        inner.diff.messages.sort_unstable();
         self
     }
 
