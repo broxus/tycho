@@ -29,6 +29,12 @@ pub struct MempoolAdapterStdImpl {
     anchor_added: Arc<Notify>,
 }
 
+impl Default for MempoolAdapterStdImpl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MempoolAdapterStdImpl {
     pub fn new() -> Self {
         let anchors = Arc::new(RwLock::new(IndexMap::new()));

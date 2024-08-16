@@ -5,24 +5,21 @@ use std::sync::Arc;
 use ahash::HashMapExt;
 use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 use tycho_storage::owned_iterator::OwnedIterator;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::shard_iterator::{IterResult, ShardIterator};
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
+use crate::internal_queue::types::InternalMessageValue;
 
 pub struct ShardIteratorWithRange {
     pub iter: OwnedIterator,
-    pub range_start: InternalMessageKey,
-    pub range_end: InternalMessageKey,
+    pub range_start: QueueKey,
+    pub range_end: QueueKey,
 }
 
 impl ShardIteratorWithRange {
-    pub fn new(
-        iter: OwnedIterator,
-        range_start: InternalMessageKey,
-        range_end: InternalMessageKey,
-    ) -> Self {
+    pub fn new(iter: OwnedIterator, range_start: QueueKey, range_end: QueueKey) -> Self {
         ShardIteratorWithRange {
             iter,
             range_start,
@@ -66,19 +63,19 @@ impl<V: InternalMessageValue> Ord for MessageExt<V> {
 #[derive(Debug, Clone)]
 pub struct IterRange {
     pub shard_id: ShardIdent,
-    pub key: InternalMessageKey,
+    pub key: QueueKey,
 }
 
 pub trait StateIterator<V: InternalMessageValue>: Send {
     fn next(&mut self) -> Result<Option<MessageExt<V>>>;
-    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey>;
+    fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey>;
 }
 
 pub struct StateIteratorImpl<V: InternalMessageValue> {
     iters: FastHashMap<ShardIdent, ShardIterator>,
     message_queue: BinaryHeap<Reverse<MessageExt<V>>>,
     in_queue: HashSet<ShardIdent>,
-    current_position: FastHashMap<ShardIdent, InternalMessageKey>,
+    current_position: FastHashMap<ShardIdent, QueueKey>,
     shards_to_remove: Vec<ShardIdent>,
 }
 
@@ -131,7 +128,7 @@ impl<V: InternalMessageValue> StateIteratorImpl<V> {
                     }
                     Some(IterResult::Skip(Some(key))) => {
                         self.current_position
-                            .insert(key.shard_ident, key.internal_message_key.clone().into());
+                            .insert(key.shard_ident, key.internal_message_key);
                         iter.shift();
                     }
                     Some(IterResult::Skip(None)) => {
@@ -159,8 +156,7 @@ impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
 
         if let Some(Reverse(message)) = self.message_queue.pop() {
             let message_key = message.message.key();
-            self.current_position
-                .insert(message.source, message_key.clone());
+            self.current_position.insert(message.source, message_key);
 
             self.in_queue.remove(&message.source);
             return Ok(Some(message));
@@ -169,7 +165,7 @@ impl<V: InternalMessageValue> StateIterator<V> for StateIteratorImpl<V> {
         Ok(None)
     }
 
-    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+    fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey> {
         self.current_position.clone()
     }
 }

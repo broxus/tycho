@@ -2,7 +2,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::usize;
 
 use anyhow::{anyhow, Result};
 use metrics::atomics::AtomicU64;

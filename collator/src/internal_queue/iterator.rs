@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageExt};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{
-    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages, QueueFullDiff,
-};
+use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages, QueueFullDiff};
 
 pub trait QueueIterator<V: InternalMessageValue>: Send {
     /// Get next message
@@ -20,7 +19,7 @@ pub trait QueueIterator<V: InternalMessageValue>: Send {
     fn next_new(&mut self) -> Result<Option<IterItem<V>>>;
     /// Returns true if there are new messages to current shard
     fn has_new_messages_for_current_shard(&self) -> bool;
-    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey>;
+    fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey>;
     fn process_new_messages(&mut self) -> Result<Option<IterItem<V>>>;
     /// Extract diff from iterator
     fn extract_full_diff(&mut self) -> QueueFullDiff<V>;
@@ -28,7 +27,7 @@ pub trait QueueIterator<V: InternalMessageValue>: Send {
     fn take_diff(&self) -> QueueDiffWithMessages<V>;
     /// Commit processed messages
     /// It's getting last message position for each shard and save
-    fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()>;
+    fn commit(&mut self, messages: Vec<(ShardIdent, QueueKey)>) -> Result<()>;
     /// Add new message to iterator
     fn add_message(&mut self, message: V) -> Result<()>;
     /// Set iterator new messages buffer from full diff
@@ -38,9 +37,9 @@ pub trait QueueIterator<V: InternalMessageValue>: Send {
 pub struct QueueIteratorImpl<V: InternalMessageValue> {
     for_shard: ShardIdent,
     messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
-    new_messages: BTreeMap<InternalMessageKey, Arc<V>>,
+    new_messages: BTreeMap<QueueKey, Arc<V>>,
     iterators_manager: StatesIteratorsManager<V>,
-    last_processed_message: FastHashMap<ShardIdent, InternalMessageKey>,
+    last_processed_message: FastHashMap<ShardIdent, QueueKey>,
 }
 
 impl<V: InternalMessageValue> QueueIteratorImpl<V> {
@@ -66,12 +65,14 @@ pub struct IterItem<V: InternalMessageValue> {
 }
 
 fn update_shard_range(
-    touched_shards: &mut FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+    touched_shards: &mut FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
     shard_id: ShardIdent,
-    from: InternalMessageKey,
-    to: InternalMessageKey,
+    from: &QueueKey,
+    to: &QueueKey,
 ) {
-    touched_shards.entry(shard_id).or_insert_with(|| (from, to));
+    touched_shards
+        .entry(shard_id)
+        .or_insert_with(|| (*from, *to));
 }
 
 impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
@@ -101,7 +102,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         !self.messages_for_current_shard.is_empty()
     }
 
-    fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+    fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey> {
         self.iterators_manager.current_position()
     }
 
@@ -130,7 +131,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
         // fill processed_upto
         for (shard_id, message_key) in self.last_processed_message.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
-            diff.processed_upto.insert(*shard_id, message_key.clone());
+            diff.processed_upto.insert(*shard_id, *message_key);
         }
 
         // move new messages
@@ -162,7 +163,7 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
 
         for (shard_id, message_key) in self.last_processed_message.iter() {
             // TODO: may be `diff.processed_upto` should be a HashMap and we can consume it from iterator
-            diff.processed_upto.insert(*shard_id, message_key.clone());
+            diff.processed_upto.insert(*shard_id, *message_key);
         }
 
         diff.messages = self.new_messages.clone();
@@ -171,16 +172,16 @@ impl<V: InternalMessageValue> QueueIterator<V> for QueueIteratorImpl<V> {
     }
 
     // Function to update the commit position
-    fn commit(&mut self, messages: Vec<(ShardIdent, InternalMessageKey)>) -> Result<()> {
+    fn commit(&mut self, messages: Vec<(ShardIdent, QueueKey)>) -> Result<()> {
         for (source_shard, message_key) in messages {
             self.last_processed_message
                 .entry(source_shard)
                 .and_modify(|e| {
-                    if message_key > *e {
-                        *e = message_key.clone();
+                    if &message_key > e {
+                        *e = message_key;
                     }
                 })
-                .or_insert(message_key.clone());
+                .or_insert(message_key);
         }
         Ok(())
     }
@@ -219,19 +220,19 @@ pub struct QueueIteratorExt;
 
 impl QueueIteratorExt {
     pub fn collect_ranges(
-        shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
-        shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
-    ) -> FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)> {
+        shards_from: FastHashMap<ShardIdent, QueueKey>,
+        shards_to: FastHashMap<ShardIdent, QueueKey>,
+    ) -> FastHashMap<ShardIdent, (QueueKey, QueueKey)> {
         let mut shards_with_ranges = FastHashMap::default();
         for from in shards_from {
             for to in &shards_to {
                 let iter_range_from = IterRange {
                     shard_id: from.0,
-                    key: from.1.clone(),
+                    key: from.1,
                 };
                 let iter_range_to = IterRange {
                     shard_id: *to.0,
-                    key: to.1.clone(),
+                    key: *to.1,
                 };
                 Self::traverse_and_collect_ranges(
                     &mut shards_with_ranges,
@@ -245,7 +246,7 @@ impl QueueIteratorExt {
     }
 
     pub fn traverse_and_collect_ranges(
-        touched_shards: &mut FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+        touched_shards: &mut FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         from_range: &IterRange,
         to_range: &IterRange,
     ) {
@@ -255,8 +256,8 @@ impl QueueIteratorExt {
             update_shard_range(
                 touched_shards,
                 from_range.shard_id,
-                from_range.key.clone(),
-                to_range.key.clone(),
+                &from_range.key,
+                &to_range.key,
             );
         } else if from_range.shard_id.is_parent_of(&to_range.shard_id)
             || from_range.shard_id.is_child_of(&to_range.shard_id)
@@ -264,14 +265,14 @@ impl QueueIteratorExt {
             update_shard_range(
                 touched_shards,
                 from_range.shard_id,
-                from_range.key.clone(),
-                InternalMessageKey::MAX,
+                &from_range.key,
+                &QueueKey::MAX,
             );
             update_shard_range(
                 touched_shards,
                 to_range.shard_id,
-                InternalMessageKey::default(),
-                to_range.key.clone(),
+                &QueueKey::MIN,
+                &to_range.key,
             );
         }
 
@@ -280,14 +281,14 @@ impl QueueIteratorExt {
             update_shard_range(
                 touched_shards,
                 from_range.shard_id,
-                from_range.key.clone(),
-                InternalMessageKey::MAX,
+                &from_range.key,
+                &QueueKey::MAX,
             );
             update_shard_range(
                 touched_shards,
                 to_range.shard_id,
-                InternalMessageKey::default(),
-                to_range.key.clone(),
+                &QueueKey::MIN,
+                &to_range.key,
             );
 
             let mut current_shard = if from_range.shard_id.is_ancestor_of(&to_range.shard_id) {
@@ -301,8 +302,8 @@ impl QueueIteratorExt {
                     update_shard_range(
                         touched_shards,
                         parent_shard,
-                        InternalMessageKey::default(),
-                        InternalMessageKey::MAX,
+                        &QueueKey::MIN,
+                        &QueueKey::MAX,
                     );
                     current_shard = parent_shard;
                 } else {

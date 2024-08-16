@@ -404,7 +404,7 @@ impl CollatorStdImpl {
         };
 
         // TODO: Check if the result mc_data is properly updated on masterchain block
-        let mc_data = mc_data.unwrap_or_else(|| prev_working_state.mc_data);
+        let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
 
         self.working_state.future = Some(Box::pin(async move {
             let new_state_stuff = new_state_stuff.await?;
@@ -416,7 +416,7 @@ impl CollatorStdImpl {
                 PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
             Ok(WorkingState {
-                mc_data: mc_data.into(),
+                mc_data,
                 prev_shard_data,
                 usage_tree,
                 has_pending_internals: Some(has_pending_internals),
@@ -495,7 +495,7 @@ impl CollatorStdImpl {
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         Ok(WorkingState {
-            mc_data: mc_data.into(),
+            mc_data,
             prev_shard_data,
             usage_tree,
             has_pending_internals: None,
@@ -786,7 +786,7 @@ impl CollatorStdImpl {
                 .on_skipped_anchor(self.next_block_id_short, next_anchor, false)
                 .await?;
 
-            self.working_state.delay(working_state)
+            self.working_state.delay(working_state);
         }
 
         Ok(())
@@ -940,7 +940,6 @@ impl DelayedWorkingState {
         }
     }
 
-    #[must_use]
     async fn wait(&mut self) -> Result<WorkingState> {
         let labels = [("workchain", self.shard_id.workchain().to_string())];
         let _histogram =

@@ -1,5 +1,6 @@
 use ahash::HashMapExt;
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 use weedb::OwnedSnapshot;
@@ -7,7 +8,7 @@ use weedb::OwnedSnapshot;
 use crate::internal_queue::state::state_iterator::{
     ShardIteratorWithRange, StateIterator, StateIteratorImpl,
 };
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
+use crate::internal_queue::types::InternalMessageValue;
 
 // CONFIG
 
@@ -64,10 +65,10 @@ pub trait LocalPersistentState<V: InternalMessageValue> {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
     ) -> Box<dyn StateIterator<V>>;
 
-    fn delete_messages(&self, shard: ShardIdent, key: InternalMessageKey) -> anyhow::Result<()>;
+    fn delete_messages(&self, shard: ShardIdent, key: &QueueKey) -> anyhow::Result<()>;
 }
 
 // IMPLEMENTATION
@@ -91,7 +92,7 @@ impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
     ) -> Box<dyn StateIterator<V>> {
         let mut shard_iters_with_ranges = FastHashMap::with_capacity(ranges.len());
 
@@ -101,19 +102,16 @@ impl<V: InternalMessageValue> PersistentState<V> for PersistentStateStdImpl {
                 .internal_queue_storage()
                 .build_iterator_persistent(snapshot);
 
-            shard_iters_with_ranges.insert(
-                shard,
-                ShardIteratorWithRange::new(iter, range.0.clone(), range.1.clone()),
-            );
+            shard_iters_with_ranges
+                .insert(shard, ShardIteratorWithRange::new(iter, range.0, range.1));
         }
 
         Box::new(StateIteratorImpl::new(shard_iters_with_ranges, receiver))
     }
 
-    fn delete_messages(&self, shard: ShardIdent, until: InternalMessageKey) -> anyhow::Result<()> {
-        let from = InternalMessageKey::default();
+    fn delete_messages(&self, shard: ShardIdent, until: &QueueKey) -> anyhow::Result<()> {
         self.storage
             .internal_queue_storage()
-            .delete_messages(shard, from.into(), until.into())
+            .delete_messages(shard, &QueueKey::MIN, until)
     }
 }

@@ -5,6 +5,7 @@ use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task;
+use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -16,11 +17,8 @@ use crate::internal_queue::state::session_state::{
     SessionState, SessionStateFactory, SessionStateImplFactory, SessionStateStdImpl,
 };
 use crate::internal_queue::state::state_iterator::StateIterator;
-use crate::internal_queue::types::{
-    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
-};
+use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::tracing_targets;
-
 // FACTORY
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,7 +66,7 @@ where
 {
     async fn iterator(
         &self,
-        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator<V>>>;
     async fn apply_diff(
@@ -121,7 +119,7 @@ where
 {
     async fn iterator(
         &self,
-        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+        ranges: &FastHashMap<ShardIdent, (QueueKey, QueueKey)>,
         for_shard_id: ShardIdent,
     ) -> Vec<Box<dyn StateIterator<V>>> {
         let snapshot = self.persistent_state.snapshot();
@@ -176,11 +174,11 @@ where
                     .for_each(|(block_seqno, shard_diff)| {
                         // find last key to commit for each shard
                         diffs_for_commit.push(*block_id_short);
-                        let last_key = shard_diff.last_key.clone().unwrap_or_default();
+                        let last_key = shard_diff.last_key.unwrap_or_default();
 
                         let current_last_key = shards_to_commit
                             .entry(block_id_short.shard)
-                            .or_insert_with(|| last_key.clone());
+                            .or_insert_with(|| last_key);
 
                         if last_key > *current_last_key {
                             *current_last_key = last_key;
@@ -191,10 +189,10 @@ where
                             for processed_upto in shard_diff.processed_upto.iter() {
                                 let last_key = gc_ranges
                                     .entry(*processed_upto.0)
-                                    .or_insert_with(|| processed_upto.1.clone());
+                                    .or_insert_with(|| *processed_upto.1);
 
                                 if processed_upto.1 < last_key {
-                                    *last_key = processed_upto.1.clone();
+                                    *last_key = *processed_upto.1;
                                 }
                             }
                         }
@@ -217,7 +215,7 @@ where
         for (shard, end_key) in gc_ranges.iter() {
             let job = GCJob {
                 shard: *shard,
-                end_key: end_key.clone(),
+                end_key: *end_key,
                 persistent_state: self.persistent_state.clone(),
             };
             self.gc.enqueue(job).await;
@@ -272,14 +270,14 @@ impl<V: InternalMessageValue> GCQueue<V> {
 
 pub struct GCJob<V: InternalMessageValue> {
     shard: ShardIdent,
-    end_key: InternalMessageKey,
+    end_key: QueueKey,
     persistent_state: Arc<dyn PersistentState<V> + Send + Sync>,
 }
 
 impl<V: InternalMessageValue> GCJob<V> {
     pub async fn run(&self, semaphore: Arc<Semaphore>) {
         let shard = self.shard;
-        let end_key = self.end_key.clone();
+        let end_key = self.end_key;
         let persistent_state = self.persistent_state.clone();
 
         let _permit = semaphore
@@ -288,9 +286,8 @@ impl<V: InternalMessageValue> GCJob<V> {
             .expect("Failed to acquire semaphore");
 
         let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time");
-        let cloned_end_key = end_key.clone();
         task::spawn_blocking(move || {
-            if let Err(e) = persistent_state.delete_messages(shard, cloned_end_key) {
+            if let Err(e) = persistent_state.delete_messages(shard, &end_key) {
                 tracing::error!(target: tracing_targets::MQ, "Failed to delete messages: {e:?}");
             }
         })
