@@ -997,7 +997,7 @@ struct ArchiveId {
 }
 
 #[derive(thiserror::Error, Debug)]
-enum BlockStorageError {
+pub enum BlockStorageError {
     #[error("Archive not found")]
     ArchiveNotFound,
     #[error("Block data not found")]
