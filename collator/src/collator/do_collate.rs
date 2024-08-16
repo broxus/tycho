@@ -425,6 +425,7 @@ impl CollatorStdImpl {
                         "tycho_do_collate_apply_queue_diff_time",
                         &labels,
                     );
+
                     mq_adapter
                         .apply_diff(diff_with_messages, block_id_short)
                         .await?;

@@ -257,13 +257,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let Some(handle) = handle_storage.load_handle(block_id) else {
             return Ok(None);
         };
-        match block_storage.load_queue_diff(&handle).await {
-            Ok(queue_diff) => Ok(Some(queue_diff)),
-            Err(e) => match e.downcast_ref::<BlockStorageError>() {
-                Some(BlockStorageError::QueueDiffNotFound) => Ok(None),
-                _ => Err(e),
-            },
-        }
+
+        block_storage.load_queue_diff(&handle).await.map(Some)
     }
 }
 
