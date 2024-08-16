@@ -90,6 +90,12 @@ pub struct QueueDiffStuff {
 }
 
 impl QueueDiffStuff {
+    pub fn new(block_id: BlockId, diff: QueueDiff) -> Self {
+        Self {
+            inner: Arc::new(Inner { block_id, diff }),
+        }
+    }
+
     pub fn builder(
         shard_ident: ShardIdent,
         seqno: u32,

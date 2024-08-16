@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use execution_manager::ExecutionManager;
 use futures_util::future::{BoxFuture, Future};
@@ -294,19 +295,21 @@ impl CollatorStdImpl {
 
         // init working state
 
-        // load states
+        // load states and prev queue diff hash
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): init: loading initial shard state...", self.next_block_id_short,
         );
-        let prev_states =
-            Self::load_init_states(self.state_node_adapter.as_ref(), prev_blocks_ids).await?;
+        let (prev_states, prev_queue_diff_hash) =
+            Self::load_init_states_and_diffs(self.state_node_adapter.clone(), prev_blocks_ids)
+                .await?;
 
         // build, validate and set working state
         tracing::info!(target: tracing_targets::COLLATOR,
             "Collator (block_id={}): init: building working state...", self.next_block_id_short,
         );
 
-        let working_state = Self::build_and_validate_working_state(mc_data, prev_states)?;
+        let working_state =
+            Self::build_and_validate_working_state(mc_data, prev_states, prev_queue_diff_hash)?;
 
         // define processed to anchor info
         // try get from mc data
@@ -393,6 +396,7 @@ impl CollatorStdImpl {
         mc_data: Option<Arc<McData>>,
         has_pending_internals: bool,
         prev_working_state: WorkingState,
+        prev_queue_diff_hash: Option<HashBytes>,
     ) -> Result<()> {
         self.next_block_id_short = BlockIdShort {
             shard: block_id.shard,
@@ -407,7 +411,7 @@ impl CollatorStdImpl {
 
             let prev_states = vec![new_state_stuff];
             Self::check_prev_states_and_master(&mc_data, &prev_states)?;
-            let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
+            let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hash)?;
 
             Ok(WorkingState {
                 mc_data: mc_data.into(),
@@ -424,26 +428,52 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Load required initial states:
+    /// Load required initial states and prev queue diff hash:
     /// master state + list of previous shard states
-    async fn load_init_states(
-        state_node_adapter: &dyn StateNodeAdapter,
+    async fn load_init_states_and_diffs(
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
         prev_blocks_ids: Vec<BlockId>,
-    ) -> Result<Vec<ShardStateStuff>> {
+    ) -> Result<(Vec<ShardStateStuff>, Option<HashBytes>)> {
         // otherwise await prev states by prev block ids
-        let mut prev_states = vec![];
-        for prev_block_id in prev_blocks_ids {
-            // request state for prev block and wait for response
-            let state = state_node_adapter.load_state(&prev_block_id).await?;
-            tracing::info!(
-                target: tracing_targets::COLLATOR,
-                "To init working state loaded prev shard state for prev_block_id {}",
-                prev_block_id.as_short_id(),
-            );
-            prev_states.push(state);
-        }
+        let max_prev_block = prev_blocks_ids.iter().max_by_key(|b| b.seqno).cloned();
+        let load_state_fut: JoinTask<Result<Vec<ShardStateStuff>>> = JoinTask::new({
+            let state_node_adapter = state_node_adapter.clone();
+            async move {
+                let mut prev_states = vec![];
+                for prev_block_id in prev_blocks_ids {
+                    // request state for prev block and wait for response
+                    let state = state_node_adapter.load_state(&prev_block_id).await?;
+                    tracing::info!(
+                        target: tracing_targets::COLLATOR,
+                        "To init working state loaded prev shard state for prev_block_id {}",
+                        prev_block_id.as_short_id(),
+                    );
+                    prev_states.push(state);
+                }
+                Ok(prev_states)
+            }
+        });
 
-        Ok(prev_states)
+        let prev_hash_fut: JoinTask<Result<Option<HashBytes>>> = JoinTask::new(async move {
+            let mut prev_hash = None;
+            if let Some(diff) = state_node_adapter
+                .load_diff(&max_prev_block.unwrap())
+                .await?
+            {
+                prev_hash = Some(*diff.diff_hash());
+                tracing::info!(
+                    target: tracing_targets::COLLATOR,
+                    "To init working state loaded prev queue diff hash - {:?}",
+                    prev_hash
+                );
+            }
+            Ok(prev_hash)
+        });
+
+        let (prev_states, prev_hash) =
+            futures_util::future::join(load_state_fut, prev_hash_fut).await;
+
+        Ok((prev_states?, prev_hash?))
     }
 
     /// Build working state structure:
@@ -455,11 +485,12 @@ impl CollatorStdImpl {
     fn build_and_validate_working_state(
         mc_data: Arc<McData>,
         prev_states: Vec<ShardStateStuff>,
+        prev_queue_diff_hash: Option<HashBytes>,
     ) -> Result<WorkingState> {
         // TODO: make real implementation
 
         Self::check_prev_states_and_master(&mc_data, &prev_states)?;
-        let (prev_shard_data, usage_tree) = PrevData::build(prev_states)?;
+        let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hash)?;
 
         Ok(WorkingState {
             mc_data: mc_data.into(),
