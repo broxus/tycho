@@ -10,7 +10,6 @@ use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
 use tycho_block_util::queue::QueueDiff;
-use tycho_block_util::queue::ShardProcessedUpto;
 use tycho_storage::BlockMetaData;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -374,38 +373,48 @@ impl CollatorStdImpl {
         let histogram_create_queue_diff =
             HistogramGuard::begin_with_labels("tycho_do_collate_create_queue_diff_time", &labels);
 
-        let (current_positions, has_pending_internals, diff) =
+        let (current_positions, has_pending_internals, diff_with_messages) =
             mq_iterator_adapter.release(!exec_manager.has_pending_messages_in_buffer())?;
 
         let create_queue_diff_elapsed = histogram_create_queue_diff.finish();
 
-        let diff_messages_len = diff.messages.len();
+        let diff_messages_len = diff_with_messages.messages.len();
         let has_pending_internals =
             exec_manager.has_pending_messages_in_buffer() || has_pending_internals;
 
-        let mut queue_diff = QueueDiff {
-            hash: HashBytes::ZERO,
-            prev_hash: HashBytes::ZERO, // TODO: fill!
-            shard_ident: self.shard_id,
-            seqno: self.next_block_id_short.seqno,
-            processed_upto: diff
-                .processed_upto
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        *k,
-                        ShardProcessedUpto {
-                            lt: v.lt,
-                            hash: v.hash,
-                        },
-                    )
-                })
-                .collect(),
-            messages: diff.messages.iter().map(|(k, _)| k.hash).collect(),
-        };
-
-        queue_diff.recompute_hash();
-
+        let queue_diff = diff_with_messages
+            .messages
+            .first_key_value()
+            .map(|(first_message, _)| {
+                QueueDiff {
+                    hash: HashBytes::ZERO,
+                    prev_hash: HashBytes::ZERO, // TODO: fill!
+                    shard_ident: self.shard_id,
+                    seqno: self.next_block_id_short.seqno,
+                    processed_upto: diff_with_messages
+                        .processed_upto
+                        .iter()
+                        .map(|(k, v)| (*k, v.clone().into()))
+                        .collect(),
+                    messages: diff_with_messages
+                        .messages
+                        .iter()
+                        .map(|(k, _)| k.hash)
+                        .collect(),
+                    max_message: diff_with_messages
+                        .messages
+                        .iter()
+                        .max_by_key(|(k, _)| k.lt)
+                        .map(|(k, _)| k.clone().into())
+                        .unwrap_or(first_message.clone().into()),
+                    min_message: diff_with_messages
+                        .messages
+                        .iter()
+                        .min_by_key(|(k, _)| k.lt)
+                        .map(|(k, _)| k.clone().into())
+                        .unwrap_or(first_message.clone().into()),
+                }
+            });
         // start async update queue task
         let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
             JoinTask::<Result<_>>::new({
@@ -418,7 +427,9 @@ impl CollatorStdImpl {
                         &labels,
                     );
                     // TODO: should panic if result is error
-                    mq_adapter.apply_diff(diff, block_id_short).await?;
+                    mq_adapter
+                        .apply_diff(diff_with_messages, block_id_short)
+                        .await?;
                     let apply_queue_diff_elapsed = histogram.finish();
 
                     Ok(apply_queue_diff_elapsed)
@@ -1419,14 +1430,11 @@ fn new_transaction(
                 });
                 let exported_value = out_msg.compute_exported_value()?;
 
-                collation_data.out_msgs.insert(
-                    in_msg_hash,
-                    PreparedOutMsg {
-                        out_msg: Lazy::new(&out_msg)?,
-                        exported_value,
-                        new_tx: None,
-                    },
-                );
+                collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
+                    out_msg: Lazy::new(&out_msg)?,
+                    exported_value,
+                    new_tx: None,
+                });
             }
             collation_data.int_dequeue_count += 1;
 
@@ -1466,14 +1474,11 @@ fn new_transaction(
             });
             let exported_value = out_msg.compute_exported_value()?;
 
-            collation_data.out_msgs.insert(
-                in_msg_hash,
-                PreparedOutMsg {
-                    out_msg: Lazy::new(&out_msg)?,
-                    exported_value,
-                    new_tx: None,
-                },
-            );
+            collation_data.out_msgs.insert(in_msg_hash, PreparedOutMsg {
+                out_msg: Lazy::new(&out_msg)?,
+                exported_value,
+                new_tx: None,
+            });
             collation_data.int_enqueue_count -= 1;
 
             in_msg
@@ -1486,13 +1491,10 @@ fn new_transaction(
         }
     };
 
-    collation_data.in_msgs.insert(
-        in_msg_hash,
-        PreparedInMsg {
-            in_msg,
-            import_fees,
-        },
-    );
+    collation_data.in_msgs.insert(in_msg_hash, PreparedInMsg {
+        in_msg,
+        import_fees,
+    });
 
     let mut out_messages = vec![];
 
@@ -1530,14 +1532,13 @@ fn new_transaction(
                     transaction: executor_output.transaction.clone(),
                 });
 
-                collation_data.out_msgs.insert(
-                    out_msg_hash,
-                    PreparedOutMsg {
+                collation_data
+                    .out_msgs
+                    .insert(out_msg_hash, PreparedOutMsg {
                         out_msg: Lazy::new(&out_msg)?,
                         exported_value: out_msg.compute_exported_value()?,
                         new_tx: Some(executor_output.transaction.clone()),
-                    },
-                );
+                    });
 
                 out_messages.push(Box::new(ParsedMessage {
                     info: out_msg_info,
@@ -1553,14 +1554,13 @@ fn new_transaction(
                     transaction: executor_output.transaction.clone(),
                 });
 
-                collation_data.out_msgs.insert(
-                    out_msg_hash,
-                    PreparedOutMsg {
+                collation_data
+                    .out_msgs
+                    .insert(out_msg_hash, PreparedOutMsg {
                         out_msg: Lazy::new(&out_msg)?,
                         exported_value: out_msg.compute_exported_value()?,
                         new_tx: None,
-                    },
-                );
+                    });
             }
             MsgInfo::ExtIn(_) => bail!("External inbound message cannot be an output"),
         }

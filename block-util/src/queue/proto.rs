@@ -30,8 +30,9 @@ impl QueueDiff {
     ///
     /// NOTE: Since the hash is not serialized, it is NOT mandatory to call this method
     /// if it will not be used after this.
-    pub fn recompute_hash(&mut self) {
+    pub fn recompute_hash(&mut self) -> HashBytes {
         self.hash = Self::compute_hash(&tl_proto::serialize(&*self));
+        self.hash
     }
 
     /// Computes the hash of the serialized diff.
