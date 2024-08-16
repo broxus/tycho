@@ -2,6 +2,8 @@
 pub use anchor_consumer::*;
 #[cfg(feature = "test")]
 pub use bootstrap::*;
+#[cfg(feature = "test")]
+pub use dag::*;
 // TODO hide the whole mod under feature flag after configs are implemented
 pub(crate) use genesis::*;
 
@@ -9,4 +11,6 @@ pub(crate) use genesis::*;
 mod anchor_consumer;
 #[cfg(feature = "test")]
 mod bootstrap;
+#[cfg(feature = "test")]
+mod dag;
 mod genesis;

@@ -15,6 +15,7 @@ use tycho_util::metrics::HistogramGuardWithLabels;
 use types::AnchorInfo;
 
 use self::types::{CachedMempoolAnchor, CollatorStats, PrevData, WorkingState};
+use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::{MempoolAdapter, MempoolAnchor, MempoolAnchorId};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::StateNodeAdapter;
@@ -36,7 +37,7 @@ mod types;
 // FACTORY
 
 pub struct CollatorContext {
-    pub mq_adapter: Arc<dyn MessageQueueAdapter>,
+    pub mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     pub mpool_adapter: Arc<dyn MempoolAdapter>,
     pub state_node_adapter: Arc<dyn StateNodeAdapter>,
     pub config: Arc<CollationConfig>,
@@ -166,7 +167,7 @@ pub struct CollatorStdImpl {
 
     dispatcher: AsyncQueuedDispatcher<Self>,
     listener: Arc<dyn CollatorEventListener>,
-    mq_adapter: Arc<dyn MessageQueueAdapter>,
+    mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     exec_manager: Option<ExecutionManager>,
     mpool_adapter: Arc<dyn MempoolAdapter>,
     state_node_adapter: Arc<dyn StateNodeAdapter>,
@@ -193,7 +194,7 @@ pub struct CollatorStdImpl {
 impl CollatorStdImpl {
     #[allow(clippy::too_many_arguments)]
     pub async fn start(
-        mq_adapter: Arc<dyn MessageQueueAdapter>,
+        mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
         mpool_adapter: Arc<dyn MempoolAdapter>,
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         config: Arc<CollationConfig>,
@@ -626,6 +627,16 @@ impl CollatorStdImpl {
     ) -> Result<bool> {
         if let Some(has_internals) = working_state.has_pending_internals {
             return Ok(has_internals);
+        }
+
+        if working_state
+            .prev_shard_data
+            .processed_upto()
+            .processed_offset
+            > 0
+        {
+            working_state.has_pending_internals = Some(true);
+            return Ok(true);
         }
 
         let has_pending_messages_in_buffer = self

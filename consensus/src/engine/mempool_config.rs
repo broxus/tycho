@@ -29,6 +29,7 @@ impl MempoolConfig {
     }
 
     /// hard limit (in rounds) on anchor history length
+    /// includes anchor candidate round, though it is committed at the next attempt
     pub const COMMIT_DEPTH: u8 = 20;
 
     pub const GENESIS_ROUND: Round = Round(1);

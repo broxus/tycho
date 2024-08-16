@@ -1,17 +1,18 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ahash::HashMapExt;
 use anyhow::Result;
-use everscale_types::boc::Boc;
 use everscale_types::models::ShardIdent;
 use tycho_storage::Storage;
 use tycho_util::FastHashMap;
 use weedb::rocksdb::WriteBatch;
 use weedb::OwnedSnapshot;
 
-use crate::internal_queue::state::state_iterator::{ShardRange, StateIterator, StateIteratorImpl};
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
-use crate::types::IntAdrExt;
+use crate::internal_queue::state::state_iterator::{
+    ShardIteratorWithRange, StateIterator, StateIteratorImpl,
+};
+use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
 
 // CONFIG
 
@@ -21,10 +22,11 @@ pub struct SessionStateConfig {
 
 // FACTORY
 
-impl<F, R> SessionStateFactory for F
+impl<F, R, V> SessionStateFactory<V> for F
 where
     F: Fn() -> R,
-    R: SessionState,
+    R: SessionState<V>,
+    V: InternalMessageValue,
 {
     type SessionState = R;
 
@@ -43,7 +45,7 @@ impl SessionStateImplFactory {
     }
 }
 
-impl SessionStateFactory for SessionStateImplFactory {
+impl<V: InternalMessageValue> SessionStateFactory<V> for SessionStateImplFactory {
     type SessionState = SessionStateStdImpl;
 
     fn create(&self) -> Self::SessionState {
@@ -51,8 +53,8 @@ impl SessionStateFactory for SessionStateImplFactory {
     }
 }
 
-pub trait SessionStateFactory {
-    type SessionState: LocalSessionState;
+pub trait SessionStateFactory<V: InternalMessageValue> {
+    type SessionState: LocalSessionState<V>;
 
     fn create(&self) -> Self::SessionState;
 }
@@ -60,24 +62,25 @@ pub trait SessionStateFactory {
 // TRAIT
 
 #[trait_variant::make(SessionState: Send)]
-pub trait LocalSessionState {
+pub trait LocalSessionState<V: InternalMessageValue> {
     fn add_messages(
         &self,
-        shard: ShardIdent,
-        messages: &BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
-    ) -> anyhow::Result<()>;
+        source: ShardIdent,
+        messages: &BTreeMap<InternalMessageKey, Arc<V>>,
+    ) -> Result<()>;
 
     fn iterator(
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, ShardRange>,
-    ) -> Box<dyn StateIterator>;
+        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+    ) -> Box<dyn StateIterator<V>>;
 
     fn commit_messages(
         &self,
         shard: ShardIdent,
-        range: (&InternalMessageKey, &InternalMessageKey),
+        from: &InternalMessageKey,
+        to: &InternalMessageKey,
     ) -> Result<()>;
 }
 
@@ -93,40 +96,30 @@ impl SessionStateStdImpl {
     }
 }
 
-impl SessionState for SessionStateStdImpl {
+impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
     /// write new messages to storage
     fn add_messages(
         &self,
-        shard_ident: ShardIdent,
-        messages: &BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+        source: ShardIdent,
+        messages: &BTreeMap<InternalMessageKey, Arc<V>>,
     ) -> Result<()> {
         let mut batch = WriteBatch::default();
 
-        for (k, v) in messages.iter() {
-            let (lt, hash, workchain, address, cell) = (
-                k.lt,
-                k.hash,
-                v.info.dst.workchain() as i8,
-                v.info.dst.get_address(),
-                Boc::encode(&v.cell),
-            );
-
+        for (internal_message_key, message) in messages.iter() {
             self.storage
                 .internal_queue_storage()
-                .write_messages_session_batch(
+                .insert_message_session(
                     &mut batch,
-                    shard_ident,
-                    lt,
-                    hash,
-                    workchain,
-                    address,
-                    cell,
-                );
+                    tycho_storage::model::ShardsInternalMessagesKey::new(
+                        source,
+                        internal_message_key.clone().into(),
+                    ),
+                    message.destination(),
+                    &message.serialize()?,
+                )?;
         }
 
-        if messages.len() > 0 {
-            self.storage.internal_queue_storage().write_batch(batch)?;
-        }
+        self.storage.internal_queue_storage().write_batch(batch)?;
 
         Ok(())
     }
@@ -135,25 +128,33 @@ impl SessionState for SessionStateStdImpl {
         &self,
         snapshot: &OwnedSnapshot,
         receiver: ShardIdent,
-        ranges: &FastHashMap<ShardIdent, ShardRange>,
-    ) -> Box<dyn StateIterator> {
-        let shards = ranges.keys().cloned().collect::<Vec<_>>();
-        let iter = self
-            .storage
-            .internal_queue_storage()
-            .build_iterator_session(&snapshot, shards);
+        ranges: &FastHashMap<ShardIdent, (InternalMessageKey, InternalMessageKey)>,
+    ) -> Box<dyn StateIterator<V>> {
+        let mut shard_iters_with_ranges = FastHashMap::with_capacity(ranges.len());
 
-        Box::new(StateIteratorImpl::new(iter, receiver, ranges.clone()))
+        for (&shard, range) in ranges {
+            let iter = self
+                .storage
+                .internal_queue_storage()
+                .build_iterator_session(snapshot);
+
+            shard_iters_with_ranges.insert(
+                shard,
+                ShardIteratorWithRange::new(iter, range.0.clone(), range.1.clone()),
+            );
+        }
+
+        Box::new(StateIteratorImpl::new(shard_iters_with_ranges, receiver))
     }
 
     fn commit_messages(
         &self,
         shard: ShardIdent,
-        range: (&InternalMessageKey, &InternalMessageKey),
+        from: &InternalMessageKey,
+        to: &InternalMessageKey,
     ) -> Result<()> {
-        let range = ((range.0.lt, range.0.hash), (range.1.lt, range.1.hash));
         self.storage
             .internal_queue_storage()
-            .commit_to_persistent(shard, range)
+            .commit(shard, from.clone().into(), to.clone().into())
     }
 }

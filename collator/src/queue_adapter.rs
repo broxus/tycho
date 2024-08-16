@@ -1,9 +1,6 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
-use everscale_types::cell::Cell;
-use everscale_types::models::{BlockIdShort, IntMsgInfo, ShardIdent};
+use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_util::FastHashMap;
 
@@ -12,89 +9,66 @@ use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
 use crate::internal_queue::state::session_state::SessionStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiff};
+use crate::internal_queue::types::{
+    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
+};
 use crate::tracing_targets;
-use crate::utils::shard::SplitMergeAction;
 
-pub struct MessageQueueAdapterStdImpl {
-    queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl>,
+pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
+    queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>,
 }
 
 #[async_trait]
-pub trait MessageQueueAdapter: Send + Sync + 'static {
-    /// Perform split and merge in the current queue state in accordance with the new shards set
-    async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()>;
+pub trait MessageQueueAdapter<V>: Send + Sync
+where
+    V: InternalMessageValue + Send + Sync,
+{
     /// Create iterator for specified shard and return it
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
         shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
         shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
-    ) -> Result<Box<dyn QueueIterator>>;
+    ) -> Result<Box<dyn QueueIterator<V>>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
-    async fn apply_diff(&self, diff: QueueDiff, block_id_short: BlockIdShort) -> Result<()>;
+    async fn apply_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+    ) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
     async fn commit_diff(&self, diff_id: &BlockIdShort) -> Result<()>;
     /// Add new messages to the iterator
     fn add_message_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator>,
-        message: (IntMsgInfo, Cell),
+        iterator: &mut Box<dyn QueueIterator<V>>,
+        message: V,
     ) -> Result<()>;
     /// Commit processed messages in the iterator
     /// Save last message position for each shard
     fn commit_messages_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator>,
+        iterator: &mut Box<dyn QueueIterator<V>>,
         messages: Vec<(ShardIdent, InternalMessageKey)>,
     ) -> Result<()>;
 }
 
-impl MessageQueueAdapterStdImpl {
-    pub fn new(queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl>) -> Self {
+impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
+    pub fn new(queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, V>) -> Self {
         Self { queue }
     }
 }
 
 #[async_trait]
-impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
-    #[instrument(skip(self), fields(?split_merge_actions))]
-    async fn update_shards(&self, split_merge_actions: Vec<SplitMergeAction>) -> Result<()> {
-        tracing::info!(target: tracing_targets::MQ_ADAPTER, "Updating shards in message queue");
-        for sma in split_merge_actions {
-            match sma {
-                SplitMergeAction::Split(_shard_id) => {
-                    // self.queue.split_shard(&shard_id).await?;
-                    // let (shard_l_id, shard_r_id) = shard_id
-                    //     .split()
-                    //     .expect("all split/merge actions should be valid there");
-                    // tracing::info!(
-                    //     target: tracing_targets::MQ_ADAPTER,
-                    //     "Shard {} splitted on {} and {} in message queue",
-                    //     shard_id,
-                    //     shard_l_id,
-                    //     shard_r_id,
-                    // );
-                }
-                SplitMergeAction::Merge(_shard_id_1, _shard_id_2) => {
-                    // self.queue.merge_shards(&shard_id_1, &shard_id_2).await?;
-                }
-                SplitMergeAction::Add(_new_shard) => {
-                    // self.queue.add_shard(&new_shard).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
+impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdImpl<V> {
     #[instrument(skip_all, fields(%for_shard_id))]
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
         shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
         shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
-    ) -> Result<Box<dyn QueueIterator>> {
+    ) -> Result<Box<dyn QueueIterator<V>>> {
         let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
 
@@ -113,16 +87,22 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         Ok(Box::new(iterator))
     }
 
-    async fn apply_diff(&self, diff: QueueDiff, block_id_short: BlockIdShort) -> Result<()> {
+    #[instrument(skip_all, fields(%block_id_short))]
+    async fn apply_diff(
+        &self,
+        diff: QueueDiffWithMessages<V>,
+        block_id_short: BlockIdShort,
+    ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
+        let processed_upto = diff.processed_upto.clone();
         self.queue.apply_diff(diff, block_id_short).await?;
 
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-                        id = ?block_id_short,
                         new_messages_len = len,
                         elapsed = ?time.elapsed(),
+                        processed_upto = ?processed_upto,
 
             "Diff applied",
         );
@@ -136,7 +116,6 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
         self.queue.commit_diff(diff_id).await?;
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,
-            id = ?diff_id,
             elapsed = ?time.elapsed(),
             "Diff commited",
         );
@@ -146,17 +125,16 @@ impl MessageQueueAdapter for MessageQueueAdapterStdImpl {
 
     fn add_message_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator>,
-        message: (IntMsgInfo, Cell),
+        iterator: &mut Box<dyn QueueIterator<V>>,
+        message: V,
     ) -> Result<()> {
-        let message = Arc::new(EnqueuedMessage::from((message.0, message.1)));
         iterator.add_message(message)?;
         Ok(())
     }
 
     fn commit_messages_to_iterator(
         &self,
-        iterator: &mut Box<dyn QueueIterator>,
+        iterator: &mut Box<dyn QueueIterator<V>>,
         messages: Vec<(ShardIdent, InternalMessageKey)>,
     ) -> Result<()> {
         tracing::trace!(

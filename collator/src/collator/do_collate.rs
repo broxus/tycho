@@ -24,7 +24,7 @@ use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
-use crate::internal_queue::types::InternalMessageKey;
+use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
 use crate::types::{BlockCollationResult, McData, TopBlockDescription};
@@ -136,7 +136,7 @@ impl CollatorStdImpl {
             collation_data.processed_upto.externals,
         );
 
-        // show intenals proccessed upto
+        // show internals processed upto
         collation_data
             .processed_upto
             .internals
@@ -177,6 +177,30 @@ impl CollatorStdImpl {
 
         // create iterator adapter
         let mut mq_iterator_adapter = exec_manager.create_iterator_adapter();
+
+        // refill messages buffer and skip groups upto offset (on node restart)
+        if !exec_manager.has_pending_messages_in_buffer()
+            && collation_data.processed_upto.processed_offset > 0
+        {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                prev_processed_offset = collation_data.processed_upto.processed_offset,
+                "refill messages buffer and skip groups upto",
+            );
+
+            while exec_manager.message_groups_offset()
+                < collation_data.processed_upto.processed_offset
+            {
+                exec_manager
+                    .get_next_message_group(
+                        self,
+                        &mut collation_data,
+                        &mut mq_iterator_adapter,
+                        InternalMessageKey::default(),
+                        &working_state,
+                    )
+                    .await?;
+            }
+        }
 
         let prepare_elapsed = prepare_histogram.finish();
 
@@ -265,10 +289,12 @@ impl CollatorStdImpl {
 
                             collation_data.inserted_new_msgs_to_iterator += 1;
 
-                            // TODO: Reduce size of parameters
+                            let enqueued_message =
+                                EnqueuedMessage::from((int_msg_info, new_message.cell));
+
                             self.mq_adapter.add_message_to_iterator(
                                 mq_iterator_adapter.iterator(),
-                                (int_msg_info, new_message.cell),
+                                enqueued_message,
                             )?;
                         }
 
@@ -366,6 +392,7 @@ impl CollatorStdImpl {
                     "tycho_do_collate_apply_queue_diff_time",
                     &labels,
                 );
+                // TODO: should panic if result is error
                 mq_adapter.apply_diff(diff, block_id_short).await?;
                 let apply_queue_diff_elapsed = histogram.finish();
 
@@ -536,7 +563,7 @@ impl CollatorStdImpl {
             collation_data.new_msgs_created, diff_messages_len,
             collation_data.in_msgs.len(), collation_data.out_msgs.len(),
             collation_data.read_ext_msgs, collation_data.read_int_msgs_from_iterator,
-            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals,
+            collation_data.read_new_msgs_from_iterator, collation_data.inserted_new_msgs_to_iterator, has_pending_internals
         );
 
         assert_eq!(

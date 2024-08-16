@@ -10,6 +10,7 @@ license.workspace = true
 
 [dependencies]
 # crates.io deps
+ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }

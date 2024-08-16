@@ -2,30 +2,38 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
-use everscale_types::cell::{Cell, HashBytes};
-use everscale_types::models::{IntAddr, IntMsgInfo, ShardIdent};
+use anyhow::{bail, Context};
+use everscale_types::boc::Boc;
+use everscale_types::cell::{Cell, HashBytes, Load};
+use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, ShardIdent};
 
-use super::state::state_iterator::MessageWithSource;
-
-pub type Lt = u64;
+use super::state::state_iterator::MessageExt;
 
 #[derive(Default, Debug, Clone)]
-pub struct QueueDiff {
-    pub messages: BTreeMap<InternalMessageKey, Arc<EnqueuedMessage>>,
+pub struct QueueDiffWithMessages<V: InternalMessageValue> {
+    pub messages: BTreeMap<InternalMessageKey, Arc<V>>,
     pub processed_upto: BTreeMap<ShardIdent, InternalMessageKey>,
     pub keys: Vec<InternalMessageKey>,
 }
 
-impl QueueDiff {
-    pub fn save_keys(&mut self) {
+impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
+    pub fn new() -> Self {
+        Self {
+            messages: BTreeMap::new(),
+            processed_upto: BTreeMap::new(),
+            keys: Vec::new(),
+        }
+    }
+
+    pub fn exclude_data(&mut self) {
         self.keys = self.messages.keys().cloned().collect();
         self.messages.clear();
     }
 }
 
-pub struct QueueFullDiff {
-    pub diff: QueueDiff,
-    pub messages_for_current_shard: BinaryHeap<Reverse<Arc<MessageWithSource>>>,
+pub struct QueueFullDiff<V: InternalMessageValue> {
+    pub diff: QueueDiffWithMessages<V>,
+    pub messages_for_current_shard: BinaryHeap<Reverse<MessageExt<V>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,17 +54,21 @@ impl EnqueuedMessage {
     pub fn destination(&self) -> &IntAddr {
         &self.info.dst
     }
+
+    pub fn hash(&self) -> &HashBytes {
+        self.cell.repr_hash()
+    }
 }
 
 impl Eq for EnqueuedMessage {}
 
-impl PartialEq<Self> for EnqueuedMessage {
+impl PartialEq for EnqueuedMessage {
     fn eq(&self, other: &Self) -> bool {
         self.key() == other.key()
     }
 }
 
-impl PartialOrd<Self> for EnqueuedMessage {
+impl PartialOrd for EnqueuedMessage {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.key().cmp(&other.key()))
     }
@@ -70,7 +82,7 @@ impl Ord for EnqueuedMessage {
 
 #[derive(Default, Debug, Ord, Eq, PartialEq, PartialOrd, Hash, Clone)]
 pub struct InternalMessageKey {
-    pub lt: Lt,
+    pub lt: u64,
     pub hash: HashBytes,
 }
 
@@ -80,36 +92,30 @@ impl InternalMessageKey {
         hash: HashBytes([u8::MAX; 32]),
     };
 
-    pub fn with_lt_and_min_hash(lt: Lt) -> Self {
-        Self {
-            lt,
-            hash: HashBytes::ZERO,
-        }
-    }
-
-    pub fn with_lt_and_max_hash(lt: Lt) -> Self {
+    pub fn with_lt_and_max_hash(lt: u64) -> Self {
         Self {
             lt,
             hash: HashBytes([255; 32]),
         }
     }
 
-    pub fn into_tuple(self) -> (Lt, HashBytes) {
+    pub fn into_tuple(self) -> (u64, HashBytes) {
         (self.lt, self.hash)
     }
 }
 
 pub trait InternalMessageKeyOpt {
-    fn map_into_tuple(self) -> Option<(Lt, HashBytes)>;
+    fn map_into_tuple(self) -> Option<(u64, HashBytes)>;
 }
+
 impl InternalMessageKeyOpt for Option<InternalMessageKey> {
-    fn map_into_tuple(self) -> Option<(Lt, HashBytes)> {
+    fn map_into_tuple(self) -> Option<(u64, HashBytes)> {
         self.map(|value| (value.lt, value.hash))
     }
 }
 
-impl From<(Lt, HashBytes)> for InternalMessageKey {
-    fn from(value: (Lt, HashBytes)) -> Self {
+impl From<(u64, HashBytes)> for InternalMessageKey {
+    fn from(value: (u64, HashBytes)) -> Self {
         Self {
             lt: value.0,
             hash: value.1,
@@ -123,5 +129,67 @@ impl EnqueuedMessage {
             lt: self.info.created_lt,
             hash: self.hash,
         }
+    }
+}
+
+impl From<InternalMessageKey> for tycho_storage::model::InternalMessageKey {
+    fn from(key: InternalMessageKey) -> Self {
+        tycho_storage::model::InternalMessageKey {
+            lt: key.lt,
+            hash: key.hash,
+        }
+    }
+}
+
+impl From<tycho_storage::model::InternalMessageKey> for InternalMessageKey {
+    fn from(key: tycho_storage::model::InternalMessageKey) -> Self {
+        InternalMessageKey {
+            lt: key.lt,
+            hash: key.hash,
+        }
+    }
+}
+
+pub trait InternalMessageValue: Send + Sync + Ord + 'static {
+    fn deserialize(bytes: &[u8]) -> anyhow::Result<Self>
+    where
+        Self: Sized;
+
+    fn serialize(&self) -> anyhow::Result<Vec<u8>>
+    where
+        Self: Sized;
+
+    fn destination(&self) -> &IntAddr;
+
+    fn key(&self) -> InternalMessageKey;
+}
+
+impl InternalMessageValue for EnqueuedMessage {
+    fn deserialize(bytes: &[u8]) -> anyhow::Result<Self> {
+        let cell = Boc::decode(bytes).context("Failed to load cell")?;
+        let message = Message::load_from(&mut cell.as_slice().context("Failed to load message")?)?;
+
+        match message.info {
+            MsgInfo::Int(info) => {
+                let hash = *cell.repr_hash();
+                Ok(Self { info, cell, hash })
+            }
+            _ => bail!("Expected internal message"),
+        }
+    }
+
+    fn serialize(&self) -> anyhow::Result<Vec<u8>>
+    where
+        Self: Sized,
+    {
+        Ok(Boc::encode(&self.cell))
+    }
+
+    fn destination(&self) -> &IntAddr {
+        self.destination()
+    }
+
+    fn key(&self) -> InternalMessageKey {
+        self.key()
     }
 }
