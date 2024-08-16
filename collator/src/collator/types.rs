@@ -123,7 +123,7 @@ pub(super) struct PrevData {
 impl PrevData {
     pub fn build(
         prev_states: Vec<ShardStateStuff>,
-        prev_queue_diff_hash: Option<HashBytes>,
+        prev_queue_diff_hashes: Vec<HashBytes>,
     ) -> Result<(Box<Self>, UsageTree)> {
         // TODO: make real implementation
         // consider split/merge logic
@@ -167,7 +167,7 @@ impl PrevData {
             _underload_history: underload_history,
 
             processed_upto: processed_upto_info.try_into()?,
-            prev_queue_diff_hash,
+            prev_queue_diff_hash: prev_queue_diff_hashes.first().copied(),
         });
 
         Ok((prev_data, usage_tree))

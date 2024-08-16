@@ -9,7 +9,7 @@ use everscale_types::prelude::*;
 use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
-use tycho_block_util::queue::{QueueDiff, QueueKey};
+use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
 use tycho_storage::BlockMetaData;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
@@ -382,40 +382,37 @@ impl CollatorStdImpl {
         let has_pending_internals =
             exec_manager.has_pending_messages_in_buffer() || has_pending_internals;
 
-        let (max_message, min_message, messages) = diff_with_messages.messages.iter().fold(
-            (
-                InternalMessageKey::with_lt_and_max_hash(collation_data.start_lt).into(),
-                InternalMessageKey::with_lt_and_min_hash(collation_data.next_lt).into(),
-                vec![],
-            ),
-            |(max, min, mut messages): (QueueKey, QueueKey, Vec<HashBytes>), (k, _)| {
-                let max = if k.lt > max.lt { (*k).into() } else { max };
+        let (min_message, max_message) = {
+            let messages = &diff_with_messages.messages;
+            match messages.first_key_value().zip(messages.last_key_value()) {
+                Some(((min, _), (max, _))) => (QueueKey::from(*min), QueueKey::from(*max)),
+                None => (
+                    InternalMessageKey::with_lt_and_min_hash(collation_data.start_lt).into(),
+                    InternalMessageKey::with_lt_and_max_hash(collation_data.next_lt).into(),
+                ),
+            }
+        };
 
-                let min = if k.lt < min.lt { (*k).into() } else { min };
-
-                messages.push(k.hash);
-
-                (max, min, messages)
-            },
-        );
-
-        let queue_diff = QueueDiff {
-            hash: HashBytes::ZERO,
-            prev_hash: working_state
+        let queue_diff = QueueDiffStuff::builder(
+            self.shard_id,
+            self.next_block_id_short.seqno,
+            &working_state
                 .prev_shard_data
                 .prev_queue_diff_hash()
                 .unwrap_or_default(),
-            shard_ident: self.shard_id,
-            seqno: self.next_block_id_short.seqno,
-            processed_upto: diff_with_messages
+        )
+        .with_processed_upto(
+            diff_with_messages
                 .processed_upto
                 .iter()
-                .map(|(k, v)| (*k, v.clone().into()))
-                .collect(),
-            messages,
-            max_message,
-            min_message,
-        };
+                .map(|(k, v)| (*k, v.lt, &v.hash)),
+        )
+        .with_messages(
+            &min_message,
+            &max_message,
+            diff_with_messages.messages.iter().map(|(k, _)| &k.hash),
+        )
+        .serialize();
 
         // start async update queue task
         let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
@@ -486,7 +483,8 @@ impl CollatorStdImpl {
                 &labels,
             );
 
-            let prev_queue_diff_hash = Some(*finalized.block_candidate.queue_diff.diff_hash());
+            let prev_queue_diff_hashes =
+                vec![*finalized.block_candidate.queue_diff_aug.diff_hash()];
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
@@ -503,7 +501,7 @@ impl CollatorStdImpl {
                 finalized.mc_data.clone(),
                 has_pending_internals,
                 working_state,
-                prev_queue_diff_hash,
+                prev_queue_diff_hashes,
             )?;
 
             handle_block_candidate_elapsed = histogram.finish();

@@ -12,7 +12,7 @@ use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
-use tycho_block_util::queue::{QueueDiff, QueueDiffStuff};
+use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::MessagesExecutor;
@@ -34,7 +34,7 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         executor: MessagesExecutor,
         working_state: &WorkingState,
-        mut queue_diff: QueueDiff,
+        queue_diff: SerializedQueueDiff,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -300,7 +300,7 @@ impl CollatorStdImpl {
                 state_update: Lazy::new(&state_update)?,
                 // do not use out msgs queue updates
                 out_msg_queue_updates: OutMsgQueueUpdates {
-                    diff_hash: queue_diff.recompute_hash(),
+                    diff_hash: *queue_diff.hash(),
                 },
                 extra: Lazy::new(&new_block_extra)?,
             };
@@ -370,7 +370,7 @@ impl CollatorStdImpl {
             fees_collected: value_flow.fees_collected,
             funds_created: value_flow.created,
             created_by: collation_data.created_by,
-            queue_diff: QueueDiffStuff::new(new_block_id, queue_diff),
+            queue_diff_aug: queue_diff.build(&new_block_id),
         });
 
         let total_elapsed = histogram.finish();

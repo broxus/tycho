@@ -46,7 +46,7 @@ impl BlockCandidateEntry {
             signatures: self.signatures.clone(),
             prev_blocks_ids: self.candidate.prev_blocks_ids.clone(),
             top_shard_blocks_ids: self.candidate.top_shard_blocks_ids.clone(),
-            queue_diff: self.candidate.queue_diff.clone(),
+            queue_diff_aug: self.candidate.queue_diff_aug.clone(),
         }
     }
 }

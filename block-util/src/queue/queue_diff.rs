@@ -51,6 +51,7 @@ impl QueueDiffStuffBuilder {
         inner.diff.min_message = *min_message;
         inner.diff.max_message = *max_message;
         inner.diff.messages = hashes.into_iter().copied().collect();
+        inner.diff.messages.sort_unstable();
         self
     }
 
@@ -90,12 +91,6 @@ pub struct QueueDiffStuff {
 }
 
 impl QueueDiffStuff {
-    pub fn new(block_id: BlockId, diff: QueueDiff) -> Self {
-        Self {
-            inner: Arc::new(Inner { block_id, diff }),
-        }
-    }
-
     pub fn builder(
         shard_ident: ShardIdent,
         seqno: u32,
