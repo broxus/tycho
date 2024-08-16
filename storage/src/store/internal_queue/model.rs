@@ -1,16 +1,17 @@
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 
 use crate::util::{StoredValue, StoredValueBuffer};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ShardsInternalMessagesKey {
     pub shard_ident: ShardIdent,
-    pub internal_message_key: InternalMessageKey,
+    pub internal_message_key: QueueKey,
 }
 
 impl ShardsInternalMessagesKey {
-    pub fn new(shard_ident: ShardIdent, internal_message_key: InternalMessageKey) -> Self {
+    pub fn new(shard_ident: ShardIdent, internal_message_key: QueueKey) -> Self {
         Self {
             shard_ident,
             internal_message_key,
@@ -26,7 +27,7 @@ impl From<&[u8]> for ShardsInternalMessagesKey {
 }
 
 impl StoredValue for ShardsInternalMessagesKey {
-    const SIZE_HINT: usize = ShardIdent::SIZE_HINT + InternalMessageKey::SIZE_HINT;
+    const SIZE_HINT: usize = ShardIdent::SIZE_HINT + QueueKey::SIZE_HINT;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
@@ -41,7 +42,7 @@ impl StoredValue for ShardsInternalMessagesKey {
         }
 
         let shard_ident = ShardIdent::deserialize(reader);
-        let internal_message_key = InternalMessageKey::deserialize(reader);
+        let internal_message_key = QueueKey::deserialize(reader);
 
         Self {
             shard_ident,
@@ -50,18 +51,8 @@ impl StoredValue for ShardsInternalMessagesKey {
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct InternalMessageKey {
-    pub lt: u64,
-    pub hash: HashBytes,
-}
-
-impl InternalMessageKey {
+impl StoredValue for QueueKey {
     const SIZE_HINT: usize = 8 + 32;
-}
-
-impl StoredValue for InternalMessageKey {
-    const SIZE_HINT: usize = Self::SIZE_HINT;
 
     type OnStackSlice = [u8; Self::SIZE_HINT];
 

@@ -12,6 +12,7 @@ use ton_executor::{
     ExecuteParams, ExecutorOutput, OrdinaryTransactionExecutor, PreloadedBlockchainConfig,
     TickTockTransactionExecutor, TransactionExecutor,
 };
+use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run_fifo;
 use tycho_util::FastHashMap;
@@ -22,7 +23,7 @@ use super::types::{
     ParsedMessage, ShardAccountStuff, WorkingState,
 };
 use super::CollatorStdImpl;
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey, QueueDiffWithMessages};
+use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::{InternalsProcessedUptoStuff, ProcessedUptoInfoStuff};
@@ -44,7 +45,7 @@ pub(super) struct ExecutionManager {
     mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
     /// current read positions of internals mq iterator
     /// when it is not finished
-    current_iterator_positions: FastHashMap<ShardIdent, InternalMessageKey>,
+    current_iterator_positions: FastHashMap<ShardIdent, QueueKey>,
 
     /// sum total time of reading existing internal messages
     read_existing_messages_total_elapsed: Duration,
@@ -99,14 +100,11 @@ impl ExecutionManager {
         }
     }
 
-    pub fn get_current_iterator_positions(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+    pub fn get_current_iterator_positions(&self) -> FastHashMap<ShardIdent, QueueKey> {
         self.current_iterator_positions.clone()
     }
 
-    pub fn set_current_iterator_positions(
-        &mut self,
-        positions: FastHashMap<ShardIdent, InternalMessageKey>,
-    ) {
+    pub fn set_current_iterator_positions(&mut self, positions: FastHashMap<ShardIdent, QueueKey>) {
         self.current_iterator_positions = positions;
     }
 
@@ -171,7 +169,7 @@ impl ExecutionManager {
         collator: &mut CollatorStdImpl,
         collation_data: &mut BlockCollationData,
         mq_iterator_adapter: &mut QueueIteratorAdapter<EnqueuedMessage>,
-        max_new_message_key_to_current_shard: InternalMessageKey,
+        max_new_message_key_to_current_shard: &QueueKey,
         working_state: &WorkingState,
     ) -> Result<Option<MessageGroup>> {
         // messages polling logic differs regarding existing and new messages
@@ -447,24 +445,24 @@ impl ExecutionManager {
             // actually, we process all message groups with new messages in one step,
             // so we update internals processed_upto each step
             if self.message_groups.is_empty()
-                && self.message_groups.max_message_key() > &InternalMessageKey::default()
+                && self.message_groups.max_message_key() > &QueueKey::MIN
             {
                 // set_int_upto_all_processed(&mut collation_data.processed_upto)?;
                 update_internals_processed_upto(
                     &mut collation_data.processed_upto,
                     self.shard_id,
                     Some(ProcessedUptoUpdate::Force(
-                        self.message_groups.max_message_key().clone(),
+                        *self.message_groups.max_message_key(),
                     )),
                     Some(ProcessedUptoUpdate::Force(
-                        self.message_groups.max_message_key().clone(),
+                        *self.message_groups.max_message_key(),
                     )),
                 );
 
                 // commit processed message to iterator
                 mq_iterator_adapter.iterator().commit(vec![(
                     self.shard_id,
-                    self.message_groups.max_message_key().clone(),
+                    *self.message_groups.max_message_key(),
                 )])?;
 
                 self.message_groups.reset();
@@ -865,23 +863,23 @@ fn execute_ticktock_transaction(
 
 #[derive(Clone)]
 pub(super) enum ProcessedUptoUpdate {
-    Force(InternalMessageKey),
-    IfHigher(InternalMessageKey),
+    Force(QueueKey),
+    IfHigher(QueueKey),
 }
 
 pub(super) fn set_int_upto_all_processed(
     processed_upto: &mut ProcessedUptoInfoStuff,
-) -> Vec<(ShardIdent, InternalMessageKey)> {
+) -> Vec<(ShardIdent, QueueKey)> {
     let mut updated_processed_to = vec![];
     for (shard_id, int_upto) in processed_upto.internals.iter_mut() {
-        int_upto.processed_to_msg = int_upto.read_to_msg.clone();
+        int_upto.processed_to_msg = int_upto.read_to_msg;
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             "updated processed_upto.internals for shard {}: {:?}",
             shard_id, int_upto,
         );
 
-        updated_processed_to.push((*shard_id, int_upto.processed_to_msg.clone()));
+        updated_processed_to.push((*shard_id, int_upto.processed_to_msg));
     }
     updated_processed_to
 }
@@ -897,9 +895,9 @@ pub(super) fn update_internals_processed_upto(
     fn get_new_to_key<F>(
         to_key_update_opt: Option<ProcessedUptoUpdate>,
         get_current: F,
-    ) -> Option<InternalMessageKey>
+    ) -> Option<QueueKey>
     where
-        F: FnOnce() -> InternalMessageKey,
+        F: FnOnce() -> QueueKey,
     {
         if let Some(to_key_update) = to_key_update_opt {
             match to_key_update {
@@ -924,26 +922,25 @@ pub(super) fn update_internals_processed_upto(
 
     let new_int_processed_upto_opt = if let Some(current) = processed_upto.internals.get(&shard_id)
     {
-        let new_processed_to_opt =
-            get_new_to_key(processed_to_opt, || current.processed_to_msg.clone());
-        let new_read_to_opt = get_new_to_key(read_to_opt, || current.read_to_msg.clone());
+        let new_processed_to_opt = get_new_to_key(processed_to_opt, || current.processed_to_msg);
+        let new_read_to_opt = get_new_to_key(read_to_opt, || current.read_to_msg);
         if new_processed_to_opt.is_none() && new_read_to_opt.is_none() {
             None
         } else {
             Some(InternalsProcessedUptoStuff {
-                processed_to_msg: new_processed_to_opt.unwrap_or(current.processed_to_msg.clone()),
-                read_to_msg: new_read_to_opt.unwrap_or(current.read_to_msg.clone()),
+                processed_to_msg: new_processed_to_opt.unwrap_or(current.processed_to_msg),
+                read_to_msg: new_read_to_opt.unwrap_or(current.read_to_msg),
             })
         }
     } else {
         Some(InternalsProcessedUptoStuff {
             processed_to_msg: match processed_to_opt {
                 Some(Force(to_key) | IfHigher(to_key)) => to_key,
-                _ => InternalMessageKey::default(),
+                _ => QueueKey::MIN,
             },
             read_to_msg: match read_to_opt {
                 Some(Force(to_key) | IfHigher(to_key)) => to_key,
-                _ => InternalMessageKey::with_lt_and_max_hash(0),
+                _ => QueueKey::max_for_lt(0), // TODO: `min_for_lt` ?
             },
         })
     };

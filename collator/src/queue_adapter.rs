@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::iterator::{QueueIterator, QueueIteratorExt, QueueIteratorImpl};
@@ -9,9 +10,7 @@ use crate::internal_queue::queue::{Queue, QueueImpl};
 use crate::internal_queue::state::persistent_state::PersistentStateStdImpl;
 use crate::internal_queue::state::session_state::SessionStateStdImpl;
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use crate::internal_queue::types::{
-    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
-};
+use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::tracing_targets;
 
 pub struct MessageQueueAdapterStdImpl<V: InternalMessageValue> {
@@ -27,8 +26,8 @@ where
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
-        shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
+        shards_from: FastHashMap<ShardIdent, QueueKey>,
+        shards_to: FastHashMap<ShardIdent, QueueKey>,
     ) -> Result<Box<dyn QueueIterator<V>>>;
     /// Apply diff to the current queue session state (waiting for the operation to complete)
     async fn apply_diff(
@@ -51,7 +50,7 @@ where
     fn commit_messages_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator<V>>,
-        messages: Vec<(ShardIdent, InternalMessageKey)>,
+        messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()>;
 }
 
@@ -67,8 +66,8 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     async fn create_iterator(
         &self,
         for_shard_id: ShardIdent,
-        shards_from: FastHashMap<ShardIdent, InternalMessageKey>,
-        shards_to: FastHashMap<ShardIdent, InternalMessageKey>,
+        shards_from: FastHashMap<ShardIdent, QueueKey>,
+        shards_to: FastHashMap<ShardIdent, QueueKey>,
     ) -> Result<Box<dyn QueueIterator<V>>> {
         let time_start = std::time::Instant::now();
         let ranges = QueueIteratorExt::collect_ranges(shards_from, shards_to);
@@ -135,7 +134,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
     fn commit_messages_to_iterator(
         &self,
         iterator: &mut Box<dyn QueueIterator<V>>,
-        messages: Vec<(ShardIdent, InternalMessageKey)>,
+        messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()> {
         tracing::trace!(
             target: tracing_targets::MQ_ADAPTER,

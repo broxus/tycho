@@ -4,6 +4,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent, StdAddr};
+use tycho_block_util::queue::QueueKey;
 use tycho_collator::internal_queue::queue::{Queue, QueueFactory, QueueFactoryStdImpl, QueueImpl};
 use tycho_collator::internal_queue::state::persistent_state::{
     PersistentStateImplFactory, PersistentStateStdImpl,
@@ -12,9 +13,7 @@ use tycho_collator::internal_queue::state::session_state::{
     SessionStateImplFactory, SessionStateStdImpl,
 };
 use tycho_collator::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
-use tycho_collator::internal_queue::types::{
-    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
-};
+use tycho_collator::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
 
@@ -62,8 +61,8 @@ impl InternalMessageValue for StoredObject {
         &self.dest
     }
 
-    fn key(&self) -> InternalMessageKey {
-        InternalMessageKey {
+    fn key(&self) -> QueueKey {
+        QueueKey {
             lt: self.key,
             hash: HashBytes::default(),
         }
@@ -187,11 +186,11 @@ async fn test_queue() -> anyhow::Result<()> {
     ranges.insert(
         ShardIdent::new_full(0),
         (
-            InternalMessageKey {
+            QueueKey {
                 lt: 1,
                 hash: HashBytes::default(),
             },
-            InternalMessageKey {
+            QueueKey {
                 lt: 4,
                 hash: HashBytes::default(),
             },
@@ -210,7 +209,7 @@ async fn test_queue() -> anyhow::Result<()> {
 
     let current_position = iterator_manager.current_position();
     let mut expected_position = FastHashMap::default();
-    expected_position.insert(ShardIdent::new_full(0), InternalMessageKey {
+    expected_position.insert(ShardIdent::new_full(0), QueueKey {
         lt: 4,
         hash: HashBytes::default(),
     });
