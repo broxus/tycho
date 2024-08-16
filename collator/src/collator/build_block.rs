@@ -12,6 +12,7 @@ use tycho_block_util::archive::WithArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::config::BlockchainConfigExt;
 use tycho_block_util::dict::RelaxedAugDict;
+use tycho_block_util::queue::SerializedQueueDiff;
 use tycho_util::metrics::HistogramGuard;
 
 use super::execution_manager::MessagesExecutor;
@@ -33,6 +34,7 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         executor: MessagesExecutor,
         working_state: &WorkingState,
+        queue_diff: SerializedQueueDiff,
     ) -> Result<FinalizedBlock> {
         tracing::debug!(target: tracing_targets::COLLATOR, "finalize_block()");
 
@@ -297,7 +299,9 @@ impl CollatorStdImpl {
                 value_flow: Lazy::new(&value_flow)?,
                 state_update: Lazy::new(&state_update)?,
                 // do not use out msgs queue updates
-                out_msg_queue_updates: None,
+                out_msg_queue_updates: OutMsgQueueUpdates {
+                    diff_hash: *queue_diff.hash(),
+                },
                 extra: Lazy::new(&new_block_extra)?,
             };
 
@@ -348,6 +352,7 @@ impl CollatorStdImpl {
         // TODO: build collated data from collation_data.shard_top_block_descriptors
         let collated_data = vec![];
 
+        let new_block_id = *new_block.id();
         let block_candidate = Box::new(BlockCandidate {
             block: new_block,
             prev_blocks_ids: prev_shard_data.blocks_ids().clone(),
@@ -365,6 +370,7 @@ impl CollatorStdImpl {
             fees_collected: value_flow.fees_collected,
             funds_created: value_flow.created,
             created_by: collation_data.created_by,
+            queue_diff_aug: queue_diff.build(&new_block_id),
         });
 
         let total_elapsed = histogram.finish();
