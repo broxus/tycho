@@ -326,7 +326,7 @@ mod tests {
                 data.par_iter()
                     .all(|(peer_id, sig)| sig.verifies(peer_id, &digest)),
                 "invalid signature"
-            )
+            );
         })
         .await;
         let elapsed = timer.elapsed();
@@ -375,6 +375,6 @@ mod tests {
         println!(
             "total {}",
             humantime::format_duration(bincode_elapsed + sha_elapsed + sig_elapsed)
-        )
+        );
     }
 }

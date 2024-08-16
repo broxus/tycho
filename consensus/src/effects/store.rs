@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tycho_storage::{MempoolStorage, PointFlags};
 
 use crate::models::{Digest, PointInfo, Round};
@@ -5,12 +7,22 @@ use crate::outer_round::{Collator, Commit, Consensus, OuterRoundRecv};
 use crate::{MempoolConfig, Point};
 
 #[derive(Clone)]
-pub struct MempoolStore {
-    inner: MempoolStorage,
+pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
+
+trait MempoolStoreImpl: Send + Sync {
+    fn insert_point(&self, point: &Point, flags: Option<&PointFlags>);
+
+    fn set_flags(&self, round: Round, digest: &Digest, flags: &PointFlags);
+
+    fn get_point(&self, round: Round, digest: &Digest) -> Option<Point>;
+
+    fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo>;
+
+    fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags;
 }
 
 impl MempoolStore {
-    pub fn new(
+    pub(crate) fn new(
         inner: MempoolStorage,
         consensus_round: OuterRoundRecv<Consensus>,
         committed_round: OuterRoundRecv<Commit>,
@@ -22,81 +34,33 @@ impl MempoolStore {
             committed_round,
             collator_round,
         );
-        Self { inner }
+
+        Self(Arc::new(inner.clone()))
     }
 
-    fn key(round: Round, digest: &Digest, key: &mut [u8; MempoolStorage::KEY_LEN]) {
-        key[..4].copy_from_slice(&round.0.to_be_bytes()[..]);
-        key[4..].copy_from_slice(&digest.inner()[..]);
+    #[cfg(feature = "test")]
+    pub fn new_stub() -> Self {
+        Self(Arc::new(()))
     }
 
     pub fn insert_point(&self, point: &Point, flags: Option<&PointFlags>) {
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        Self::key(point.round(), point.digest(), &mut key);
-
-        let info = bincode::serialize(&PointInfo::serializable_from(point))
-            .expect("serialize db point info equivalent from point");
-        let point = bincode::serialize(point).expect("serialize db point");
-        let flags = flags.map(PointFlags::encode);
-
-        let db = self.inner.db.rocksdb();
-        let points_cf = self.inner.db.points.cf();
-        let info_cf = self.inner.db.points_info.cf();
-
-        // transaction not needed as there is no concurrent puts for the same key,
-        // as they occur inside DAG futures whose uniqueness is protected by dash map;
-        // in contrast, flags are written from random places, but only via `merge_cf()`
-        let mut batch = MempoolStorage::new_batch();
-        batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
-        batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
-
-        if let Some(flags) = flags {
-            let flags_cf = self.inner.db.points_flags.cf();
-            batch.merge_cf(&flags_cf, key.as_slice(), flags.as_slice());
-        }
-
-        db.write(batch).expect("db batch insert point, info, flags");
+        self.0.insert_point(point, flags);
     }
 
     pub fn set_flags(&self, round: Round, digest: &Digest, flags: &PointFlags) {
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        Self::key(round, digest, &mut key);
-
-        let db = self.inner.db.rocksdb();
-        let flags_cf = self.inner.db.points_flags.cf();
-
-        let result = db.merge_cf(&flags_cf, key.as_slice(), flags.encode().as_slice());
-        result.expect("db merge point flag");
+        self.0.set_flags(round, digest, flags);
     }
 
     pub fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        Self::key(round, digest, &mut key);
-
-        let table = &self.inner.db.points;
-        let found = table.get(key.as_slice()).expect("db get point");
-
-        found.map(|a| bincode::deserialize(&a).expect("deserialize db point"))
+        self.0.get_point(round, digest)
     }
 
     pub fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        Self::key(round, digest, &mut key);
-
-        let table = &self.inner.db.points_info;
-        let found = table.get(key.as_slice()).expect("db get point info");
-
-        found.map(|a| bincode::deserialize(&a).expect("deserialize db point info"))
+        self.0.get_info(round, digest)
     }
 
     pub fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags {
-        let mut key = [0_u8; MempoolStorage::KEY_LEN];
-        Self::key(round, digest, &mut key);
-
-        let table = &self.inner.db.points_flags;
-
-        let found = table.get(key.as_slice()).expect("db get point flags");
-        found.as_deref().map(PointFlags::decode).unwrap_or_default()
+        self.0.get_flags(round, digest)
     }
 
     fn clean_task(
@@ -192,6 +156,100 @@ impl MempoolStore {
         db.compact_range_cf(&flags_cf, none, Some(up_to_exclusive.as_slice()));
         db.compact_range_cf(&info_cf, none, Some(up_to_exclusive.as_slice()));
         db.compact_range_cf(&points_cf, none, Some(up_to_exclusive.as_slice()));
+    }
+}
 
+fn fill_key(round: Round, digest: &Digest, key: &mut [u8; MempoolStorage::KEY_LEN]) {
+    key[..4].copy_from_slice(&round.0.to_be_bytes()[..]);
+    key[4..].copy_from_slice(&digest.inner()[..]);
+}
+
+impl MempoolStoreImpl for MempoolStorage {
+    fn insert_point(&self, point: &Point, flags: Option<&PointFlags>) {
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        fill_key(point.round(), point.digest(), &mut key);
+
+        let info = bincode::serialize(&PointInfo::serializable_from(point))
+            .expect("serialize db point info equivalent from point");
+        let point = bincode::serialize(point).expect("serialize db point");
+        let flags = flags.map(PointFlags::encode);
+
+        let db = self.db.rocksdb();
+        let points_cf = self.db.points.cf();
+        let info_cf = self.db.points_info.cf();
+
+        // transaction not needed as there is no concurrent puts for the same key,
+        // as they occur inside DAG futures whose uniqueness is protected by dash map;
+        // in contrast, flags are written from random places, but only via `merge_cf()`
+        let mut batch = MempoolStorage::new_batch();
+        batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
+        batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
+
+        if let Some(flags) = flags {
+            let flags_cf = self.db.points_flags.cf();
+            batch.merge_cf(&flags_cf, key.as_slice(), flags.as_slice());
+        }
+
+        db.write(batch).expect("db batch insert point, info, flags");
+    }
+
+    fn set_flags(&self, round: Round, digest: &Digest, flags: &PointFlags) {
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        fill_key(round, digest, &mut key);
+
+        let db = self.db.rocksdb();
+        let flags_cf = self.db.points_flags.cf();
+
+        let result = db.merge_cf(&flags_cf, key.as_slice(), flags.encode().as_slice());
+        result.expect("db merge point flag");
+    }
+
+    fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        fill_key(round, digest, &mut key);
+
+        let table = &self.db.points;
+        let found = table.get(key.as_slice()).expect("db get point");
+
+        found.map(|a| bincode::deserialize(&a).expect("deserialize db point"))
+    }
+
+    fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        fill_key(round, digest, &mut key);
+
+        let table = &self.db.points_info;
+        let found = table.get(key.as_slice()).expect("db get point info");
+
+        found.map(|a| bincode::deserialize(&a).expect("deserialize db point info"))
+    }
+
+    fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags {
+        let mut key = [0_u8; MempoolStorage::KEY_LEN];
+        fill_key(round, digest, &mut key);
+
+        let table = &self.db.points_flags;
+
+        let found = table.get(key.as_slice()).expect("db get point flags");
+        found.as_deref().map(PointFlags::decode).unwrap_or_default()
+    }
+}
+
+#[cfg(feature = "test")]
+impl MempoolStoreImpl for () {
+    fn insert_point(&self, _: &Point, _: Option<&PointFlags>) {}
+
+    fn set_flags(&self, _: Round, _: &Digest, _: &PointFlags) {}
+
+    fn get_point(&self, _: Round, _: &Digest) -> Option<Point> {
+        None
+    }
+
+    fn get_info(&self, _: Round, _: &Digest) -> Option<PointInfo> {
+        None
+    }
+
+    fn get_flags(&self, _: Round, _: &Digest) -> PointFlags {
+        PointFlags::default()
     }
 }

@@ -9,7 +9,7 @@ use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_storage::MempoolStorage;
 use tycho_util::metrics::HistogramGuard;
 
-use crate::dag::{Dag, DagRound};
+use crate::dag::{Dag, DagRound, Verifier};
 use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
 use crate::engine::input_buffer::InputBuffer;
 use crate::engine::round_task::RoundTaskReady;

@@ -532,7 +532,7 @@ impl Verifier {
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
     ) -> bool {
-        if point.body().location.round == MempoolConfig::GENESIS_ROUND {
+        if point.round() == MempoolConfig::GENESIS_ROUND {
             // `is_well_formed()` ensured that genesis has empty includes, witness and evidence
             return true;
         }
