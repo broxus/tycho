@@ -8,12 +8,10 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::block::{BlockStuffAug, ValidatorSubsetInfo};
-use tycho_block_util::queue::QueueDiffStuffAug;
+use tycho_block_util::queue::{QueueDiffStuffAug, QueueKey};
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::{serde_helpers, FastHashMap};
-
-use crate::internal_queue::types::InternalMessageKey;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(default)]
@@ -157,16 +155,16 @@ pub struct InternalsProcessedUptoStuff {
     /// already processed during previous blocks collations.
     ///
     /// Needs to read internals from this point to reproduce buffer state from prev collation.
-    pub processed_to_msg: InternalMessageKey,
+    pub processed_to_msg: QueueKey,
     /// Needs to read internals to this point (LT, Hash) to reproduce buffer state from prev collation.
-    pub read_to_msg: InternalMessageKey,
+    pub read_to_msg: QueueKey,
 }
 
 impl From<InternalsProcessedUptoStuff> for InternalsProcessedUpto {
     fn from(value: InternalsProcessedUptoStuff) -> Self {
         Self {
-            processed_to_msg: value.processed_to_msg.into_tuple(),
-            read_to_msg: value.read_to_msg.into_tuple(),
+            processed_to_msg: value.processed_to_msg.split(),
+            read_to_msg: value.read_to_msg.split(),
         }
     }
 }

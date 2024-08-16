@@ -169,7 +169,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
 
         self.blocks
             .entry(block_id.shard)
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(block_id.seqno, block);
 
         let broadcast_result = self.broadcaster.send(block_id).ok();
@@ -258,7 +258,13 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
             return Ok(None);
         };
 
-        block_storage.load_queue_diff(&handle).await.map(Some)
+        match block_storage.load_queue_diff(&handle).await {
+            Ok(queue_diff) => Ok(Some(queue_diff)),
+            Err(e) => match e.downcast_ref::<BlockStorageError>() {
+                Some(BlockStorageError::QueueDiffNotFound) => Ok(None),
+                _ => Err(e),
+            },
+        }
     }
 }
 

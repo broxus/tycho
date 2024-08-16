@@ -4,14 +4,13 @@ use std::time::Duration;
 use anyhow::Result;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{update_internals_processed_upto, ProcessedUptoUpdate};
 use super::types::WorkingState;
 use crate::internal_queue::iterator::{IterItem, QueueIterator};
-use crate::internal_queue::types::{
-    InternalMessageKey, InternalMessageValue, QueueDiffWithMessages,
-};
+use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::tracing_targets;
 use crate::types::ProcessedUptoInfoStuff;
@@ -27,9 +26,9 @@ pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     /// there is no more new messages in mq iterator
     no_pending_new_messages: bool,
     /// current new messages to read_to border
-    new_messages_read_to: InternalMessageKey,
+    new_messages_read_to: QueueKey,
     /// current read position of internals mq iterator
-    current_positions: FastHashMap<ShardIdent, InternalMessageKey>,
+    current_positions: FastHashMap<ShardIdent, QueueKey>,
     /// sum total iterators initialization time
     init_iterator_total_elapsed: Duration,
 }
@@ -38,7 +37,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
     pub fn new(
         shard_id: ShardIdent,
         mq_adapter: Arc<dyn MessageQueueAdapter<V>>,
-        current_positions_opt: Option<FastHashMap<ShardIdent, InternalMessageKey>>,
+        current_positions_opt: Option<FastHashMap<ShardIdent, QueueKey>>,
     ) -> Self {
         Self {
             shard_id,
@@ -46,7 +45,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             iterator_opt: None,
             no_pending_existing_internals: true,
             no_pending_new_messages: true,
-            new_messages_read_to: InternalMessageKey::default(),
+            new_messages_read_to: QueueKey::MIN,
             current_positions: current_positions_opt.unwrap_or_default(),
             init_iterator_total_elapsed: Duration::ZERO,
         }
@@ -56,7 +55,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
         mut self,
         check_pending_internals: bool,
     ) -> Result<(
-        FastHashMap<ShardIdent, InternalMessageKey>,
+        FastHashMap<ShardIdent, QueueKey>,
         bool,
         QueueDiffWithMessages<V>,
     )> {
@@ -122,8 +121,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             if int_processed_upto.processed_to_msg != int_processed_upto.read_to_msg {
                 ranges_fully_read = false;
             }
-            ranges_from.insert(*shard_id, int_processed_upto.processed_to_msg.clone());
-            ranges_to.insert(*shard_id, int_processed_upto.read_to_msg.clone());
+            ranges_from.insert(*shard_id, int_processed_upto.processed_to_msg);
+            ranges_to.insert(*shard_id, int_processed_upto.read_to_msg);
         }
 
         tracing::debug!(target: tracing_targets::COLLATOR,
@@ -146,7 +145,7 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
 
             for (shard_id, from) in ranges_from.iter_mut() {
                 if let Some(curren_position) = self.current_positions.get(shard_id) {
-                    *from = curren_position.clone();
+                    *from = *curren_position;
                 }
                 let to = ranges_to.get(shard_id).unwrap();
                 if from != to {
@@ -178,11 +177,11 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
             let mc_shard_id = ShardIdent::new_full(-1);
             ranges_from.entry(mc_shard_id).or_insert_with(|| {
                 ranges_updated = true;
-                InternalMessageKey::default()
+                QueueKey::MIN
             });
             let mc_read_to = ranges_to.entry(mc_shard_id).or_insert_with(|| {
                 ranges_updated = true;
-                InternalMessageKey::with_lt_and_max_hash(0)
+                QueueKey::max_for_lt(0) // TODO: `min_for_lt` ?
             });
 
             // try update masterchain range read_to border
@@ -204,11 +203,11 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                 // add default shardchain range if not exist
                 ranges_from.entry(shard_id).or_insert_with(|| {
                     ranges_updated = true;
-                    InternalMessageKey::default()
+                    QueueKey::MIN
                 });
                 let sc_read_to = ranges_to.entry(shard_id).or_insert_with(|| {
                     ranges_updated = true;
-                    InternalMessageKey::with_lt_and_max_hash(0)
+                    QueueKey::max_for_lt(0) // TODO: `min_for_lt` ?
                 });
 
                 // try update shardchain read_to
@@ -241,8 +240,8 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
                     update_internals_processed_upto(
                         processed_upto,
                         *shard_id,
-                        Some(ProcessedUptoUpdate::Force(new_process_to_key.clone())),
-                        Some(ProcessedUptoUpdate::Force(new_read_to_key.clone())),
+                        Some(ProcessedUptoUpdate::Force(*new_process_to_key)),
+                        Some(ProcessedUptoUpdate::Force(*new_read_to_key)),
                     );
                 }
                 // and init iterator
@@ -300,17 +299,17 @@ impl<V: InternalMessageValue> QueueIteratorAdapter<V> {
 
     pub fn try_update_new_messages_read_to(
         &mut self,
-        max_new_message_key_to_current_shard: InternalMessageKey,
+        max_new_message_key_to_current_shard: &QueueKey,
     ) -> Result<bool> {
         // try to set new messages read_to border
         if self.no_pending_new_messages
-            && max_new_message_key_to_current_shard > self.new_messages_read_to
+            && max_new_message_key_to_current_shard > &self.new_messages_read_to
         {
             tracing::debug!(target: tracing_targets::COLLATOR,
                 "will read new messages for shard {} upto {:?}",
                 self.shard_id, max_new_message_key_to_current_shard,
             );
-            self.new_messages_read_to = max_new_message_key_to_current_shard;
+            self.new_messages_read_to = *max_new_message_key_to_current_shard;
             self.no_pending_new_messages = false;
             Ok(true)
         } else {

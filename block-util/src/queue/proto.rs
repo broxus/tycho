@@ -120,6 +120,49 @@ pub struct QueueKey {
 
 impl QueueKey {
     const SIZE_HINT: usize = 8 + 32;
+
+    pub const MIN: Self = Self {
+        lt: 0,
+        hash: HashBytes::ZERO,
+    };
+
+    pub const MAX: Self = Self {
+        lt: u64::MAX,
+        hash: HashBytes([0xff; 32]),
+    };
+
+    pub const fn min_for_lt(lt: u64) -> Self {
+        Self {
+            lt,
+            hash: HashBytes::ZERO,
+        }
+    }
+
+    pub const fn max_for_lt(lt: u64) -> Self {
+        Self {
+            lt,
+            hash: HashBytes([0xff; 32]),
+        }
+    }
+
+    #[inline]
+    pub const fn split(self) -> (u64, HashBytes) {
+        (self.lt, self.hash)
+    }
+}
+
+impl From<(u64, HashBytes)> for QueueKey {
+    #[inline]
+    fn from((lt, hash): (u64, HashBytes)) -> Self {
+        Self { lt, hash }
+    }
+}
+
+impl From<QueueKey> for (u64, HashBytes) {
+    #[inline]
+    fn from(key: QueueKey) -> Self {
+        key.split()
+    }
 }
 
 mod processed_upto_map {
@@ -211,7 +254,7 @@ mod queue_diffs_list {
         items.push(QueueDiff::read_from(data, offset)?);
 
         let (mut latest_seqno, mut prev_hash) = {
-            let latest = items.get(0).expect("always not empty");
+            let latest = items.first().expect("always not empty");
             (latest.seqno, latest.prev_hash)
         };
 
