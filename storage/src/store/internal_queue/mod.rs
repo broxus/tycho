@@ -104,45 +104,21 @@ impl InternalQueueStorage {
         from: InternalMessageKey,
         to: InternalMessageKey,
     ) -> Result<()> {
-        let snapshot = self.snapshot();
-
-        let mut readopts = self.db.shards_internal_messages.new_read_config();
-        readopts.set_snapshot(&snapshot);
-
         let start_key = ShardsInternalMessagesKey::new(source_shard, from);
         let end_key = ShardsInternalMessagesKey::new(source_shard, to);
 
         let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
 
-        let mut iter = self
-            .db
-            .rocksdb()
-            .raw_iterator_cf_opt(&shards_internal_messages_cf, readopts);
-
-        iter.seek(&start_key.to_vec());
-
         let mut batch = WriteBatch::default();
 
-        while iter.valid() {
-            let (mut key, _) = match (iter.key(), iter.value()) {
-                (Some(key), Some(value)) => (key, value),
-                _ => break,
-            };
-
-            let current_position = ShardsInternalMessagesKey::deserialize(&mut key);
-
-            if current_position > end_key {
-                break;
-            }
-            batch.delete_cf(&shards_internal_messages_cf, &current_position.to_vec());
-            iter.next();
-        }
+        batch.delete_range_cf(
+            &shards_internal_messages_cf,
+            &start_key.to_vec(),
+            &end_key.to_vec(),
+        );
+        batch.delete_cf(&shards_internal_messages_cf, &end_key.to_vec());
 
         self.db.rocksdb().write(batch)?;
-        let bound = Option::<[u8; 0]>::None;
-        self.db
-            .rocksdb()
-            .compact_range_cf(&self.db.shards_internal_messages.cf(), bound, bound);
 
         Ok(())
     }
