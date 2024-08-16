@@ -1,9 +1,10 @@
 use anyhow::Result;
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
 use crate::internal_queue::state::state_iterator::{MessageExt, StateIterator};
-use crate::internal_queue::types::{InternalMessageKey, InternalMessageValue};
+use crate::internal_queue::types::InternalMessageValue;
 
 pub struct StatesIteratorsManager<V: InternalMessageValue> {
     iterators: Vec<Box<dyn StateIterator<V>>>,
@@ -39,7 +40,7 @@ impl<V: InternalMessageValue> StatesIteratorsManager<V> {
         Ok(None)
     }
 
-    pub fn current_position(&self) -> FastHashMap<ShardIdent, InternalMessageKey> {
+    pub fn current_position(&self) -> FastHashMap<ShardIdent, QueueKey> {
         let mut result = FastHashMap::default();
         for iterator in &self.iterators {
             for (shard, position) in iterator.current_position() {

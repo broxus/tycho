@@ -2,12 +2,13 @@ use std::u64;
 
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
+use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
 
 use crate::db::*;
-use crate::model::{InternalMessageKey, ShardsInternalMessagesKey};
+use crate::model::ShardsInternalMessagesKey;
 use crate::util::{OwnedIterator, StoredValue};
 
 pub mod model;
@@ -101,16 +102,16 @@ impl InternalQueueStorage {
     pub fn delete_messages(
         &self,
         source_shard: ShardIdent,
-        from: InternalMessageKey,
-        to: InternalMessageKey,
+        from: &QueueKey,
+        to: &QueueKey,
     ) -> Result<()> {
         let snapshot = self.snapshot();
 
         let mut readopts = self.db.shards_internal_messages.new_read_config();
         readopts.set_snapshot(&snapshot);
 
-        let start_key = ShardsInternalMessagesKey::new(source_shard, from);
-        let end_key = ShardsInternalMessagesKey::new(source_shard, to);
+        let start_key = ShardsInternalMessagesKey::new(source_shard, *from);
+        let end_key = ShardsInternalMessagesKey::new(source_shard, *to);
 
         let shards_internal_messages_cf = self.db.shards_internal_messages.cf();
 
@@ -147,14 +148,15 @@ impl InternalQueueStorage {
         Ok(())
     }
 
-    pub fn commit(&self, ranges: FastHashMap<ShardIdent, InternalMessageKey>) -> Result<()> {
+    pub fn commit(&self, ranges: FastHashMap<ShardIdent, QueueKey>) -> Result<()> {
         let snapshot = self.snapshot();
+
         let mut batch = WriteBatch::default();
 
         for range in ranges {
             let from = ShardsInternalMessagesKey {
                 shard_ident: range.0,
-                internal_message_key: InternalMessageKey::default(),
+                internal_message_key: QueueKey::MIN,
             };
             let to = ShardsInternalMessagesKey {
                 shard_ident: range.0,

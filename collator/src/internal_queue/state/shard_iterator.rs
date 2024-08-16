@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use everscale_types::models::ShardIdent;
+use tycho_block_util::queue::QueueKey;
 use tycho_storage::model::ShardsInternalMessagesKey;
 use tycho_storage::owned_iterator::OwnedIterator;
 
-use crate::internal_queue::types::InternalMessageKey;
 use crate::types::ShortAddr;
 
 #[derive(Clone, Debug)]
@@ -18,10 +18,10 @@ impl Range {
     }
 }
 
-impl From<(InternalMessageKey, InternalMessageKey, ShardIdent)> for Range {
-    fn from(value: (InternalMessageKey, InternalMessageKey, ShardIdent)) -> Self {
-        let from = ShardsInternalMessagesKey::new(value.2, value.0.into());
-        let to = ShardsInternalMessagesKey::new(value.2, value.1.into());
+impl From<(QueueKey, QueueKey, ShardIdent)> for Range {
+    fn from(value: (QueueKey, QueueKey, ShardIdent)) -> Self {
+        let from = ShardsInternalMessagesKey::new(value.2, value.0);
+        let to = ShardsInternalMessagesKey::new(value.2, value.1);
 
         Range { from, to }
     }
@@ -42,12 +42,12 @@ pub struct ShardIterator {
 impl ShardIterator {
     pub fn new(
         source: ShardIdent,
-        from: InternalMessageKey,
-        to: InternalMessageKey,
+        from: QueueKey,
+        to: QueueKey,
         receiver: ShardIdent,
         mut iterator: OwnedIterator,
     ) -> Self {
-        iterator.seek(ShardsInternalMessagesKey::new(source, from.clone().into()));
+        iterator.seek(ShardsInternalMessagesKey::new(source, from));
 
         let range = Range::from((from, to, source));
 

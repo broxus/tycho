@@ -12,11 +12,11 @@ use everscale_types::models::{
     ShardDescription, ShardFeeCreated, ShardFees, ShardIdent, ShardIdentFull, SimpleLib,
     SpecialFlags, StateInit, Transaction, ValueFlow,
 };
+use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
-use crate::internal_queue::types::InternalMessageKey;
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
 use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 
@@ -896,7 +896,7 @@ pub(super) struct MessageGroups {
     shard_id: ShardIdent,
 
     offset: u32,
-    max_message_key: InternalMessageKey,
+    max_message_key: QueueKey,
     groups: FastHashMap<u32, MessageGroup>,
 
     int_messages_count: usize,
@@ -918,7 +918,7 @@ impl MessageGroups {
 
     pub fn reset(&mut self) {
         self.offset = 0;
-        self.max_message_key = InternalMessageKey::default();
+        self.max_message_key = QueueKey::MIN;
         self.groups.clear();
         self.int_messages_count = 0;
         self.ext_messages_count = 0;
@@ -928,7 +928,7 @@ impl MessageGroups {
         self.offset
     }
 
-    pub fn max_message_key(&self) -> &InternalMessageKey {
+    pub fn max_message_key(&self) -> &QueueKey {
         &self.max_message_key
     }
 
@@ -974,7 +974,7 @@ impl MessageGroups {
             MsgInfo::Int(IntMsgInfo {
                 dst, created_lt, ..
             }) => {
-                self.max_message_key = self.max_message_key.clone().max(InternalMessageKey {
+                self.max_message_key = self.max_message_key.max(QueueKey {
                     lt: *created_lt,
                     hash: *msg.cell.repr_hash(),
                 });

@@ -531,7 +531,7 @@ impl CollatorStdImpl {
         // TODO: here should be the split/merge logic, refer to old node impl
 
         // STUB: just do nothing for now: no split/merge, no session rotation
-        let mut min_ref_mc_seqno = u32::max_value();
+        let mut min_ref_mc_seqno = u32::MAX;
         for shard_descr in collation_data.shards_mut()?.values_mut() {
             min_ref_mc_seqno = std::cmp::min(min_ref_mc_seqno, shard_descr.min_ref_mc_seqno);
         }

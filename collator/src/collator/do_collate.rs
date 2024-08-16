@@ -25,7 +25,7 @@ use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
-use crate::internal_queue::types::{EnqueuedMessage, InternalMessageKey};
+use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
 use crate::types::{BlockCollationResult, McData, TopBlockDescription};
@@ -125,7 +125,7 @@ impl CollatorStdImpl {
         }
 
         let start_lt = Self::calc_start_lt(
-            &mc_data,
+            mc_data,
             prev_shard_data,
             is_masterchain,
             collation_data_builder.shards_max_end_lt,
@@ -150,7 +150,7 @@ impl CollatorStdImpl {
             });
 
         // compute created / minted / recovered / from_prev_block
-        self.update_value_flow(&mc_data, prev_shard_data, &mut collation_data)?;
+        self.update_value_flow(mc_data, prev_shard_data, &mut collation_data)?;
 
         // prepare to read and execute internals and externals
 
@@ -196,7 +196,7 @@ impl CollatorStdImpl {
                         self,
                         &mut collation_data,
                         &mut mq_iterator_adapter,
-                        InternalMessageKey::default(),
+                        &QueueKey::MIN,
                         &working_state,
                     )
                     .await?;
@@ -212,14 +212,14 @@ impl CollatorStdImpl {
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tick_time", &labels);
 
             self.create_ticktock_transactions(
-                &mc_data,
+                mc_data,
                 TickTock::Tick,
                 &mut collation_data,
                 &mut executor,
             )
             .await?;
 
-            self.create_special_transactions(&mc_data, &mut collation_data, &mut executor)
+            self.create_special_transactions(mc_data, &mut collation_data, &mut executor)
                 .await?;
 
             execute_tick_elapsed = histogram.finish();
@@ -236,7 +236,7 @@ impl CollatorStdImpl {
 
         {
             let mut executed_groups_count = 0;
-            let mut max_new_message_key_to_current_shard = InternalMessageKey::default();
+            let mut max_new_message_key_to_current_shard = QueueKey::MIN;
 
             loop {
                 let mut timer = std::time::Instant::now();
@@ -245,7 +245,7 @@ impl CollatorStdImpl {
                         self,
                         &mut collation_data,
                         &mut mq_iterator_adapter,
-                        max_new_message_key_to_current_shard.clone(),
+                        &max_new_message_key_to_current_shard,
                         &working_state,
                     )
                     .await?;
@@ -278,7 +278,7 @@ impl CollatorStdImpl {
                             };
 
                             if new_message.dst_in_current_shard {
-                                let new_message_key = InternalMessageKey {
+                                let new_message_key = QueueKey {
                                     lt: int_msg_info.created_lt,
                                     hash: *new_message.cell.repr_hash(),
                                 };
@@ -358,7 +358,7 @@ impl CollatorStdImpl {
             let histogram =
                 HistogramGuard::begin_with_labels("tycho_do_collate_execute_tock_time", &labels);
             self.create_ticktock_transactions(
-                &mc_data,
+                mc_data,
                 TickTock::Tock,
                 &mut collation_data,
                 &mut executor,
@@ -385,10 +385,10 @@ impl CollatorStdImpl {
         let (min_message, max_message) = {
             let messages = &diff_with_messages.messages;
             match messages.first_key_value().zip(messages.last_key_value()) {
-                Some(((min, _), (max, _))) => (QueueKey::from(*min), QueueKey::from(*max)),
+                Some(((min, _), (max, _))) => (*min, *max),
                 None => (
-                    InternalMessageKey::with_lt_and_min_hash(collation_data.start_lt).into(),
-                    InternalMessageKey::with_lt_and_max_hash(collation_data.next_lt).into(),
+                    QueueKey::min_for_lt(collation_data.start_lt),
+                    QueueKey::max_for_lt(collation_data.next_lt),
                 ),
             }
         };
@@ -410,7 +410,7 @@ impl CollatorStdImpl {
         .with_messages(
             &min_message,
             &max_message,
-            diff_with_messages.messages.iter().map(|(k, _)| &k.hash),
+            diff_with_messages.messages.keys().map(|k| &k.hash),
         )
         .serialize();
 
@@ -1190,7 +1190,7 @@ impl CollatorStdImpl {
         );
 
         let Some(account_stuff) =
-            executor.take_account_stuff_if(&account_id, |stuff| match tick_tock {
+            executor.take_account_stuff_if(account_id, |stuff| match tick_tock {
                 TickTock::Tick => stuff.special.tick,
                 TickTock::Tock => stuff.special.tock,
             })?

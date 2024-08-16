@@ -280,7 +280,7 @@ pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> Arc<MempoolAnchor> {
             let mut builder = CellBuilder::new();
             builder.store_u32(id).unwrap();
             builder.store_u64(chain_time).unwrap();
-            builder.store_u32(i as u32).unwrap();
+            builder.store_u32(i).unwrap();
             builder.build().unwrap()
         };
 

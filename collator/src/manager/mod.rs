@@ -445,7 +445,7 @@ where
 
             // check if we should skip this master block from the blockchain
             // because it is not far ahead of last collated by ourselves
-            if !self.check_should_process_mc_block_from_bc(&block_id) {
+            if !self.check_should_process_mc_block_from_bc(block_id) {
                 return Ok(());
             }
             // when state received execute master block processing routines
@@ -463,7 +463,7 @@ where
                 let short_id = block_id.as_short_id();
                 self.validator.cancel_validation(&short_id)?;
                 // Need to do validation routine
-                self.process_valid_master_block(&block_id).await?;
+                self.process_valid_master_block(block_id).await?;
             }
 
             let mc_data = McData::load_from_state(&state)?;

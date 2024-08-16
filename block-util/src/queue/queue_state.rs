@@ -13,7 +13,7 @@ pub struct QueueStateStuff {
 
 impl QueueStateStuff {
     pub fn deserialize(block_id: &BlockId, data: &[u8]) -> Result<Self> {
-        let state = tl_proto::deserialize::<QueueState>(&data)?;
+        let state = tl_proto::deserialize::<QueueState>(data)?;
 
         anyhow::ensure!(
             block_id.shard == state.shard_ident && block_id.seqno == state.seqno,

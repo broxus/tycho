@@ -717,7 +717,7 @@ impl ExchangeSignatures for SessionState {
 
             // If more signatures are still needed, validate and store new to the block
             if !signatures.validated.load(Ordering::Acquire) {
-                self.add_signature(&signatures, slot, peer_id, &signature)?;
+                self.add_signature(signatures, slot, peer_id, &signature)?;
             }
 
             proto::Exchange::Complete(signatures.own_signature.clone())
