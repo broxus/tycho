@@ -7,13 +7,21 @@ use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::{BlockMetaData, Storage};
 
 pub(crate) fn get_archive() -> Result<Archive> {
-    let data = include_bytes!("../../tests/data/archive.bin");
-    Archive::new(data.as_slice())
+    let root_path = env!("CARGO_MANIFEST_DIR");
+    let relative_path = "tests/data/archive.bin";
+    let file_path = std::path::Path::new(root_path).join(relative_path);
+
+    let data = std::fs::read(file_path)?;
+    Archive::new(data)
 }
 
 pub(crate) fn get_zerostate() -> Result<ShardStateStuff> {
-    let data = include_bytes!("../../tests/data/zerostate.boc");
-    let file_hash = Boc::file_hash_blake(data);
+    let root_path = env!("CARGO_MANIFEST_DIR");
+    let relative_path = "tests/data/zerostate.boc";
+    let file_path = std::path::Path::new(root_path).join(relative_path);
+
+    let data = std::fs::read(file_path)?;
+    let file_hash = Boc::file_hash_blake(&data);
 
     let root = Boc::decode(&data).context("failed to decode BOC")?;
     let root_hash = *root.repr_hash();
