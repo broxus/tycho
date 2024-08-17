@@ -37,7 +37,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: nextest
-          args: run -p tycho-core -p tycho-storage # only core and storage have working tests :(
+          args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage # only core and storage have working tests :(
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest

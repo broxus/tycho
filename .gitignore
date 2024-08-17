@@ -14,7 +14,6 @@ perf.data*
 .DS_Store
 
 zerostate.json
-zerostate.boc
 
 config.json
 global-config.json
