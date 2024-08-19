@@ -949,7 +949,7 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 
 #[derive(thiserror::Error, Debug)]
-pub enum BlockStorageError {
+enum BlockStorageError {
     #[error("Block data not found")]
     BlockDataNotFound,
     #[error("Block proof not found")]
