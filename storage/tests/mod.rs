@@ -1,5 +1,3 @@
-use std::str::FromStr;
-
 use anyhow::Result;
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, DynCell};
@@ -59,11 +57,12 @@ async fn persistent_storage_everscale() -> Result<()> {
     assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     // Read zerostate
-    let zero_state_raw =
-        ShardStateCombined::from_bytes(include_bytes!("../../test/test_state_2_master.boc"))?;
+    let zero_state_raw = ShardStateCombined::from_bytes(include_bytes!(
+        "../../core/tests/data/everscale_zerostate.boc"
+    ))?;
 
     // Parse block id
-    let block_id = BlockId::from_str("-1:8000000000000000:2:4557702252a8fcec88387ab78407e5116e83222b213653911f86e6504cb7aa78:e2bc83d6be6975b9c68f56c5f6d4997d2a33226bfac6a431b47874e3ba18db75")?;
+    let block_id = BlockId::default();
 
     // Write zerostate to db
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
