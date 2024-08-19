@@ -162,7 +162,7 @@ impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
 }
 
 pub struct CollatorStdImpl {
-    next_block_id_short: BlockIdShort,
+    next_block_info: BlockIdShort,
 
     config: Arc<CollationConfig>,
     collation_session: Arc<CollationSessionInfo>,
@@ -205,13 +205,10 @@ impl CollatorStdImpl {
         prev_blocks_ids: Vec<BlockId>,
         mc_data: Arc<McData>,
     ) -> AsyncQueuedDispatcher<Self> {
-        let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
-        let next_block_id_short = BlockIdShort {
-            shard: shard_id,
-            seqno: max_prev_seqno + 1,
-        };
+        let next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
+
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): starting...", next_block_id_short,
+            "(next_block_id={}): collator starting...", next_block_info,
         );
 
         // create dispatcher for own async tasks queue
@@ -229,7 +226,7 @@ impl CollatorStdImpl {
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<WorkingState>>();
 
         let processor = Self {
-            next_block_id_short,
+            next_block_info,
             config,
             collation_session,
             listener,
@@ -256,7 +253,7 @@ impl CollatorStdImpl {
 
         AsyncQueuedDispatcher::run(processor, receiver);
         tracing::trace!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): tasks queue dispatcher started", next_block_id_short,
+            "(next_block_id={}): collator tasks queue dispatcher started", next_block_info,
         );
 
         // equeue first initialization task
@@ -271,18 +268,29 @@ impl CollatorStdImpl {
             .await
             .expect("task receiver had to be not closed or dropped here");
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): initialization task enqueued", next_block_id_short,
+            "(next_block_id={}): collator initialization task enqueued", next_block_info,
         );
 
         tracing::info!(target: tracing_targets::COLLATOR,
-            "Collator (block_id={}): started", next_block_id_short,
+            "(next_block_id={}): collator started", next_block_info,
         );
 
         dispatcher
     }
 
+    pub fn calc_next_block_id_short(prev_blocks_ids: &[BlockId]) -> BlockIdShort {
+        debug_assert!(!prev_blocks_ids.is_empty());
+
+        let shard = prev_blocks_ids[0].shard;
+        let max_prev_seqno = prev_blocks_ids.iter().map(|id| id.seqno).max().unwrap();
+        BlockIdShort {
+            shard,
+            seqno: max_prev_seqno + 1,
+        }
+    }
+
     // Initialize collator working state then run collation
-    #[tracing::instrument(skip_all, fields(block_id = %self.next_block_id_short))]
+    #[tracing::instrument(skip_all, fields(next_block_id = %self.next_block_info))]
     async fn init_collator(
         &mut self,
         prev_blocks_ids: Vec<BlockId>,
@@ -331,7 +339,7 @@ impl CollatorStdImpl {
                     }
                 }
                 // get mc data processed to info if prev shard block is eq to top
-                let sc_prev_seqno = self.next_block_id_short.seqno - 1;
+                let sc_prev_seqno = working_state.prev_shard_data.blocks_ids()[0].seqno;
                 if sc_prev_seqno == top_sc_block_seqno_from_mc_data {
                     mc_ext_processed_to_opt = Some(processed_to);
                 }
@@ -376,43 +384,36 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    /// Update working state from new block and state after block collation
-    fn update_working_state(
-        &mut self,
-        block_id: &BlockId,
+    /// Build working state update that would be applied before next collation
+    fn prepare_working_state_update(
+        delayed_working_state: &mut DelayedWorkingState,
         new_state_stuff: JoinTask<Result<ShardStateStuff>>,
+        new_queue_diff_hash: HashBytes,
         mc_data: Option<Arc<McData>>,
         has_pending_internals: bool,
         prev_working_state: WorkingState,
-        prev_queue_diff_hash: HashBytes,
     ) -> Result<()> {
-        self.next_block_id_short = BlockIdShort {
-            shard: block_id.shard,
-            seqno: block_id.seqno + 1,
-        };
-
         // TODO: Check if the result mc_data is properly updated on masterchain block
         let mc_data = mc_data.unwrap_or(prev_working_state.mc_data);
 
-        self.working_state.future = Some(Box::pin(async move {
+        delayed_working_state.future = Some(Box::pin(async move {
             let new_state_stuff = new_state_stuff.await?;
 
             let prev_states = vec![new_state_stuff];
-            let prev_queue_diff_hashes = vec![prev_queue_diff_hash];
+            let prev_queue_diff_hashes = vec![new_queue_diff_hash];
             let (prev_shard_data, usage_tree) =
                 PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
+            let next_block_id_short = Self::calc_next_block_id_short(prev_shard_data.blocks_ids());
+
             Ok(WorkingState {
+                next_block_id_short,
                 mc_data,
                 prev_shard_data,
                 usage_tree,
                 has_pending_internals: Some(has_pending_internals),
             })
         }));
-
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            "working state updated from just collated block",
-        );
 
         Ok(())
     }
@@ -486,7 +487,10 @@ impl CollatorStdImpl {
 
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
+        let next_block_id_short = Self::calc_next_block_id_short(prev_shard_data.blocks_ids());
+
         Ok(WorkingState {
+            next_block_id_short,
             mc_data,
             prev_shard_data,
             usage_tree,
@@ -723,7 +727,10 @@ impl CollatorStdImpl {
     /// Run collation if there are internals,
     /// otherwise import next anchor and notify it to manager
     /// that will route next collation steps
-    #[tracing::instrument(parent = None, name = "try_collate_next_master_block", skip_all, fields(block_id = %self.next_block_id_short))]
+    #[tracing::instrument(
+        parent = None, name = "try_collate_next_master_block",
+        skip_all, fields(next_block_id = %self.next_block_info)
+    )]
     async fn try_collate_next_master_block_impl(
         &mut self,
         mut working_state: WorkingState,
@@ -760,7 +767,7 @@ impl CollatorStdImpl {
             }
             // this may start master block collation or cause next anchor import
             self.listener
-                .on_skipped_anchor(self.next_block_id_short, next_anchor, false)
+                .on_skipped_anchor(working_state.next_block_id_short, next_anchor, false)
                 .await?;
 
             self.working_state.delay(working_state);
@@ -774,7 +781,10 @@ impl CollatorStdImpl {
     /// If it has externals then run collation,
     /// otherwise return empty anchor to manager
     /// that will route next collation steps
-    #[tracing::instrument(parent = None, name = "try_collate_next_shard_block", skip_all, fields(block_id = %self.next_block_id_short))]
+    #[tracing::instrument(
+        parent = None, name = "try_collate_next_shard_block",
+        skip_all, fields(next_block_id = %self.next_block_info)
+    )]
     async fn try_collate_next_shard_block_impl(
         &mut self,
         mut working_state: WorkingState,
@@ -814,7 +824,8 @@ impl CollatorStdImpl {
                 last_committed_seqno = shard_descr.seqno;
             }
         }
-        let uncommitted_chain_length = self.next_block_id_short.seqno - 1 - last_committed_seqno;
+        let uncommitted_chain_length =
+            working_state.next_block_id_short.seqno - 1 - last_committed_seqno;
 
         // check if should force master block collation
         let force_mc_block_by_uncommitted_chain =
@@ -885,7 +896,7 @@ impl CollatorStdImpl {
                 }
                 self.listener
                     .on_skipped_anchor(
-                        self.next_block_id_short,
+                        working_state.next_block_id_short,
                         next_anchor,
                         force_mc_block_by_uncommitted_chain,
                     )

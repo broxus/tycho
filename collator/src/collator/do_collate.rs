@@ -39,7 +39,7 @@ impl CollatorStdImpl {
         parent =  None,
         skip_all,
         fields(
-            block_id = %self.next_block_id_short,
+            next_block_id = %self.next_block_info,
             ct = self.last_imported_anchor.as_ref().map(|a| a.ct).unwrap_or_default()
         )
     )]
@@ -77,13 +77,8 @@ impl CollatorStdImpl {
         tracing::trace!(target: tracing_targets::COLLATOR, "rand_seed from chain time: {}", rand_seed);
 
         let is_masterchain = self.shard_id.is_masterchain();
+
         // prepare block collation data
-        // STUB: consider split/merge in future for taking prev_block_id
-        let prev_block_id = prev_shard_data.blocks_ids()[0];
-        let block_id_short = BlockIdShort {
-            shard: prev_block_id.shard,
-            seqno: prev_block_id.seqno + 1,
-        };
         let block_limits = mc_data.config.get_block_limits(is_masterchain)?;
         tracing::debug!(target: tracing_targets::COLLATOR,
             "Block limits: {:?}",
@@ -91,7 +86,7 @@ impl CollatorStdImpl {
         );
 
         let mut collation_data_builder = BlockCollationDataBuilder::new(
-            block_id_short,
+            working_state.next_block_id_short,
             rand_seed,
             mc_data.block_id.seqno,
             next_chain_time,
@@ -114,7 +109,7 @@ impl CollatorStdImpl {
             collation_data_builder.set_shards(shards);
 
             if let Some(top_shard_blocks_info) = top_shard_blocks_info {
-                self.import_new_shard_top_blocks_for_masterchain(
+                Self::import_new_shard_top_blocks_for_masterchain(
                     &mc_data.config,
                     &mut collation_data_builder,
                     top_shard_blocks_info,
@@ -393,7 +388,7 @@ impl CollatorStdImpl {
 
         let queue_diff = QueueDiffStuff::builder(
             self.shard_id,
-            self.next_block_id_short.seqno,
+            collation_data.block_id_short.seqno,
             &working_state
                 .prev_shard_data
                 .prev_queue_diff_hash()
@@ -417,6 +412,7 @@ impl CollatorStdImpl {
         // start async update queue task
         let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
             JoinTask::<Result<_>>::new({
+                let block_id_short = collation_data.block_id_short;
                 let mq_adapter = self.mq_adapter.clone();
                 let labels = labels.clone();
                 async move {
@@ -447,7 +443,7 @@ impl CollatorStdImpl {
 
         metrics::counter!("tycho_do_collate_blocks_count", &labels).increment(1);
         metrics::gauge!("tycho_do_collate_block_seqno", &labels)
-            .set(self.next_block_id_short.seqno);
+            .set(collation_data.block_id_short.seqno);
 
         let block_id = *finalized.block_candidate.block.id();
         let new_state_stuff = JoinTask::new({
@@ -483,7 +479,7 @@ impl CollatorStdImpl {
                 &labels,
             );
 
-            let prev_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
+            let new_queue_diff_hash = *finalized.block_candidate.queue_diff_aug.diff_hash();
             // return collation result
             self.listener
                 .on_block_candidate(BlockCollationResult {
@@ -493,15 +489,25 @@ impl CollatorStdImpl {
                 })
                 .await?;
 
-            // update PrevData in working state
-            self.update_working_state(
-                &block_id,
+            // spawn update PrevData and working state
+            Self::prepare_working_state_update(
+                &mut self.working_state,
                 new_state_stuff,
+                new_queue_diff_hash,
                 finalized.mc_data.clone(),
                 has_pending_internals,
                 working_state,
-                prev_queue_diff_hash,
             )?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "working state updated prepare spawned",
+            );
+
+            // update next block info
+            self.next_block_info = BlockIdShort {
+                shard: block_id.shard,
+                seqno: block_id.seqno + 1,
+            };
 
             handle_block_candidate_elapsed = histogram.finish();
         }
@@ -970,7 +976,7 @@ impl CollatorStdImpl {
                 }
             };
 
-            collation_data.value_flow.minted = self.compute_minted_amount(mc_data)?;
+            collation_data.value_flow.minted = Self::compute_minted_amount(mc_data)?;
 
             if collation_data.value_flow.minted != CurrencyCollection::ZERO
                 && mc_data.config.get_minter_address().is_err()
@@ -997,8 +1003,7 @@ impl CollatorStdImpl {
         Ok(())
     }
 
-    fn compute_minted_amount(&self, mc_data: &McData) -> Result<CurrencyCollection> {
-        // TODO: just copied from old node, needs to review
+    fn compute_minted_amount(mc_data: &McData) -> Result<CurrencyCollection> {
         tracing::trace!(target: tracing_targets::COLLATOR, "compute_minted_amount");
 
         let mut to_mint = CurrencyCollection::default();
@@ -1211,7 +1216,6 @@ impl CollatorStdImpl {
     }
 
     fn import_new_shard_top_blocks_for_masterchain(
-        &self,
         config: &BlockchainConfig,
         collation_data_builder: &mut BlockCollationDataBuilder,
         top_shard_blocks_info: Vec<TopBlockDescription>,
