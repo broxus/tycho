@@ -80,7 +80,7 @@ impl BlockStorage {
             };
 
             let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
-            let chunk_index = usize::from_be_bytes(key[4..].try_into().unwrap());
+            let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
 
             if chunk_index == ARCHIVE_SIZE_MAGIC {
                 check_archive(&current_archive_data)?;
@@ -360,8 +360,9 @@ impl BlockStorage {
                 .ok_or(BlockStorageError::ArchiveNotFound)?;
 
             let storage_cf = db.archives.cf();
+            let intermediate_storage_cf = db.intermediate_archives.cf();
 
-            let data_len = data.len();
+            let data_len = data.len() as u64;
             let num_chunks = (data_len + ARCHIVE_CHUNK_SIZE - 1) / ARCHIVE_CHUNK_SIZE; // Round up to get the number of chunks
 
             // Create transaction
@@ -371,7 +372,7 @@ impl BlockStorage {
             for i in 0..num_chunks {
                 let start = i * ARCHIVE_CHUNK_SIZE;
                 let end = std::cmp::min(start + ARCHIVE_CHUNK_SIZE, data_len);
-                let chunk = &data[start..end];
+                let chunk = &data[start as usize..end as usize];
 
                 let mut key = [0u8; tables::Archives::KEY_LEN];
                 key[..4].copy_from_slice(&archive_id.to_be_bytes());
@@ -385,13 +386,13 @@ impl BlockStorage {
             key[..4].copy_from_slice(&archive_id.to_be_bytes());
             key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
 
-            batch.put_cf(&storage_cf, key.as_slice(), data_len.to_be_bytes());
+            batch.put_cf(&storage_cf, key.as_slice(), data.len().to_be_bytes());
+
+            // Remove intermediate archive
+            batch.delete_cf(&intermediate_storage_cf, key);
 
             // Execute transaction
             db.rocksdb().write(batch)?;
-
-            // Remove intermediate archive
-            db.intermediate_archives.remove(key)?;
 
             Ok(())
         })
@@ -567,57 +568,29 @@ impl BlockStorage {
         }
     }
 
-    /// Loads an archive slice.
-    pub async fn get_archive_slice(&self, id: u32, offset: usize, limit: usize) -> Result<Vec<u8>> {
+    /// Loads an archive slice (chunk).
+    pub async fn get_archive_slice(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
         let archive_size = self
             .get_archive_size(id)?
-            .ok_or(BlockStorageError::ArchiveNotFound)?;
+            .ok_or(BlockStorageError::ArchiveNotFound)? as u64;
 
-        if offset >= archive_size {
+        if offset % ARCHIVE_CHUNK_SIZE != 0 || offset >= archive_size {
             return Err(BlockStorageError::InvalidOffset.into());
         }
 
-        let mut data = Vec::with_capacity(limit);
+        let chunk_index = offset / ARCHIVE_CHUNK_SIZE;
 
-        let start_index = offset / ARCHIVE_CHUNK_SIZE;
-        let end_index =
-            (std::cmp::min(offset.saturating_add(limit), archive_size) - 1) / ARCHIVE_CHUNK_SIZE;
+        let mut key = [0u8; tables::Archives::KEY_LEN];
+        key[..4].copy_from_slice(&id.to_be_bytes());
+        key[4..].copy_from_slice(&chunk_index.to_be_bytes());
 
-        for i in start_index..=end_index {
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&id.to_be_bytes());
-            key[4..].copy_from_slice(&i.to_be_bytes());
+        let chunk = self
+            .db
+            .archives
+            .get(key.as_slice())?
+            .ok_or(BlockStorageError::ArchiveNotFound)?;
 
-            let chunk = self
-                .db
-                .archives
-                .get(key.as_slice())?
-                .ok_or(BlockStorageError::ArchiveNotFound)?;
-
-            let start_offset = if i == start_index {
-                offset % ARCHIVE_CHUNK_SIZE
-            } else {
-                0
-            };
-
-            let end_offset = if i == end_index {
-                std::cmp::min((offset + limit) - i * ARCHIVE_CHUNK_SIZE, chunk.len())
-            } else {
-                chunk.len()
-            };
-
-            assert!(start_offset <= end_offset);
-
-            let relevant_data = &chunk[start_offset..end_offset];
-            data.extend_from_slice(relevant_data);
-
-            // a single get takes 2.5 ms
-            tokio::task::yield_now().await;
-        }
-
-        assert!(data.len() <= limit);
-
-        Ok(data)
+        Ok(chunk.to_vec())
     }
 
     #[tracing::instrument(skip_all, fields(mc_seqno))]
@@ -806,7 +779,6 @@ impl BlockStorage {
             ..Default::default()
         };
 
-        // but what if we started right in the middle of the archive?
         let is_first_archive = prev_id.is_none();
         if is_first_archive || mc_seqno.saturating_sub(archive_id.id) >= ARCHIVE_PACKAGE_SIZE {
             self.archive_ids.write().insert(mc_seqno);
@@ -975,8 +947,8 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 }
 
 pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-pub const ARCHIVE_SIZE_MAGIC: usize = usize::MAX;
-pub const ARCHIVE_CHUNK_SIZE: usize = 8 * 1024 * 1024; // 8MB
+pub const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
+pub const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
 
 #[derive(Default)]
 struct ArchiveId {

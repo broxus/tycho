@@ -68,6 +68,7 @@ pub struct ArchiveInfoRequest {
 pub struct ArchiveInfo {
     pub id: u32,
     pub size: u64,
+    pub chunk_size: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -79,7 +80,6 @@ pub enum ArchiveInfoResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveSliceRequest {
     pub archive_id: u32,
-    pub limit: u32,
     pub offset: u64,
 }
 

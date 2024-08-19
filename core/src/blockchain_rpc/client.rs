@@ -201,16 +201,11 @@ impl BlockchainRpcClient {
     pub async fn get_archive_slice(
         &self,
         archive_id: u64,
-        limit: u32,
         offset: u64,
     ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, Data>(&rpc::GetArchiveSlice {
-                archive_id,
-                limit,
-                offset,
-            })
+            .query::<_, Data>(&rpc::GetArchiveSlice { archive_id, offset })
             .await?;
         Ok(data)
     }
@@ -375,15 +370,8 @@ impl BlockchainRpcClient {
         output: &mut (dyn Write + Send),
     ) -> Result<usize, Error> {
         const PARALLEL_REQUESTS: usize = 10;
-        const PACKET_OFFSET: usize = 256; // 32 bytes for the overlay id and some more for TL stuff
 
-        let frame_size = self.inner.overlay_client.network().max_frame_size();
-        let chunk_size = std::cmp::min(frame_size, tycho_storage::ARCHIVE_CHUNK_SIZE)
-            .saturating_sub(PACKET_OFFSET)
-            .try_into()
-            .unwrap_or(u32::MAX);
-
-        let (neighbour, archive_id, archive_size) =
+        let (neighbour, archive_id, archive_size, chunk_size) =
             find_peer_with_archive(self.overlay_client().clone(), mc_seqno).await?;
 
         tracing::info!(peer_id = %neighbour.peer_id(), archive_id, "archive found. {archive_size} bytes");
@@ -398,11 +386,7 @@ impl BlockchainRpcClient {
                 let neighbour = neighbour.clone();
                 let overlay_client = self.overlay_client().clone();
                 JoinTask::new(download_archive_inner(
-                    Request::from_tl(rpc::GetArchiveSlice {
-                        archive_id,
-                        offset,
-                        limit: chunk_size,
-                    }),
+                    Request::from_tl(rpc::GetArchiveSlice { archive_id, offset }),
                     overlay_client,
                     neighbour,
                 ))
@@ -448,7 +432,7 @@ impl BlockchainRpcClient {
 async fn find_peer_with_archive(
     client: PublicOverlayClient,
     mc_seqno: u32,
-) -> Result<(Neighbour, u64, u64), Error> {
+) -> Result<(Neighbour, u64, u64, u64), Error> {
     // TODO: Iterate through all known (or unknown) neighbours
     const NEIGHBOUR_COUNT: usize = 10;
     let neighbours = client.neighbours().choose_multiple(NEIGHBOUR_COUNT).await;
@@ -471,7 +455,11 @@ async fn find_peer_with_archive(
         };
 
         match info {
-            ArchiveInfo::Found { id, size } => return Ok((handle.accept(), id, size)),
+            ArchiveInfo::Found {
+                id,
+                size,
+                chunk_size,
+            } => return Ok((handle.accept(), id, size, chunk_size)),
             ArchiveInfo::NotFound => continue,
         }
     }

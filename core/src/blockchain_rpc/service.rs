@@ -6,7 +6,7 @@ use bytesize::ByteSize;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
+use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage, ARCHIVE_CHUNK_SIZE};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
@@ -239,7 +239,6 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
             rpc::GetArchiveSlice as req => {
                 tracing::debug!(
                     archive_id = %req.archive_id,
-                    limit = %req.limit,
                     offset = %req.offset,
                     "getArchiveSlice"
                 );
@@ -515,6 +514,7 @@ impl<B> Inner<B> {
                     (Some(id), Ok(Some(size))) => ArchiveInfo::Found {
                         id: id as u64,
                         size: size as u64,
+                        chunk_size: ARCHIVE_CHUNK_SIZE,
                     },
                     _ => ArchiveInfo::NotFound,
                 })
@@ -536,13 +536,8 @@ impl<B> Inner<B> {
         let block_storage = self.storage.block_storage();
 
         let get_archive_slice = || async {
-            // TODO: Add a range check for the `limit` field
             let archive_slice = block_storage
-                .get_archive_slice(
-                    req.archive_id as u32,
-                    req.offset as usize,
-                    req.limit as usize,
-                )
+                .get_archive_slice(req.archive_id as u32, req.offset)
                 .await?;
 
             Ok::<_, anyhow::Error>(archive_slice)

@@ -53,12 +53,12 @@ impl ColumnFamilyOptions<Caches> for IntermediateArchives {
 }
 
 /// Stores split archives
-/// - Key: `u32 (BE)` (archive id) + `usize (BE)` (chunk index)
+/// - Key: `u32 (BE)` (archive id) + `u64 (BE)` (chunk index)
 /// - Value: `Vec<u8>` (archive data chunk)
 pub struct Archives;
 
 impl Archives {
-    pub const KEY_LEN: usize = size_of::<u32>() + size_of::<usize>();
+    pub const KEY_LEN: usize = 4 + 8;
 }
 
 impl ColumnFamily for Archives {

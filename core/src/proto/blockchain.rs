@@ -67,7 +67,7 @@ pub enum PersistentStateInfo {
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
     #[tl(id = "blockchain.archiveInfo.found", size_hint = 16)]
-    Found { id: u64, size: u64 },
+    Found { id: u64, size: u64, chunk_size: u64 },
     #[tl(id = "blockchain.archiveInfo.notFound")]
     NotFound,
 }
@@ -147,7 +147,6 @@ pub mod rpc {
     )]
     pub struct GetArchiveSlice {
         pub archive_id: u64,
-        pub limit: u32,
         pub offset: u64,
     }
 }
