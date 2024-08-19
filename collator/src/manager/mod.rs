@@ -1113,7 +1113,7 @@ where
         mpool_adapter.on_new_mc_state(mc_block_id).await
     }
 
-    #[tracing::instrument(skip_all, fields(block_id = %next_block_id_short, ct = anchor.chain_time, force_mc_block))]
+    #[tracing::instrument(skip_all, fields(next_block_id = %next_block_id_short, ct = anchor.chain_time, force_mc_block))]
     async fn process_skipped_anchor(
         &self,
         next_block_id_short: BlockIdShort,
