@@ -12,7 +12,7 @@ use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_storage::{BlockHandle, BlockMetaData, BlockStorageError, MaybeExistingHandle, Storage};
+use tycho_storage::{BlockHandle, BlockMetaData, MaybeExistingHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -254,16 +254,11 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let handle_storage = self.storage.block_handle_storage();
         let block_storage = self.storage.block_storage();
 
-        let Some(handle) = handle_storage.load_handle(block_id) else {
-            return Ok(None);
-        };
-
-        match block_storage.load_queue_diff(&handle).await {
-            Ok(queue_diff) => Ok(Some(queue_diff)),
-            Err(e) => match e.downcast_ref::<BlockStorageError>() {
-                Some(BlockStorageError::QueueDiffNotFound) => Ok(None),
-                _ => Err(e),
-            },
+        match handle_storage.load_handle(block_id) {
+            Some(handle) if handle.meta().has_queue_diff() => {
+                block_storage.load_queue_diff(&handle).await.map(Some)
+            }
+            _ => Ok(None),
         }
     }
 }
