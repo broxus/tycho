@@ -526,7 +526,7 @@ mod tests {
         for _ in 0..10 {
             let mut futures = FuturesUnordered::new();
             for _ in 0..100 {
-                futures.push(left.send(&right.peer_id(), req.clone()));
+                futures.push(left.send(right.peer_id(), req.clone()));
             }
 
             while let Some(res) = futures.next().await {

@@ -6,7 +6,7 @@ on:
       - master
   pull_request:
     branches:
-      - master
+        - "**"
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
@@ -44,8 +44,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-      - name: Install Clang
-        run: sudo apt-get update && sudo apt-get install -y clang
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -53,7 +51,6 @@ jobs:
           profile: minimal
           override: true
           components: rustfmt
-      - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         uses: actions-rs/cargo@v1
         with:
@@ -93,28 +90,28 @@ jobs:
           command: check
           args: -p tycho-cli
 
-  # clippy:
-  #   name: Clippy
-  #   needs: rustfmt
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@v3
-  #     - name: Install Clang
-  #       run: sudo apt-get update && sudo apt-get install -y clang
-  #     - name: Install Rust toolchain
-  #       uses: actions-rs/toolchain@v1
-  #       with:
-  #         toolchain: stable
-  #         profile: minimal
-  #         override: true
-  #         components: clippy
-  #     - uses: Swatinem/rust-cache@v2
-  #     - name: Clippy check
-  #       uses: actions-rs/cargo@v1
-  #       with:
-  #         command: clippy
-  #         args: --all-targets --all-features --workspace -- -D warnings
+  clippy:
+    name: Clippy
+    needs: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: Install Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy check
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -- -D warnings # change to --workspace later
 
   # docs:
   #   name: Docs
