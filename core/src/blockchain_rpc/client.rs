@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +7,7 @@ use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use scopeguard::ScopeGuard;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
@@ -68,11 +68,6 @@ impl<T> BlockchainRpcClientBuilder<T> {
 #[repr(transparent)]
 pub struct BlockchainRpcClient {
     inner: Arc<Inner>,
-}
-
-struct Inner {
-    overlay_client: PublicOverlayClient,
-    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
 }
 
 impl BlockchainRpcClient {
@@ -364,39 +359,106 @@ impl BlockchainRpcClient {
         )))
     }
 
-    // TODO: Split into `find_` and `download_` methods to not spam the network.
+    pub async fn find_archive(&self, mc_seqno: u32) -> std::result::Result<PendingArchive, Error> {
+        const NEIGHBOUR_COUNT: usize = 10;
+        let neighbours = self
+            .overlay_client()
+            .neighbours()
+            .choose_multiple(NEIGHBOUR_COUNT)
+            .await;
+
+        // Find a neighbour which has the requested archive
+        let pending_archive = 'info: {
+            let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+
+            let mut futures = FuturesUnordered::new();
+            for neighbour in neighbours {
+                futures.push(self.overlay_client().query_raw(neighbour, req.clone()));
+            }
+
+            let mut err = None;
+            while let Some(info) = futures.next().await {
+                let (handle, info) = match info {
+                    Ok(res) => res.split(),
+                    Err(e) => {
+                        err = Some(e);
+                        continue;
+                    }
+                };
+
+                match info {
+                    ArchiveInfo::Found {
+                        id,
+                        size,
+                        chunk_size,
+                    } => {
+                        break 'info PendingArchive {
+                            id,
+                            size,
+                            chunk_size,
+                            neighbour: handle.accept(),
+                        }
+                    }
+                    ArchiveInfo::NotFound => {
+                        handle.accept();
+                        continue;
+                    }
+                }
+            }
+
+            return match err {
+                None => Err(Error::Internal(anyhow::anyhow!(
+                    "no neighbour has the requested archive",
+                ))),
+                Some(err) => Err(err),
+            };
+        };
+
+        tracing::debug!(
+            peer_id = %pending_archive.neighbour.peer_id(),
+            archive_id = pending_archive.id,
+            archive_size = pending_archive.size.get(),
+            archuve_chunk_size = pending_archive.chunk_size.get(),
+            "found archive",
+        );
+
+        Ok(pending_archive)
+    }
+
+    #[tracing::instrument(skip_all, fields(
+        peer_id = %archive.neighbour.peer_id(),
+        archive_id = archive.id,
+        archive_size = %bytesize::ByteSize::b(archive.size.get()),
+        archive_chunk_size = %bytesize::ByteSize::b(archive.chunk_size.get() as _),
+    ))]
     pub async fn download_archive(
         &self,
-        mc_seqno: u32,
-        output: &mut (dyn Write + Send),
-    ) -> Result<usize, Error> {
+        archive: PendingArchive,
+        output: &mut DynArchiveWriter,
+    ) -> Result<(), Error> {
         const PARALLEL_REQUESTS: usize = 10;
 
-        let (neighbour, archive_id, archive_size, chunk_size) =
-            find_peer_with_archive(self.overlay_client().clone(), mc_seqno).await?;
+        tracing::debug!("started");
 
-        tracing::info!(peer_id = %neighbour.peer_id(), archive_id, "archive found. {archive_size} bytes");
+        let mut stream = futures_util::stream::iter(
+            (0..archive.size.get()).step_by(archive.chunk_size.get() as usize),
+        )
+        .map(|offset| {
+            let archive_id = archive.id;
+            let neighbour = archive.neighbour.clone();
+            let overlay_client = self.overlay_client().clone();
 
+            tracing::debug!(archive_id, offset, "downloading archive chunk");
+            JoinTask::new(download_archive_inner(
+                Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
+                overlay_client,
+                neighbour,
+            ))
+        })
+        .buffered(PARALLEL_REQUESTS);
+
+        let mut downloaded = 0;
         let mut verifier = ArchiveVerifier::default();
-
-        tracing::debug!("size {}, chunk size {}", archive_size, chunk_size);
-
-        let mut stream =
-            futures_util::stream::iter((0..archive_size.get()).step_by(chunk_size.get() as usize))
-                .map(|offset| {
-                    tracing::debug!("downloading archive chunk at offset {}", offset);
-                    let neighbour = neighbour.clone();
-                    let overlay_client = self.overlay_client().clone();
-                    JoinTask::new(download_archive_inner(
-                        Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
-                        overlay_client,
-                        neighbour,
-                    ))
-                })
-                .buffered(PARALLEL_REQUESTS);
-
-        let mut downloaded: u64 = 0;
-
         let mut stream = std::pin::pin!(stream);
         while let Some((h, chunk)) = stream.next().await.transpose()? {
             let guard = scopeguard::guard(h, |handle| {
@@ -413,11 +475,15 @@ impl BlockchainRpcClient {
                 Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))
             })?;
 
-            output.write_all(&chunk).map_err(|e| {
+            output.write_all(&chunk).await.map_err(|e| {
                 Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
             })?;
 
             ScopeGuard::into_inner(guard).accept(); // defuse the guard
+        }
+
+        if archive.size.get() != downloaded {
+            return Err(Error::Internal(anyhow::anyhow!("archive size mismatch")));
         }
 
         verifier
@@ -425,56 +491,27 @@ impl BlockchainRpcClient {
             .map_err(|e| Error::Internal(anyhow::anyhow!("Received invalid archive: {e}")))?;
         output
             .flush()
+            .await
             .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to flush archive: {e}")))?;
 
-        Ok(downloaded as usize)
+        tracing::debug!("finished");
+        Ok(())
     }
 }
 
-async fn find_peer_with_archive(
-    client: PublicOverlayClient,
-    mc_seqno: u32,
-) -> Result<(Neighbour, u64, NonZeroU64, NonZeroU32), Error> {
-    // TODO: Iterate through all known (or unknown) neighbours
-    const NEIGHBOUR_COUNT: usize = 10;
-    let neighbours = client.neighbours().choose_multiple(NEIGHBOUR_COUNT).await;
+pub type DynArchiveWriter = dyn AsyncWrite + Unpin + Send;
 
-    let req = Request::from_tl(rpc::GetArchiveInfo { mc_seqno });
+struct Inner {
+    overlay_client: PublicOverlayClient,
+    broadcast_listener: Option<Box<dyn SelfBroadcastListener>>,
+}
 
-    let mut futures = FuturesUnordered::new();
-    for neighbour in neighbours {
-        futures.push(client.query_raw(neighbour, req.clone()));
-    }
-
-    let mut err = None;
-    while let Some(info) = futures.next().await {
-        let (handle, info) = match info {
-            Ok(res) => res.split(),
-            Err(e) => {
-                err = Some(e);
-                continue;
-            }
-        };
-
-        match info {
-            ArchiveInfo::Found {
-                id,
-                size,
-                chunk_size,
-            } => return Ok((handle.accept(), id, size, chunk_size)),
-            ArchiveInfo::NotFound => {
-                handle.accept();
-                continue;
-            }
-        }
-    }
-
-    match err {
-        None => Err(Error::Internal(anyhow::anyhow!(
-            "no neighbour has the requested archive",
-        ))),
-        Some(err) => Err(err),
-    }
+#[derive(Clone)]
+pub struct PendingArchive {
+    pub id: u64,
+    pub size: NonZeroU64,
+    pub chunk_size: NonZeroU32,
+    pub neighbour: Neighbour,
 }
 
 async fn download_archive_inner(

@@ -25,10 +25,10 @@ use tycho_collator::validator::{
 };
 use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
 use tycho_core::block_strider::{
-    ArchiveBlockProvider, BlockProvider, BlockProviderExt, BlockStrider, BlockSubscriber,
-    BlockSubscriberExt, BlockchainBlockProvider, BlockchainBlockProviderConfig,
-    FileZerostateProvider, GcSubscriber, MetricsSubscriber, OptionalBlockStuff,
-    PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
+    ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
+    BlockStrider, BlockSubscriber, BlockSubscriberExt, BlockchainBlockProvider,
+    BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
+    OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
     StateSubscriberContext, StorageBlockProvider,
 };
 use tycho_core::blockchain_rpc::{
@@ -301,6 +301,7 @@ pub struct Node {
     rpc_config: Option<RpcConfig>,
     control_config: Option<ControlServerConfig>,
     blockchain_block_provider_config: BlockchainBlockProviderConfig,
+    archive_block_provider_config: ArchiveBlockProviderConfig,
 
     collation_config: CollationConfig,
     validator_config: ValidatorStdImplConfig,
@@ -425,6 +426,7 @@ impl Node {
             rpc_config: node_config.rpc,
             control_config: node_config.control,
             blockchain_block_provider_config: node_config.blockchain_block_provider,
+            archive_block_provider_config: node_config.archive_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
             internal_queue_config: node_config.internal_queue_config,
@@ -620,8 +622,11 @@ impl Node {
             PersistentBlockStriderState::new(self.zerostate.as_block_id(), self.storage.clone());
 
         // TODO: add to block_strider later
-        let _archive_block_provider =
-            ArchiveBlockProvider::new(self.blockchain_rpc_client.clone(), self.storage.clone());
+        let _archive_block_provider = ArchiveBlockProvider::new(
+            self.blockchain_rpc_client.clone(),
+            self.storage.clone(),
+            self.archive_block_provider_config.clone(),
+        );
 
         let block_strider = BlockStrider::builder()
             .with_provider(activate_collator.chain((

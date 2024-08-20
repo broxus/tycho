@@ -15,7 +15,7 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_storage::{BlockMetaData, BlockProofHandle, Storage};
 use tycho_util::metrics::HistogramGuard;
 
-pub use self::archive_provider::ArchiveBlockProvider;
+pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
 pub use self::storage_provider::StorageBlockProvider;
 

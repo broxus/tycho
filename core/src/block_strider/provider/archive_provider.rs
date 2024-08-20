@@ -3,15 +3,37 @@ use std::time::Duration;
 
 use anyhow::Result;
 use arc_swap::{ArcSwapAny, ArcSwapOption};
-use bytes::{BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
+use bytesize::ByteSize;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
+use serde::{Deserialize, Serialize};
+use tokio::fs::File;
+use tokio::io::BufWriter;
+use tokio::sync::oneshot;
+use tokio::task::AbortHandle;
+use tokio_util::either::Either;
 use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_storage::{BlockMetaData, Storage};
+use tycho_util::io::BytesWriter;
 use tycho_util::time::now_sec;
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
-use crate::blockchain_rpc::BlockchainRpcClient;
+use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchiveBlockProviderConfig {
+    pub max_archive_to_memory_size: ByteSize,
+}
+
+impl Default for ArchiveBlockProviderConfig {
+    fn default() -> Self {
+        Self {
+            max_archive_to_memory_size: ByteSize::mb(100),
+        }
+    }
+}
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -20,8 +42,12 @@ pub struct ArchiveBlockProvider {
 }
 
 impl ArchiveBlockProvider {
-    pub fn new(client: BlockchainRpcClient, storage: Storage) -> Self {
-        let proof_checker = ProofChecker::new(storage);
+    pub fn new(
+        client: BlockchainRpcClient,
+        storage: Storage,
+        config: ArchiveBlockProviderConfig,
+    ) -> Self {
+        let proof_checker = ProofChecker::new(storage.clone());
 
         Self {
             inner: Arc::new(Inner {
@@ -29,6 +55,10 @@ impl ArchiveBlockProvider {
                 proof_checker,
                 last_known_archive: ArcSwapOption::empty(),
                 prev_known_archive: ArcSwapOption::empty(),
+                next_archive: tokio::sync::Mutex::new(None),
+
+                storage,
+                config,
             }),
         }
     }
@@ -56,12 +86,12 @@ impl ArchiveBlockProvider {
             if let Some(archive) = this.last_known_archive.load_full() {
                 if let Some(mc_block_id) = archive.mc_block_ids.get(&next_block_seqno) {
                     block_id = *mc_block_id;
+                    tracing::debug!(%mc_block_id, "block found in the last known archive");
                     break archive;
                 }
             }
 
-            // TODO: Impl parallel download
-            match self.download_archive(next_block_seqno).await {
+            match self.get_next_archive(next_block_seqno).await {
                 Ok(archive) => {
                     // Duplicate the last known archive
                     if let Some(last) = this.last_known_archive.load_full() {
@@ -127,39 +157,77 @@ impl ArchiveBlockProvider {
         Some(Ok(block.clone()))
     }
 
-    #[tracing::instrument(skip(self))]
-    async fn download_archive(&self, seqno: u32) -> Result<Archive> {
-        let client = &self.inner.client;
-
-        tracing::debug!("started");
-        scopeguard::defer! {
-            tracing::debug!("finished");
-        }
+    async fn get_next_archive(&self, next_block_seqno: u32) -> Result<Archive> {
+        let mut guard = self.inner.next_archive.lock().await;
 
         loop {
-            let mut archive_data = BytesMut::new().writer();
+            match &mut *guard {
+                Some(next) => {
+                    let archive_data = next.wait_for_archive().await?;
 
-            let archive_data = match client.download_archive(seqno, &mut archive_data).await {
-                Ok(_) => archive_data.into_inner().freeze(),
-                Err(e) => {
-                    tracing::error!(seqno, "failed to download archive: {e}");
+                    // Reset the guard
+                    //
+                    // FIXME: At this point if the future is cancelled, subsequent call will
+                    // download the same archive again. We might want to reset the guard only
+                    // after the archive is successfully constructed. But this will require
+                    // the `archive_data` to be a `Shared` (clonable) future.
+                    *guard = None;
 
-                    // TODO: backoff
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+                    let archive = match self.inner.construct_archive(archive_data).await {
+                        Ok(archive) => archive,
+                        Err(e) => {
+                            // TODO: backoff
+                            tracing::error!(
+                                seqno = next_block_seqno,
+                                "failed to construct archive {e:?}"
+                            );
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+
+                    if let Some((seqno, _)) = archive.mc_block_ids.last_key_value() {
+                        *guard = Some(self.make_next_archive_task(*seqno + 1));
+                    }
+
+                    return Ok(archive);
                 }
-            };
+                None => *guard = Some(self.make_next_archive_task(next_block_seqno)),
+            }
+        }
+    }
 
-            match Archive::new(archive_data) {
-                Ok(archive) => return Ok(archive),
-                Err(e) => {
-                    tracing::error!(seqno, "failed to parse downloaded archive: {e}");
+    fn make_next_archive_task(&self, seqno: u32) -> NextArchive {
+        // TODO: Use a proper backoff here?
+        const INTERVAL: Duration = Duration::from_secs(1);
 
-                    // TODO: backoff
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
+        let (tx, rx) = oneshot::channel();
+
+        // NOTE: Use a separate downloader to prevent reference cycles
+        let downloader = self.inner.make_downloader();
+        let handle = tokio::spawn(async move {
+            tracing::debug!(seqno, "started preloading archive");
+            scopeguard::defer! {
+                tracing::debug!(seqno, "finished preloading archive");
+            }
+
+            loop {
+                match downloader.try_download(seqno).await {
+                    Ok(archive) => {
+                        tx.send(archive).ok();
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::error!(seqno, "failed to preload archive {e:?}");
+                        tokio::time::sleep(INTERVAL).await;
+                    }
                 }
             }
+        });
+
+        NextArchive {
+            rx: Some(rx),
+            abort_handle: handle.abort_handle(),
         }
     }
 }
@@ -169,10 +237,109 @@ fn is_block_recent(meta: &BlockMetaData) -> bool {
 }
 
 struct Inner {
+    storage: Storage,
+
     client: BlockchainRpcClient,
     proof_checker: ProofChecker,
     last_known_archive: ArcSwapOption<Archive>,
     prev_known_archive: ArcSwapOption<Archive>,
+
+    next_archive: tokio::sync::Mutex<Option<NextArchive>>,
+
+    config: ArchiveBlockProviderConfig,
+}
+
+impl Inner {
+    fn make_downloader(&self) -> ArchiveDownloader {
+        ArchiveDownloader {
+            client: self.client.clone(),
+            storage: self.storage.clone(),
+            memory_threshold: self.config.max_archive_to_memory_size,
+        }
+    }
+
+    async fn construct_archive(&self, data: ArchiveData) -> Result<Archive> {
+        let bytes = match data {
+            ArchiveData::Bytes(bytes) => bytes,
+            ArchiveData::File { id } => {
+                let temp_archives = self.storage.temp_archive_storage();
+
+                let data = temp_archives.read_archive_to_bytes(id).await?;
+                if let Err(e) = temp_archives.remove_archive(id) {
+                    tracing::warn!("failed to remove temp archive: {e:?}");
+                }
+
+                data
+            }
+        };
+
+        Archive::new(bytes)
+    }
+}
+
+struct ArchiveDownloader {
+    client: BlockchainRpcClient,
+    storage: Storage,
+    memory_threshold: ByteSize,
+}
+
+impl ArchiveDownloader {
+    async fn try_download(&self, seqno: u32) -> Result<ArchiveData> {
+        let pending = self.client.find_archive(seqno).await?;
+        let archive_id = pending.id;
+
+        let mut writer = self.get_archive_writer(&pending)?;
+        self.client.download_archive(pending, &mut writer).await?;
+
+        Ok(match writer {
+            Either::Left(_) => ArchiveData::File { id: archive_id },
+            Either::Right(data) => ArchiveData::Bytes(data.writer.into_inner().freeze()),
+        })
+    }
+
+    fn get_archive_writer(
+        &self,
+        pending: &PendingArchive,
+    ) -> Result<Either<BufWriter<File>, BytesWriter>> {
+        Ok(if pending.size.get() > self.memory_threshold.as_u64() {
+            let file = self
+                .storage
+                .temp_archive_storage()
+                .create_archive_file(pending.id)?;
+            Either::Left(BufWriter::new(file))
+        } else {
+            Either::Right(BytesWriter {
+                writer: BytesMut::new().writer(),
+            })
+        })
+    }
+}
+
+struct NextArchive {
+    rx: Option<oneshot::Receiver<ArchiveData>>,
+    abort_handle: AbortHandle,
+}
+
+impl NextArchive {
+    pub async fn wait_for_archive(&mut self) -> Result<ArchiveData, oneshot::error::RecvError> {
+        let result = self.rx.as_mut().expect("should not wait twice").await;
+        self.rx = None;
+        result
+    }
+}
+
+impl Drop for NextArchive {
+    fn drop(&mut self) {
+        if self.rx.is_some() {
+            self.abort_handle.abort();
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ArchiveData {
+    Bytes(Bytes),
+    File { id: u64 },
 }
 
 impl BlockProvider for ArchiveBlockProvider {

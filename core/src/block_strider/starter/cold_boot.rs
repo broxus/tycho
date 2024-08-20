@@ -317,6 +317,7 @@ impl StarterInner {
     where
         P: ZerostateProvider,
     {
+        tracing::info!("import zerostates");
         // Use a separate tracker for zerostates
         let tracker = MinRefMcStateTracker::default();
 
@@ -424,6 +425,7 @@ impl StarterInner {
 
     async fn download_zerostates(&self) -> Result<(BlockHandle, ShardStateStuff)> {
         let zerostate_id = self.zerostate.as_block_id();
+        tracing::info!(zerostate_id = ?zerostate_id, "download zerostates");
 
         let (handle, state) = self.load_or_download_state(&zerostate_id).await?;
 

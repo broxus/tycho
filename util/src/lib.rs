@@ -17,6 +17,11 @@ pub mod futures {
     mod shared;
 }
 
+pub mod io {
+    pub use bytes_writer::BytesWriter;
+    mod bytes_writer;
+}
+
 pub mod sync {
     pub use once_take::*;
 
