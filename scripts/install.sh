@@ -20,12 +20,15 @@ EOF
     exit 1
 fi
 
-features=""
+features="--features tokio-metrics"
 if set_clang_env 19; then
   features="$features --features lto"
   echo "INFO: Building node with lto"
   export RUSTFLAGS="-Clinker-plugin-lto -Clinker=clang -Clink-arg=-fuse-ld=$LD"
 fi
+
+# merge the features
+export RUSTFLAGS="$RUSTFLAGS -Ctarget_cpu=native -Cforce-frame-pointers=true --cfg tokio_unstable"
 
 cargo install $features --path ./cli --locked
 

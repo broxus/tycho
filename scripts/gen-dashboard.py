@@ -67,6 +67,7 @@ def create_gauge_panel(
     unit_format=UNITS.NUMBER_FORMAT,
     labels=[],
     legend_format: str | None = None,
+    description: str | None = None,
 ) -> Panel:
     if isinstance(expr, str):
         expr = [Expr(metric=expr, label_selectors=labels)]
@@ -88,9 +89,7 @@ def create_gauge_panel(
     targets = [target(e, legend_format=legend_format) for e in expr]
 
     return timeseries_panel(
-        title=title,
-        targets=targets,
-        unit=unit_format,
+        title=title, targets=targets, unit=unit_format, description=description
     )
 
 
@@ -101,6 +100,7 @@ def create_counter_panel(
     labels_selectors: List[str] = [],
     legend_format: str | None = None,
     by_labels: list[str] = ["instance"],
+    description: str | None = None,
 ) -> Panel:
     """
     Create a counter panel for visualization.
@@ -156,6 +156,7 @@ def create_counter_panel(
         title=title,
         targets=targets,
         unit=unit_format,
+        description=description,
     )
 
 
@@ -2074,6 +2075,149 @@ def rayon_stats() -> RowPanel:
     return create_row("Rayon Stats", metrics)
 
 
+def tokio_overview_panel() -> RowPanel:
+    metrics = [
+        create_gauge_panel(
+            "tycho_tokio_num_alive_tasks",
+            "Num Alive Tasks",
+            UNITS.NUMBER_FORMAT,
+            description="Current number of alive tasks in the runtime",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_global_queue_depth",
+            "Global Queue Depth",
+            UNITS.NUMBER_FORMAT,
+            description="Number of tasks currently scheduled in the global queue. Should be zero in normal operation.",
+        ),
+        create_counter_panel(
+            "tycho_tokio_spawned_tasks_count",
+            "Spawned Tasks Count",
+            description="Number of spawned tasks",
+        ),
+        create_counter_panel(
+            "tycho_tokio_budget_forced_yield_count",
+            "Forced Yield Count",
+            UNITS.NUMBER_FORMAT,
+            description="""
+            Returns the number of times that tasks have been forced to yield back to the scheduler after exhausting their task budgets.
+            This count starts at zero when the runtime is created and increases by one each time a task yields due to exhausting its budget.
+            """,
+        ),
+        create_counter_panel(
+            "tycho_tokio_remote_schedule_count",
+            "Number of tasks scheduled from outside of the runtime.",
+            UNITS.NUMBER_FORMAT,
+            description="""
+             Number of tasks which were spawned or notified from a non-runtime thread and must be queued using the Runtime’s injection queue, which tends to be slower.
+            """,
+        ),
+        create_gauge_panel(
+            "tycho_tokio_injection_queue_depth",
+            "Injection Queue Depth",
+            description="Number of tasks in the injection queue",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_blocking_queue_depth",
+            "Blocking Queue Depth",
+            description="Number of tasks currently scheduled in the blocking thread pool",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_num_blocking_threads",
+            "Num Blocking Threads",
+            description="Number of additional threads spawned by the runtime for blocking operations",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_num_idle_blocking_threads",
+            "Num Idle Blocking Threads",
+            description="Number of idle blocking threads",
+        ),
+        create_counter_panel(
+            "tycho_tokio_io_driver_fd_registered_count",
+            "Registered IO FDs",
+            description="Number of registered file descriptors",
+        ),
+        create_counter_panel(
+            "tycho_tokio_io_driver_fd_deregistered_count",
+            "Deregistered IO FDs",
+            description="Number of deregistered file descriptors",
+        ),
+    ]
+    return create_row("Tokio Overview", metrics)
+
+
+def tokio_details_panel() -> RowPanel:
+    legend = "{{instance}} - worker: {{worker_id}}"
+
+    metrics = [
+        # to supress check-metrics.py warnings
+        # uses tycho_tokio_poll_count_time_bucket
+        # uses tycho_tokio_poll_count_time_count
+        # uses tycho_tokio_poll_count_time_sum
+        create_heatmap_panel(
+            "tycho_tokio_poll_count_time",
+            "Poll Count Time",
+            yaxis(UNITS.SECONDS),
+        ),
+        create_gauge_panel(
+            "tycho_tokio_mean_poll_time",
+            "Mean Poll Time",
+            UNITS.SECONDS,
+            description="Mean task poll time",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_max_poll_time",
+            "Max Poll Time",
+            UNITS.SECONDS,
+            description="Max task execution time",
+        ),
+        create_counter_panel(
+            "tycho_tokio_worker_park_count",
+            "Worker Park Count",
+            legend_format=legend,
+            description="Number of times worker parked",
+        ),
+        create_counter_panel(
+            "tycho_tokio_worker_noop_count",
+            "Worker No-op Count",
+            legend_format=legend,
+            description="Number of times worker performed no-op",
+        ),
+        create_counter_panel(
+            "tycho_tokio_worker_steal_count",
+            "Worker Steal Count",
+            legend_format=legend,
+            description="Number of tasks stolen from other workers",
+        ),
+        create_counter_panel(
+            "tycho_tokio_worker_steal_operations",
+            "Worker Steal Operations",
+            legend_format=legend,
+            description="Number of times worker tryed to steal new tasks",
+        ),
+        create_counter_panel(
+            "tycho_tokio_worker_busy_time",
+            "The amount of time the given worker thread has been busy",
+            legend_format=legend,
+            description="The worker busy duration starts at zero when the runtime is created and increases whenever the worker is spending time processing work."
+            "Using this value can indicate the load of the given worker. If a lot of time is spent busy, then the worker is under load and will check for inbound events less often.",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_worker_local_queue_depth",
+            "Worker Local Queue Depth",
+            legend_format=legend,
+            description="Number of tasks in local worker's queue",
+        ),
+        create_gauge_panel(
+            "tycho_tokio_worker_mean_poll_time",
+            "Mean Worker Poll Time",
+            legend_format=legend,
+            unit_format=UNITS.SECONDS,
+            description="Mean task poll time for worker",
+        ),
+    ]
+    return create_row("Tokio Details", metrics)
+
+
 def templates() -> Templating:
     return Templating(
         list=[
@@ -2164,6 +2308,8 @@ dashboard = Dashboard(
         net_dht(),
         allocator_stats(),
         rayon_stats(),
+        tokio_overview_panel(),
+        tokio_details_panel(),
         jrpc(),
         jrpc_timings(),
     ],

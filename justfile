@@ -43,6 +43,7 @@ check_format: install_fmt
 # Clippy go brr.
 lint:
     #cargo clippy --all-targets --all-features --workspace # update when clippy is fixed
+    export RUSTFLAGS="-cfg tokio_unstable"
     cargo clippy --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -p tycho-collator -p tycho-control -p tycho-light-node  -p tycho-cli -- -D warnings
 
 # Generates cargo docs.
