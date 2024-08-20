@@ -1,10 +1,17 @@
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use everscale_types::cell::HashBytes;
-use everscale_types::models::{BlockIdShort, IntAddr, ShardIdent, StdAddr};
-use tycho_block_util::queue::QueueKey;
+use everscale_types::cell::{Cell, CellSliceRange, HashBytes};
+use everscale_types::models::{
+    AccountStatus, BlockExtra, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason,
+    CurrencyCollection, HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, Lazy, MsgEnvelope,
+    MsgInfo, OrdinaryTxInfo, OutMsg, OutMsgDescr, OutMsgNew, OwnedMessage, ShardIdent,
+    SkippedComputePhase, StdAddr, Transaction, TxInfo,
+};
+use everscale_types::num::Tokens;
+use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
 use tycho_collator::internal_queue::queue::{Queue, QueueFactory, QueueFactoryStdImpl, QueueImpl};
 use tycho_collator::internal_queue::state::persistent_state::{
     PersistentStateImplFactory, PersistentStateStdImpl,
@@ -217,4 +224,179 @@ async fn test_queue() -> anyhow::Result<()> {
     assert_eq!(expected_position, current_position);
 
     Ok(())
+}
+
+#[test]
+fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
+    let mut out_msg = OutMsgDescr::default();
+
+    let transaction = Transaction {
+        account: HashBytes::ZERO,
+        lt: 0x01,
+        prev_trans_hash: HashBytes::ZERO,
+        prev_trans_lt: 0x00,
+        now: 0,
+        out_msg_count: Default::default(),
+        orig_status: AccountStatus::Active,
+        end_status: AccountStatus::Active,
+        in_msg: None,
+        out_msgs: Default::default(),
+        total_fees: Default::default(),
+        state_update: Lazy::new(&HashUpdate {
+            old: HashBytes::ZERO,
+            new: HashBytes::ZERO,
+        })
+        .unwrap(),
+        info: Lazy::new(&TxInfo::Ordinary(OrdinaryTxInfo {
+            credit_first: true,
+            storage_phase: None,
+            credit_phase: None,
+            compute_phase: ComputePhase::Skipped(SkippedComputePhase {
+                reason: ComputePhaseSkipReason::NoState,
+            }),
+            action_phase: None,
+            aborted: false,
+            bounce_phase: None,
+            destroyed: false,
+        }))
+        .unwrap(),
+    };
+
+    let message_body = Cell::default();
+
+    let message1 = Lazy::new(&OwnedMessage {
+        info: MsgInfo::Int(IntMsgInfo {
+            created_lt: 0x01,
+            ..Default::default()
+        }),
+        init: None,
+        body: (message_body.clone(), CellSliceRange::default()),
+        layout: None,
+    })
+    .unwrap();
+    let message1_hash = *message1.inner().repr_hash();
+    out_msg
+        .add(
+            message1_hash,
+            CurrencyCollection::ZERO,
+            OutMsg::New(OutMsgNew {
+                out_msg_envelope: create_dump_msg_envelope(message1),
+                transaction: Lazy::new(&transaction).unwrap(),
+            }),
+        )
+        .unwrap();
+    let message2 = Lazy::new(&OwnedMessage {
+        info: MsgInfo::Int(IntMsgInfo {
+            created_lt: 0x02,
+            ..Default::default()
+        }),
+        init: None,
+        body: (message_body.clone(), CellSliceRange::default()),
+        layout: None,
+    })
+    .unwrap();
+    let message2_hash = *message2.inner().repr_hash();
+    out_msg
+        .add(
+            message2_hash,
+            CurrencyCollection::ZERO,
+            OutMsg::New(OutMsgNew {
+                out_msg_envelope: create_dump_msg_envelope(message2),
+                transaction: Lazy::new(&transaction).unwrap(),
+            }),
+        )
+        .unwrap();
+    let message3 = Lazy::new(&OwnedMessage {
+        info: MsgInfo::Int(IntMsgInfo {
+            created_lt: 0x03,
+            ..Default::default()
+        }),
+        init: None,
+        body: (message_body.clone(), CellSliceRange::default()),
+        layout: None,
+    })
+    .unwrap();
+    let message3_hash = *message3.inner().repr_hash();
+    out_msg
+        .add(
+            message3_hash,
+            CurrencyCollection::ZERO,
+            OutMsg::New(OutMsgNew {
+                out_msg_envelope: create_dump_msg_envelope(message3),
+                transaction: Lazy::new(&transaction).unwrap(),
+            }),
+        )
+        .unwrap();
+
+    let mut messages = vec![message1_hash, message2_hash, message3_hash];
+    messages.sort_unstable();
+
+    let diff = QueueDiff {
+        hash: HashBytes::ZERO,
+        prev_hash: HashBytes::from([0x33; 32]),
+        shard_ident: ShardIdent::MASTERCHAIN,
+        seqno: 123,
+        processed_upto: BTreeMap::from([
+            (ShardIdent::MASTERCHAIN, QueueKey {
+                lt: 1,
+                hash: message1_hash,
+            }),
+            (ShardIdent::BASECHAIN, QueueKey {
+                lt: 2,
+                hash: message2_hash,
+            }),
+        ]),
+        min_message: QueueKey {
+            lt: 1,
+            hash: message1_hash,
+        },
+        max_message: QueueKey {
+            lt: 2,
+            hash: message2_hash,
+        },
+        messages,
+    };
+    let data = tl_proto::serialize(&diff);
+
+    let block_id = BlockId {
+        shard: ShardIdent::MASTERCHAIN,
+        seqno: 123,
+        root_hash: HashBytes::ZERO,
+        file_hash: HashBytes::ZERO,
+    };
+
+    let queue_diff_stuff = QueueDiffStuff::deserialize(&block_id, &data).unwrap();
+
+    let diff_with_messages = QueueDiffWithMessages::from_queue_diff(queue_diff_stuff, &out_msg)?;
+
+    assert_eq!(
+        diff_with_messages.processed_upto,
+        diff.processed_upto
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect()
+    );
+
+    assert_eq!(
+        diff_with_messages
+            .messages
+            .into_iter()
+            .map(|(key, _)| key.hash)
+            .collect::<Vec<_>>(),
+        vec![message1_hash, message2_hash, message3_hash,]
+    );
+
+    assert_eq!(diff_with_messages.last_key, None);
+
+    Ok(())
+}
+
+fn create_dump_msg_envelope(message: Lazy<OwnedMessage>) -> Lazy<MsgEnvelope> {
+    Lazy::new(&MsgEnvelope {
+        cur_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
+        next_addr: IntermediateAddr::FULL_DEST_SAME_WORKCHAIN,
+        fwd_fee_remaining: Tokens::ONE,
+        message,
+    })
+    .unwrap()
 }
