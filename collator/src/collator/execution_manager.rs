@@ -864,6 +864,7 @@ fn execute_ticktock_transaction(
 #[derive(Clone)]
 pub(super) enum ProcessedUptoUpdate {
     Force(QueueKey),
+    #[allow(dead_code)]
     IfHigher(QueueKey),
 }
 

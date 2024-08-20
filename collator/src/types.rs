@@ -89,6 +89,7 @@ impl Default for MsgsExecutionParams {
 
 pub struct BlockCollationResult {
     pub candidate: Box<BlockCandidate>,
+    pub prev_mc_block_id: BlockId,
     pub mc_data: Option<Arc<McData>>,
     /// There are unprocessed internals in shard queue after block collation
     pub has_pending_internals: bool,
@@ -382,6 +383,44 @@ impl Addr for ShortAddr {
 
     fn prefix(&self) -> u64 {
         self.prefix
+    }
+}
+
+pub trait BlockIdExt {
+    fn get_next_id_short(&self) -> BlockIdShort;
+}
+impl BlockIdExt for BlockId {
+    fn get_next_id_short(&self) -> BlockIdShort {
+        BlockIdShort {
+            shard: self.shard,
+            seqno: self.seqno + 1,
+        }
+    }
+}
+impl BlockIdExt for BlockIdShort {
+    fn get_next_id_short(&self) -> BlockIdShort {
+        BlockIdShort {
+            shard: self.shard,
+            seqno: self.seqno + 1,
+        }
+    }
+}
+
+pub(super) struct DisplayFullBlockIdsSlice<'a>(pub &'a [BlockId]);
+
+impl std::fmt::Debug for DisplayFullBlockIdsSlice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::fmt::Display for DisplayFullBlockIdsSlice<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for block_id in self.0 {
+            l.entry(&block_id.to_string());
+        }
+        l.finish()
     }
 }
 

@@ -79,6 +79,7 @@ pub trait CollatorEventListener: Send + Sync {
     /// or due to master block force condition
     async fn on_skipped_anchor(
         &self,
+        prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
         anchor: Arc<MempoolAnchor>,
         force_mc_block: bool,
@@ -767,7 +768,12 @@ impl CollatorStdImpl {
             }
             // this may start master block collation or cause next anchor import
             self.listener
-                .on_skipped_anchor(working_state.next_block_id_short, next_anchor, false)
+                .on_skipped_anchor(
+                    working_state.mc_data.block_id,
+                    working_state.next_block_id_short,
+                    next_anchor,
+                    false,
+                )
                 .await?;
 
             self.working_state.delay(working_state);
@@ -896,6 +902,7 @@ impl CollatorStdImpl {
                 }
                 self.listener
                     .on_skipped_anchor(
+                        working_state.mc_data.block_id,
                         working_state.next_block_id_short,
                         next_anchor,
                         force_mc_block_by_uncommitted_chain,

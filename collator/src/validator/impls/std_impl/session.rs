@@ -169,7 +169,7 @@ impl ValidatorSession {
     )]
     pub async fn validate_block(&self, block_id: &BlockId) -> Result<ValidationStatus> {
         let _histogram = HistogramGuard::begin(METRIC_VALIDATE_BLOCK_TIME);
-        tracing::debug!("started");
+        tracing::debug!(target: tracing_targets::VALIDATOR, "started");
 
         debug_assert_eq!(self.inner.state.shard_ident, block_id.shard);
 
@@ -361,7 +361,7 @@ impl ValidatorSession {
                             target: tracing_targets::VALIDATOR,
                             %peer_id,
                             block_seqno,
-                            "cached signature is invalid: {}",
+                            "cached signature is invalid on reuse: {}",
                             ValidationError::InvalidSignature
                         );
 
@@ -450,7 +450,8 @@ impl Inner {
                 Err(e) => {
                     tracing::warn!(
                         target: tracing_targets::VALIDATOR,
-                        "cached signature is invalid: {e:?}",
+                        %peer_id,
+                        "cached signature is invalid on add_signature: {e:?}",
                     );
                 }
             }

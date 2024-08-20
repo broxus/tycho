@@ -472,8 +472,6 @@ impl BlockCollationData {
     }
 }
 
-pub(super) type InternalMessagesQueueStats = FastHashMap<AccountId, u32>;
-
 #[derive(Debug, Default)]
 pub(super) struct CollatorStats {
     pub total_execute_msgs_time_mc: u128,

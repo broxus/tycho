@@ -70,7 +70,10 @@ impl BlockchainBlockProvider {
         // TODO: Backoff?
         let mut interval = tokio::time::interval(self.config.get_next_block_polling_interval);
 
+        let prev_block_short_id = prev_block_id.as_short_id();
+
         loop {
+            tracing::debug!(prev_block_id = %prev_block_short_id, "get_next_block_full requested");
             match self.client.get_next_block_full(prev_block_id).await {
                 Ok(response) => {
                     let parsed = self.process_received_block(response).await;
@@ -89,7 +92,10 @@ impl BlockchainBlockProvider {
         // TODO: Backoff?
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
 
+        let block_short_id = block_id.as_short_id();
+
         loop {
+            tracing::debug!(block_id = %block_short_id, "get_block_full requested");
             match self.client.get_block_full(block_id).await {
                 Ok(response) => {
                     let parsed = self.process_received_block(response).await;
