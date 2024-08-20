@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -6,7 +7,7 @@ use bytesize::ByteSize;
 use futures_util::Future;
 use serde::{Deserialize, Serialize};
 use tycho_network::{try_handle_prefix, InboundRequestMeta, Response, Service, ServiceRequest};
-use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage, ARCHIVE_CHUNK_SIZE};
+use tycho_storage::{BlockConnection, KeyBlocksDirection, Storage};
 use tycho_util::futures::BoxFutureOrNoop;
 use tycho_util::metrics::HistogramGuard;
 
@@ -236,16 +237,16 @@ impl<B: BroadcastListener> Service<ServiceRequest> for BlockchainRpcService<B> {
                     Some(Response::from_tl(res))
                 })
             },
-            rpc::GetArchiveSlice as req => {
+            rpc::GetArchiveChunk as req => {
                 tracing::debug!(
                     archive_id = %req.archive_id,
                     offset = %req.offset,
-                    "getArchiveSlice"
+                    "getArchiveChunk"
                 );
 
                 let inner = self.inner.clone();
                 BoxFutureOrNoop::future(async move {
-                    let res = inner.handle_get_archive_slice(&req).await;
+                    let res = inner.handle_get_archive_chunk(&req).await;
                     Some(Response::from_tl(res))
                 })
             },
@@ -511,10 +512,10 @@ impl<B> Inner<B> {
                 let size_res = id.map_or(Ok(None), |id| block_storage.get_archive_size(id));
 
                 overlay::Response::Ok(match (id, size_res) {
-                    (Some(id), Ok(Some(size))) => ArchiveInfo::Found {
+                    (Some(id), Ok(Some(size))) if size > 0 => ArchiveInfo::Found {
                         id: id as u64,
-                        size: size as u64,
-                        chunk_size: ARCHIVE_CHUNK_SIZE,
+                        size: NonZeroU64::new(size as _).unwrap(),
+                        chunk_size: block_storage.archive_chunk_size(),
                     },
                     _ => ArchiveInfo::NotFound,
                 })
@@ -526,27 +527,27 @@ impl<B> Inner<B> {
         }
     }
 
-    async fn handle_get_archive_slice(
+    async fn handle_get_archive_chunk(
         &self,
-        req: &rpc::GetArchiveSlice,
+        req: &rpc::GetArchiveChunk,
     ) -> overlay::Response<Data> {
-        let label = [("method", "getArchiveSlice")];
+        let label = [("method", "getArchiveChunk")];
         let _hist = HistogramGuard::begin_with_labels(RPC_METHOD_TIMINGS_METRIC, &label);
 
         let block_storage = self.storage.block_storage();
 
-        let get_archive_slice = || async {
+        let get_archive_chunk = || async {
             let archive_slice = block_storage
-                .get_archive_slice(req.archive_id as u32, req.offset)
+                .get_archive_chunk(req.archive_id as u32, req.offset)
                 .await?;
 
             Ok::<_, anyhow::Error>(archive_slice)
         };
 
-        match get_archive_slice().await {
+        match get_archive_chunk().await {
             Ok(data) => overlay::Response::Ok(Data { data: data.into() }),
             Err(e) => {
-                tracing::warn!("get_archive_slice failed: {e:?}");
+                tracing::warn!("get_archive_chunk failed: {e:?}");
                 overlay::Response::Err(INTERNAL_ERROR_CODE)
             }
         }

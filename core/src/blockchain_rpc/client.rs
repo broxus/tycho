@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -198,14 +199,14 @@ impl BlockchainRpcClient {
         Ok(data)
     }
 
-    pub async fn get_archive_slice(
+    pub async fn get_archive_chunk(
         &self,
         archive_id: u64,
         offset: u64,
     ) -> Result<QueryResponse<Data>, Error> {
         let client = &self.inner.overlay_client;
         let data = client
-            .query::<_, Data>(&rpc::GetArchiveSlice { archive_id, offset })
+            .query::<_, Data>(&rpc::GetArchiveChunk { archive_id, offset })
             .await?;
         Ok(data)
     }
@@ -380,18 +381,19 @@ impl BlockchainRpcClient {
 
         tracing::debug!("size {}, chunk size {}", archive_size, chunk_size);
 
-        let mut stream = futures_util::stream::iter((0..archive_size).step_by(chunk_size as usize))
-            .map(|offset| {
-                tracing::debug!("downloading archive chunk at offset {}", offset);
-                let neighbour = neighbour.clone();
-                let overlay_client = self.overlay_client().clone();
-                JoinTask::new(download_archive_inner(
-                    Request::from_tl(rpc::GetArchiveSlice { archive_id, offset }),
-                    overlay_client,
-                    neighbour,
-                ))
-            })
-            .buffered(PARALLEL_REQUESTS);
+        let mut stream =
+            futures_util::stream::iter((0..archive_size.get()).step_by(chunk_size.get() as usize))
+                .map(|offset| {
+                    tracing::debug!("downloading archive chunk at offset {}", offset);
+                    let neighbour = neighbour.clone();
+                    let overlay_client = self.overlay_client().clone();
+                    JoinTask::new(download_archive_inner(
+                        Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
+                        overlay_client,
+                        neighbour,
+                    ))
+                })
+                .buffered(PARALLEL_REQUESTS);
 
         let mut downloaded: u64 = 0;
 
@@ -432,7 +434,7 @@ impl BlockchainRpcClient {
 async fn find_peer_with_archive(
     client: PublicOverlayClient,
     mc_seqno: u32,
-) -> Result<(Neighbour, u64, u64, u64), Error> {
+) -> Result<(Neighbour, u64, NonZeroU64, NonZeroU32), Error> {
     // TODO: Iterate through all known (or unknown) neighbours
     const NEIGHBOUR_COUNT: usize = 10;
     let neighbours = client.neighbours().choose_multiple(NEIGHBOUR_COUNT).await;
@@ -460,7 +462,10 @@ async fn find_peer_with_archive(
                 size,
                 chunk_size,
             } => return Ok((handle.accept(), id, size, chunk_size)),
-            ArchiveInfo::NotFound => continue,
+            ArchiveInfo::NotFound => {
+                handle.accept();
+                continue;
+            }
         }
     }
 

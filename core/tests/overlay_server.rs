@@ -264,7 +264,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
     let result = client.get_archive_info(0).await;
     assert!(result.is_err());
 
-    let result = client.get_archive_slice(0, 0).await;
+    let result = client.get_archive_chunk(0, 0).await;
     assert!(result.is_err());
 
     tracing::info!("done!");

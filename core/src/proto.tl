@@ -171,12 +171,12 @@ blockchain.getArchiveInfo
     = overlay.Response blockchain.ArchiveInfo;
 
 /**
-* Get archive slice
+* Get archive chunk
 *
 * @param archive_id     archive id (masterchain seqno)
-* @param offset         part offset in bytes
+* @param offset         chunk offset in bytes (must be a multiple of `chunk_size`)
 */
-blockchain.getArchiveSlice
+blockchain.getArchiveChunk
     archive_id:long
     offset:long
     = overlay.Response blockchain.Data;

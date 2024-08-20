@@ -1,6 +1,41 @@
 use bytes::Bytes;
 use tl_proto::{TlError, TlPacket, TlRead, TlResult, TlWrite};
 
+macro_rules! define_non_zero {
+    ($($mod:ident => ($ty:ident, $write_method:ident, $read_ty:ty)),*$(,)?) => {
+        $(pub mod $mod {
+            use std::num::$ty;
+
+            use super::*;
+
+            #[inline]
+            pub const fn size_hint(_: $ty) -> usize {
+                std::mem::size_of::<$ty>()
+            }
+
+            #[inline]
+            pub fn write<P: TlPacket>(value: &$ty, packet: &mut P) {
+                packet.$write_method(value.get());
+            }
+
+            #[inline]
+            pub fn read(packet: &'_ [u8], offset: &mut usize) -> TlResult<$ty> {
+                match <$ty>::new(<$read_ty>::read_from(packet, offset)?) {
+                    Some(value) => Ok(value),
+                    None => Err(TlError::InvalidData),
+                }
+            }
+        })*
+    };
+}
+
+define_non_zero! {
+    non_zero_u32 => (NonZeroU32, write_u32, u32),
+    non_zero_i32 => (NonZeroI32, write_i32, i32),
+    non_zero_u64 => (NonZeroU64, write_u64, u64),
+    non_zero_i64 => (NonZeroI64, write_i64, i64),
+}
+
 pub mod signature_ref {
     use super::*;
 

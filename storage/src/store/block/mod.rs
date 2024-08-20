@@ -1,6 +1,7 @@
 use std::borrow::Borrow;
 use std::collections::BTreeSet;
 use std::hash::Hash;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -48,6 +49,10 @@ impl BlockStorage {
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
         }
+    }
+
+    pub fn archive_chunk_size(&self) -> NonZeroU32 {
+        NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
     }
 
     /// Iterates over all archives and preloads their ids into memory.
@@ -568,8 +573,8 @@ impl BlockStorage {
         }
     }
 
-    /// Loads an archive slice (chunk).
-    pub async fn get_archive_slice(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
+    /// Loads an archive chunk.
+    pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
         let archive_size = self
             .get_archive_size(id)?
             .ok_or(BlockStorageError::ArchiveNotFound)? as u64;
@@ -679,15 +684,17 @@ impl BlockStorage {
 
         drop(archive_ids);
 
-        // Remove archives
+        // Remove all archives in range `[0, until_id)`
         let archives_cf = self.db.intermediate_archives.cf();
         let write_options = self.db.intermediate_archives.write_config();
 
         let start_key = [0u8; tables::Archives::KEY_LEN];
 
+        // NOTE: End key points to the first entry of the `until_id` archive,
+        // because `delete_range` removes all entries in range ["from", "to").
         let mut end_key = [0u8; tables::Archives::KEY_LEN];
         end_key[..4].copy_from_slice(&until_id.to_be_bytes());
-        end_key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
+        end_key[4..].copy_from_slice(&[0; 8]);
 
         self.db
             .rocksdb()
@@ -750,20 +757,16 @@ impl BlockStorage {
         }
     }
 
-    fn prev_id(&self, mc_seqno: u32) -> Option<u32> {
+    fn compute_archive_id(&self, handle: &BlockHandle) -> ArchiveId {
+        let mc_seqno = handle.mc_ref_seqno();
+
+        // Get the closest archive id
         let prev_id = {
             let latest_archives = self.archive_ids.read();
             latest_archives.range(..=mc_seqno).next_back().cloned()
         };
 
-        prev_id
-    }
-
-    fn compute_archive_id(&self, handle: &BlockHandle) -> ArchiveId {
-        let mc_seqno = handle.mc_ref_seqno();
-
         if handle.meta().is_key_block() {
-            let prev_id = self.prev_id(mc_seqno);
             self.archive_ids.write().insert(mc_seqno);
             return ArchiveId {
                 id: mc_seqno,
@@ -771,8 +774,6 @@ impl BlockStorage {
                 prev_id,
             };
         }
-
-        let prev_id = self.prev_id(mc_seqno);
 
         let mut archive_id = ArchiveId {
             id: prev_id.unwrap_or_default(),
@@ -946,9 +947,9 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
     }
 }
 
-pub const ARCHIVE_PACKAGE_SIZE: u32 = 100;
-pub const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
-pub const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
+const ARCHIVE_PACKAGE_SIZE: u32 = 100;
+const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
+const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
 
 #[derive(Default)]
 struct ArchiveId {

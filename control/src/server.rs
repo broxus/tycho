@@ -1,3 +1,4 @@
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -6,7 +7,7 @@ use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
 use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
-use tycho_storage::{Storage, ARCHIVE_CHUNK_SIZE};
+use tycho_storage::Storage;
 
 use crate::error::ServerResult;
 use crate::profiler::{MemoryProfiler, StubMemoryProfiler};
@@ -214,19 +215,19 @@ impl proto::ControlServer for ControlServer {
 
         Ok(proto::ArchiveInfoResponse::Found(proto::ArchiveInfo {
             id,
-            size: size as u64,
-            chunk_size: ARCHIVE_CHUNK_SIZE,
+            size: NonZeroU64::new(size as _).unwrap(),
+            chunk_size: blocks.archive_chunk_size(),
         }))
     }
 
-    async fn get_archive_slice(
+    async fn get_archive_chunk(
         self,
         _: Context,
         req: proto::ArchiveSliceRequest,
     ) -> ServerResult<proto::ArchiveSliceResponse> {
         let blocks = self.inner.storage.block_storage();
 
-        let data = blocks.get_archive_slice(req.archive_id, req.offset).await?;
+        let data = blocks.get_archive_chunk(req.archive_id, req.offset).await?;
 
         Ok(proto::ArchiveSliceResponse { data })
     }

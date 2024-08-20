@@ -1,3 +1,5 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use everscale_types::models::BlockId;
 use serde::{Deserialize, Serialize};
 use tycho_core::block_strider::ManualGcTrigger;
@@ -34,7 +36,7 @@ pub trait ControlServer {
     async fn get_archive_info(req: ArchiveInfoRequest) -> ServerResult<ArchiveInfoResponse>;
 
     /// Download archive slice.
-    async fn get_archive_slice(req: ArchiveSliceRequest) -> ServerResult<ArchiveSliceResponse>;
+    async fn get_archive_chunk(req: ArchiveSliceRequest) -> ServerResult<ArchiveSliceResponse>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,8 +69,8 @@ pub struct ArchiveInfoRequest {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ArchiveInfo {
     pub id: u32,
-    pub size: u64,
-    pub chunk_size: u64,
+    pub size: NonZeroU64,
+    pub chunk_size: NonZeroU32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
