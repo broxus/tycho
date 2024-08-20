@@ -28,7 +28,9 @@ use crate::collator::types::{
 use crate::internal_queue::types::EnqueuedMessage;
 use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
-use crate::types::{BlockCollationResult, DisplayBlockIdsList, McData, TopBlockDescription};
+use crate::types::{
+    BlockCollationResult, BlockIdExt, DisplayBlockIdsList, McData, TopBlockDescription,
+};
 
 #[cfg(test)]
 #[path = "tests/do_collate_tests.rs"]
@@ -408,6 +410,7 @@ impl CollatorStdImpl {
         .serialize();
 
         let queue_diff_hash = *queue_diff.hash();
+        tracing::debug!(target: tracing_targets::COLLATOR, queue_diff_hash = %queue_diff_hash);
 
         // start async update queue task
         let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
@@ -484,6 +487,7 @@ impl CollatorStdImpl {
             self.listener
                 .on_block_candidate(BlockCollationResult {
                     candidate: finalized.block_candidate,
+                    prev_mc_block_id: working_state.mc_data.block_id,
                     mc_data: finalized.mc_data.clone(),
                     has_pending_internals,
                 })
@@ -504,10 +508,7 @@ impl CollatorStdImpl {
             );
 
             // update next block info
-            self.next_block_info = BlockIdShort {
-                shard: block_id.shard,
-                seqno: block_id.seqno + 1,
-            };
+            self.next_block_info = block_id.get_next_id_short();
 
             handle_block_candidate_elapsed = histogram.finish();
         }

@@ -102,15 +102,23 @@ impl StateNodeAdapterStdImpl {
 #[async_trait]
 impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn load_last_applied_mc_block_id(&self) -> Result<BlockId> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load last applied mc block id");
-        self.storage
+        let las_applied_mc_block_id = self
+            .storage
             .node_state()
             .load_last_mc_block_id()
-            .context("no blocks applied yet")
+            .context("no blocks applied yet")?;
+
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER,
+            "Loaded last applied mc block id {}",
+            las_applied_mc_block_id.as_short_id(),
+        );
+
+        Ok(las_applied_mc_block_id)
     }
 
     async fn load_state(&self, block_id: &BlockId) -> Result<ShardStateStuff> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load state: {}", block_id.as_short_id());
+
         let state = self
             .storage
             .shard_state_storage()
@@ -125,7 +133,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         meta: NewBlockMeta,
         state_root: Cell,
     ) -> Result<ShardStateStuff> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
 
         let (handle, _) = self
             .storage
@@ -146,15 +154,17 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_block(&self, block_id: &BlockId) -> Result<Option<BlockStuff>> {
-        tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {}", block_id.as_short_id());
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load block: {}", block_id.as_short_id());
 
         let handle_storage = self.storage.block_handle_storage();
         let block_storage = self.storage.block_storage();
 
-        let Some(handle) = handle_storage.load_handle(block_id) else {
-            return Ok(None);
-        };
-        block_storage.load_block_data(&handle).await.map(Some)
+        match handle_storage.load_handle(block_id) {
+            Some(handle) if handle.has_data() => {
+                block_storage.load_block_data(&handle).await.map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 
     async fn load_block_handle(&self, block_id: &BlockId) -> Result<Option<BlockHandle>> {
@@ -251,6 +261,8 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     }
 
     async fn load_diff(&self, block_id: &BlockId) -> Result<Option<QueueDiffStuff>> {
+        tracing::debug!(target: tracing_targets::STATE_NODE_ADAPTER, "Load queue diff: {}", block_id.as_short_id());
+
         let handle_storage = self.storage.block_handle_storage();
         let block_storage = self.storage.block_storage();
 
