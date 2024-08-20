@@ -92,6 +92,7 @@ blockchain.keyBlockProof.notFound = blockchain.KeyBlockProof;
 blockchain.archiveInfo.found
     id:long
     size:long
+    chunk_size:long
     = blockchain.ArchiveInfo;
 /**
 * An unsuccessul response for the 'getArchiveInfo' query
@@ -170,15 +171,13 @@ blockchain.getArchiveInfo
     = overlay.Response blockchain.ArchiveInfo;
 
 /**
-* Get archive slice
+* Get archive chunk
 *
 * @param archive_id     archive id (masterchain seqno)
-* @param limit          max response size in bytes
-* @param offset         part offset in bytes
+* @param offset         chunk offset in bytes (must be a multiple of `chunk_size`)
 */
-blockchain.getArchiveSlice
+blockchain.getArchiveChunk
     archive_id:long
-    limit:int
     offset:long
     = overlay.Response blockchain.Data;
 

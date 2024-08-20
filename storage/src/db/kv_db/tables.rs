@@ -35,7 +35,31 @@ impl ColumnFamilyOptions<Caches> for State {
 /// Stores prepared archives
 /// - Key: `u32 (BE)` (archive id)
 /// - Value: `Vec<u8>` (archive data)
+pub struct IntermediateArchives;
+
+impl ColumnFamily for IntermediateArchives {
+    const NAME: &'static str = "intermediate_archives";
+}
+
+impl ColumnFamilyOptions<Caches> for IntermediateArchives {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        default_block_based_table_factory(opts, caches);
+        optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+
+        opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
+        opts.set_compression_type(DBCompressionType::Zstd);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+    }
+}
+
+/// Stores split archives
+/// - Key: `u32 (BE)` (archive id) + `u64 (BE)` (chunk index)
+/// - Value: `Vec<u8>` (archive data chunk)
 pub struct Archives;
+
+impl Archives {
+    pub const KEY_LEN: usize = 4 + 8;
+}
 
 impl ColumnFamily for Archives {
     const NAME: &'static str = "archives";
@@ -46,7 +70,6 @@ impl ColumnFamilyOptions<Caches> for Archives {
         default_block_based_table_factory(opts, caches);
         optimize_for_level_compaction(opts, ByteSize::mib(512u64));
 
-        opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
         opts.set_compression_type(DBCompressionType::Zstd);
         with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
     }

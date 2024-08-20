@@ -319,7 +319,7 @@ def core_blockchain_rpc() -> RowPanel:
         "getNextBlockFull",
         "getKeyBlockProof",
         "getArchiveInfo",
-        "getArchiveSlice",
+        "getArchiveChunk",
         "getPersistentStateInfo",
         "getPersistentStatePart",
     ]

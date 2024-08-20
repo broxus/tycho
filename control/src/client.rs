@@ -109,25 +109,25 @@ impl ControlClient {
     where
         T: AsyncWrite + Unpin,
     {
-        const CHUNK_SIZE: u64 = 16 << 20; // 16 MB
         const PARALLEL_CHUNKS: usize = 10;
 
-        let chunk_num = (info.size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+        let chunk_size = info.chunk_size.get() as u64;
+        let chunk_num = (info.size.get() + chunk_size - 1) / chunk_size;
+
         let mut chunks = futures_util::stream::iter(0..chunk_num)
             .map(|chunk| {
                 let req = ArchiveSliceRequest {
                     archive_id: info.id,
-                    limit: CHUNK_SIZE as u32,
-                    offset: chunk * CHUNK_SIZE,
+                    offset: chunk * chunk_size,
                 };
 
-                let span = tracing::debug_span!("get_archive_slice", ?req);
+                let span = tracing::debug_span!("get_archive_chunk", ?req);
 
                 let client = self.inner.clone();
                 JoinTask::new(
                     async move {
                         tracing::debug!("started");
-                        let res = client.get_archive_slice(context::current(), req).await;
+                        let res = client.get_archive_chunk(context::current(), req).await;
                         tracing::debug!("finished");
                         res
                     }

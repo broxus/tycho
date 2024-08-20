@@ -1,3 +1,5 @@
+use std::num::{NonZeroU32, NonZeroU64};
+
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
 use tycho_util::tl;
@@ -67,7 +69,13 @@ pub enum PersistentStateInfo {
 #[tl(boxed, scheme = "proto.tl")]
 pub enum ArchiveInfo {
     #[tl(id = "blockchain.archiveInfo.found", size_hint = 16)]
-    Found { id: u64, size: u64 },
+    Found {
+        id: u64,
+        #[tl(with = "tl::non_zero_u64")]
+        size: NonZeroU64,
+        #[tl(with = "tl::non_zero_u32")]
+        chunk_size: NonZeroU32,
+    },
     #[tl(id = "blockchain.archiveInfo.notFound")]
     NotFound,
 }
@@ -141,13 +149,12 @@ pub mod rpc {
     #[derive(Debug, Clone, TlRead, TlWrite)]
     #[tl(
         boxed,
-        id = "blockchain.getArchiveSlice",
+        id = "blockchain.getArchiveChunk",
         size_hint = 20,
         scheme = "proto.tl"
     )]
-    pub struct GetArchiveSlice {
+    pub struct GetArchiveChunk {
         pub archive_id: u64,
-        pub limit: u32,
         pub offset: u64,
     }
 }

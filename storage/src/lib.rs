@@ -137,7 +137,7 @@ impl StorageBuilder {
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
 
-        block_storage.preload_archive_ids();
+        block_storage.preload_archive_ids()?;
 
         let inner = Arc::new(Inner {
             root,
