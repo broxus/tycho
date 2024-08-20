@@ -3,8 +3,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use bytes::Bytes;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tycho_network::{Network, PublicOverlay, Request};
+use crate::overlay_client::validator_subscriber::ValidatorSubscriber;
 
 pub use self::config::PublicOverlayClientConfig;
 pub use self::neighbour::{Neighbour, NeighbourStats};
@@ -14,6 +17,7 @@ use crate::proto::overlay;
 mod config;
 mod neighbour;
 mod neighbours;
+mod validator_subscriber;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -22,6 +26,7 @@ pub struct PublicOverlayClient {
 }
 
 impl PublicOverlayClient {
+
     pub fn new(
         network: Network,
         overlay: PublicOverlay,
@@ -42,12 +47,14 @@ impl PublicOverlayClient {
             .collect::<Vec<_>>();
 
         let neighbours = Neighbours::new(entries, config.max_neighbours);
+        let subscriber = ValidatorSubscriber::new();
 
         let mut res = Inner {
             network,
             overlay,
             neighbours,
             config,
+            subscriber,
             ping_task: None,
             update_task: None,
             cleanup_task: None,
@@ -62,6 +69,10 @@ impl PublicOverlayClient {
         Self {
             inner: Arc::new(res),
         }
+    }
+
+    pub fn validator_set_subscriber(&self) -> &ValidatorSubscriber {
+        &self.inner.subscriber
     }
 
     pub fn config(&self) -> &PublicOverlayClientConfig {
@@ -133,6 +144,8 @@ struct Inner {
     neighbours: Neighbours,
     config: PublicOverlayClientConfig,
 
+    subscriber: ValidatorSubscriber,
+
     ping_task: Option<AbortHandle>,
     update_task: Option<AbortHandle>,
     cleanup_task: Option<AbortHandle>,
@@ -145,6 +158,7 @@ impl Clone for Inner {
             overlay: self.overlay.clone(),
             neighbours: self.neighbours.clone(),
             config: self.config.clone(),
+            subscriber: self.subscriber.clone(),
             ping_task: None,
             update_task: None,
             cleanup_task: None,
