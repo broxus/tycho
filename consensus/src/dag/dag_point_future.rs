@@ -63,6 +63,7 @@ impl DagPointFuture {
     pub fn new_local_trusted(point: &Point, state: &InclusionState, store: &MempoolStore) -> Self {
         let flags = PointFlags {
             is_valid: true,
+            is_trusted: true,
             ..Default::default()
         };
         store.insert_point(point, Some(&flags));
@@ -244,6 +245,7 @@ impl DagPointFuture {
             let flags = PointFlags {
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
+                is_trusted: dag_point.trusted().is_some(),
                 is_certified: certified_clone.is_taken(),
                 ..Default::default()
             };

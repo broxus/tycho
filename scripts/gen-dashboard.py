@@ -1324,6 +1324,50 @@ def mempool_components() -> RowPanel:
     ]
     return create_row("Mempool components", metrics)
 
+def mempool_storage() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_mempool_store_clean_time",
+            "Clean task",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_expand_anchor_history_time",
+            "Expand anchor history",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_insert_point_time",
+            "Insert point with info and optional flags",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_set_flags_time",
+            "Set flags",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_get_point_count",
+            "Get point count",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_point_time",
+            "Get point",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_get_info_count",
+            "Get info count",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_info_time",
+            "Get info",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_get_flags_count",
+            "Get flags count",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_flags_time",
+            "Get flags",
+        ),
+    ]
+    return create_row("Mempool storage", metrics)
 
 def collator_execution_manager() -> RowPanel:
     metrics = [
@@ -1444,6 +1488,7 @@ dashboard = Dashboard(
         validator(),
         mempool(),
         mempool_components(),
+        mempool_storage(),
         net_traffic(),
         net_conn_manager(),
         net_request_handler(),

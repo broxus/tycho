@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use ahash::HashMapExt;
 use tycho_storage::{MempoolStorage, PointFlags};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
 use crate::models::{Digest, PointInfo, Round};
@@ -139,6 +140,7 @@ impl MempoolStore {
 
     /// delete all stored data up to provided value (exclusive)
     fn clean(inner: &MempoolStorage, least_to_keep: Round) {
+        let _call_duration = HistogramGuard::begin(StoreContext::CLEAN_DURATION);
         let zero = [0_u8; MempoolStorage::KEY_LEN];
         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
         fill_prefix(least_to_keep, &mut up_to_exclusive);
@@ -177,6 +179,7 @@ fn fill_prefix(round: Round, key: &mut [u8; MempoolStorage::KEY_LEN]) {
 
 impl MempoolStoreImpl for MempoolStorage {
     fn insert_point(&self, point: &Point, flags: Option<&PointFlags>) {
+        let _call_duration = HistogramGuard::begin(StoreContext::INSERT_POINT_DURATION);
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(point.round(), point.digest(), &mut key);
 
@@ -205,6 +208,7 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn set_flags(&self, round: Round, digest: &Digest, flags: &PointFlags) {
+        let _call_duration = HistogramGuard::begin(StoreContext::SET_FLAGS_DURATION);
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -216,6 +220,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
+        metrics::counter!(StoreContext::GET_POINT_COUNT).increment(1);
+        let _call_duration = HistogramGuard::begin(StoreContext::GET_POINT_DURATION);
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -226,6 +232,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
+        metrics::counter!(StoreContext::GET_INFO_COUNT).increment(1);
+        let _call_duration = HistogramGuard::begin(StoreContext::GET_INFO_DURATION);
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -236,6 +244,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags {
+        metrics::counter!(StoreContext::GET_FLAGS_COUNT).increment(1);
+        let _call_duration = HistogramGuard::begin(StoreContext::GET_FLAGS_DURATION);
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -246,6 +256,7 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point> {
+        let _call_duration = HistogramGuard::begin(StoreContext::EXPAND_ANCHOR_HISTORY_DURATION);
         let mut buf = [0_u8; MempoolStorage::KEY_LEN];
         let mut keys = history
             .iter()
@@ -326,4 +337,23 @@ impl MempoolStoreImpl for () {
     fn expand_anchor_history(&self, _: &[PointInfo]) -> Vec<Point> {
         panic!("should not be used in tests")
     }
+}
+
+struct StoreContext;
+impl StoreContext {
+    const CLEAN_DURATION: &'static str = "tycho_mempool_store_clean_time";
+    const EXPAND_ANCHOR_HISTORY_DURATION: &'static str =
+        "tycho_mempool_store_expand_anchor_history_time";
+
+    const INSERT_POINT_DURATION: &'static str = "tycho_mempool_store_insert_point_time";
+    const SET_FLAGS_DURATION: &'static str = "tycho_mempool_store_set_flags_time";
+
+    const GET_POINT_COUNT: &'static str = "tycho_mempool_store_get_point_count";
+    const GET_POINT_DURATION: &'static str = "tycho_mempool_store_get_point_time";
+
+    const GET_INFO_COUNT: &'static str = "tycho_mempool_store_get_info_count";
+    const GET_INFO_DURATION: &'static str = "tycho_mempool_store_get_info_time";
+
+    const GET_FLAGS_COUNT: &'static str = "tycho_mempool_store_get_flags_count";
+    const GET_FLAGS_DURATION: &'static str = "tycho_mempool_store_get_flags_time";
 }
