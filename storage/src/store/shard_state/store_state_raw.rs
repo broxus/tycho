@@ -571,7 +571,6 @@ enum FilesContextError {
 
 #[cfg(test)]
 mod test {
-
     use std::io::{BufReader, Read};
 
     use bytesize::ByteSize;
@@ -636,6 +635,7 @@ mod test {
             )
             .context("Failed to create ShardStateReplaceTransaction")?;
 
+            #[allow(clippy::disallowed_methods)]
             let file = File::open(file.path())?;
             let mut file = BufReader::new(file);
             let chunk_size = 10_000_000; // size of each chunk in bytes

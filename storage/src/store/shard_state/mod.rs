@@ -64,14 +64,7 @@ impl ShardStateStorage {
     }
 
     pub fn metrics(&self) -> ShardStateStorageMetrics {
-        #[cfg(feature = "count-cells")]
-        let storage_cell = countme::get::<StorageCell>();
-
         ShardStateStorageMetrics {
-            #[cfg(feature = "count-cells")]
-            storage_cell_live_count: storage_cell.live,
-            #[cfg(feature = "count-cells")]
-            storage_cell_max_live_count: storage_cell.max_live,
             max_new_mc_cell_count: self.max_new_mc_cell_count.swap(0, Ordering::AcqRel),
             max_new_sc_cell_count: self.max_new_sc_cell_count.swap(0, Ordering::AcqRel),
         }
@@ -355,10 +348,6 @@ impl ShardStateStorage {
 
 #[derive(Debug, Copy, Clone)]
 pub struct ShardStateStorageMetrics {
-    #[cfg(feature = "count-cells")]
-    pub storage_cell_live_count: usize,
-    #[cfg(feature = "count-cells")]
-    pub storage_cell_max_live_count: usize,
     pub max_new_mc_cell_count: usize,
     pub max_new_sc_cell_count: usize,
 }

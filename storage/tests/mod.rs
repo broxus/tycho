@@ -13,7 +13,7 @@ struct ShardStateCombined {
 
 impl ShardStateCombined {
     fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let cell = Boc::decode(&bytes)?;
+        let cell = Boc::decode(bytes)?;
         let state = cell.parse()?;
         Ok(Self { cell, state })
     }
@@ -117,8 +117,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     let exist = storage
         .persistent_state_storage()
         .state_exists(zerostate.block_id());
-    assert_eq!(exist, true);
-
+    assert!(exist);
     // Read persistent state a couple of times to check if it is stateless
     for _ in 0..2 {
         let limit = bytesize::mb(1u32);

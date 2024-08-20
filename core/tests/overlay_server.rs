@@ -107,11 +107,11 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
     impl BroadcastListener for BroadcastCounter {
         type HandleMessageFut<'a> = futures_util::future::Ready<()>;
 
-        fn handle_message<'a>(
-            &'a self,
+        fn handle_message(
+            &self,
             meta: Arc<InboundRequestMeta>,
             message: bytes::Bytes,
-        ) -> Self::HandleMessageFut<'a> {
+        ) -> Self::HandleMessageFut<'_> {
             tracing::info!(
                 peer_id = %meta.peer_id,
                 remote_addr = %meta.remote_address,
@@ -310,7 +310,7 @@ async fn overlay_server_blocks() -> Result<()> {
                         let block = BlockStuff::deserialize_checked(block_id, block)?;
 
                         let archive_block = BlockStuff::deserialize_checked(
-                            &block_id,
+                            block_id,
                             archive_data.block.unwrap().as_ref(),
                         )?;
                         assert_eq!(block.as_ref(), archive_block.block());
@@ -323,7 +323,7 @@ async fn overlay_server_blocks() -> Result<()> {
                         assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
                         assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
                     }
-                    _ => anyhow::bail!("block not found"),
+                    BlockFull::NotFound => anyhow::bail!("block not found"),
                 }
             }
         }

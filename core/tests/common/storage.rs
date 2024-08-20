@@ -66,7 +66,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     // Init blocks
     let block_provider = get_archive()?;
 
-    for (_, block_id) in &block_provider.mc_block_ids {
+    for block_id in block_provider.mc_block_ids.values() {
         let block = block_provider.get_block_by_id(block_id)?;
         let proof = block_provider.get_proof_by_id(block_id)?;
 

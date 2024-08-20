@@ -1,5 +1,3 @@
-use std::u64;
-
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_util::FastHashMap;
@@ -116,7 +114,7 @@ impl InternalQueueStorage {
             &start_key.to_vec(),
             &end_key.to_vec(),
         );
-        batch.delete_cf(&shards_internal_messages_cf, &end_key.to_vec());
+        batch.delete_cf(&shards_internal_messages_cf, end_key.to_vec());
 
         self.db.rocksdb().write(batch)?;
 
@@ -165,7 +163,7 @@ impl InternalQueueStorage {
                 let dest_prefix = u64::from_be_bytes(value[1..9].try_into().unwrap());
                 let cell_bytes = &value[9..];
 
-                batch.delete_cf(&internal_messages_session_cf, &current_position.to_vec());
+                batch.delete_cf(&internal_messages_session_cf, current_position.to_vec());
                 Self::insert_message(
                     &mut batch,
                     internal_messages_cf,

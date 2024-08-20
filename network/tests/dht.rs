@@ -119,7 +119,7 @@ async fn bootstrap_nodes_store_value() -> Result<()> {
     // Retrieve an existing value
     let value = first
         .entry(proto::dht::PeerValueKeyName::NodeInfo)
-        .find_value::<SomeValue>(&first.network().peer_id())
+        .find_value::<SomeValue>(first.network().peer_id())
         .await?;
     assert_eq!(value, VALUE);
 

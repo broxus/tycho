@@ -38,11 +38,11 @@ pub async fn test() {
     let fifth_success_rate = [0.0, 1.0];
 
     let indices = vec![
-        WeightedIndex::new(&first_success_rate).unwrap(),
-        WeightedIndex::new(&second_success_rate).unwrap(),
-        WeightedIndex::new(&third_success_rate).unwrap(),
-        WeightedIndex::new(&fourth_success_rate).unwrap(),
-        WeightedIndex::new(&fifth_success_rate).unwrap(),
+        WeightedIndex::new(first_success_rate).unwrap(),
+        WeightedIndex::new(second_success_rate).unwrap(),
+        WeightedIndex::new(third_success_rate).unwrap(),
+        WeightedIndex::new(fourth_success_rate).unwrap(),
+        WeightedIndex::new(fifth_success_rate).unwrap(),
     ];
 
     let mut i = 0;
@@ -61,15 +61,15 @@ pub async fn test() {
             let answer = indices[index].sample(&mut rng);
             if answer == 0 {
                 println!("Success request to peer: {}", n.peer_id());
-                n.track_request(&Duration::from_millis(200), true)
+                n.track_request(&Duration::from_millis(200), true);
             } else {
                 println!("Failed request to peer: {}", n.peer_id());
-                n.track_request(&Duration::from_millis(200), false)
+                n.track_request(&Duration::from_millis(200), false);
             }
 
             neighbours.update_selection_index().await;
         }
-        i = i + 1;
+        i += 1;
     }
 
     let new_neighbours = vec![

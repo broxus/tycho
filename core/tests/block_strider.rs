@@ -124,7 +124,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
 
     let archive = common::storage::get_archive()?;
     for block_id in archive.mc_block_ids.values() {
-        let block = provider.get_block(&block_id).await;
+        let block = provider.get_block(block_id).await;
         assert!(block.is_some());
 
         if let Some(block) = block {
@@ -132,7 +132,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
             assert_eq!(block_id, block.id());
 
             let archive_block =
-                BlockStuff::deserialize_checked(&block_id, block.as_new_archive_data()?);
+                BlockStuff::deserialize_checked(block_id, block.as_new_archive_data()?);
             assert_eq!(archive_block?.block(), block.block());
         }
     }
