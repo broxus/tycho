@@ -105,10 +105,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
             .await?
             .handle;
 
-        let bp = storage
-            .block_storage()
-            .load_block_proof(&handle, false)
-            .await?;
+        let bp = storage.block_storage().load_block_proof(&handle).await?;
 
         assert_eq!(bp.is_link(), proof.is_link());
         assert_eq!(bp.proof().root, proof.as_ref().root);

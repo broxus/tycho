@@ -315,11 +315,11 @@ async fn overlay_server_blocks() -> Result<()> {
                         )?;
                         assert_eq!(block.as_ref(), archive_block.block());
 
-                        let proof = BlockProofStuff::deserialize(block_id, proof, false)?;
+                        let proof = BlockProofStuff::deserialize(block_id, proof)?;
 
-                        let (proof_data, is_link) = archive_data.proof.unwrap();
+                        let proof_data = archive_data.proof.unwrap();
                         let archive_proof =
-                            BlockProofStuff::deserialize(block_id, proof_data.as_ref(), is_link)?;
+                            BlockProofStuff::deserialize(block_id, proof_data.as_ref())?;
                         assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
                         assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
                     }

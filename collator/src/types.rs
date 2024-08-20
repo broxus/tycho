@@ -289,10 +289,10 @@ impl ValidatedBlock {
 
 pub struct BlockStuffForSync {
     pub block_stuff_aug: BlockStuffAug,
+    pub queue_diff_aug: QueueDiffStuffAug,
     pub signatures: FastHashMap<PeerId, ArcSignature>,
     pub prev_blocks_ids: Vec<BlockId>,
     pub top_shard_blocks_ids: Vec<BlockId>,
-    pub queue_diff_aug: QueueDiffStuffAug,
 }
 
 /// (`ShardIdent`, seqno)
