@@ -1,12 +1,14 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::iter;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
+use parking_lot::Mutex;
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::Instrument;
 use tycho_network::PeerId;
@@ -18,7 +20,7 @@ use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
-use crate::models::{PeerCount, PointId};
+use crate::models::{PeerCount, PointId, Round};
 use crate::Point;
 
 #[derive(Clone)]
@@ -36,6 +38,57 @@ pub enum DownloadResult {
 struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
+    limiter: Mutex<Limiter>,
+}
+
+#[derive(Default)]
+struct Limiter {
+    running: u16,
+    waiters: BTreeMap<Round, VecDeque<Arc<Semaphore>>>,
+}
+
+impl Limiter {
+    fn enter(&mut self, round: Round) -> Option<Arc<Semaphore>> {
+        // cannot be strict equality: at least one is always allowed, others are concurrent to it
+        if self.running <= MempoolConfig::CONCURRENT_DOWNLOADS {
+            self.running += 1;
+            None
+        } else {
+            // create locked
+            let semaphore = Arc::new(Semaphore::new(0));
+            self.waiters
+                .entry(round)
+                .or_default()
+                .push_back(semaphore.clone());
+            Some(semaphore)
+        }
+    }
+
+    fn exit(&mut self) {
+        // free the topmost waiter by round
+        if let Some(mut entry) = self.waiters.last_entry() {
+            // fifo among those with the same round
+            match entry.get_mut().pop_front() {
+                Some(semaphore) => {
+                    assert_eq!(
+                        semaphore.available_permits(),
+                        0,
+                        "dequeued semaphore must not have permits"
+                    );
+                    semaphore.add_permits(1); // unlock waiter
+                }
+                None => panic!("downloader limiter: round queue was left empty"),
+            }
+            if entry.get().is_empty() {
+                entry.remove_entry();
+            }
+        } else {
+            self.running = self
+                .running
+                .checked_sub(1)
+                .expect("decrease running downloads counter");
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -56,11 +109,39 @@ impl Downloader {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
+                limiter: Default::default(),
             }),
         }
     }
 
     pub async fn run(
+        &self,
+        point_id: &PointId,
+        dependers: mpsc::UnboundedReceiver<PeerId>,
+        verified_broadcast: oneshot::Receiver<Point>,
+        effects: Effects<DownloadContext>,
+    ) -> DownloadResult {
+        let semaphore_opt = {
+            let mut limiter = self.inner.limiter.lock();
+            limiter.enter(point_id.round)
+        };
+        if let Some(semaphore) = semaphore_opt {
+            match semaphore.acquire().await {
+                Ok(_permit) => {}
+                Err(err) => panic!("downloader limiter: {err}"),
+            }
+        }
+        let result = self
+            .run_task(point_id, dependers, verified_broadcast, effects)
+            .await;
+        {
+            let mut limiter = self.inner.limiter.lock();
+            limiter.exit();
+        }
+        result
+    }
+
+    async fn run_task(
         &self,
         point_id: &PointId,
         dependers: mpsc::UnboundedReceiver<PeerId>,
