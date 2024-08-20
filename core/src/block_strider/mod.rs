@@ -14,9 +14,9 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
 pub use self::provider::{
-    ArchiveBlockProvider, BlockProvider, BlockProviderExt, BlockchainBlockProvider,
-    BlockchainBlockProviderConfig, ChainBlockProvider, EmptyBlockProvider, OptionalBlockStuff,
-    ProofChecker, StorageBlockProvider,
+    ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
+    BlockchainBlockProvider, BlockchainBlockProviderConfig, ChainBlockProvider, EmptyBlockProvider,
+    OptionalBlockStuff, ProofChecker, StorageBlockProvider,
 };
 pub use self::starter::{FileZerostateProvider, Starter, ZerostateProvider};
 pub use self::state::{BlockStriderState, PersistentBlockStriderState, TempBlockStriderState};

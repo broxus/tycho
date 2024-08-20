@@ -131,6 +131,8 @@ impl StorageBuilder {
         )?;
         let persistent_state_storage =
             PersistentStateStorage::new(base_db.clone(), &file_db, block_handle_storage.clone())?;
+
+        let temp_archive_storage = TempArchiveStorage::new(&file_db)?;
         let node_state_storage = NodeStateStorage::new(base_db.clone());
 
         let rpc_state = rpc_db.map(RpcStorage::new);
@@ -152,6 +154,7 @@ impl StorageBuilder {
             runtime_storage,
             rpc_state,
             internal_queue_storage,
+            temp_archive_storage,
         });
 
         spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
@@ -222,6 +225,10 @@ impl Storage {
         &self.inner.persistent_state_storage
     }
 
+    pub fn temp_archive_storage(&self) -> &TempArchiveStorage {
+        &self.inner.temp_archive_storage
+    }
+
     pub fn block_handle_storage(&self) -> &BlockHandleStorage {
         &self.inner.block_handle_storage
     }
@@ -265,4 +272,5 @@ struct Inner {
     persistent_state_storage: PersistentStateStorage,
     rpc_state: Option<RpcStorage>,
     internal_queue_storage: InternalQueueStorage,
+    temp_archive_storage: TempArchiveStorage,
 }

@@ -23,7 +23,8 @@ scopeguard = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "fs"] }
+tokio-util = {workspace = true }
 tracing = { workspace = true }
 
 # local deps
