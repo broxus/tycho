@@ -155,7 +155,7 @@ impl BlockchainBlockProvider {
                 }
 
                 handle.accept();
-                return Some(Ok(block.with_archive_data(block_data)));
+                Some(Ok(block.with_archive_data(block_data)))
             }
             (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
                 handle.reject();

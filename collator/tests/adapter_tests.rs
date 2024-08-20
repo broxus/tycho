@@ -7,6 +7,7 @@ use everscale_types::boc::Boc;
 use everscale_types::cell::Cell;
 use everscale_types::models::{Block, BlockId, ShardIdent, ShardStateUnsplit};
 use tycho_block_util::block::{BlockStuff, BlockStuffAug};
+use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_collator::state_node::{
     StateNodeAdapter, StateNodeAdapterStdImpl, StateNodeEventListener,
@@ -47,9 +48,11 @@ async fn test_add_and_get_block() {
     let empty_block = BlockStuff::new_empty(ShardIdent::BASECHAIN, 1);
     let block_id = *empty_block.id();
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
+    let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
 
     let block = BlockStuffForSync {
         block_stuff_aug,
+        queue_diff_aug,
         signatures: Default::default(),
         prev_blocks_ids: Vec::new(),
         top_shard_blocks_ids: Vec::new(),
@@ -115,9 +118,11 @@ async fn test_add_and_get_next_block() {
 
     let empty_block = BlockStuff::new_empty(ShardIdent::MASTERCHAIN, 2);
     let block_stuff_aug = BlockStuffAug::loaded(empty_block);
+    let queue_diff_aug = QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(block_stuff_aug.id()));
 
     let block = BlockStuffForSync {
         block_stuff_aug,
+        queue_diff_aug,
         signatures: Default::default(),
         prev_blocks_ids: vec![*prev_block_id],
         top_shard_blocks_ids: Vec::new(),
@@ -182,9 +187,12 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                     empty_block.block().clone(),
                     empty_block.root_cell().clone(),
                 ));
+                let queue_diff_aug =
+                    QueueDiffStuffAug::loaded(QueueDiffStuff::new_empty(&block_id));
 
                 let block = BlockStuffForSync {
                     block_stuff_aug,
+                    queue_diff_aug,
                     signatures: Default::default(),
                     prev_blocks_ids: Vec::new(),
                     top_shard_blocks_ids: Vec::new(),

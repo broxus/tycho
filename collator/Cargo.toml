@@ -56,7 +56,7 @@ tycho-util = { workspace = true, features = ["test"] }
 
 [features]
 default = []
-test = []
+test = ["tycho-block-util/test"]
 block-creator-stats = []
 
 [lints]

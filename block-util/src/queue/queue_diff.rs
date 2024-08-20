@@ -91,6 +91,27 @@ pub struct QueueDiffStuff {
 }
 
 impl QueueDiffStuff {
+    #[cfg(any(test, feature = "test"))]
+    pub fn new_empty(block_id: &BlockId) -> Self {
+        use std::collections::BTreeMap;
+
+        Self {
+            inner: Arc::new(Inner {
+                block_id: *block_id,
+                diff: QueueDiff {
+                    hash: HashBytes::ZERO,
+                    prev_hash: HashBytes::ZERO,
+                    shard_ident: block_id.shard,
+                    seqno: block_id.seqno,
+                    processed_upto: BTreeMap::from([(block_id.shard, QueueKey::MIN)]),
+                    min_message: QueueKey::MIN,
+                    max_message: QueueKey::MIN,
+                    messages: Vec::new(),
+                },
+            }),
+        }
+    }
+
     pub fn builder(
         shard_ident: ShardIdent,
         seqno: u32,
