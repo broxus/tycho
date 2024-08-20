@@ -2,11 +2,11 @@ use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 
-use anyhow::{bail, Context};
+use anyhow::{bail, Context, Result};
 use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, HashBytes, Load};
-use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, ShardIdent};
-use tycho_block_util::queue::QueueKey;
+use everscale_types::models::{IntAddr, IntMsgInfo, Message, MsgInfo, OutMsgDescr, ShardIdent};
+use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
 
 use super::state::state_iterator::MessageExt;
 
@@ -29,6 +29,38 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
     pub fn exclude_last_key(&mut self) {
         self.last_key = self.messages.last_key_value().map(|(key, _)| *key);
         self.messages.clear();
+    }
+}
+
+impl QueueDiffWithMessages<EnqueuedMessage> {
+    pub fn from_queue_diff(
+        queue_diff_stuff: QueueDiffStuff,
+        out_msg_description: &OutMsgDescr,
+    ) -> Result<Self> {
+        let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
+        let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
+            .into_iter()
+            .map(|(shard_ident, key)| (*shard_ident, (*key).into()))
+            .collect();
+
+        let mut messages: BTreeMap<QueueKey, Arc<_>> = BTreeMap::new();
+        for msg in queue_diff_stuff.zip(out_msg_description) {
+            let lazy_msg = msg?;
+            let cell = lazy_msg.into_inner();
+            let hash = *cell.repr_hash();
+            let info = MsgInfo::load_from(&mut cell.as_slice()?)?;
+            if let MsgInfo::Int(out_msg_info) = info {
+                let created_lt = out_msg_info.created_lt;
+                let value = EnqueuedMessage::from((out_msg_info, cell));
+                messages.insert((created_lt, hash).into(), Arc::new(value));
+            }
+        }
+
+        Ok(Self {
+            messages,
+            processed_upto,
+            last_key: None,
+        })
     }
 }
 
