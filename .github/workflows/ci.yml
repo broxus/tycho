@@ -35,6 +35,8 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Test with latest nextest release
         uses: actions-rs/cargo@v1
+        env:
+          RUST_LOG: warn
         with:
           command: nextest
           args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage # only core and storage have working tests :(
