@@ -1,7 +1,7 @@
 use bytesize::ByteSize;
 use weedb::rocksdb::{
     BlockBasedIndexType, BlockBasedOptions, DBCompressionType, DataBlockIndexType, MergeOperands,
-    Options, ReadOptions,
+    Options, ReadOptions, SliceTransform,
 };
 use weedb::{rocksdb, Caches, ColumnFamily, ColumnFamilyOptions};
 
@@ -33,9 +33,13 @@ impl ColumnFamilyOptions<Caches> for State {
 // === Base tables ===
 
 /// Stores prepared archives
-/// - Key: `u32 (BE)` (archive id)
+/// - Key: `u32 (BE)` (archive id) + `u64 (BE)` (chunk index)
 /// - Value: `Vec<u8>` (archive data)
 pub struct IntermediateArchives;
+
+impl IntermediateArchives {
+    pub const KEY_LEN: usize = 4 + 8;
+}
 
 impl ColumnFamily for IntermediateArchives {
     const NAME: &'static str = "intermediate_archives";
@@ -45,6 +49,9 @@ impl ColumnFamilyOptions<Caches> for IntermediateArchives {
     fn options(opts: &mut Options, caches: &mut Caches) {
         default_block_based_table_factory(opts, caches);
         optimize_for_level_compaction(opts, ByteSize::mib(512u64));
+
+        let transform = SliceTransform::create_fixed_prefix(4); // archive_id prefix
+        opts.set_prefix_extractor(transform);
 
         opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
         opts.set_compression_type(DBCompressionType::Zstd);

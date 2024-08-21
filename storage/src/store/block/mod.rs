@@ -383,57 +383,6 @@ impl BlockStorage {
             .await
     }
 
-    // === Archive stuff ===
-
-    pub async fn commit_archive(&self, archive_id: u32) -> Result<()> {
-        let db = self.db.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let data = db
-                .intermediate_archives
-                .get(archive_id.to_be_bytes())?
-                .ok_or(BlockStorageError::ArchiveNotFound)?;
-
-            let storage_cf = db.archives.cf();
-            let intermediate_storage_cf = db.intermediate_archives.cf();
-
-            let data_len = data.len() as u64;
-            let num_chunks = (data_len + ARCHIVE_CHUNK_SIZE - 1) / ARCHIVE_CHUNK_SIZE; // Round up to get the number of chunks
-
-            // Create transaction
-            let mut batch = rocksdb::WriteBatch::default();
-
-            // Write archive chunks
-            for i in 0..num_chunks {
-                let start = i * ARCHIVE_CHUNK_SIZE;
-                let end = std::cmp::min(start + ARCHIVE_CHUNK_SIZE, data_len);
-                let chunk = &data[start as usize..end as usize];
-
-                let mut key = [0u8; tables::Archives::KEY_LEN];
-                key[..4].copy_from_slice(&archive_id.to_be_bytes());
-                key[4..].copy_from_slice(&i.to_be_bytes());
-
-                batch.put_cf(&storage_cf, key.as_slice(), chunk);
-            }
-
-            // Write archive size
-            let mut key = [0u8; tables::Archives::KEY_LEN];
-            key[..4].copy_from_slice(&archive_id.to_be_bytes());
-            key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
-
-            batch.put_cf(&storage_cf, key.as_slice(), data.len().to_be_bytes());
-
-            // Remove intermediate archive
-            batch.delete_cf(&intermediate_storage_cf, key);
-
-            // Execute transaction
-            db.rocksdb().write(batch)?;
-
-            Ok(())
-        })
-        .await?
-    }
-
     /// Loads data and proof for the block and appends them to the corresponding archive.
     pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_storage_move_into_archive_time");
@@ -478,23 +427,38 @@ impl BlockStorage {
             (lock, data)
         };
 
+        // Prepare archive
+        let archive_id = self.compute_archive_id(handle);
+
+        let mut archive_size_key = [0u8; tables::IntermediateArchives::KEY_LEN];
+        archive_size_key[..4].copy_from_slice(&archive_id.id.to_be_bytes());
+        archive_size_key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
+
+        let size = self
+            .db
+            .intermediate_archives
+            .get(archive_size_key.as_slice())?
+            .map(|slice| u64::from_be_bytes(slice.as_ref().try_into().unwrap()))
+            .unwrap_or_default();
+
+        let index = size / INTERMEDIATE_ARCHIVE_CHUNK_SIZE;
+
+        let mut archive_key = [0u8; tables::IntermediateArchives::KEY_LEN];
+        archive_key[..4].copy_from_slice(&archive_id.id.to_be_bytes());
+        archive_key[4..].copy_from_slice(&index.to_be_bytes());
+
         // Prepare cf
         let storage_cf = self.db.intermediate_archives.cf();
         let handle_cf = self.db.block_handles.cf();
 
-        // Prepare archive
-        let archive_id = self.compute_archive_id(handle);
-        let archive_id_bytes = archive_id.id.to_be_bytes();
-
         // 0. Create transaction
         let mut batch = rocksdb::WriteBatch::default();
         // 1. Append archive segment with block data
-        batch.merge_cf(&storage_cf, archive_id_bytes, &block_data.1);
+        batch.merge_cf(&storage_cf, archive_key, &block_data.1);
         // 2. Append archive segment with block proof data
-        batch.merge_cf(&storage_cf, archive_id_bytes, &block_proof_data.1);
+        batch.merge_cf(&storage_cf, archive_key, &block_proof_data.1);
         // 3. Append archive segment with queue diff data
-        batch.merge_cf(&storage_cf, archive_id_bytes, &queue_diff_data.1);
-
+        batch.merge_cf(&storage_cf, archive_key, &queue_diff_data.1);
         // 4. Update block handle meta
         if handle.meta().set_is_archived() {
             batch.put_cf(
@@ -511,7 +475,8 @@ impl BlockStorage {
 
         if let (Some(prev_id), true) = (archive_id.prev_id, archive_id.is_new) {
             // commit previous archive
-            self.commit_archive(prev_id).await?;
+            let db = self.db.clone();
+            commit_archive(db, prev_id).await?;
         }
 
         // Done
@@ -958,6 +923,99 @@ fn remove_blocks(
     Ok(stats)
 }
 
+async fn commit_archive(db: BaseDb, archive_id: u32) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut archive_size_key = [0u8; tables::IntermediateArchives::KEY_LEN];
+        archive_size_key[..4].copy_from_slice(&archive_id.to_be_bytes());
+        archive_size_key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
+
+        let archive_size = db
+            .intermediate_archives
+            .get(archive_size_key.as_slice())?
+            .map(|slice| u64::from_be_bytes(slice.as_ref().try_into().unwrap()))
+            .ok_or(BlockStorageError::ArchiveNotFound)?;
+
+        let mut archive_data = Vec::with_capacity(archive_size as usize);
+
+        let mut iter = db
+            .intermediate_archives
+            .prefix_iterator(archive_id.to_be_bytes());
+
+        while let Some((key, value)) = iter.item() {
+            let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
+            match chunk_index {
+                index if index == u64::from_be_bytes(ARCHIVE_SIZE_MAGIC.to_be_bytes()) => {
+                    // we skip this chunk as it contains the archive size
+                }
+                0 => {
+                    // first chunk with archive prefix
+                    archive_data.extend_from_slice(value);
+                }
+                _ => {
+                    // strip archive prefix
+                    archive_data.extend_from_slice(&value[4..]);
+                }
+            }
+
+            iter.next();
+        }
+
+        if archive_data.is_empty() {
+            return Err(BlockStorageError::ArchiveNotFound.into());
+        }
+
+        let storage_cf = db.archives.cf();
+        let intermediate_storage_cf = db.intermediate_archives.cf();
+
+        let data_len = archive_data.len() as u64;
+        let num_chunks = (data_len + ARCHIVE_CHUNK_SIZE - 1) / ARCHIVE_CHUNK_SIZE; // Round up to get the number of chunks
+
+        // Create transaction
+        let mut batch = rocksdb::WriteBatch::default();
+
+        // Write archive chunks
+        for i in 0..num_chunks {
+            let start = i * ARCHIVE_CHUNK_SIZE;
+            let end = std::cmp::min(start + ARCHIVE_CHUNK_SIZE, data_len);
+            let chunk = &archive_data[start as usize..end as usize];
+
+            let mut key = [0u8; tables::Archives::KEY_LEN];
+            key[..4].copy_from_slice(&archive_id.to_be_bytes());
+            key[4..].copy_from_slice(&i.to_be_bytes());
+
+            batch.put_cf(&storage_cf, key.as_slice(), chunk);
+        }
+
+        // Write archive size
+        let mut key = [0u8; tables::Archives::KEY_LEN];
+        key[..4].copy_from_slice(&archive_id.to_be_bytes());
+        key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
+
+        batch.put_cf(
+            &storage_cf,
+            key.as_slice(),
+            archive_data.len().to_be_bytes(),
+        );
+
+        // Remove intermediate archive
+        let mut start_key = [0u8; tables::IntermediateArchives::KEY_LEN];
+        start_key[..4].copy_from_slice(&archive_id.to_be_bytes());
+        start_key[4..].copy_from_slice(&[0; 8]);
+
+        let mut end_key = [0u8; tables::IntermediateArchives::KEY_LEN];
+        end_key[..4].copy_from_slice(&archive_id.to_be_bytes());
+        end_key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
+
+        batch.delete_range_cf(&intermediate_storage_cf, start_key, end_key);
+
+        // Execute transaction
+        db.rocksdb().write(batch)?;
+
+        Ok(())
+    })
+    .await?
+}
+
 #[derive(Debug, Copy, Clone, Default)]
 pub struct BlockGcStats {
     pub mc_package_entries_removed: usize,
@@ -978,7 +1036,8 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
-const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
+const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1Mb
+const INTERMEDIATE_ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024 * 1024; // 1Gb
 
 #[derive(Default)]
 struct ArchiveId {
