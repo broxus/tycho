@@ -310,9 +310,8 @@ impl StateNodeAdapterStdImpl {
         let proof_boc = BocRepr::encode_rayon(block_proof_stuff.as_ref())?;
         let archive_data = block_proof_stuff.with_archive_data(proof_boc);
 
-        let result = self
-            .storage
-            .block_storage()
+        let block_storage = self.storage.block_storage();
+        let result = block_storage
             .store_block_proof(
                 &archive_data,
                 MaybeExistingHandle::New(BlockMetaData {
@@ -322,12 +321,22 @@ impl StateNodeAdapterStdImpl {
                 }),
             )
             .await?;
+        let is_new_proof = result.new;
+        let is_proof_updated = result.updated;
+
+        let result = block_storage
+            .store_queue_diff(&block.queue_diff_aug, result.handle.into())
+            .await?;
+        let is_new_diff = result.new;
+        let is_diff_updated = result.updated;
 
         tracing::info!(
-            "Proof saved {:?}. New: {}, Updated: {}",
-            result.handle.id(),
-            result.new,
-            result.updated
+            block_id = %result.handle.id(),
+            is_new_proof,
+            is_proof_updated,
+            is_new_diff,
+            is_diff_updated,
+            "block saved",
         );
 
         Ok(())

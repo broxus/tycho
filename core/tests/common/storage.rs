@@ -45,6 +45,8 @@ pub(crate) fn get_zerostate() -> Result<ShardStateStuff> {
 
 pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp()?;
+    let handles = storage.block_handle_storage();
+    let blocks = storage.block_storage();
 
     // Init zerostate
     let zerostate = get_zerostate()?;
@@ -67,8 +69,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let block_provider = get_archive()?;
 
     for block_id in block_provider.mc_block_ids.values() {
-        let block = block_provider.get_block_by_id(block_id)?;
-        let proof = block_provider.get_proof_by_id(block_id)?;
+        let (block, proof, diff) = block_provider.get_entry_by_id(block_id)?;
 
         let info = block.load_info().context("Failed to load block info")?;
         let meta = BlockMetaData {
@@ -77,39 +78,39 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
             mc_ref_seqno: Some(block_id.seqno),
         };
 
-        let block_result = storage
-            .block_storage()
+        let block_result = blocks
             .store_block_data(&block, &block.archive_data, meta)
             .await?;
 
         assert!(block_result.new);
 
-        let handle = storage
-            .block_handle_storage()
-            .load_handle(block_id)
-            .unwrap();
+        let handle = handles.load_handle(block_id).unwrap();
 
         assert_eq!(handle.id(), block.id());
 
-        let bs = storage
-            .block_storage()
-            .load_block_data(&block_result.handle)
-            .await?;
-
+        let bs = blocks.load_block_data(&block_result.handle).await?;
         assert_eq!(bs.id(), block_id);
         assert_eq!(bs.block(), block.as_ref());
 
-        let handle = storage
-            .block_storage()
+        let handle = blocks
             .store_block_proof(&proof, handle.into())
             .await?
             .handle;
-
-        let bp = storage.block_storage().load_block_proof(&handle).await?;
+        let bp = blocks.load_block_proof(&handle).await?;
 
         assert_eq!(bp.is_link(), proof.is_link());
         assert_eq!(bp.proof().root, proof.as_ref().root);
         assert_eq!(bp.proof().proof_for, proof.as_ref().proof_for);
+
+        let handle = storage
+            .block_storage()
+            .store_queue_diff(&diff, handle.into())
+            .await?
+            .handle;
+        let df = blocks.load_queue_diff(&handle).await?;
+
+        assert_eq!(df.block_id(), diff.block_id());
+        assert_eq!(df.as_ref(), diff.as_ref());
     }
 
     Ok((storage, tmp_dir))
