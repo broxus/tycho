@@ -581,7 +581,7 @@ impl<B> Inner<B> {
                 let (block, proof, queue_diff) = tokio::join!(
                     block_storage.load_block_data_raw(&handle),
                     block_storage.load_block_proof_raw(&handle),
-                    block_storage.load_block_proof_raw(&handle)
+                    block_storage.load_queue_diff_raw(&handle)
                 );
 
                 BlockFull::Found {

@@ -448,37 +448,34 @@ impl BlockStorage {
         // Prepare data
         let block_id = handle.id();
 
-        let block_data = if handle.meta().has_data() {
+        let block_data = {
+            anyhow::ensure!(handle.meta().has_data(), "block data not found");
             let lock = handle.block_data_lock().write().await;
 
-            let entry_id = ArchiveEntryId::proof(block_id);
+            let entry_id = ArchiveEntryId::block(block_id);
             let data = self.make_archive_segment(&entry_id)?;
 
-            Some((lock, data))
-        } else {
-            None
+            (lock, data)
         };
 
-        let block_proof_data = if handle.meta().has_proof() {
+        let block_proof_data = {
+            anyhow::ensure!(handle.meta().has_proof(), "block proof not found");
             let lock = handle.proof_data_lock().write().await;
 
             let entry_id = ArchiveEntryId::proof(block_id);
             let data = self.make_archive_segment(&entry_id)?;
 
-            Some((lock, data))
-        } else {
-            None
+            (lock, data)
         };
 
-        let queue_diff_data = if handle.meta().has_queue_diff() {
+        let queue_diff_data = {
+            anyhow::ensure!(handle.meta().has_queue_diff(), "queue diff not found");
             let lock = handle.queue_diff_data_lock().write().await;
 
             let entry_id = ArchiveEntryId::queue_diff(block_id);
             let data = self.make_archive_segment(&entry_id)?;
 
-            Some((lock, data))
-        } else {
-            None
+            (lock, data)
         };
 
         // Prepare cf
@@ -492,17 +489,11 @@ impl BlockStorage {
         // 0. Create transaction
         let mut batch = rocksdb::WriteBatch::default();
         // 1. Append archive segment with block data
-        if let Some((_, data)) = &block_data {
-            batch.merge_cf(&storage_cf, archive_id_bytes, data);
-        }
+        batch.merge_cf(&storage_cf, archive_id_bytes, &block_data.1);
         // 2. Append archive segment with block proof data
-        if let Some((_, data)) = &block_proof_data {
-            batch.merge_cf(&storage_cf, archive_id_bytes, data);
-        }
+        batch.merge_cf(&storage_cf, archive_id_bytes, &block_proof_data.1);
         // 3. Append archive segment with queue diff data
-        if let Some((_, data)) = &queue_diff_data {
-            batch.merge_cf(&storage_cf, archive_id_bytes, data);
-        }
+        batch.merge_cf(&storage_cf, archive_id_bytes, &queue_diff_data.1);
 
         // 4. Update block handle meta
         if handle.meta().set_is_archived() {

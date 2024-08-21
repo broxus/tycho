@@ -254,17 +254,17 @@ mod tests {
         };
 
         check_package_id(ArchiveEntryId {
-            block_id: block_id.clone(),
+            block_id,
             kind: ArchiveEntryIdKind::Block,
         });
 
         check_package_id(ArchiveEntryId {
-            block_id: block_id.clone(),
+            block_id,
             kind: ArchiveEntryIdKind::Proof,
         });
 
         check_package_id(ArchiveEntryId {
-            block_id: block_id.clone(),
+            block_id,
             kind: ArchiveEntryIdKind::QueueDiff,
         });
     }

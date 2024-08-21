@@ -51,7 +51,7 @@ impl BlockProofStuff {
     }
 
     pub fn is_link(&self) -> bool {
-        self.inner.proof.proof_for.is_masterchain()
+        !self.inner.proof.proof_for.is_masterchain()
     }
 
     pub fn virtualize_block_root(&self) -> Result<&DynCell> {

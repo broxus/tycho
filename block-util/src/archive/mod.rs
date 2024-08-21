@@ -56,7 +56,10 @@ impl Archive {
                     parsed.proof = Some(data.slice_ref(entry.data));
                 }
                 ArchiveEntryIdKind::QueueDiff => {
-                    anyhow::ensure!(parsed.proof.is_none(), "duplicate queue diff for: {id}");
+                    anyhow::ensure!(
+                        parsed.queue_diff.is_none(),
+                        "duplicate queue diff for: {id}"
+                    );
                     parsed.queue_diff = Some(data.slice_ref(entry.data));
                 }
             }
