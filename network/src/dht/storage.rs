@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
+use bytesize::ByteSize;
 use moka::sync::{Cache, CacheBuilder};
 use moka::Expiry;
 use tl_proto::TlWrite;
@@ -82,8 +83,8 @@ impl StorageBuilder {
         self
     }
 
-    pub fn with_max_capacity(mut self, max_capacity: u64) -> Self {
-        self.cache_builder = self.cache_builder.max_capacity(max_capacity);
+    pub fn with_max_capacity(mut self, max_capacity: ByteSize) -> Self {
+        self.cache_builder = self.cache_builder.max_capacity(max_capacity.0);
         self
     }
 

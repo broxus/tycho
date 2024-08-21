@@ -22,7 +22,7 @@ struct Node {
 }
 
 impl Node {
-    fn with_random_key() -> Self {
+    fn with_random_key(spawn_dht_tasks: bool) -> Self {
         let key = ed25519::SecretKey::generate(&mut rand::thread_rng());
         let local_id = ed25519::PublicKey::from(&key).into();
 
@@ -45,7 +45,9 @@ impl Node {
             .build((Ipv4Addr::LOCALHOST, 0), router)
             .unwrap();
 
-        dht_tasks.spawn(&network);
+        if spawn_dht_tasks {
+            dht_tasks.spawn(&network);
+        }
 
         let dht = dht_service.make_client(&network);
 
@@ -53,9 +55,9 @@ impl Node {
     }
 }
 
-fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
+fn make_network(node_count: usize, spawn_dht_tasks: bool) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
     let nodes = (0..node_count)
-        .map(|_| Node::with_random_key())
+        .map(|_| Node::with_random_key(spawn_dht_tasks))
         .collect::<Vec<_>>();
 
     let bootstrap_info = nodes
@@ -74,10 +76,9 @@ fn make_network(node_count: usize) -> (Vec<Node>, Vec<Arc<PeerInfo>>) {
 
 #[tokio::test]
 async fn bootstrap_nodes_accessible() -> Result<()> {
-    tracing_subscriber::fmt::try_init().ok();
-    tracing::info!("bootstrap_nodes_accessible");
+    tycho_util::test::init_logger("bootstrap_nodes_accessible", "debug");
 
-    let (nodes, _) = make_network(5);
+    let (nodes, _) = make_network(5, true);
 
     for i in 0..nodes.len() {
         for j in 0..nodes.len() {
@@ -96,15 +97,14 @@ async fn bootstrap_nodes_accessible() -> Result<()> {
 
 #[tokio::test]
 async fn bootstrap_nodes_store_value() -> Result<()> {
-    tracing_subscriber::fmt::try_init().ok();
-    tracing::info!("bootstrap_nodes_store_value");
+    tycho_util::test::init_logger("bootstrap_nodes_store_value", "debug");
 
     #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
     struct SomeValue(u32);
 
     const VALUE: SomeValue = SomeValue(123123);
 
-    let (nodes, _) = make_network(5);
+    let (nodes, _) = make_network(5, false);
 
     // Store value
     let first = &nodes[0].dht;
@@ -135,17 +135,16 @@ async fn bootstrap_nodes_store_value() -> Result<()> {
 
 #[tokio::test]
 async fn connect_new_node_to_bootstrap() -> Result<()> {
-    tracing_subscriber::fmt::try_init().ok();
-    tracing::info!("connect_new_node_to_bootstrap");
+    tycho_util::test::init_logger("connect_new_node_to_bootstrap", "debug");
 
     #[derive(Debug, Clone, PartialEq, Eq, TlWrite, TlRead)]
     struct SomeValue(u32);
 
     const VALUE: SomeValue = SomeValue(123123);
 
-    let (bootstrap_nodes, global_config) = make_network(5);
+    let (bootstrap_nodes, global_config) = make_network(5, true);
 
-    let node = Node::with_random_key();
+    let node = Node::with_random_key(false);
     for peer_info in &global_config {
         node.dht.add_peer(peer_info.clone())?;
     }
@@ -183,8 +182,7 @@ async fn connect_new_node_to_bootstrap() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn startup_from_single_bootstrap_node() -> Result<()> {
-    tracing_subscriber::fmt::try_init().ok();
-    tracing::info!("startup_from_single_bootstrap_node");
+    tycho_util::test::init_logger("startup_from_single_bootstrap_node", "debug");
 
     #[derive(Debug, Default)]
     struct PeerState {
@@ -197,7 +195,7 @@ async fn startup_from_single_bootstrap_node() -> Result<()> {
     const NODE_COUNT: usize = 20;
 
     let nodes = (0..NODE_COUNT)
-        .map(|_| Node::with_random_key())
+        .map(|_| Node::with_random_key(true))
         .collect::<Vec<_>>();
 
     let first_node_info = nodes

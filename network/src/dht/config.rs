@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 use tycho_util::serde_helpers;
 
@@ -26,8 +27,8 @@ pub struct DhtConfig {
 
     /// Maximum storage capacity (number of entries).
     ///
-    /// Default: 10000.
-    pub max_storage_capacity: u64,
+    /// Default: 16 MiB.
+    pub max_storage_capacity: ByteSize,
 
     /// Time until a stored item is considered idle and can be removed.
     ///
@@ -77,7 +78,7 @@ impl Default for DhtConfig {
             max_k: 6,
             max_peer_info_ttl: Duration::from_secs(3600),
             max_stored_value_ttl: Duration::from_secs(3600),
-            max_storage_capacity: 10000,
+            max_storage_capacity: ByteSize::mib(16),
             storage_item_time_to_idle: None,
             local_info_refresh_period: Duration::from_secs(60),
             local_info_announce_period: Duration::from_secs(600),
