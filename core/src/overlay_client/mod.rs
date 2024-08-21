@@ -7,11 +7,11 @@ use tokio::sync::mpsc::Receiver;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 use tycho_network::{Network, PublicOverlay, Request};
-use crate::overlay_client::validator_subscriber::ValidatorSubscriber;
 
 pub use self::config::PublicOverlayClientConfig;
 pub use self::neighbour::{Neighbour, NeighbourStats};
 pub use self::neighbours::Neighbours;
+use crate::overlay_client::validator_subscriber::ValidatorSubscriber;
 use crate::proto::overlay;
 
 mod config;
@@ -26,7 +26,6 @@ pub struct PublicOverlayClient {
 }
 
 impl PublicOverlayClient {
-
     pub fn new(
         network: Network,
         overlay: PublicOverlay,
@@ -81,6 +80,10 @@ impl PublicOverlayClient {
 
     pub fn neighbours(&self) -> &Neighbours {
         &self.inner.neighbours
+    }
+
+    pub fn current_vset(&self) -> &Neighbours {
+        self.inner.subscriber.get_current_validator_set()
     }
 
     pub fn overlay(&self) -> &PublicOverlay {

@@ -477,6 +477,17 @@ impl Node {
             .load_state(last_block_id)
             .await?;
 
+        let config = mc_state.config_params()?;
+        let current_validator_set = config.get_current_validator_set()?;
+
+        let validator_subscriber = self
+            .blockchain_rpc_client
+            .overlay_client()
+            .validator_set_subscriber();
+        validator_subscriber
+            .update_current_validator_set(current_validator_set)
+            .await;
+
         // Run mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
         mempool_adapter.run(

@@ -121,7 +121,7 @@ impl BlockchainRpcClient {
         let client = &self.inner.overlay_client;
 
         // TODO: Reuse vector
-        let neighbours = client.neighbours().choose_multiple(TARGET_COUNT).await;
+        let neighbours = client.current_vset().choose_multiple(TARGET_COUNT).await;
         let mut futures = FuturesUnordered::new();
         for neighbour in neighbours {
             futures.push(client.send_raw(neighbour, req.clone()));
