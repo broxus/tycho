@@ -1,4 +1,3 @@
-pub mod error;
 pub mod iterator;
 pub mod queue;
 pub mod state;

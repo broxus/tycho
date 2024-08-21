@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::{bail, Result};
+use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Semaphore};
@@ -9,7 +11,6 @@ use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::persistent_state::{
     PersistentState, PersistentStateFactory, PersistentStateImplFactory, PersistentStateStdImpl,
 };
@@ -73,9 +74,9 @@ where
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-    ) -> Result<(), QueueError>;
-    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>)
-        -> Result<(), QueueError>;
+        diff_hash: HashBytes,
+    ) -> Result<()>;
+    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -99,6 +100,22 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
     }
 }
 
+struct ShortQueueDiff {
+    pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
+    pub last_key: Option<QueueKey>,
+    pub hash: HashBytes,
+}
+
+impl<V: InternalMessageValue> From<(QueueDiffWithMessages<V>, HashBytes)> for ShortQueueDiff {
+    fn from(value: (QueueDiffWithMessages<V>, HashBytes)) -> Self {
+        Self {
+            processed_upto: value.0.processed_upto,
+            last_key: value.0.messages.last_key_value().map(|(key, _)| *key),
+            hash: value.1,
+        }
+    }
+}
+
 pub struct QueueImpl<S, P, V>
 where
     S: SessionState<V>,
@@ -107,7 +124,7 @@ where
 {
     session_state: Arc<S>,
     persistent_state: Arc<P>,
-    diffs: FastDashMap<ShardIdent, BTreeMap<u32, QueueDiffWithMessages<V>>>,
+    diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
     gc: GCQueue<V>,
 }
 
@@ -133,33 +150,50 @@ where
 
     async fn apply_diff(
         &self,
-        mut diff: QueueDiffWithMessages<V>,
+        diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-    ) -> Result<(), QueueError> {
-        if self.diffs.contains_key(&block_id_short.shard) {
-            let shard_diffs = self.diffs.get_mut(&block_id_short.shard).unwrap();
-            if shard_diffs.contains_key(&block_id_short.seqno) {
-                panic!("Duplicate diff for block_id_short: {:?}", block_id_short)
+        hash: HashBytes,
+    ) -> Result<()> {
+        // Get or insert the shard diffs for the given block_id_short.shard
+        let mut shard_diffs = self.diffs.entry(block_id_short.shard).or_default();
+
+        // Check for duplicate diffs based on the block_id_short.seqno and hash
+        let shard_diff = shard_diffs.get(&block_id_short.seqno);
+        if let Some(shard_diff) = shard_diff {
+            if shard_diff.hash != hash {
+                bail!("Duplicate diff with different hash")
+            } else {
+                return Ok(());
             }
         }
 
+        let last_applied_seqno = shard_diffs.last_key_value().map(|(key, _)| *key);
+
+        if let Some(last_applied_seqno) = last_applied_seqno {
+            // Check if the diff is already applied
+            if block_id_short.seqno <= last_applied_seqno {
+                return Ok(());
+            }
+
+            // Check if the diff is sequential
+            if block_id_short.seqno != last_applied_seqno + 1 {
+                bail!("Diff seqno is not sequential");
+            }
+        }
+
+        // Add messages to session_state if there are any
         if !diff.messages.is_empty() {
             self.session_state
                 .add_messages(block_id_short.shard, &diff.messages)?;
-            diff.exclude_last_key();
         }
 
-        let mut diffs = self.diffs.entry(block_id_short.shard).or_default();
-
-        diffs.insert(block_id_short.seqno, diff);
+        // Insert the diff into the shard diffs
+        shard_diffs.insert(block_id_short.seqno, (diff, hash).into());
 
         Ok(())
     }
 
-    async fn commit_diff(
-        &self,
-        mc_top_blocks: Vec<(BlockIdShort, bool)>,
-    ) -> Result<(), QueueError> {
+    async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()> {
         let mut diffs_for_commit = vec![];
         let mut shards_to_commit = FastHashMap::default();
         let mut gc_ranges = FastHashMap::default();

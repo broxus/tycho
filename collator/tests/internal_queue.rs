@@ -134,7 +134,9 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    queue.apply_diff(diff, block).await?;
+    queue
+        .apply_diff(diff, block, HashBytes::from([1; 32]))
+        .await?;
 
     let mut top_blocks = vec![];
 
@@ -186,7 +188,9 @@ async fn test_queue() -> anyhow::Result<()> {
 
     top_blocks.push((block2, true));
 
-    queue.apply_diff(diff, block2).await?;
+    queue
+        .apply_diff(diff, block2, HashBytes::from([0; 32]))
+        .await?;
     queue.commit_diff(top_blocks).await?;
 
     let mut ranges = FastHashMap::default();
@@ -385,8 +389,6 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec![message1_hash, message2_hash, message3_hash,]
     );
-
-    assert_eq!(diff_with_messages.last_key, None);
 
     Ok(())
 }
