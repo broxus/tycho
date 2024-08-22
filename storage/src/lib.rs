@@ -94,10 +94,9 @@ impl StorageBuilder {
         };
 
         let rpc_db = if self.init_rpc_storage {
-            // Half the resources for the RPC storage
-            // TODO: Is it ok to use exactly half?
-            threads = std::cmp::max(2, threads / 2);
-            fdlimit = std::cmp::max(256, fdlimit / 2);
+            // Third part of the resources for the RPC storage
+            threads = std::cmp::max(2, threads / 3);
+            fdlimit = std::cmp::max(256, fdlimit / 3);
 
             tracing::debug!(threads, fdlimit, subdir = RPC_DB_SUBDIR);
             RpcDb::builder_prepared(self.config.root_dir.join(RPC_DB_SUBDIR), caches.clone())
@@ -106,6 +105,10 @@ impl StorageBuilder {
                 .build()
                 .map(Some)?
         } else {
+            // TODO: Is it ok to use exactly half?
+            threads = std::cmp::max(2, threads / 2);
+            fdlimit = std::cmp::max(256, fdlimit / 2);
+
             None
         };
 
@@ -172,6 +175,7 @@ impl StorageBuilder {
             if let Some(rpc_state) = this.rpc_state.as_ref() {
                 rpc_state.db().refresh_metrics();
             }
+            this.mempool_storage.db.refresh_metrics();
         });
 
         Ok(Storage { inner })

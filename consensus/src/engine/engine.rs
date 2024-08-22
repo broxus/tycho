@@ -181,7 +181,8 @@ impl Engine {
                     (prev_round_ok, current_dag_round, round_effects)
                 }
             };
-            metrics::gauge!(EngineContext::CURRENT_ROUND).set(current_dag_round.round().0);
+            metrics::counter!(EngineContext::CURRENT_ROUND)
+                .absolute(current_dag_round.round().0 as _);
 
             let next_dag_round = self.dag.fill_to_top(
                 current_dag_round.round().next(),

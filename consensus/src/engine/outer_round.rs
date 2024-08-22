@@ -67,6 +67,9 @@ impl<T: Source> Default for OuterRound<T> {
 }
 
 impl<T: Source> OuterRound<T> {
+    /// **warning** do not use prior [`Self::receiver`], as the latter may skip updates;
+    ///
+    /// either use only on sender side, or prefer [`OuterRoundRecv::get`]
     pub fn get(&self) -> Round {
         *self.tx.borrow()
     }
@@ -101,11 +104,12 @@ pub(crate) struct OuterRoundRecv<T: Source> {
 }
 
 impl<T: Source> OuterRoundRecv<T> {
+    /// the only way to inspect the value upon creation, as [`Self::next`] will not return it
     pub fn get(&self) -> Round {
         *self.rx.borrow()
     }
 
-    /// does not return (hardly viable) default value
+    /// does not return (hardly viable) default value, as any other prior [`Self`] creation
     pub async fn next(&mut self) -> Round {
         self.rx.changed().await.expect("sender is dropped");
         *self.rx.borrow_and_update()

@@ -94,28 +94,50 @@ impl RoundTaskReady {
                 (current_dag_round.round().0) // latest reliably detected consensus round
                     .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32),
             );
-            let wait_collator_ready = if self.state.collator_round.get() >= not_silent_since {
+            let mut collator_round_recv = self.state.collator_round.receiver();
+            let collator_round = collator_round_recv.get();
+            // Fixme temporarily disable silent mode
+            let wait_collator_ready = if true || collator_round >= not_silent_since {
                 future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
             } else {
+                tracing::info!(
+                    parent: round_effects.span(),
+                    collator_round = collator_round.0,
+                    not_silent_since = not_silent_since.0,
+                    "enter silent mode by collator feedback",
+                );
                 // must cancel on collector finish/err signal
-                let mut collator_round = self.state.collator_round.receiver();
                 let mut collector_signal_rx = collector_signal_rx.clone();
                 future::Either::Left(tokio::spawn(async move {
                     loop {
                         tokio::select! {
-                            collated = collator_round.next() => if collated >= not_silent_since {
-                                break true; // ready to produce point: collator synced enough
+                            collator_round = collator_round_recv.next() => {
+                                //  exit if ready to produce point: collator synced enough
+                                let exit = collator_round >= not_silent_since;
+                                tracing::info!(
+                                    collator_round = collator_round.0,
+                                    not_silent_since = not_silent_since.0,
+                                    exit = exit,
+                                    "collator feedback in silent mode"
+                                );
+                                if exit {
+                                    break true;
+                                }
                             },
-                            Ok(()) = collector_signal_rx.changed() => {
-                                let signal = *collector_signal_rx.borrow_and_update();
-                                match signal {
-                                    CollectorSignal::Finish | CollectorSignal::Err => break false,
-                                    CollectorSignal::Retry => {}
-                                };
+                            collector_signal = collector_signal_rx.changed() => {
+                                match collector_signal {
+                                    Ok(()) => {
+                                        match *collector_signal_rx.borrow_and_update() {
+                                            CollectorSignal::Finish | CollectorSignal::Err => break false,
+                                            CollectorSignal::Retry => {}
+                                        };
+                                    }
+                                    Err(_collector_exited) => break false,
+                                }
                             }
                         }
                     }
-                }))
+                }).instrument(round_effects.span().clone()))
             };
 
             let current_dag_round = current_dag_round.clone();

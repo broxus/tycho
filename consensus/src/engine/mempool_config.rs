@@ -30,7 +30,7 @@ impl MempoolConfig {
 
     /// hard limit (in rounds) on anchor history length
     /// includes anchor candidate round, though it is committed at the next attempt
-    pub const COMMIT_DEPTH: u8 = 20;
+    pub const COMMIT_DEPTH: u8 = 21;
 
     pub const GENESIS_ROUND: Round = Round(1);
 
@@ -46,7 +46,7 @@ impl MempoolConfig {
     ///   before local mempool enters silent mode (stops to produce points).
     /// * max amount of rounds (behind peer's last commit, defined by an anchor trigger in points)
     ///   a peer must respond with valid points if it directly referenced them
-    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 20 } else { 210 };
+    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 21 } else { 210 };
 
     // == Configs above must be globally same for consensus to run
     // ========
@@ -54,9 +54,8 @@ impl MempoolConfig {
     // == though misconfiguration may make the node unusable or banned
 
     /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
-    /// and allows [`Dag`](crate::dag::Dag) to grow in one time to catch up the lag behind consensus
-    /// without explicit sync
-    pub const ROUNDS_LAG_BEFORE_SYNC: u8 = 20;
+    /// to extend [`Dag`](crate::dag::Dag) without downloading points for locally skipped rounds
+    pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 21;
 
     /// see [`LogFlavor`]
     pub const LOG_FLAVOR: LogFlavor = LogFlavor::Truncated;
@@ -106,12 +105,7 @@ const _: () = assert!(
 
 const _: () = assert!(
     MempoolConfig::MAX_ANCHOR_DISTANCE >= MempoolConfig::COMMIT_DEPTH as u16,
-    "invalid config: max acceptable anchor distance cannot not be less than commit depth"
-);
-
-const _: () = assert!(
-    MempoolConfig::ROUNDS_LAG_BEFORE_SYNC >= MempoolConfig::COMMIT_DEPTH,
-    "invalid config: no need to sync when data is present in DAG"
+    "invalid config: max acceptable anchor distance cannot be less than commit depth"
 );
 
 const _: () = assert!(

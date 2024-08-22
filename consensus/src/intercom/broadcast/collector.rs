@@ -178,14 +178,14 @@ impl CollectorTask {
                     if self.is_ready() {
                         return Ok(self.next_includes)
                     } else {
-                        _ = self.collector_signal.send(CollectorSignal::Retry);
+                        _ = self.collector_signal.send_replace(CollectorSignal::Retry);
                     }
                 },
                 // very frequent event that may seldom cause completion
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
                         if let Err(round) = self.match_filtered(consensus_event) {
-                            _ = self.collector_signal.send(CollectorSignal::Err); // last signal
+                            _ = self.collector_signal.send_replace(CollectorSignal::Err); // last signal
                             return Err(round)
                         }
                     },
@@ -225,7 +225,7 @@ impl CollectorTask {
             self.includes_ready.len() >= self.current_round.peer_count().majority();
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         if result {
-            _ = self.collector_signal.send(CollectorSignal::Finish); // last signal
+            _ = self.collector_signal.send_replace(CollectorSignal::Finish); // last signal
         }
         tracing::debug!(
             parent: self.effects.span(),
@@ -253,7 +253,7 @@ impl CollectorTask {
                     parent: self.effects.span(),
                     "Collector was left behind while broadcast filter advanced ?"
                 );
-                _ = self.collector_signal.send(CollectorSignal::Err); // last signal
+                _ = self.collector_signal.send_replace(CollectorSignal::Err); // last signal
                 Some(Err(point_round))
             }
             cmp::Ordering::Equal => {

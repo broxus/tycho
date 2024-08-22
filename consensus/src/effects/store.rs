@@ -116,11 +116,26 @@ impl MempoolStore {
             let mut prev_least_to_keep = least_to_keep(consensus, committed, collated);
             loop {
                 tokio::select! {
-                    new_consensus = consensus_round.next() => consensus = new_consensus,
+                    new_consensus = consensus_round.next() => {
+                        consensus = new_consensus;
+                        metrics::counter!("tycho_mempool_consensus_current_round")
+                            .absolute(consensus.0 as _);
+                    },
                     new_committed = committed_round.next() => committed = new_committed,
                     new_collated = collator_round.next() => collated = new_collated,
                 }
+
+                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_collated")
+                    .set((consensus.0 as f64) - (collated.0 as f64));
+                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_committed")
+                    .set((consensus.0 as f64) - (committed.0 as f64));
+                metrics::gauge!("tycho_mempool_rounds_committed_ahead_collated")
+                    .set((committed.0 as f64) - (collated.0 as f64));
+
                 let new_least_to_keep = least_to_keep(consensus, committed, collated);
+                metrics::counter!("tycho_mempool_store_least_to_keep_round")
+                    .absolute(new_least_to_keep.0 as _);
+
                 if new_least_to_keep > prev_least_to_keep {
                     let inner = inner.clone();
                     let task =
@@ -268,7 +283,6 @@ impl MempoolStoreImpl for MempoolStorage {
         buf.fill(0);
 
         let mut opt = MempoolStorage::read_options();
-        opt.set_async_io(true);
 
         let first = history.first().expect("anchor history mut not be empty");
         fill_prefix(first.round(), &mut buf);

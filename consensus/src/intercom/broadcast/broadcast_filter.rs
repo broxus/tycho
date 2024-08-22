@@ -309,7 +309,7 @@ impl BroadcastFilterInner {
             "advance round"
         );
 
-        let limit = (top_round.0).saturating_add(MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32);
+        let limit = (top_round.0).saturating_add(MempoolConfig::CACHE_AHEAD_ENGINE_ROUNDS as u32);
         self.by_round
             .retain(|round, _| top_round < *round && round.0 <= limit);
     }

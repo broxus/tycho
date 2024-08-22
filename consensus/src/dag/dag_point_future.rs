@@ -290,6 +290,7 @@ impl DagPointFuture {
         {
             // FIXME limit by validation depth
             if let Some(oneshot) = certified.take() {
+                // TODO store flag when taken or follow only in-mem recursion?
                 // receiver is dropped upon completion
                 _ = oneshot.send(());
             }
