@@ -6,7 +6,6 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tokio::task;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
@@ -269,18 +268,19 @@ impl<V: InternalMessageValue> GCQueue<V> {
     pub fn new(buffer_size: usize) -> Self {
         let (sender, mut receiver) = mpsc::channel::<GCJob<V>>(buffer_size);
 
+        let cloned_sender = sender.clone();
         // Spawn the worker thread
-        task::spawn({
-            let cloned_sender = sender.clone();
-            async move {
-                while let Some(job) = receiver.recv().await {
-                    job.run().await;
+        tokio::spawn(async move {
+            let cloned_sender = cloned_sender.clone();
+            while let Some(job) = receiver.recv().await {
+                let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time");
+                job.run().await;
+                histogram.finish();
 
-                    let current_queue_size = buffer_size - cloned_sender.capacity();
+                let current_queue_size = buffer_size - cloned_sender.capacity();
 
-                    metrics::counter!("tycho_internal_queue_gc_current_queue_size")
-                        .increment(current_queue_size as u64);
-                }
+                metrics::counter!("tycho_internal_queue_gc_current_queue_size")
+                    .increment(current_queue_size as u64);
             }
         });
 
@@ -312,16 +312,10 @@ impl<V: InternalMessageValue> GCJob<V> {
         let end_key = self.end_key;
         let persistent_state = self.persistent_state.clone();
 
-        let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time");
-        task::spawn_blocking(move || {
-            let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time_run");
-            if let Err(e) = persistent_state.delete_messages(shard, &end_key) {
-                tracing::error!(target: tracing_targets::MQ, "Failed to delete messages: {e:?}");
-            }
-            histogram.finish();
-        })
-        .await
-        .expect("Failed to spawn blocking task");
+        let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time_run");
+        if let Err(e) = persistent_state.delete_messages(shard, &end_key) {
+            tracing::error!(target: tracing_targets::MQ, "Failed to delete messages: {e:?}");
+        }
         histogram.finish();
 
         let labels = [("shard", shard.to_string())];
