@@ -1,6 +1,5 @@
 use everscale_types::models::*;
 use parking_lot::RwLock;
-use weedb::{ColumnFamily, Table};
 
 use crate::db::*;
 use crate::models::*;
@@ -52,25 +51,19 @@ impl BlockConnectionStorage {
             None
         };
 
-        // Use strange match because all columns have different types
-        let store = match direction {
-            BlockConnection::Prev1 if !handle.meta().has_prev1() => {
-                store_block_connection_impl(&self.db.prev1, handle, connected_block_id);
-                handle.meta().set_has_prev1()
+        let store = {
+            let flag = direction.as_flag();
+            if handle.meta().flags().contains(flag) {
+                return;
             }
-            BlockConnection::Prev2 if !handle.meta().has_prev2() => {
-                store_block_connection_impl(&self.db.prev2, handle, connected_block_id);
-                handle.meta().set_has_prev2()
-            }
-            BlockConnection::Next1 if !handle.meta().has_next1() => {
-                store_block_connection_impl(&self.db.next1, handle, connected_block_id);
-                handle.meta().set_has_next1()
-            }
-            BlockConnection::Next2 if !handle.meta().has_next2() => {
-                store_block_connection_impl(&self.db.next2, handle, connected_block_id);
-                handle.meta().set_has_next2()
-            }
-            _ => return,
+
+            let key = make_key(handle.id(), direction);
+            self.db
+                .block_connections
+                .insert(key, write_block_id_le(connected_block_id))
+                .unwrap();
+
+            handle.meta().add_flags(flag)
         };
 
         if is_next1 {
@@ -114,39 +107,38 @@ impl BlockConnectionStorage {
         block_id: &BlockId,
         direction: BlockConnection,
     ) -> Option<BlockId> {
-        match direction {
-            BlockConnection::Prev1 => load_block_connection_impl(&self.db.prev1, block_id),
-            BlockConnection::Prev2 => load_block_connection_impl(&self.db.prev2, block_id),
-            BlockConnection::Next1 => load_block_connection_impl(&self.db.next1, block_id),
-            BlockConnection::Next2 => load_block_connection_impl(&self.db.next2, block_id),
+        let key = make_key(block_id, direction);
+        let data = self.db.block_connections.get(key).unwrap()?;
+        Some(read_block_id_le(&data))
+    }
+}
+
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum BlockConnection {
+    Prev1 = 0,
+    Prev2 = 1,
+    Next1 = 2,
+    Next2 = 3,
+}
+
+impl BlockConnection {
+    const fn as_flag(self) -> BlockFlags {
+        match self {
+            Self::Prev1 => BlockFlags::HAS_PREV_1,
+            Self::Prev2 => BlockFlags::HAS_PREV_2,
+            Self::Next1 => BlockFlags::HAS_NEXT_1,
+            Self::Next2 => BlockFlags::HAS_NEXT_2,
         }
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum BlockConnection {
-    Prev1,
-    Prev2,
-    Next1,
-    Next2,
-}
-
-#[inline]
-fn store_block_connection_impl<T>(db: &Table<T>, handle: &BlockHandle, block_id: &BlockId)
-where
-    T: ColumnFamily,
-{
-    db.insert(
-        handle.id().root_hash.as_slice(),
-        write_block_id_le(block_id),
-    )
-    .unwrap();
-}
-
-fn load_block_connection_impl<T>(db: &Table<T>, block_id: &BlockId) -> Option<BlockId>
-where
-    T: ColumnFamily,
-{
-    let data = db.get(block_id.root_hash.as_slice()).unwrap()?;
-    Some(read_block_id_le(&data))
+fn make_key(block_id: &BlockId, ty: BlockConnection) -> [u8; tables::BlockConnections::KEY_LEN] {
+    let mut key = [0u8; tables::BlockConnections::KEY_LEN];
+    key[..4].copy_from_slice(&block_id.shard.workchain().to_be_bytes());
+    key[4..12].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+    key[12..16].copy_from_slice(&block_id.seqno.to_be_bytes());
+    key[16..48].copy_from_slice(block_id.root_hash.as_slice());
+    key[48] = ty as u8;
+    key
 }

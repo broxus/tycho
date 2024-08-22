@@ -1,7 +1,7 @@
 use everscale_types::boc::Boc;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockMetaData, Storage};
+use tycho_storage::{NewBlockMeta, Storage};
 
 pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilter) {
     use std::io::IsTerminal;
@@ -54,7 +54,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let (handle, _) =
         storage
             .block_handle_storage()
-            .create_or_load_handle(&master_id, BlockMetaData {
+            .create_or_load_handle(&master_id, NewBlockMeta {
                 is_key_block: mc_state_extra.after_key_block,
                 gen_utime: master_state_stuff.state().gen_utime,
                 mc_ref_seqno: Some(master_id.seqno),
@@ -81,7 +81,7 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
     let (handle, _) =
         storage
             .block_handle_storage()
-            .create_or_load_handle(&shard_id, BlockMetaData {
+            .create_or_load_handle(&shard_id, NewBlockMeta {
                 is_key_block: false,
                 gen_utime: shard_state_stuff.state().gen_utime,
                 mc_ref_seqno: Some(master_id.seqno),

@@ -89,7 +89,7 @@ impl PersistentStateStorage {
     }
 
     pub async fn store_state(&self, handle: &BlockHandle, root_hash: &HashBytes) -> Result<()> {
-        if handle.meta().has_persistent_state() {
+        if handle.has_persistent_state() {
             return Ok(());
         }
 
@@ -263,7 +263,7 @@ impl PersistentStateStorage {
                         continue 'outer;
                     };
 
-                    if handle.meta().masterchain_ref_seqno() != mc_seqno {
+                    if handle.meta().mc_ref_seqno() != mc_seqno {
                         tracing::warn!(%block_id, mc_seqno, "block handle has wrong ref seqno");
                         continue 'outer;
                     }

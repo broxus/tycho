@@ -22,7 +22,7 @@ impl BlockHandleStorage {
     }
 
     pub fn set_block_applied(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().set_is_applied();
+        let updated = handle.meta().add_flags(BlockFlags::IS_APPLIED);
         if updated {
             self.store_handle(handle);
         }
@@ -30,7 +30,7 @@ impl BlockHandleStorage {
     }
 
     pub fn set_has_persistent_state(&self, handle: &BlockHandle) -> bool {
-        let updated = handle.meta().set_has_persistent_state();
+        let updated = handle.meta().add_flags(BlockFlags::HAS_PERSISTENT_STATE);
         if updated {
             self.store_handle(handle);
         }
@@ -46,7 +46,7 @@ impl BlockHandleStorage {
     pub fn create_or_load_handle(
         &self,
         block_id: &BlockId,
-        meta_data: BlockMetaData,
+        meta_data: NewBlockMeta,
     ) -> (BlockHandle, HandleCreationStatus) {
         use dashmap::mapref::entry::Entry;
 
@@ -258,7 +258,7 @@ impl BlockHandleStorage {
             } else {
                 // Remove all outdated
                 total_removed += 1;
-                value.meta().clear_data_and_proof();
+                value.meta().clear_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
                 false
             }
         });

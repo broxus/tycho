@@ -228,82 +228,23 @@ impl ColumnFamilyOptions<Caches> for TempCells {
 }
 
 /// Stores connections data
-/// - Key: `[u8; 32]` (block root hash)
+/// - Key: `BlockIdShort (16 bytes), [u8; 32] (block root hash), connection type (1 byte)`
 /// - Value: `BlockId (LE)`
-pub struct Prev1;
+pub struct BlockConnections;
 
-impl ColumnFamily for Prev1 {
-    const NAME: &'static str = "prev1";
+impl BlockConnections {
+    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 1;
+}
+
+impl ColumnFamily for BlockConnections {
+    const NAME: &'static str = "block_connections";
 
     fn read_options(opts: &mut ReadOptions) {
         opts.set_verify_checksums(false);
     }
 }
 
-impl ColumnFamilyOptions<Caches> for Prev1 {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-
-        optimize_for_point_lookup(opts, caches);
-    }
-}
-
-/// Stores connections data
-/// - Key: `[u8; 32]` (block root hash)
-/// - Value: `BlockId (LE)`
-pub struct Prev2;
-
-impl ColumnFamily for Prev2 {
-    const NAME: &'static str = "prev2";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(false);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for Prev2 {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-
-        optimize_for_point_lookup(opts, caches);
-    }
-}
-
-/// Stores connections data
-/// - Key: `[u8; 32]` (block root hash)
-/// - Value: `BlockId (LE)`
-pub struct Next1;
-
-impl ColumnFamily for Next1 {
-    const NAME: &'static str = "next1";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(false);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for Next1 {
-    fn options(opts: &mut Options, caches: &mut Caches) {
-        default_block_based_table_factory(opts, caches);
-
-        optimize_for_point_lookup(opts, caches);
-    }
-}
-
-/// Stores connections data
-/// - Key: `[u8; 32]` (block root hash)
-/// - Value: `BlockId (LE)`
-pub struct Next2;
-
-impl ColumnFamily for Next2 {
-    const NAME: &'static str = "next2";
-
-    fn read_options(opts: &mut ReadOptions) {
-        opts.set_verify_checksums(false);
-    }
-}
-
-impl ColumnFamilyOptions<Caches> for Next2 {
+impl ColumnFamilyOptions<Caches> for BlockConnections {
     fn options(opts: &mut Options, caches: &mut Caches) {
         default_block_based_table_factory(opts, caches);
 

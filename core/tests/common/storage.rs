@@ -4,7 +4,7 @@ use everscale_types::models::{BlockId, ShardStateUnsplit};
 use tempfile::TempDir;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockMetaData, Storage};
+use tycho_storage::{NewBlockMeta, Storage};
 
 pub(crate) fn get_archive() -> Result<Archive> {
     let root_path = env!("CARGO_MANIFEST_DIR");
@@ -54,7 +54,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let (handle, _) =
         storage
             .block_handle_storage()
-            .create_or_load_handle(zerostate.block_id(), BlockMetaData {
+            .create_or_load_handle(zerostate.block_id(), NewBlockMeta {
                 is_key_block: zerostate.block_id().is_masterchain(),
                 gen_utime: zerostate.state().gen_utime,
                 mc_ref_seqno: Some(0),
@@ -72,7 +72,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
         let (block, proof, diff) = block_provider.get_entry_by_id(block_id)?;
 
         let info = block.load_info().context("Failed to load block info")?;
-        let meta = BlockMetaData {
+        let meta = NewBlockMeta {
             is_key_block: info.key_block,
             gen_utime: info.gen_utime,
             mc_ref_seqno: Some(block_id.seqno),

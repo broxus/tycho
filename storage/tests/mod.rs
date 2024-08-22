@@ -3,7 +3,7 @@ use everscale_types::boc::Boc;
 use everscale_types::cell::{Cell, DynCell};
 use everscale_types::models::{BlockId, ShardState};
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockMetaData, Storage};
+use tycho_storage::{NewBlockMeta, Storage};
 
 #[derive(Clone)]
 struct ShardStateCombined {
@@ -67,7 +67,7 @@ async fn persistent_storage_everscale() -> Result<()> {
     // Write zerostate to db
     let (handle, _) = storage.block_handle_storage().create_or_load_handle(
         &block_id,
-        BlockMetaData::zero_state(zero_state_raw.gen_utime().unwrap(), true),
+        NewBlockMeta::zero_state(zero_state_raw.gen_utime().unwrap(), true),
     );
 
     let zerostate = ShardStateStuff::from_root(

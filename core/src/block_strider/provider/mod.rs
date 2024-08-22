@@ -13,7 +13,7 @@ use tycho_block_util::block::{
 };
 use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
-use tycho_storage::{BlockMetaData, MaybeExistingHandle, Storage};
+use tycho_storage::{MaybeExistingHandle, NewBlockMeta, Storage};
 use tycho_util::metrics::HistogramGuard;
 
 pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
@@ -190,7 +190,7 @@ impl ProofChecker {
         proof: &BlockProofStuffAug,
         queue_diff: &QueueDiffStuffAug,
         store_proof_on_success: bool,
-    ) -> Result<BlockMetaData> {
+    ) -> Result<NewBlockMeta> {
         // TODO: Add labels with shard?
         let _histogram = HistogramGuard::begin("tycho_core_check_block_proof_time");
 
@@ -205,7 +205,7 @@ impl ProofChecker {
         anyhow::ensure!(is_masterchain ^ proof.is_link(), "unexpected proof type");
 
         let (virt_block, virt_block_info) = proof.pre_check_block_proof()?;
-        let meta = BlockMetaData {
+        let meta = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
             mc_ref_seqno: is_masterchain.then(|| block.id().seqno),

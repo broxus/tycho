@@ -12,7 +12,7 @@ use tycho_block_util::block::{BlockProofStuff, BlockStuff, BlockStuffAug};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
-use tycho_storage::{BlockHandle, BlockMetaData, MaybeExistingHandle, Storage};
+use tycho_storage::{BlockHandle, MaybeExistingHandle, NewBlockMeta, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap};
 
@@ -57,7 +57,7 @@ pub trait StateNodeAdapter: Send + Sync + 'static {
     async fn store_state_root(
         &self,
         block_id: &BlockId,
-        meta: BlockMetaData,
+        meta: NewBlockMeta,
         state_root: Cell,
     ) -> Result<ShardStateStuff>;
     /// Return block by it's id from node local state
@@ -122,7 +122,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
     async fn store_state_root(
         &self,
         block_id: &BlockId,
-        meta: BlockMetaData,
+        meta: NewBlockMeta,
         state_root: Cell,
     ) -> Result<ShardStateStuff> {
         tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Store state root: {}", block_id.as_short_id());
@@ -255,7 +255,7 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
         let block_storage = self.storage.block_storage();
 
         match handle_storage.load_handle(block_id) {
-            Some(handle) if handle.meta().has_queue_diff() => {
+            Some(handle) if handle.has_queue_diff() => {
                 block_storage.load_queue_diff(&handle).await.map(Some)
             }
             _ => Ok(None),
@@ -314,7 +314,7 @@ impl StateNodeAdapterStdImpl {
         let result = block_storage
             .store_block_proof(
                 &archive_data,
-                MaybeExistingHandle::New(BlockMetaData {
+                MaybeExistingHandle::New(NewBlockMeta {
                     is_key_block: block_info.key_block,
                     gen_utime: block_info.gen_utime,
                     mc_ref_seqno: None,

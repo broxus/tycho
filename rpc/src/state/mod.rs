@@ -291,7 +291,7 @@ impl Inner {
                 break 'key_block;
             };
 
-            if handle.meta().has_data() {
+            if handle.has_data() {
                 let key_block = blocks.load_block_data(&handle).await?;
                 self.update_mc_block_cache(&key_block)?;
             } else {
