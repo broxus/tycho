@@ -282,7 +282,12 @@ impl ColumnFamily for ShardsInternalMessages {
 
 impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
     fn options(opts: &mut Options, caches: &mut Caches) {
-        zstd_block_based_table_factory(opts, caches);
+        let mut block_factory = BlockBasedOptions::default();
+        block_factory.set_block_cache(&caches.block_cache);
+        opts.set_block_based_table_factory(&block_factory);
+
+        opts.set_disable_auto_compactions(true); // we will trigger compactions manually
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
     }
 }
 
