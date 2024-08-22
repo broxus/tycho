@@ -7,7 +7,7 @@ use futures_util::future::BoxFuture;
 use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, RefMcStateHandle, ShardStateStuff};
-use tycho_storage::{BlockConnection, BlockHandle, BlockMetaData, Storage};
+use tycho_storage::{BlockConnection, BlockHandle, NewBlockMeta, Storage};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 
@@ -96,7 +96,7 @@ where
         }
 
         // Load/Apply state
-        let (state, handles) = if handle.meta().has_state() {
+        let (state, handles) = if handle.has_state() {
             // Fast path when state is already applied
             let state = state_storage
                 .load_state(handle.id())
@@ -222,7 +222,7 @@ where
 
         let info = block.load_info()?;
         let res = block_storage
-            .store_block_data(block, archive_data, BlockMetaData {
+            .store_block_data(block, archive_data, NewBlockMeta {
                 is_key_block: info.key_block,
                 gen_utime: info.gen_utime,
                 mc_ref_seqno: Some(mc_block_id.seqno),

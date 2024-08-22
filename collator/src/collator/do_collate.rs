@@ -10,7 +10,7 @@ use humantime::format_duration;
 use sha2::Digest;
 use ton_executor::{ExecuteParams, ExecutorOutput, PreloadedBlockchainConfig};
 use tycho_block_util::queue::{QueueDiffStuff, QueueKey};
-use tycho_storage::BlockMetaData;
+use tycho_storage::NewBlockMeta;
 use tycho_util::futures::JoinTask;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_millis;
@@ -451,7 +451,7 @@ impl CollatorStdImpl {
 
         let block_id = *finalized.block_candidate.block.id();
         let new_state_stuff = JoinTask::new({
-            let meta = BlockMetaData {
+            let meta = NewBlockMeta {
                 is_key_block: false, // TODO: set from collation data
                 gen_utime: collation_data.gen_utime,
                 mc_ref_seqno: None,

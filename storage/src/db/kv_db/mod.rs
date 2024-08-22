@@ -61,10 +61,7 @@ weedb::tables! {
         pub shard_states: tables::ShardStates,
         pub cells: tables::Cells,
         pub temp_cells: tables::TempCells,
-        pub prev1: tables::Prev1,
-        pub prev2: tables::Prev2,
-        pub next1: tables::Next1,
-        pub next2: tables::Next2,
+        pub block_connections: tables::BlockConnections,
         pub shards_internal_messages: tables::ShardsInternalMessages,
         pub shards_internal_messages_session: tables::ShardsInternalMessagesSession,
     }

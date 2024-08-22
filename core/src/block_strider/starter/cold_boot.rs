@@ -12,7 +12,7 @@ use tycho_block_util::block::{
 };
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
-use tycho_storage::{BlockHandle, BlockMetaData, KeyBlocksDirection, MaybeExistingHandle, Storage};
+use tycho_storage::{BlockHandle, KeyBlocksDirection, MaybeExistingHandle, NewBlockMeta, Storage};
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
@@ -389,7 +389,7 @@ impl StarterInner {
 
         for state in to_import {
             let (handle, status) =
-                handle_storage.create_or_load_handle(state.block_id(), BlockMetaData {
+                handle_storage.create_or_load_handle(state.block_id(), NewBlockMeta {
                     is_key_block: state.block_id().is_masterchain(),
                     gen_utime,
                     mc_ref_seqno: Some(0),
@@ -449,7 +449,7 @@ impl StarterInner {
         let persistent_states = storage.persistent_state_storage();
 
         let (handle, state) = match block_handles.load_handle(block_id) {
-            Some(handle) if handle.meta().has_state() => {
+            Some(handle) if handle.has_state() => {
                 // Load state
                 let shard_state_storage = storage.shard_state_storage();
                 let state = shard_state_storage
@@ -467,7 +467,7 @@ impl StarterInner {
 
                 let (handle, _) = storage.block_handle_storage().create_or_load_handle(
                     block_id,
-                    BlockMetaData::zero_state(state.state().gen_utime, block_id.is_masterchain()),
+                    NewBlockMeta::zero_state(state.state().gen_utime, block_id.is_masterchain()),
                 );
 
                 storage
@@ -499,7 +499,7 @@ impl StarterInner {
 
         let handle = block_handle_storage
             .load_handle(block_id)
-            .filter(|handle| handle.meta().has_data());
+            .filter(BlockHandle::has_data);
 
         // Download block data and proof
         let (block, handle) = 'data: {
@@ -560,7 +560,7 @@ impl StarterInner {
 
                         match proof.pre_check_block_proof() {
                             Ok((_, block_info)) => {
-                                break (block, proof, diff, BlockMetaData {
+                                break (block, proof, diff, NewBlockMeta {
                                     is_key_block: block_info.key_block,
                                     gen_utime: block_info.gen_utime,
                                     mc_ref_seqno: Some(mc_seqno),
@@ -585,14 +585,14 @@ impl StarterInner {
                 .await?
                 .handle;
 
-            if !handle.meta().has_proof() {
+            if !handle.has_proof() {
                 handle = block_storage
                     .store_block_proof(&proof, handle.into())
                     .await?
                     .handle;
             }
 
-            if !handle.meta().has_queue_diff() {
+            if !handle.has_queue_diff() {
                 handle = block_storage
                     .store_queue_diff(&diff, handle.into())
                     .await?
@@ -603,7 +603,7 @@ impl StarterInner {
         };
 
         // Download block state
-        if !handle.meta().has_state() {
+        if !handle.has_state() {
             let state_update = block.block().load_state_update()?;
 
             tracing::info!(block_id = %handle.id(), "downloading state");
@@ -717,12 +717,12 @@ impl InitBlock {
         }
     }
 
-    fn check_next_proof(&self, next_proof: &BlockProofStuff) -> Result<BlockMetaData> {
+    fn check_next_proof(&self, next_proof: &BlockProofStuff) -> Result<NewBlockMeta> {
         let (virt_block, virt_block_info) = next_proof
             .pre_check_block_proof()
             .context("Failed to pre check block proof")?;
 
-        let res = BlockMetaData {
+        let res = NewBlockMeta {
             is_key_block: virt_block_info.key_block,
             gen_utime: virt_block_info.gen_utime,
             mc_ref_seqno: Some(next_proof.proof().proof_for.seqno),

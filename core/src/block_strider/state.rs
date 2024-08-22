@@ -37,7 +37,7 @@ impl BlockStriderState for PersistentBlockStriderState {
 
     fn is_commited(&self, block_id: &BlockId) -> bool {
         match self.storage.block_handle_storage().load_handle(block_id) {
-            Some(handle) => handle.meta().is_applied(),
+            Some(handle) => handle.is_applied(),
             None => false,
         }
     }

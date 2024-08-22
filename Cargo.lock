@@ -3473,6 +3473,7 @@ dependencies = [
  "ahash",
  "anyhow",
  "arc-swap",
+ "bitflags",
  "bumpalo",
  "bytes",
  "bytesize",

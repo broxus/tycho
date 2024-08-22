@@ -12,6 +12,7 @@ license.workspace = true
 ahash = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
+bitflags = { workspace = true }
 bumpalo = { workspace = true }
 bytes = { workspace = true }
 bytesize = { workspace = true }
@@ -32,7 +33,7 @@ smallvec = { workspace = true }
 sysinfo = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "fs", "io-util"] }
 tracing = { workspace = true }
 triomphe = { workspace = true }
 weedb = { workspace = true }

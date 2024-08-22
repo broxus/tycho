@@ -400,7 +400,7 @@ impl<B> Inner<B> {
 
         let get_next_block_full = async {
             let next_block_id = match block_handle_storage.load_handle(&req.prev_block_id) {
-                Some(handle) if handle.meta().has_next1() => block_connection_storage
+                Some(handle) if handle.has_next1() => block_connection_storage
                     .load_connection(&req.prev_block_id, BlockConnection::Next1)
                     .context("connection not found")?,
                 _ => return Ok(BlockFull::NotFound),
@@ -430,7 +430,7 @@ impl<B> Inner<B> {
 
         let get_key_block_proof = async {
             match block_handle_storage.load_handle(&req.block_id) {
-                Some(handle) if handle.meta().has_proof() => {
+                Some(handle) if handle.has_proof() => {
                     let data = block_storage.load_block_proof_raw(&handle).await?;
                     Ok::<_, anyhow::Error>(KeyBlockProof::Found { proof: data.into() })
                 }
@@ -577,7 +577,7 @@ impl<B> Inner<B> {
         let block_storage = self.storage().block_storage();
 
         Ok(match block_handle_storage.load_handle(block_id) {
-            Some(handle) if handle.has_all_parts() => {
+            Some(handle) if handle.has_all_block_parts() => {
                 let (block, proof, queue_diff) = tokio::join!(
                     block_storage.load_block_data_raw(&handle),
                     block_storage.load_block_proof_raw(&handle),

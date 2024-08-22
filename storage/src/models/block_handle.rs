@@ -4,7 +4,7 @@ use everscale_types::models::*;
 use tokio::sync::RwLock;
 use tycho_util::FastDashMap;
 
-use super::BlockMeta;
+use super::{BlockFlags, BlockMeta};
 
 pub type BlockHandleCache = FastDashMap<BlockId, WeakBlockHandle>;
 
@@ -44,47 +44,74 @@ impl BlockHandle {
         }
     }
 
-    #[inline]
     pub fn id(&self) -> &BlockId {
         &self.inner.id
     }
 
-    #[inline]
     pub fn meta(&self) -> &BlockMeta {
         &self.inner.meta
     }
 
-    #[inline]
     pub fn is_key_block(&self) -> bool {
-        self.inner.meta.is_key_block() || self.inner.id.is_masterchain() && self.inner.id.seqno == 0
+        self.inner.meta.flags().contains(BlockFlags::IS_KEY_BLOCK)
+            || self.inner.id.is_masterchain() && self.inner.id.seqno == 0
     }
 
-    #[inline]
+    pub fn is_applied(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::IS_APPLIED)
+    }
+
     pub fn block_data_lock(&self) -> &RwLock<()> {
         &self.inner.block_data_lock
     }
 
-    #[inline]
     pub fn proof_data_lock(&self) -> &RwLock<()> {
         &self.inner.proof_data_block
     }
 
-    #[inline]
     pub fn queue_diff_data_lock(&self) -> &RwLock<()> {
         &self.inner.queue_diff_data_lock
     }
 
-    pub fn has_all_parts(&self) -> bool {
-        // TODO: Load once?
-        let meta = self.meta();
-        meta.has_data() && meta.has_proof() && meta.has_queue_diff()
+    pub fn has_data(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::HAS_DATA)
+    }
+
+    pub fn has_proof(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::HAS_PROOF)
+    }
+
+    pub fn has_queue_diff(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::HAS_QUEUE_DIFF)
+    }
+
+    pub fn has_next1(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::HAS_NEXT_1)
+    }
+
+    pub fn has_all_block_parts(&self) -> bool {
+        self.inner
+            .meta
+            .flags()
+            .contains(BlockFlags::HAS_ALL_BLOCK_PARTS)
+    }
+
+    pub fn has_state(&self) -> bool {
+        self.inner.meta.flags().contains(BlockFlags::HAS_STATE)
+    }
+
+    pub fn has_persistent_state(&self) -> bool {
+        self.inner
+            .meta
+            .flags()
+            .contains(BlockFlags::HAS_PERSISTENT_STATE)
     }
 
     pub fn mc_ref_seqno(&self) -> u32 {
         if self.inner.id.shard.is_masterchain() {
             self.inner.id.seqno
         } else {
-            self.inner.meta.masterchain_ref_seqno()
+            self.inner.meta.mc_ref_seqno()
         }
     }
 

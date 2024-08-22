@@ -15,7 +15,7 @@ use self::store_state_raw::StoreStateRaw;
 use crate::db::*;
 use crate::models::BlockHandle;
 use crate::util::*;
-use crate::{BlockHandleStorage, BlockStorage};
+use crate::{BlockFlags, BlockHandleStorage, BlockStorage};
 
 mod cell_storage;
 mod entries_buffer;
@@ -89,13 +89,13 @@ impl ShardStateStorage {
     }
 
     pub async fn store_state_root(&self, handle: &BlockHandle, root_cell: Cell) -> Result<bool> {
-        if handle.meta().has_state() {
+        if handle.has_state() {
             return Ok(false);
         }
         let _gc_lock = self.gc_lock.lock().await;
 
         // Double check if the state is already stored
-        if handle.meta().has_state() {
+        if handle.has_state() {
             return Ok(false);
         }
         let _hist = HistogramGuard::begin("tycho_storage_state_store_time");
@@ -122,7 +122,7 @@ impl ShardStateStorage {
             raw_db.write(batch)?;
             hist.finish();
 
-            let updated = handle.meta().set_has_state();
+            let updated = handle.meta().add_flags(BlockFlags::HAS_STATE);
             if updated {
                 block_handle_storage.store_handle(&handle);
             }
@@ -272,7 +272,7 @@ impl ShardStateStorage {
 
         // Find block handle
         let handle = match self.block_handle_storage.load_handle(&mc_block_id) {
-            Some(handle) if handle.meta().has_data() => handle,
+            Some(handle) if handle.has_data() => handle,
             // Skip blocks without handle or data
             _ => return Ok(None),
         };
@@ -294,7 +294,7 @@ impl ShardStateStorage {
 
         // Find block handle
         let min_ref_block_handle = match self.block_handle_storage.load_handle(&min_ref_block_id) {
-            Some(handle) if handle.meta().has_data() => handle,
+            Some(handle) if handle.has_data() => handle,
             // Skip blocks without handle or data
             _ => return Ok(None),
         };

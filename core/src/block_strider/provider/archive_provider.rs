@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tokio_util::either::Either;
 use tycho_block_util::archive::{Archive, ArchiveError};
-use tycho_storage::{BlockMetaData, Storage};
+use tycho_storage::{NewBlockMeta, Storage};
 use tycho_util::io::BytesWriter;
 use tycho_util::time::now_sec;
 
@@ -237,7 +237,7 @@ impl ArchiveBlockProvider {
     }
 }
 
-fn is_block_recent(meta: &BlockMetaData) -> bool {
+fn is_block_recent(meta: &NewBlockMeta) -> bool {
     meta.gen_utime + 600 > now_sec()
 }
 

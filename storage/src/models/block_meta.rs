@@ -5,13 +5,13 @@ use bytes::Buf;
 use crate::util::{StoredValue, StoredValueBuffer};
 
 #[derive(Debug, Copy, Clone)]
-pub struct BlockMetaData {
+pub struct NewBlockMeta {
     pub is_key_block: bool,
     pub gen_utime: u32,
     pub mc_ref_seqno: Option<u32>,
 }
 
-impl BlockMetaData {
+impl NewBlockMeta {
     pub fn zero_state(gen_utime: u32, is_key_block: bool) -> Self {
         Self {
             is_key_block,
@@ -27,12 +27,22 @@ pub struct BlockMeta {
     gen_utime: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LoadedBlockMeta {
+    pub flags: BlockFlags,
+    pub mc_ref_seqno: u32,
+    pub gen_utime: u32,
+}
+
 impl BlockMeta {
-    pub fn with_data(data: BlockMetaData) -> Self {
+    pub fn with_data(data: NewBlockMeta) -> Self {
+        const IS_KEY_BLOCK_MASK: u64 =
+            (BlockFlags::IS_KEY_BLOCK.bits() as u64) << BLOCK_FLAGS_OFFSET;
+
         Self {
             flags: AtomicU64::new(
                 if data.is_key_block {
-                    BLOCK_META_FLAG_IS_KEY_BLOCK
+                    IS_KEY_BLOCK_MASK
                 } else {
                     0
                 } | data.mc_ref_seqno.unwrap_or_default() as u64,
@@ -41,132 +51,40 @@ impl BlockMeta {
         }
     }
 
-    pub fn brief(&self) -> BriefBlockMeta {
-        BriefBlockMeta {
-            flags: self.flags.load(Ordering::Acquire),
+    pub fn load(&self) -> LoadedBlockMeta {
+        let flags = self.flags.load(Ordering::Acquire);
+        LoadedBlockMeta {
+            flags: BlockFlags::from_bits_retain((flags >> BLOCK_FLAGS_OFFSET) as u32),
+            mc_ref_seqno: flags as u32,
             gen_utime: self.gen_utime,
         }
     }
 
-    pub fn masterchain_ref_seqno(&self) -> u32 {
+    pub fn flags(&self) -> BlockFlags {
+        let flags = self.flags.load(Ordering::Acquire) >> BLOCK_FLAGS_OFFSET;
+        BlockFlags::from_bits_retain(flags as u32)
+    }
+
+    pub fn mc_ref_seqno(&self) -> u32 {
         self.flags.load(Ordering::Acquire) as u32
     }
 
-    pub fn set_mc_ref_seqno(&self, seqno: u32) -> u32 {
-        self.flags.fetch_or(seqno as u64, Ordering::Release) as u32
-    }
-
-    #[inline]
     pub fn gen_utime(&self) -> u32 {
         self.gen_utime
     }
 
-    pub fn clear_data_and_proof(&self) {
-        self.flags.fetch_and(CLEAR_DATA_MASK, Ordering::Release);
+    pub(crate) fn add_flags(&self, flags: BlockFlags) -> bool {
+        let flags = (flags.bits() as u64) << BLOCK_FLAGS_OFFSET;
+        self.flags.fetch_or(flags, Ordering::Release) & flags != flags
     }
 
-    pub fn set_has_data(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_DATA)
+    pub(crate) fn clear_flags(&self, flags: BlockFlags) {
+        let mask = !((flags.bits() as u64) << BLOCK_FLAGS_OFFSET);
+        self.flags.fetch_and(mask, Ordering::Release);
     }
 
-    pub fn has_data(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_DATA)
-    }
-
-    pub fn set_has_proof(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_PROOF)
-    }
-
-    pub fn has_proof(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_PROOF)
-    }
-
-    pub fn set_has_queue_diff(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_QUEUE_DIFF)
-    }
-
-    pub fn has_queue_diff(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_QUEUE_DIFF)
-    }
-
-    pub fn set_has_state(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_STATE)
-    }
-
-    pub fn has_state(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_STATE)
-    }
-
-    pub fn set_has_persistent_state(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_PERSISTENT_STATE)
-    }
-
-    pub fn has_persistent_state(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_PERSISTENT_STATE)
-    }
-
-    pub fn set_has_next1(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_NEXT_1)
-    }
-
-    pub fn has_next1(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_NEXT_1)
-    }
-
-    pub fn set_has_next2(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_NEXT_2)
-    }
-
-    pub fn has_next2(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_NEXT_2)
-    }
-
-    pub fn set_has_prev1(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_PREV_1)
-    }
-
-    pub fn has_prev1(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_PREV_1)
-    }
-
-    pub fn set_has_prev2(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_HAS_PREV_2)
-    }
-
-    pub fn has_prev2(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_HAS_PREV_2)
-    }
-
-    pub fn set_is_applied(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_IS_APPLIED)
-    }
-
-    pub fn is_applied(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_IS_APPLIED)
-    }
-
-    pub fn is_key_block(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_IS_KEY_BLOCK)
-    }
-
-    pub fn set_is_moving_to_archive(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_MOVING_TO_ARCHIVE)
-    }
-
-    pub fn set_is_archived(&self) -> bool {
-        self.set_flag(BLOCK_META_FLAG_MOVED_TO_ARCHIVE)
-    }
-
-    pub fn is_archived(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_MOVED_TO_ARCHIVE)
-    }
-
-    fn test_flag(&self, flag: u64) -> bool {
-        self.flags.load(Ordering::Acquire) & flag == flag
-    }
-
-    fn set_flag(&self, flag: u64) -> bool {
-        self.flags.fetch_or(flag, Ordering::Release) & flag != flag
+    pub(crate) fn set_mc_ref_seqno(&self, seqno: u32) -> u32 {
+        self.flags.fetch_or(seqno as u64, Ordering::Release) as u32
     }
 }
 
@@ -178,9 +96,7 @@ impl StoredValue for BlockMeta {
     type OnStackSlice = [u8; Self::SIZE_HINT];
 
     fn serialize<T: StoredValueBuffer>(&self, buffer: &mut T) {
-        const FLAGS_MASK: u64 = 0x0000_ffff_ffff_ffff;
-        let flags = self.flags.load(Ordering::Acquire) & FLAGS_MASK;
-
+        let flags = self.flags.load(Ordering::Acquire);
         buffer.write_raw_slice(&flags.to_le_bytes());
         buffer.write_raw_slice(&self.gen_utime.to_le_bytes());
     }
@@ -199,59 +115,63 @@ impl StoredValue for BlockMeta {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone)]
-pub struct BriefBlockMeta {
-    flags: u64,
-    gen_utime: u32,
-}
+bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct BlockFlags: u32 {
+        // Persistent flags
+        const HAS_DATA = 1 << 0;
+        const HAS_PROOF = 1 << 1;
+        const HAS_QUEUE_DIFF = 1 << 2;
 
-impl BriefBlockMeta {
-    #[inline]
-    pub fn gen_utime(&self) -> u32 {
-        self.gen_utime
-    }
+        const HAS_STATE = 1 << 4;
+        const HAS_PERSISTENT_STATE = 1 << 5;
+        const HAS_NEXT_1 = 1 << 6;
+        const HAS_NEXT_2 = 1 << 7;
+        const HAS_PREV_1 = 1 << 8;
+        const HAS_PREV_2 = 1 << 9;
+        const IS_APPLIED = 1 << 10;
+        const IS_KEY_BLOCK = 1 << 11;
+        const IS_ARCHIVED = 1 << 12;
 
-    #[inline]
-    pub fn masterchain_ref_seqno(&self) -> u32 {
-        self.flags as u32
-    }
-
-    #[inline]
-    pub fn is_key_block(&self) -> bool {
-        self.test_flag(BLOCK_META_FLAG_IS_KEY_BLOCK)
-    }
-
-    #[inline]
-    fn test_flag(&self, flag: u64) -> bool {
-        self.flags & flag == flag
+        // Composite flags
+        const HAS_ALL_BLOCK_PARTS =
+            Self::HAS_DATA.bits() | Self::HAS_PROOF.bits() | Self::HAS_QUEUE_DIFF.bits();
     }
 }
 
-const BLOCK_META_FLAG_HAS_DATA: u64 = 1 << 32;
-const BLOCK_META_FLAG_HAS_PROOF: u64 = 1 << (32 + 1);
-const BLOCK_META_FLAG_HAS_QUEUE_DIFF: u64 = 1 << (32 + 2);
-
-const BLOCK_META_FLAG_HAS_STATE: u64 = 1 << (32 + 4);
-const BLOCK_META_FLAG_HAS_PERSISTENT_STATE: u64 = 1 << (32 + 5);
-const BLOCK_META_FLAG_HAS_NEXT_1: u64 = 1 << (32 + 6);
-const BLOCK_META_FLAG_HAS_NEXT_2: u64 = 1 << (32 + 7);
-const BLOCK_META_FLAG_HAS_PREV_1: u64 = 1 << (32 + 8);
-const BLOCK_META_FLAG_HAS_PREV_2: u64 = 1 << (32 + 9);
-const BLOCK_META_FLAG_IS_APPLIED: u64 = 1 << (32 + 10);
-const BLOCK_META_FLAG_IS_KEY_BLOCK: u64 = 1 << (32 + 11);
-
-const BLOCK_META_FLAG_MOVING_TO_ARCHIVE: u64 = 1 << (32 + 12);
-const BLOCK_META_FLAG_MOVED_TO_ARCHIVE: u64 = 1 << (32 + 13);
-
-const CLEAR_DATA_MASK: u64 =
-    !(BLOCK_META_FLAG_HAS_DATA | BLOCK_META_FLAG_HAS_PROOF | BLOCK_META_FLAG_HAS_QUEUE_DIFF);
+const BLOCK_FLAGS_OFFSET: usize = 32;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    pub fn fully_on_stack() {
-        assert!(!BlockMeta::default().to_vec().spilled());
+    fn meta_store_load() {
+        let meta = BlockMeta::with_data(NewBlockMeta {
+            is_key_block: true,
+            gen_utime: 123456789,
+            mc_ref_seqno: Some(4311231),
+        });
+        assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
+        assert_eq!(meta.mc_ref_seqno(), 4311231);
+        assert_eq!(meta.gen_utime(), 123456789);
+
+        let stored = meta.to_vec();
+        assert_eq!(stored.len(), BlockMeta::SIZE_HINT);
+
+        let loaded = BlockMeta::from_slice(&stored);
+        assert_eq!(loaded.flags(), BlockFlags::IS_KEY_BLOCK);
+        assert_eq!(loaded.mc_ref_seqno(), 4311231);
+        assert_eq!(loaded.gen_utime(), 123456789);
+
+        let updated = meta.add_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
+        assert!(updated);
+        assert_eq!(
+            meta.flags(),
+            BlockFlags::HAS_ALL_BLOCK_PARTS | BlockFlags::IS_KEY_BLOCK
+        );
+
+        meta.clear_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
+        assert_eq!(meta.flags(), BlockFlags::IS_KEY_BLOCK);
     }
 }
