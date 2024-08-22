@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokio::task;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::metrics::HistogramGuard;
@@ -268,15 +268,13 @@ pub struct GCQueue<V: InternalMessageValue> {
 impl<V: InternalMessageValue> GCQueue<V> {
     pub fn new(buffer_size: usize) -> Self {
         let (sender, mut receiver) = mpsc::channel::<GCJob<V>>(buffer_size);
-        let semaphore = Arc::new(Semaphore::new(1));
 
         // Spawn the worker thread
         task::spawn({
-            let semaphore = semaphore.clone();
             let cloned_sender = sender.clone();
             async move {
                 while let Some(job) = receiver.recv().await {
-                    job.run(semaphore.clone()).await;
+                    job.run().await;
 
                     let current_queue_size = buffer_size - cloned_sender.capacity();
 
@@ -309,21 +307,18 @@ pub struct GCJob<V: InternalMessageValue> {
 }
 
 impl<V: InternalMessageValue> GCJob<V> {
-    pub async fn run(&self, semaphore: Arc<Semaphore>) {
+    pub async fn run(&self) {
         let shard = self.shard;
         let end_key = self.end_key;
         let persistent_state = self.persistent_state.clone();
 
-        let _permit = semaphore
-            .acquire_owned()
-            .await
-            .expect("Failed to acquire semaphore");
-
         let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time");
         task::spawn_blocking(move || {
+            let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time_run");
             if let Err(e) = persistent_state.delete_messages(shard, &end_key) {
                 tracing::error!(target: tracing_targets::MQ, "Failed to delete messages: {e:?}");
             }
+            histogram.finish();
         })
         .await
         .expect("Failed to spawn blocking task");
