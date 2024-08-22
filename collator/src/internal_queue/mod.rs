@@ -1,3 +1,4 @@
+mod gc;
 pub mod iterator;
 pub mod queue;
 pub mod state;

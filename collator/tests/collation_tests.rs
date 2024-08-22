@@ -109,7 +109,7 @@ async fn test_collation_process_on_stubs() {
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory,
         persistent_state_factory,
-        gc_queue_buffer_size: 100,
+        gc_run_interval: 100,
     };
     let queue = queue_factory.create();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);

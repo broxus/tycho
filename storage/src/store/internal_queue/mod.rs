@@ -1,7 +1,6 @@
 use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueueKey;
-use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 use weedb::rocksdb::{ReadOptions, WriteBatch};
 use weedb::{BoundedCfHandle, OwnedSnapshot};
@@ -117,14 +116,12 @@ impl InternalQueueStorage {
         batch.delete_range_cf(&shards_internal_messages_cf, &start_key, &end_key);
         batch.delete_cf(&shards_internal_messages_cf, &end_key);
 
-        let histogram = HistogramGuard::begin("tycho_internal_queue_delete_messages_write_batch");
         self.db.rocksdb().write(batch)?;
         self.db.rocksdb().compact_range_cf(
             &shards_internal_messages_cf,
             Some(&start_key),
             Some(&end_key),
         );
-        histogram.finish();
 
         Ok(())
     }

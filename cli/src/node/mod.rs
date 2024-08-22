@@ -526,7 +526,7 @@ impl Node {
         let queue_factory = QueueFactoryStdImpl {
             session_state_factory,
             persistent_state_factory,
-            gc_queue_buffer_size: self.internal_queue_config.gc_queue_buffer_size,
+            gc_run_interval: self.internal_queue_config.gc_run_interval,
         };
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);

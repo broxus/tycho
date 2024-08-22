@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use everscale_types::cell::{Cell, CellSliceRange, HashBytes};
@@ -90,7 +91,7 @@ async fn test_queue() -> anyhow::Result<()> {
             storage: storage.clone(),
         },
         persistent_state_factory: PersistentStateImplFactory { storage },
-        gc_queue_buffer_size: 100,
+        gc_run_interval: Duration::from_secs(1),
     };
 
     let queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, StoredObject> =

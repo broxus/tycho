@@ -1,16 +1,16 @@
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio::task;
 use tycho_block_util::queue::QueueKey;
-use tycho_util::metrics::HistogramGuard;
-use tycho_util::{FastDashMap, FastHashMap};
+use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
 
+use crate::internal_queue::gc::GCManager;
 use crate::internal_queue::state::persistent_state::{
     PersistentState, PersistentStateFactory, PersistentStateImplFactory, PersistentStateStdImpl,
 };
@@ -19,18 +19,19 @@ use crate::internal_queue::state::session_state::{
 };
 use crate::internal_queue::state::state_iterator::StateIterator;
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
-use crate::tracing_targets;
+
 // FACTORY
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
-    pub gc_queue_buffer_size: usize,
+    #[serde(with = "serde_helpers::humantime")]
+    pub gc_run_interval: Duration,
 }
 
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            gc_queue_buffer_size: 100,
+            gc_run_interval: Duration::from_secs(5),
         }
     }
 }
@@ -55,7 +56,7 @@ where
 pub struct QueueFactoryStdImpl {
     pub session_state_factory: SessionStateImplFactory,
     pub persistent_state_factory: PersistentStateImplFactory,
-    pub gc_queue_buffer_size: usize,
+    pub gc_run_interval: Duration,
 }
 
 // TRAIT
@@ -91,11 +92,14 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
         let persistent_state = <PersistentStateImplFactory as PersistentStateFactory<V>>::create(
             &self.persistent_state_factory,
         );
+        let persistent_state = Arc::new(persistent_state);
+        let gc = GCManager::create_and_run::<V>(persistent_state.clone(), self.gc_run_interval);
         QueueImpl {
             session_state: Arc::new(session_state),
-            persistent_state: Arc::new(persistent_state),
+            persistent_state,
             diffs: Default::default(),
-            gc: GCQueue::new(self.gc_queue_buffer_size),
+            gc,
+            _phantom_data: Default::default(),
         }
     }
 }
@@ -125,7 +129,8 @@ where
     session_state: Arc<S>,
     persistent_state: Arc<P>,
     diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
-    gc: GCQueue<V>,
+    gc: GCManager,
+    _phantom_data: PhantomData<V>,
 }
 
 impl<S, P, V> Queue<V> for QueueImpl<S, P, V>
@@ -246,85 +251,10 @@ where
         metrics::counter!("tycho_internal_queue_uncommitted_diffs_count")
             .increment(uncommitted_diffs_count as u64);
 
-        for (shard, end_key) in gc_ranges.iter() {
-            let job = GCJob {
-                shard: *shard,
-                end_key: *end_key,
-                persistent_state: self.persistent_state.clone(),
-            };
-            self.gc.enqueue(job).await;
+        for (shard, end_key) in gc_ranges {
+            self.gc.update_delete_until(shard, end_key);
         }
 
         Ok(())
-    }
-}
-
-#[derive(Clone)]
-pub struct GCQueue<V: InternalMessageValue> {
-    sender: mpsc::Sender<GCJob<V>>,
-    buffer_size: usize,
-}
-
-impl<V: InternalMessageValue> GCQueue<V> {
-    pub fn new(buffer_size: usize) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<GCJob<V>>(buffer_size);
-
-        // Spawn the worker thread
-        task::spawn({
-            let cloned_sender = sender.clone();
-            async move {
-                while let Some(job) = receiver.recv().await {
-                    job.run().await;
-
-                    let current_queue_size = buffer_size - cloned_sender.capacity();
-
-                    metrics::counter!("tycho_internal_queue_gc_current_queue_size")
-                        .increment(current_queue_size as u64);
-                }
-            }
-        });
-
-        GCQueue {
-            sender,
-            buffer_size,
-        }
-    }
-
-    pub async fn enqueue(&self, job: GCJob<V>) {
-        self.sender.send(job).await.unwrap();
-
-        let current_queue_size = self.buffer_size - self.sender.capacity();
-
-        metrics::counter!("tycho_internal_queue_gc_current_queue_size")
-            .increment(current_queue_size as u64);
-    }
-}
-
-pub struct GCJob<V: InternalMessageValue> {
-    shard: ShardIdent,
-    end_key: QueueKey,
-    persistent_state: Arc<dyn PersistentState<V> + Send + Sync>,
-}
-
-impl<V: InternalMessageValue> GCJob<V> {
-    pub async fn run(&self) {
-        let shard = self.shard;
-        let end_key = self.end_key;
-        let persistent_state = self.persistent_state.clone();
-
-        let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time");
-        task::spawn_blocking(move || {
-            let histogram = HistogramGuard::begin("tycho_internal_queue_gc_time_run");
-            if let Err(e) = persistent_state.delete_messages(shard, &end_key) {
-                tracing::error!(target: tracing_targets::MQ, "Failed to delete messages: {e:?}");
-            }
-            histogram.finish();
-        })
-        .await
-        .expect("Failed to spawn blocking task");
-        histogram.finish();
-
-        let labels = [("shard", shard.to_string())];
-        metrics::gauge!("tycho_internal_queue_processed_upto", &labels).set(end_key.lt as f64);
     }
 }
