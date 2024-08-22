@@ -3,8 +3,8 @@ use std::{cmp, mem};
 use ahash::HashSetExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use futures_util::{FutureExt, StreamExt};
-use tokio::sync::{mpsc, oneshot};
+use futures_util::{future, FutureExt, StreamExt};
+use tokio::sync::{mpsc, oneshot, watch};
 use tycho_network::PeerId;
 use tycho_util::FastHashSet;
 
@@ -17,10 +17,10 @@ use crate::intercom::BroadcasterSignal;
 use crate::models::Round;
 
 /// collector may run without broadcaster, as if broadcaster signalled Ok
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum CollectorSignal {
-    Finish,
-    Err,
+    Finish, // must be sent last
+    Err,    // must be sent last
     Retry,
 }
 
@@ -43,7 +43,7 @@ impl Collector {
         self.next_round = next_round;
         self.next_includes = Some(
             next_includes
-                .map(|a| futures_util::future::ready(a).boxed())
+                .map(|a| future::ready(a).boxed())
                 .collect::<FuturesUnordered<_>>(),
         );
     }
@@ -53,7 +53,7 @@ impl Collector {
         effects: Effects<CollectorContext>,
         next_dag_round: DagRound, // r+1
         own_point_state: oneshot::Receiver<InclusionState>,
-        collector_signal: mpsc::UnboundedSender<CollectorSignal>,
+        collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Round {
         let span_guard = effects.span().clone().entered();
@@ -138,7 +138,7 @@ struct CollectorTask {
     /// anyway should rewrite signing mechanics - look for comments inside [`DagRound`::`add_exact`]
     next_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
     /// Receiver may be closed (bcaster finished), so do not require `Ok` on send
-    collector_signal: mpsc::UnboundedSender<CollectorSignal>,
+    collector_signal: watch::Sender<CollectorSignal>,
     is_bcaster_ready_ok: bool,
 }
 
@@ -178,14 +178,14 @@ impl CollectorTask {
                     if self.is_ready() {
                         return Ok(self.next_includes)
                     } else {
-                        _ = self.collector_signal.send(CollectorSignal::Retry);
+                        _ = self.collector_signal.send_replace(CollectorSignal::Retry);
                     }
                 },
                 // very frequent event that may seldom cause completion
                 filtered = from_bcast_filter.recv() => match filtered {
                     Some(consensus_event) => {
                         if let Err(round) = self.match_filtered(consensus_event) {
-                            _ = self.collector_signal.send(CollectorSignal::Err);
+                            _ = self.collector_signal.send_replace(CollectorSignal::Err); // last signal
                             return Err(round)
                         }
                     },
@@ -225,7 +225,7 @@ impl CollectorTask {
             self.includes_ready.len() >= self.current_round.peer_count().majority();
         let result = self.is_includes_ready && self.is_bcaster_ready_ok;
         if result {
-            _ = self.collector_signal.send(CollectorSignal::Finish);
+            _ = self.collector_signal.send_replace(CollectorSignal::Finish); // last signal
         }
         tracing::debug!(
             parent: self.effects.span(),
@@ -239,10 +239,9 @@ impl CollectorTask {
 
     fn jump_up(&mut self, state: InclusionState) -> Option<Result<(), Round>> {
         // its ok to discard invalid state from `next_includes` queue
-        let point_round = state.point()?.valid()?.point.body().location.round;
+        let point_round = state.point()?.valid()?.info.round();
         // will be signed on the next round
-        self.next_includes
-            .push(futures_util::future::ready(state).boxed());
+        self.next_includes.push(future::ready(state).boxed());
         self.is_includes_ready = true;
         let result = match point_round.cmp(&self.next_dag_round.round()) {
             cmp::Ordering::Less => {
@@ -254,7 +253,7 @@ impl CollectorTask {
                     parent: self.effects.span(),
                     "Collector was left behind while broadcast filter advanced ?"
                 );
-                _ = self.collector_signal.send(CollectorSignal::Err);
+                _ = self.collector_signal.send_replace(CollectorSignal::Err); // last signal
                 Some(Err(point_round))
             }
             cmp::Ordering::Equal => {
@@ -305,23 +304,23 @@ impl CollectorTask {
                 }
             }
             ConsensusEvent::Validating { point_id, task } => {
-                if point_id.location.round > self.next_dag_round.round() {
+                if point_id.round > self.next_dag_round.round() {
                     let _guard = self.effects.span().enter();
                     panic!(
                         "Coding error: broadcast filter advanced \
                          while collector left behind; Validating {:?}",
                         point_id.alt()
                     )
-                } else if point_id.location.round == self.next_dag_round.round() {
+                } else if point_id.round == self.next_dag_round.round() {
                     self.next_includes.push(task);
-                } else if point_id.location.round == self.current_round.round() {
+                } else if point_id.round == self.current_round.round() {
                     self.includes.push(task);
                 } // else maybe other's dependency, but too old to be included
                 tracing::debug!(
                     parent: self.effects.span(),
                     event = display("Validating"),
-                    author = display(point_id.location.author.alt()),
-                    round = point_id.location.round.0,
+                    author = display(point_id.author.alt()),
+                    round = point_id.round.0,
                     digest = display(point_id.digest.alt()),
                     "from bcast filter",
                 );
@@ -331,28 +330,23 @@ impl CollectorTask {
     }
 
     // FIXME not so great: some signature requests will be retried,
-    //  just because this futures were not polled. Use global 'current dag round' round
-    //  and sign inside shared join task in dag location,
-    //  do not return location from DagLocation::add_validate(point)
+    //  just because this futures were not polled. Refactor `InclusionState`
     fn on_inclusion_validated(&mut self, state: &InclusionState) {
         let Some(dag_point) = state.point() else {
             let _guard = self.effects.span().enter();
             panic!("Coding error: validated inclusion state must be non empty")
         };
         let signed = match state.signable() {
-            Some(signable) => signable.sign(
-                self.current_round.round(),
-                self.next_dag_round.key_pair(),
-                MempoolConfig::sign_time_range(),
-            ),
+            Some(signable) => {
+                signable.sign(self.current_round.round(), self.next_dag_round.key_pair())
+            }
             None => false,
         };
         let point_signed = state.signed().map_or(false, |result| result.is_ok());
-        let point_included =
-            match point_signed && dag_point.location().round == self.current_round.round() {
-                true => self.includes_ready.insert(dag_point.location().author),
-                false => self.includes_ready.contains(&dag_point.location().author),
-            };
+        let point_included = match point_signed && dag_point.round() == self.current_round.round() {
+            true => self.includes_ready.insert(dag_point.author()),
+            false => self.includes_ready.contains(&dag_point.author()),
+        };
         let level = if dag_point.trusted().is_some() {
             tracing::Level::TRACE
         } else {
@@ -362,8 +356,8 @@ impl CollectorTask {
             parent: self.effects.span(),
             level,
             result = display(dag_point.alt()),
-            author = display(dag_point.location().author.alt()),
-            round = dag_point.location().round.0,
+            author = display(dag_point.author().alt()),
+            round = dag_point.round().0,
             digest = display(dag_point.digest().alt()),
             signed = signed,
             point_signed = point_signed,

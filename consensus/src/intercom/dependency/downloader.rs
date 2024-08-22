@@ -1,24 +1,26 @@
+use std::collections::{BTreeMap, VecDeque};
 use std::iter;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{FutureExt, StreamExt};
+use parking_lot::Mutex;
 use rand::{thread_rng, RngCore};
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing::Instrument;
 use tycho_network::PeerId;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::FastHashMap;
 
-use crate::dag::{DagRound, Verifier};
-use crate::effects::{AltFormat, DownloadContext, Effects, ValidateContext};
+use crate::dag::{Verifier, VerifyError};
+use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
-use crate::models::{DagPoint, PeerCount, PointId};
+use crate::models::{PeerCount, PointId, Round};
 use crate::Point;
 
 #[derive(Clone)]
@@ -26,9 +28,67 @@ pub struct Downloader {
     inner: Arc<DownloaderInner>,
 }
 
+pub enum DownloadResult {
+    NotFound,
+    Verified(Point),
+    #[allow(dead_code)]
+    IllFormed(Point),
+}
+
 struct DownloaderInner {
     dispatcher: Dispatcher,
     peer_schedule: PeerSchedule,
+    limiter: Mutex<Limiter>,
+}
+
+#[derive(Default)]
+struct Limiter {
+    running: u16,
+    waiters: BTreeMap<Round, VecDeque<Arc<Semaphore>>>,
+}
+
+impl Limiter {
+    fn enter(&mut self, round: Round) -> Option<Arc<Semaphore>> {
+        // cannot be strict equality: at least one is always allowed, others are concurrent to it
+        if self.running <= MempoolConfig::CONCURRENT_DOWNLOADS {
+            self.running += 1;
+            None
+        } else {
+            // create locked
+            let semaphore = Arc::new(Semaphore::new(0));
+            self.waiters
+                .entry(round)
+                .or_default()
+                .push_back(semaphore.clone());
+            Some(semaphore)
+        }
+    }
+
+    fn exit(&mut self) {
+        // free the topmost waiter by round
+        if let Some(mut entry) = self.waiters.last_entry() {
+            // fifo among those with the same round
+            match entry.get_mut().pop_front() {
+                Some(semaphore) => {
+                    assert_eq!(
+                        semaphore.available_permits(),
+                        0,
+                        "dequeued semaphore must not have permits"
+                    );
+                    semaphore.add_permits(1); // unlock waiter
+                }
+                None => panic!("downloader limiter: round queue was left empty"),
+            }
+            if entry.get().is_empty() {
+                entry.remove_entry();
+            }
+        } else {
+            self.running = self
+                .running
+                .checked_sub(1)
+                .expect("decrease running downloads counter");
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -49,39 +109,53 @@ impl Downloader {
             inner: Arc::new(DownloaderInner {
                 dispatcher: dispatcher.clone(),
                 peer_schedule: peer_schedule.clone(),
+                limiter: Default::default(),
             }),
         }
     }
 
     pub async fn run(
-        self,
-        point_id: PointId,
-        // Download task holds weak reference to containing round and does not prevent its drop,
-        // while passes weak ref to validate; so Verifier is able to break recursive validation
-        // (trust consensus on `DAG_DEPTH` at least) and does not require too deep points
-        // to be checked against their dependencies (if dag round is removed from DAG).
-        // The task will be dropped in case DAG round is dropped and no validation waits this point.
-        // Do not pass `WeakDagRound` here as it would be incorrect to return `DagPoint::NotExists`
-        // if we need to download at a very deep round - let the start of this task hold strong ref.
-        point_dag_round_strong: DagRound,
-        certified_rx: oneshot::Receiver<()>,
+        &self,
+        point_id: &PointId,
         dependers: mpsc::UnboundedReceiver<PeerId>,
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
-    ) -> DagPoint {
+    ) -> DownloadResult {
+        let semaphore_opt = {
+            let mut limiter = self.inner.limiter.lock();
+            limiter.enter(point_id.round)
+        };
+        if let Some(semaphore) = semaphore_opt {
+            match semaphore.acquire().await {
+                Ok(_permit) => {}
+                Err(err) => panic!("downloader limiter: {err}"),
+            }
+        }
+        let result = self
+            .run_task(point_id, dependers, verified_broadcast, effects)
+            .await;
+        {
+            let mut limiter = self.inner.limiter.lock();
+            limiter.exit();
+        }
+        result
+    }
+
+    async fn run_task(
+        &self,
+        point_id: &PointId,
+        dependers: mpsc::UnboundedReceiver<PeerId>,
+        verified_broadcast: oneshot::Receiver<Point>,
+        effects: Effects<DownloadContext>,
+    ) -> DownloadResult {
         let _task_duration = HistogramGuard::begin(DownloadContext::TASK_DURATION);
-        effects.meter_start(&point_id);
+        effects.meter_start(point_id);
         let span_guard = effects.span().enter();
-        assert_eq!(
-            point_id.location.round,
-            point_dag_round_strong.round(),
-            "point and DAG round mismatch"
-        );
         // request point from its signers (any depender is among them as point is already verified)
         let (undone_peers, author_state, updates) = {
             let guard = self.inner.peer_schedule.read();
-            let undone_peers = guard.data.peers_state_for(point_id.location.round.next());
-            let author_state = guard.data.peer_state(&point_id.location.author);
+            let undone_peers = guard.data.peers_state_for(point_id.round.next());
+            let author_state = guard.data.peer_state(&point_id.author);
             (undone_peers.clone(), author_state, guard.updates())
         };
         let peer_count = PeerCount::try_from(undone_peers.len())
@@ -89,9 +163,9 @@ impl Downloader {
         let undone_peers = undone_peers
             .iter()
             // query author no matter if it is scheduled for the next round or not;
-            // it won't affect 2F reliable `NotFound`s to break the task with `DagPoint::NotExists`:
+            // it won't affect 2F reliable `None` responses to break the task with `DagPoint::NotFound`:
             // author is a depender for its point, so its `NotFound` response is not reliable
-            .chain(iter::once((&point_id.location.author, &author_state)))
+            .chain(iter::once((&point_id.author, &author_state)))
             .map(|(peer_id, state)| {
                 let status = PeerStatus {
                     state: *state,
@@ -103,14 +177,11 @@ impl Downloader {
             })
             .collect::<FastHashMap<_, _>>();
 
-        let point_dag_round = point_dag_round_strong.downgrade();
-        // do not leak span and strong round ref across await
-        drop(point_dag_round_strong);
         drop(span_guard);
 
         let mut task = DownloadTask {
             parent: self.clone(),
-            request: Dispatcher::point_by_id_request(&point_id),
+            request: Dispatcher::point_by_id_request(point_id),
             point_id: point_id.clone(),
             peer_count,
             reliably_not_found: 0, // this node is +1 to 2F
@@ -129,25 +200,7 @@ impl Downloader {
 
         DownloadContext::meter_task(&task);
 
-        match downloaded {
-            None => DagPoint::NotExists(Arc::new(point_id)),
-            Some(point) => {
-                tracing::trace!(
-                    parent: effects.span(),
-                    peer = display(point.body().location.author.alt()),
-                    "downloaded, now validating",
-                );
-                Verifier::validate(
-                    point.clone(),
-                    point_dag_round,
-                    self.clone(),
-                    certified_rx,
-                    Effects::<ValidateContext>::new(&effects, &point),
-                )
-                // this is the only `await` in the task, that resolves the download
-                .await
-            }
-        }
+        downloaded
     }
 }
 
@@ -176,7 +229,10 @@ struct DownloadTask {
 impl DownloadTask {
     // point's author is a top priority; fallback priority is (any) dependent point's author
     // recursively: every dependency is expected to be signed by 2/3+1
-    pub async fn run(&mut self, mut verified_broadcast: oneshot::Receiver<Point>) -> Option<Point> {
+    pub async fn run(
+        &mut self,
+        mut verified_broadcast: oneshot::Receiver<Point>,
+    ) -> DownloadResult {
         // give equal time to every attempt, ignoring local runtime delays; do not `Burst` requests
         self.interval
             .set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -184,16 +240,16 @@ impl DownloadTask {
         loop {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
-                Ok(point) = &mut verified_broadcast => break Some(point),
+                Ok(point) = &mut verified_broadcast => break DownloadResult::Verified(point),
                 Some(depender) = self.dependers.recv() => self.add_depender(&depender),
                 update = self.updates.recv() => self.match_peer_updates(update),
                 Some((peer_id, result)) = self.downloading.next() =>
                     match self.verify(&peer_id, result) {
-                        Some(point) => break Some(point),
+                        Some(found) => break found,
                         None => if self.shall_continue() {
                             continue
                         } else {
-                            break None;
+                            break DownloadResult::NotFound;
                         }
                     },
                 // most rare arm to make progress despite slow responding peers
@@ -281,7 +337,7 @@ impl DownloadTask {
         &mut self,
         peer_id: &PeerId,
         result: anyhow::Result<PointByIdResponse>,
-    ) -> Option<Point> {
+    ) -> Option<DownloadResult> {
         let defined_response =
             match result {
                 Ok(PointByIdResponse::Defined(response)) => response,
@@ -341,8 +397,8 @@ impl DownloadTask {
                 self.unreliable_peers = self.unreliable_peers.saturating_add(1);
                 tracing::error!(
                     peer_id = display(peer_id.alt()),
-                    author = display(point.body().location.author.alt()),
-                    round = point.body().location.round.0,
+                    author = display(point.data().author.alt()),
+                    round = point.round().0,
                     digest = display(point.digest().alt()),
                     "returned wrong point",
                 );
@@ -350,21 +406,18 @@ impl DownloadTask {
             }
             Some(point) => {
                 match Verifier::verify(&point, &self.parent.inner.peer_schedule) {
-                    Err(dag_point) => {
+                    Err(error @ VerifyError::BadSig) => {
                         // reliable peer won't return unverifiable point
                         self.unreliable_peers = self.unreliable_peers.saturating_add(1);
-                        assert!(
-                            dag_point.valid().is_none(),
-                            "Coding error: verify() cannot result into a valid point"
-                        );
                         tracing::error!(
-                            result = display(dag_point.alt()),
+                            result = debug(error),
                             peer = display(peer_id.alt()),
                             "downloaded",
                         );
                         None
                     }
-                    Ok(()) => Some(point), // breaks loop
+                    Err(VerifyError::IllFormed) => Some(DownloadResult::IllFormed(point)),
+                    Ok(()) => Some(DownloadResult::Verified(point)), // `Some` breaks outer loop
                 }
             }
         }
@@ -375,7 +428,7 @@ impl DownloadTask {
         //     panic!("too many unreliable peers: {}", self.unreliable_peers)
         // } else
         if self.reliably_not_found as usize >= self.peer_count.majority_of_others() {
-            // the only normal case to resolve into `NotExists`
+            // the only normal case to resolve into `NotFound`
             tracing::warn!(
                 unreliable = self.unreliable_peers,
                 "not downloaded from majority",
@@ -436,6 +489,6 @@ impl Effects<DownloadContext> {
 
         // FIXME not guaranteed to show the latest value as rounds advance, but better than nothing
         metrics::gauge!("tycho_mempool_download_depth_rounds")
-            .set(self.download_max_depth(point_id.location.round));
+            .set(self.download_max_depth(point_id.round));
     }
 }

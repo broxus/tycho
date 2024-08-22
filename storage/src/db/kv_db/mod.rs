@@ -92,6 +92,28 @@ weedb::tables! {
     }
 }
 
+// === Mempool DB ===
+
+pub type MempoolDb = WeeDb<MempoolTables>;
+
+impl WithMigrations for MempoolDb {
+    const NAME: &'static str = "mempool";
+    const VERSION: Semver = [0, 0, 1];
+
+    fn register_migrations(_migrations: &mut Migrations<Self>) -> Result<(), MigrationError> {
+        // TODO: register migrations here
+        Ok(())
+    }
+}
+
+weedb::tables! {
+    pub struct MempoolTables<Caches> {
+        pub points: tables::Points,
+        pub points_info: tables:: PointsInfo,
+        pub points_flags: tables::PointsFlags,
+    }
+}
+
 // === Migrations stuff ===
 
 trait WithMigrations: Sized {

@@ -10,8 +10,10 @@ use indexmap::IndexMap;
 use parking_lot::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{mpsc, Notify};
-use tycho_consensus::{InputBuffer, InputBufferImpl, Point};
+use tycho_consensus::outer_round::{Collator, OuterRound};
+use tycho_consensus::{InputBuffer, MempoolConfig, Point, PointInfo};
 use tycho_network::{DhtClient, OverlayService, PeerId};
+use tycho_storage::MempoolStorage;
 
 use crate::mempool::{
     ExternalMessage, ExternalMessageCache, MempoolAdapter, MempoolAdapterFactory, MempoolAnchor,
@@ -25,6 +27,7 @@ pub struct MempoolAdapterStdImpl {
 
     externals_rx: InputBuffer,
     externals_tx: mpsc::UnboundedSender<Bytes>,
+    top_known_block_round: OuterRound<Collator>,
 
     anchor_added: Arc<Notify>,
 }
@@ -44,7 +47,8 @@ impl MempoolAdapterStdImpl {
         Self {
             anchors,
             externals_tx,
-            externals_rx: InputBufferImpl::new(externals_rx),
+            externals_rx: InputBuffer::new(externals_rx),
+            top_known_block_round: OuterRound::default(),
             anchor_added: Arc::new(Notify::new()),
         }
     }
@@ -52,9 +56,11 @@ impl MempoolAdapterStdImpl {
     pub fn run(
         self: &Arc<Self>,
         key_pair: Arc<KeyPair>,
-        dht_client: DhtClient,
-        overlay_service: OverlayService,
+        dht_client: &DhtClient,
+        overlay_service: &OverlayService,
+        mempool_storage: &MempoolStorage,
         peers: Vec<PeerId>,
+        use_genesis: bool,
     ) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "Creating mempool adapter...");
 
@@ -62,14 +68,18 @@ impl MempoolAdapterStdImpl {
 
         let mut engine = tycho_consensus::Engine::new(
             key_pair,
-            &dht_client,
-            &overlay_service,
+            dht_client,
+            overlay_service,
+            mempool_storage,
             sender,
+            &self.top_known_block_round,
             self.externals_rx.clone(),
         );
 
+        if use_genesis {
+            engine.init_with_genesis(&peers);
+        }
         tokio::spawn(async move {
-            engine.init_with_genesis(&peers).await;
             engine.run().await;
         });
 
@@ -82,18 +92,21 @@ impl MempoolAdapterStdImpl {
         self.externals_tx.send(message).ok();
     }
 
-    async fn handle_anchors_task(self: Arc<Self>, mut rx: UnboundedReceiver<(Point, Vec<Point>)>) {
-        let mut cache = ExternalMessageCache::new(1000);
+    async fn handle_anchors_task(
+        self: Arc<Self>,
+        mut rx: UnboundedReceiver<(PointInfo, Vec<Point>)>,
+    ) {
+        let mut cache = ExternalMessageCache::new(MempoolConfig::DEDUPLICATE_ROUNDS);
         while let Some((anchor, points)) = rx.recv().await {
-            let anchor_id: MempoolAnchorId = anchor.body().location.round.0;
+            let anchor_id: MempoolAnchorId = anchor.round().0;
             let mut messages = Vec::new();
             let mut total_messages = 0;
             let mut total_bytes = 0;
             let mut messages_bytes = 0;
 
             for point in points.iter() {
-                total_messages += point.body().payload.len();
-                'message: for message in &point.body().payload {
+                total_messages += point.payload().len();
+                'message: for message in point.payload() {
                     total_bytes += message.len();
                     let cell = match Boc::decode(message) {
                         Ok(cell) => cell,
@@ -130,7 +143,7 @@ impl MempoolAdapterStdImpl {
                 }
             }
 
-            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.body().location.round.0);
+            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.round().0);
             metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
             metrics::counter!("tycho_mempool_externals_bytes_total").increment(messages_bytes as _);
             metrics::counter!("tycho_mempool_duplicates_count_total")
@@ -141,7 +154,7 @@ impl MempoolAdapterStdImpl {
             tracing::info!(
                 target: tracing_targets::MEMPOOL_ADAPTER,
                 round = anchor_id,
-                time = anchor.body().time.as_u64(),
+                time = anchor.data().time.as_u64(),
                 externals_unique = messages.len(),
                 externals_skipped = total_messages - messages.len(),
                 "new anchor"
@@ -149,8 +162,8 @@ impl MempoolAdapterStdImpl {
 
             self.add_anchor(Arc::new(MempoolAnchor {
                 id: anchor_id,
-                chain_time: anchor.body().time.as_u64(),
-                author: anchor.body().location.author,
+                chain_time: anchor.data().time.as_u64(),
+                author: anchor.data().author,
                 externals: messages,
             }));
 
@@ -189,7 +202,6 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>> {
         // TODO: make real implementation, currently only return anchor from local cache
-
         Ok(self.anchors.read().get(&anchor_id).cloned())
     }
 
@@ -229,8 +241,8 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         }
     }
 
-    async fn handle_top_processed_to_anchor(&self, _anchor_id: u32) -> Result<()> {
-        // TODO: make real implementation, currently does nothing
+    async fn handle_top_processed_to_anchor(&self, anchor_id: u32) -> Result<()> {
+        self.top_known_block_round.set_max_raw(anchor_id);
         Ok(())
     }
 

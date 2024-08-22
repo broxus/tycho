@@ -57,7 +57,7 @@ impl Debug for AltFmt<'_, PointId> {
             LogFlavor::Truncated => write!(
                 f,
                 "PointId( {:.4} @ {} # {:.4} )",
-                self.0.location.author, self.0.location.round.0, self.0.digest
+                self.0.author, self.0.round.0, self.0.digest
             ),
         }
     }
@@ -70,7 +70,8 @@ impl Display for AltFmt<'_, DagPoint> {
             DagPoint::Trusted(_) => "Trusted",
             DagPoint::Suspicious(_) => "Suspicious",
             DagPoint::Invalid(_) => "Invalid",
-            DagPoint::NotExists(_) => "NotExists",
+            DagPoint::IllFormed(_) => "IllFormed",
+            DagPoint::NotFound(_) => "NotFound",
         })
     }
 }

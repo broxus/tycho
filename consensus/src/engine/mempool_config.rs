@@ -1,4 +1,3 @@
-use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use crate::models::{Round, UnixTime};
@@ -14,27 +13,30 @@ pub struct MempoolConfig;
 
 impl MempoolConfig {
     /// how far a signed point (by the time in its body)
-    /// may be in the future compared with local (wall) time
-    const CLOCK_SKEW: UnixTime = UnixTime::from_millis(5 * 1000);
-    /// how long a point from past remains eligible for signature and inclusion;
-    /// time in point body is compared with wall time;
-    /// if consensus makes no progress for such long, it will need a manual restart from a new genesis
-    const MAX_OUTDATED: UnixTime = UnixTime::from_millis(365 * 24 * 60 * 60 * 1000);
+    /// may be in the future compared with local (wall) time.
+    /// Lower bound is defined by genesis, and then advanced by leaders among reliable peers.
+    /// Time is non-decreasing due to its inheritance from anchor candidate in every point.
+    pub const CLOCK_SKEW: UnixTime = UnixTime::from_millis(5 * 1000);
 
-    /// see [`CLOCK_SKEW`](Self::CLOCK_SKEW) and [`MAX_OUTDATED`](Self::MAX_OUTDATED)
-    pub fn sign_time_range() -> RangeInclusive<UnixTime> {
-        let now = UnixTime::now();
-        now - Self::MAX_OUTDATED..=now + Self::CLOCK_SKEW
-    }
-
-    /// the least amount of [Round]s that are kept in [`Dag`](crate::dag::Dag)
+    /// hard limit (in rounds) on anchor history length
     /// includes anchor candidate round, though it is committed at the next attempt
-    pub const COMMIT_DEPTH: u8 = 20;
+    pub const COMMIT_DEPTH: u8 = 21;
 
     pub const GENESIS_ROUND: Round = Round(1);
 
     /// hard limit on point payload (excessive will be postponed)
     pub const PAYLOAD_BATCH_BYTES: usize = 768 * 1024;
+
+    /// External messages are deduplicated within a fixed depth for each anchor.
+    /// Zero turns off deduplication.
+    pub const DEDUPLICATE_ROUNDS: u16 = 140;
+
+    /// The max expected distance (in rounds) between two anchor triggers. Defines both:
+    /// * max acceptable distance between consensus and the top known block,
+    ///   before local mempool enters silent mode (stops to produce points).
+    /// * max amount of rounds (behind peer's last commit, defined by an anchor trigger in points)
+    ///   a peer must respond with valid points if it directly referenced them
+    pub const MAX_ANCHOR_DISTANCE: u16 = if cfg!(feature = "test") { 21 } else { 210 };
 
     // == Configs above must be globally same for consensus to run
     // ========
@@ -42,9 +44,8 @@ impl MempoolConfig {
     // == though misconfiguration may make the node unusable or banned
 
     /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
-    /// and allows [`Dag`](crate::dag::Dag) to grow in one time to catch up the lag behind consensus
-    /// without explicit sync
-    pub const ROUNDS_LAG_BEFORE_SYNC: u8 = 20;
+    /// to extend [`Dag`](crate::dag::Dag) without downloading points for locally skipped rounds
+    pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 21;
 
     /// see [`LogFlavor`]
     pub const LOG_FLAVOR: LogFlavor = LogFlavor::Truncated;
@@ -72,11 +73,29 @@ impl MempoolConfig {
     /// Notice that reliable peers respond immediately with points they already have
     /// validated successfully, or return `None`.
     pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(25);
+
+    /// max count of ongoing downloads (except the first one) at any point of time
+    pub const CONCURRENT_DOWNLOADS: u16 = if cfg!(feature = "test") { 0 } else { 260 };
+
+    /// Max distance (in rounds) behind consensus at which local mempool
+    /// in silent mode (see [`Self::MAX_ANCHOR_DISTANCE`])
+    /// is supposed to keep collation-ready history
+    /// (see [`Self::DEDUPLICATE_ROUNDS`] and [`Self::COMMIT_DEPTH`])
+    pub const ACCEPTABLE_COLLATOR_LAG: u16 = 1_050 - Self::MAX_ANCHOR_DISTANCE;
+
+    /// How often (in rounds) try to flush and delete obsolete data. Cannot be zero.
+    /// Also affects WAL file size (more often flushes create more small files).
+    pub const CLEAN_ROCKS_PERIOD: u16 = if cfg!(feature = "test") { 10 } else { 105 };
 }
 
 const _: () = assert!(
-    MempoolConfig::ROUNDS_LAG_BEFORE_SYNC >= MempoolConfig::COMMIT_DEPTH,
-    "invalid config: no need to sync when data is present in DAG"
+    MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
+    "invalid config: genesis round is too low and will make code panic"
+);
+
+const _: () = assert!(
+    MempoolConfig::MAX_ANCHOR_DISTANCE >= MempoolConfig::COMMIT_DEPTH as u16,
+    "invalid config: max acceptable anchor distance cannot be less than commit depth"
 );
 
 const _: () = assert!(
@@ -85,6 +104,6 @@ const _: () = assert!(
 );
 
 const _: () = assert!(
-    MempoolConfig::GENESIS_ROUND.0 > Round::BOTTOM.0,
-    "invalid config: genesis round is too low and will make code panic"
+    MempoolConfig::CLEAN_ROCKS_PERIOD > 0,
+    "invalid config: rocks db clean period cannot be zero rounds"
 );

@@ -1,9 +1,9 @@
 use std::array;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use everscale_crypto::ed25519::KeyPair;
 use tycho_network::PeerId;
+use tycho_util::FastHashSet;
 
 use crate::models::Round;
 
@@ -12,22 +12,26 @@ pub struct PeerScheduleStateless {
     /// retrieved for arbitrary round
     local_keys: Arc<KeyPair>,
     /// order matters to derive leader in `AnchorStage`
-    peers: [Arc<BTreeSet<PeerId>>; 3],
+    peer_vecs: [Arc<Vec<PeerId>>; 3],
+    peer_sets: [Arc<FastHashSet<PeerId>>; 3],
     prev_epoch_start: Round,
     cur_epoch_start: Round,
     next_epoch_start: Option<Round>,
-    empty: Arc<BTreeSet<PeerId>>,
+    empty_vec: Arc<Vec<PeerId>>,
+    empty_set: Arc<FastHashSet<PeerId>>,
 }
 
 impl PeerScheduleStateless {
     pub fn new(local_keys: Arc<KeyPair>) -> Self {
         Self {
             local_keys,
-            peers: Default::default(),
+            peer_vecs: Default::default(),
+            peer_sets: Default::default(),
             prev_epoch_start: Round::BOTTOM,
             cur_epoch_start: Round::BOTTOM,
             next_epoch_start: None,
-            empty: Default::default(),
+            empty_vec: Default::default(),
+            empty_set: Default::default(),
         }
     }
 
@@ -63,24 +67,37 @@ impl PeerScheduleStateless {
     pub fn peers_for_array<const N: usize>(
         &self,
         rounds: [Round; N],
-    ) -> [Arc<BTreeSet<PeerId>>; N] {
+    ) -> [Arc<FastHashSet<PeerId>>; N] {
         array::from_fn(|i| self.peers_for(rounds[i]).clone())
     }
 
-    pub fn peers_for(&self, round: Round) -> &'_ Arc<BTreeSet<PeerId>> {
+    pub fn peers_for(&self, round: Round) -> &Arc<FastHashSet<PeerId>> {
         if self.next_epoch_start.map_or(false, |r| round >= r) {
-            &self.peers[2]
+            &self.peer_sets[2]
         } else if round >= self.cur_epoch_start {
-            &self.peers[1]
+            &self.peer_sets[1]
         } else if round >= self.prev_epoch_start {
-            &self.peers[0]
+            &self.peer_sets[0]
         } else {
-            &self.empty
+            &self.empty_set
+        }
+    }
+
+    pub fn peers_ordered_for(&self, round: Round) -> &Arc<Vec<PeerId>> {
+        if self.next_epoch_start.map_or(false, |r| round >= r) {
+            &self.peer_vecs[2]
+        } else if round >= self.cur_epoch_start {
+            &self.peer_vecs[1]
+        } else if round >= self.prev_epoch_start {
+            &self.peer_vecs[0]
+        } else {
+            &self.empty_vec
         }
     }
 
     pub(super) fn set_next_peers(&mut self, peers: &[PeerId]) {
-        self.peers[2] = Arc::new(peers.iter().copied().collect());
+        self.peer_sets[2] = Arc::new(peers.iter().copied().collect());
+        self.peer_vecs[2] = Arc::new(peers.to_vec());
     }
 
     pub(super) fn set_next_start(&mut self, round: Round) {
@@ -98,10 +115,12 @@ impl PeerScheduleStateless {
         self.next_epoch_start = None; // makes next epoch peers inaccessible for reads
 
         self.forget_previous(); // in case it was not called manually earlier
-        self.peers.rotate_left(1);
+        self.peer_sets.rotate_left(1);
+        self.peer_vecs.rotate_left(1);
     }
 
     pub(super) fn forget_previous(&mut self) {
-        self.peers[0] = Default::default();
+        self.peer_sets[0] = Default::default();
+        self.peer_vecs[0] = Default::default();
     }
 }

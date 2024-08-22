@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::mem;
 use std::sync::Arc;
 
@@ -7,7 +6,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 use tycho_network::PeerId;
 use tycho_util::{FastHashMap, FastHashSet};
 
@@ -46,14 +45,14 @@ impl Broadcaster {
         point: &Point,
         peer_schedule: &PeerSchedule,
         bcaster_signal: oneshot::Sender<BroadcasterSignal>,
-        collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
+        collector_signal: watch::Receiver<CollectorSignal>,
     ) -> LastOwnPoint {
         let (signers, mut bcast_peers, peer_updates) = {
             let guard = peer_schedule.read();
             // `atomic` can be updated only under write lock, so view under read lock is consistent
             let signers = peer_schedule
                 .atomic()
-                .peers_for(point.body().location.round.next())
+                .peers_for(point.round().next())
                 .clone();
             let bcast_peers = guard.data.broadcast_receivers().clone();
             (signers, bcast_peers, guard.updates())
@@ -82,7 +81,7 @@ impl Broadcaster {
             bcast_current: QueryResponses::default(),
             bcast_outdated,
 
-            sig_request: Dispatcher::signature_request(point.body().location.round),
+            sig_request: Dispatcher::signature_request(point.round()),
             sig_peers: FastHashSet::default(),
             sig_current: FuturesUnordered::default(),
         };
@@ -92,7 +91,7 @@ impl Broadcaster {
         LastOwnPoint {
             digest: point.digest().clone(),
             evidence: task.signatures.into_iter().collect(),
-            round: point.body().location.round,
+            round: point.round(),
             signers: signers_count,
         }
     }
@@ -104,12 +103,12 @@ struct BroadcasterTask {
     point_digest: Digest,
     /// Receiver may be closed (collector finished), so do not require `Ok` on send
     bcaster_signal: Option<oneshot::Sender<BroadcasterSignal>>,
-    collector_signal: mpsc::UnboundedReceiver<CollectorSignal>,
+    collector_signal: watch::Receiver<CollectorSignal>,
 
     peer_updates: broadcast::Receiver<(PeerId, PeerState)>,
     removed_peers: FastHashSet<PeerId>,
     // every connected peer should receive broadcast, but only signer's signatures are accountable
-    signers: Arc<BTreeSet<PeerId>>,
+    signers: Arc<FastHashSet<PeerId>>,
     signers_count: PeerCount,
     // results
     rejections: FastHashSet<PeerId>,
@@ -126,7 +125,7 @@ struct BroadcasterTask {
 
 impl BroadcasterTask {
     /// returns evidence for broadcast point
-    pub async fn run(&mut self, bcast_peers: FastHashSet<PeerId>) {
+    async fn run(&mut self, bcast_peers: FastHashSet<PeerId>) {
         // how this was supposed to work:
         // * in short: broadcast to all and gather signatures from those who accepted the point
         // * both broadcast and signature tasks have their own retry loop for every peer
@@ -156,8 +155,9 @@ impl BroadcasterTask {
             tokio::select! {
                 biased; // mandatory priority: signals lifecycle, updates, data lifecycle
                 // rare event that may cause immediate completion
-                Some(collector_signal) = self.collector_signal.recv() => {
-                    if self.should_finish(collector_signal) {
+                Ok(()) = self.collector_signal.changed() => {
+                    let signal = *self.collector_signal.borrow_and_update();
+                    if self.should_finish(signal) {
                         break;
                     }
                 }

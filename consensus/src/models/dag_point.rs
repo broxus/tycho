@@ -1,24 +1,32 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::models::point::{Digest, Location, Point, PointId};
+use tycho_network::PeerId;
+
+use crate::models::point::{Digest, PointId};
+use crate::models::{PointInfo, Round};
 
 #[derive(Clone, Debug)]
 pub struct ValidPoint {
-    pub point: Point,
+    pub info: PointInfo,
     pub is_committed: Arc<AtomicBool>,
 }
 
 impl ValidPoint {
-    pub fn new(point: Point) -> Self {
+    pub fn new(info: PointInfo) -> Self {
         Self {
-            point,
+            info,
             is_committed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 #[derive(Clone, Debug)]
+/// cases with point hash or signature mismatch are not represented in enum;
+/// at most we are able to use [`crate::dag::DagRound::set_bad_sig_in_broadcast`],
+/// but any bad signatures from third party nodes:
+/// * in download response - makes sender not reliable
+/// * in dependency graph - cannot be used, most likely will not be downloaded, i.e. `NotExist`
 pub enum DagPoint {
     /// valid without demur, needed to blame equivocation or graph connectivity violations
     Trusted(ValidPoint),
@@ -26,35 +34,28 @@ pub enum DagPoint {
     /// we do not sign such a point, but others may include it without consequences;
     /// consensus will decide whether to sign its proof or not; we shall ban the author anyway
     Suspicious(ValidPoint),
+    /// dependency issues;
     /// invalidates dependent point; needed to blame equivocation
-    Invalid(Point),
-    /// point hash or signature mismatch, not well-formed, download failed - i.e. unusable point;
+    Invalid(PointInfo),
+    /// not well-formed, unusable point;
     /// invalidates dependent point; blame author of dependent point
-    NotExists(Arc<PointId>),
+    IllFormed(Arc<PointId>),
+    /// download failed despite multiple retries;
+    /// invalidates dependent point; blame author of dependent point
+    NotFound(Arc<PointId>),
 }
 
 impl DagPoint {
     pub fn into_valid(self) -> Option<ValidPoint> {
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => Some(valid),
-            Self::Suspicious(valid) => Some(valid),
-            _ => None,
-        }
-    }
-
-    pub fn into_trusted(self) -> Option<ValidPoint> {
-        match self {
-            Self::Trusted(valid) => Some(valid),
+            Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
             _ => None,
         }
     }
 
     pub fn valid(&self) -> Option<&'_ ValidPoint> {
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => Some(valid),
-            Self::Suspicious(valid) => Some(valid),
+            Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
             _ => None,
         }
     }
@@ -66,23 +67,27 @@ impl DagPoint {
         }
     }
 
-    pub fn location(&self) -> &'_ Location {
-        #[allow(clippy::match_same_arms)]
+    pub fn author(&self) -> PeerId {
         match self {
-            Self::Trusted(valid) => &valid.point.body().location,
-            Self::Suspicious(valid) => &valid.point.body().location,
-            Self::Invalid(point) => &point.body().location,
-            Self::NotExists(id) => &id.location,
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.data().author,
+            Self::Invalid(info) => info.data().author,
+            Self::IllFormed(id) | Self::NotFound(id) => id.author,
+        }
+    }
+
+    pub fn round(&self) -> Round {
+        match self {
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.round(),
+            Self::Invalid(info) => info.round(),
+            Self::IllFormed(id) | Self::NotFound(id) => id.round,
         }
     }
 
     pub fn digest(&self) -> &'_ Digest {
-        #[allow(clippy::match_same_arms)]
         match self {
-            Self::Trusted(valid) => valid.point.digest(),
-            Self::Suspicious(valid) => valid.point.digest(),
-            Self::Invalid(point) => point.digest(),
-            Self::NotExists(id) => &id.digest,
+            Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.digest(),
+            Self::Invalid(info) => info.digest(),
+            Self::IllFormed(id) | Self::NotFound(id) => &id.digest,
         }
     }
 }

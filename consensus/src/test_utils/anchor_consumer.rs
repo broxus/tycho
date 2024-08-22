@@ -9,30 +9,43 @@ use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
 use crate::models::{PointId, Round};
-use crate::{MempoolConfig, Point};
+use crate::outer_round::{Collator, OuterRound};
+use crate::{MempoolConfig, Point, PointInfo};
 
 #[derive(Default)]
 pub struct AnchorConsumer {
-    streams: StreamMap<PeerId, UnboundedReceiverStream<(Point, Vec<Point>)>>,
+    streams: StreamMap<PeerId, UnboundedReceiverStream<(PointInfo, Vec<Point>)>>,
     // all committers must share the same sequence of anchor points
     anchors: FastHashMap<Round, FastHashMap<PeerId, PointId>>,
     // all committers must share the same anchor history (linearized inclusion dag) for each anchor
     history: FastHashMap<Round, Vec<PointId>>,
+    // simulates feedback from collator, as if anchor committed by all peers
+    // is immediately confirmed by a top known block
+    collator_round: OuterRound<Collator>,
 }
 
 impl AnchorConsumer {
-    pub fn add(&mut self, committer: PeerId, committed: UnboundedReceiver<(Point, Vec<Point>)>) {
+    pub fn add(
+        &mut self,
+        committer: PeerId,
+        committed: UnboundedReceiver<(PointInfo, Vec<Point>)>,
+    ) {
         self.streams
             .insert(committer, UnboundedReceiverStream::new(committed));
     }
 
+    pub fn collator_round(&self) -> &OuterRound<Collator> {
+        &self.collator_round
+    }
+
     pub async fn drain(mut self) {
         loop {
-            _ = self
+            let (_, (anchor, _)) = self
                 .streams
                 .next()
                 .await
                 .expect("committed anchor reader must be alive");
+            self.collator_round.set_max(anchor.round());
         }
     }
 
@@ -46,7 +59,7 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
             let anchor_id = anchor.id();
 
-            let anchor_round = anchor.body().location.round;
+            let anchor_round = anchor.round();
 
             // get last previous anchor round and check if we don't have previous
             for (prev_anchor_round, committers) in self
@@ -133,7 +146,7 @@ impl AnchorConsumer {
 
             let minmax_history_round = common_history
                 .iter()
-                .map(|point_id| point_id.location.round)
+                .map(|point_id| point_id.round)
                 .minmax()
                 .into_option();
 
@@ -146,9 +159,11 @@ impl AnchorConsumer {
                 next_expected_history_round = max.next();
             }
 
+            common_anchors.sort_unstable();
             tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
-            tracing::debug!("Refs hashmap ken: {}", self.history.len());
-            if !common_anchors.is_empty() {
+            tracing::trace!("History hashmap len: {}", self.history.len());
+            if let Some(top_common_anchor) = common_anchors.last() {
+                self.collator_round.set_max_raw(*top_common_anchor);
                 tracing::info!(
                     "all nodes committed anchors for rounds {:?}",
                     common_anchors

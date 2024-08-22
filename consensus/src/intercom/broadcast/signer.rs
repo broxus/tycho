@@ -1,10 +1,10 @@
 use tycho_network::PeerId;
 
 use crate::dag::DagRound;
+use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::intercom::dto::{SignatureRejectedReason, SignatureResponse};
 use crate::models::Round;
-use crate::{dyn_event, MempoolConfig};
 
 pub struct Signer;
 impl Signer {
@@ -79,7 +79,7 @@ impl Signer {
                     "requests for other rounds are filtered out at the beginning of this method"
                 )
             };
-            signable.sign(engine_round, key_pair, MempoolConfig::sign_time_range());
+            signable.sign(engine_round, key_pair);
         }
         match state.signed() {
             Some(Ok(signed)) => SignatureResponse::Signature(signed.with.clone()),

@@ -17,8 +17,9 @@ use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 use tycho_consensus::test_utils::AnchorConsumer;
-use tycho_consensus::{Engine, InputBufferStub};
+use tycho_consensus::{Engine, InputBuffer};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId, PeerInfo};
+use tycho_storage::Storage;
 use tycho_util::time::now_sec;
 
 #[tokio::main]
@@ -133,20 +134,26 @@ impl CmdRun {
         }
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
+        let (mock_storage, _tmp_dir) = Storage::new_temp()?;
+
+        let mut anchor_consumer = AnchorConsumer::default();
+        anchor_consumer.add(local_id, committed_rx);
+
         let mut engine = Engine::new(
             key_pair.clone(),
             &dht_client,
             &overlay,
+            mock_storage.mempool_storage(),
             committed_tx,
-            InputBufferStub::new(
+            anchor_consumer.collator_round(),
+            InputBuffer::new_stub(
                 NonZeroUsize::new(100).unwrap(),
                 NonZeroUsize::new(5).unwrap(),
             ),
         );
-        engine.init_with_genesis(all_peers.as_slice()).await;
-        let mut anchor_consumer = AnchorConsumer::default();
-        anchor_consumer.add(local_id, committed_rx);
+
         tokio::spawn(anchor_consumer.drain());
+        engine.init_with_genesis(&all_peers);
 
         tracing::info!(
             local_id = %dht_client.network().peer_id(),

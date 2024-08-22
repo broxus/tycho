@@ -463,6 +463,63 @@ impl ColumnFamilyOptions<Caches> for CodeHashesByAddress {
     }
 }
 
+/// Stores mempool point data
+/// - Key: `round: u32, digest: [u8; 32]`
+/// - Value: `Point`
+pub struct Points;
+
+impl ColumnFamily for Points {
+    const NAME: &'static str = "points";
+}
+
+impl ColumnFamilyOptions<Caches> for Points {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        optimize_for_point_lookup(opts, caches);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_enable_blob_files(true);
+        opts.set_enable_blob_gc(false); // manual
+        opts.set_min_blob_size(DEFAULT_MIN_BLOB_SIZE);
+        opts.set_blob_compression_type(DBCompressionType::None);
+    }
+}
+
+/// Stores truncated mempool point data
+/// - Key: `round: u32, digest: [u8; 32]`
+/// - Value: `PointInfo`
+pub struct PointsInfo;
+
+impl ColumnFamily for PointsInfo {
+    const NAME: &'static str = "points_info";
+}
+
+impl ColumnFamilyOptions<Caches> for PointsInfo {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        optimize_for_point_lookup(opts, caches);
+        opts.set_disable_auto_compactions(true);
+    }
+}
+
+/// Stores mempool point flags
+/// - Key: `round: u32, digest: [u8; 32]` as in [`Points`]
+/// - Value: [`crate::models::PointFlags`]
+pub struct PointsFlags;
+
+impl PointsFlags {}
+
+impl ColumnFamily for PointsFlags {
+    const NAME: &'static str = "points_flags";
+}
+
+impl ColumnFamilyOptions<Caches> for PointsFlags {
+    fn options(opts: &mut Options, caches: &mut Caches) {
+        optimize_for_point_lookup(opts, caches);
+        opts.set_disable_auto_compactions(true);
+
+        opts.set_merge_operator_associative("points_flags_merge", crate::models::PointFlags::merge);
+    }
+}
+
 fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     let mut block_factory = BlockBasedOptions::default();
     block_factory.set_block_cache(&caches.block_cache);

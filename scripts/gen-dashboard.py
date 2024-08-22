@@ -1157,16 +1157,38 @@ def validator() -> RowPanel:
     return create_row("Validator", metrics)
 
 
+def mempool_rounds() -> RowPanel:
+    metrics = [
+        create_counter_panel(
+            "tycho_mempool_engine_current_round",
+            "Engine: current round (is always started at consensus round or next one)",
+        ),
+        create_counter_panel(
+            "tycho_mempool_consensus_current_round",
+            "Broadcast Filter: determined consensus round",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_least_to_keep_round",
+            "Storage: least to keep history round",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_consensus_ahead_collated",
+            "Consensus ahead of top known block: silent mode trigger",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_consensus_ahead_committed",
+            "Consensus ahead of committed: commit latency",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_committed_ahead_collated",
+            "Committed ahead of top known block: block consensus latency",
+        ),
+    ]
+    return create_row("Mempool rounds", metrics)
+
+
 def mempool() -> RowPanel:
     metrics = [
-        create_gauge_panel(
-            "tycho_mempool_last_anchor_round",
-            "Adapter: last anchor round",
-        ),
-        create_gauge_panel(
-            "tycho_mempool_engine_current_round",
-            "Engine: current round",
-        ),
         # == Mempool adapter == #
         create_counter_panel(
             "tycho_mempool_externals_count_total",
@@ -1336,6 +1358,52 @@ def mempool_components() -> RowPanel:
     return create_row("Mempool components", metrics)
 
 
+def mempool_storage() -> RowPanel:
+    metrics = [
+        create_heatmap_panel(
+            "tycho_mempool_store_clean_time",
+            "Clean task",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_expand_anchor_history_time",
+            "Expand anchor history",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_insert_point_time",
+            "Insert point with info and optional flags",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_set_flags_time",
+            "Set flags",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_get_point_count",
+            "Get point count",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_point_time",
+            "Get point",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_get_info_count",
+            "Get info count",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_info_time",
+            "Get info",
+        ),
+        create_counter_panel(
+            "tycho_mempool_store_get_flags_count",
+            "Get flags count",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_flags_time",
+            "Get flags",
+        ),
+    ]
+    return create_row("Mempool storage", metrics)
+
+
 def collator_execution_manager() -> RowPanel:
     metrics = [
         create_heatmap_panel(
@@ -1453,8 +1521,10 @@ dashboard = Dashboard(
         collator_finalize_block(),
         collator_execution_manager(),
         validator(),
+        mempool_rounds(),
         mempool(),
         mempool_components(),
+        mempool_storage(),
         net_traffic(),
         net_conn_manager(),
         net_request_handler(),

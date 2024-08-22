@@ -19,8 +19,8 @@ pub struct PeerScheduleStateful {
     all_resolved: FastHashSet<PeerId>,
 }
 
-impl PeerScheduleStateful {
-    pub fn new() -> Self {
+impl Default for PeerScheduleStateful {
+    fn default() -> Self {
         Self {
             peers_state: Default::default(),
             prev_epoch_start: Round::BOTTOM,
@@ -31,7 +31,9 @@ impl PeerScheduleStateful {
             all_resolved: Default::default(),
         }
     }
+}
 
+impl PeerScheduleStateful {
     /// local peer id is always kept as not resolved, so always excluded from result
     pub fn broadcast_receivers(&self) -> &FastHashSet<PeerId> {
         &self.broadcast_receivers

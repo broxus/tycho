@@ -1,11 +1,11 @@
 use std::collections::{btree_map, BTreeMap};
-use std::ops::RangeInclusive;
 use std::sync::{Arc, OnceLock};
 
 use everscale_crypto::ed25519::KeyPair;
 
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
+use crate::MempoolConfig;
 
 /// If DAG location exists, it must have non-empty `versions` map;
 ///
@@ -30,6 +30,9 @@ pub struct DagLocation {
     /// may become proven by the next round point(s) of a node;
     /// even if we marked a proven point as invalid, consensus may ignore our decision
     versions: BTreeMap<Digest, DagPointFuture>,
+    /// If author produced and sent a point with invalid sig, that only affects equivocation,
+    /// but that point cannot be used in any other way.
+    pub bad_sig_in_broadcast: bool,
 }
 
 impl DagLocation {
@@ -133,20 +136,17 @@ impl Signable {
         &self,
         at: Round,
         key_pair: Option<&KeyPair>, // same round for own point and next round for other's
-        time_range: RangeInclusive<UnixTime>,
     ) -> bool {
         let mut this_call_signed = false;
         if let Some((valid, key_pair)) = self.first_completed.trusted().zip(key_pair) {
-            if time_range.contains(&valid.point.body().time) {
+            if valid.info.data().time < (UnixTime::now() + MempoolConfig::CLOCK_SKEW) {
                 _ = self.signed.get_or_init(|| {
                     this_call_signed = true;
                     Ok(Signed {
                         at,
-                        with: Signature::new(key_pair, valid.point.digest()),
+                        with: Signature::new(key_pair, valid.info.digest()),
                     })
                 });
-            } else if &valid.point.body().time < time_range.start() {
-                self.reject();
             } // else decide later
         } else {
             self.reject();

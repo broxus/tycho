@@ -9,10 +9,9 @@ use tycho_util::FastDashMap;
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
-use crate::effects::{Effects, EngineContext, ValidateContext};
-use crate::engine::MempoolConfig;
+use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, PeerCount, Point, Round, ValidPoint};
+use crate::models::{DagPoint, Digest, PeerCount, Point, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -65,7 +64,7 @@ impl DagRound {
 
     pub fn genesis(genesis: &Point, peer_schedule: &PeerSchedule) -> Self {
         let locations = FastDashMap::with_capacity_and_hasher(1, Default::default());
-        let round = genesis.body().location.round;
+        let round = genesis.round();
         Self(Arc::new(DagRoundInner {
             round,
             peer_count: PeerCount::GENESIS,
@@ -135,16 +134,17 @@ impl DagRound {
         &self,
         point: &Point,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<EngineContext>,
     ) -> Option<BoxFuture<'static, InclusionState>> {
         let _guard = effects.span().enter();
         assert_eq!(
-            point.body().location.round,
+            point.round(),
             self.round(),
             "Coding error: point round does not match dag round"
         );
         let digest = point.digest();
-        self.edit(&point.body().location.author, |loc| {
+        self.edit(&point.data().author, |loc| {
             let result_state = loc.state().clone();
             loc.init_or_modify(
                 digest,
@@ -152,7 +152,9 @@ impl DagRound {
                 //   because current DAG round could advance concurrently;
                 //   now current dag round changes consistently,
                 //   maybe its possible to reduce locking in 'inclusion state'
-                |state| DagPointFuture::new_broadcast(self, point, state, downloader, effects),
+                |state| {
+                    DagPointFuture::new_broadcast(self, point, state, downloader, store, effects)
+                },
                 |existing| existing.resolve_download(point),
             )
             .map(|first| first.clone().map(|_| result_state).boxed())
@@ -160,18 +162,19 @@ impl DagRound {
     }
 
     /// notice: `round` must exactly match point's round,
-    /// otherwise dependency will resolve to [`DagPoint::NotExists`]
+    /// otherwise dependency will resolve to [`DagPoint::NotFound`]
     pub fn add_dependency_exact(
         &self,
         author: &PeerId,
         digest: &Digest,
         depender: &PeerId,
         downloader: &Downloader,
+        store: &MempoolStore,
         effects: &Effects<ValidateContext>,
     ) -> DagPointFuture {
         let future = self.edit(author, |loc| {
             loc.get_or_init(digest, |state| {
-                DagPointFuture::new_download(self, author, digest, state, downloader, effects)
+                DagPointFuture::new_load(self, author, digest, state, downloader, store, effects)
             })
             .clone()
         });
@@ -180,13 +183,27 @@ impl DagRound {
     }
 
     /// for genesis (next round key pair) and own points (point round key pair)
-    pub fn insert_exact_sign(&self, point: &Point, key_pair: Option<&KeyPair>) -> InclusionState {
-        let state = self.insert_exact(
-            &point.body().location.author,
-            &DagPoint::Trusted(ValidPoint::new(point.clone())),
+    pub fn insert_exact_sign(
+        &self,
+        point: &Point,
+        key_pair: Option<&KeyPair>,
+        store: &MempoolStore,
+    ) -> InclusionState {
+        assert_eq!(
+            point.round(),
+            self.round(),
+            "Coding error: dag round mismatches point round on insert"
         );
+        let state = self.edit(&point.data().author, |loc| {
+            let _ready = loc.init_or_modify(
+                point.digest(),
+                |state| DagPointFuture::new_local_trusted(point, state, store),
+                |_fut| {},
+            );
+            loc.state().clone()
+        });
         if let Some(signable) = state.signable() {
-            signable.sign(self.round(), key_pair, MempoolConfig::sign_time_range());
+            signable.sign(self.round(), key_pair);
         }
         assert!(
             state.signed_point(self.round()).is_some(),
@@ -196,28 +213,19 @@ impl DagRound {
         state
     }
 
-    pub fn insert_invalid_exact(&self, sender: &PeerId, dag_point: &DagPoint) {
-        assert!(
-            dag_point.valid().is_none(),
-            "Coding error: failed to insert valid point as invalid"
-        );
-        self.insert_exact(sender, dag_point);
-    }
-
-    fn insert_exact(&self, sender: &PeerId, dag_point: &DagPoint) -> InclusionState {
-        assert_eq!(
-            dag_point.location().round,
-            self.round(),
-            "Coding error: dag round mismatches point round on insert"
-        );
-        self.edit(sender, |loc| {
+    pub fn insert_ill_formed_exact(&self, point: &Point, store: &MempoolStore) {
+        let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
+        self.edit(&point.data().author, |loc| {
             let _ready = loc.init_or_modify(
-                dag_point.digest(),
-                |state| DagPointFuture::new_local(dag_point, state),
+                point.digest(),
+                |state| DagPointFuture::new_invalid(dag_point, state, store),
                 |_fut| {},
             );
-            loc.state().clone()
-        })
+        });
+    }
+
+    pub fn set_bad_sig_in_broadcast(&self, author: &PeerId) {
+        self.edit(author, |loc| loc.bad_sig_in_broadcast = true);
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {

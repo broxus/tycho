@@ -8,25 +8,27 @@ use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
 
-use crate::dag::anchor_stage::AnchorStage;
+use crate::dag::anchor_stage::{AnchorStage, WAVE_ROUNDS};
 use crate::dag::DagRound;
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
-use crate::models::{Digest, LinkField, Location, Point, PointId, Round, ValidPoint};
+use crate::models::{AnchorStageRole, Digest, PointId, PointInfo, Round, ValidPoint};
 
+#[derive(Default)]
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
     rounds: BTreeMap<Round, DagRound>,
 }
 
-impl Dag {
-    pub fn new() -> Self {
-        Self {
-            rounds: BTreeMap::new(),
-        }
-    }
+struct LinkedAnchor {
+    anchor: ValidPoint,
+    anchor_round: DagRound,
+    proof_round: DagRound,
+    trigger_round: Option<DagRound>,
+}
 
+impl Dag {
     pub fn init(&mut self, dag_round: DagRound, next_dag_round: DagRound) {
         assert_eq!(
             Some(dag_round.round()),
@@ -66,7 +68,7 @@ impl Dag {
                 "far behind consensus"
             );
         }
-        if (top.round().0 + MempoolConfig::ROUNDS_LAG_BEFORE_SYNC as u32) < next_round.0 {
+        if (top.round().0 + MempoolConfig::CACHE_AHEAD_ENGINE_ROUNDS as u32) < next_round.0 {
             tracing::warn!(
                 parent: effects.span(),
                 lag = next_round.0 - top.round().0,
@@ -84,18 +86,24 @@ impl Dag {
         top
     }
 
-    fn drop_tail(&mut self, anchor_at: Round) {
-        if let Some(tail) = anchor_at.0.checked_sub(MempoolConfig::COMMIT_DEPTH as u32) {
-            self.rounds.retain(|k, _| k.0 >= tail);
-        };
+    fn drop_tail_before_commit(&mut self, anchor_at: Round) {
+        let tail = (anchor_at.0).saturating_sub(MempoolConfig::COMMIT_DEPTH as u32);
+        self.rounds.retain(|k, _| k.0 >= tail);
     }
 
-    pub fn commit(&mut self) -> Vec<(Point, Vec<Point>)> {
+    fn drop_tail_after_commit(&mut self, anchor_at: Round) {
+        let tail = (anchor_at.0)
+            .saturating_add(WAVE_ROUNDS) // next anchor round
+            .saturating_sub(MempoolConfig::COMMIT_DEPTH as u32);
+        self.rounds.retain(|k, _| k.0 >= tail);
+    }
+
+    pub fn commit(&mut self) -> Vec<(PointInfo, Vec<PointInfo>)> {
         self.commit_up_to(self.top())
     }
 
     /// result is in historical order
-    fn commit_up_to(&mut self, up_to: DagRound) -> Vec<(Point, Vec<Point>)> {
+    fn commit_up_to(&mut self, up_to: DagRound) -> Vec<(PointInfo, Vec<PointInfo>)> {
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -119,8 +127,8 @@ impl Dag {
         let _span = if let Some((latest_trigger, _)) = trigger_stack.first() {
             tracing::error_span!(
                 "commit trigger",
-                author = display(&latest_trigger.body().location.author.alt()),
-                round = latest_trigger.body().location.round.0,
+                author = display(&latest_trigger.data().author.alt()),
+                round = latest_trigger.round().0,
                 digest = display(&latest_trigger.digest().alt()),
             )
             .entered()
@@ -135,48 +143,49 @@ impl Dag {
         // if chain is broken - take the prefix until first gap
         while let Some((trigger, trigger_round)) = trigger_stack.pop() {
             let contiguous_part =
-                Self::anchor_stack(&trigger, trigger_round.clone(), oldest_proof_round);
+                Self::anchor_chain(&trigger, trigger_round.clone(), oldest_proof_round);
             match contiguous_part {
                 None => break, // some dag point future is not yet resolved
-                Some(anchor_data) => {
-                    for (anchor, anchor_round, proof_round, trigger_round) in anchor_data {
+                Some(chain) => {
+                    for linked in chain {
                         // safety net: as rounds are traversed from oldest to newest,
                         // trigger can be met only at first time its candidate round is met;
                         // although triggers should not be overwritten, ensure with `entry` API
-                        anchors.entry(anchor_round.round()).or_insert((
-                            anchor,
-                            anchor_round,
-                            proof_round,
-                            trigger_round,
-                        ));
+                        anchors.entry(linked.anchor.info.round()).or_insert(linked);
                     }
                 }
             }
-            if let Some((_, _, last_proof_round, _)) = anchors.values().last() {
+            if let Some(last_linked) = anchors.values().last() {
                 // no reason to traverse deeper than last proof
-                oldest_proof_round = last_proof_round.round();
+                oldest_proof_round = last_linked.proof_round.round();
             }
         }
 
-        for (_, (anchor, anchor_round, proof_round, trigger_round)) in anchors {
+        for LinkedAnchor {
+            anchor,
+            anchor_round,
+            proof_round,
+            trigger_round,
+        } in anchors.into_values()
+        {
             // Note every next "little anchor candidate that could" must have at least full dag depth
-            // Note if sync is implemented as a second sub-graph - drop up to the last linked in chain
-            self.drop_tail(anchor_round.round());
-            let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.point, anchor_round)
+            // in case previous anchor was triggered directly - rounds are already dropped
+            self.drop_tail_before_commit(anchor_round.round());
+            let Some(uncommitted_rev) = Self::gather_uncommitted_rev(&anchor.info, anchor_round)
             else {
                 break; // will continue at the next call
             };
             match proof_round.anchor_stage() {
-                Some(AnchorStage::Proof { is_used, .. }) => {
-                    is_used.store(true, Ordering::Relaxed);
+                Some(stage) if stage.role == AnchorStageRole::Proof => {
+                    stage.is_used.store(true, Ordering::Relaxed);
                 }
                 _ => panic!("expected AnchorStage::Proof"),
             };
             // Note a proof may be marked as used while it is fired by a future tigger, which
             //   may be left unmarked at the current run until upcoming points become ready
             match trigger_round.as_ref().map(|tr| tr.anchor_stage()) {
-                Some(Some(AnchorStage::Trigger { is_used, .. })) => {
-                    is_used.store(true, Ordering::Relaxed);
+                Some(Some(stage)) if stage.role == AnchorStageRole::Trigger => {
+                    stage.is_used.store(true, Ordering::Relaxed);
                 }
                 Some(_) => panic!("expected AnchorStage::Trigger"),
                 None => {} // anchor triplet without direct trigger (not ready/valid/exists)
@@ -187,10 +196,14 @@ impl Dag {
                 .rev() // return historical order
                 .map(|valid| {
                     valid.is_committed.store(true, Ordering::Relaxed);
-                    valid.point
+                    valid.info
                 })
                 .collect::<Vec<_>>();
-            ordered.push((anchor.point, committed));
+            ordered.push((anchor.info, committed));
+        }
+        if let Some((last_anchor, _)) = ordered.last() {
+            // drop rounds that we'll never need again to free some memory
+            self.drop_tail_after_commit(last_anchor.round());
         }
         ordered
     }
@@ -213,23 +226,28 @@ impl Dag {
                 }
             })
             .find_map(|(round, dag_round)| {
-                dag_round.anchor_stage().and_then(|stage| match stage {
-                    AnchorStage::Proof { is_used, .. } if !is_used.load(Ordering::Relaxed) => {
-                        Some(*round)
-                    }
-                    _ => None,
-                })
+                dag_round
+                    .anchor_stage()
+                    .filter(|stage| {
+                        stage.role == AnchorStageRole::Proof
+                            && !stage.is_used.load(Ordering::Relaxed)
+                    })
+                    .map(|_| *round)
             })
     }
 
     /// not yet used commit triggers in reverse order (newest in front and oldest in back);
     /// use with `vec::pop()`
-    fn trigger_stack(mut dag_round: DagRound, oldest_proof_round: Round) -> Vec<(Point, DagRound)> {
+    fn trigger_stack(
+        mut dag_round: DagRound,
+        oldest_proof_round: Round,
+    ) -> Vec<(PointInfo, DagRound)> {
         let mut latest_trigger = Vec::new();
         loop {
             let prev_dag_round = dag_round.prev().upgrade();
 
-            if let Some(AnchorStage::Trigger {
+            if let Some(AnchorStage {
+                role: AnchorStageRole::Trigger,
                 ref is_used,
                 ref leader,
             }) = dag_round.anchor_stage()
@@ -249,7 +267,7 @@ impl Dag {
                     })
                     .flatten()
                 {
-                    latest_trigger.push((valid.point, dag_round.clone()));
+                    latest_trigger.push((valid.info, dag_round.clone()));
                 };
             };
 
@@ -263,19 +281,18 @@ impl Dag {
         latest_trigger
     }
 
-    /// return values: anchor round, anchor point, anchor round, proof round, direct trigger round
-    fn anchor_stack(
-        trigger: &Point,
+    fn anchor_chain(
+        trigger: &PointInfo,
         trigger_round: DagRound,
         oldest_proof_round: Round,
-    ) -> Option<Vec<(ValidPoint, DagRound, DagRound, Option<DagRound>)>> {
+    ) -> Option<Vec<LinkedAnchor>> {
         assert_eq!(
             trigger.prev_id(),
-            Some(trigger.anchor_id(LinkField::Proof)),
+            Some(trigger.anchor_id(AnchorStageRole::Proof)),
             "invalid anchor proof link, trigger point must have been invalidated"
         );
         assert_eq!(
-            trigger.body().location.round,
+            trigger.round(),
             trigger_round.round(),
             "trigger round does not match trigger point"
         );
@@ -287,22 +304,23 @@ impl Dag {
         let mut result_stack = Vec::new();
         loop {
             assert_eq!(
-                proof_id.location.round,
+                proof_id.round,
                 proof_round.round(),
                 "anchor proof id round does not match"
             );
             let proof = Self::ready_valid_point(
                 &proof_round,
-                &proof_id.location.author,
+                &proof_id.author,
                 &proof_id.digest,
                 "anchor proof",
             )?;
             assert_eq!(
-                proof.point.body().location.round,
+                proof.info.round(),
                 proof_round.round(),
                 "anchor proof round does not match"
             );
-            let Some(AnchorStage::Proof {
+            let Some(AnchorStage {
+                role: AnchorStageRole::Proof,
                 ref leader,
                 ref is_used,
             }) = proof_round.anchor_stage()
@@ -310,26 +328,31 @@ impl Dag {
                 panic!("anchor proof round is not expected, validation is broken")
             };
             assert_eq!(
-                proof.point.body().location.author,
+                proof.info.data().author,
                 leader,
                 "anchor proof author does not match prescribed by round"
             );
             if is_used.load(Ordering::Relaxed) {
                 break Some(result_stack);
             };
-            let anchor_digest = match &proof.point.body().proof {
-                Some(prev) => &prev.digest,
+            let anchor_digest = match proof.info.data().prev_digest.as_ref() {
+                Some(anchor_digest) => anchor_digest,
                 None => panic!("anchor proof must prove to anchor point, verify() is broken"),
             };
             let anchor_round = proof_round.prev().upgrade().expect("cannot be weak");
             let anchor = Self::ready_valid_point(&anchor_round, leader, anchor_digest, "anchor")?;
 
-            proof_id = anchor.point.anchor_id(LinkField::Proof);
-            let next_proof_round = anchor_round.scan(proof_id.location.round);
+            proof_id = anchor.info.anchor_id(AnchorStageRole::Proof);
+            let next_proof_round = anchor_round.scan(proof_id.round);
 
             let trigger_round =
                 mem::take(&mut trigger_round).filter(|tr| proof_round.round() == tr.round().prev());
-            result_stack.push((anchor, anchor_round, proof_round, trigger_round));
+            result_stack.push(LinkedAnchor {
+                anchor,
+                anchor_round,
+                proof_round,
+                trigger_round,
+            });
 
             match next_proof_round {
                 Some(next_proof_round) if next_proof_round.round() >= oldest_proof_round => {
@@ -345,7 +368,7 @@ impl Dag {
     ///
     /// Note: at this point there is no way to check if passed point is really an anchor
     fn gather_uncommitted_rev(
-        anchor: &Point,              // @ r+1
+        anchor: &PointInfo,          // @ r+1
         mut current_round: DagRound, // r+1
     ) -> Option<Vec<ValidPoint>> {
         fn extend(to: &mut BTreeMap<PeerId, Digest>, from: &BTreeMap<PeerId, Digest>) {
@@ -359,7 +382,7 @@ impl Dag {
         }
         assert_eq!(
             current_round.round(),
-            anchor.body().location.round,
+            anchor.round(),
             "passed anchor round does not match anchor point's round"
         );
         let history_limit = Round(
@@ -371,8 +394,8 @@ impl Dag {
         );
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]
-        extend(&mut r[0], &anchor.body().includes); // points @ r+0
-        extend(&mut r[1], &anchor.body().witness); // points @ r-1
+        extend(&mut r[0], &anchor.data().includes); // points @ r+0
+        extend(&mut r[1], &anchor.data().witness); // points @ r-1
 
         let mut rng = rand_pcg::Pcg64::from_seed(*anchor.digest().inner());
         let mut uncommitted_rev = Vec::new();
@@ -394,8 +417,8 @@ impl Dag {
                     Self::ready_valid_point(&point_round, node, digest, "point")?;
                 // select only uncommitted ones
                 if !global.is_committed.load(Ordering::Relaxed) {
-                    extend(&mut r[1], &global.point.body().includes); // points @ r-1
-                    extend(&mut r[2], &global.point.body().witness); // points @ r-2
+                    extend(&mut r[1], &global.info.data().includes); // points @ r-1
+                    extend(&mut r[2], &global.info.data().witness); // points @ r-2
                     uncommitted_rev.push(global);
                 }
             }
@@ -426,10 +449,8 @@ impl Dag {
             .transpose()
             .unwrap_or_else(|msg| {
                 let point_id = PointId {
-                    location: Location {
-                        round: dag_round.round(),
-                        author: *author,
-                    },
+                    author: *author,
+                    round: dag_round.round(),
                     digest: digest.clone(),
                 };
                 panic!("{point_kind} {msg}: {:?}", point_id.alt())
@@ -438,7 +459,6 @@ impl Dag {
 }
 
 #[cfg(test)]
-#[cfg(feature = "test")]
 mod test {
     use std::array;
     use std::io::Write;
@@ -448,24 +468,27 @@ mod test {
     use tycho_util::FastDashMap;
 
     use crate::dag::dag_location::DagLocation;
-    use crate::dag::{AnchorStage, Dag};
-    use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext};
-    use crate::models::Round;
-    use crate::{test_utils, Point};
+    use crate::dag::Dag;
+    use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
+    use crate::models::{AnchorStageRole, Round};
+    use crate::{test_utils, PointInfo};
 
     const PEER_COUNT: usize = 3;
 
     #[tokio::test]
     async fn test_commit_with_gap() {
+        let stub_store = MempoolStore::no_read_stub();
+
         let genesis = test_utils::genesis();
         let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
             let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));
             (PeerId::from(keys.public_key), keys)
         });
 
-        let (mut dag, peer_schedule, stub_downloader) = test_utils::make_dag(&peers, &genesis);
+        let (mut dag, peer_schedule, stub_downloader) =
+            test_utils::make_dag(&peers, &genesis, &stub_store);
 
-        let effects = Effects::<ChainedRoundsContext>::new(genesis.body().location.round);
+        let effects = Effects::<ChainedRoundsContext>::new(genesis.round());
 
         for i in 1..=10 {
             let round = Round(i * 10);
@@ -475,24 +498,27 @@ mod test {
 
         println!("dag of {} rounds with {PEER_COUNT} peers", dag.rounds.len());
 
-        test_utils::populate_dag(&peers, &genesis, 0, 0, &mut dag.rounds);
+        test_utils::populate_dag(
+            &peers,
+            &peer_schedule,
+            &stub_downloader,
+            &stub_store,
+            &effects,
+            &genesis,
+            0,
+            0,
+            &mut dag.rounds,
+        )
+        .await;
 
-        println!("populated");
-
-        test_utils::verify_dag(&dag.rounds, &peer_schedule);
-
-        println!("verified");
-
-        test_utils::validate_dag(&dag.rounds, &effects, &stub_downloader).await;
-
-        println!("validated");
+        println!("populated and validated");
 
         assert_eq!(commit(&mut dag, Some(Round(48))).len(), 11);
 
         let mut r_points = vec![];
 
         for i in 50..55 {
-            r_points.push(remove_point(&mut dag, Round(i), &peers[0].0));
+            r_points.push(remove_point(&mut dag, Round(i), &peers[1].0));
         }
 
         let r_leader = remove_leader(&mut dag, Round(62));
@@ -532,7 +558,7 @@ mod test {
         let in_question = dag.rounds.get(&round).expect("in dag").clone();
         println!("restored {round:?}");
         for (peer_id, loc) in removed {
-            if let Some(_) = in_question.locations().insert(peer_id, loc) {
+            if in_question.locations().insert(peer_id, loc).is_some() {
                 panic!("was not removed from dag: {} @ {round:?}", peer_id.alt());
             }
         }
@@ -541,17 +567,16 @@ mod test {
     fn remove_leader(dag: &mut Dag, round: Round) -> (Round, PeerId, DagLocation) {
         let in_question = dag.rounds.get(&round).expect("in dag").clone();
         let leader = match in_question.anchor_stage() {
-            Some(AnchorStage::Trigger { leader, .. }) => {
-                println!("removed trigger @ {round:?}");
-                leader
-            }
-            Some(AnchorStage::Proof { leader, .. }) => {
-                println!("removed proof @ {round:?}");
-                leader
+            Some(stage) => {
+                match stage.role {
+                    AnchorStageRole::Trigger => println!("removed trigger @ {round:?}"),
+                    AnchorStageRole::Proof => println!("removed proof @ {round:?}"),
+                }
+                stage.leader
             }
             None => panic!("no leader @ {round:?}"),
         };
-        let (peer_id, loc) = in_question.locations().remove(leader).expect("in dag");
+        let (peer_id, loc) = in_question.locations().remove(&leader).expect("in dag");
         (round, peer_id, loc)
     }
 
@@ -566,21 +591,21 @@ mod test {
         let (round, peer_id, loc) = pack;
         let in_question = dag.rounds.get(&round).expect("in dag").clone();
         match in_question.anchor_stage() {
-            Some(AnchorStage::Trigger { leader, .. }) if leader == peer_id => {
-                println!("restored trigger {} @ {round:?}", peer_id.alt());
-            }
-            Some(AnchorStage::Proof { leader, .. }) if leader == peer_id => {
-                println!("restored proof {} @ {round:?}", peer_id.alt());
-            }
+            Some(stage) if stage.leader == peer_id => match stage.role {
+                AnchorStageRole::Proof => println!("restored proof {} @ {round:?}", peer_id.alt()),
+                AnchorStageRole::Trigger => {
+                    println!("restored trigger {} @ {round:?}", peer_id.alt());
+                }
+            },
             _ => println!("restored point {} @ {round:?}", peer_id.alt()),
         };
 
-        if let Some(_) = in_question.locations().insert(peer_id, loc) {
+        if in_question.locations().insert(peer_id, loc).is_some() {
             panic!("was not removed from dag: {} @ {round:?}", peer_id.alt());
         }
     }
 
-    fn commit(dag: &mut Dag, up_to: Option<Round>) -> Vec<(Point, Vec<Point>)> {
+    fn commit(dag: &mut Dag, up_to: Option<Round>) -> Vec<(PointInfo, Vec<PointInfo>)> {
         let committed = if let Some(up_to) = up_to {
             let up_to = dag.rounds.get(&up_to).unwrap().clone();
             dag.commit_up_to(up_to)
@@ -588,7 +613,7 @@ mod test {
             dag.commit()
         };
         for (anchor, _) in &committed {
-            println!("anchor {:?}", anchor.id().alt())
+            println!("anchor {:?}", anchor.id().alt());
         }
         if let Some(up_to) = up_to {
             println!("committed up to {:?}", up_to);

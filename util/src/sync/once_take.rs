@@ -24,6 +24,9 @@ impl<T> OnceTake<T> {
             None
         }
     }
+    pub fn is_taken(&self) -> bool {
+        self.has_value.load(Ordering::Relaxed)
+    }
 }
 
 impl<T> Drop for OnceTake<T> {
