@@ -15,6 +15,7 @@ use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
 use crate::models::{AnchorStageRole, Digest, PointId, PointInfo, Round, ValidPoint};
 
+#[derive(Default)]
 pub struct Dag {
     // from the oldest to the current round; newer ones are in the future;
     rounds: BTreeMap<Round, DagRound>,
@@ -28,12 +29,6 @@ struct LinkedAnchor {
 }
 
 impl Dag {
-    pub fn new() -> Self {
-        Self {
-            rounds: BTreeMap::new(),
-        }
-    }
-
     pub fn init(&mut self, dag_round: DagRound, next_dag_round: DagRound) {
         assert_eq!(
             Some(dag_round.round()),
@@ -464,7 +459,6 @@ impl Dag {
 }
 
 #[cfg(test)]
-#[cfg(feature = "test")]
 mod test {
     use std::array;
     use std::io::Write;

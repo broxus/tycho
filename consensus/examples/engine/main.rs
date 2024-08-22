@@ -10,7 +10,7 @@ use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::test_utils::*;
-use tycho_consensus::{Engine, InputBufferStub};
+use tycho_consensus::{Engine, InputBuffer};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId};
 use tycho_storage::Storage;
 
@@ -150,7 +150,7 @@ fn make_network(cli: Cli) {
                             mock_storage.mempool_storage(),
                             committed_tx.clone(),
                             &collator_round,
-                            InputBufferStub::new(cli.points_in_step, cli.steps_until_full),
+                            InputBuffer::new_stub(cli.points_in_step, cli.steps_until_full),
                         );
                         engine.init_with_genesis(&all_peers);
                         tracing::info!("created engine {}", dht_client.network().peer_id());

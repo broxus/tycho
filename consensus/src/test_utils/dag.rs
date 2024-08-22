@@ -77,7 +77,7 @@ pub fn make_dag<const PEER_COUNT: usize>(
 
     let _ = genesis_round.insert_exact_sign(genesis, next_dag_round.key_pair(), store);
 
-    let mut dag = Dag::new();
+    let mut dag = Dag::default();
 
     dag.init(genesis_round.clone(), genesis_round.next(&peer_schedule));
 
@@ -229,37 +229,21 @@ pub fn point<const PEER_COUNT: usize>(
         payload.push(Bytes::from(data));
     }
 
-    let anchor_proof = match anchor_stage {
-        Some(stage) if stage.role == AnchorStageRole::Proof && stage.leader == peers[idx].0 => {
-            Link::ToSelf
-        }
-        _ => {
-            if last_proof.round == round.prev() {
-                Link::Direct(Through::Includes(last_proof.author))
-            } else {
-                Link::Indirect {
-                    to: last_proof.clone(),
-                    path: Through::Includes(peers[idx].0),
-                }
-            }
-        }
-    };
+    let anchor_proof = point_anchor_link(
+        round,
+        peers[idx].0,
+        anchor_stage,
+        last_proof,
+        AnchorStageRole::Proof,
+    );
 
-    let anchor_trigger = match anchor_stage {
-        Some(stage) if stage.role == AnchorStageRole::Trigger && stage.leader == peers[idx].0 => {
-            Link::ToSelf
-        }
-        _ => {
-            if last_trigger.round == round.prev() {
-                Link::Direct(Through::Includes(last_trigger.author))
-            } else {
-                Link::Indirect {
-                    to: last_trigger.clone(),
-                    path: Through::Includes(peers[idx].0),
-                }
-            }
-        }
-    };
+    let anchor_trigger = point_anchor_link(
+        round,
+        peers[idx].0,
+        anchor_stage,
+        last_trigger,
+        AnchorStageRole::Trigger,
+    );
 
     Point::new(&peers[idx].1, round, evidence, payload, PointData {
         author: peers[idx].0,
@@ -271,6 +255,28 @@ pub fn point<const PEER_COUNT: usize>(
         anchor_proof,
         anchor_time: last_candidate.data().time,
     })
+}
+
+fn point_anchor_link(
+    round: Round,
+    peer: PeerId,
+    anchor_stage: Option<&AnchorStage>,
+    last_same_stage_point: &PointId,
+    role: AnchorStageRole,
+) -> Link {
+    match anchor_stage {
+        Some(stage) if stage.role == role && stage.leader == peer => Link::ToSelf,
+        _ => {
+            if last_same_stage_point.round == round.prev() {
+                Link::Direct(Through::Includes(last_same_stage_point.author))
+            } else {
+                Link::Indirect {
+                    to: last_same_stage_point.clone(),
+                    path: Through::Includes(peer),
+                }
+            }
+        }
+    }
 }
 
 fn rand_arr<const N: usize>() -> [usize; N] {

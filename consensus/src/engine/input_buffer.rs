@@ -1,10 +1,8 @@
 use std::collections::VecDeque;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard};
-use rand::{thread_rng, RngCore};
 use tokio::sync::mpsc;
 
 use crate::engine::MempoolConfig;
@@ -17,6 +15,12 @@ trait InputBufferInner: Send {
 pub struct InputBuffer(Arc<Mutex<dyn InputBufferInner>>);
 
 impl InputBuffer {
+    pub fn new(externals: mpsc::UnboundedReceiver<Bytes>) -> InputBuffer {
+        let inner = Arc::new(Mutex::new(InputBufferData::default()));
+        tokio::spawn(InputBufferImpl::consume(inner.clone(), externals));
+        InputBuffer(inner)
+    }
+
     /// `only_fresh = false` to repeat the same elements if they are still buffered,
     /// use in case last round failed
     pub fn fetch(&self, only_fresh: bool) -> Vec<Bytes> {
@@ -25,14 +29,9 @@ impl InputBuffer {
     }
 }
 
-pub struct InputBufferImpl;
+struct InputBufferImpl;
 
 impl InputBufferImpl {
-    pub fn new(externals: mpsc::UnboundedReceiver<Bytes>) -> InputBuffer {
-        let inner = Arc::new(Mutex::new(InputBufferData::default()));
-        tokio::spawn(Self::consume(inner.clone(), externals));
-        InputBuffer(inner)
-    }
     async fn consume(
         inner: Arc<Mutex<InputBufferData>>,
         mut externals: mpsc::UnboundedReceiver<Bytes>,
@@ -154,39 +153,50 @@ impl InputBufferData {
     }
 }
 
-pub struct InputBufferStub {
-    fetch_count: NonZeroUsize,
-    steps_until_full: NonZeroUsize,
-    points_in_step: NonZeroUsize,
-}
+#[cfg(feature = "test")]
+mod stub {
+    use std::num::NonZeroUsize;
 
-impl InputBufferStub {
+    use rand::{thread_rng, RngCore};
+
+    use super::*;
+
     /// External message is limited by 64 KiB
     const EXTERNAL_MSG_MAX_BYTES: usize = 64 * 1024;
-
-    pub fn new(points_in_step: NonZeroUsize, steps_until_full: NonZeroUsize) -> InputBuffer {
-        InputBuffer(Arc::new(Mutex::new(Self {
-            fetch_count: NonZeroUsize::MIN,
-            steps_until_full,
-            points_in_step,
-        })))
+    struct InputBufferStub {
+        fetch_count: NonZeroUsize,
+        steps_until_full: NonZeroUsize,
+        points_in_step: NonZeroUsize,
     }
-}
 
-impl InputBufferInner for InputBufferStub {
-    fn fetch_inner(&mut self, _: bool) -> Vec<Bytes> {
-        let step =
-            (self.fetch_count.get() / self.points_in_step.get()).min(self.steps_until_full.get());
-        let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
-            / self.steps_until_full
-            / Self::EXTERNAL_MSG_MAX_BYTES;
-        let mut result = Vec::with_capacity(msg_count);
-        for _ in 0..msg_count {
-            let mut data = vec![0; Self::EXTERNAL_MSG_MAX_BYTES];
-            thread_rng().fill_bytes(data.as_mut_slice());
-            result.push(Bytes::from(data));
+    impl InputBuffer {
+        pub fn new_stub(
+            points_in_step: NonZeroUsize,
+            steps_until_full: NonZeroUsize,
+        ) -> InputBuffer {
+            InputBuffer(Arc::new(Mutex::new(InputBufferStub {
+                fetch_count: NonZeroUsize::MIN,
+                steps_until_full,
+                points_in_step,
+            })))
         }
-        self.fetch_count = self.fetch_count.saturating_add(1);
-        result
+    }
+
+    impl InputBufferInner for InputBufferStub {
+        fn fetch_inner(&mut self, _: bool) -> Vec<Bytes> {
+            let step = (self.fetch_count.get() / self.points_in_step.get())
+                .min(self.steps_until_full.get());
+            let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
+                / self.steps_until_full
+                / EXTERNAL_MSG_MAX_BYTES;
+            let mut result = Vec::with_capacity(msg_count);
+            for _ in 0..msg_count {
+                let mut data = vec![0; EXTERNAL_MSG_MAX_BYTES];
+                thread_rng().fill_bytes(data.as_mut_slice());
+                result.push(Bytes::from(data));
+            }
+            self.fetch_count = self.fetch_count.saturating_add(1);
+            result
+        }
     }
 }

@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::outer_round::{Collator, OuterRound};
-use tycho_consensus::{InputBuffer, InputBufferImpl, MempoolConfig, Point, PointInfo};
+use tycho_consensus::{InputBuffer, MempoolConfig, Point, PointInfo};
 use tycho_network::{DhtClient, OverlayService, PeerId};
 use tycho_storage::MempoolStorage;
 
@@ -41,7 +41,7 @@ impl MempoolAdapterStdImpl {
         Self {
             anchors,
             externals_tx,
-            externals_rx: InputBufferImpl::new(externals_rx),
+            externals_rx: InputBuffer::new(externals_rx),
             top_known_block_round: OuterRound::default(),
             anchor_added: Arc::new(Notify::new()),
         }

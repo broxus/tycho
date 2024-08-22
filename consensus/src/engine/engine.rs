@@ -69,7 +69,7 @@ impl Engine {
             }
         });
         Self {
-            dag: Dag::new(),
+            dag: Dag::default(),
             committed,
             peer_schedule,
             store,

@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::{fmt, EnvFilter, Layer};
 use tycho_consensus::test_utils::AnchorConsumer;
-use tycho_consensus::{Engine, InputBufferStub};
+use tycho_consensus::{Engine, InputBuffer};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId, PeerInfo};
 use tycho_storage::Storage;
 use tycho_util::time::now_sec;
@@ -146,7 +146,7 @@ impl CmdRun {
             mock_storage.mempool_storage(),
             committed_tx,
             anchor_consumer.collator_round(),
-            InputBufferStub::new(
+            InputBuffer::new_stub(
                 NonZeroUsize::new(100).unwrap(),
                 NonZeroUsize::new(5).unwrap(),
             ),

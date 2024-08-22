@@ -32,7 +32,7 @@ impl PeerScheduleLocked {
             overlay,
             abort_resolve_peers: None,
             updates: broadcast::Sender::new(PeerCount::MAX.full()),
-            data: PeerScheduleStateful::new(),
+            data: PeerScheduleStateful::default(),
         }
     }
 
