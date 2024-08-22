@@ -72,7 +72,7 @@ impl MempoolAdapterStubImpl {
         }
 
         for anchor_id in 1.. {
-            tokio::time::sleep(make_round_interval() * 5).await;
+            tokio::time::sleep(make_round_interval() * 4).await;
 
             let anchor = make_stub_anchor(anchor_id);
             self.anchors_cache.write().insert(anchor_id, anchor.clone());
@@ -100,7 +100,7 @@ impl MempoolAdapterStubImpl {
 
         let mut last_chain_time = 0;
         for anchor_id in 1.. {
-            tokio::time::sleep(make_round_interval() * 5).await;
+            tokio::time::sleep(make_round_interval() * 4).await;
 
             let anchor = 'anchor: {
                 if let Some(path) = iter.next() {
@@ -117,7 +117,7 @@ impl MempoolAdapterStubImpl {
                     }
                 }
 
-                make_empty_anchor(anchor_id, last_chain_time + 600)
+                make_empty_anchor(anchor_id, last_chain_time + 1336)
             };
 
             last_chain_time = anchor.chain_time;
@@ -155,6 +155,12 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
+                if let Some((_, last_anchor)) = self.anchors_cache.read().last_key_value() {
+                    if last_anchor.id > anchor_id {
+                        return Ok(None);
+                    }
+                }
+
                 if last_attempt_at.is_none() {
                     tracing::debug!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
@@ -165,7 +171,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 }
 
                 last_attempt_at = Some(Instant::now());
-                tokio::time::sleep(tokio::time::Duration::from_millis(1020)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1320)).await;
                 continue;
             };
 
@@ -220,7 +226,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 }
 
                 last_attempt_at = Some(Instant::now());
-                tokio::time::sleep(tokio::time::Duration::from_millis(1020)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1320)).await;
                 continue;
             };
 
@@ -269,11 +275,7 @@ pub(crate) fn make_empty_anchor(id: MempoolAnchorId, chain_time: u64) -> Arc<Mem
 }
 
 pub(crate) fn make_stub_anchor(id: MempoolAnchorId) -> Arc<MempoolAnchor> {
-    let chain_time = if id == 0 {
-        1700
-    } else {
-        id as u64 * 1736 % 1000000000
-    };
+    let chain_time = id as u64 * 1736 % 1000000000;
 
     let externals_count = (chain_time % 10) as u32;
 
@@ -346,7 +348,7 @@ pub(crate) fn make_anchor_from_file(
 }
 
 fn make_round_interval() -> Duration {
-    Duration::from_millis(rand::thread_rng().gen_range(400..600))
+    Duration::from_millis(rand::thread_rng().gen_range(240..340))
 }
 
 #[cfg(test)]
@@ -375,12 +377,7 @@ mod tests {
         let adapter =
             MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener));
 
-        // try get not existing anchor by id
-        let opt_anchor = adapter.get_anchor_by_id(10).await?;
-        assert!(opt_anchor.is_none());
-
-        // try get existing anchor by id (after sleep)
-        tokio::time::sleep(tokio::time::Duration::from_millis(600 * 6 * 4)).await;
+        // try get existing anchor by id
         let opt_anchor = adapter.get_anchor_by_id(3).await?;
         assert!(opt_anchor.is_some());
         assert_eq!(opt_anchor.unwrap().id, 3);
@@ -390,20 +387,20 @@ mod tests {
         assert!(opt_anchor.is_some());
         assert_eq!(opt_anchor.unwrap().id, 4);
 
-        // try get next anchor after (id: 8), will wait some time
-        let opt_anchor = adapter.get_next_anchor(8).await?;
+        // try get next anchor after (id: 5), will wait some time
+        let opt_anchor = adapter.get_next_anchor(5).await?;
         assert!(opt_anchor.is_some());
-        assert_eq!(opt_anchor.unwrap().id, 9);
+        assert_eq!(opt_anchor.unwrap().id, 6);
 
         // test clear anchors cache
-        adapter.clear_anchors_cache(7).await?;
+        adapter.clear_anchors_cache(6).await?;
         let opt_anchor = adapter.get_anchor_by_id(3).await?;
         assert!(opt_anchor.is_none());
-        let opt_anchor = adapter.get_anchor_by_id(6).await?;
+        let opt_anchor = adapter.get_anchor_by_id(4).await?;
         assert!(opt_anchor.is_none());
-        let opt_anchor = adapter.get_anchor_by_id(7).await?;
+        let opt_anchor = adapter.get_anchor_by_id(6).await?;
         assert!(opt_anchor.is_some());
-        assert_eq!(opt_anchor.unwrap().id, 7);
+        assert_eq!(opt_anchor.unwrap().id, 6);
 
         Ok(())
     }
