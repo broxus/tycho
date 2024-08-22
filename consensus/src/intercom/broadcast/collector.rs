@@ -337,11 +337,9 @@ impl CollectorTask {
             panic!("Coding error: validated inclusion state must be non empty")
         };
         let signed = match state.signable() {
-            Some(signable) => signable.sign(
-                self.current_round.round(),
-                self.next_dag_round.key_pair(),
-                MempoolConfig::sign_time_range(),
-            ),
+            Some(signable) => {
+                signable.sign(self.current_round.round(), self.next_dag_round.key_pair())
+            }
             None => false,
         };
         let point_signed = state.signed().map_or(false, |result| result.is_ok());

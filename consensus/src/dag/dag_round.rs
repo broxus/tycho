@@ -10,7 +10,6 @@ use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
-use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{DagPoint, Digest, PeerCount, Point, Round};
 
@@ -204,7 +203,7 @@ impl DagRound {
             loc.state().clone()
         });
         if let Some(signable) = state.signable() {
-            signable.sign(self.round(), key_pair, MempoolConfig::sign_time_range());
+            signable.sign(self.round(), key_pair);
         }
         assert!(
             state.signed_point(self.round()).is_some(),

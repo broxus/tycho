@@ -1,4 +1,3 @@
-use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use crate::models::{Round, UnixTime};
@@ -14,19 +13,10 @@ pub struct MempoolConfig;
 
 impl MempoolConfig {
     /// how far a signed point (by the time in its body)
-    /// may be in the future compared with local (wall) time
-    const CLOCK_SKEW: UnixTime = UnixTime::from_millis(5 * 1000);
-    // FIXME remove: no matter how old time is in genesis, and later time is inherited from anchors
-    /// how long a point from past remains eligible for signature and inclusion;
-    /// time in point body is compared with wall time;
-    /// if consensus makes no progress for such long, it will need a manual restart from a new genesis
-    const MAX_OUTDATED: UnixTime = UnixTime::from_millis(365 * 24 * 60 * 60 * 1000);
-
-    /// see [`CLOCK_SKEW`](Self::CLOCK_SKEW) and [`MAX_OUTDATED`](Self::MAX_OUTDATED)
-    pub fn sign_time_range() -> RangeInclusive<UnixTime> {
-        let now = UnixTime::now();
-        now - Self::MAX_OUTDATED..=now + Self::CLOCK_SKEW
-    }
+    /// may be in the future compared with local (wall) time.
+    /// Lower bound is defined by genesis, and then advanced by leaders among reliable peers.
+    /// Time is non-decreasing due to its inheritance from anchor candidate in every point.
+    pub const CLOCK_SKEW: UnixTime = UnixTime::from_millis(5 * 1000);
 
     /// hard limit (in rounds) on anchor history length
     /// includes anchor candidate round, though it is committed at the next attempt
