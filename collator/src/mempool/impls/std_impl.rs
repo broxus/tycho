@@ -143,7 +143,7 @@ impl MempoolAdapterStdImpl {
                 }
             }
 
-            metrics::gauge!("tycho_mempool_last_anchor_round").set(anchor.round().0);
+            metrics::counter!("tycho_mempool_last_anchor_round").absolute(anchor.round().0 as _);
             metrics::counter!("tycho_mempool_externals_count_total").increment(messages.len() as _);
             metrics::counter!("tycho_mempool_externals_bytes_total").increment(messages_bytes as _);
             metrics::counter!("tycho_mempool_duplicates_count_total")

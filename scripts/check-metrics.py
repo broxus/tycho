@@ -125,7 +125,9 @@ if __name__ == "__main__":
     )
     blacklisted_dirs = [
         "consensus/src/dag/verifier.rs",
+        "consensus/src/effects/store.rs",
         "consensus/src/engine/engine.rs",
+        "consensus/src/engine/round_task.rs",
         "consensus/src/intercom/core/dispatcher.rs",
         "consensus/src/intercom/core/responder.rs",
         "consensus/src/intercom/dependency/downloader.rs",
