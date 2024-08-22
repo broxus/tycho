@@ -1164,6 +1164,10 @@ def mempool_rounds() -> RowPanel:
             "Engine: current round (is always started at consensus round or next one)",
         ),
         create_counter_panel(
+            "tycho_mempool_last_anchor_round",
+            "Adapter: last anchor round",
+        ),
+        create_counter_panel(
             "tycho_mempool_consensus_current_round",
             "Broadcast Filter: determined consensus round",
         ),
@@ -1172,16 +1176,16 @@ def mempool_rounds() -> RowPanel:
             "Storage: least to keep history round",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_consensus_ahead_collated",
-            "Consensus ahead of top known block: silent mode trigger",
-        ),
-        create_gauge_panel(
             "tycho_mempool_rounds_consensus_ahead_committed",
             "Consensus ahead of committed: commit latency",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_committed_ahead_collated",
             "Committed ahead of top known block: block consensus latency",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_consensus_ahead_collated",
+            "Consensus ahead of top known block: silent mode trigger",
         ),
     ]
     return create_row("Mempool rounds", metrics)
