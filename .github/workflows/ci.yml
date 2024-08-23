@@ -39,7 +39,7 @@ jobs:
           RUST_LOG: warn
         with:
           command: nextest
-          args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage # only core and storage have working tests :(
+          args: run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -113,7 +113,7 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -- -D warnings # change to --workspace later
+          args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -- -D warnings # change to --workspace later
 
   # docs:
   #   name: Docs
