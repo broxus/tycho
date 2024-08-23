@@ -1,3 +1,4 @@
+#![allow(clippy::print_stdout)] // show keys and dht config in example
 //! Run tests with this env:
 //! ```text
 //! RUST_LOG=info,tycho_consensus=debug
@@ -64,7 +65,7 @@ impl Cli {
 
         match self.cmd {
             Cmd::Run(cmd) => cmd.run().await,
-            Cmd::GenKey(cmd) => cmd.run(),
+            Cmd::GenKey(_) => CmdGenKey::run(),
             Cmd::GenDht(cmd) => cmd.run(),
         }
     }
@@ -173,7 +174,7 @@ impl CmdRun {
 struct CmdGenKey {}
 
 impl CmdGenKey {
-    fn run(self) -> Result<()> {
+    fn run() -> Result<()> {
         let secret_key = ed25519::SecretKey::generate(&mut rand::thread_rng());
         let public_key = ed25519::PublicKey::from(&secret_key);
         let peer_id = PeerId::from(public_key);

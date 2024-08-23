@@ -1,5 +1,3 @@
-#![allow(clippy::exit)]
-
 use std::sync::Arc;
 
 use parking_lot::Mutex;

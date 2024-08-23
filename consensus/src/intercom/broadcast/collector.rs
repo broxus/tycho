@@ -278,7 +278,7 @@ impl CollectorTask {
     fn match_filtered(&self, consensus_event: ConsensusEvent) -> Result<(), Round> {
         match consensus_event {
             ConsensusEvent::Forward(consensus_round) => {
-                #[allow(clippy::match_same_arms)]
+                #[allow(clippy::match_same_arms)] // for comments
                 let should_fail = match consensus_round.cmp(&self.next_dag_round.round()) {
                     // we're too late, consensus moved forward
                     cmp::Ordering::Greater => true,

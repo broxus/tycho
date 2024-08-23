@@ -85,7 +85,7 @@ pub fn make_dag<const PEER_COUNT: usize>(
     (dag, peer_schedule, stub_downloader)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // ok in test
 pub async fn populate_dag<const PEER_COUNT: usize>(
     peers: &[(PeerId, KeyPair); PEER_COUNT],
     peer_schedule: &PeerSchedule,
@@ -189,7 +189,7 @@ pub async fn populate_dag<const PEER_COUNT: usize>(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // ok in test
 pub fn point<const PEER_COUNT: usize>(
     round: Round,
     idx: usize,

@@ -306,7 +306,7 @@ impl Verifier {
             }
         };
 
-        #[allow(clippy::match_same_arms)]
+        #[allow(clippy::match_same_arms)] // for comments
         match point.anchor_link(link_field) {
             Link::ToSelf => {
                 // do not search in DAG the point that is currently under validation;
@@ -470,7 +470,7 @@ impl Verifier {
                         }
                     }
                     Some(_) | None => {
-                        #[allow(clippy::match_same_arms)]
+                        #[allow(clippy::match_same_arms)] // for comments
                         match dag_point {
                             DagPoint::Trusted(_) | DagPoint::Suspicious(_) => {
                                 // Some: point must have named _this_ point in `prev_digest`

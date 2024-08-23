@@ -36,16 +36,16 @@ struct Cli {
     #[arg(short, long, default_value_t = NonZeroUsize::new(33).unwrap())]
     points_in_step: NonZeroUsize,
     /// number of steps in which payload will increase from 0
-    /// to [PAYLOAD_BATCH_BYTES](tycho_consensus::MempoolConfig::PAYLOAD_BATCH_BYTES)
+    /// to [`PAYLOAD_BATCH_BYTES`](tycho_consensus::MempoolConfig::PAYLOAD_BATCH_BYTES)
     #[arg(short, long, default_value_t = NonZeroUsize::new(3).unwrap())]
     steps_until_full: NonZeroUsize,
     /// generate data for span-aware flame graph (changes log format);
-    /// follows https://github.com/tokio-rs/tracing/tree/master/tracing-flame#generating-the-image,
+    /// follows `<https://github.com/tokio-rs/tracing/tree/master/tracing-flame#generating-the-image>`,
     /// but results are in git-ignored `./.temp` dir, so don't forget to `$ cd ./.temp` after run
     #[arg(short, long, default_value_t = false)]
     flame: bool,
     /// shutdown after duration elapsed;
-    /// format https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+    /// format `<https://docs.rs/humantime/latest/humantime/fn.parse_duration.html>`
     #[arg(short, long)]
     #[clap(value_parser = humantime::parse_duration)]
     duration: Option<Duration>,
@@ -56,8 +56,8 @@ impl Cli {
         if self.flame {
             logger::flame("engine with --flame");
         } else {
-            logger::spans("engine", "info,tycho_consensus=info,tycho_network=info")
-        };
+            logger::spans("engine", "info,tycho_consensus=info,tycho_network=info");
+        }
         check_parking_lot();
         heart_beat(self.duration);
         make_network(self);
@@ -226,6 +226,7 @@ fn heart_beat(duration: Option<Duration>) {
                     use std::io::Write;
                     std::io::stderr().flush().ok();
                     std::io::stdout().flush().ok();
+                    #[allow(clippy::exit)] // ok in example if it deadlocked
                     std::process::exit(0);
                 }
             }

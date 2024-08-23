@@ -30,7 +30,7 @@ pub struct Downloader {
 pub enum DownloadResult {
     NotFound,
     Verified(Point),
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Todo use point ?
     IllFormed(Point),
 }
 

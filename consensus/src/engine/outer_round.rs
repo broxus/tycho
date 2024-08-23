@@ -115,35 +115,3 @@ impl<T: Source> OuterRoundRecv<T> {
         *self.rx.borrow_and_update()
     }
 }
-
-// Keep outdated drop-in replacement for some time
-#[allow(dead_code)]
-#[deprecated]
-mod unused {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
-
-    use crate::models::Round;
-
-    #[derive(Clone)]
-    pub struct OuterRoundAtomic(Arc<AtomicU32>);
-    impl Default for OuterRoundAtomic {
-        fn default() -> Self {
-            Self(Arc::new(AtomicU32::new(Round::BOTTOM.0)))
-        }
-    }
-
-    impl OuterRoundAtomic {
-        pub fn get(&self) -> Round {
-            Round(self.0.load(Ordering::Relaxed))
-        }
-
-        pub fn set_max_raw(&self, value: u32) {
-            self.0.fetch_max(value, Ordering::Relaxed);
-        }
-
-        pub fn set_max(&self, round: Round) {
-            self.0.fetch_max(round.0, Ordering::Relaxed);
-        }
-    }
-}
