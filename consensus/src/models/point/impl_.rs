@@ -9,11 +9,20 @@ use rayon::prelude::IntoParallelRefIterator;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tycho_network::PeerId;
 
-use crate::models::point::inner::{PointBody, PointInner};
-use crate::models::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
+use crate::models::point::body::PointBody;
+use crate::models::point::{AnchorStageRole, Digest, Link, PointData, PointId, Round, Signature};
 
 #[derive(Clone)]
 pub struct Point(Arc<PointInner>);
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PointInner {
+    // hash of everything except signature
+    digest: Digest,
+    // author's signature for the digest
+    signature: Signature,
+    body: PointBody,
+}
 
 impl Serialize for Point {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -40,6 +49,14 @@ impl Debug for Point {
             .field("digest", self.digest())
             .field("signature", self.signature())
             .finish()
+    }
+}
+
+impl PointInner {
+    fn is_integrity_ok(&self) -> bool {
+        self.signature
+            .verifies(&self.body.data.author, &self.digest)
+            && self.digest == self.body.make_digest()
     }
 }
 
@@ -185,8 +202,7 @@ mod tests {
     use tycho_util::sync::rayon_run;
 
     use super::*;
-    use crate::models::{Through, UnixTime};
-    use crate::PointInfo;
+    use crate::models::{PointInfo, Through, UnixTime};
 
     const PEERS: usize = 100;
     const MSG_COUNT: usize = 120;

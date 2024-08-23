@@ -12,13 +12,13 @@ use crate::effects::{
     AltFormat, CollectorContext, Effects, EngineContext, MempoolStore, ValidateContext,
 };
 use crate::engine::input_buffer::InputBuffer;
+use crate::engine::outer_round::{Collator, Consensus, OuterRound};
+use crate::engine::MempoolConfig;
 use crate::intercom::{
     BroadcastFilter, Broadcaster, BroadcasterSignal, Collector, CollectorSignal, Dispatcher,
     Downloader, PeerSchedule, Responder,
 };
 use crate::models::{Link, Point, Round};
-use crate::outer_round::{Collator, Consensus, OuterRound};
-use crate::MempoolConfig;
 
 struct RoundTaskState {
     peer_schedule: PeerSchedule,
@@ -96,7 +96,7 @@ impl RoundTaskReady {
             );
             let mut collator_round_recv = self.state.collator_round.receiver();
             let collator_round = collator_round_recv.get();
-            // Fixme temporarily disable silent mode
+            #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
             let wait_collator_ready = if true || collator_round >= not_silent_since {
                 future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
             } else {

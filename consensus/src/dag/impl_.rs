@@ -74,7 +74,7 @@ impl Dag {
                 lag = next_round.0 - top.round().0,
                 "need sync"
             );
-            unimplemented!("sync")
+            panic!("not implemented: sync")
         }
         for _ in top.round().next().0..=next_round.0 {
             top = self
@@ -470,8 +470,8 @@ mod test {
     use crate::dag::dag_location::DagLocation;
     use crate::dag::Dag;
     use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
-    use crate::models::{AnchorStageRole, Round};
-    use crate::{test_utils, PointInfo};
+    use crate::models::{AnchorStageRole, PointInfo, Round};
+    use crate::test_utils;
 
     const PEER_COUNT: usize = 3;
 

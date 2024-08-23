@@ -12,11 +12,11 @@ use tycho_util::metrics::HistogramGuard;
 use crate::dag::{Dag, DagRound, Verifier};
 use crate::effects::{AltFormat, ChainedRoundsContext, Effects, EngineContext, MempoolStore};
 use crate::engine::input_buffer::InputBuffer;
+use crate::engine::outer_round::{Collator, Commit, Consensus, OuterRound};
 use crate::engine::round_task::RoundTaskReady;
 use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, PeerSchedule, Responder};
 use crate::models::{Point, PointInfo, UnixTime};
-use crate::outer_round::{Collator, Commit, Consensus, OuterRound};
 
 pub struct Engine {
     dag: Dag,

@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use tycho_network::PeerId;
 
 use crate::dag::DagRound;
+use crate::engine::{InputBuffer, MempoolConfig};
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, Round, Signature, Through, UnixTime,
+    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointInfo, Round, Signature,
+    Through, UnixTime,
 };
-use crate::{InputBuffer, MempoolConfig, PointInfo};
 
 pub struct LastOwnPoint {
     pub digest: Digest,

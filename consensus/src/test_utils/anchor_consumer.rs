@@ -8,9 +8,9 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::effects::AltFormat;
-use crate::models::{PointId, Round};
-use crate::outer_round::{Collator, OuterRound};
-use crate::{MempoolConfig, Point, PointInfo};
+use crate::engine::outer_round::{Collator, OuterRound};
+use crate::engine::MempoolConfig;
+use crate::models::{Point, PointId, PointInfo, Round};
 
 #[derive(Default)]
 pub struct AnchorConsumer {

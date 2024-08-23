@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::models::point::*;
+use crate::models::{
+    AnchorStageRole, Digest, Link, Point, PointData, PointDataRef, PointId, Round,
+};
 
 #[derive(Clone)]
 #[cfg_attr(test, derive(PartialEq))]

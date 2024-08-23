@@ -13,9 +13,9 @@ pub struct ValidPoint {
 }
 
 impl ValidPoint {
-    pub fn new(info: PointInfo) -> Self {
+    pub fn new<T: Into<PointInfo>>(into_info: T) -> Self {
         Self {
-            info,
+            info: into_info.into(),
             is_committed: Arc::new(AtomicBool::new(false)),
         }
     }

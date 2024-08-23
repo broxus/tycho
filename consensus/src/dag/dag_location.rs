@@ -4,8 +4,8 @@ use std::sync::{Arc, OnceLock};
 use everscale_crypto::ed25519::KeyPair;
 
 use crate::dag::dag_point_future::DagPointFuture;
+use crate::engine::MempoolConfig;
 use crate::models::{DagPoint, Digest, Round, Signature, UnixTime, ValidPoint};
-use crate::MempoolConfig;
 
 /// If DAG location exists, it must have non-empty `versions` map;
 ///

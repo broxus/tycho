@@ -3,9 +3,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use tycho_network::{Response, ServiceRequest, Version};
 
+use crate::engine::MempoolConfig;
 use crate::intercom::dto::{BroadcastResponse, PointByIdResponse, SignatureResponse};
 use crate::models::{Point, PointId, Round};
-use crate::MempoolConfig;
 
 // 65535 bytes is a rough estimate for the largest point with more than 250 validators in set,
 // as it contains 2 mappings of 32 (peer_id) to 32 (digest) valuable bytes (includes and witness),

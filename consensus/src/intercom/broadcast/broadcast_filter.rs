@@ -11,11 +11,11 @@ use super::dto::ConsensusEvent;
 use crate::dag::{DagRound, Verifier, VerifyError};
 use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, EngineContext, MempoolStore};
+use crate::engine::outer_round::{Consensus, OuterRound};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::PeerState;
 use crate::intercom::{Downloader, PeerSchedule};
 use crate::models::{Digest, PeerCount, Point, PointId, Round};
-use crate::outer_round::{Consensus, OuterRound};
 
 #[derive(Clone)]
 pub struct BroadcastFilter {

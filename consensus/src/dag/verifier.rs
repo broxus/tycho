@@ -10,11 +10,13 @@ use tycho_util::sync::rayon_run;
 use crate::dag::dag_location::DagLocation;
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::dag::{DagRound, WeakDagRound};
+use crate::dyn_event;
 use crate::effects::{AltFormat, Effects, MempoolStore, ValidateContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, ValidPoint};
-use crate::{dyn_event, PointInfo};
+use crate::models::{
+    AnchorStageRole, DagPoint, Digest, Link, PeerCount, Point, PointInfo, ValidPoint,
+};
 
 // Note on equivocation.
 // Detected point equivocation does not invalidate the point, it just
@@ -74,7 +76,7 @@ impl Verifier {
         );
         let Some(r_0) = r_0.upgrade() else {
             tracing::info!("cannot (in)validate point, no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new((&point).into()));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new(&point));
             return ValidateContext::validated(dag_point);
         };
         assert_eq!(
@@ -112,7 +114,7 @@ impl Verifier {
 
         let Some(r_1) = r_0.prev().upgrade() else {
             tracing::info!("cannot (in)validate point's 'includes', no round in local DAG");
-            let dag_point = DagPoint::Suspicious(ValidPoint::new((&point).into()));
+            let dag_point = DagPoint::Suspicious(ValidPoint::new(&point));
             return ValidateContext::validated(dag_point);
         };
 
@@ -217,15 +219,15 @@ impl Verifier {
                 // here "trust consensus" call chain resolves;
                 // ignore other flags, though it looks like a race condition:
                 // follow majority's decision now, otherwise will follow it via sync
-                DagPoint::Trusted(ValidPoint::new((&point).into())),
+                DagPoint::Trusted(ValidPoint::new(&point)),
                 tracing::Level::INFO,
             ),
             (false, Some(true), Some(true), Some(true)) => (
-                DagPoint::Trusted(ValidPoint::new((&point).into())),
+                DagPoint::Trusted(ValidPoint::new(&point)),
                 tracing::Level::TRACE,
             ),
             (false, Some(true), Some(true), Some(false)) => (
-                DagPoint::Suspicious(ValidPoint::new((&point).into())),
+                DagPoint::Suspicious(ValidPoint::new(&point)),
                 tracing::Level::WARN,
             ),
             (false, Some(false), _, _) | (false, _, Some(false), _) => {

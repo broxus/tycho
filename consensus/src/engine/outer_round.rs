@@ -89,7 +89,7 @@ impl<T: Source> OuterRound<T> {
     }
 
     // not available to collator or adapter
-    pub(crate) fn receiver(&self) -> OuterRoundRecv<T> {
+    pub fn receiver(&self) -> OuterRoundRecv<T> {
         OuterRoundRecv {
             rx: self.tx.subscribe(),
             _phantom_data: Default::default(),
@@ -98,7 +98,7 @@ impl<T: Source> OuterRound<T> {
 }
 
 // no `Clone` and not available to collator or adapter
-pub(crate) struct OuterRoundRecv<T: Source> {
+pub struct OuterRoundRecv<T: Source> {
     rx: watch::Receiver<Round>,
     _phantom_data: PhantomData<T>,
 }

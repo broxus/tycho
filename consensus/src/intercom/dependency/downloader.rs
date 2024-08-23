@@ -20,8 +20,7 @@ use crate::effects::{AltFormat, DownloadContext, Effects};
 use crate::engine::MempoolConfig;
 use crate::intercom::dto::{PeerState, PointByIdResponse};
 use crate::intercom::{Dispatcher, PeerSchedule, QueryKind};
-use crate::models::{PeerCount, PointId, Round};
-use crate::Point;
+use crate::models::{PeerCount, Point, PointId, Round};
 
 #[derive(Clone)]
 pub struct Downloader {

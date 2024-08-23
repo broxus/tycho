@@ -9,8 +9,8 @@ use everscale_crypto::ed25519::{KeyPair, SecretKey};
 use futures_util::future::FutureExt;
 use parking_lot::deadlock;
 use tokio::sync::{mpsc, Notify};
+use tycho_consensus::prelude::{Engine, InputBuffer};
 use tycho_consensus::test_utils::*;
-use tycho_consensus::{Engine, InputBuffer};
 use tycho_network::{Address, DhtConfig, NetworkConfig, PeerId};
 use tycho_storage::Storage;
 

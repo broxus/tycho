@@ -2,8 +2,8 @@ use std::fmt::{Debug, Display, Formatter, Result};
 
 use tycho_network::PeerId;
 
+use crate::engine::{LogFlavor, MempoolConfig};
 use crate::models::{DagPoint, Digest, PointId, Signature};
-use crate::{LogFlavor, MempoolConfig};
 
 /// Display implementations to be used as fields in structured logs,
 /// while Debug is a temporary convenience

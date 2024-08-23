@@ -5,9 +5,9 @@ use tycho_storage::{MempoolStorage, PointFlags};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
 
-use crate::models::{Digest, PointInfo, Round};
-use crate::outer_round::{Collator, Commit, Consensus, OuterRoundRecv};
-use crate::{MempoolConfig, Point};
+use crate::engine::outer_round::{Collator, Commit, Consensus, OuterRoundRecv};
+use crate::engine::MempoolConfig;
+use crate::models::{Digest, Point, PointInfo, Round};
 
 #[derive(Clone)]
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
@@ -27,7 +27,7 @@ trait MempoolStoreImpl: Send + Sync {
 }
 
 impl MempoolStore {
-    pub(crate) fn new(
+    pub fn new(
         inner: MempoolStorage,
         consensus_round: OuterRoundRecv<Consensus>,
         committed_round: OuterRoundRecv<Commit>,

@@ -4,8 +4,7 @@ use std::sync::Arc;
 use tracing::Span;
 
 use crate::effects::AltFormat;
-use crate::models::{Digest, PointId, Round};
-use crate::Point;
+use crate::models::{Digest, Point, PointId, Round};
 
 /// All side effects are scoped to their context, that often (but not always) equals to module.
 pub trait EffectsContext {}

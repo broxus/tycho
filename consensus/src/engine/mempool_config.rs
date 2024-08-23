@@ -75,7 +75,7 @@ impl MempoolConfig {
     pub const DOWNLOAD_INTERVAL: Duration = Duration::from_millis(25);
 
     /// max count of ongoing downloads (except the first one) at any point of time
-    pub const CONCURRENT_DOWNLOADS: u16 = if cfg!(feature = "test") { 0 } else { 260 };
+    pub const CONCURRENT_DOWNLOADS: u16 = if cfg!(feature = "test") { 1 } else { 260 };
 
     /// Max distance (in rounds) behind consensus at which local mempool
     /// in silent mode (see [`Self::MAX_ANCHOR_DISTANCE`])

@@ -15,8 +15,7 @@ use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::{DownloadResult, Downloader};
-use crate::models::{DagPoint, Digest, PointId, PointInfo, ValidPoint};
-use crate::Point;
+use crate::models::{DagPoint, Digest, Point, PointId, ValidPoint};
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -67,7 +66,7 @@ impl DagPointFuture {
             ..Default::default()
         };
         store.insert_point(point, Some(&flags));
-        let dag_point = DagPoint::Trusted(ValidPoint::new(PointInfo::from(point)));
+        let dag_point = DagPoint::Trusted(ValidPoint::new(point));
         state.init(&dag_point); // only after persisted
         Self(DagPointFutureType::Ready(future::ready(dag_point)))
     }

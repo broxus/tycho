@@ -14,12 +14,13 @@ use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, Dag, DagRound, Verifier};
 use crate::effects::{ChainedRoundsContext, Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::engine::MempoolConfig;
 use crate::intercom::{Dispatcher, Downloader, PeerSchedule, Responder};
 use crate::models::{
-    AnchorStageRole, Digest, Link, PeerCount, PointData, PointId, Round, Signature, Through,
-    UnixTime,
+    AnchorStageRole, Digest, Link, PeerCount, Point, PointData, PointId, PointInfo, Round,
+    Signature, Through, UnixTime,
 };
-use crate::{test_utils, MempoolConfig, Point, PointInfo};
+use crate::test_utils;
 
 pub fn make_dag<const PEER_COUNT: usize>(
     peers: &[(PeerId, KeyPair); PEER_COUNT],
