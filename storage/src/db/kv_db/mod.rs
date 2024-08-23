@@ -54,7 +54,7 @@ weedb::tables! {
     pub struct BaseTables<Caches> {
         pub state: tables::State,
         pub archives: tables::Archives,
-        pub intermediate_archives: tables::IntermediateArchives,
+        pub archive_block_ids: tables::ArchiveBlockIds,
         pub block_handles: tables::BlockHandles,
         pub key_blocks: tables::KeyBlocks,
         pub package_entries: tables::PackageEntries,

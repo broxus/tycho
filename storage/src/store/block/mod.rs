@@ -10,9 +10,10 @@ use everscale_types::boc::BocRepr;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use parking_lot::RwLock;
+use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
     make_archive_entry, ArchiveData, ArchiveEntryId, ArchiveEntryIdKind, ArchiveReaderError,
-    ArchiveVerifier, GetFileName,
+    ArchiveVerifier, GetFileName, ARCHIVE_PREFIX,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
@@ -34,6 +35,7 @@ pub struct BlockStorage {
     archive_ids: RwLock<BTreeSet<u32>>,
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
+    prev_archive_commit: tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>,
 }
 
 impl BlockStorage {
@@ -51,6 +53,7 @@ impl BlockStorage {
             archive_ids: Default::default(),
             block_subscriptions: Default::default(),
             store_block_data: Default::default(),
+            prev_archive_commit: Default::default(),
         }
     }
 
@@ -385,102 +388,131 @@ impl BlockStorage {
 
     // === Archive stuff ===
 
-    pub async fn commit_archive(&self, archive_id: u32) -> Result<()> {
+    pub async fn spawn_commit_archive(&self, archive_id: u32) -> JoinHandle<Result<()>> {
         let db = self.db.clone();
+        let block_handle_storage = self.block_handle_storage.clone();
 
         tokio::task::spawn_blocking(move || {
+            let _histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
+
             let data = db
-                .intermediate_archives
+                .archive_block_ids
                 .get(archive_id.to_be_bytes())?
                 .ok_or(BlockStorageError::ArchiveNotFound)?;
 
-            let storage_cf = db.archives.cf();
-            let intermediate_storage_cf = db.intermediate_archives.cf();
+            assert_eq!(data.len() % BlockId::SIZE_HINT, 0);
 
-            let data_len = data.len() as u64;
-            let num_chunks = (data_len + ARCHIVE_CHUNK_SIZE - 1) / ARCHIVE_CHUNK_SIZE; // Round up to get the number of chunks
+            let mut total_size = 0u64;
+            let mut chunk_index = 0u64;
 
-            // Create transaction
-            let mut batch = rocksdb::WriteBatch::default();
+            let mut buffer = Vec::with_capacity(ARCHIVE_CHUNK_SIZE as usize);
+            buffer.extend_from_slice(ARCHIVE_PREFIX.as_slice());
 
-            // Write archive chunks
-            for i in 0..num_chunks {
-                let start = i * ARCHIVE_CHUNK_SIZE;
-                let end = std::cmp::min(start + ARCHIVE_CHUNK_SIZE, data_len);
-                let chunk = &data[start as usize..end as usize];
+            let block_ids = data
+                .chunks_exact(BlockId::SIZE_HINT)
+                .map(BlockId::from_slice)
+                .collect::<Vec<BlockId>>();
 
-                let mut key = [0u8; tables::Archives::KEY_LEN];
-                key[..4].copy_from_slice(&archive_id.to_be_bytes());
-                key[4..].copy_from_slice(&i.to_be_bytes());
+            let mut flush_buffer = |buf: &mut Vec<u8>| -> Result<()> {
+                if !buf.is_empty() {
+                    let mut key = [0u8; tables::Archives::KEY_LEN];
+                    key[..4].copy_from_slice(&archive_id.to_be_bytes());
+                    key[4..].copy_from_slice(&chunk_index.to_be_bytes());
 
-                batch.put_cf(&storage_cf, key.as_slice(), chunk);
+                    db.archives.insert(key.as_slice(), buf.as_slice())?;
+
+                    total_size += buf.len() as u64;
+                    chunk_index += 1;
+
+                    buf.clear();
+                }
+
+                Ok(())
+            };
+
+            for block_id in block_ids {
+                let handle = block_handle_storage
+                    .load_handle(&block_id)
+                    .ok_or(BlockStorageError::BlockHandleNotFound)?;
+
+                let flags = handle.meta().flags();
+
+                let block_data = {
+                    anyhow::ensure!(flags.contains(BlockFlags::HAS_DATA), "block data not found");
+
+                    let entry_id = ArchiveEntryId::block(block_id);
+                    make_archive_segment(&db, &entry_id)?
+                };
+
+                let block_proof_data = {
+                    anyhow::ensure!(
+                        flags.contains(BlockFlags::HAS_PROOF),
+                        "block proof not found"
+                    );
+
+                    let entry_id = ArchiveEntryId::proof(block_id);
+                    make_archive_segment(&db, &entry_id)?
+                };
+
+                let queue_diff_data = {
+                    anyhow::ensure!(
+                        flags.contains(BlockFlags::HAS_QUEUE_DIFF),
+                        "queue diff not found"
+                    );
+
+                    let entry_id = ArchiveEntryId::queue_diff(block_id);
+                    make_archive_segment(&db, &entry_id)?
+                };
+
+                for data in [&block_data, &block_proof_data, &queue_diff_data] {
+                    let mut remaining = data.as_slice();
+                    while !remaining.is_empty() {
+                        let space = ARCHIVE_CHUNK_SIZE as usize - buffer.len();
+                        let (chunk, rest) =
+                            remaining.split_at(std::cmp::min(space, remaining.len()));
+                        buffer.extend_from_slice(chunk);
+                        remaining = rest;
+
+                        if buffer.len() == ARCHIVE_CHUNK_SIZE as usize {
+                            flush_buffer(&mut buffer)?;
+                        }
+                    }
+                }
             }
 
-            // Write archive size
+            // Write the remaining data in the buffer if any
+            flush_buffer(&mut buffer)?;
+
+            // Write archive size and remove archive block ids atomically
+            let storage_cf = db.archives.cf();
+            let archive_block_ids_cf = db.archives.cf();
+
+            let mut batch = rocksdb::WriteBatch::default();
+
             let mut key = [0u8; tables::Archives::KEY_LEN];
             key[..4].copy_from_slice(&archive_id.to_be_bytes());
             key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
+            batch.put_cf(&storage_cf, key.as_slice(), total_size.to_be_bytes());
 
-            batch.put_cf(&storage_cf, key.as_slice(), data.len().to_be_bytes());
+            let key = archive_id.to_be_bytes();
+            batch.delete_cf(&archive_block_ids_cf, key);
 
-            // Remove intermediate archive
-            batch.delete_cf(&intermediate_storage_cf, key);
-
-            // Execute transaction
             db.rocksdb().write(batch)?;
 
             Ok(())
         })
-        .await?
     }
 
     /// Loads data and proof for the block and appends them to the corresponding archive.
     pub async fn move_into_archive(&self, handle: &BlockHandle) -> Result<()> {
         let _histogram = HistogramGuard::begin("tycho_storage_move_into_archive_time");
 
-        let flags = handle.meta().flags();
-
         // Prepare data
         let block_id = handle.id();
-
-        let block_data = {
-            anyhow::ensure!(flags.contains(BlockFlags::HAS_DATA), "block data not found");
-            let lock = handle.block_data_lock().write().await;
-
-            let entry_id = ArchiveEntryId::block(block_id);
-            let data = self.make_archive_segment(&entry_id)?;
-
-            (lock, data)
-        };
-
-        let block_proof_data = {
-            anyhow::ensure!(
-                flags.contains(BlockFlags::HAS_PROOF),
-                "block proof not found"
-            );
-            let lock = handle.proof_data_lock().write().await;
-
-            let entry_id = ArchiveEntryId::proof(block_id);
-            let data = self.make_archive_segment(&entry_id)?;
-
-            (lock, data)
-        };
-
-        let queue_diff_data = {
-            anyhow::ensure!(
-                flags.contains(BlockFlags::HAS_QUEUE_DIFF),
-                "queue diff not found"
-            );
-            let lock = handle.queue_diff_data_lock().write().await;
-
-            let entry_id = ArchiveEntryId::queue_diff(block_id);
-            let data = self.make_archive_segment(&entry_id)?;
-
-            (lock, data)
-        };
+        let block_id_bytes = handle.id().to_vec();
 
         // Prepare cf
-        let storage_cf = self.db.intermediate_archives.cf();
+        let storage_cf = self.db.archive_block_ids.cf();
         let handle_cf = self.db.block_handles.cf();
 
         // Prepare archive
@@ -489,14 +521,9 @@ impl BlockStorage {
 
         // 0. Create transaction
         let mut batch = rocksdb::WriteBatch::default();
-        // 1. Append archive segment with block data
-        batch.merge_cf(&storage_cf, archive_id_bytes, &block_data.1);
-        // 2. Append archive segment with block proof data
-        batch.merge_cf(&storage_cf, archive_id_bytes, &block_proof_data.1);
-        // 3. Append archive segment with queue diff data
-        batch.merge_cf(&storage_cf, archive_id_bytes, &queue_diff_data.1);
-
-        // 4. Update block handle meta
+        // 1. Append archive block id
+        batch.merge_cf(&storage_cf, archive_id_bytes, &block_id_bytes);
+        // 2. Update block handle meta
         if handle.meta().add_flags(BlockFlags::IS_ARCHIVED) {
             batch.put_cf(
                 &handle_cf,
@@ -504,15 +531,19 @@ impl BlockStorage {
                 handle.meta().to_vec(),
             );
         }
-        // 5. Execute transaction
+        // 3. Execute transaction
         self.db.rocksdb().write(batch)?;
 
-        tracing::trace!(block_id = %handle.id(), "saved block into archive");
+        tracing::trace!(block_id = %handle.id(), "saved block id into archive");
         // Block will be removed after blocks gc
 
         if let (Some(prev_id), true) = (archive_id.prev_id, archive_id.is_new) {
             // commit previous archive
-            self.commit_archive(prev_id).await?;
+            let mut prev_archive_commit = self.prev_archive_commit.lock().await;
+            if let Some(handle) = prev_archive_commit.take() {
+                handle.await??;
+            }
+            *prev_archive_commit = Some(self.spawn_commit_archive(prev_id).await);
         }
 
         // Done
@@ -657,8 +688,8 @@ impl BlockStorage {
         drop(archive_ids);
 
         // Remove all archives in range `[0, until_id)`
-        let archives_cf = self.db.intermediate_archives.cf();
-        let write_options = self.db.intermediate_archives.write_config();
+        let archives_cf = self.db.archives.cf();
+        let write_options = self.db.archives.write_config();
 
         let start_key = [0u8; tables::Archives::KEY_LEN];
 
@@ -770,16 +801,6 @@ impl BlockStorage {
         debug_assert!(mc_seqno - archive_id.id <= ARCHIVE_PACKAGE_SIZE);
 
         archive_id
-    }
-
-    fn make_archive_segment<I>(&self, entry_id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
-    where
-        I: Borrow<BlockId> + Hash,
-    {
-        match self.db.package_entries.get(entry_id.to_vec())? {
-            Some(data) => Ok(make_archive_entry(&entry_id.filename(), &data)),
-            None => Err(BlockStorageError::InvalidBlockData.into()),
-        }
     }
 }
 
@@ -923,6 +944,16 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
     }
 }
 
+fn make_archive_segment<I>(db: &BaseDb, entry_id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
+where
+    I: Borrow<BlockId> + Hash,
+{
+    match db.package_entries.get(entry_id.to_vec())? {
+        Some(data) => Ok(make_archive_entry(&entry_id.filename(), &data)),
+        None => Err(BlockStorageError::InvalidBlockData.into()),
+    }
+}
+
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
 const ARCHIVE_SIZE_MAGIC: u64 = u64::MAX;
 const ARCHIVE_CHUNK_SIZE: u64 = 1024 * 1024; // 1MB
@@ -946,6 +977,8 @@ enum BlockStorageError {
     QueueDiffNotFound,
     #[error("Block handle id mismatch")]
     BlockHandleIdMismatch,
+    #[error("Block handle not found")]
+    BlockHandleNotFound,
     #[error("Invalid block data")]
     InvalidBlockData,
     #[error("Offset is outside of the archive slice")]
