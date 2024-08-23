@@ -436,30 +436,22 @@ impl BlockStorage {
                     .ok_or(BlockStorageError::BlockHandleNotFound)?;
 
                 let flags = handle.meta().flags();
+                anyhow::ensure!(
+                    flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
+                    "block not full"
+                );
 
                 let block_data = {
-                    anyhow::ensure!(flags.contains(BlockFlags::HAS_DATA), "block data not found");
-
                     let entry_id = ArchiveEntryId::block(block_id);
                     make_archive_segment(&db, &entry_id)?
                 };
 
                 let block_proof_data = {
-                    anyhow::ensure!(
-                        flags.contains(BlockFlags::HAS_PROOF),
-                        "block proof not found"
-                    );
-
                     let entry_id = ArchiveEntryId::proof(block_id);
                     make_archive_segment(&db, &entry_id)?
                 };
 
                 let queue_diff_data = {
-                    anyhow::ensure!(
-                        flags.contains(BlockFlags::HAS_QUEUE_DIFF),
-                        "queue diff not found"
-                    );
-
                     let entry_id = ArchiveEntryId::queue_diff(block_id);
                     make_archive_segment(&db, &entry_id)?
                 };

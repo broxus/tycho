@@ -312,7 +312,9 @@ fn archive_data_merge(
     current_value: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
-    let total_len: usize = operands.iter().map(|data| data.len()).sum();
+    let total_len = current_value.map(|data| data.len()).unwrap_or_default()
+        + operands.iter().map(|data| data.len()).sum::<usize>();
+
     let mut result = Vec::with_capacity(total_len);
 
     if let Some(current_value) = current_value {
