@@ -931,7 +931,7 @@ where
     let keys = entry_ids.iter().map(|x| x.to_vec()).collect::<Vec<_>>();
     let key_slices = keys.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
 
-    let results = db.package_entries.multi_get(&key_slices);
+    let results = db.package_entries.batched_multi_get(&key_slices, true);
 
     let mut buffer = vec![];
     for (entry_id, result) in entry_ids.iter().zip(results.into_iter()) {

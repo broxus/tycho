@@ -3697,7 +3697,7 @@ dependencies = [
 [[package]]
 name = "weedb"
 version = "0.3.3"
-source = "git+https://github.com/broxus/weedb.git#b3c6ef4c457ae490b81496574b5605b0d4b81c53"
+source = "git+https://github.com/broxus/weedb.git#75fa5a5be6eb82726fcf906828702f7fabaab070"
 dependencies = [
  "librocksdb-sys",
  "metrics",
