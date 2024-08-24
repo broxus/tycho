@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -18,16 +19,16 @@ use crate::mempool::{
 };
 use crate::tracing_targets;
 
-#[derive(Clone)]
 pub struct MempoolAdapterStubImpl {
     listener: Arc<dyn MempoolEventListener>,
     anchors_cache: Arc<RwLock<BTreeMap<MempoolAnchorId, Arc<MempoolAnchor>>>>,
+    sleep_between_anchors: AtomicBool,
 }
 
 impl MempoolAdapterStubImpl {
-    pub fn with_stub_externals(listener: Arc<dyn MempoolEventListener>) -> Self {
+    pub fn with_stub_externals(listener: Arc<dyn MempoolEventListener>) -> Arc<Self> {
         Self::with_generator(listener, |a| {
-            tokio::spawn(a.stub_externals_generator());
+            tokio::spawn(Self::stub_externals_generator(a));
             Ok(())
         })
         .unwrap()
@@ -36,28 +37,31 @@ impl MempoolAdapterStubImpl {
     pub fn with_externals_from_dir(
         listener: Arc<dyn MempoolEventListener>,
         dir_path: impl AsRef<Path>,
-    ) -> Result<Self> {
+    ) -> Result<Arc<Self>> {
         Self::with_generator(listener, move |a| {
             let mut paths = std::fs::read_dir(dir_path)?
                 .map(|res| res.map(|e| e.path()))
                 .collect::<Result<Vec<_>, _>>()?;
             paths.sort();
 
-            tokio::spawn(a.file_externals_generator(paths));
+            tokio::spawn(Self::file_externals_generator(a, paths));
             Ok(())
         })
     }
 
-    fn with_generator<F>(listener: Arc<dyn MempoolEventListener>, start: F) -> Result<Self>
+    fn with_generator<F>(listener: Arc<dyn MempoolEventListener>, start: F) -> Result<Arc<Self>>
     where
-        F: FnOnce(Self) -> Result<()>,
+        F: FnOnce(Arc<Self>) -> Result<()>,
     {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "creating mempool adapter");
 
         let adapter = Self {
             listener,
             anchors_cache: Arc::new(RwLock::new(BTreeMap::new())),
+            sleep_between_anchors: AtomicBool::new(true),
         };
+
+        let adapter = Arc::new(adapter);
 
         start(adapter.clone())?;
 
@@ -65,14 +69,16 @@ impl MempoolAdapterStubImpl {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn stub_externals_generator(self) {
+    async fn stub_externals_generator(self: Arc<Self>) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
         defer! {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
         }
 
         for anchor_id in 1.. {
-            tokio::time::sleep(make_round_interval() * 4).await;
+            if self.sleep_between_anchors.load(Ordering::Acquire) {
+                tokio::time::sleep(make_round_interval() * 4).await;
+            }
 
             let anchor = make_stub_anchor(anchor_id);
             self.anchors_cache.write().insert(anchor_id, anchor.clone());
@@ -90,7 +96,7 @@ impl MempoolAdapterStubImpl {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn file_externals_generator(self, paths: Vec<PathBuf>) {
+    async fn file_externals_generator(self: Arc<Self>, paths: Vec<PathBuf>) {
         tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "started");
         defer! {
             tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER, "finished");
@@ -100,7 +106,9 @@ impl MempoolAdapterStubImpl {
 
         let mut last_chain_time = 0;
         for anchor_id in 1.. {
-            tokio::time::sleep(make_round_interval() * 4).await;
+            if self.sleep_between_anchors.load(Ordering::Acquire) {
+                tokio::time::sleep(make_round_interval() * 4).await;
+            }
 
             let anchor = 'anchor: {
                 if let Some(path) = iter.next() {
@@ -158,7 +166,22 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 if let Some((_, last_anchor)) = self.anchors_cache.read().last_key_value() {
                     if last_anchor.id > anchor_id {
                         return Ok(None);
+                    } else {
+                        let delta = anchor_id.saturating_sub(last_anchor.id);
+                        if delta > 3 {
+                            self.sleep_between_anchors.store(false, Ordering::Release);
+                            tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                                "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 3",
+                                anchor_id, last_anchor.id, delta,
+                            );
+                        }
                     }
+                } else {
+                    self.sleep_between_anchors.store(false, Ordering::Release);
+                    tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                        "sleep_between_anchors set to False because no last anchor when requested anchor_id {}",
+                        anchor_id,
+                    );
                 }
 
                 if last_attempt_at.is_none() {
@@ -174,6 +197,13 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 tokio::time::sleep(tokio::time::Duration::from_millis(1320)).await;
                 continue;
             };
+
+            if !self.sleep_between_anchors.fetch_or(true, Ordering::AcqRel) {
+                tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                    "sleep_between_anchors set to True when requested was returned by anchor_id {}",
+                    anchor_id,
+                );
+            }
 
             match last_attempt_at {
                 Some(last) => {
@@ -216,6 +246,23 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 .map(|(_, v)| v.clone());
 
             let Some(anchor) = res else {
+                if let Some((_, last_anchor)) = self.anchors_cache.read().last_key_value() {
+                    let delta = prev_anchor_id.saturating_sub(last_anchor.id);
+                    if delta > 2 {
+                        self.sleep_between_anchors.store(false, Ordering::Release);
+                        tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                            "sleep_between_anchors set to False because prev_anchor_id {} ahead last {} on {} > 2",
+                            prev_anchor_id, last_anchor.id, delta,
+                        );
+                    }
+                } else {
+                    self.sleep_between_anchors.store(false, Ordering::Release);
+                    tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                        "sleep_between_anchors set to False because no last anchor when prev_anchor_id {}",
+                        prev_anchor_id,
+                    );
+                }
+
                 if last_attempt_at.is_none() {
                     tracing::debug!(
                         target: tracing_targets::MEMPOOL_ADAPTER,
@@ -229,6 +276,13 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 tokio::time::sleep(tokio::time::Duration::from_millis(1320)).await;
                 continue;
             };
+
+            if !self.sleep_between_anchors.fetch_or(true, Ordering::AcqRel) {
+                tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                    "sleep_between_anchors set to True when next was returned after prev_anchor_id {}",
+                    prev_anchor_id,
+                );
+            }
 
             match last_attempt_at {
                 Some(last) => {

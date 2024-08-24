@@ -375,21 +375,15 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
 
     let queue_diff_stuff = QueueDiffStuff::deserialize(&block_id, &data).unwrap();
 
-    let diff_with_messages = QueueDiffWithMessages::from_queue_diff(queue_diff_stuff, &out_msg)?;
+    let diff_with_messages = QueueDiffWithMessages::from_queue_diff(&queue_diff_stuff, &out_msg)?;
 
-    assert_eq!(
-        diff_with_messages.processed_upto,
-        diff.processed_upto
-            .into_iter()
-            .map(|(k, v)| (k, v.into()))
-            .collect()
-    );
+    assert_eq!(diff_with_messages.processed_upto, diff.processed_upto,);
 
     assert_eq!(
         diff_with_messages
             .messages
-            .into_iter()
-            .map(|(key, _)| key.hash)
+            .into_keys()
+            .map(|key| key.hash)
             .collect::<Vec<_>>(),
         vec![message1_hash, message2_hash, message3_hash,]
     );

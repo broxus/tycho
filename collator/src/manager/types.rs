@@ -27,6 +27,7 @@ pub(super) struct BlockCacheStoreResult {
     pub block_id: BlockId,
     pub kind: BlockCacheEntryKind,
     pub send_sync_status: SendSyncStatus,
+    pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
 }
 
@@ -41,8 +42,11 @@ impl std::fmt::Display for DisplayBlockCacheStoreResult<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "block_id={}, kind={:?}, send_sync_status={:?}, ",
-            self.0.block_id, self.0.kind, self.0.send_sync_status,
+            "block_id={}, kind={:?}, last_collated_mc_block_id={:?}, send_sync_status={:?}, ",
+            self.0.block_id,
+            self.0.kind,
+            self.0.last_collated_mc_block_id.map(|id| id.to_string()),
+            self.0.send_sync_status,
         )?;
         write!(
             f,
@@ -61,6 +65,7 @@ pub(super) struct BlocksCache {
 #[derive(Default)]
 pub(super) struct MasterBlocksCache {
     pub blocks: BTreeMap<BlockSeqno, BlockCacheEntry>,
+    pub last_known_synced: Option<BlockSeqno>,
     /// id of last master block collated by ourselves
     pub last_collated_mc_block_id: Option<BlockId>,
     pub applied_mc_queue_range: Option<(BlockSeqno, BlockSeqno)>,
@@ -69,9 +74,24 @@ pub(super) struct MasterBlocksCache {
 #[derive(Default)]
 pub(super) struct ShardBlocksCache {
     pub blocks: BTreeMap<BlockSeqno, BlockCacheEntry>,
+    pub last_known_synced: Option<BlockSeqno>,
     pub value_flow: ValueFlow,
     pub proof_funds: ProofFunds,
     pub creators: Vec<HashBytes>,
+}
+
+/// Returns Some(seqno: u32) of last known synced block when it newer than provided
+pub(super) fn check_refresh_last_known_synced(
+    last_known_seqno: &mut Option<BlockSeqno>,
+    block_seqno: BlockSeqno,
+) -> Option<BlockSeqno> {
+    if let Some(last_known) = last_known_seqno {
+        if *last_known >= block_seqno {
+            return Some(*last_known);
+        }
+    }
+    *last_known_seqno = Some(block_seqno);
+    None
 }
 
 #[derive(Clone)]
@@ -232,7 +252,7 @@ impl BlockCacheEntry {
         })
     }
 
-    pub fn key(&self) -> &BlockCacheKey {
+    pub fn key(&self) -> &BlockIdShort {
         &self.key
     }
 
@@ -272,79 +292,70 @@ impl BlockCacheEntry {
         &self.top_shard_blocks_keys
     }
 
-    pub fn extract_stuff_for_sync(&mut self) -> Result<Option<BlockCandidateStuffToSend>> {
-        let candidate_stuff_opt = match self.send_sync_status {
+    pub fn extract_entry_stuff_for_sync(&mut self) -> Result<BlockCandidateStuffToSend> {
+        let send_sync_status = self.send_sync_status;
+        match self.send_sync_status {
             SendSyncStatus::NotReady => {
                 bail!(
                     "Block is not ready for sync: ({})",
-                    self.block_id.as_short_id()
+                    self.block_id().as_short_id()
                 );
             }
             SendSyncStatus::Ready => {
-                let candidate_stuff = std::mem::take(&mut self.candidate_stuff).ok_or_else(|| {
-                    anyhow!(
-                        "Block candidate stuff already extracted for sync but sync status is Ready: ({})",
-                        self.block_id.as_short_id(),
-                    )
-                })?;
                 self.send_sync_status = SendSyncStatus::Sending;
-                Some(candidate_stuff)
             }
-            SendSyncStatus::Sending => {
-                // Already extracted and sending now
-                return Ok(None);
+            _ => {
+                // do not update send_sync_status
             }
-            SendSyncStatus::Sent | SendSyncStatus::Synced => None,
-        };
-        Ok(Some(BlockCandidateStuffToSend {
-            key: self.key,
-            candidate_stuff: candidate_stuff_opt,
-            send_sync_status: self.send_sync_status,
-        }))
+        }
+        Ok(self.extract_entry_stuff_with_status(send_sync_status))
     }
 
-    pub fn restore_entry(
+    fn extract_entry_stuff_with_status(
         &mut self,
-        candidate_stuff_opt: Option<BlockCandidateStuff>,
         send_sync_status: SendSyncStatus,
-    ) -> Result<()> {
-        if self.candidate_stuff.is_some() {
-            bail!(
-                "Block candidate stuff was not extracted before. Unable to restore! ({})",
-                self.block_id.as_short_id(),
-            )
-        } else {
-            self.candidate_stuff = candidate_stuff_opt;
-
-            // if block was not sent or synced then return cache entry status to Ready
-            let new_send_sync_status = if matches!(
-                send_sync_status,
-                SendSyncStatus::Sent | SendSyncStatus::Synced
-            ) {
-                send_sync_status
-            } else {
-                SendSyncStatus::Ready
-            };
-            self.send_sync_status = new_send_sync_status;
+    ) -> BlockCandidateStuffToSend {
+        BlockCandidateStuffToSend {
+            key: self.key,
+            kind: self.kind,
+            candidate_stuff: self.candidate_stuff.take(),
+            applied_block_stuff: self.applied_block_stuff.take(),
+            send_sync_status,
         }
+    }
+
+    pub fn restore_entry_stuff(&mut self, entry_stuff: BlockCandidateStuffToSend) -> Result<()> {
+        // if block was not sent or synced then return cache entry status to Ready
+        let new_send_sync_status = match entry_stuff.send_sync_status {
+            SendSyncStatus::NotReady => {
+                bail!("incorrect send_sync_status on restore: NotReady")
+            }
+            SendSyncStatus::Sending => SendSyncStatus::Ready,
+            val => val,
+        };
+        self.send_sync_status = new_send_sync_status;
+        self.candidate_stuff = entry_stuff.candidate_stuff;
+        self.applied_block_stuff = entry_stuff.applied_block_stuff;
         Ok(())
     }
 
     pub fn candidate_stuff(&self) -> Result<&BlockCandidateStuff> {
         self.candidate_stuff
             .as_ref()
-            .ok_or_else(|| anyhow!("`entry` was extracted"))
+            .ok_or_else(|| anyhow!("`candidate_stuff` was extracted"))
     }
 }
 
 pub(super) struct BlockCandidateStuffToSend {
     pub key: BlockCacheKey,
+    pub kind: BlockCacheEntryKind,
     pub candidate_stuff: Option<BlockCandidateStuff>,
+    pub applied_block_stuff: Option<AppliedBlockStuff>,
     pub send_sync_status: SendSyncStatus,
 }
 
 pub(super) struct McBlockSubgraphToSend {
-    pub mc_block: BlockCandidateStuffToSend,
+    pub master_block: Option<BlockCandidateStuffToSend>,
     pub shard_blocks: Vec<BlockCandidateStuffToSend>,
 }
 
@@ -352,4 +363,14 @@ pub(super) enum McBlockSubgraphExtract {
     Extracted(McBlockSubgraphToSend),
     NotFullValid,
     AlreadyExtracted,
+}
+
+impl std::fmt::Display for McBlockSubgraphExtract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Extracted(_) => write!(f, "Extracted"),
+            Self::NotFullValid => write!(f, "NotFullValid"),
+            Self::AlreadyExtracted => write!(f, "AlreadyExtracted"),
+        }
+    }
 }

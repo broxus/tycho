@@ -27,7 +27,7 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
 
 impl QueueDiffWithMessages<EnqueuedMessage> {
     pub fn from_queue_diff(
-        queue_diff_stuff: QueueDiffStuff,
+        queue_diff_stuff: &QueueDiffStuff,
         out_msg_description: &OutMsgDescr,
     ) -> Result<Self> {
         let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();

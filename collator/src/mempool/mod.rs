@@ -31,13 +31,13 @@ pub trait MempoolAdapterFactory {
 
 impl<F, R> MempoolAdapterFactory for F
 where
-    F: Fn(Arc<dyn MempoolEventListener>) -> R,
+    F: Fn(Arc<dyn MempoolEventListener>) -> Arc<R>,
     R: MempoolAdapter,
 {
     type Adapter = R;
 
     fn create(&self, listener: Arc<dyn MempoolEventListener>) -> Arc<Self::Adapter> {
-        Arc::new(self(listener))
+        self(listener)
     }
 }
 

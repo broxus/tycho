@@ -10,6 +10,7 @@ use execution_manager::ExecutionManager;
 use futures_util::future::Future;
 use mq_iterator_adapter::QueueIteratorAdapter;
 use tokio::sync::oneshot;
+use tracing::field::display;
 use tracing::Instrument;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::futures::JoinTask;
@@ -95,15 +96,20 @@ pub trait CollatorEventListener: Send + Sync {
 #[async_trait]
 pub trait Collator: Send + Sync + 'static {
     /// Enqueue collator stop task
-    async fn equeue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
-    /// Enqueue update of McData in working state and run attempt to collate next shard block
-    async fn equeue_update_mc_data_and_try_collate(&self, mc_data: Arc<McData>) -> Result<()>;
+    async fn enqueue_stop(&self, stop_key: CollationSessionId) -> Result<()>;
+    /// Enqueue update McData if newer, reset PrevData and run next collation attempt
+    async fn enqueue_resume_collation(
+        &self,
+        mc_data: Arc<McData>,
+        reset: bool,
+        prev_blocks_ids: Vec<BlockId>,
+    ) -> Result<()>;
     /// Enqueue next attemt to collate block
     /// (with check if there are internals or externals for collation).
     /// Check implementation for master and shards for details
-    async fn equeue_try_collate(&self) -> Result<()>;
+    async fn enqueue_try_collate(&self) -> Result<()>;
     /// Enqueue new block collation (without check of internals and externals)
-    async fn equeue_do_collate(
+    async fn enqueue_do_collate(
         &self,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()>;
@@ -133,24 +139,32 @@ impl CollatorFactory for CollatorStdImplFactory {
 
 #[async_trait]
 impl Collator for AsyncQueuedDispatcher<CollatorStdImpl> {
-    async fn equeue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
+    async fn enqueue_stop(&self, _stop_key: CollationSessionId) -> Result<()> {
         todo!()
     }
 
-    async fn equeue_update_mc_data_and_try_collate(&self, mc_data: Arc<McData>) -> Result<()> {
+    /// Enqueue update McData if newer, reset PrevData if required and run next collation attempt
+    async fn enqueue_resume_collation(
+        &self,
+        mc_data: Arc<McData>,
+        reset: bool,
+        prev_blocks_ids: Vec<BlockId>,
+    ) -> Result<()> {
         self.enqueue_task(method_to_queued_async_closure!(
-            update_mc_data_and_try_collate,
-            mc_data
+            resume_collation,
+            mc_data,
+            reset,
+            prev_blocks_ids
         ))
         .await
     }
 
-    async fn equeue_try_collate(&self) -> Result<()> {
-        self.enqueue_task(method_to_queued_async_closure!(try_collate,))
+    async fn enqueue_try_collate(&self) -> Result<()> {
+        self.enqueue_task(method_to_queued_async_closure!(wait_state_and_try_collate,))
             .await
     }
 
-    async fn equeue_do_collate(
+    async fn enqueue_do_collate(
         &self,
         top_shard_blocks_info: Vec<TopBlockDescription>,
     ) -> Result<()> {
@@ -216,14 +230,6 @@ impl CollatorStdImpl {
         let (dispatcher, receiver) =
             AsyncQueuedDispatcher::new(STANDARD_QUEUED_DISPATCHER_BUFFER_SIZE);
 
-        let exec_manager = ExecutionManager::new(
-            shard_id,
-            mq_adapter.clone(),
-            config.msgs_exec_params.buffer_limit as _,
-            config.msgs_exec_params.group_limit as _,
-            config.msgs_exec_params.group_vert_size as _,
-        );
-
         let (working_state_tx, working_state_rx) = oneshot::channel::<Result<WorkingState>>();
 
         let processor = Self {
@@ -232,7 +238,7 @@ impl CollatorStdImpl {
             collation_session,
             listener,
             mq_adapter,
-            exec_manager: Some(exec_manager),
+            exec_manager: None,
             mpool_adapter,
             state_node_adapter,
             shard_id,
@@ -301,62 +307,12 @@ impl CollatorStdImpl {
         tracing::info!(target: tracing_targets::COLLATOR, "initializing...");
 
         // init working state
-
-        // load states and prev queue diff hash
-        tracing::info!(target: tracing_targets::COLLATOR,
-            prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
-            "loading initial states...",
-        );
-        let (prev_states, prev_queue_diff_hashes) =
-            Self::load_init_states_and_diffs(self.state_node_adapter.clone(), prev_blocks_ids)
+        let working_state =
+            Self::init_working_state(self.state_node_adapter.clone(), mc_data, prev_blocks_ids)
                 .await?;
 
-        // build, validate and set working state
-        tracing::info!(target: tracing_targets::COLLATOR, "building working state...");
-
-        let working_state =
-            Self::build_and_validate_working_state(mc_data, prev_states, prev_queue_diff_hashes)?;
-
-        // define processed to anchor info
-        // try get from mc data
-        let mut mc_ext_processed_to_opt = None;
-        if !self.shard_id.is_masterchain() {
-            if let Some(processed_to) = working_state
-                .mc_data
-                .processed_upto
-                .externals
-                .as_ref()
-                .map(|upto| upto.processed_to)
-            {
-                // TODO: consider split/merge
-
-                // find top shard block seqno for current shard from mc data
-                let mut top_sc_block_seqno_from_mc_data = 0;
-                for item in working_state.mc_data.shards.iter() {
-                    let (shard_id, shard_descr) = item?;
-                    if self.shard_id == shard_id {
-                        top_sc_block_seqno_from_mc_data = shard_descr.seqno;
-                        break;
-                    }
-                }
-                // get mc data processed to info if prev shard block is eq to top
-                let sc_prev_seqno = working_state.prev_shard_data.blocks_ids()[0].seqno;
-                if sc_prev_seqno == top_sc_block_seqno_from_mc_data {
-                    mc_ext_processed_to_opt = Some(processed_to);
-                }
-            }
-        }
-
-        // try get from prev data
-        let ext_processed_to_opt = match mc_ext_processed_to_opt {
-            None => working_state
-                .prev_shard_data
-                .processed_upto()
-                .externals
-                .as_ref()
-                .map(|upto| upto.processed_to),
-            val => val,
-        };
+        // calc last processed to anchor
+        let ext_processed_to_opt = Self::try_calc_last_processed_to_anchor_info(&working_state)?;
 
         // import anchors
         if let Some(ext_processed_to) = ext_processed_to_opt {
@@ -372,6 +328,9 @@ impl CollatorStdImpl {
             .await?;
         }
 
+        // init exec manager
+        self.init_exec_manager();
+
         working_state_tx.send(Ok(working_state)).ok();
 
         self.timer = std::time::Instant::now();
@@ -380,9 +339,122 @@ impl CollatorStdImpl {
 
         // trying to collate next block
         tracing::info!(target: tracing_targets::COLLATOR, "trying to collate next block after init...");
-        self.try_collate().await?;
+        self.wait_state_and_try_collate().await?;
 
         Ok(())
+    }
+
+    #[tracing::instrument(skip_all, fields(next_block_id = %self.next_block_info))]
+    async fn resume_collation(
+        &mut self,
+        mc_data: Arc<McData>,
+        reset: bool,
+        prev_blocks_ids: Vec<BlockId>,
+    ) -> Result<()> {
+        let mut working_state = self.working_state.wait().await?;
+
+        // update mc_data if newer
+        if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
+            working_state.mc_data = mc_data;
+
+            if working_state.has_pending_internals == Some(false) {
+                working_state.has_pending_internals = None;
+            }
+
+            // reset state if required
+            if reset {
+                self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
+
+                let span = tracing::Span::current();
+                span.record("new_next_block_id", display(self.next_block_info));
+
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+                    prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
+                    "resume collation with reset",
+                );
+
+                // reload prev data
+                working_state = Self::init_working_state(
+                    self.state_node_adapter.clone(),
+                    working_state.mc_data,
+                    prev_blocks_ids,
+                )
+                .await?;
+
+                // reset anchors cache
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "reset anchors cache",
+                );
+                self.anchors_cache.clear();
+
+                // calc last processed to anchor
+                let ext_processed_to_opt =
+                    Self::try_calc_last_processed_to_anchor_info(&working_state)?;
+
+                // import anchors
+                if let Some(ext_processed_to) = ext_processed_to_opt {
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "import anchors from processed to anchor {:?}",
+                        ext_processed_to,
+                    );
+                    self.import_anchors_on_init(
+                        ext_processed_to.0,
+                        ext_processed_to.1 as _,
+                        working_state.prev_shard_data.gen_chain_time(),
+                    )
+                    .await?;
+                }
+
+                // reset exec manager with msgs buffer
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "reset exec manager with msgs buffer",
+                );
+                self.init_exec_manager();
+            } else {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+                    "resume collation without reset",
+                );
+            }
+        }
+
+        if self.shard_id.is_masterchain() {
+            self.try_collate_next_master_block_impl(working_state).await
+        } else {
+            self.try_collate_next_shard_block_impl(working_state).await
+        }
+    }
+
+    fn init_exec_manager(&mut self) {
+        let exec_manager = ExecutionManager::new(
+            self.shard_id,
+            self.mq_adapter.clone(),
+            self.config.msgs_exec_params.buffer_limit as _,
+            self.config.msgs_exec_params.group_limit as _,
+            self.config.msgs_exec_params.group_vert_size as _,
+        );
+        self.exec_manager = Some(exec_manager);
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn init_working_state(
+        state_node_adapter: Arc<dyn StateNodeAdapter>,
+        mc_data: Arc<McData>,
+        prev_blocks_ids: Vec<BlockId>,
+    ) -> Result<WorkingState> {
+        // load prev states and queue diff hashes
+        tracing::debug!(target: tracing_targets::COLLATOR,
+            prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
+            "loading prev states and queue diffs...",
+        );
+        let (prev_states, prev_queue_diff_hashes) =
+            Self::load_states_and_diffs(state_node_adapter, prev_blocks_ids).await?;
+
+        // build and validate working state
+        tracing::debug!(target: tracing_targets::COLLATOR, "building working state...");
+
+        Self::build_and_validate_working_state(mc_data, prev_states, prev_queue_diff_hashes)
     }
 
     /// Build working state update that would be applied before next collation
@@ -421,7 +493,7 @@ impl CollatorStdImpl {
 
     /// Load required initial states and prev queue diff hash:
     /// master state + list of previous shard states
-    async fn load_init_states_and_diffs(
+    async fn load_states_and_diffs(
         state_node_adapter: Arc<dyn StateNodeAdapter>,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<(Vec<ShardStateStuff>, Vec<HashBytes>)> {
@@ -435,9 +507,8 @@ impl CollatorStdImpl {
                 for prev_block_id in prev_blocks_ids {
                     // request state for prev block and wait for response
                     let state = state_node_adapter.load_state(&prev_block_id).await?;
-                    tracing::info!(
-                        target: tracing_targets::COLLATOR,
-                        "To init working state loaded prev shard state for prev_block_id {}",
+                    tracing::debug!(target: tracing_targets::COLLATOR,
+                        "loaded prev shard state for prev_block_id {}",
                         prev_block_id.as_short_id(),
                     );
                     prev_states.push(state);
@@ -454,9 +525,8 @@ impl CollatorStdImpl {
                 for prev_block_id in prev_blocks_ids {
                     // request state for prev block and wait for response
                     if let Some(diff) = state_node_adapter.load_diff(&prev_block_id).await? {
-                        tracing::info!(
-                            target: tracing_targets::COLLATOR,
-                            "To init working state loaded prev shard state for prev_block_id {}",
+                        tracing::debug!(target: tracing_targets::COLLATOR,
+                            "loaded queue diff for prev_block_id {}",
                             prev_block_id.as_short_id(),
                         );
                         prev_hashes.push(*diff.diff_hash());
@@ -695,18 +765,7 @@ impl CollatorStdImpl {
         Ok(has_internals)
     }
 
-    async fn update_mc_data_and_try_collate(&mut self, mc_data: Arc<McData>) -> Result<()> {
-        let mut working_state = self.working_state.wait().await?;
-
-        working_state.mc_data = mc_data;
-        if working_state.has_pending_internals == Some(false) {
-            working_state.has_pending_internals = None;
-        }
-
-        self.try_collate_next_shard_block_impl(working_state).await
-    }
-
-    async fn try_collate(&mut self) -> Result<()> {
+    async fn wait_state_and_try_collate(&mut self) -> Result<()> {
         let working_state = self.working_state.wait().await?;
 
         if self.shard_id.is_masterchain() {
