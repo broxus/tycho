@@ -406,15 +406,15 @@ impl BlockIdExt for BlockIdShort {
     }
 }
 
-pub(super) struct DisplayFullBlockIdsSlice<'a>(pub &'a [BlockId]);
+pub(super) struct DisplayFullBlockIdsSlice<'a, BID: ToString>(pub &'a [BID]);
 
-impl std::fmt::Debug for DisplayFullBlockIdsSlice<'_> {
+impl<BID: ToString> std::fmt::Debug for DisplayFullBlockIdsSlice<'_, BID> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
 
-impl std::fmt::Display for DisplayFullBlockIdsSlice<'_> {
+impl<BID: ToString> std::fmt::Display for DisplayFullBlockIdsSlice<'_, BID> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut l = f.debug_list();
         for block_id in self.0 {

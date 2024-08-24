@@ -238,14 +238,14 @@ impl StateNodeAdapter for StateNodeAdapterStdImpl {
                     let _histogram =
                         HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_ext_time");
 
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {:?}", block_id);
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled external: {}", block_id);
                     self.listener.on_block_accepted_external(state).await?;
                 }
                 true => {
                     let _histogram =
                         HistogramGuard::begin("tycho_collator_adapter_on_block_accepted_time");
 
-                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {:?}", block_id);
+                    tracing::info!(target: tracing_targets::STATE_NODE_ADAPTER, "Block handled: {}", block_id);
                     self.listener.on_block_accepted(state).await?;
                 }
             }

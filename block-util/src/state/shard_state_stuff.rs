@@ -121,6 +121,10 @@ impl ShardStateStuff {
     pub fn config_params(&self) -> Result<&BlockchainConfig> {
         Ok(&self.state_extra()?.config)
     }
+
+    pub fn get_gen_chain_time(&self) -> u64 {
+        self.state().gen_utime as u64 * 1000 + self.state().gen_utime_ms as u64
+    }
 }
 
 impl AsRef<ShardStateUnsplit> for ShardStateStuff {
