@@ -441,33 +441,21 @@ impl BlockStorage {
                     "block not full"
                 );
 
-                let block_data = {
-                    let entry_id = ArchiveEntryId::block(block_id);
-                    make_archive_segment(&db, &entry_id)?
-                };
+                let archive_data = make_archive_segment(&db, &[
+                    ArchiveEntryId::block(block_id),
+                    ArchiveEntryId::proof(block_id),
+                    ArchiveEntryId::queue_diff(block_id),
+                ])?;
 
-                let block_proof_data = {
-                    let entry_id = ArchiveEntryId::proof(block_id);
-                    make_archive_segment(&db, &entry_id)?
-                };
+                let mut remaining = archive_data.as_slice();
+                while !remaining.is_empty() {
+                    let space = ARCHIVE_CHUNK_SIZE as usize - buffer.len();
+                    let (chunk, rest) = remaining.split_at(std::cmp::min(space, remaining.len()));
+                    buffer.extend_from_slice(chunk);
+                    remaining = rest;
 
-                let queue_diff_data = {
-                    let entry_id = ArchiveEntryId::queue_diff(block_id);
-                    make_archive_segment(&db, &entry_id)?
-                };
-
-                for data in [&block_data, &block_proof_data, &queue_diff_data] {
-                    let mut remaining = data.as_slice();
-                    while !remaining.is_empty() {
-                        let space = ARCHIVE_CHUNK_SIZE as usize - buffer.len();
-                        let (chunk, rest) =
-                            remaining.split_at(std::cmp::min(space, remaining.len()));
-                        buffer.extend_from_slice(chunk);
-                        remaining = rest;
-
-                        if buffer.len() == ARCHIVE_CHUNK_SIZE as usize {
-                            flush_buffer(&mut buffer)?;
-                        }
+                    if buffer.len() == ARCHIVE_CHUNK_SIZE as usize {
+                        flush_buffer(&mut buffer)?;
                     }
                 }
             }
@@ -936,14 +924,27 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
     }
 }
 
-fn make_archive_segment<I>(db: &BaseDb, entry_id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
+fn make_archive_segment<I>(db: &BaseDb, entry_ids: &[ArchiveEntryId<I>]) -> Result<Vec<u8>>
 where
     I: Borrow<BlockId> + Hash,
 {
-    match db.package_entries.get(entry_id.to_vec())? {
-        Some(data) => Ok(make_archive_entry(&entry_id.filename(), &data)),
-        None => Err(BlockStorageError::InvalidBlockData.into()),
+    let keys = entry_ids.iter().map(|x| x.to_vec()).collect::<Vec<_>>();
+    let key_slices = keys.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+
+    let results = db.package_entries.multi_get(&key_slices);
+
+    let mut buffer = vec![];
+    for (entry_id, result) in entry_ids.iter().zip(results.into_iter()) {
+        match result? {
+            Some(data) => {
+                let archive_entry = make_archive_entry(&entry_id.filename(), &data);
+                buffer.extend(archive_entry);
+            }
+            None => return Err(BlockStorageError::InvalidBlockData.into()),
+        }
     }
+
+    Ok(buffer)
 }
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;

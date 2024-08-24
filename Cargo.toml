@@ -107,7 +107,8 @@ tracing-stackdriver = "0.10.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 trait-variant = "0.1.2"
 triomphe = "0.1.11"
-weedb = "0.3.1"
+#weedb = "0.3.1"
+weedb = { git = "https://github.com/broxus/weedb.git" }
 x509-parser = "0.16"
 
 # TODO: RIIR
