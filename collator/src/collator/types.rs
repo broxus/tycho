@@ -563,17 +563,10 @@ pub(super) struct CollatorStats {
     pub tps: u128,
 }
 
-pub(super) struct CachedMempoolAnchor {
-    pub anchor: Arc<MempoolAnchor>,
-    /// Has externals for current shard of collator
-    pub has_externals: bool,
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct AnchorInfo {
     pub id: MempoolAnchorId,
     pub ct: u64,
-    pub all_exts_count: usize,
     pub our_exts_count: usize,
     pub author: PeerId,
 }
@@ -583,7 +576,6 @@ impl AnchorInfo {
         Self {
             id: anchor.id,
             ct: anchor.chain_time,
-            all_exts_count: anchor.externals.len(),
             our_exts_count,
             author: anchor.author,
         }
