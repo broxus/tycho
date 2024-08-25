@@ -316,21 +316,6 @@ impl BlockCacheEntry {
         }
     }
 
-    pub fn restore_entry_stuff(&mut self, entry_stuff: BlockCandidateStuffToSend) -> Result<()> {
-        // if block was not sent or synced then return cache entry status to Ready
-        let new_send_sync_status = match entry_stuff.send_sync_status {
-            SendSyncStatus::NotReady => {
-                bail!("incorrect send_sync_status on restore: NotReady")
-            }
-            SendSyncStatus::Sending => SendSyncStatus::Ready,
-            val => val,
-        };
-        self.send_sync_status = new_send_sync_status;
-        self.candidate_stuff = entry_stuff.candidate_stuff;
-        self.applied_block_stuff = entry_stuff.applied_block_stuff;
-        Ok(())
-    }
-
     pub fn candidate_stuff(&self) -> Result<&BlockCandidateStuff> {
         self.candidate_stuff
             .as_ref()

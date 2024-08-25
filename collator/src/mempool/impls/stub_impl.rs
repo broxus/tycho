@@ -78,6 +78,8 @@ impl MempoolAdapterStubImpl {
         for anchor_id in 1.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
             let anchor = make_stub_anchor(anchor_id);
@@ -170,7 +172,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                         let delta = anchor_id.saturating_sub(last_anchor.id);
                         if delta > 3 {
                             self.sleep_between_anchors.store(false, Ordering::Release);
-                            tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
                                 "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 3",
                                 anchor_id, last_anchor.id, delta,
                             );
@@ -178,7 +180,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                     }
                 } else {
                     self.sleep_between_anchors.store(false, Ordering::Release);
-                    tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                    tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
                         "sleep_between_anchors set to False because no last anchor when requested anchor_id {}",
                         anchor_id,
                     );
@@ -199,7 +201,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
             };
 
             if !self.sleep_between_anchors.fetch_or(true, Ordering::AcqRel) {
-                tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
                     "sleep_between_anchors set to True when requested was returned by anchor_id {}",
                     anchor_id,
                 );
@@ -250,14 +252,14 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                     let delta = prev_anchor_id.saturating_sub(last_anchor.id);
                     if delta > 2 {
                         self.sleep_between_anchors.store(false, Ordering::Release);
-                        tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
                             "sleep_between_anchors set to False because prev_anchor_id {} ahead last {} on {} > 2",
                             prev_anchor_id, last_anchor.id, delta,
                         );
                     }
                 } else {
                     self.sleep_between_anchors.store(false, Ordering::Release);
-                    tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                    tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
                         "sleep_between_anchors set to False because no last anchor when prev_anchor_id {}",
                         prev_anchor_id,
                     );
@@ -278,7 +280,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
             };
 
             if !self.sleep_between_anchors.fetch_or(true, Ordering::AcqRel) {
-                tracing::debug!(target: tracing_targets::MEMPOOL_ADAPTER,
+                tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
                     "sleep_between_anchors set to True when next was returned after prev_anchor_id {}",
                     prev_anchor_id,
                 );
