@@ -1,11 +1,16 @@
 use std::collections::VecDeque;
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
+use tycho_network::PeerId;
 
 use crate::collator::types::{AnchorInfo, BlockCollationDataBuilder, CachedMempoolAnchor};
 use crate::collator::CollatorStdImpl;
-use crate::mempool::make_stub_anchor;
+use crate::mempool::{
+    make_stub_anchor, MempoolAdapterStubImpl, MempoolAnchor, MempoolEventListener,
+};
 use crate::test_utils::try_init_test_tracing;
 
 fn get_test_block_limits() -> BlockLimits {
@@ -214,3 +219,93 @@ const DEFAULT_BLOCK_LIMITS: BlockLimits = BlockLimits {
         hard_limit: 10000,
     },
 };
+
+struct MempoolEventStubListener;
+#[async_trait]
+impl MempoolEventListener for MempoolEventStubListener {
+    async fn on_new_anchor(&self, anchor: Arc<MempoolAnchor>) -> anyhow::Result<()> {
+        tracing::trace!(
+            "MempoolEventStubListener: on_new_anchor event emitted for anchor \
+            (id: {}, chain_time: {}, externals: {})",
+            anchor.id,
+            anchor.chain_time,
+            anchor.externals.len(),
+        );
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_import_anchor_on_init() {
+    try_init_test_tracing(tracing_subscriber::filter::LevelFilter::DEBUG);
+
+    let processed_to_anchor_id = 1;
+    let processed_to_msgs_offset = 0;
+    let last_block_chain_time = 0;
+    let shard_id = ShardIdent::default();
+    let mut anchors_cache = VecDeque::new();
+    let mut last_imported_anchor = None;
+    let mut has_pending_externals = false;
+
+    let adapter = MempoolAdapterStubImpl::with_stub_externals(Arc::new(MempoolEventStubListener));
+    let mpool_adapter = Arc::new(adapter);
+
+    // =========================================================================
+    // Get first anchor from mempool
+    // =========================================================================
+    let anchors_info = CollatorStdImpl::import_anchors_on_init(
+        processed_to_anchor_id,
+        processed_to_msgs_offset as _,
+        last_block_chain_time,
+        shard_id,
+        &mut anchors_cache,
+        &mut last_imported_anchor,
+        &mut has_pending_externals,
+        mpool_adapter.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(anchors_info.len(), 1);
+    assert_eq!(anchors_cache.len(), 1);
+    assert!(last_imported_anchor.is_some());
+    assert!(has_pending_externals);
+
+    // =========================================================================
+
+    anchors_cache.clear();
+    last_imported_anchor = None;
+    has_pending_externals = false;
+
+    // =========================================================================
+    // Get first anchor from cache
+    // =========================================================================
+
+    let anchor = Arc::new(MempoolAnchor {
+        id: 1,
+        author: PeerId([0u8; 32]),
+        chain_time: 1,
+        externals: vec![],
+    });
+
+    anchors_cache.push_back((1, CachedMempoolAnchor {
+        anchor,
+        has_externals: false,
+    }));
+    let anchors_info = CollatorStdImpl::import_anchors_on_init(
+        processed_to_anchor_id,
+        processed_to_msgs_offset as _,
+        last_block_chain_time,
+        shard_id,
+        &mut anchors_cache,
+        &mut last_imported_anchor,
+        &mut has_pending_externals,
+        mpool_adapter.clone(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(anchors_info.len(), 1);
+    assert_eq!(anchors_cache.len(), 1);
+    assert!(last_imported_anchor.is_some());
+    assert!(!has_pending_externals);
+}

@@ -353,18 +353,34 @@ impl CollatorStdImpl {
         };
 
         // import anchors
-        if let Some(ext_processed_to) = ext_processed_to_opt {
+        if let Some((processed_to_anchor_id, processed_to_msgs_offset)) = ext_processed_to_opt {
             tracing::info!(target: tracing_targets::COLLATOR,
-                "Collator (block_id={}): init: import anchors from processed to anchor ({:?}) ...",
+                "Collator (block_id={}): init: import anchors from processed to anchor ({}) with offset ({}) ...",
                 self.next_block_id_short,
-                ext_processed_to,
+                processed_to_anchor_id,
+                processed_to_msgs_offset,
             );
-            self.import_anchors_on_init(
-                ext_processed_to.0,
-                ext_processed_to.1 as _,
+
+            let timer = std::time::Instant::now();
+
+            let anchors_info = Self::import_anchors_on_init(
+                processed_to_anchor_id,
+                processed_to_msgs_offset as _,
                 working_state.prev_shard_data.gen_chain_time(),
+                self.shard_id,
+                &mut self.anchors_cache,
+                &mut self.last_imported_anchor,
+                &mut self.has_pending_externals,
+                self.mpool_adapter.clone(),
             )
             .await?;
+
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                elapsed = timer.elapsed().as_millis(),
+                "Collator (block_id={}): init: imported anchors on init: {:?}",
+                self.next_block_id_short,
+                anchors_info.as_slice()
+            );
         }
 
         working_state_tx.send(Ok(working_state)).ok();
@@ -578,18 +594,19 @@ impl CollatorStdImpl {
     /// 1. Get `processed_to` anchor from
     /// 2. Get next anchors until `last_block_chain_time`
     /// 3. Store anchors in cache
-    async fn import_anchors_on_init(
-        &mut self,
+    pub(self) async fn import_anchors_on_init(
         processed_to_anchor_id: MempoolAnchorId,
         processed_to_msgs_offset: usize,
         last_block_chain_time: u64,
-    ) -> Result<()> {
-        let labels = [("workchain", self.shard_id.workchain().to_string())];
+        shard_id: ShardIdent,
+        anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
+        last_imported_in_collator_anchor: &mut Option<AnchorInfo>,
+        has_pending_externals: &mut bool,
+        mpool_adapter: Arc<dyn MempoolAdapter>,
+    ) -> Result<Vec<AnchorInfo>> {
+        let labels = [("workchain", shard_id.workchain().to_string())];
 
-        let timer = std::time::Instant::now();
-
-        let (mut next_anchor, anchor_index_in_cache) = if let Some((index, anchor)) = self
-            .anchors_cache
+        let (mut next_anchor, anchor_index_in_cache) = if let Some((index, anchor)) = anchors_cache
             .iter()
             .take_while(|(id, _)| *id >= processed_to_anchor_id)
             .enumerate()
@@ -603,7 +620,7 @@ impl CollatorStdImpl {
             (anchor.clone(), Some(index))
         } else {
             (
-                self.mpool_adapter
+                mpool_adapter
                     .get_anchor_by_id(processed_to_anchor_id)
                     .await?
                     .unwrap(),
@@ -614,17 +631,16 @@ impl CollatorStdImpl {
         let mut anchors_info: Vec<AnchorInfo> = vec![];
 
         let mut our_exts_count =
-            next_anchor.count_externals_for(&self.shard_id, processed_to_msgs_offset);
+            next_anchor.count_externals_for(&shard_id, processed_to_msgs_offset);
         let has_externals = our_exts_count > 0;
         if has_externals {
-            self.has_pending_externals = true;
+            *has_pending_externals = true;
 
             if anchor_index_in_cache.is_none() {
-                self.anchors_cache
-                    .push_back((next_anchor.id, CachedMempoolAnchor {
-                        anchor: next_anchor.clone(),
-                        has_externals,
-                    }));
+                anchors_cache.push_back((next_anchor.id, CachedMempoolAnchor {
+                    anchor: next_anchor.clone(),
+                    has_externals,
+                }));
             }
         }
 
@@ -635,8 +651,8 @@ impl CollatorStdImpl {
         if let Some(mut anchor_index_in_cache) = anchor_index_in_cache {
             while anchor_index_in_cache > 0 {
                 let (_, CachedMempoolAnchor { anchor, .. }) =
-                    self.anchors_cache.get(anchor_index_in_cache - 1).unwrap();
-                let our_exts_count = anchor.count_externals_for(&self.shard_id, 0);
+                    anchors_cache.get(anchor_index_in_cache - 1).unwrap();
+                let our_exts_count = anchor.count_externals_for(&shard_id, 0);
 
                 last_imported_anchor = AnchorInfo::from_anchor(anchor.clone(), our_exts_count);
 
@@ -647,21 +663,19 @@ impl CollatorStdImpl {
         }
 
         while last_block_chain_time > last_imported_anchor.ct {
-            next_anchor = self
-                .mpool_adapter
+            next_anchor = mpool_adapter
                 .get_next_anchor(last_imported_anchor.id)
                 .await?;
 
-            our_exts_count = next_anchor.count_externals_for(&self.shard_id, 0);
+            our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
             let has_externals = our_exts_count > 0;
             if has_externals {
-                self.has_pending_externals = true;
+                *has_pending_externals = true;
 
-                self.anchors_cache
-                    .push_back((next_anchor.id, CachedMempoolAnchor {
-                        anchor: next_anchor.clone(),
-                        has_externals,
-                    }));
+                anchors_cache.push_back((next_anchor.id, CachedMempoolAnchor {
+                    anchor: next_anchor.clone(),
+                    has_externals,
+                }));
             }
 
             let next_anchor_id = next_anchor.id;
@@ -669,8 +683,7 @@ impl CollatorStdImpl {
 
             anchors_info.push(last_imported_anchor.clone());
 
-            if let Some(mut anchor_index_in_cache) = self
-                .anchors_cache
+            if let Some(mut anchor_index_in_cache) = anchors_cache
                 .iter()
                 .take_while(|(id, _)| *id >= next_anchor_id)
                 .enumerate()
@@ -684,8 +697,8 @@ impl CollatorStdImpl {
             {
                 while anchor_index_in_cache > 0 && last_block_chain_time > last_imported_anchor.ct {
                     let (_, CachedMempoolAnchor { anchor, .. }) =
-                        self.anchors_cache.get(anchor_index_in_cache - 1).unwrap();
-                    let our_exts_count = anchor.count_externals_for(&self.shard_id, 0);
+                        anchors_cache.get(anchor_index_in_cache - 1).unwrap();
+                    let our_exts_count = anchor.count_externals_for(&shard_id, 0);
 
                     last_imported_anchor = AnchorInfo::from_anchor(anchor.clone(), our_exts_count);
 
@@ -696,7 +709,7 @@ impl CollatorStdImpl {
             }
         }
 
-        self.last_imported_anchor = Some(last_imported_anchor);
+        *last_imported_in_collator_anchor = Some(last_imported_anchor);
 
         let imported_count: usize = anchors_info.iter().map(|a| a.our_exts_count).sum();
         metrics::counter!("tycho_collator_ext_msgs_imported_count", &labels)
@@ -704,14 +717,7 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
             .increment(imported_count as f64);
 
-        tracing::debug!(target: tracing_targets::COLLATOR,
-            elapsed = timer.elapsed().as_millis(),
-            "Collator (block_id={}): init: imported anchors on init: {:?}",
-            self.next_block_id_short,
-            anchors_info.as_slice()
-        );
-
-        Ok(())
+        Ok(anchors_info)
     }
 
     async fn check_has_pending_internals(
