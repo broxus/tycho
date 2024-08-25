@@ -580,7 +580,7 @@ impl CollatorStdImpl {
     /// 3. Store anchors in cache
     async fn import_anchors_on_init(
         &mut self,
-        processed_to_anchor_id: u32,
+        processed_to_anchor_id: MempoolAnchorId,
         processed_to_msgs_offset: usize,
         last_block_chain_time: u64,
     ) -> Result<()> {
@@ -588,11 +588,28 @@ impl CollatorStdImpl {
 
         let timer = std::time::Instant::now();
 
-        let mut next_anchor = self
-            .mpool_adapter
-            .get_anchor_by_id(processed_to_anchor_id)
-            .await?
-            .unwrap();
+        let (mut next_anchor, anchor_index_in_cache) = if let Some((index, anchor)) = self
+            .anchors_cache
+            .iter()
+            .take_while(|(id, _)| *id >= processed_to_anchor_id)
+            .enumerate()
+            .find_map(|(index, (id, CachedMempoolAnchor { anchor, .. }))| {
+                if *id == processed_to_anchor_id {
+                    Some((index, anchor.clone()))
+                } else {
+                    None
+                }
+            }) {
+            (anchor.clone(), Some(index))
+        } else {
+            (
+                self.mpool_adapter
+                    .get_anchor_by_id(processed_to_anchor_id)
+                    .await?
+                    .unwrap(),
+                None,
+            )
+        };
 
         let mut anchors_info: Vec<AnchorInfo> = vec![];
 
@@ -602,16 +619,32 @@ impl CollatorStdImpl {
         if has_externals {
             self.has_pending_externals = true;
 
-            self.anchors_cache
-                .push_back((next_anchor.id, CachedMempoolAnchor {
-                    anchor: next_anchor.clone(),
-                    has_externals,
-                }));
+            if anchor_index_in_cache.is_none() {
+                self.anchors_cache
+                    .push_back((next_anchor.id, CachedMempoolAnchor {
+                        anchor: next_anchor.clone(),
+                        has_externals,
+                    }));
+            }
         }
 
         let mut last_imported_anchor = AnchorInfo::from_anchor(next_anchor, our_exts_count);
 
         anchors_info.push(last_imported_anchor.clone());
+
+        if let Some(mut anchor_index_in_cache) = anchor_index_in_cache {
+            while anchor_index_in_cache > 0 {
+                let (_, CachedMempoolAnchor { anchor, .. }) =
+                    self.anchors_cache.get(anchor_index_in_cache - 1).unwrap();
+                let our_exts_count = anchor.count_externals_for(&self.shard_id, 0);
+
+                last_imported_anchor = AnchorInfo::from_anchor(anchor.clone(), our_exts_count);
+
+                anchors_info.push(last_imported_anchor.clone());
+
+                anchor_index_in_cache -= 1;
+            }
+        }
 
         while last_block_chain_time > last_imported_anchor.ct {
             next_anchor = self
@@ -631,9 +664,36 @@ impl CollatorStdImpl {
                     }));
             }
 
+            let next_anchor_id = next_anchor.id;
             last_imported_anchor = AnchorInfo::from_anchor(next_anchor, our_exts_count);
 
             anchors_info.push(last_imported_anchor.clone());
+
+            if let Some(mut anchor_index_in_cache) = self
+                .anchors_cache
+                .iter()
+                .take_while(|(id, _)| *id >= next_anchor_id)
+                .enumerate()
+                .find_map(|(index, (id, _))| {
+                    if *id == next_anchor_id {
+                        Some(index)
+                    } else {
+                        None
+                    }
+                })
+            {
+                while anchor_index_in_cache > 0 && last_block_chain_time > last_imported_anchor.ct {
+                    let (_, CachedMempoolAnchor { anchor, .. }) =
+                        self.anchors_cache.get(anchor_index_in_cache - 1).unwrap();
+                    let our_exts_count = anchor.count_externals_for(&self.shard_id, 0);
+
+                    last_imported_anchor = AnchorInfo::from_anchor(anchor.clone(), our_exts_count);
+
+                    anchors_info.push(last_imported_anchor.clone());
+
+                    anchor_index_in_cache -= 1;
+                }
+            }
         }
 
         self.last_imported_anchor = Some(last_imported_anchor);
