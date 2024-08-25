@@ -93,7 +93,7 @@ fn test_read_next_externals() {
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (4, 0));
     assert_eq!(ext_processed_upto.read_to, (8, 3));
-    let kv = anchors_cache.cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 8);
 
     collation_data.processed_upto.externals = Some(ExternalsProcessedUpto {
@@ -115,7 +115,7 @@ fn test_read_next_externals() {
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (8, 8));
-    let kv = anchors_cache.cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 8);
 
     let externals = CollatorStdImpl::read_next_externals_impl(
@@ -132,7 +132,7 @@ fn test_read_next_externals() {
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (24, 3));
-    let kv = anchors_cache.cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 12);
 
     let externals = CollatorStdImpl::read_next_externals_impl(
@@ -149,7 +149,7 @@ fn test_read_next_externals() {
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
-    let kv = anchors_cache.cache.front().unwrap();
+    let kv = anchors_cache.get(0).unwrap();
     assert_eq!(kv.0, 24);
 
     let externals = CollatorStdImpl::read_next_externals_impl(
@@ -166,7 +166,7 @@ fn test_read_next_externals() {
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
-    let kv = anchors_cache.cache.front();
+    let kv = anchors_cache.get(0);
     assert!(kv.is_none());
 
     // all anchors removed from cache, should not fail on empty cache
@@ -184,7 +184,7 @@ fn test_read_next_externals() {
     let ext_processed_upto = collation_data.processed_upto.externals.as_ref().unwrap();
     assert_eq!(ext_processed_upto.processed_to, (8, 3));
     assert_eq!(ext_processed_upto.read_to, (40, 0));
-    let kv = anchors_cache.cache.front();
+    let kv = anchors_cache.get(0);
     assert!(kv.is_none());
 }
 
@@ -248,7 +248,7 @@ async fn test_import_anchor_on_init() {
     .await
     .unwrap();
     assert_eq!(anchors_info.len(), 1);
-    assert_eq!(anchors_cache.len(), 1);
+    assert!(anchors_cache.get(0).is_some());
     assert!(anchors_cache.get_last_imported_anchor_ct().is_some());
     assert!(anchors_cache.has_pending_externals());
 

@@ -1,5 +1,5 @@
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
@@ -567,6 +567,7 @@ pub(super) struct CollatorStats {
 pub(super) struct AnchorInfo {
     pub id: MempoolAnchorId,
     pub ct: u64,
+    pub all_exts_count: usize,
     pub our_exts_count: usize,
     pub author: PeerId,
 }
@@ -576,6 +577,7 @@ impl AnchorInfo {
         Self {
             id: anchor.id,
             ct: anchor.chain_time,
+            all_exts_count: anchor.externals.len(),
             our_exts_count,
             author: anchor.author,
         }
@@ -1155,5 +1157,103 @@ impl std::fmt::Display for DisplayMessageGroups<'_> {
             m.entry(k, &DisplayMessageGroup(v));
         }
         m.finish()
+    }
+}
+
+#[derive(Default)]
+pub struct AnchorsCache {
+    /// The cache of imported from mempool anchors that were not processed yet.
+    /// Anchor is removed from the cache when all its externals are processed.
+    cache: VecDeque<(MempoolAnchorId, Arc<MempoolAnchor>)>,
+
+    last_imported_anchor: Option<AnchorInfo>,
+
+    has_pending_externals: bool,
+}
+
+impl AnchorsCache {
+    pub fn get_last_imported_anchor_ct(&self) -> Option<u64> {
+        self.last_imported_anchor.as_ref().map(|anchor| anchor.ct)
+    }
+
+    pub fn get_last_imported_anchor_ct_and_author(&self) -> Option<(u64, HashBytes)> {
+        self.last_imported_anchor
+            .as_ref()
+            .map(|anchor| (anchor.ct, anchor.author.0.into()))
+    }
+
+    pub fn get_last_imported_anchor_id_and_ct(&self) -> Option<(u32, u64)> {
+        self.last_imported_anchor
+            .as_ref()
+            .map(|anchor| (anchor.id, anchor.ct))
+    }
+
+    pub fn get_last_imported_anchor_id_and_all_exts_counts(&self) -> Option<(u32, u64)> {
+        self.last_imported_anchor
+            .as_ref()
+            .map(|anchor| (anchor.id, anchor.our_exts_count as _))
+    }
+
+    pub fn insert(&mut self, anchor: Arc<MempoolAnchor>, our_exts_count: usize) {
+        if our_exts_count > 0 {
+            self.has_pending_externals = true;
+            self.cache.push_back((anchor.id, anchor.clone()));
+        }
+        self.last_imported_anchor = Some(AnchorInfo::from_anchor(anchor, our_exts_count));
+    }
+
+    pub fn remove(&mut self, _index: usize) {
+        self.cache.pop_front();
+    }
+
+    pub fn get(&self, index: usize) -> Option<(MempoolAnchorId, Arc<MempoolAnchor>)> {
+        self.cache.get(index).cloned()
+    }
+
+    pub fn has_pending_externals(&self) -> bool {
+        self.has_pending_externals
+    }
+
+    pub fn set_has_pending_externals(&mut self, has_pending_externals: bool) {
+        self.has_pending_externals = has_pending_externals;
+    }
+
+    fn find_index(&self, processed_to_anchor_id: MempoolAnchorId) -> Option<usize> {
+        self.cache.iter().enumerate().find_map(|(index, (id, _))| {
+            if *id == processed_to_anchor_id {
+                Some(index)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn take_after_index(&self, index: usize) -> impl Iterator<Item = Arc<MempoolAnchor>> + '_ {
+        self.cache
+            .iter()
+            .skip(index)
+            .map(|(_, anchor)| anchor.clone())
+    }
+
+    pub fn take_from_id(
+        &self,
+        processed_to_anchor_id: MempoolAnchorId,
+    ) -> Box<dyn Iterator<Item = Arc<MempoolAnchor>> + '_> {
+        if let Some(mut anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
+            if anchor_index_in_cache > 0 {
+                anchor_index_in_cache -= 1;
+            }
+            Box::new(self.take_after_index(anchor_index_in_cache))
+        } else {
+            Box::new(std::iter::empty::<Arc<MempoolAnchor>>())
+        }
+    }
+
+    pub fn any_after_id(&self, processed_to_anchor_id: MempoolAnchorId) -> bool {
+        if let Some(anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
+            self.cache.len() > anchor_index_in_cache + 1
+        } else {
+            false
+        }
     }
 }

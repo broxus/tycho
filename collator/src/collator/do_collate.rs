@@ -17,8 +17,10 @@ use tycho_util::time::now_millis;
 use tycho_util::FastHashMap;
 
 use super::execution_manager::{ExecutionManager, MessagesExecutor};
-use super::types::{BlockCollationDataBuilder, BlockLimitsLevel, SpecialOrigin, WorkingState};
-use super::{AnchorsCache, CollatorStdImpl};
+use super::types::{
+    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, SpecialOrigin, WorkingState,
+};
+use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
@@ -696,7 +698,7 @@ impl CollatorStdImpl {
                 "try read next anchor from cache",
             );
             // try read next anchor
-            let next_entry = anchors_cache.cache.get(next_idx);
+            let next_entry = anchors_cache.get(next_idx);
             let entry = match next_entry {
                 Some(entry) => entry,
                 // stop reading if there is no next anchor
@@ -712,7 +714,8 @@ impl CollatorStdImpl {
             let key = entry.0;
             if key < was_read_to.0 {
                 // skip and remove already processed anchor from cache
-                let _ = anchors_cache.cache.remove(next_idx);
+                assert_eq!(next_idx, 0);
+                let _ = anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "anchor with key {} already processed, removed from anchors cache", key,
                 );
@@ -757,7 +760,8 @@ impl CollatorStdImpl {
                         .decrement(expired_msgs_count as f64);
 
                     // skip and remove expired anchor
-                    let _ = anchors_cache.cache.remove(next_idx);
+                    assert_eq!(next_idx, 0);
+                    let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
                     );
@@ -768,7 +772,8 @@ impl CollatorStdImpl {
 
                 if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
                     // skip and remove fully processed anchor
-                    let _ = anchors_cache.cache.remove(next_idx);
+                    assert_eq!(next_idx, 0);
+                    let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully processed, removed from anchors cache", key,
                     );
@@ -892,6 +897,8 @@ impl CollatorStdImpl {
                 collation_data.processed_upto.externals,
             );
         }
+
+        anchors_cache.set_has_pending_externals(has_pending_externals);
 
         Ok(ext_messages)
     }
