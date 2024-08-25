@@ -331,7 +331,7 @@ impl ExecutionManager {
                     break;
                 }
 
-                if !collator.has_pending_externals {
+                if !collator.anchors_cache.has_pending_externals() {
                     break;
                 }
             }
@@ -356,7 +356,7 @@ impl ExecutionManager {
             self.read_ext_messages_total_elapsed -= add_to_groups_elapsed;
             self.add_to_message_groups_total_elapsed += add_to_groups_elapsed;
 
-            if self.message_groups.is_empty() && !collator.has_pending_externals {
+            if self.message_groups.is_empty() && !collator.anchors_cache.has_pending_externals() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "message_groups buffer is empty and there are no pending externals, will process new internals"
                 );

@@ -294,12 +294,6 @@ where
         }
     }
 
-    /// Return last collated master block id
-    fn get_last_collated_mc_block_id(&self) -> Option<BlockId> {
-        let guard = self.blocks_cache.masters.lock();
-        guard.last_collated_mc_block_id
-    }
-
     fn get_last_processed_mc_block_id(&self) -> Option<BlockId> {
         *self.last_processed_mc_block_id.lock()
     }
@@ -684,85 +678,6 @@ where
         }
 
         Ok(true)
-    }
-
-    /// 1. Skip if it is equal or not far ahead from last collated by ourselves
-    /// 2. Skip if it was already processed before
-    /// 3. Skip if waiting for the first own master block collation less then `max_mc_block_delta_from_bc_to_await_own`
-    fn check_should_process_mc_block_from_bc(&self, mc_block_id: &BlockId) -> bool {
-        let last_collated_mc_block_id_opt = self.get_last_collated_mc_block_id();
-        let last_processed_mc_block_id_opt = self.get_last_processed_mc_block_id();
-        if last_collated_mc_block_id_opt.is_some() {
-            // when we have last own collated master block then skip if incoming one is equal
-            // or not far ahead from last own collated
-            // then will wait for next own collated master block
-            let (seqno_delta, is_equal) =
-                Self::compare_mc_block_with(mc_block_id, last_collated_mc_block_id_opt.as_ref());
-            if is_equal || seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "Should NOT process mc block from bc: should wait for next own collated: \
-                    mc_block_id = {}, is_equal = {}, seqno_delta = {}, max_mc_block_delta_from_bc_to_await_own = {}",
-                    mc_block_id.as_short_id(), is_equal, seqno_delta,
-                    self.config.max_mc_block_delta_from_bc_to_await_own,
-                );
-
-                return false;
-            } else {
-                // STUB: skip processing master block from bc even if it is far away from own last collated
-                //      because the logic for updating collators in this case is not implemented yet
-                tracing::info!(
-                    target: tracing_targets::COLLATION_MANAGER,
-                    "STUB: skip processing mc block from bc anyway if we are collating by ourselves: mc_block_id = {}",
-                    mc_block_id.as_short_id(),
-                );
-                return false;
-            }
-        } else {
-            // When we do not have last own collated master block then check last processed master block
-            // If None then we should process incoming master block anyway to init collation process
-            // If we have already processed some previous incoming master block and collations were started
-            // then we should wait for the first own collated master block
-            // but not more then `max_mc_block_delta_from_bc_to_await_own`
-            if last_processed_mc_block_id_opt.is_some() {
-                let (seqno_delta, is_equal) = Self::compare_mc_block_with(
-                    mc_block_id,
-                    last_processed_mc_block_id_opt.as_ref(),
-                );
-                let already_processed_before = is_equal || seqno_delta < 0;
-                if already_processed_before {
-                    tracing::info!(
-                        target: tracing_targets::COLLATION_MANAGER,
-                        "Should NOT process mc block from bc - it was already processed before: mc_block_id = {}",
-                        mc_block_id.as_short_id(),
-                    );
-
-                    return false;
-                }
-                if self.active_collators.contains_key(&ShardIdent::MASTERCHAIN) {
-                    if seqno_delta <= self.config.max_mc_block_delta_from_bc_to_await_own {
-                        tracing::info!(
-                            target: tracing_targets::COLLATION_MANAGER,
-                            "Should NOT process mc block from bc - should wait for first own collated: \
-                            mc_block_id = {}, seqno_delta = {}, max_mc_block_delta_from_bc_to_await_own = {}",
-                            mc_block_id.as_short_id(), seqno_delta,
-                            self.config.max_mc_block_delta_from_bc_to_await_own,
-                        );
-                        return false;
-                    } else {
-                        // STUB: skip processing master block from bc even if it is far away from last processed
-                        //      because the logic for updating collators in this case is not implemented yet
-                        tracing::info!(
-                            target: tracing_targets::COLLATION_MANAGER,
-                            "STUB: skip processing mc block from bc anyway if we are collating by ourselves: mc_block_id = {}",
-                            mc_block_id.as_short_id(),
-                        );
-                        return false;
-                    }
-                }
-            }
-        }
-        true
     }
 
     fn check_should_process_and_update_last_processed_mc_block(&self, block_id: &BlockId) -> bool {
@@ -1461,17 +1376,6 @@ where
             .iter_mut()
         {
             last_collated_chain_times.retain(|(ct, _)| ct > &chain_time);
-        }
-    }
-
-    /// Prunes the cache of last collated chain times
-    fn prune_last_collated_chain_times(&self, to_chain_time: u64) {
-        let mut chain_times_guard = self.chain_times_sync_state.lock();
-        for (_, last_collated_chain_times) in chain_times_guard
-            .last_collated_chain_times_by_shards
-            .iter_mut()
-        {
-            last_collated_chain_times.retain(|(ct, _)| ct > &to_chain_time);
         }
     }
 
@@ -2566,55 +2470,6 @@ where
         Ok(())
     }
 
-    /// Find and restore block entries stuff in cache
-    fn _restore_blocks_in_cache(&self, to_restore: Vec<BlockCandidateStuffToSend>) -> Result<()> {
-        let to_restore_keys = to_restore.iter().map(|b| b.key).collect::<Vec<_>>();
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Restoring blocks in cache: {}",
-            DisplayFullBlockIdsSlice(&to_restore_keys),
-        );
-        scopeguard::defer! {
-            tracing::debug!(
-                target: tracing_targets::COLLATION_MANAGER,
-                "Blocks restored in cache: {}",
-                DisplayFullBlockIdsSlice(&to_restore_keys),
-            );
-        }
-        for entry_stuff in to_restore {
-            if entry_stuff.key.shard.is_masterchain() {
-                let mut guard = self.blocks_cache.masters.lock();
-                let block_entry =
-                    guard
-                        .blocks
-                        .get_mut(&entry_stuff.key.seqno)
-                        .ok_or_else(|| {
-                            anyhow!("Master block not found in cache! ({})", entry_stuff.key)
-                        })?;
-                block_entry.restore_entry_stuff(entry_stuff)?;
-            } else {
-                let mut shard_cache = self
-                    .blocks_cache
-                    .shards
-                    .get_mut(&entry_stuff.key.shard)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Shard blocks map not found in cache! ({})",
-                            entry_stuff.key.shard
-                        )
-                    })?;
-                let block_entry = shard_cache
-                    .blocks
-                    .get_mut(&entry_stuff.key.seqno)
-                    .ok_or_else(|| {
-                        anyhow!("Shard block not found in cache! ({})", entry_stuff.key)
-                    })?;
-                block_entry.restore_entry_stuff(entry_stuff)?;
-            };
-        }
-        Ok(())
-    }
-
     /// Try to commit validated and valid master block
     /// if it was not already committed before
     /// 1. Check if master block is valid
@@ -2739,7 +2594,7 @@ where
     }
 
     /// Try find master block and execute post validation routines
-    async fn _process_valid_shard_block(&self, block_id: &BlockId) -> Result<()> {
+    async fn _commit_valid_shard_block(&self, block_id: &BlockId) -> Result<()> {
         if let Some((mc_block_id, is_valid)) = self._find_containing_mc_block(block_id) {
             if is_valid {
                 tracing::debug!(

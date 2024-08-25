@@ -1,4 +1,4 @@
-use std::collections::{hash_map, HashMap, VecDeque};
+use std::collections::{hash_map, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,15 +18,13 @@ use tycho_util::FastHashMap;
 
 use super::execution_manager::{ExecutionManager, MessagesExecutor};
 use super::types::{
-    AnchorInfo, BlockCollationDataBuilder, BlockLimitsLevel, CachedMempoolAnchor, SpecialOrigin,
-    WorkingState,
+    AnchorsCache, BlockCollationDataBuilder, BlockLimitsLevel, SpecialOrigin, WorkingState,
 };
 use super::CollatorStdImpl;
 use crate::collator::types::{
     BlockCollationData, ParsedMessage, PreparedInMsg, PreparedOutMsg, PrevData, ShardDescriptionExt,
 };
 use crate::internal_queue::types::EnqueuedMessage;
-use crate::mempool::MempoolAnchorId;
 use crate::tracing_targets;
 use crate::types::{
     BlockCollationResult, BlockIdExt, DisplayBlockIdsList, McData, TopBlockDescription,
@@ -41,8 +39,8 @@ impl CollatorStdImpl {
         parent =  None,
         skip_all,
         fields(
-            next_block_id = %self.next_block_info,
-            ct = self.last_imported_anchor.as_ref().map(|a| a.ct).unwrap_or_default()
+            block_id = %self.next_block_info,
+            ct = self.anchors_cache.get_last_imported_anchor_ct().unwrap_or_default()
         )
     )]
     pub(super) async fn do_collate(
@@ -69,9 +67,10 @@ impl CollatorStdImpl {
             )),
         );
 
-        let last_imported_anchor = self.last_imported_anchor.as_ref().unwrap();
-        let next_chain_time = last_imported_anchor.ct;
-        let created_by = HashBytes(last_imported_anchor.author.0);
+        let (next_chain_time, created_by) = self
+            .anchors_cache
+            .get_last_imported_anchor_ct_and_author()
+            .unwrap();
 
         // generate seed from the chain_time from the anchor
         let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
@@ -646,26 +645,22 @@ impl CollatorStdImpl {
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
     ) -> Result<Vec<Box<ParsedMessage>>> {
-        let (res, has_pending_externals) = Self::read_next_externals_impl(
+        Self::read_next_externals_impl(
             &self.shard_id,
             &mut self.anchors_cache,
-            self.last_imported_anchor.as_ref(),
             count,
             collation_data,
             continue_from_read_to,
-        )?;
-        self.has_pending_externals = has_pending_externals;
-        Ok(res)
+        )
     }
 
     fn read_next_externals_impl(
         shard_id: &ShardIdent,
-        anchors_cache: &mut VecDeque<(MempoolAnchorId, CachedMempoolAnchor)>,
-        last_imported_anchor_opt: Option<&AnchorInfo>,
+        anchors_cache: &mut AnchorsCache,
         count: usize,
         collation_data: &mut BlockCollationData,
         continue_from_read_to: bool,
-    ) -> Result<(Vec<Box<ParsedMessage>>, bool)> {
+    ) -> Result<Vec<Box<ParsedMessage>>> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
@@ -723,6 +718,7 @@ impl CollatorStdImpl {
             let key = entry.0;
             if key < was_read_to.0 {
                 // skip and remove already processed anchor from cache
+                assert_eq!(next_idx, 0);
                 let _ = anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "anchor with key {} already processed, removed from anchors cache", key,
@@ -741,7 +737,7 @@ impl CollatorStdImpl {
                     "last_read_anchor: {}", key,
                 );
 
-                let anchor = &entry.1.anchor;
+                let anchor = &entry.1;
                 let expire_timeout = 60 * 1000; // 1 minute
                 let next_chain_time = collation_data.get_gen_chain_time();
                 if next_chain_time - anchor.chain_time > expire_timeout {
@@ -767,6 +763,7 @@ impl CollatorStdImpl {
                         .decrement(expired_msgs_count as f64);
 
                     // skip and remove expired anchor
+                    assert_eq!(next_idx, 0);
                     let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
@@ -778,6 +775,7 @@ impl CollatorStdImpl {
 
                 if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
                     // skip and remove fully processed anchor
+                    assert_eq!(next_idx, 0);
                     let _ = anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully processed, removed from anchors cache", key,
@@ -860,11 +858,13 @@ impl CollatorStdImpl {
 
         // update read up to info
         if last_read_anchor_opt.is_none() || anchors_cache_fully_read {
-            if let Some(last_imported_anchor) = last_imported_anchor_opt {
-                last_read_anchor_opt = Some(last_imported_anchor.id);
-                msgs_read_offset_in_last_anchor = last_imported_anchor.all_exts_count as u64;
+            if let Some((id, all_exts_count)) =
+                anchors_cache.get_last_imported_anchor_id_and_all_exts_counts()
+            {
+                last_read_anchor_opt = Some(id);
+                msgs_read_offset_in_last_anchor = all_exts_count;
                 if read_from_anchor_opt.is_none() {
-                    read_from_anchor_opt = Some(last_imported_anchor.id);
+                    read_from_anchor_opt = Some(id);
                 }
             }
         }
@@ -883,13 +883,12 @@ impl CollatorStdImpl {
         let has_pending_externals = if has_pending_externals_in_last_read_anchor {
             true
         } else {
-            let has_pending_externals = anchors_cache.iter().any(|(id, cached_anchor)| {
-                if let Some(ref last_read_anchor) = last_read_anchor_opt {
-                    id > last_read_anchor && cached_anchor.has_externals
-                } else {
-                    cached_anchor.has_externals
-                }
-            });
+            let has_pending_externals = if let Some(last_read_anchor) = last_read_anchor_opt {
+                anchors_cache.any_after_id(last_read_anchor)
+            } else {
+                anchors_cache.has_pending_externals()
+            };
+
             tracing::info!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                 "remaning anchors in cache has pending externals: {}", has_pending_externals,
             );
@@ -902,7 +901,9 @@ impl CollatorStdImpl {
             );
         }
 
-        Ok((ext_messages, has_pending_externals))
+        anchors_cache.set_has_pending_externals(has_pending_externals);
+
+        Ok(ext_messages)
     }
 
     /// Get max LT from masterchain (and shardchain) then calc start LT
