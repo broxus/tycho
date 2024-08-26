@@ -109,6 +109,8 @@ trait-variant = "0.1.2"
 triomphe = "0.1.11"
 weedb = "0.3.4"
 x509-parser = "0.16"
+zstd-safe = "7.2"
+zstd-sys = "2.0"
 
 # TODO: RIIR
 ton_executor = { git = "https://github.com/broxus/ton-labs-executor.git", branch = "new_cells" }
@@ -121,7 +123,6 @@ tycho-control = { path = "./control" }
 tycho-core = { path = "./core" }
 tycho-network = { path = "./network" }
 tycho-rpc = { path = "./rpc" }
-tycho-simulator = { path = "./simulator" }
 tycho-storage = { path = "./storage" }
 tycho-util = { path = "./util" }
 
