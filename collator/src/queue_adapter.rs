@@ -35,7 +35,7 @@ where
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        diff_hash: HashBytes,
+        diff_hash: &HashBytes,
     ) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
@@ -94,7 +94,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        hash: HashBytes,
+        hash: &HashBytes,
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();

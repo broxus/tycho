@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::{serde_helpers, FastDashMap, FastHashMap};
 
-use crate::internal_queue::gc::GCManager;
+use crate::internal_queue::gc::GcManager;
 use crate::internal_queue::state::persistent_state::{
     PersistentState, PersistentStateFactory, PersistentStateImplFactory, PersistentStateStdImpl,
 };
@@ -24,17 +24,19 @@ use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QueueConfig {
+    /// Default: 5 seconds.
     #[serde(with = "serde_helpers::humantime")]
-    pub gc_run_interval: Duration,
+    pub gc_interval: Duration,
 }
 
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {
-            gc_run_interval: Duration::from_secs(5),
+            gc_interval: Duration::from_secs(5),
         }
     }
 }
+
 pub trait QueueFactory<V: InternalMessageValue> {
     type Queue: Queue<V>;
 
@@ -56,7 +58,7 @@ where
 pub struct QueueFactoryStdImpl {
     pub session_state_factory: SessionStateImplFactory,
     pub persistent_state_factory: PersistentStateImplFactory,
-    pub gc_run_interval: Duration,
+    pub config: QueueConfig,
 }
 
 // TRAIT
@@ -75,7 +77,7 @@ where
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        diff_hash: HashBytes,
+        diff_hash: &HashBytes,
     ) -> Result<()>;
     async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
 }
@@ -93,7 +95,7 @@ impl<V: InternalMessageValue> QueueFactory<V> for QueueFactoryStdImpl {
             &self.persistent_state_factory,
         );
         let persistent_state = Arc::new(persistent_state);
-        let gc = GCManager::create_and_run::<V>(persistent_state.clone(), self.gc_run_interval);
+        let gc = GcManager::start::<V>(persistent_state.clone(), self.config.gc_interval);
         QueueImpl {
             session_state: Arc::new(session_state),
             persistent_state,
@@ -129,7 +131,7 @@ where
     session_state: Arc<S>,
     persistent_state: Arc<P>,
     diffs: FastDashMap<ShardIdent, BTreeMap<u32, ShortQueueDiff>>,
-    gc: GCManager,
+    gc: GcManager,
     _phantom_data: PhantomData<V>,
 }
 
@@ -157,7 +159,7 @@ where
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
-        hash: HashBytes,
+        hash: &HashBytes,
     ) -> Result<()> {
         // Get or insert the shard diffs for the given block_id_short.shard
         let mut shard_diffs = self.diffs.entry(block_id_short.shard).or_default();
@@ -165,7 +167,7 @@ where
         // Check for duplicate diffs based on the block_id_short.seqno and hash
         let shard_diff = shard_diffs.get(&block_id_short.seqno);
         if let Some(shard_diff) = shard_diff {
-            if shard_diff.hash != hash {
+            if &shard_diff.hash != hash {
                 bail!("Duplicate diff with different hash")
             } else {
                 return Ok(());
@@ -193,7 +195,7 @@ where
         }
 
         // Insert the diff into the shard diffs
-        shard_diffs.insert(block_id_short.seqno, (diff, hash).into());
+        shard_diffs.insert(block_id_short.seqno, (diff, *hash).into());
 
         Ok(())
     }

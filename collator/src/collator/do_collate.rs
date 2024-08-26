@@ -429,7 +429,7 @@ impl CollatorStdImpl {
                     );
 
                     mq_adapter
-                        .apply_diff(diff_with_messages, block_id_short, queue_diff_hash)
+                        .apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)
                         .await?;
                     let apply_queue_diff_elapsed = histogram.finish();
 

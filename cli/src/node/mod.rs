@@ -429,7 +429,7 @@ impl Node {
             archive_block_provider_config: node_config.archive_block_provider,
             collation_config: node_config.collator,
             validator_config: node_config.validator,
-            internal_queue_config: node_config.internal_queue_config,
+            internal_queue_config: node_config.internal_queue,
         })
     }
 
@@ -526,7 +526,7 @@ impl Node {
         let queue_factory = QueueFactoryStdImpl {
             session_state_factory,
             persistent_state_factory,
-            gc_run_interval: self.internal_queue_config.gc_run_interval,
+            config: self.internal_queue_config,
         };
         let queue = queue_factory.create();
         let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);

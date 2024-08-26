@@ -68,6 +68,8 @@ pub struct NodeConfig {
 
     pub collator: CollationConfig,
 
+    pub internal_queue: QueueConfig,
+
     pub validator: ValidatorStdImplConfig,
 
     pub rpc: Option<RpcConfig>,
@@ -81,8 +83,6 @@ pub struct NodeConfig {
     pub profiling: MemoryProfilingConfig,
 
     pub logger: LoggerConfig,
-
-    pub internal_queue_config: QueueConfig,
 }
 
 impl Default for NodeConfig {
@@ -108,7 +108,7 @@ impl Default for NodeConfig {
             threads: ThreadPoolConfig::default(),
             profiling: Default::default(),
             logger: Default::default(),
-            internal_queue_config: QueueConfig::default(),
+            internal_queue: QueueConfig::default(),
         }
     }
 }

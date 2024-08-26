@@ -7,13 +7,9 @@ use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use tycho_block_util::state::MinRefMcStateTracker;
 use tycho_collator::collator::CollatorStdImplFactory;
-use tycho_collator::internal_queue::queue::{QueueConfig, QueueFactory, QueueFactoryStdImpl};
-use tycho_collator::internal_queue::state::persistent_state::{
-    PersistentStateConfig, PersistentStateImplFactory,
-};
-use tycho_collator::internal_queue::state::session_state::{
-    SessionStateConfig, SessionStateImplFactory,
-};
+use tycho_collator::internal_queue::queue::{QueueFactory, QueueFactoryStdImpl};
+use tycho_collator::internal_queue::state::persistent_state::PersistentStateImplFactory;
+use tycho_collator::internal_queue::state::session_state::SessionStateImplFactory;
 use tycho_collator::manager::CollationManager;
 use tycho_collator::mempool::MempoolAdapterStubImpl;
 use tycho_collator::queue_adapter::MessageQueueAdapterStdImpl;
@@ -109,7 +105,7 @@ async fn test_collation_process_on_stubs() {
     let queue_factory = QueueFactoryStdImpl {
         session_state_factory,
         persistent_state_factory,
-        gc_run_interval: 100,
+        config: Default::default(),
     };
     let queue = queue_factory.create();
     let message_queue_adapter = MessageQueueAdapterStdImpl::new(queue);
