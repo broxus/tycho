@@ -141,7 +141,7 @@ impl Engine {
         });
 
         loop {
-            let _round_duration = HistogramGuard::begin(EngineContext::ROUND_DURATION);
+            let _round_duration = HistogramGuard::begin("tycho_mempool_engine_round_time");
             let (prev_round_ok, current_dag_round, round_effects) = {
                 // do not repeat the `get()` - it can give non-reproducible result
                 let consensus_round = self.consensus_round.get();
@@ -152,8 +152,8 @@ impl Engine {
                     consensus_round.0,
                     top_dag_round.round().0,
                 );
-                metrics::counter!(EngineContext::ROUNDS_SKIP)
-                    .absolute((consensus_round.0 - top_dag_round.round().0) as _); // safe
+                metrics::gauge!("tycho_mempool_engine_rounds_skipped")
+                    .increment((consensus_round.0 as f64) - (top_dag_round.round().0 as f64));
 
                 // `true` if we collected enough dependencies and (optionally) signatures,
                 // so `next_dag_round` from the previous loop is the current now
@@ -181,8 +181,7 @@ impl Engine {
                     (prev_round_ok, current_dag_round, round_effects)
                 }
             };
-            metrics::counter!(EngineContext::CURRENT_ROUND)
-                .absolute(current_dag_round.round().0 as _);
+            metrics::gauge!("tycho_mempool_engine_current_round").set(current_dag_round.round().0);
 
             let next_dag_round = self.dag.fill_to_top(
                 current_dag_round.round().next(),
@@ -219,7 +218,7 @@ impl Engine {
                                 .send(points) // not recoverable
                                 .expect("Failed to send anchor history info to mpsc channel");
                         }
-                        metrics::histogram!(EngineContext::COMMIT_DURATION)
+                        metrics::histogram!("tycho_mempool_engine_commit_time")
                             .record(task_start.elapsed());
                     }
                     dag
@@ -256,13 +255,6 @@ impl Engine {
         }
         panic!("engine commit info channel closed")
     }
-}
-
-impl EngineContext {
-    const CURRENT_ROUND: &'static str = "tycho_mempool_engine_current_round";
-    const ROUNDS_SKIP: &'static str = "tycho_mempool_engine_rounds_skipped";
-    const ROUND_DURATION: &'static str = "tycho_mempool_engine_round_time";
-    const COMMIT_DURATION: &'static str = "tycho_mempool_engine_commit_time";
 }
 
 impl Effects<EngineContext> {

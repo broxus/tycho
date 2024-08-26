@@ -118,8 +118,8 @@ impl MempoolStore {
                 tokio::select! {
                     new_consensus = consensus_round.next() => {
                         consensus = new_consensus;
-                        metrics::counter!("tycho_mempool_consensus_current_round")
-                            .absolute(consensus.0 as _);
+                        metrics::gauge!("tycho_mempool_consensus_current_round")
+                            .set(consensus.0);
                     },
                     new_committed = committed_round.next() => committed = new_committed,
                     new_collated = collator_round.next() => collated = new_collated,
@@ -133,8 +133,8 @@ impl MempoolStore {
                     .set((committed.0 as f64) - (collated.0 as f64));
 
                 let new_least_to_keep = least_to_keep(consensus, committed, collated);
-                metrics::counter!("tycho_mempool_store_least_to_keep_round")
-                    .absolute(new_least_to_keep.0 as _);
+                metrics::gauge!("tycho_mempool_rounds_consensus_ahead_storage_round")
+                    .set((consensus.0 as f64) - (new_least_to_keep.0 as f64));
 
                 if new_least_to_keep > prev_least_to_keep {
                     let inner = inner.clone();
@@ -155,7 +155,7 @@ impl MempoolStore {
 
     /// delete all stored data up to provided value (exclusive)
     fn clean(inner: &MempoolStorage, least_to_keep: Round) {
-        let _call_duration = HistogramGuard::begin(StoreContext::CLEAN_DURATION);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_clean_time");
         let zero = [0_u8; MempoolStorage::KEY_LEN];
         let mut up_to_exclusive = [0_u8; MempoolStorage::KEY_LEN];
         fill_prefix(least_to_keep, &mut up_to_exclusive);
@@ -194,7 +194,7 @@ fn fill_prefix(round: Round, key: &mut [u8; MempoolStorage::KEY_LEN]) {
 
 impl MempoolStoreImpl for MempoolStorage {
     fn insert_point(&self, point: &Point, flags: Option<&PointFlags>) {
-        let _call_duration = HistogramGuard::begin(StoreContext::INSERT_POINT_DURATION);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(point.round(), point.digest(), &mut key);
 
@@ -223,7 +223,7 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn set_flags(&self, round: Round, digest: &Digest, flags: &PointFlags) {
-        let _call_duration = HistogramGuard::begin(StoreContext::SET_FLAGS_DURATION);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_set_flags_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -235,8 +235,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn get_point(&self, round: Round, digest: &Digest) -> Option<Point> {
-        metrics::counter!(StoreContext::GET_POINT_COUNT).increment(1);
-        let _call_duration = HistogramGuard::begin(StoreContext::GET_POINT_DURATION);
+        metrics::counter!("tycho_mempool_store_get_point_count").increment(1);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -247,8 +247,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn get_info(&self, round: Round, digest: &Digest) -> Option<PointInfo> {
-        metrics::counter!(StoreContext::GET_INFO_COUNT).increment(1);
-        let _call_duration = HistogramGuard::begin(StoreContext::GET_INFO_DURATION);
+        metrics::counter!("tycho_mempool_store_get_info_count").increment(1);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_info_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -259,8 +259,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags {
-        metrics::counter!(StoreContext::GET_FLAGS_COUNT).increment(1);
-        let _call_duration = HistogramGuard::begin(StoreContext::GET_FLAGS_DURATION);
+        metrics::counter!("tycho_mempool_store_get_flags_count").increment(1);
+        let _call_duration = HistogramGuard::begin("tycho_mempool_store_get_flags_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(round, digest, &mut key);
 
@@ -271,7 +271,8 @@ impl MempoolStoreImpl for MempoolStorage {
     }
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point> {
-        let _call_duration = HistogramGuard::begin(StoreContext::EXPAND_ANCHOR_HISTORY_DURATION);
+        let _call_duration =
+            HistogramGuard::begin("tycho_mempool_store_expand_anchor_history_time");
         let mut buf = [0_u8; MempoolStorage::KEY_LEN];
         let mut keys = history
             .iter()
@@ -351,23 +352,4 @@ impl MempoolStoreImpl for () {
     fn expand_anchor_history(&self, _: &[PointInfo]) -> Vec<Point> {
         panic!("should not be used in tests")
     }
-}
-
-struct StoreContext;
-impl StoreContext {
-    const CLEAN_DURATION: &'static str = "tycho_mempool_store_clean_time";
-    const EXPAND_ANCHOR_HISTORY_DURATION: &'static str =
-        "tycho_mempool_store_expand_anchor_history_time";
-
-    const INSERT_POINT_DURATION: &'static str = "tycho_mempool_store_insert_point_time";
-    const SET_FLAGS_DURATION: &'static str = "tycho_mempool_store_set_flags_time";
-
-    const GET_POINT_COUNT: &'static str = "tycho_mempool_store_get_point_count";
-    const GET_POINT_DURATION: &'static str = "tycho_mempool_store_get_point_time";
-
-    const GET_INFO_COUNT: &'static str = "tycho_mempool_store_get_info_count";
-    const GET_INFO_DURATION: &'static str = "tycho_mempool_store_get_info_time";
-
-    const GET_FLAGS_COUNT: &'static str = "tycho_mempool_store_get_flags_count";
-    const GET_FLAGS_DURATION: &'static str = "tycho_mempool_store_get_flags_time";
 }

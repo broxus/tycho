@@ -147,7 +147,7 @@ impl Downloader {
         verified_broadcast: oneshot::Receiver<Point>,
         effects: Effects<DownloadContext>,
     ) -> DownloadResult {
-        let _task_duration = HistogramGuard::begin(DownloadContext::TASK_DURATION);
+        let _task_duration = HistogramGuard::begin("tycho_mempool_download_task_time");
         effects.meter_start(point_id);
         let span_guard = effects.span().enter();
         // request point from its signers (any depender is among them as point is already verified)
@@ -356,7 +356,7 @@ impl DownloadTask {
                     });
                     status.is_in_flight = false;
                     status.failed_queries = status.failed_queries.saturating_add(1);
-                    metrics::counter!(DownloadContext::FAILED_QUERY).increment(1);
+                    metrics::counter!("tycho_mempool_download_query_failed_count").increment(1);
                     tracing::warn!(
                         peer = display(peer_id.alt()),
                         error = display(network_err),
@@ -468,9 +468,6 @@ impl DownloadTask {
     }
 }
 impl DownloadContext {
-    const TASK_DURATION: &'static str = "tycho_mempool_download_task_time";
-    const FAILED_QUERY: &'static str = "tycho_mempool_download_query_failed_count";
-
     fn meter_task(task: &DownloadTask) {
         metrics::counter!("tycho_mempool_download_not_found_responses")
             .increment(task.reliably_not_found as _);
@@ -484,10 +481,8 @@ impl Effects<DownloadContext> {
     fn meter_start(&self, point_id: &PointId) {
         metrics::counter!("tycho_mempool_download_task_count").increment(1);
 
-        metrics::counter!(DownloadContext::FAILED_QUERY).increment(0); // refresh
-
-        // FIXME not guaranteed to show the latest value as rounds advance, but better than nothing
-        metrics::gauge!("tycho_mempool_download_depth_rounds")
-            .set(self.download_max_depth(point_id.round));
+        // need to keep max value unless recorder cleans the metric, so gauge!().set() does not fit
+        metrics::counter!("tycho_mempool_download_depth_rounds")
+            .absolute(self.download_max_depth(point_id.round) as _);
     }
 }

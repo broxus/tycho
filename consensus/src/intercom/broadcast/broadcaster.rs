@@ -88,6 +88,8 @@ impl Broadcaster {
         task.run(bcast_peers).await;
         // preserve only broadcasts from the last round and drop older ones as hung up
         self.bcast_outdated = Some(task.bcast_current);
+        metrics::counter!("tycho_mempool_collected_signatures_count")
+            .increment(task.signatures.len() as _);
         LastOwnPoint {
             digest: point.digest().clone(),
             evidence: task.signatures.into_iter().collect(),

@@ -125,21 +125,23 @@ impl Responder {
 
 impl EngineContext {
     fn response_metrics(mp_response: &MPResponse, elapsed: Duration) {
-        let metric_name = match mp_response {
-            MPResponse::Broadcast => "tycho_mempool_broadcast_query_responder_time",
+        let histogram = match mp_response {
+            MPResponse::Broadcast => {
+                metrics::histogram!("tycho_mempool_broadcast_query_responder_time")
+            }
             MPResponse::Signature(SignatureResponse::NoPoint | SignatureResponse::TryLater) => {
-                "tycho_mempool_signature_query_responder_pong_time"
+                metrics::histogram!("tycho_mempool_signature_query_responder_pong_time")
             }
             MPResponse::Signature(
                 SignatureResponse::Signature(_) | SignatureResponse::Rejected(_),
-            ) => "tycho_mempool_signature_query_responder_data_time",
+            ) => metrics::histogram!("tycho_mempool_signature_query_responder_data_time"),
             MPResponse::PointById(PointByIdResponse::Defined(Some(_))) => {
-                "tycho_mempool_download_query_responder_some_time"
+                metrics::histogram!("tycho_mempool_download_query_responder_some_time")
             }
             MPResponse::PointById(
                 PointByIdResponse::Defined(None) | PointByIdResponse::TryLater,
-            ) => "tycho_mempool_download_query_responder_none_time",
+            ) => metrics::histogram!("tycho_mempool_download_query_responder_none_time"),
         };
-        metrics::histogram!(metric_name).record(elapsed);
+        histogram.record(elapsed);
     }
 }
