@@ -806,7 +806,7 @@ impl<'a> ArchiveWriter<'a> {
         key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
         key[4..].copy_from_slice(&self.chunk_index.to_be_bytes());
 
-        self.total_len += self.chunk_len;
+        self.total_len += self.chunk_buffer.len() as u64;
         self.chunk_index += 1;
 
         self.db.archives.insert(key, self.chunk_buffer.as_slice())?;
