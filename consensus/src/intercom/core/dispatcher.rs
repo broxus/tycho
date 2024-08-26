@@ -61,12 +61,12 @@ impl Dispatcher {
         T: TryFrom<MPResponse, Error = anyhow::Error>,
     {
         let peer_id = *peer_id;
-        let metric_name = request.metric_name();
+        let metric = request.metric();
         let request = request.data().clone();
         let overlay = self.overlay.clone();
         let network = self.network.clone();
         async move {
-            let _task_duration = HistogramGuard::begin(metric_name);
+            let _task_duration = metric;
             overlay
                 .query(&network, &peer_id, request)
                 .map(move |response| {
@@ -95,11 +95,17 @@ impl QueryKind {
             | QueryKind::PointById(data) => data,
         }
     }
-    fn metric_name(&self) -> &'static str {
+    fn metric(&self) -> HistogramGuard {
         match self {
-            QueryKind::Broadcast(_) => "tycho_mempool_broadcast_query_dispatcher_time",
-            QueryKind::Signature(_) => "tycho_mempool_signature_query_dispatcher_time",
-            QueryKind::PointById(_) => "tycho_mempool_download_query_dispatcher_time",
+            QueryKind::Broadcast(_) => {
+                HistogramGuard::begin("tycho_mempool_broadcast_query_dispatcher_time")
+            }
+            QueryKind::Signature(_) => {
+                HistogramGuard::begin("tycho_mempool_signature_query_dispatcher_time")
+            }
+            QueryKind::PointById(_) => {
+                HistogramGuard::begin("tycho_mempool_download_query_dispatcher_time")
+            }
         }
     }
 }

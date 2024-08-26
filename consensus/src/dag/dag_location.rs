@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::{btree_map, BTreeMap};
 use std::sync::{Arc, OnceLock};
 
@@ -147,6 +148,19 @@ impl Signable {
                         with: Signature::new(key_pair, valid.info.digest()),
                     })
                 });
+                if this_call_signed {
+                    match valid.info.round().cmp(&at) {
+                        cmp::Ordering::Less => {
+                            metrics::counter!("tycho_mempool_signing_prev_round_count")
+                                .increment(1);
+                        }
+                        cmp::Ordering::Equal => {
+                            metrics::counter!("tycho_mempool_signing_current_round_count")
+                                .increment(1);
+                        }
+                        cmp::Ordering::Greater => panic!("cannot sign points of future rounds"),
+                    };
+                }
             } // else decide later
         } else {
             self.reject();

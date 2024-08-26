@@ -8,6 +8,8 @@ from dashboard_builder import (
     template,
     Expr,
     expr_sum_rate,
+    expr_sum_increase,
+    expr_aggr_func,
     heatmap_panel,
     yaxis,
     expr_operator,
@@ -87,7 +89,7 @@ def create_gauge_panel(
 
 
 def create_counter_panel(
-    expr: Union[str, List[Union[str, Expr]]],
+    expr: Union[str | Expr, List[Union[str, Expr]]],
     title: str,
     unit_format: str = UNITS.NUMBER_FORMAT,
     labels_selectors: List[str] = [],
@@ -137,6 +139,8 @@ def create_counter_panel(
             targets = [target(e, legend_format=legend_format) for e in expr]
         else:
             raise ValueError("List elements must be all strings or all Expr objects.")
+    elif isinstance(expr, Expr):
+        targets = [target(expr, legend_format=legend_format)]
     else:
         raise TypeError(
             "expr must be a string, a list of strings, or a list of Expr objects."
@@ -1159,41 +1163,52 @@ def validator() -> RowPanel:
 
 def mempool_rounds() -> RowPanel:
     metrics = [
-        create_counter_panel(
+        create_gauge_panel(
             "tycho_mempool_engine_current_round",
             "Engine: current round (is always started at consensus round or next one)",
         ),
-        create_counter_panel(
+        create_gauge_panel(
             "tycho_mempool_last_anchor_round",
             "Adapter: last anchor round",
         ),
-        create_counter_panel(
+        create_gauge_panel(
             "tycho_mempool_consensus_current_round",
-            "Broadcast Filter: determined consensus round",
+            "Consensus: round determined by Broadcast Filter",
         ),
-        create_counter_panel(
-            "tycho_mempool_store_least_to_keep_round",
-            "Storage: least to keep history round",
+        create_gauge_panel(
+            "tycho_mempool_rounds_consensus_ahead_collated",
+            "Consensus ahead of top known block: silent mode trigger",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_dag_length",
+            "DAG length in memory",
         ),
         create_gauge_panel(
             "tycho_mempool_rounds_consensus_ahead_committed",
             "Consensus ahead of committed: commit latency",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_committed_ahead_collated",
-            "Committed ahead of top known block: block consensus latency",
+            "tycho_mempool_rounds_engine_ahead_last_trigger",
+            "Engine ahead of last anchor trigger: leaders finish 3 rounds in a row",
         ),
         create_gauge_panel(
-            "tycho_mempool_rounds_consensus_ahead_collated",
-            "Consensus ahead of top known block: silent mode trigger",
+            "tycho_mempool_rounds_committed_ahead_collated",
+            "Committed ahead of top known block: confirm block duration",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_engine_ahead_proof_chain",
+            "Engine ahead of last linked anchor proof: local gaps in leader chain",
+        ),
+        create_gauge_panel(
+            "tycho_mempool_rounds_consensus_ahead_storage_round",
+            "Consensus ahead of storage: history to keep",
         ),
     ]
     return create_row("Mempool rounds", metrics)
 
 
-def mempool() -> RowPanel:
+def mempool_point_rates() -> RowPanel:
     metrics = [
-        # == Mempool adapter == #
         create_counter_panel(
             "tycho_mempool_externals_count_total",
             "Adapter: unique externals count",
@@ -1213,16 +1228,6 @@ def mempool() -> RowPanel:
             unit_format=UNITS.BYTES,
         ),
         create_counter_panel(
-            "tycho_mempool_evicted_externals_count",
-            "Input buffer: evicted externals count",
-        ),
-        create_counter_panel(
-            "tycho_mempool_evicted_externals_size",
-            "Input buffer: evicted externals size",
-            unit_format=UNITS.BYTES,
-        ),
-        # == Engine own point == #
-        create_counter_panel(
             "tycho_mempool_point_payload_count",
             "Engine: points payload count",
         ),
@@ -1232,34 +1237,69 @@ def mempool() -> RowPanel:
             unit_format=UNITS.BYTES,
         ),
         create_counter_panel(
+            "tycho_mempool_evicted_externals_count",
+            "Input buffer: evicted externals count",
+        ),
+        create_counter_panel(
+            "tycho_mempool_evicted_externals_size",
+            "Input buffer: evicted externals size",
+            unit_format=UNITS.BYTES,
+        ),
+    ]
+    return create_row("Mempool point rates", metrics)
+
+
+def mempool_engine_rates() -> RowPanel:
+    metrics = [
+        create_counter_panel(
             "tycho_mempool_points_produced",
             "Engine: produced points",
         ),
         create_counter_panel(
-            "tycho_mempool_points_no_proof_produced",
-            "Engine: produced points without proof",
+            "tycho_mempool_commit_anchors",
+            "Engine: committed anchors",
         ),
-        # == Engine == #
         create_counter_panel(
-            "tycho_mempool_engine_rounds_skipped",
-            "Engine: skipped rounds",
+            "tycho_mempool_collected_signatures_count",
+            "Broadcaster: collected signatures in response",
+        ),
+        create_counter_panel(
+            "tycho_mempool_collected_includes_count",
+            "Collector: timely received broadcasts",
+        ),
+        create_counter_panel(
+            "tycho_mempool_signing_current_round_count",
+            "Current round broadcasts signed",
+        ),
+        create_counter_panel(
+            "tycho_mempool_signing_prev_round_count",
+            "Previous round broadcasts signed",
+        ),
+    ]
+    return create_row("Mempool engine rates", metrics)
+
+
+def mempool_engine() -> RowPanel:
+    metrics = [
+        create_counter_panel(
+            expr_sum_increase("tycho_mempool_engine_rounds_skipped", range_selector="$__interval"),
+            "Engine: skipped rounds (total at moment)",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_round_time",
             "Engine: round duration",
         ),
         create_counter_panel(
-            "tycho_mempool_engine_produce_skipped",
-            "Engine: points to produce skipped",
+            expr_sum_increase("tycho_mempool_points_no_proof_produced", range_selector="$__interval"),
+            "Engine: produced points without proof (total at moment)",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_produce_time",
             "Engine: produce point task duration",
         ),
-        # == Engine commit == #
         create_counter_panel(
-            "tycho_mempool_commit_anchors",
-            "Engine: committed anchors",
+            expr_sum_increase("tycho_mempool_engine_produce_skipped", range_selector="$__interval"),
+            "Engine: points to produce skipped (total at moment)",
         ),
         create_heatmap_panel(
             "tycho_mempool_engine_commit_time",
@@ -1267,65 +1307,18 @@ def mempool() -> RowPanel:
         ),
         create_gauge_panel(
             "tycho_mempool_commit_latency_rounds",
-            "Engine: committed anchor rounds latency (max over batch)",
+            "Engine committed anchor: rounds latency (max over batch)",
         ),
         create_heatmap_panel(
             "tycho_mempool_commit_anchor_latency_time",
-            "Engine: committed anchor time latency (min over batch)",
+            "Engine committed anchor: time latency (min over batch)",
         ),
     ]
-    return create_row("Mempool", metrics)
+    return create_row("Mempool engine", metrics)
 
 
-def mempool_components() -> RowPanel:
+def mempool_intercom() -> RowPanel:
     metrics = [
-        # == Verifier == #
-        create_counter_panel(
-            "tycho_mempool_verifier_verify",
-            "Verifier: verify() errors",
-            labels_selectors=['kind=~"$kind"'],
-            by_labels=["kind", "instance"],
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_verifier_verify_time",
-            "Verifier: verify() point structure and author's sig",
-        ),
-        create_counter_panel(
-            "tycho_mempool_verifier_validate",
-            "Verifier: validate() errors and warnings",
-            labels_selectors=['kind=~"$kind"'],
-            by_labels=["kind", "instance"],
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_verifier_validate_time",
-            "Verifier: validate() point dependencies in DAG and all-1 sigs",
-        ),
-        # == Download tasks - multiple per round == #
-        create_counter_panel(
-            "tycho_mempool_download_task_count",
-            "Downloader: tasks (unique point id)",
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_download_task_time", "Downloader: tasks duration"
-        ),
-        # FIXME next one needs max value over collection period, but no `gauge.set_max()`
-        create_gauge_panel(
-            "tycho_mempool_download_depth_rounds",
-            "Downloader: point depth (max rounds from current) #fixme",
-        ),
-        create_counter_panel(
-            "tycho_mempool_download_not_found_responses",
-            "Downloader: received None in response",
-        ),
-        create_counter_panel(
-            "tycho_mempool_download_aborted_on_exit_count",
-            "Downloader: queries aborted (on task completion)",
-        ),
-        create_counter_panel(
-            "tycho_mempool_download_query_failed_count",
-            "Downloader: queries network error",
-        ),
-        # == Network tasks - multiple per round == #
         create_heatmap_panel(
             "tycho_mempool_broadcast_query_dispatcher_time",
             "Dispatcher: Broadcast send",
@@ -1334,6 +1327,33 @@ def mempool_components() -> RowPanel:
             "tycho_mempool_broadcast_query_responder_time",
             "Responder: Broadcast accept",
         ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_verifier_verify",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Verifier: verify() errors (total at moment)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_verify_time",
+            "Verifier: verify() point structure and author's sig",
+        ),
+        create_counter_panel(
+            expr_sum_increase(
+                "tycho_mempool_verifier_validate",
+                label_selectors=['kind=~"$kind"'],
+                range_selector="$__interval",
+                by_labels=["kind", "instance"],
+            ),
+            "Verifier: validate() errors and warnings (total at moment)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_verifier_validate_time",
+            "Verifier: validate() point dependencies in DAG and all-1 sigs",
+        ),
+        # == Network tasks - multiple per round == #
         create_heatmap_panel(
             "tycho_mempool_signature_query_dispatcher_time",
             "Dispatcher: Signature request",
@@ -1347,19 +1367,50 @@ def mempool_components() -> RowPanel:
             "Responder: Signature send: send ready or sign or reject",
         ),
         create_heatmap_panel(
-            "tycho_mempool_signature_query_responder_pong_time",
-            "Responder: Signature send: no point or try later",
-        ),
-        create_heatmap_panel(
             "tycho_mempool_download_query_responder_some_time",
             "Responder: Download send: Some(point)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_signature_query_responder_pong_time",
+            "Responder: Signature send: no point or try later",
         ),
         create_heatmap_panel(
             "tycho_mempool_download_query_responder_none_time",
             "Responder: Download send: None",
         ),
+        # == Download tasks - multiple per round == #
+        create_counter_panel(
+            expr_sum_increase("tycho_mempool_download_task_count", range_selector="$__interval"),
+            "Downloader: tasks (unique point id) (total at moment)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_download_task_time", "Downloader: tasks duration"
+        ),
+        create_counter_panel(
+            expr_aggr_func(
+                metric="tycho_mempool_download_depth_rounds",
+                aggr_op="max",
+                func="increase",
+                label_selectors=[],
+                range_selector="$__interval",
+                by_labels=["instance"],
+            ),
+            "Downloader: point depth (max rounds from current) (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase("tycho_mempool_download_not_found_responses", range_selector="$__interval"),
+            "Downloader: received None in response (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase("tycho_mempool_download_aborted_on_exit_count", range_selector="$__interval"),
+            "Downloader: queries aborted (on task completion) (total at moment)",
+        ),
+        create_counter_panel(
+            expr_sum_increase("tycho_mempool_download_query_failed_count", range_selector="$__interval"),
+            "Downloader: queries network error (total at moment)",
+        ),
     ]
-    return create_row("Mempool components", metrics)
+    return create_row("Mempool communication", metrics)
 
 
 def mempool_storage() -> RowPanel:
@@ -1381,28 +1432,28 @@ def mempool_storage() -> RowPanel:
             "Set flags",
         ),
         create_counter_panel(
-            "tycho_mempool_store_get_point_count",
-            "Get point count",
+            expr_sum_increase("tycho_mempool_store_get_point_count", range_selector="$__interval"),
+            "Get point count (total at moment)",
         ),
         create_heatmap_panel(
             "tycho_mempool_store_get_point_time",
             "Get point",
         ),
         create_counter_panel(
-            "tycho_mempool_store_get_info_count",
-            "Get info count",
-        ),
-        create_heatmap_panel(
-            "tycho_mempool_store_get_info_time",
-            "Get info",
-        ),
-        create_counter_panel(
-            "tycho_mempool_store_get_flags_count",
-            "Get flags count",
+            expr_sum_increase("tycho_mempool_store_get_flags_count", range_selector="$__interval"),
+            "Get flags count (total at moment)",
         ),
         create_heatmap_panel(
             "tycho_mempool_store_get_flags_time",
             "Get flags",
+        ),
+        create_counter_panel(
+            expr_sum_increase("tycho_mempool_store_get_info_count", range_selector="$__interval"),
+            "Get info count (total at moment)",
+        ),
+        create_heatmap_panel(
+            "tycho_mempool_store_get_info_time",
+            "Get info",
         ),
     ]
     return create_row("Mempool storage", metrics)
@@ -1526,8 +1577,10 @@ dashboard = Dashboard(
         collator_execution_manager(),
         validator(),
         mempool_rounds(),
-        mempool(),
-        mempool_components(),
+        mempool_point_rates(),
+        mempool_engine_rates(),
+        mempool_engine(),
+        mempool_intercom(),
         mempool_storage(),
         net_traffic(),
         net_conn_manager(),

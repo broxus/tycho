@@ -161,7 +161,7 @@ impl RoundTaskReady {
                                     &store,
                                 );
                                 own_point_state_tx.send(state).ok();
-                                metrics::histogram!(EngineContext::PRODUCE_POINT_DURATION)
+                                metrics::histogram!("tycho_mempool_engine_produce_time")
                                     .record(task_start_time.elapsed());
                             };
                             point_opt
@@ -316,10 +316,6 @@ impl RoundTaskRunning {
     }
 }
 
-impl EngineContext {
-    const PRODUCE_POINT_DURATION: &'static str = "tycho_mempool_engine_produce_time";
-}
-
 impl Effects<EngineContext> {
     fn own_point(&self, own_point: Option<&Point>) {
         // refresh counters with zeros every round
@@ -341,8 +337,8 @@ impl Effects<EngineContext> {
         metrics::counter!("tycho_mempool_point_payload_bytes")
             .increment(payload_bytes.unwrap_or_default());
 
-        match own_point {
-            Some(own_point) => tracing::info!(
+        if let Some(own_point) = own_point {
+            tracing::info!(
                 parent: self.span(),
                 digest = display(own_point.digest().alt()),
                 payload_bytes = own_point
@@ -351,34 +347,9 @@ impl Effects<EngineContext> {
                 is_proof = Some(own_point.data().anchor_proof == Link::ToSelf).filter(|x| *x),
                 is_trigger = Some(own_point.data().anchor_trigger == Link::ToSelf).filter(|x| *x),
                 "produced point"
-            ),
-            None => tracing::info!(parent: self.span(), "will not produce point"),
+            );
+        } else {
+            tracing::info!(parent: self.span(), "will not produce point");
         };
-
-        // FIXME all commented metrics needs `gauge.set_max()` or `gauge.set_min()`,
-        //  or (better) should be accumulated per round as standalone values
-
-        // let Some(own_point) = own_point else {
-        //     return;
-        // };
-
-        // if let Some(_proof) = &own_point.body().proof {
-        //     metrics::gauge!("tycho_mempool_point_evidence_count_min")
-        //         .set_min(proof.evidence.len() as f64);
-        //     metrics::gauge!("tycho_mempool_point_evidence_count_max")
-        //         .set_max(proof.evidence.len() as f64);
-        // }
-
-        // metrics::gauge!("tycho_mempool_point_includes_count_min")
-        //     .set_min(own_point.body().includes.len() as f64);
-        // metrics::gauge!("tycho_mempool_point_includes_count_max")
-        //     .set_max(own_point.body().includes.len() as f64);
-        // metrics::gauge!("tycho_mempool_point_witness_count_max")
-        //     .set_max(own_point.body().witness.len() as f64);
-        //
-        // metrics::gauge!("tycho_mempool_point_last_anchor_proof_rounds_ago")
-        //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Proof).0);
-        // metrics::gauge!("tycho_mempool_point_last_anchor_trigger_rounds_ago")
-        //     .set_max(own_point.body().location.round.0 - own_point.anchor_round(LinkField::Trigger).0);
     }
 }

@@ -94,7 +94,7 @@ impl Collector {
 
         self.next_round = next_dag_round.round();
         let includes_ready = FastHashSet::with_capacity(current_dag_round.peer_count().full());
-        let task = CollectorTask {
+        let mut task = CollectorTask {
             effects,
             current_round: current_dag_round.clone(),
             next_dag_round,
@@ -102,16 +102,20 @@ impl Collector {
             includes_ready,
             is_includes_ready: false,
             next_includes: FuturesUnordered::new(),
-
             collector_signal,
             is_bcaster_ready_ok: false,
         };
 
         drop(span_guard);
-        match task.run(&mut self.from_bcast_filter, bcaster_signal).await {
-            Ok(includes) => {
+
+        let result = task.run(&mut self.from_bcast_filter, bcaster_signal).await;
+        metrics::counter!("tycho_mempool_collected_includes_count")
+            .increment(task.includes_ready.len() as _);
+
+        match result {
+            Ok(()) => {
                 // no jump by task - prepare for Engine will not jump too
-                self.next_includes = Some(includes);
+                self.next_includes = Some(task.next_includes);
                 // self.next_round is up-to-date
             }
             Err(round) => {
@@ -147,10 +151,10 @@ impl CollectorTask {
 
     /// returns includes for our point at the next round
     async fn run(
-        mut self,
+        &mut self,
         from_bcast_filter: &mut mpsc::UnboundedReceiver<ConsensusEvent>,
         mut bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
-    ) -> Result<FuturesUnordered<BoxFuture<'static, InclusionState>>, Round> {
+    ) -> Result<(), Round> {
         let mut retry_interval = tokio::time::interval(MempoolConfig::RETRY_INTERVAL);
         loop {
             tokio::select! {
@@ -158,7 +162,7 @@ impl CollectorTask {
                 // jump is rare and must not be postponed
                 Some(state) = self.next_includes.next(), if ! self.is_includes_ready => {
                     if let Some(result) = self.jump_up(state) {
-                        return result.map(|_ | self.next_includes)
+                        return result
                     }
                 },
                 // broadcaster signal is rare and must not be postponed
@@ -170,13 +174,13 @@ impl CollectorTask {
                     // bcaster sends its signal immediately after receiving Signal::Retry,
                     // so we don't have to wait for one more interval
                     if self.is_ready() {
-                        return Ok(self.next_includes)
+                        return Ok(())
                     }
                 },
                 // tick is more frequent than bcaster signal, leads to completion too
                 _ = retry_interval.tick() => {
                     if self.is_ready() {
-                        return Ok(self.next_includes)
+                        return Ok(())
                     } else {
                         _ = self.collector_signal.send_replace(CollectorSignal::Retry);
                     }

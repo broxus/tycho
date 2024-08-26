@@ -43,7 +43,7 @@ pub enum VerifyError {
 impl Verifier {
     /// the first and mandatory check of any Point received no matter where from
     pub fn verify(point: &Point, peer_schedule: &PeerSchedule) -> Result<(), VerifyError> {
-        let _task_duration = HistogramGuard::begin(ValidateContext::VERIFY_DURATION);
+        let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_verify_time");
         let result = if !point.is_integrity_ok() {
             Err(VerifyError::BadSig)
         } else if !(point.is_well_formed() && Self::is_peer_usage_ok(point, peer_schedule)) {
@@ -64,7 +64,7 @@ impl Verifier {
         mut certified_rx: oneshot::Receiver<()>,
         effects: Effects<ValidateContext>,
     ) -> DagPoint {
-        let _task_duration = HistogramGuard::begin(ValidateContext::VALIDATE_DURATION);
+        let _task_duration = HistogramGuard::begin("tycho_mempool_verifier_validate_time");
         let span_guard = effects.span().enter();
 
         // for genesis point it's sufficient to be well-formed and pass integrity check,
@@ -628,8 +628,6 @@ impl Verifier {
 }
 
 impl ValidateContext {
-    const VERIFY_DURATION: &'static str = "tycho_mempool_verifier_verify_time";
-    const VALIDATE_DURATION: &'static str = "tycho_mempool_verifier_validate_time";
     const KIND: &'static str = "kind";
 
     const VERIFY_LABELS: [(&'static str, &'static str); 2] =

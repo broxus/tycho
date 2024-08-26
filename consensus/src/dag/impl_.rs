@@ -104,6 +104,10 @@ impl Dag {
 
     /// result is in historical order
     fn commit_up_to(&mut self, up_to: DagRound) -> Vec<(PointInfo, Vec<PointInfo>)> {
+        // Note that it's always engine round in production, but may differ in local tests
+        let engine_round = up_to.round().prev();
+        metrics::gauge!("tycho_mempool_rounds_dag_length").set(self.rounds.len() as u32);
+
         // The call must not take long, better try later than wait now, slowing down whole Engine.
         // Try to collect longest anchor chain in historical order, until any unready point is met:
         // * take all ready and uncommitted triggers, skipping not ready ones
@@ -125,6 +129,8 @@ impl Dag {
         // take all ready triggers, skipping not ready ones
         let mut trigger_stack = Self::trigger_stack(up_to, oldest_proof_round);
         let _span = if let Some((latest_trigger, _)) = trigger_stack.first() {
+            metrics::gauge!("tycho_mempool_rounds_engine_ahead_last_trigger")
+                .set((engine_round.0 as f64) - (latest_trigger.round().0 as f64));
             tracing::error_span!(
                 "commit trigger",
                 author = display(&latest_trigger.data().author.alt()),
@@ -159,6 +165,11 @@ impl Dag {
                 // no reason to traverse deeper than last proof
                 oldest_proof_round = last_linked.proof_round.round();
             }
+        }
+
+        if let Some((_, last_linked)) = anchors.last_key_value() {
+            metrics::gauge!("tycho_mempool_rounds_engine_ahead_proof_chain")
+                .set((engine_round.0 as f64) - (last_linked.proof_round.round().0 as f64));
         }
 
         for LinkedAnchor {
@@ -242,7 +253,7 @@ impl Dag {
         mut dag_round: DagRound,
         oldest_proof_round: Round,
     ) -> Vec<(PointInfo, DagRound)> {
-        let mut latest_trigger = Vec::new();
+        let mut triggers_rev = Vec::new();
         loop {
             let prev_dag_round = dag_round.prev().upgrade();
 
@@ -267,7 +278,7 @@ impl Dag {
                     })
                     .flatten()
                 {
-                    latest_trigger.push((valid.info, dag_round.clone()));
+                    triggers_rev.push((valid.info, dag_round.clone()));
                 };
             };
 
@@ -278,7 +289,7 @@ impl Dag {
                 _ => break,
             };
         }
-        latest_trigger
+        triggers_rev
     }
 
     fn anchor_chain(
