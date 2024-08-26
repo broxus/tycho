@@ -2,9 +2,8 @@ use std::num::{NonZeroU32, NonZeroU64};
 
 use bytes::Bytes;
 use tl_proto::{TlRead, TlWrite};
+use tycho_block_util::tl::{block_id as tl_block_id, block_id_vec as tl_block_id_vec};
 use tycho_util::tl;
-
-use crate::proto::{tl_block_id, tl_block_id_vec};
 
 pub type BigBytes = tl::BigBytes<{ 100 << 20 }>; // 100 MB
 

@@ -1,3 +1,10 @@
+//! # Archive structure
+//!
+//! - Archive prefix (4 bytes): `0x65 0x8F 0x14 0x29`
+//! - For each archive entry:
+//!  * Archive entry header ([`ArchiveEntryHeader`] as TL)
+//!  * Archive entry data
+
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -5,17 +12,17 @@ use bytes::Bytes;
 use everscale_types::models::BlockId;
 use tycho_util::FastHashMap;
 
-pub use self::entry_id::{ArchiveEntryId, ArchiveEntryIdKind, GetFileName};
+pub use self::entry_id::ArchiveEntryId;
+pub use self::proto::{
+    ArchiveEntryHeader, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
+};
 pub use self::reader::{ArchiveEntry, ArchiveReader, ArchiveReaderError, ArchiveVerifier};
 use crate::block::{BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug};
 use crate::queue::{QueueDiffStuff, QueueDiffStuffAug};
 
 mod entry_id;
+mod proto;
 mod reader;
-
-pub const ARCHIVE_PREFIX: [u8; 4] = u32::to_le_bytes(0xae8fdd01);
-pub const ARCHIVE_ENTRY_PREFIX: [u8; 2] = u16::to_le_bytes(0x1e8b);
-pub const ARCHIVE_ENTRY_HEADER_LEN: usize = ARCHIVE_ENTRY_PREFIX.len() + 2 + 4; // magic + filename len + data len
 
 pub struct Archive {
     pub mc_block_ids: BTreeMap<u32, BlockId>,
@@ -37,25 +44,24 @@ impl Archive {
 
         for entry_data in reader {
             let entry = entry_data?;
-            let header = ArchiveEntryId::from_filename(entry.name)?;
 
-            let id = &header.block_id;
+            let id = &entry.id.block_id;
             if id.is_masterchain() {
                 res.mc_block_ids.insert(id.seqno, *id);
             }
 
             let parsed = res.blocks.entry(*id).or_default();
 
-            match header.kind {
-                ArchiveEntryIdKind::Block => {
+            match entry.id.ty {
+                ArchiveEntryType::Block => {
                     anyhow::ensure!(parsed.block.is_none(), "duplicate block data for: {id}");
                     parsed.block = Some(data.slice_ref(entry.data));
                 }
-                ArchiveEntryIdKind::Proof => {
+                ArchiveEntryType::Proof => {
                     anyhow::ensure!(parsed.proof.is_none(), "duplicate block proof for: {id}");
                     parsed.proof = Some(data.slice_ref(entry.data));
                 }
-                ArchiveEntryIdKind::QueueDiff => {
+                ArchiveEntryType::QueueDiff => {
                     anyhow::ensure!(
                         parsed.queue_diff.is_none(),
                         "duplicate queue diff for: {id}"
@@ -205,17 +211,6 @@ pub enum ArchiveError {
     ProofNotFound,
     #[error(transparent)]
     Other(#[from] anyhow::Error),
-}
-
-/// Encodes archive package segment.
-pub fn make_archive_entry(filename: &str, data: &[u8]) -> Vec<u8> {
-    let mut vec = Vec::with_capacity(2 + 2 + 4 + filename.len() + data.len());
-    vec.extend_from_slice(&ARCHIVE_ENTRY_PREFIX);
-    vec.extend_from_slice(&(filename.len() as u16).to_le_bytes());
-    vec.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    vec.extend_from_slice(filename.as_bytes());
-    vec.extend_from_slice(data);
-    vec
 }
 
 #[cfg(test)]

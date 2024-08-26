@@ -3496,6 +3496,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror",
+ "tl-proto",
  "tokio",
  "tracing",
  "triomphe",
@@ -3696,8 +3697,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.3.3"
-source = "git+https://github.com/broxus/weedb.git#75fa5a5be6eb82726fcf906828702f7fabaab070"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bc7024031673dd75dfcc4c94081df69c6a993c70c7283f62047bd98002249b9"
 dependencies = [
  "librocksdb-sys",
  "metrics",
