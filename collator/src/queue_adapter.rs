@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockIdShort, ShardIdent};
 use tracing::instrument;
 use tycho_block_util::queue::QueueKey;
@@ -34,6 +35,7 @@ where
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
+        diff_hash: &HashBytes,
     ) -> Result<()>;
     /// Commit previously applied diff, saving changes to persistent state (waiting for the operation to complete).
     /// Return `None` if specified diff does not exist.
@@ -92,11 +94,12 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         &self,
         diff: QueueDiffWithMessages<V>,
         block_id_short: BlockIdShort,
+        hash: &HashBytes,
     ) -> Result<()> {
         let time = std::time::Instant::now();
         let len = diff.messages.len();
         let processed_upto = diff.processed_upto.clone();
-        self.queue.apply_diff(diff, block_id_short).await?;
+        self.queue.apply_diff(diff, block_id_short, hash).await?;
 
         tracing::info!(
             target: tracing_targets::MQ_ADAPTER,

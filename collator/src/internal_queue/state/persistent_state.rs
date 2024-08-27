@@ -50,15 +50,14 @@ impl<V: InternalMessageValue> PersistentStateFactory<V> for PersistentStateImplF
 }
 
 pub trait PersistentStateFactory<V: InternalMessageValue> {
-    type PersistentState: LocalPersistentState<V>;
+    type PersistentState: PersistentState<V>;
 
     fn create(&self) -> Self::PersistentState;
 }
 
 // TRAIT
 
-#[trait_variant::make(PersistentState: Send)]
-pub trait LocalPersistentState<V: InternalMessageValue> {
+pub trait PersistentState<V: InternalMessageValue>: Send + Sync {
     fn snapshot(&self) -> OwnedSnapshot;
 
     fn iterator(

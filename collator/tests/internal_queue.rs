@@ -1,18 +1,21 @@
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use everscale_types::cell::{Cell, CellSliceRange, HashBytes};
 use everscale_types::models::{
-    AccountStatus, BlockExtra, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason,
-    CurrencyCollection, HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, Lazy, MsgEnvelope,
-    MsgInfo, OrdinaryTxInfo, OutMsg, OutMsgDescr, OutMsgNew, OwnedMessage, ShardIdent,
-    SkippedComputePhase, StdAddr, Transaction, TxInfo,
+    AccountStatus, BlockId, BlockIdShort, ComputePhase, ComputePhaseSkipReason, CurrencyCollection,
+    HashUpdate, IntAddr, IntMsgInfo, IntermediateAddr, Lazy, MsgEnvelope, MsgInfo, OrdinaryTxInfo,
+    OutMsg, OutMsgDescr, OutMsgNew, OwnedMessage, ShardIdent, SkippedComputePhase, StdAddr,
+    Transaction, TxInfo,
 };
 use everscale_types::num::Tokens;
 use tycho_block_util::queue::{QueueDiff, QueueDiffStuff, QueueKey};
-use tycho_collator::internal_queue::queue::{Queue, QueueFactory, QueueFactoryStdImpl, QueueImpl};
+use tycho_collator::internal_queue::queue::{
+    Queue, QueueConfig, QueueFactory, QueueFactoryStdImpl, QueueImpl,
+};
 use tycho_collator::internal_queue::state::persistent_state::{
     PersistentStateImplFactory, PersistentStateStdImpl,
 };
@@ -90,7 +93,9 @@ async fn test_queue() -> anyhow::Result<()> {
             storage: storage.clone(),
         },
         persistent_state_factory: PersistentStateImplFactory { storage },
-        gc_queue_buffer_size: 100,
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
     };
 
     let queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, StoredObject> =
@@ -134,7 +139,9 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    queue.apply_diff(diff, block).await?;
+    queue
+        .apply_diff(diff, block, &HashBytes::from([1; 32]))
+        .await?;
 
     let mut top_blocks = vec![];
 
@@ -186,7 +193,9 @@ async fn test_queue() -> anyhow::Result<()> {
 
     top_blocks.push((block2, true));
 
-    queue.apply_diff(diff, block2).await?;
+    queue
+        .apply_diff(diff, block2, &HashBytes::from([0; 32]))
+        .await?;
     queue.commit_diff(top_blocks).await?;
 
     let mut ranges = FastHashMap::default();
@@ -207,9 +216,8 @@ async fn test_queue() -> anyhow::Result<()> {
     let iterators = queue.iterator(&ranges, ShardIdent::new_full(1)).await;
 
     let mut iterator_manager = StatesIteratorsManager::new(iterators);
-
-    let mut loaded_stored_object = iterator_manager.next();
-    loaded_stored_object = iterator_manager.next();
+    iterator_manager.next().ok();
+    let loaded_stored_object = iterator_manager.next();
 
     let loaded_stored_object = loaded_stored_object.unwrap().unwrap();
     assert_eq!(stored_objects[3], loaded_stored_object.message);
@@ -385,8 +393,6 @@ fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
             .collect::<Vec<_>>(),
         vec![message1_hash, message2_hash, message3_hash,]
     );
-
-    assert_eq!(diff_with_messages.last_key, None);
 
     Ok(())
 }

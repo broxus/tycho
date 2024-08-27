@@ -7,7 +7,6 @@ use everscale_types::models::ShardIdent;
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
 
-use crate::internal_queue::error::QueueError;
 use crate::internal_queue::state::state_iterator::{IterRange, MessageExt};
 use crate::internal_queue::state::states_iterators_manager::StatesIteratorsManager;
 use crate::internal_queue::types::{InternalMessageValue, QueueDiffWithMessages, QueueFullDiff};
@@ -46,7 +45,7 @@ impl<V: InternalMessageValue> QueueIteratorImpl<V> {
     pub fn new(
         iterators_manager: StatesIteratorsManager<V>,
         for_shard: ShardIdent,
-    ) -> Result<Self, QueueError> {
+    ) -> Result<Self> {
         let messages_for_current_shard = BinaryHeap::default();
 
         Ok(Self {

@@ -110,14 +110,18 @@ impl InternalQueueStorage {
 
         let mut batch = WriteBatch::default();
 
-        batch.delete_range_cf(
-            &shards_internal_messages_cf,
-            &start_key.to_vec(),
-            &end_key.to_vec(),
-        );
-        batch.delete_cf(&shards_internal_messages_cf, end_key.to_vec());
+        let start_key = start_key.to_vec();
+        let end_key = end_key.to_vec();
+
+        batch.delete_range_cf(&shards_internal_messages_cf, &start_key, &end_key);
+        batch.delete_cf(&shards_internal_messages_cf, &end_key);
 
         self.db.rocksdb().write(batch)?;
+        self.db.rocksdb().compact_range_cf(
+            &shards_internal_messages_cf,
+            Some(&start_key),
+            Some(&end_key),
+        );
 
         Ok(())
     }

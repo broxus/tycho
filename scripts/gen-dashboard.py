@@ -879,12 +879,9 @@ def collator_queue_metrics() -> RowPanel:
             legend_format=legend_format,
         ),
         create_counter_panel(
-            "tycho_internal_queue_gc_current_queue_size", "GC queue size"
-        ),
-        create_counter_panel(
             "tycho_internal_queue_uncommitted_diffs_count", "Uncommited diffs"
         ),
-        create_heatmap_panel("tycho_internal_queue_gc_time", "GC run time"),
+        create_heatmap_panel("tycho_internal_queue_gc_execute_task_time", "GC execute time"),
     ]
     return create_row("collator: Queue Metrics", metrics)
 

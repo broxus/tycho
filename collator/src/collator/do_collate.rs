@@ -414,6 +414,8 @@ impl CollatorStdImpl {
         )
         .serialize();
 
+        let queue_diff_hash = *queue_diff.hash();
+
         // start async update queue task
         let update_queue_task: JoinTask<std::result::Result<Duration, anyhow::Error>> =
             JoinTask::<Result<_>>::new({
@@ -427,7 +429,7 @@ impl CollatorStdImpl {
                     );
 
                     mq_adapter
-                        .apply_diff(diff_with_messages, block_id_short)
+                        .apply_diff(diff_with_messages, block_id_short, &queue_diff_hash)
                         .await?;
                     let apply_queue_diff_elapsed = histogram.finish();
 

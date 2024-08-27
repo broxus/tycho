@@ -14,7 +14,6 @@ use super::state::state_iterator::MessageExt;
 pub struct QueueDiffWithMessages<V: InternalMessageValue> {
     pub messages: BTreeMap<QueueKey, Arc<V>>,
     pub processed_upto: BTreeMap<ShardIdent, QueueKey>,
-    pub last_key: Option<QueueKey>,
 }
 
 impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
@@ -22,13 +21,7 @@ impl<V: InternalMessageValue> QueueDiffWithMessages<V> {
         Self {
             messages: BTreeMap::new(),
             processed_upto: BTreeMap::new(),
-            last_key: None,
         }
-    }
-
-    pub fn exclude_last_key(&mut self) {
-        self.last_key = self.messages.last_key_value().map(|(key, _)| *key);
-        self.messages.clear();
     }
 }
 
@@ -39,8 +32,8 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
     ) -> Result<Self> {
         let QueueDiff { processed_upto, .. } = queue_diff_stuff.as_ref();
         let processed_upto: BTreeMap<ShardIdent, QueueKey> = processed_upto
-            .into_iter()
-            .map(|(shard_ident, key)| (*shard_ident, (*key).into()))
+            .iter()
+            .map(|(shard_ident, key)| (*shard_ident, *key))
             .collect();
 
         let mut messages: BTreeMap<QueueKey, Arc<_>> = BTreeMap::new();
@@ -59,7 +52,6 @@ impl QueueDiffWithMessages<EnqueuedMessage> {
         Ok(Self {
             messages,
             processed_upto,
-            last_key: None,
         })
     }
 }
