@@ -238,7 +238,7 @@ impl GlobalConfig {
 
         let now = now_sec();
         for peer in &config.bootstrap_peers {
-            anyhow::ensure!(peer.is_valid(now), "invalid peer info for {}", peer.id);
+            anyhow::ensure!(peer.verify(now), "invalid peer info for {}", peer.id);
         }
 
         Ok(config)

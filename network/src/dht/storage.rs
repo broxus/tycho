@@ -153,10 +153,7 @@ impl Storage {
             return Err(StorageError::InvalidSignature);
         };
 
-        if !matches!(
-            <&[u8; 64]>::try_from(value.signature.as_ref()),
-            Ok(signature) if public_key.verify(value, signature)
-        ) {
+        if !public_key.verify(value, value.signature) {
             return Err(StorageError::InvalidSignature);
         }
 

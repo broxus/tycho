@@ -82,17 +82,21 @@ impl DhtInner {
                     }
                     Action::AddPeer(peer_info) => {
                         let peer_id = peer_info.id;
-                        let added = this.add_peer_info(&network, peer_info);
-                        tracing::debug!(
-                            local_id = %this.local_id,
-                            %peer_id,
-                            ?added,
-                            "received peer info",
-                        );
-
-                        if let Err(e) = added {
-                            tracing::error!("failed to add peer to the routing table: {e}");
+                        let mut signature_checked = false;
+                        if peer_info.verify_ext(now_sec(), &mut signature_checked) {
+                            let added = this.add_peer_info(&network, peer_info);
+                            tracing::debug!(
+                                local_id = %this.local_id,
+                                %peer_id,
+                                added,
+                                "received peer info",
+                            );
+                        } else {
+                            // TODO: Is it ok to WARN here since it can be spammed?
+                            tracing::warn!(%peer_id, "received invalid peer info");
                         }
+
+                        tycho_util::sync::yield_on_complex(signature_checked).await;
                     }
                 }
             }

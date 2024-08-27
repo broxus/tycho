@@ -18,19 +18,21 @@ pub mod futures {
 }
 
 pub mod io {
-    pub use bytes_writer::BytesWriter;
+    pub use self::bytes_writer::BytesWriter;
+
     mod bytes_writer;
 }
 
 pub mod sync {
-    pub use once_take::*;
-
+    pub use self::once_take::*;
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};
     pub use self::rayon::{rayon_run, rayon_run_fifo};
+    pub use self::task::yield_on_complex;
 
     mod once_take;
     mod priority_semaphore;
     mod rayon;
+    mod task;
 }
 
 #[cfg(any(test, feature = "test"))]
