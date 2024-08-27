@@ -9,6 +9,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Future, StreamExt};
 use tokio::sync::Semaphore;
 use tycho_util::futures::{JoinTask, Shared, WeakShared};
+use tycho_util::sync::{rayon_run, yield_on_complex};
 use tycho_util::time::now_sec;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 
@@ -182,8 +183,12 @@ impl Query {
             match res {
                 // Return the value if found
                 Some(Ok(ValueResponse::Found(value))) => {
-                    let is_valid = value.is_valid(now_sec(), self.local_id());
+                    let mut signature_checked = false;
+                    let is_valid =
+                        value.verify_ext(now_sec(), self.local_id(), &mut signature_checked);
                     tracing::debug!(peer_id = %node.id, is_valid, "found value");
+
+                    yield_on_complex(signature_checked).await;
 
                     if !is_valid {
                         // Ignore invalid values
@@ -195,8 +200,9 @@ impl Query {
                 // Refill futures from the nodes response
                 Some(Ok(ValueResponse::NotFound(nodes))) => {
                     let node_count = nodes.len();
-                    let has_new =
-                        self.update_candidates(now_sec(), self.max_k, nodes, &mut visited);
+                    let has_new = self
+                        .update_candidates(now_sec(), self.max_k, nodes, &mut visited)
+                        .await;
                     tracing::debug!(peer_id = %node.id, count = node_count, has_new, "received nodes");
 
                     if !has_new {
@@ -264,7 +270,10 @@ impl Query {
                 // Refill futures from the nodes response
                 Some(Ok(NodeResponse { nodes })) => {
                     tracing::debug!(peer_id = %node.id, count = nodes.len(), "received nodes");
-                    if !self.update_candidates_full(now_sec(), self.max_k, nodes, &mut result) {
+                    if !self
+                        .update_candidates_full(now_sec(), self.max_k, nodes, &mut result)
+                        .await
+                    {
                         // Do nothing if candidates were not changed
                         continue;
                     }
@@ -305,7 +314,7 @@ impl Query {
         result
     }
 
-    fn update_candidates(
+    async fn update_candidates(
         &mut self,
         now: u32,
         max_k: usize,
@@ -313,23 +322,19 @@ impl Query {
         visited: &mut FastHashSet<PeerId>,
     ) -> bool {
         let mut has_new = false;
-        for node in nodes {
-            // Skip invalid entries
-            if !node.is_valid(now) {
-                continue;
-            }
-
+        process_only_valid(now, nodes, |node| {
             // Insert a new entry
             if visited.insert(node.id) {
                 self.candidates.add(node, max_k, &Duration::MAX, Some);
                 has_new = true;
             }
-        }
+        })
+        .await;
 
         has_new
     }
 
-    fn update_candidates_full(
+    async fn update_candidates_full(
         &mut self,
         now: u32,
         max_k: usize,
@@ -337,12 +342,7 @@ impl Query {
         visited: &mut FastHashMap<PeerId, Arc<PeerInfo>>,
     ) -> bool {
         let mut has_new = false;
-        for node in nodes {
-            // Skip invalid entries
-            if !node.is_valid(now) {
-                continue;
-            }
-
+        process_only_valid(now, nodes, |node| {
             match visited.entry(node.id) {
                 // Insert a new entry
                 hash_map::Entry::Vacant(entry) => {
@@ -357,7 +357,8 @@ impl Query {
                     }
                 }
             }
-        }
+        })
+        .await;
 
         has_new
     }
@@ -472,6 +473,36 @@ impl<T: Future<Output = (Arc<PeerInfo>, Option<Result<()>>)> + Send> StoreValue<
             }
         }
     }
+}
+
+async fn process_only_valid<F>(now: u32, mut nodes: Vec<Arc<PeerInfo>>, mut handle_valid_node: F)
+where
+    F: FnMut(Arc<PeerInfo>) + Send,
+{
+    const SPAWN_THRESHOLD: usize = 4;
+
+    // NOTE: Ensure that we don't block the thread for too long
+    if nodes.len() > SPAWN_THRESHOLD {
+        let nodes = rayon_run(move || {
+            nodes.retain(|node| node.verify(now));
+            nodes
+        })
+        .await;
+
+        for node in nodes {
+            handle_valid_node(node);
+        }
+    } else {
+        for node in nodes {
+            let mut signature_checked = false;
+            let is_valid = node.verify_ext(now, &mut signature_checked);
+            yield_on_complex(signature_checked).await;
+
+            if is_valid {
+                handle_valid_node(node);
+            }
+        }
+    };
 }
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);

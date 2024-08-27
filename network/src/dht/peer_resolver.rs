@@ -316,8 +316,9 @@ impl PeerResolverInner {
 
                 let now = now_sec();
                 match res {
-                    // TODO: Should we move signature check into the `spawn_blocking`?
-                    Ok(peer_info) if peer_info.id == data.peer_id && peer_info.is_valid(now) => {
+                    // NOTE: Single blocking signature check here is ok since
+                    //       we are going to wait for some interval anyway.
+                    Ok(peer_info) if peer_info.id == data.peer_id && peer_info.verify(now) => {
                         // NOTE: We only need a NEW peer info, otherwise the `resolve_peer`
                         // method will be called again and again and again... without any progress.
                         if PeerResolverTimings::is_new_info(prev_timings, &peer_info) {

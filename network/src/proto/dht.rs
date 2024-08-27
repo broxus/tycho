@@ -182,12 +182,26 @@ pub enum Value {
 }
 
 impl Value {
-    pub fn is_valid(&self, at: u32, key_hash: &[u8; 32]) -> bool {
+    /// Fully verifies the value.
+    ///
+    /// NOTE: Might be expensive since it requires signature verification.
+    pub fn verify(&self, at: u32, key_hash: &[u8; 32]) -> bool {
+        self.verify_ext(at, key_hash, &mut false)
+    }
+
+    /// Fully verifies the value.
+    ///
+    /// NOTE: Might be expensive since it requires signature verification.
+    pub fn verify_ext(&self, at: u32, key_hash: &[u8; 32], signature_checked: &mut bool) -> bool {
         match self {
             Self::Peer(value) => {
-                value.expires_at >= at
-                    && key_hash == &tl_proto::hash(&value.key)
-                    && check_peer_signature(&value.key.peer_id, &value.signature, value)
+                let timings_ok = value.expires_at >= at && key_hash == &tl_proto::hash(&value.key);
+                if !timings_ok {
+                    return false;
+                }
+
+                *signature_checked = true;
+                check_peer_signature(&value.key.peer_id, &value.signature, value)
             }
             Self::Merged(value) => {
                 value.expires_at >= at && key_hash == &tl_proto::hash(&value.key)
@@ -250,19 +264,6 @@ pub enum ValueRef<'tl> {
 }
 
 impl ValueRef<'_> {
-    pub fn is_valid(&self, at: u32, key_hash: &[u8; 32]) -> bool {
-        match self {
-            Self::Peer(value) => {
-                value.expires_at >= at
-                    && key_hash == &tl_proto::hash(&value.key)
-                    && check_peer_signature(value.key.peer_id, value.signature, value)
-            }
-            Self::Merged(value) => {
-                value.expires_at >= at && key_hash == &tl_proto::hash(&value.key)
-            }
-        }
-    }
-
     pub const fn expires_at(&self) -> u32 {
         match self {
             Self::Peer(value) => value.expires_at,

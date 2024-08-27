@@ -33,13 +33,29 @@ pub struct PeerInfo {
 impl PeerInfo {
     pub const MAX_ADDRESSES: usize = 4;
 
-    pub fn is_valid(&self, at: u32) -> bool {
+    /// Fully verifies the peer info.
+    ///
+    /// NOTE: Might be expensive since it requires signature verification.
+    pub fn verify(&self, at: u32) -> bool {
+        self.verify_ext(at, &mut false)
+    }
+
+    /// Fully verifies the peer info.
+    ///
+    /// NOTE: Might be expensive since it requires signature verification.
+    pub fn verify_ext(&self, at: u32, signature_checked: &mut bool) -> bool {
         const CLOCK_THRESHOLD: u32 = 1;
 
-        self.created_at <= at + CLOCK_THRESHOLD
+        let timings_ok = self.created_at <= at + CLOCK_THRESHOLD
             && self.expires_at >= at
-            && !self.address_list.is_empty()
-            && check_peer_signature(&self.id, &self.signature, self)
+            && !self.address_list.is_empty();
+
+        if !timings_ok {
+            return false;
+        }
+
+        *signature_checked = true;
+        check_peer_signature(&self.id, &self.signature, self)
     }
 
     pub fn is_expired(&self, at: u32) -> bool {

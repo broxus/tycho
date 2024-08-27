@@ -21,7 +21,7 @@ impl GlobalConfig {
 
     pub fn validate(&self, now: u32) -> Result<()> {
         for peer in &self.bootstrap_peers {
-            anyhow::ensure!(peer.is_valid(now), "invalid peer info for {}", peer.id);
+            anyhow::ensure!(peer.verify(now), "invalid peer info for {}", peer.id);
         }
         Ok(())
     }

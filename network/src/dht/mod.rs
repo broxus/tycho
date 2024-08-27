@@ -60,7 +60,9 @@ impl DhtClient {
     }
 
     pub fn add_peer(&self, peer: Arc<PeerInfo>) -> Result<bool> {
-        self.inner.add_peer_info(&self.network, peer)
+        anyhow::ensure!(peer.verify(now_sec()), "invalid peer info");
+        let added = self.inner.add_peer_info(&self.network, peer);
+        Ok(added)
     }
 
     pub async fn get_node_info(&self, peer_id: &PeerId) -> Result<PeerInfo> {
@@ -567,11 +569,10 @@ impl DhtInner {
         self.storage.insert(DhtValueSource::Local, value)
     }
 
-    fn add_peer_info(&self, network: &Network, peer_info: Arc<PeerInfo>) -> Result<bool> {
-        anyhow::ensure!(peer_info.is_valid(now_sec()), "invalid peer info");
-
+    // NOTE: Requires the incoming peer info to be valid.
+    fn add_peer_info(&self, network: &Network, peer_info: Arc<PeerInfo>) -> bool {
         if peer_info.id == self.local_id {
-            return Ok(false);
+            return false;
         }
 
         let mut routing_table = self.routing_table.lock().unwrap();
@@ -586,7 +587,7 @@ impl DhtInner {
             self.peer_added.notify_waiters();
         }
 
-        Ok(added)
+        added
     }
 
     fn make_unsigned_peer_value<'a>(
