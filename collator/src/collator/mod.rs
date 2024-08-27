@@ -410,7 +410,6 @@ impl CollatorStdImpl {
             let new_state_stuff = new_state_stuff.await?;
 
             let prev_states = vec![new_state_stuff];
-            Self::check_prev_states_and_master(&mc_data, &prev_states)?;
             let prev_queue_diff_hashes = vec![prev_queue_diff_hash];
             let (prev_shard_data, usage_tree) =
                 PrevData::build(prev_states, prev_queue_diff_hashes)?;
@@ -489,9 +488,8 @@ impl CollatorStdImpl {
         prev_states: Vec<ShardStateStuff>,
         prev_queue_diff_hashes: Vec<HashBytes>,
     ) -> Result<WorkingState> {
-        // TODO: make real implementation
+        // TODO: consider split/merge
 
-        Self::check_prev_states_and_master(&mc_data, &prev_states)?;
         let (prev_shard_data, usage_tree) = PrevData::build(prev_states, prev_queue_diff_hashes)?;
 
         Ok(WorkingState {
@@ -500,17 +498,6 @@ impl CollatorStdImpl {
             usage_tree,
             has_pending_internals: None,
         })
-    }
-
-    /// (TODO) Perform some checks on master state and prev states
-    fn check_prev_states_and_master(
-        _mc_data: &McData,
-        _prev_states: &[ShardStateStuff],
-    ) -> Result<()> {
-        // TODO: make real implementation
-        // refer to the old node impl:
-        //  Collator::unpack_last_state()
-        Ok(())
     }
 
     /// 1. Get last imported anchor from cache or last processed from `externals_processed_upto`
