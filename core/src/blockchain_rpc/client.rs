@@ -483,7 +483,11 @@ impl BlockchainRpcClient {
         }
 
         if archive.size.get() != downloaded {
-            return Err(Error::Internal(anyhow::anyhow!("archive size mismatch")));
+            return Err(Error::Internal(anyhow::anyhow!(
+                "archive size mismatch: requested - {}, downloaded - {}",
+                archive.size.get(),
+                downloaded
+            )));
         }
 
         verifier

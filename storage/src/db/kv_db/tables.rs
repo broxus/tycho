@@ -34,14 +34,14 @@ impl ColumnFamilyOptions<Caches> for State {
 
 /// Stores prepared archives
 /// - Key: `u32 (BE)` (archive id)
-/// - Value: `Vec<u8>` (archive data)
-pub struct IntermediateArchives;
+/// - Value: `Vec<u8>` (archive block ids)
+pub struct ArchiveBlockIds;
 
-impl ColumnFamily for IntermediateArchives {
-    const NAME: &'static str = "intermediate_archives";
+impl ColumnFamily for ArchiveBlockIds {
+    const NAME: &'static str = "archive_block_ids";
 }
 
-impl ColumnFamilyOptions<Caches> for IntermediateArchives {
+impl ColumnFamilyOptions<Caches> for ArchiveBlockIds {
     fn options(opts: &mut Options, caches: &mut Caches) {
         default_block_based_table_factory(opts, caches);
         optimize_for_level_compaction(opts, ByteSize::mib(512u64));
@@ -312,15 +312,16 @@ fn archive_data_merge(
     current_value: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
-    use tycho_block_util::archive::ARCHIVE_PREFIX;
+    let total_len = current_value.map(|data| data.len()).unwrap_or_default()
+        + operands.iter().map(|data| data.len()).sum::<usize>();
 
-    let total_len: usize = operands.iter().map(|data| data.len()).sum();
-    let mut result = Vec::with_capacity(ARCHIVE_PREFIX.len() + total_len);
+    let mut result = Vec::with_capacity(total_len);
 
-    result.extend_from_slice(current_value.unwrap_or(&ARCHIVE_PREFIX));
+    if let Some(current_value) = current_value {
+        result.extend_from_slice(current_value);
+    }
 
     for data in operands {
-        let data = data.strip_prefix(&ARCHIVE_PREFIX).unwrap_or(data);
         result.extend_from_slice(data);
     }
 

@@ -1400,7 +1400,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4979f22fdb869068da03c9f7528f8297c6fd2606bc3a4affe42e6a823fdb8da4"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -3496,6 +3496,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "thiserror",
+ "tl-proto",
  "tokio",
  "tracing",
  "triomphe",
@@ -3696,9 +3697,9 @@ dependencies = [
 
 [[package]]
 name = "weedb"
-version = "0.3.3"
+version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28ceae4f0ce90e6e953ef9a1d8cc3c95fc7f9b77bf86470b596fe29db53311e4"
+checksum = "4bc7024031673dd75dfcc4c94081df69c6a993c70c7283f62047bd98002249b9"
 dependencies = [
  "librocksdb-sys",
  "metrics",

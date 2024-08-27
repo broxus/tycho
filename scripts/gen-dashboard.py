@@ -570,6 +570,9 @@ def storage() -> RowPanel:
         create_heatmap_panel(
             "tycho_storage_move_into_archive_time", "Time to move into archive"
         ),
+        create_heatmap_panel(
+            "tycho_storage_commit_archive_time", "Time to commit archive"
+        ),
         create_gauge_panel(
             "tycho_storage_cells_tree_cache_size", "Cells tree cache size"
         ),
