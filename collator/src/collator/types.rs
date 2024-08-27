@@ -70,8 +70,7 @@ impl PrevData {
             prev_states[0].ref_mc_state_handle().tracker(),
         )?];
 
-        let gen_utime = observable_states[0].state().gen_utime;
-        let gen_utime_ms = observable_states[0].state().gen_utime_ms;
+        let gen_chain_time = observable_states[0].get_gen_chain_time();
         let gen_lt = observable_states[0].state().gen_lt;
         let observable_accounts = observable_states[0].state().load_accounts()?;
         let total_validator_fees = observable_states[0].state().total_validator_fees.clone();
@@ -88,7 +87,7 @@ impl PrevData {
             pure_states: pure_prev_states,
             pure_state_root: pure_prev_state_root.clone(),
 
-            gen_chain_time: gen_utime as u64 * 1000 + gen_utime_ms as u64,
+            gen_chain_time,
             gen_lt,
             total_validator_fees,
             gas_used_from_last_anchor,
@@ -359,6 +358,12 @@ pub(super) struct BlockCollationData {
 
     // TODO: set from anchor
     pub created_by: HashBytes,
+}
+
+impl BlockCollationData {
+    pub fn get_gen_chain_time(&self) -> u64 {
+        self.gen_utime as u64 * 1000 + self.gen_utime_ms as u64
+    }
 }
 
 #[derive(Debug)]
@@ -771,8 +776,6 @@ impl ShardDescriptionExt for ShardDescription {
             funds_created: value_flow.created.clone(),
             copyleft_rewards: Default::default(),
             proof_chain: None,
-            #[cfg(feature = "venom")]
-            collators: None,
         }
     }
 }

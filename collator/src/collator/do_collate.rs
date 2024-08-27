@@ -175,17 +175,14 @@ impl CollatorStdImpl {
         let mut mq_iterator_adapter = exec_manager.create_iterator_adapter();
 
         // refill messages buffer and skip groups upto offset (on node restart)
-        if !exec_manager.has_pending_messages_in_buffer()
-            && collation_data.processed_upto.processed_offset > 0
-        {
+        let prev_processed_offset = collation_data.processed_upto.processed_offset;
+        if !exec_manager.has_pending_messages_in_buffer() && prev_processed_offset > 0 {
             tracing::debug!(target: tracing_targets::COLLATOR,
-                prev_processed_offset = collation_data.processed_upto.processed_offset,
+                prev_processed_offset,
                 "refill messages buffer and skip groups upto",
             );
 
-            while exec_manager.message_groups_offset()
-                < collation_data.processed_upto.processed_offset
-            {
+            while exec_manager.message_groups_offset() < prev_processed_offset {
                 exec_manager
                     .get_next_message_group(
                         self,
@@ -746,8 +743,7 @@ impl CollatorStdImpl {
 
                 let anchor = &entry.1.anchor;
                 let expire_timeout = 60 * 1000; // 1 minute
-                let next_chain_time =
-                    collation_data.gen_utime as u64 * 1000 + collation_data.gen_utime_ms as u64;
+                let next_chain_time = collation_data.get_gen_chain_time();
                 if next_chain_time - anchor.chain_time > expire_timeout {
                     let iter_from = if key == was_read_to.0 {
                         was_read_to.1 as usize

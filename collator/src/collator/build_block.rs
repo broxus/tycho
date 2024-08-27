@@ -216,8 +216,6 @@ impl CollatorStdImpl {
                 libraries: Dict::new(),
                 master_ref,
                 custom: mc_state_extra.as_ref().map(Lazy::new).transpose()?,
-                #[cfg(feature = "venom")]
-                shard_block_refs: None,
             });
 
             new_observable_state
@@ -337,6 +335,7 @@ impl CollatorStdImpl {
 
                 prev_key_block_seqno,
                 gen_lt: new_block_info.end_lt,
+                gen_chain_time: collation_data.get_gen_chain_time(),
                 libraries: global_libraries,
                 total_validator_fees,
 
@@ -359,8 +358,7 @@ impl CollatorStdImpl {
             top_shard_blocks_ids: collation_data.top_shard_blocks_ids.clone(),
             collated_data,
             collated_file_hash: HashBytes::ZERO,
-            chain_time: (new_block_info.gen_utime as u64 * 1000)
-                + new_block_info.gen_utime_ms as u64,
+            chain_time: collation_data.get_gen_chain_time(),
             ext_processed_upto_anchor_id: collation_data
                 .processed_upto
                 .externals

@@ -10,7 +10,9 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_network::PeerId;
 use tycho_util::{FastDashMap, FastHashMap};
 
-use crate::types::{ArcSignature, BlockCandidate, BlockStuffForSync, ProofFunds};
+use crate::types::{
+    ArcSignature, BlockCandidate, BlockStuffForSync, McData, ProofFunds, ShardDescriptionExt,
+};
 
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
@@ -115,7 +117,6 @@ impl BlockCandidateStuff {
 
 #[derive(Clone)]
 pub(super) struct AppliedBlockStuff {
-    pub block_id: BlockId,
     pub state: Option<ShardStateStuff>,
     pub queue_diff_and_msgs: Option<(QueueDiffStuff, Lazy<OutMsgDescr>)>,
 }
@@ -161,17 +162,22 @@ pub(super) struct BlockCacheEntry {
     pub send_sync_status: SendSyncStatus,
 
     /// Ids of 1 (or 2 in case of merge) previous blocks in shard or master chain
-    pub prev_blocks_keys: Vec<BlockCacheKey>,
-    /// Ids of all top shard blocks of corresponding shard chains, included in current block.
+    pub prev_blocks_ids: Vec<BlockId>,
+    /// List of (top_block_id, to_block_updated) included in current block.
+    /// `to_block_updated` indicates if `top_block_id` was updated since previous block.
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without master.
-    pub top_shard_blocks_keys: Vec<BlockCacheKey>,
+    pub top_shard_blocks_info: Vec<(BlockId, bool)>,
+
     /// Id of master block that includes current shard block in his subgraph
     pub containing_mc_block: Option<BlockCacheKey>,
 }
 
 impl BlockCacheEntry {
-    pub fn from_candidate(candidate: Box<BlockCandidate>) -> Self {
+    pub fn from_candidate(
+        candidate: Box<BlockCandidate>,
+        mc_data: Option<Arc<McData>>,
+    ) -> Result<Self> {
         let block_id = *candidate.block.id();
         let key = block_id.as_short_id();
         let entry = BlockCandidateStuff {
@@ -179,58 +185,51 @@ impl BlockCacheEntry {
             signatures: Default::default(),
         };
 
-        Self {
+        let mut top_shard_blocks_info = vec![];
+        if let Some(mc_data) = mc_data {
+            for item in mc_data.shards.iter() {
+                let (shard_id, shard_descr) = item?;
+                top_shard_blocks_info.push((
+                    shard_descr.get_block_id(shard_id),
+                    shard_descr.top_sc_block_updated,
+                ));
+            }
+        }
+
+        Ok(Self {
             key,
             block_id,
             kind: BlockCacheEntryKind::Collated,
-            prev_blocks_keys: entry
-                .candidate
-                .prev_blocks_ids
-                .iter()
-                .map(|id| id.as_short_id())
-                .collect(),
-            top_shard_blocks_keys: entry
-                .candidate
-                .top_shard_blocks_ids
-                .iter()
-                .map(|id| id.as_short_id())
-                .collect(),
+            prev_blocks_ids: entry.candidate.prev_blocks_ids.clone(),
+            top_shard_blocks_info,
             candidate_stuff: Some(entry),
             applied_block_stuff: None,
             is_valid: false,
             containing_mc_block: None,
             send_sync_status: SendSyncStatus::NotReady,
-        }
+        })
     }
 
     pub fn from_block_from_bc(
         state: ShardStateStuff,
-        prev_block_ids: &[BlockId],
+        prev_blocks_ids: Vec<BlockId>,
         queue_diff_and_msgs: Option<(QueueDiffStuff, Lazy<OutMsgDescr>)>,
     ) -> Result<Self> {
         let block_id = *state.block_id();
         let key = block_id.as_short_id();
 
-        let mut top_shard_blocks_ids = vec![];
+        let mut top_shard_blocks_info = vec![];
         if block_id.is_masterchain() {
-            for item in state.shards()?.latest_blocks() {
-                top_shard_blocks_ids.push(item?);
+            for item in state.shards()?.iter() {
+                let (shard_id, shard_descr) = item?;
+                top_shard_blocks_info.push((
+                    shard_descr.get_block_id(shard_id),
+                    shard_descr.top_sc_block_updated,
+                ));
             }
-            // for item in state.shards()?.iter() {
-            //     let (shard, shard_descr) = item?;
-            //     if shard_descr.top_sc_block_updated {
-            //         top_shard_blocks_ids.push(BlockId {
-            //             shard,
-            //             seqno: shard_descr.seqno,
-            //             root_hash: shard_descr.root_hash,
-            //             file_hash: shard_descr.file_hash,
-            //         });
-            //     }
-            // }
         }
 
         let applied_block_stuff = AppliedBlockStuff {
-            block_id,
             state: Some(state),
             queue_diff_and_msgs,
         };
@@ -243,11 +242,8 @@ impl BlockCacheEntry {
             applied_block_stuff: Some(applied_block_stuff),
             is_valid: true,
             send_sync_status: SendSyncStatus::Synced,
-            prev_blocks_keys: prev_block_ids.iter().map(|id| id.as_short_id()).collect(),
-            top_shard_blocks_keys: top_shard_blocks_ids
-                .iter()
-                .map(|id| id.as_short_id())
-                .collect(),
+            prev_blocks_ids,
+            top_shard_blocks_info,
             containing_mc_block: None,
         })
     }
@@ -284,12 +280,8 @@ impl BlockCacheEntry {
         }
     }
 
-    pub fn prev_blocks_keys(&self) -> &[BlockCacheKey] {
-        &self.prev_blocks_keys
-    }
-
-    pub fn top_shard_blocks_keys(&self) -> &[BlockCacheKey] {
-        &self.top_shard_blocks_keys
+    pub fn top_shard_blocks_ids_iter(&self) -> impl Iterator<Item = &BlockId> {
+        self.top_shard_blocks_info.iter().map(|(id, _)| id)
     }
 
     pub fn extract_entry_stuff_for_sync(&mut self) -> Result<BlockCandidateStuffToSend> {
@@ -346,12 +338,67 @@ impl BlockCacheEntry {
     }
 }
 
+impl AppliedBlockStuffContainer for BlockCacheEntry {
+    fn key(&self) -> &BlockCacheKey {
+        &self.key
+    }
+
+    fn applied_block_stuff(&self) -> Option<&AppliedBlockStuff> {
+        self.applied_block_stuff.as_ref()
+    }
+}
+
 pub(super) struct BlockCandidateStuffToSend {
     pub key: BlockCacheKey,
     pub kind: BlockCacheEntryKind,
     pub candidate_stuff: Option<BlockCandidateStuff>,
     pub applied_block_stuff: Option<AppliedBlockStuff>,
     pub send_sync_status: SendSyncStatus,
+}
+
+impl AppliedBlockStuffContainer for BlockCandidateStuffToSend {
+    fn key(&self) -> &BlockCacheKey {
+        &self.key
+    }
+
+    fn applied_block_stuff(&self) -> Option<&AppliedBlockStuff> {
+        self.applied_block_stuff.as_ref()
+    }
+}
+
+pub(super) trait AppliedBlockStuffContainer {
+    fn key(&self) -> &BlockCacheKey;
+
+    fn applied_block_stuff(&self) -> Option<&AppliedBlockStuff>;
+
+    fn state(&self) -> Result<&ShardStateStuff> {
+        let Some(applied_block_stuff) = self.applied_block_stuff() else {
+            bail!(
+                "applied_block_stuff should not be None for block ({})",
+                self.key(),
+            )
+        };
+        let Some(state) = applied_block_stuff.state.as_ref() else {
+            bail!("state should not be None for block ({})", self.key(),)
+        };
+        Ok(state)
+    }
+
+    fn queue_diff_and_msgs(&self) -> Result<&(QueueDiffStuff, Lazy<OutMsgDescr>)> {
+        let Some(applied_block_stuff) = self.applied_block_stuff() else {
+            bail!(
+                "applied_block_stuff should not be None for block ({})",
+                self.key(),
+            )
+        };
+        let Some(result) = applied_block_stuff.queue_diff_and_msgs.as_ref() else {
+            bail!(
+                "queue_diff_and_msgs should not be None for block ({})",
+                self.key(),
+            )
+        };
+        Ok(result)
+    }
 }
 
 pub(super) struct McBlockSubgraphToSend {

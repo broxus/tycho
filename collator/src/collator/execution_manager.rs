@@ -241,8 +241,8 @@ impl ExecutionManager {
             group_opt = self.message_groups.extract_first_group();
             if let Some(first_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
-                    DisplayMessageGroup(first_group),
+                    "extracted first message group from message_groups buffer: offset={}, group {}, buffer int={}, ext={}",
+                    self.message_groups.offset(), DisplayMessageGroup(first_group),
                     self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
@@ -346,8 +346,8 @@ impl ExecutionManager {
             group_opt = self.message_groups.extract_first_group();
             if let Some(first_group) = group_opt.as_ref() {
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "extracted first message group from message_groups buffer: group {}, buffer int={}, ext={}",
-                    DisplayMessageGroup(first_group),
+                    "extracted first message group from message_groups buffer: offset={}, group {}, buffer int={}, ext={}",
+                    self.message_groups.offset(), DisplayMessageGroup(first_group),
                     self.message_groups.int_messages_count(), self.message_groups.ext_messages_count(),
                 );
             }
