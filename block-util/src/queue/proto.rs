@@ -165,6 +165,12 @@ impl From<QueueKey> for (u64, HashBytes) {
     }
 }
 
+impl std::fmt::Display for QueueKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "LT_HASH({}_{})", self.lt, self.hash)
+    }
+}
+
 mod processed_upto_map {
     use tl_proto::{TlPacket, TlResult};
 

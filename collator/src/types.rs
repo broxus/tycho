@@ -177,6 +177,7 @@ pub struct McData {
 
     pub prev_key_block_seqno: u32,
     pub gen_lt: u64,
+    pub gen_chain_time: u64,
     pub libraries: Dict<HashBytes, LibDescr>,
 
     pub total_validator_fees: CurrencyCollection,
@@ -190,10 +191,10 @@ pub struct McData {
 }
 
 impl McData {
-    pub fn load_from_state(state: &ShardStateStuff) -> Result<Arc<Self>> {
-        let block_id = *state.block_id();
-        let extra = state.state_extra()?;
-        let state = state.as_ref();
+    pub fn load_from_state(state_stuff: &ShardStateStuff) -> Result<Arc<Self>> {
+        let block_id = *state_stuff.block_id();
+        let extra = state_stuff.state_extra()?;
+        let state = state_stuff.as_ref();
 
         let prev_key_block_seqno = if extra.after_key_block {
             block_id.seqno
@@ -209,6 +210,7 @@ impl McData {
 
             prev_key_block_seqno,
             gen_lt: state.gen_lt,
+            gen_chain_time: state_stuff.get_gen_chain_time(),
             libraries: state.libraries.clone(),
             total_validator_fees: state.total_validator_fees.clone(),
 
@@ -402,6 +404,20 @@ impl BlockIdExt for BlockIdShort {
         BlockIdShort {
             shard: self.shard,
             seqno: self.seqno + 1,
+        }
+    }
+}
+
+pub trait ShardDescriptionExt {
+    fn get_block_id(&self, shard_id: ShardIdent) -> BlockId;
+}
+impl ShardDescriptionExt for ShardDescription {
+    fn get_block_id(&self, shard_id: ShardIdent) -> BlockId {
+        BlockId {
+            shard: shard_id,
+            seqno: self.seqno,
+            root_hash: self.root_hash,
+            file_hash: self.file_hash,
         }
     }
 }

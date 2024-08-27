@@ -82,7 +82,7 @@ pub trait CollatorEventListener: Send + Sync {
         &self,
         prev_mc_block_id: BlockId,
         next_block_id_short: BlockIdShort,
-        anchor: Arc<MempoolAnchor>,
+        anchor_chain_time: u64,
         force_mc_block: bool,
     ) -> Result<()>;
     /// Process new collated shard or master block
@@ -317,8 +317,8 @@ impl CollatorStdImpl {
         // import anchors
         if let Some(ext_processed_to) = ext_processed_to_opt {
             tracing::info!(target: tracing_targets::COLLATOR,
-                "import anchors from processed to anchor {:?}",
-                ext_processed_to,
+                "import anchors from processed to anchor {:?} to chain_time {}",
+                ext_processed_to, working_state.prev_shard_data.gen_chain_time(),
             );
             self.import_anchors_on_init(
                 ext_processed_to.0,
@@ -395,8 +395,8 @@ impl CollatorStdImpl {
                 // import anchors
                 if let Some(ext_processed_to) = ext_processed_to_opt {
                     tracing::debug!(target: tracing_targets::COLLATOR,
-                        "import anchors from processed to anchor {:?}",
-                        ext_processed_to,
+                        "import anchors from processed to anchor {:?} to chain_time {}",
+                        ext_processed_to, working_state.prev_shard_data.gen_chain_time(),
                     );
                     self.import_anchors_on_init(
                         ext_processed_to.0,
@@ -567,6 +567,54 @@ impl CollatorStdImpl {
             usage_tree,
             has_pending_internals: None,
         })
+    }
+
+    fn try_calc_last_processed_to_anchor_info(
+        working_state: &WorkingState,
+    ) -> Result<Option<(MempoolAnchorId, u64)>> {
+        let working_state_shard_id = working_state.next_block_id_short.shard;
+
+        // try get from mc data
+        let mut mc_ext_processed_to_opt = None;
+        if !working_state_shard_id.is_masterchain() {
+            if let Some(processed_to) = working_state
+                .mc_data
+                .processed_upto
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to)
+            {
+                // TODO: consider split/merge
+
+                // find top shard block seqno for current shard from mc data
+                let mut top_sc_block_seqno_from_mc_data = 0;
+                for item in working_state.mc_data.shards.iter() {
+                    let (shard_id, shard_descr) = item?;
+                    if working_state_shard_id == shard_id && !shard_descr.top_sc_block_updated {
+                        top_sc_block_seqno_from_mc_data = shard_descr.seqno;
+                        break;
+                    }
+                }
+                // get mc data processed to info if prev shard block is eq to top
+                let sc_prev_seqno = working_state.prev_shard_data.blocks_ids()[0].seqno;
+                if sc_prev_seqno == top_sc_block_seqno_from_mc_data {
+                    mc_ext_processed_to_opt = Some(processed_to);
+                }
+            }
+        }
+
+        // try get from prev data
+        let processed_to_opt = match mc_ext_processed_to_opt {
+            None => working_state
+                .prev_shard_data
+                .processed_upto()
+                .externals
+                .as_ref()
+                .map(|upto| upto.processed_to),
+            val => val,
+        };
+
+        Ok(processed_to_opt)
     }
 
     /// 1. Get last imported anchor from cache or last processed from `externals_processed_upto`
@@ -830,7 +878,7 @@ impl CollatorStdImpl {
                 .on_skipped_anchor(
                     working_state.mc_data.block_id,
                     working_state.next_block_id_short,
-                    next_anchor,
+                    next_anchor.chain_time,
                     false,
                 )
                 .await?;
@@ -905,18 +953,16 @@ impl CollatorStdImpl {
         let no_pending_msgs = !has_internals && !has_externals;
 
         // import next anchor if meet one of above conditions
-        let next_anchor_info_opt = if no_pending_msgs
-            || force_import_anchor_by_used_gas
-            || force_mc_block_by_uncommitted_chain
-        {
+        let next_anchor_info_opt = if force_mc_block_by_uncommitted_chain {
+            tracing::info!(target: tracing_targets::COLLATOR,
+                "max_uncommitted_chain_length {} reached",
+                self.config.max_uncommitted_chain_length,
+            );
+            None
+        } else if no_pending_msgs || force_import_anchor_by_used_gas {
             if no_pending_msgs {
                 tracing::debug!(target: tracing_targets::COLLATOR,
                     "there are no internals or pending externals, will import next anchor",
-                );
-            } else if force_mc_block_by_uncommitted_chain {
-                tracing::info!(target: tracing_targets::COLLATOR,
-                    "max_uncommitted_chain_length {} reached, will import next anchor",
-                    self.config.max_uncommitted_chain_length,
                 );
             } else if force_import_anchor_by_used_gas {
                 tracing::info!(target: tracing_targets::COLLATOR,
@@ -926,7 +972,7 @@ impl CollatorStdImpl {
             }
             let (next_anchor, next_anchor_has_externals) = self.import_next_anchor().await?;
             has_externals = next_anchor_has_externals;
-            if has_externals && !force_mc_block_by_uncommitted_chain {
+            if has_externals {
                 tracing::info!(target: tracing_targets::COLLATOR,
                     "just imported anchor has externals, will collate next block",
                 );
@@ -943,31 +989,29 @@ impl CollatorStdImpl {
         if (has_internals || has_externals) && !force_mc_block_by_uncommitted_chain {
             self.do_collate(working_state, None).await?;
         } else {
-            // otherwise we have definitely imported the next anchor
-            let (next_anchor, next_anchor_has_externals) =
-                next_anchor_info_opt.expect("should be Some here");
-            // notify manager when next anchor was imported but id does not contain externals
-            if !next_anchor_has_externals || force_mc_block_by_uncommitted_chain {
-                // this may start master block collation or next shard block collation attempt
-                if force_mc_block_by_uncommitted_chain {
-                    tracing::info!(target: tracing_targets::COLLATOR,
-                        "force_mc_block_by_uncommitted_chain={}, will notify collation manager",
-                        force_mc_block_by_uncommitted_chain,
-                    );
-                } else {
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "just imported anchor has no externals for current shard, will notify collation manager",
-                    );
-                }
-                self.listener
-                    .on_skipped_anchor(
-                        working_state.mc_data.block_id,
-                        working_state.next_block_id_short,
-                        next_anchor,
-                        force_mc_block_by_uncommitted_chain,
-                    )
-                    .await?;
-            }
+            // here just imported anchor has no externals
+            // or we reached max uncommitted chain length
+            let anchor_chain_time = if let Some((next_anchor, _)) = next_anchor_info_opt {
+                tracing::debug!(target: tracing_targets::COLLATOR,
+                    "just imported anchor has no externals for current shard, will notify collation manager",
+                );
+                next_anchor.chain_time
+            } else {
+                tracing::info!(target: tracing_targets::COLLATOR,
+                    "force_mc_block_by_uncommitted_chain={}, will notify collation manager",
+                    force_mc_block_by_uncommitted_chain,
+                );
+                self.last_imported_anchor.as_ref().unwrap().ct
+            };
+
+            self.listener
+                .on_skipped_anchor(
+                    working_state.mc_data.block_id,
+                    working_state.next_block_id_short,
+                    anchor_chain_time,
+                    force_mc_block_by_uncommitted_chain,
+                )
+                .await?;
 
             self.working_state.delay(working_state);
         }
