@@ -124,6 +124,10 @@ impl ColumnFamilyOptions<Caches> for KeyBlocks {}
 /// - Value: `Vec<u8>`
 pub struct PackageEntries;
 
+impl PackageEntries {
+    pub const KEY_LEN: usize = 4 + 8 + 4 + 32 + 1;
+}
+
 impl ColumnFamily for PackageEntries {
     const NAME: &'static str = "package_entries";
 }

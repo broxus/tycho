@@ -173,13 +173,15 @@ impl StorageBuilder {
             mempool_storage,
         });
 
-        spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
-            this.base_db.refresh_metrics();
-            if let Some(rpc_state) = this.rpc_state.as_ref() {
-                rpc_state.db().refresh_metrics();
-            }
-            this.mempool_storage.db.refresh_metrics();
-        });
+        if inner.config.rocksdb_enable_metrics {
+            spawn_metrics_loop(&inner, Duration::from_secs(5), |this| async move {
+                this.base_db.refresh_metrics();
+                if let Some(rpc_state) = this.rpc_state.as_ref() {
+                    rpc_state.db().refresh_metrics();
+                }
+                this.mempool_storage.db.refresh_metrics();
+            });
+        }
 
         Ok(Storage { inner })
     }

@@ -230,9 +230,9 @@ impl BlockStorage {
         };
 
         let mut readopts = package_entries.new_read_config();
-        readopts.set_iterate_lower_bound(ArchiveEntryId::block(bound).to_vec().as_slice());
+        readopts.set_iterate_lower_bound(entry_key(&bound, ArchiveEntryType::Block));
         bound.seqno += 1;
-        readopts.set_iterate_upper_bound(ArchiveEntryId::block(bound).to_vec().as_slice());
+        readopts.set_iterate_upper_bound(entry_key(&bound, ArchiveEntryType::Block));
 
         let mut iter = self
             .db
@@ -246,7 +246,7 @@ impl BlockStorage {
                 return Ok(None);
             };
 
-            let Some(ArchiveEntryType::Block) = ArchiveEntryId::<()>::extract_type(key) else {
+            let Some(ArchiveEntryType::Block) = extract_entry_type(key) else {
                 continue;
             };
 
@@ -522,9 +522,8 @@ impl BlockStorage {
         let span = tracing::Span::current();
         let db = self.db.clone();
         let BlockGcStats {
-            mc_package_entries_removed,
-            total_package_entries_removed,
-            total_handles_removed,
+            mc_entries_removed,
+            total_entries_removed,
         } = rayon_run(move || {
             let _span = span.enter();
             remove_blocks(db, max_blocks_per_batch, mc_seqno, shard_heights)
@@ -533,9 +532,8 @@ impl BlockStorage {
 
         tracing::info!(
             total_cached_handles_removed,
-            mc_package_entries_removed,
-            total_package_entries_removed,
-            total_handles_removed,
+            mc_entries_removed,
+            total_entries_removed,
             "finished blocks GC"
         );
         Ok(())
@@ -597,22 +595,15 @@ impl BlockStorage {
 
     fn add_data<I>(&self, id: &ArchiveEntryId<I>, data: &[u8]) -> Result<(), rocksdb::Error>
     where
-        I: Borrow<BlockId> + Hash,
+        I: Borrow<BlockId>,
     {
-        self.db.package_entries.insert(id.to_vec(), data)
-    }
-
-    #[allow(dead_code)]
-    fn has_data<I>(&self, id: &ArchiveEntryId<I>) -> Result<bool, rocksdb::Error>
-    where
-        I: Borrow<BlockId> + Hash,
-    {
-        self.db.package_entries.contains_key(id.to_vec())
+        let key = entry_key(id.block_id.borrow(), id.ty);
+        self.db.package_entries.insert(key, data)
     }
 
     async fn get_data<I>(&self, handle: &BlockHandle, id: &ArchiveEntryId<I>) -> Result<Vec<u8>>
     where
-        I: Borrow<BlockId> + Hash,
+        I: Borrow<BlockId>,
     {
         let _lock = match id.ty {
             ArchiveEntryType::Block => handle.block_data_lock(),
@@ -622,7 +613,8 @@ impl BlockStorage {
         .read()
         .await;
 
-        match self.db.package_entries.get(id.to_vec())? {
+        let key = entry_key(id.block_id.borrow(), id.ty);
+        match self.db.package_entries.get(key)? {
             Some(a) => Ok(a.to_vec()),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
@@ -644,7 +636,8 @@ impl BlockStorage {
         .read()
         .await;
 
-        match self.db.package_entries.get(id.to_vec())? {
+        let key = entry_key(id.block_id.borrow(), id.ty);
+        match self.db.package_entries.get(key)? {
             Some(data) => Ok(BlockContentsLock { _lock: lock, data }),
             None => Err(BlockStorageError::InvalidBlockData.into()),
         }
@@ -726,8 +719,8 @@ impl BlockStorage {
                     ArchiveEntryType::Proof,
                     ArchiveEntryType::QueueDiff,
                 ] {
-                    let archive_id = ArchiveEntryId { block_id, ty };
-                    let Some(data) = db.package_entries.get(archive_id.to_vec()).unwrap() else {
+                    let key = entry_key(&block_id, ty);
+                    let Some(data) = db.package_entries.get(key).unwrap() else {
                         return Err(BlockStorageError::BlockDataNotFound.into());
                     };
 
@@ -870,6 +863,7 @@ fn remove_blocks(
     let mut stats = BlockGcStats::default();
 
     let raw = db.rocksdb().as_ref();
+    let block_connections_cf = db.block_connections.cf();
     let package_entries_cf = db.package_entries.cf();
     let block_handles_cf = db.block_handles.cf();
     let key_blocks_cf = db.key_blocks.cf();
@@ -885,6 +879,38 @@ fn remove_blocks(
     let mut blocks_iter = raw.raw_iterator_cf_opt(&package_entries_cf, package_entries_readopts);
     blocks_iter.seek_to_first();
 
+    let is_key_block = |seqno: u32| {
+        raw.get_pinned_cf_opt(&key_blocks_cf, seqno.to_be_bytes(), &key_blocks_readopts)
+            .map(|value| value.is_some())
+    };
+
+    let mut key_buffer = [0u8; tables::PackageEntries::KEY_LEN];
+    let mut delete_range =
+        |batch: &mut rocksdb::WriteBatch, from: &BlockIdShort, to: &BlockIdShort| {
+            debug_assert_eq!(from.shard, to.shard);
+            debug_assert!(from.seqno <= to.seqno);
+
+            let range_from = &mut key_buffer;
+            range_from[..4].copy_from_slice(&from.shard.workchain().to_be_bytes());
+            range_from[4..12].copy_from_slice(&from.shard.prefix().to_be_bytes());
+            range_from[12..16].copy_from_slice(&from.seqno.to_be_bytes());
+
+            let mut range_to = *range_from;
+            range_to[12..16].copy_from_slice(&to.seqno.saturating_add(1).to_be_bytes());
+
+            // At this point we have two keys:
+            // [workchain, shard, from_seqno, 0...]
+            // [workchain, shard, to_seqno + 1, 0...]
+            //
+            // It will delete all entries in range [from_seqno, to_seqno) for this shard.
+            // Note that package entry keys are the same as block connection keys.
+            batch.delete_range_cf(&package_entries_cf, &*range_from, &range_to);
+            batch.delete_range_cf(&block_connections_cf, &*range_from, &range_to);
+
+            tracing::debug!(%from, %to, "delete_range");
+        };
+
+    let mut current_range = None::<(BlockIdShort, BlockIdShort)>;
     loop {
         let key = match blocks_iter.key() {
             Some(key) => key,
@@ -892,34 +918,41 @@ fn remove_blocks(
         };
 
         // Read only prefix with shard ident and seqno
-        let BlockIdShort { shard, seqno } = BlockIdShort::from_slice(key);
-        let is_masterchain = shard.is_masterchain();
+        let block_id = BlockIdShort::from_slice(key);
+        let is_masterchain = block_id.shard.is_masterchain();
 
-        // Don't gc latest blocks
-        if is_masterchain && seqno >= mc_seqno
-            || !is_masterchain && shard_heights.contains_shard_seqno(&shard, seqno)
+        // Don't gc latest blocks or key blocks
+        if block_id.seqno == 0
+            || is_masterchain && (block_id.seqno >= mc_seqno || is_key_block(block_id.seqno)?)
+            || !is_masterchain
+                && shard_heights.contains_shard_seqno(&block_id.shard, block_id.seqno)
         {
+            // Remove the current range
+            if let Some((from, to)) = current_range.take() {
+                delete_range(&mut batch, &from, &to);
+                batch_len += 1; // Ensure that we flush the batch
+            }
             blocks_iter.next();
             continue;
         }
 
-        // Additionally check whether this item is a key block
-        if seqno == 0
-            || is_masterchain
-                && raw
-                    .get_pinned_cf_opt(&key_blocks_cf, seqno.to_be_bytes(), &key_blocks_readopts)?
-                    .is_some()
-        {
-            // Don't remove key blocks
-            blocks_iter.next();
-            continue;
+        match &mut current_range {
+            // Delete the previous range and start a new one
+            Some((from, to)) if from.shard != block_id.shard => {
+                delete_range(&mut batch, from, to);
+                *from = block_id;
+                *to = block_id;
+            }
+            // Update the current range
+            Some((_, to)) => *to = block_id,
+            // Start a new range
+            None => current_range = Some((block_id, block_id)),
         }
 
-        // Add item to the batch
-        batch.delete_cf(&package_entries_cf, key);
-        stats.total_package_entries_removed += 1;
-        if shard.is_masterchain() {
-            stats.mc_package_entries_removed += 1;
+        // Count entry
+        stats.total_entries_removed += 1;
+        if is_masterchain {
+            stats.mc_entries_removed += 1;
         }
 
         // Key structure:
@@ -928,10 +961,7 @@ fn remove_blocks(
         // [seqno, 4 bytes]
         // [root hash, 32 bytes] <-
         // ..
-        if key.len() >= 48 {
-            batch.delete_cf(&block_handles_cf, &key[16..48]);
-            stats.total_handles_removed += 1;
-        }
+        batch.delete_cf(&block_handles_cf, &key[16..48]);
 
         batch_len += 1;
         if matches!(
@@ -939,7 +969,7 @@ fn remove_blocks(
             Some(max_blocks_per_batch) if batch_len >= max_blocks_per_batch
         ) {
             tracing::info!(
-                total_package_entries_removed = stats.total_package_entries_removed,
+                total_package_entries_removed = stats.total_entries_removed,
                 "applying intermediate batch",
             );
             let batch = std::mem::take(&mut batch);
@@ -948,6 +978,11 @@ fn remove_blocks(
         }
 
         blocks_iter.next();
+    }
+
+    if let Some((from, to)) = current_range.take() {
+        delete_range(&mut batch, &from, &to);
+        batch_len += 1; // Ensure that we flush the batch
     }
 
     if batch_len > 0 {
@@ -959,11 +994,10 @@ fn remove_blocks(
     Ok(stats)
 }
 
-#[derive(Debug, Copy, Clone, Default)]
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub struct BlockGcStats {
-    pub mc_package_entries_removed: usize,
-    pub total_package_entries_removed: usize,
-    pub total_handles_removed: usize,
+    pub mc_entries_removed: usize,
+    pub total_entries_removed: usize,
 }
 
 struct BlockContentsLock<'a> {
@@ -975,6 +1009,20 @@ impl<'a> AsRef<[u8]> for BlockContentsLock<'a> {
     fn as_ref(&self) -> &[u8] {
         self.data.as_ref()
     }
+}
+
+fn entry_key(block_id: &BlockId, ty: ArchiveEntryType) -> [u8; tables::PackageEntries::KEY_LEN] {
+    let mut result = [0; tables::PackageEntries::KEY_LEN];
+    result[..4].copy_from_slice(&block_id.shard.workchain().to_be_bytes());
+    result[4..12].copy_from_slice(&block_id.shard.prefix().to_be_bytes());
+    result[12..16].copy_from_slice(&block_id.seqno.to_be_bytes());
+    result[16..48].copy_from_slice(block_id.root_hash.as_slice());
+    result[48] = ty as u8;
+    result
+}
+
+fn extract_entry_type(key: &[u8]) -> Option<ArchiveEntryType> {
+    key.get(48).copied().and_then(ArchiveEntryType::from_byte)
 }
 
 const ARCHIVE_PACKAGE_SIZE: u32 = 100;
@@ -1006,4 +1054,133 @@ enum BlockStorageError {
     InvalidBlockData,
     #[error("Offset is outside of the archive slice")]
     InvalidOffset,
+}
+
+#[cfg(test)]
+mod tests {
+    use ahash::HashMap;
+
+    use super::*;
+    use crate::{BlockConnection, Storage};
+
+    #[test]
+    fn blocks_gc() -> Result<()> {
+        const GARBAGE: &[u8] = b"garbage";
+        const ENTRY_TYPES: [ArchiveEntryType; 3] = [
+            ArchiveEntryType::Block,
+            ArchiveEntryType::Proof,
+            ArchiveEntryType::QueueDiff,
+        ];
+        const CONNECTION_TYPES: [BlockConnection; 2] =
+            [BlockConnection::Prev1, BlockConnection::Next1];
+
+        let (storage, _tmp_dir) = Storage::new_temp()?;
+
+        let blocks = storage.block_storage();
+        let block_handles = storage.block_handle_storage();
+        let block_connections = storage.block_connection_storage();
+
+        let mut shard_block_ids = HashMap::<ShardIdent, Vec<BlockId>>::default();
+
+        for shard in [ShardIdent::MASTERCHAIN, ShardIdent::BASECHAIN] {
+            let entry = shard_block_ids.entry(shard).or_default();
+
+            for seqno in 0..100 {
+                let block_id = BlockId {
+                    shard,
+                    seqno,
+                    root_hash: HashBytes(rand::random()),
+                    file_hash: HashBytes(rand::random()),
+                };
+                entry.push(block_id);
+
+                let (handle, _) = block_handles.create_or_load_handle(&block_id, NewBlockMeta {
+                    is_key_block: seqno == 0,
+                    gen_utime: 0,
+                    mc_ref_seqno: None,
+                });
+
+                for ty in ENTRY_TYPES {
+                    blocks.add_data(&ArchiveEntryId { block_id, ty }, GARBAGE)?;
+                }
+                for direction in CONNECTION_TYPES {
+                    block_connections.store_connection(&handle, direction, &block_id);
+                }
+
+                handle.meta().add_flags(BlockFlags::HAS_ALL_BLOCK_PARTS);
+                block_handles.store_handle(&handle);
+            }
+        }
+
+        // Remove some blocks
+        let stats = remove_blocks(
+            blocks.db.clone(),
+            None,
+            70,
+            [(ShardIdent::BASECHAIN, 50)].into(),
+        )?;
+        assert_eq!(stats, BlockGcStats {
+            mc_entries_removed: 69 * ENTRY_TYPES.len(),
+            total_entries_removed: (69 + 49) * ENTRY_TYPES.len(),
+        });
+
+        let removed_ranges = HashMap::from_iter([
+            (ShardIdent::MASTERCHAIN, vec![1..=69]),
+            (ShardIdent::BASECHAIN, vec![1..=49]),
+        ]);
+        for (shard, block_ids) in shard_block_ids {
+            let removed_ranges = removed_ranges.get(&shard).unwrap();
+
+            for block_id in block_ids {
+                let must_be_removed = 'removed: {
+                    for range in removed_ranges {
+                        if range.contains(&block_id.seqno) {
+                            break 'removed true;
+                        }
+                    }
+                    false
+                };
+
+                let handle = block_handles.load_handle(&block_id);
+                assert_eq!(handle.is_none(), must_be_removed);
+
+                for ty in ENTRY_TYPES {
+                    let key = entry_key(block_id.borrow(), ty);
+                    let stored = blocks.db.package_entries.get(key)?;
+                    assert_eq!(stored.is_none(), must_be_removed);
+                }
+
+                for direction in CONNECTION_TYPES {
+                    let connection = block_connections.load_connection(&block_id, direction);
+                    assert_eq!(connection.is_none(), must_be_removed);
+                }
+            }
+        }
+
+        // Remove single block
+        let stats = remove_blocks(
+            blocks.db.clone(),
+            None,
+            71,
+            [(ShardIdent::BASECHAIN, 51)].into(),
+        )?;
+        assert_eq!(stats, BlockGcStats {
+            mc_entries_removed: ENTRY_TYPES.len(),
+            total_entries_removed: 2 * ENTRY_TYPES.len(),
+        });
+
+        // Remove no blocks
+        let stats = remove_blocks(
+            blocks.db.clone(),
+            None,
+            71,
+            [(ShardIdent::BASECHAIN, 51)].into(),
+        )?;
+        assert_eq!(stats, BlockGcStats {
+            mc_entries_removed: 0,
+            total_entries_removed: 0,
+        });
+
+        Ok(())
+    }
 }

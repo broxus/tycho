@@ -71,6 +71,12 @@ impl ShardHeights {
     }
 }
 
+impl<const N: usize> From<[(ShardIdent, u32); N]> for ShardHeights {
+    fn from(value: [(ShardIdent, u32); N]) -> Self {
+        Self(FastHashMap::from_iter(value))
+    }
+}
+
 impl FromIterator<(ShardIdent, u32)> for ShardHeights {
     #[inline]
     fn from_iter<T: IntoIterator<Item = (ShardIdent, u32)>>(iter: T) -> Self {
