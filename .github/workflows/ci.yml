@@ -6,7 +6,7 @@ on:
       - master
   pull_request:
     branches:
-        - "**"
+      - "**"
     paths:
       - "Cargo.toml"
       - "Cargo.lock"
@@ -31,6 +31,8 @@ jobs:
           override: true
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
       - name: Test with latest nextest release
@@ -86,6 +88,8 @@ jobs:
           profile: minimal
           override: true
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Build CLI
         uses: actions-rs/cargo@v1
         with:
@@ -109,11 +113,14 @@ jobs:
           override: true
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Clippy check
         uses: actions-rs/cargo@v1
         with:
           command: clippy
           args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -- -D warnings # change to --workspace later
+
 
   # docs:
   #   name: Docs
