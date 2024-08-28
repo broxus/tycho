@@ -191,7 +191,10 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         }
     }
 
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
+    async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+    ) -> Result<Option<Arc<MempoolAnchor>>> {
         let range = (
             std::ops::Bound::Excluded(prev_anchor_id),
             std::ops::Bound::Unbounded,
@@ -241,7 +244,7 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 }
             }
 
-            return Ok(anchor);
+            return Ok(Some(anchor));
         }
     }
 
@@ -383,12 +386,14 @@ mod tests {
         assert_eq!(opt_anchor.unwrap().id, 3);
 
         // try get next anchor after (id: 3)
-        let anchor = adapter.get_next_anchor(3).await?;
-        assert_eq!(anchor.id, 4);
+        let opt_anchor = adapter.get_next_anchor(3).await?;
+        assert!(opt_anchor.is_some());
+        assert_eq!(opt_anchor.unwrap().id, 4);
 
         // try get next anchor after (id: 8), will wait some time
-        let anchor = adapter.get_next_anchor(8).await?;
-        assert_eq!(anchor.id, 9);
+        let opt_anchor = adapter.get_next_anchor(8).await?;
+        assert!(opt_anchor.is_some());
+        assert_eq!(opt_anchor.unwrap().id, 9);
 
         // test clear anchors cache
         adapter.clear_anchors_cache(7).await?;

@@ -521,7 +521,8 @@ impl CollatorStdImpl {
                     .map(|a| a.id)
                     .unwrap_or_default(),
             )
-            .await?;
+            .await?
+            .unwrap();
 
         let our_exts_count = next_anchor.count_externals_for(&self.shard_id, 0);
         let has_externals = our_exts_count > 0;
@@ -604,7 +605,8 @@ impl CollatorStdImpl {
             next_anchor = self
                 .mpool_adapter
                 .get_next_anchor(last_imported_anchor.id)
-                .await?;
+                .await?
+                .unwrap();
 
             our_exts_count = next_anchor.count_externals_for(&self.shard_id, 0);
             let has_externals = our_exts_count > 0;
