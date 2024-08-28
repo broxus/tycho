@@ -20,8 +20,8 @@ use types::{
 };
 
 use self::types::{
-    BlockCacheEntry, BlockCacheKey, BlockCandidateStuffToSend, BlocksCache, ChainTimesSyncState,
-    McBlockSubgraphExtract, McBlockSubgraphToSend, SendSyncStatus,
+    BlockCacheEntry, BlockCacheEntryStuff, BlockCacheKey, BlocksCache, ChainTimesSyncState,
+    McBlockSubgraph, McBlockSubgraphExtract, SendSyncStatus,
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{Collator, CollatorContext, CollatorEventListener, CollatorFactory};
@@ -396,7 +396,7 @@ where
 
     async fn apply_block_queue_diff_from_entry_stuff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        block_entry_stuff: &BlockCandidateStuffToSend,
+        block_entry_stuff: &BlockCacheEntryStuff,
     ) -> Result<()> {
         if block_entry_stuff.key.seqno == 0 {
             return Ok(());
@@ -2298,7 +2298,7 @@ where
                         is_last = false;
                         break;
                     } else {
-                        let mc_block_entry_stuff = mc_block_entry.extract_entry_stuff_for_sync()?;
+                        let mc_block_entry_stuff = mc_block_entry.extract_entry_stuff()?;
                         let prev_shard_blocks_ids = mc_block_entry
                             .top_shard_blocks_info
                             .iter()
@@ -2319,14 +2319,17 @@ where
             }
         }
         let (mc_block_entry_stuff, prev_shard_blocks_ids) = extracted_mc_block_entry.unwrap();
-        let subgraph_extract =
-            self.extract_mc_block_subgraph_internal(mc_block_entry_stuff, prev_shard_blocks_ids)?;
+        let subgraph_extract = self.extract_mc_block_subgraph_internal(
+            mc_block_entry_stuff,
+            prev_shard_blocks_ids,
+            false,
+        )?;
         Ok((subgraph_extract, is_last))
     }
 
     /// Find all shard blocks included in master block subgraph.
     /// Then extract and return them and master block
-    fn extract_mc_block_subgraph(
+    fn extract_mc_block_subgraph_for_sync(
         &self,
         block_id: &BlockId,
         only_if_valid: bool,
@@ -2360,17 +2363,18 @@ where
             types::check_refresh_last_known_synced(&mut guard.last_known_synced, block_id.seqno);
         }
 
-        self.extract_mc_block_subgraph_internal(mc_block_entry_stuff, prev_shard_blocks_ids)
+        self.extract_mc_block_subgraph_internal(mc_block_entry_stuff, prev_shard_blocks_ids, true)
     }
 
     fn extract_mc_block_subgraph_internal(
         &self,
-        mc_block_entry_stuff: BlockCandidateStuffToSend,
+        mc_block_entry_stuff: BlockCacheEntryStuff,
         mut prev_shard_blocks_ids: VecDeque<BlockId>,
+        for_sync: bool,
     ) -> Result<McBlockSubgraphExtract> {
         let mc_block_key = mc_block_entry_stuff.key;
 
-        let mut subgraph = McBlockSubgraphToSend {
+        let mut subgraph = McBlockSubgraph {
             master_block: Some(mc_block_entry_stuff),
             shard_blocks: vec![],
         };
@@ -2395,7 +2399,11 @@ where
                 // if shard block included in current master block subgraph
                 if matches!(sc_block_entry.containing_mc_block, Some(key) if key == mc_block_key) {
                     // 5. Extract stuff for sync
-                    let sc_block_entry_stuff = sc_block_entry.extract_entry_stuff_for_sync()?;
+                    let sc_block_entry_stuff = if for_sync {
+                        sc_block_entry.extract_entry_stuff_for_sync()?
+                    } else {
+                        sc_block_entry.extract_entry_stuff()?
+                    };
                     subgraph.shard_blocks.push(sc_block_entry_stuff);
                     sc_block_entry
                         .prev_blocks_ids
@@ -2491,7 +2499,7 @@ where
         let mut sync_elapsed = Default::default();
 
         // extract master block with all shard blocks if valid, and process them
-        match self.extract_mc_block_subgraph(block_id, true)? {
+        match self.extract_mc_block_subgraph_for_sync(block_id, true)? {
             McBlockSubgraphExtract::Extracted(mut mc_block_subgraph) => {
                 extract_elapsed = histogram_extract.finish();
                 let timer = std::time::Instant::now();
@@ -2506,16 +2514,16 @@ where
                     let mut build_stuff_for_sync_elapsed = Duration::ZERO;
                     let mut sync_stuff_elapsed = Duration::ZERO;
 
-                    let mut blocks_to_send = std::mem::take(&mut mc_block_subgraph.shard_blocks);
-                    blocks_to_send.push(mc_block_subgraph.master_block.take().unwrap());
+                    let mut entries_to_sync = std::mem::take(&mut mc_block_subgraph.shard_blocks);
+                    entries_to_sync.push(mc_block_subgraph.master_block.take().unwrap());
 
-                    for mut block_to_send in blocks_to_send {
+                    for mut entry_to_sync in entries_to_sync {
                         if !matches!(
-                            block_to_send.send_sync_status,
+                            entry_to_sync.send_sync_status,
                             SendSyncStatus::Sending | SendSyncStatus::Sent | SendSyncStatus::Synced,
                         ) {
                             let timer = std::time::Instant::now();
-                            let candidate_stuff = block_to_send.candidate_stuff.take().unwrap();
+                            let candidate_stuff = entry_to_sync.candidate_stuff.take().unwrap();
                             let block_id = *candidate_stuff.candidate.block.id();
                             let block_stuff_for_sync = candidate_stuff.as_block_for_sync();
                             build_stuff_for_sync_elapsed += timer.elapsed();
@@ -2529,13 +2537,13 @@ where
                                 "Block was successfully sent to sync ({})",
                                 block_id,
                             );
-                            block_to_send.send_sync_status = SendSyncStatus::Sent;
+                            entry_to_sync.send_sync_status = SendSyncStatus::Sent;
                             sync_stuff_elapsed += timer.elapsed();
                         }
-                        if block_to_send.key.shard.is_masterchain() {
-                            mc_block_subgraph.master_block = Some(block_to_send);
+                        if entry_to_sync.key.shard.is_masterchain() {
+                            mc_block_subgraph.master_block = Some(entry_to_sync);
                         } else {
-                            mc_block_subgraph.shard_blocks.push(block_to_send);
+                            mc_block_subgraph.shard_blocks.push(entry_to_sync);
                         }
                     }
 

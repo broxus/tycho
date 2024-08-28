@@ -163,7 +163,7 @@ pub(super) struct BlockCacheEntry {
 
     /// Ids of 1 (or 2 in case of merge) previous blocks in shard or master chain
     pub prev_blocks_ids: Vec<BlockId>,
-    /// List of (top_block_id, to_block_updated) included in current block.
+    /// List of (`top_block_id`, `to_block_updated`) included in current block.
     /// `to_block_updated` indicates if `top_block_id` was updated since previous block.
     /// It must be filled for master block.
     /// It could be filled for shard blocks if shards can exchange shard blocks with each other without master.
@@ -248,7 +248,7 @@ impl BlockCacheEntry {
         })
     }
 
-    pub fn key(&self) -> &BlockIdShort {
+    pub fn key(&self) -> &BlockCacheKey {
         &self.key
     }
 
@@ -284,7 +284,11 @@ impl BlockCacheEntry {
         self.top_shard_blocks_info.iter().map(|(id, _)| id)
     }
 
-    pub fn extract_entry_stuff_for_sync(&mut self) -> Result<BlockCandidateStuffToSend> {
+    pub fn extract_entry_stuff(&mut self) -> Result<BlockCacheEntryStuff> {
+        Ok(self.extract_entry_stuff_with_status(self.send_sync_status))
+    }
+
+    pub fn extract_entry_stuff_for_sync(&mut self) -> Result<BlockCacheEntryStuff> {
         let send_sync_status = self.send_sync_status;
         match self.send_sync_status {
             SendSyncStatus::NotReady => {
@@ -306,8 +310,8 @@ impl BlockCacheEntry {
     fn extract_entry_stuff_with_status(
         &mut self,
         send_sync_status: SendSyncStatus,
-    ) -> BlockCandidateStuffToSend {
-        BlockCandidateStuffToSend {
+    ) -> BlockCacheEntryStuff {
+        BlockCacheEntryStuff {
             key: self.key,
             kind: self.kind,
             candidate_stuff: self.candidate_stuff.take(),
@@ -333,7 +337,7 @@ impl AppliedBlockStuffContainer for BlockCacheEntry {
     }
 }
 
-pub(super) struct BlockCandidateStuffToSend {
+pub(super) struct BlockCacheEntryStuff {
     pub key: BlockCacheKey,
     pub kind: BlockCacheEntryKind,
     pub candidate_stuff: Option<BlockCandidateStuff>,
@@ -341,7 +345,7 @@ pub(super) struct BlockCandidateStuffToSend {
     pub send_sync_status: SendSyncStatus,
 }
 
-impl AppliedBlockStuffContainer for BlockCandidateStuffToSend {
+impl AppliedBlockStuffContainer for BlockCacheEntryStuff {
     fn key(&self) -> &BlockCacheKey {
         &self.key
     }
@@ -386,13 +390,13 @@ pub(super) trait AppliedBlockStuffContainer {
     }
 }
 
-pub(super) struct McBlockSubgraphToSend {
-    pub master_block: Option<BlockCandidateStuffToSend>,
-    pub shard_blocks: Vec<BlockCandidateStuffToSend>,
+pub(super) struct McBlockSubgraph {
+    pub master_block: Option<BlockCacheEntryStuff>,
+    pub shard_blocks: Vec<BlockCacheEntryStuff>,
 }
 
 pub(super) enum McBlockSubgraphExtract {
-    Extracted(McBlockSubgraphToSend),
+    Extracted(McBlockSubgraph),
     NotFullValid,
     AlreadyExtracted,
 }
