@@ -238,6 +238,11 @@ impl GcSubscriber {
                         min_interval,
                     },
                 ) => {
+                    // TODO: Must be in sync with the largest possible archive size (in mc blocks).
+                    const MIN_SAFE_DISTANCE: u32 = 100;
+
+                    let safe_distance = std::cmp::max(safe_distance, MIN_SAFE_DISTANCE);
+
                     // Compute the target masterchain block seqno
                     let target_seqno = match tick.mc_block_id.seqno.checked_sub(safe_distance) {
                         // Skip GC for the first N blocks
