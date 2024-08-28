@@ -59,19 +59,19 @@ pub trait MempoolAdapter: Send + Sync + 'static {
     async fn on_new_mc_state(&self, mc_block_id: &BlockId) -> Result<()>;
 
     /// Request, await, and return anchor from connected mempool by id.
-    /// Return None if the requested anchor does not exist.
-    ///
-    /// (TODO) Cache anchor to handle similar request from collator of another shard
+    /// Return None if the requested anchor does not exist and cannot be synced from other nodes.
     async fn get_anchor_by_id(
         &self,
         anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>>;
 
     /// Request, await, and return the next anchor after the specified previous one.
-    /// If anchor was not produced yet then await until mempool does this.
-    ///
-    /// (TODO) ? Should return Error if mempool does not reply fro a long timeout
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>>;
+    /// If anchor does not exist then await until it be produced or downloaded during sync.
+    /// Return None if anchor cannot be produced or synced from other nodes.
+    async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+    ) -> Result<Option<Arc<MempoolAnchor>>>;
 
     /// Process top processed to anchor reported by collation manager.
     /// Will manage mempool sync depth.

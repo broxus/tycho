@@ -200,12 +200,13 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         &self,
         anchor_id: MempoolAnchorId,
     ) -> Result<Option<Arc<MempoolAnchor>>> {
-        // TODO: make real implementation, currently only return anchor from local cache
         Ok(self.anchors.read().get(&anchor_id).cloned())
     }
 
-    async fn get_next_anchor(&self, prev_anchor_id: MempoolAnchorId) -> Result<Arc<MempoolAnchor>> {
-        // TODO: make real implementation, currently only return anchor from local cache
+    async fn get_next_anchor(
+        &self,
+        prev_anchor_id: MempoolAnchorId,
+    ) -> Result<Option<Arc<MempoolAnchor>>> {
         loop {
             // NOTE: Subscribe to notification before checking
             let anchor_added = self.anchor_added.notified();
@@ -217,7 +218,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
                     // Continue to wait for the first anchor on node start
                     None if prev_anchor_id == 0 => {}
                     // Return the first anchor on node start
-                    Some((_, first)) if prev_anchor_id == 0 => return Ok(first.clone()),
+                    Some((_, first)) if prev_anchor_id == 0 => return Ok(Some(first.clone())),
                     // Trying to get anchor that is too old
                     Some((first_id, _)) if prev_anchor_id < *first_id => {
                         anyhow::bail!("Requested anchor {prev_anchor_id} is too old");
@@ -230,7 +231,7 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
 
                         // Try to get the next anchor
                         if let Some((_, value)) = anchors.get_index(index + 1) {
-                            return Ok(value.clone());
+                            return Ok(Some(value.clone()));
                         }
                     }
                 }
