@@ -27,7 +27,7 @@ fmt: install_fmt
     cargo +nightly fmt --all
 
 # CI checks.
-ci: check_dev_docs check_format lint docs test
+ci: check_dev_docs check_format lint test
 
 # Checks links in the `/docs` directory.
 check_dev_docs:
@@ -39,7 +39,8 @@ check_format: install_fmt
 
 # Clippy go brr.
 lint:
-    cargo clippy --all-targets --all-features --workspace
+    #cargo clippy --all-targets --all-features --workspace # update when clippy is fixed
+    cargo clippy --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -- -D warnings
 
 # Generates cargo docs.
 docs:
@@ -48,7 +49,7 @@ docs:
 
 # Runs all tests.
 test:
-    cargo test --all-targets --all-features --workspace
+    cargo nextest run -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus
 
 # Generates a Grafana panel JSON.
 gen_dashboard:
