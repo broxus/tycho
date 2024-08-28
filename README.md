@@ -7,6 +7,7 @@
 - [zstd](https://pkgs.org/download/zstd)
 - [clang](https://pkgs.org/download/clang)
 - [llvm](https://pkgs.org/download/llvm)
+- [cargo-nextest](https://nexte.st/docs/installation/from-source/)
 
 ## Testing
 
@@ -45,7 +46,8 @@ just node 3
 ```
 
 > [!NOTE]
-> By default the `dev` profile is used. Use this env to specify a different profile:
+> By default the `dev` profile is used. Use this env to specify a different
+> profile:
 > ```bash
 > export TYCHO_BUILD_PROFILE=release
 > ```
@@ -66,7 +68,8 @@ cargo build -p tycho-cli
 ```
 
 Note, that the system must provide a recent version of the library which,
-depending on which operating system you're using, may require installing packages
+depending on which operating system you're using, may require installing
+packages
 from a testing branch. Or you could build the RocksDB from source manually:
 
 ```bash
