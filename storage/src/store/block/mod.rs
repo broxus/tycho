@@ -20,6 +20,7 @@ use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
 };
 use tycho_block_util::queue::{QueueDiffStuff, QueueDiffStuffAug};
+use tycho_util::compression::ZstdCompressStream;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::sync::rayon_run;
 use weedb::rocksdb;
@@ -695,11 +696,11 @@ impl BlockStorage {
                 .ok_or(BlockStorageError::ArchiveNotFound)?;
             assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
-            let mut writer = ArchiveWriter::new(&db, archive_id, ARCHIVE_CHUNK_SIZE);
+            let mut writer = ArchiveWriter::new(&db, archive_id, ARCHIVE_CHUNK_SIZE)?;
             let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
 
             // Write archive prefix
-            writer.write(&ARCHIVE_PREFIX)?;
+            writer.write_with_compression(&ARCHIVE_PREFIX)?;
 
             // Write all entries
             for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
@@ -734,13 +735,16 @@ impl BlockStorage {
                     .write_to(&mut header_buffer);
 
                     // Write entry header and data
-                    writer.write(&header_buffer)?;
-                    writer.write(data.as_ref())?;
+                    writer.write_with_compression(&header_buffer)?;
+                    writer.write_with_compression(data.as_ref())?;
                 }
             }
 
             // Drop ids entry just in case (before removing it)
             drop(raw_block_ids);
+
+            // Ends zstd stream
+            writer.compression_finalize()?;
 
             // Write the remaining data in the buffer if any
             writer.flush()?;
@@ -758,18 +762,22 @@ struct ArchiveWriter<'a> {
     total_len: u64,
     chunk_index: u64,
     chunk_buffer: Vec<u8>,
+    zstd_compressor: ZstdCompressStream<'a>,
 }
 
 impl<'a> ArchiveWriter<'a> {
-    fn new(db: &'a BaseDb, archive_id: u32, chunk_len: u64) -> Self {
-        Self {
+    fn new(db: &'a BaseDb, archive_id: u32, chunk_len: u64) -> Result<Self> {
+        let zstd_compressor = ZstdCompressStream::new(9, chunk_len as usize)?;
+
+        Ok(Self {
             db,
             archive_id,
             chunk_len,
             total_len: 0,
             chunk_index: 0,
             chunk_buffer: Vec::with_capacity(chunk_len as usize),
-        }
+            zstd_compressor,
+        })
     }
 
     fn write(&mut self, mut data: &[u8]) -> Result<()> {
@@ -790,6 +798,13 @@ impl<'a> ArchiveWriter<'a> {
         }
     }
 
+    fn write_with_compression(&mut self, data: &[u8]) -> Result<()> {
+        let mut compressed = Vec::new();
+        self.zstd_compressor.write(data, &mut compressed)?;
+
+        self.write(&compressed)
+    }
+
     fn flush(&mut self) -> Result<()> {
         if self.chunk_buffer.is_empty() {
             return Ok(());
@@ -805,6 +820,13 @@ impl<'a> ArchiveWriter<'a> {
         self.db.archives.insert(key, self.chunk_buffer.as_slice())?;
         self.chunk_buffer.clear();
         Ok(())
+    }
+
+    fn compression_finalize(&mut self) -> Result<()> {
+        let mut compressed = Vec::new();
+        self.zstd_compressor.finish(&mut compressed)?;
+
+        self.write(&compressed)
     }
 
     fn finalize(self) -> Result<()> {
