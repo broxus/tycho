@@ -410,6 +410,7 @@ impl Node {
             .with_public_overlay_client(PublicOverlayClient::new(
                 network,
                 public_overlay,
+                peer_resolver.clone(),
                 node_config.public_overlay_client,
             ))
             .with_self_broadcast_listener(rpc_mempool_adapter.clone())
@@ -486,6 +487,15 @@ impl Node {
             .shard_state_storage()
             .load_state(last_block_id)
             .await?;
+
+        let config = mc_state.config_params()?;
+        let current_validator_set = config.get_current_validator_set()?;
+
+        let validator_subscriber = self
+            .blockchain_rpc_client
+            .overlay_client()
+            .validator_set_subscriber();
+        validator_subscriber.update_current_validator_set(current_validator_set);
 
         // Run mempool adapter
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();

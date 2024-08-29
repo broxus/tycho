@@ -3365,6 +3365,7 @@ dependencies = [
  "everscale-crypto",
  "everscale-types",
  "futures-util",
+ "indexmap 2.3.0",
  "metrics",
  "parking_lot",
  "rand",

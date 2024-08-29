@@ -81,6 +81,7 @@ pub fn make_fast_overlay_config() -> OverlayConfig {
 pub struct Node {
     network: Network,
     public_overlay: PublicOverlay,
+    peer_resolver: PeerResolver,
     dht_client: DhtClient,
 }
 
@@ -93,6 +94,10 @@ impl Node {
         &self.public_overlay
     }
 
+    pub fn peer_resolver(&self) -> &PeerResolver {
+        &self.peer_resolver
+    }
+
     fn with_random_key(storage: Storage) -> Self {
         let NodeBase {
             network,
@@ -101,7 +106,7 @@ impl Node {
             peer_resolver,
         } = NodeBase::with_random_key();
         let public_overlay = PublicOverlay::builder(PUBLIC_OVERLAY_ID)
-            .with_peer_resolver(peer_resolver)
+            .with_peer_resolver(peer_resolver.clone())
             .build(
                 BlockchainRpcService::builder()
                     .with_storage(storage)
@@ -115,6 +120,7 @@ impl Node {
         Self {
             network,
             public_overlay,
+            peer_resolver,
             dht_client,
         }
     }

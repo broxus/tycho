@@ -13,7 +13,7 @@ mod common;
 
 #[tokio::test]
 async fn storage_block_strider() -> anyhow::Result<()> {
-    tycho_util::test::init_logger("storage_block_strider", "debug");
+    tycho_util::test::init_logger("storage_block_strider", "info");
 
     let (storage, _tmp_dir) = common::storage::init_storage().await?;
 
@@ -42,7 +42,7 @@ async fn storage_block_strider() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn overlay_block_strider() -> anyhow::Result<()> {
-    tycho_util::test::init_logger("overlay_block_strider", "debug");
+    tycho_util::test::init_logger("overlay_block_strider", "info");
 
     #[derive(Debug, Default)]
     struct PeerState {
@@ -117,6 +117,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         .with_public_overlay_client(PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
+            node.peer_resolver().clone(),
             PublicOverlayClientConfig::default(),
         ))
         .build();

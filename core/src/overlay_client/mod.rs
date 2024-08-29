@@ -4,16 +4,18 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use tokio::task::AbortHandle;
-use tycho_network::{Network, PublicOverlay, Request};
+use tycho_network::{Network, PeerId, PeerResolver, PublicOverlay, Request};
 
 pub use self::config::PublicOverlayClientConfig;
 pub use self::neighbour::{Neighbour, NeighbourStats};
 pub use self::neighbours::Neighbours;
+use crate::overlay_client::validator_subscriber::{Validator, ValidatorSubscriber};
 use crate::proto::overlay;
 
 mod config;
 mod neighbour;
 mod neighbours;
+mod validator_subscriber;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -25,6 +27,7 @@ impl PublicOverlayClient {
     pub fn new(
         network: Network,
         overlay: PublicOverlay,
+        peer_resolver: PeerResolver,
         config: PublicOverlayClientConfig,
     ) -> Self {
         let ttl = overlay.entry_ttl_sec();
@@ -42,12 +45,14 @@ impl PublicOverlayClient {
             .collect::<Vec<_>>();
 
         let neighbours = Neighbours::new(entries, config.max_neighbours);
+        let subscriber = ValidatorSubscriber::new(peer_resolver);
 
         let mut res = Inner {
             network,
             overlay,
             neighbours,
             config,
+            subscriber,
             ping_task: None,
             update_task: None,
             cleanup_task: None,
@@ -64,12 +69,24 @@ impl PublicOverlayClient {
         }
     }
 
+    pub fn validator_set_subscriber(&self) -> &ValidatorSubscriber {
+        &self.inner.subscriber
+    }
+
     pub fn config(&self) -> &PublicOverlayClientConfig {
         &self.inner.config
     }
 
     pub fn neighbours(&self) -> &Neighbours {
         &self.inner.neighbours
+    }
+
+    pub fn get_random_validators(&self, amount: usize) -> Vec<Validator> {
+        self.inner.subscriber.get_random_validators(amount)
+    }
+
+    pub fn force_update_validators(&self, peers: Vec<PeerId>) {
+        self.inner.subscriber.send_validators(peers);
     }
 
     pub fn overlay(&self) -> &PublicOverlay {
@@ -85,6 +102,14 @@ impl PublicOverlayClient {
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
         self.inner.send(data).await
+    }
+
+    pub async fn send_to_validator(
+        &self,
+        validator: Validator,
+        data: Request,
+    ) -> Result<(), Error> {
+        self.inner.send_to_validator(validator.clone(), data).await
     }
 
     #[inline]
@@ -133,6 +158,8 @@ struct Inner {
     neighbours: Neighbours,
     config: PublicOverlayClientConfig,
 
+    subscriber: ValidatorSubscriber,
+
     ping_task: Option<AbortHandle>,
     update_task: Option<AbortHandle>,
     cleanup_task: Option<AbortHandle>,
@@ -145,6 +172,7 @@ impl Clone for Inner {
             overlay: self.overlay.clone(),
             neighbours: self.neighbours.clone(),
             config: self.config.clone(),
+            subscriber: self.subscriber.clone(),
             ping_task: None,
             update_task: None,
             cleanup_task: None,
@@ -243,6 +271,14 @@ impl Inner {
         };
 
         self.send_impl(neighbour, Request::from_tl(data)).await
+    }
+
+    async fn send_to_validator(&self, validator: Validator, data: Request) -> Result<(), Error> {
+        let res = self
+            .overlay
+            .send(&self.network, &validator.peer_id(), data)
+            .await;
+        res.map_err(Error::NetworkError)
     }
 
     async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>, Error>
