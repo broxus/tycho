@@ -24,7 +24,7 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 tl-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs"] }
-tokio-util = {workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 # local deps
@@ -35,7 +35,12 @@ tycho-util = { workspace = true }
 
 [dev-dependencies]
 everscale-crypto = { workspace = true }
+itertools = { workspace = true }
+hex = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
+tycho-block-util = { workspace = true, features = ["test"] }
 tycho-storage = { workspace = true, features = ["test"] }
 tycho-util = { workspace = true, features = ["test"] }
 

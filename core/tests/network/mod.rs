@@ -56,7 +56,7 @@ impl NodeBase {
     }
 }
 
-pub fn make_fast_dht_config() -> DhtConfig {
+fn make_fast_dht_config() -> DhtConfig {
     DhtConfig {
         local_info_announce_period: Duration::from_secs(1),
         local_info_announce_period_max_jitter: Duration::from_secs(1),
@@ -66,7 +66,7 @@ pub fn make_fast_dht_config() -> DhtConfig {
     }
 }
 
-pub fn make_fast_overlay_config() -> OverlayConfig {
+fn make_fast_overlay_config() -> OverlayConfig {
     OverlayConfig {
         public_overlay_peer_store_period: Duration::from_secs(1),
         public_overlay_peer_store_max_jitter: Duration::from_secs(1),
@@ -136,4 +136,4 @@ pub fn make_network(storage: Storage, node_count: usize) -> Vec<Node> {
     nodes
 }
 
-pub static PUBLIC_OVERLAY_ID: OverlayId = OverlayId([1; 32]);
+static PUBLIC_OVERLAY_ID: OverlayId = OverlayId([1; 32]);

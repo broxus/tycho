@@ -13,7 +13,9 @@ use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStateInfo}
 use tycho_network::{DhtClient, InboundRequestMeta, Network, OverlayId, PeerId, PublicOverlay};
 use tycho_storage::Storage;
 
-mod common;
+mod network;
+mod storage;
+mod utils;
 
 trait TestNode {
     fn network(&self) -> &Network;
@@ -21,7 +23,7 @@ trait TestNode {
     fn force_update_validators(&self, peers: Vec<PeerId>);
 }
 
-impl TestNode for common::node::Node {
+impl TestNode for network::Node {
     fn network(&self) -> &Network {
         self.network()
     }
@@ -127,7 +129,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
     }
 
     struct Node {
-        base: common::node::NodeBase,
+        base: network::NodeBase,
         dht_client: DhtClient,
         blockchain_client: BlockchainRpcClient,
     }
@@ -136,7 +138,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
         fn with_random_key(storage: Storage, broadcast_counter: BroadcastCounter) -> Self {
             const OVERLAY_ID: OverlayId = OverlayId([0x33; 32]);
 
-            let base = common::node::NodeBase::with_random_key();
+            let base = network::NodeBase::with_random_key();
             let public_overlay = PublicOverlay::builder(OVERLAY_ID)
                 .with_peer_resolver(base.peer_resolver.clone())
                 .build(
@@ -180,7 +182,7 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
     }
 
     let broadcast_counter = BroadcastCounter::default();
-    let (storage, _tmp_dir) = common::storage::init_storage().await?;
+    let (storage, _tmp_dir) = storage::init_storage().await?;
 
     let nodes = (0..10)
         .map(|_| Node::with_random_key(storage.clone(), broadcast_counter.clone()))
@@ -228,7 +230,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
     let (storage, _tmp_dir) = Storage::new_temp()?;
 
-    let nodes = common::node::make_network(storage, 10);
+    let nodes = network::make_network(storage, 10);
 
     discover(&nodes).await?;
 
@@ -290,9 +292,9 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 async fn overlay_server_blocks() -> Result<()> {
     tycho_util::test::init_logger("overlay_server_blocks", "info");
 
-    let (storage, _tmp_dir) = common::storage::init_storage().await?;
+    let (storage, _tmp_dir) = storage::init_storage().await?;
 
-    let nodes = common::node::make_network(storage, 10);
+    let nodes = network::make_network(storage, 10);
 
     discover(&nodes).await?;
 
@@ -308,7 +310,7 @@ async fn overlay_server_blocks() -> Result<()> {
         ))
         .build();
 
-    let archive = common::storage::get_archive()?;
+    let (archive, _) = utils::get_archive_with_data("archive.bin", false).await?;
     for (block_id, archive_data) in archive.blocks {
         if block_id.shard.is_masterchain() {
             let result = client.get_block_full(&block_id).await;

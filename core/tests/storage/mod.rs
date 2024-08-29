@@ -1,47 +1,8 @@
 use anyhow::{Context, Result};
-use everscale_types::boc::Boc;
-use everscale_types::models::{BlockId, ShardStateUnsplit};
 use tempfile::TempDir;
-use tycho_block_util::archive::Archive;
-use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_storage::{NewBlockMeta, Storage};
 
-pub(crate) fn get_archive() -> Result<Archive> {
-    let root_path = env!("CARGO_MANIFEST_DIR");
-    let relative_path = "tests/data/archive.bin";
-    let file_path = std::path::Path::new(root_path).join(relative_path);
-
-    let data = std::fs::read(file_path)?;
-    Archive::new(data)
-}
-
-pub(crate) fn get_zerostate() -> Result<ShardStateStuff> {
-    let root_path = env!("CARGO_MANIFEST_DIR");
-    let relative_path = "tests/data/zerostate.boc";
-    let file_path = std::path::Path::new(root_path).join(relative_path);
-
-    let data = std::fs::read(file_path)?;
-    let file_hash = Boc::file_hash_blake(&data);
-
-    let root = Boc::decode(&data).context("failed to decode BOC")?;
-    let root_hash = *root.repr_hash();
-
-    let state = root
-        .parse::<ShardStateUnsplit>()
-        .context("failed to parse state")?;
-
-    anyhow::ensure!(state.seqno == 0, "not a zerostate");
-
-    let block_id = BlockId {
-        shard: state.shard_ident,
-        seqno: state.seqno,
-        root_hash,
-        file_hash,
-    };
-
-    let tracker = MinRefMcStateTracker::default();
-    ShardStateStuff::from_root(&block_id, root, &tracker)
-}
+use crate::utils;
 
 pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let (storage, tmp_dir) = Storage::new_temp()?;
@@ -49,7 +10,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let blocks = storage.block_storage();
 
     // Init zerostate
-    let zerostate = get_zerostate()?;
+    let zerostate = utils::get_zerostate("zerostate.boc", false).await?;
 
     let (handle, _) =
         storage
@@ -66,7 +27,7 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
         .await?;
 
     // Init blocks
-    let block_provider = get_archive()?;
+    let (block_provider, _) = utils::get_archive_with_data("archive.bin", false).await?;
 
     for block_id in block_provider.mc_block_ids.values() {
         let (block, proof, diff) = block_provider.get_entry_by_id(block_id)?;
