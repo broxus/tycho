@@ -341,6 +341,10 @@ impl DhtService {
         }
     }
 
+    pub fn local_id(&self) -> &PeerId {
+        &self.0.local_id
+    }
+
     pub fn make_client(&self, network: &Network) -> DhtClient {
         DhtClient {
             inner: self.0.clone(),

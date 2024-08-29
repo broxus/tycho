@@ -128,8 +128,8 @@ impl BlockchainRpcClient {
         }
 
         while let Some(res) = futures.next().await {
-            if let Err(err) = res {
-                tracing::warn!("failed to broadcast external message: {}", err);
+            if let Err(e) = res {
+                tracing::warn!("failed to broadcast external message: {e}");
             }
         }
     }

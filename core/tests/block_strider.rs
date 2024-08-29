@@ -117,7 +117,6 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         .with_public_overlay_client(PublicOverlayClient::new(
             node.network().clone(),
             node.public_overlay().clone(),
-            node.peer_resolver().clone(),
             PublicOverlayClientConfig::default(),
         ))
         .build();

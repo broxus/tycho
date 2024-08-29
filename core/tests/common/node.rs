@@ -81,7 +81,6 @@ pub fn make_fast_overlay_config() -> OverlayConfig {
 pub struct Node {
     network: Network,
     public_overlay: PublicOverlay,
-    peer_resolver: PeerResolver,
     dht_client: DhtClient,
 }
 
@@ -92,10 +91,6 @@ impl Node {
 
     pub fn public_overlay(&self) -> &PublicOverlay {
         &self.public_overlay
-    }
-
-    pub fn peer_resolver(&self) -> &PeerResolver {
-        &self.peer_resolver
     }
 
     fn with_random_key(storage: Storage) -> Self {
@@ -120,7 +115,6 @@ impl Node {
         Self {
             network,
             public_overlay,
-            peer_resolver,
             dht_client,
         }
     }

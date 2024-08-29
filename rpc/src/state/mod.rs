@@ -672,8 +672,8 @@ mod test {
     use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService};
     use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
     use tycho_network::{
-        service_query_fn, BoxCloneService, DhtService, Network, NetworkConfig, OverlayId,
-        PublicOverlay, Response, ServiceExt, ServiceRequest,
+        service_query_fn, BoxCloneService, Network, NetworkConfig, OverlayId, PublicOverlay,
+        Response, ServiceExt, ServiceRequest,
     };
     use tycho_storage::{Storage, StorageConfig};
 
@@ -750,14 +750,10 @@ mod test {
                 .build(),
         );
 
-        let (_, dht_service) = DhtService::builder(*network.peer_id()).build();
-        let peer_resolver = dht_service.make_peer_resolver().build(&network);
-
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_public_overlay_client(PublicOverlayClient::new(
                 network,
                 public_overlay,
-                peer_resolver,
                 PublicOverlayClientConfig::default(),
             ))
             .build();
@@ -821,14 +817,10 @@ mod test {
                 .build(),
         );
 
-        let (_, dht_service) = DhtService::builder(*network.peer_id()).build();
-        let peer_resolver = dht_service.make_peer_resolver().build(&network);
-
         let blockchain_rpc_client = BlockchainRpcClient::builder()
             .with_public_overlay_client(PublicOverlayClient::new(
                 network,
                 public_overlay,
-                peer_resolver,
                 PublicOverlayClientConfig::default(),
             ))
             .build();
