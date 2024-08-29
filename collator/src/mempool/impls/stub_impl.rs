@@ -110,6 +110,8 @@ impl MempoolAdapterStubImpl {
         for anchor_id in 1.. {
             if self.sleep_between_anchors.load(Ordering::Acquire) {
                 tokio::time::sleep(make_round_interval() * 4).await;
+            } else {
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
 
             let anchor = 'anchor: {
@@ -165,25 +167,34 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
         let mut last_attempt_at = None;
         loop {
             let Some(anchor) = self.anchors_cache.read().get(&anchor_id).cloned() else {
-                if let Some((_, last_anchor)) = self.anchors_cache.read().last_key_value() {
-                    if last_anchor.id > anchor_id {
-                        return Ok(None);
-                    } else {
-                        let delta = anchor_id.saturating_sub(last_anchor.id);
-                        if delta > 3 {
-                            self.sleep_between_anchors.store(false, Ordering::Release);
-                            tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                                "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 3",
-                                anchor_id, last_anchor.id, delta,
-                            );
-                        }
-                    }
+                let last_anchor_id = self
+                    .anchors_cache
+                    .read()
+                    .last_key_value()
+                    .map(|(_, last_anchor)| last_anchor.id)
+                    .unwrap_or_default();
+                if last_anchor_id > anchor_id {
+                    return Ok(None);
                 } else {
-                    self.sleep_between_anchors.store(false, Ordering::Release);
-                    tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                        "sleep_between_anchors set to False because no last anchor when requested anchor_id {}",
-                        anchor_id,
-                    );
+                    let delta = anchor_id.saturating_sub(last_anchor_id);
+                    if delta > 20 {
+                        self.sleep_between_anchors.store(false, Ordering::Release);
+                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                            "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 20",
+                            anchor_id, last_anchor_id, delta,
+                        );
+                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                            "STUB: mempool return None because requested anchor_id {} ahead last {} on {} > 20",
+                            anchor_id, last_anchor_id, delta,
+                        );
+                        return Ok(None);
+                    } else if delta > 3 {
+                        self.sleep_between_anchors.store(false, Ordering::Release);
+                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                            "sleep_between_anchors set to False because anchor_id {} ahead last {} on {} > 3",
+                            anchor_id, last_anchor_id, delta,
+                        );
+                    }
                 }
 
                 if last_attempt_at.is_none() {
@@ -248,20 +259,28 @@ impl MempoolAdapter for MempoolAdapterStubImpl {
                 .map(|(_, v)| v.clone());
 
             let Some(anchor) = res else {
-                if let Some((_, last_anchor)) = self.anchors_cache.read().last_key_value() {
-                    let delta = prev_anchor_id.saturating_sub(last_anchor.id);
-                    if delta > 2 {
-                        self.sleep_between_anchors.store(false, Ordering::Release);
-                        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                            "sleep_between_anchors set to False because prev_anchor_id {} ahead last {} on {} > 2",
-                            prev_anchor_id, last_anchor.id, delta,
-                        );
-                    }
-                } else {
+                let last_anchor_id = self
+                    .anchors_cache
+                    .read()
+                    .last_key_value()
+                    .map(|(_, last_anchor)| last_anchor.id)
+                    .unwrap_or_default();
+                let delta = prev_anchor_id.saturating_sub(last_anchor_id);
+                if delta >= 20 {
+                    tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                        "sleep_between_anchors set to False because prev_anchor_id {} ahead last {} on {} >= 20",
+                        prev_anchor_id, last_anchor_id, delta,
+                    );
+                    tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+                        "STUB: mempool return None because prev_anchor_id {} ahead last {} on {} >= 20",
+                        prev_anchor_id, last_anchor_id, delta,
+                    );
+                    return Ok(None);
+                } else if delta >= 3 {
                     self.sleep_between_anchors.store(false, Ordering::Release);
                     tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
-                        "sleep_between_anchors set to False because no last anchor when prev_anchor_id {}",
-                        prev_anchor_id,
+                        "sleep_between_anchors set to False because prev_anchor_id {} ahead last {} on {} >= 3",
+                        prev_anchor_id, last_anchor_id, delta,
                     );
                 }
 

@@ -17,6 +17,17 @@ use crate::types::{
 pub(super) type BlockCacheKey = BlockIdShort;
 pub(super) type BlockSeqno = u32;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum CollatorState {
+    Active,
+    Cancelled,
+}
+
+pub(super) struct ActiveCollator<C> {
+    pub collator: C,
+    pub state: CollatorState,
+}
+
 #[derive(Default)]
 pub(super) struct ChainTimesSyncState {
     /// latest known chain time for master block: last imported or next to be collated
