@@ -12,6 +12,7 @@ use tycho_block_util::archive::ArchiveVerifier;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
 use tycho_storage::Storage;
+use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 use tycho_util::sync::rayon_run;
 
@@ -460,6 +461,12 @@ impl BlockchainRpcClient {
         let mut downloaded = 0;
         let mut verifier = ArchiveVerifier::default();
         let mut stream = std::pin::pin!(stream);
+        let mut zstd_decoder = ZstdDecompressStream::new(archive.chunk_size.get() as usize)
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to init zstd decoder: {e}")))?;
+
+        // Prealloc buffer for decompressed data
+        let mut decompressed_chunk = Vec::new();
+
         while let Some((h, chunk)) = stream.next().await.transpose()? {
             let guard = scopeguard::guard(h, |handle| {
                 handle.reject();
@@ -471,11 +478,19 @@ impl BlockchainRpcClient {
                 downloaded = %bytesize::ByteSize::b(downloaded),
                 "got archive chunk"
             );
-            verifier.write_verify(&chunk).map_err(|e| {
+
+            decompressed_chunk.clear();
+            zstd_decoder
+                .write(chunk.as_ref(), &mut decompressed_chunk)
+                .map_err(|e| {
+                    Error::Internal(anyhow::anyhow!("Failed to decode archive chunk: {e}"))
+                })?;
+
+            verifier.write_verify(&decompressed_chunk).map_err(|e| {
                 Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))
             })?;
 
-            output.write_all(&chunk).await.map_err(|e| {
+            output.write_all(&decompressed_chunk).await.map_err(|e| {
                 Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
             })?;
 
