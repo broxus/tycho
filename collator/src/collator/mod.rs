@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use error::CollatorError;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use execution_manager::ExecutionManager;
@@ -32,9 +33,12 @@ use crate::{method_to_queued_async_closure, tracing_targets};
 
 mod build_block;
 mod do_collate;
+mod error;
 mod execution_manager;
 mod mq_iterator_adapter;
 mod types;
+
+pub use error::CollationCancelReason;
 
 // FACTORY
 
@@ -83,6 +87,13 @@ pub trait CollatorEventListener: Send + Sync {
         next_block_id_short: BlockIdShort,
         anchor_chain_time: u64,
         force_mc_block: bool,
+    ) -> Result<()>;
+    /// Handle when collator action was cancelled
+    async fn on_cancelled(
+        &self,
+        prev_mc_block_id: BlockId,
+        next_block_id_short: BlockIdShort,
+        cancel_reason: CollationCancelReason,
     ) -> Result<()>;
     /// Process new collated shard or master block
     async fn on_block_candidate(&self, collation_result: BlockCollationResult) -> Result<()>;
@@ -305,7 +316,7 @@ impl CollatorStdImpl {
                 working_state.prev_shard_data.gen_chain_time(),
             );
 
-            let anchors_info = Self::import_anchors_on_init(
+            let anchors_info = match Self::import_anchors_on_init(
                 processed_to_anchor_id,
                 processed_to_msgs_offset as _,
                 working_state.prev_shard_data.gen_chain_time(),
@@ -313,7 +324,20 @@ impl CollatorStdImpl {
                 &mut self.anchors_cache,
                 self.mpool_adapter.clone(),
             )
-            .await?;
+            .await
+            {
+                Err(CollatorError::Cancelled(reason)) => {
+                    self.listener
+                        .on_cancelled(
+                            working_state.mc_data.block_id,
+                            working_state.next_block_id_short,
+                            reason,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                res => res?,
+            };
 
             tracing::debug!(target: tracing_targets::COLLATOR,
                 elapsed = timer.elapsed().as_millis(),
@@ -345,82 +369,93 @@ impl CollatorStdImpl {
         reset: bool,
         prev_blocks_ids: Vec<BlockId>,
     ) -> Result<()> {
-        let mut working_state = self.working_state.wait().await?;
+        let working_state = if !reset {
+            let mut working_state = self.working_state.wait().await?;
 
-        // update mc_data if newer
-        if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
-            working_state.mc_data = mc_data;
+            // update mc_data if newer
+            if working_state.mc_data.block_id.seqno < mc_data.block_id.seqno {
+                working_state.mc_data = mc_data;
 
-            if working_state.has_pending_internals == Some(false) {
-                working_state.has_pending_internals = None;
+                if working_state.has_pending_internals == Some(false) {
+                    working_state.has_pending_internals = None;
+                }
             }
 
-            // reset state if required
-            if reset {
-                self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
+                "resume collation without reset",
+            );
 
-                let span = tracing::Span::current();
-                span.record("new_next_block_id", display(self.next_block_info));
+            working_state
+        } else {
+            self.next_block_info = Self::calc_next_block_id_short(&prev_blocks_ids);
 
-                tracing::debug!(target: tracing_targets::COLLATOR,
-                    mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
-                    prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
-                    "resume collation with reset",
-                );
+            let span = tracing::Span::current();
+            span.record("new_next_block_id", display(self.next_block_info));
 
-                // reload prev data
-                working_state = Self::init_working_state(
-                    self.state_node_adapter.clone(),
-                    working_state.mc_data,
-                    prev_blocks_ids,
-                )
-                .await?;
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                mc_data_block_id = %mc_data.block_id.as_short_id(),
+                prev_blocks_ids = %DisplayBlockIdsSlice(&prev_blocks_ids),
+                "resume collation with reset",
+            );
 
-                // calc last processed to anchor
-                let ext_processed_to_opt =
-                    Self::try_calc_last_processed_to_anchor_info(&working_state)?;
-
-                // import anchors
-                if let Some((processed_to_anchor_id, processed_to_msgs_offset)) =
-                    ext_processed_to_opt
-                {
-                    let timer = std::time::Instant::now();
-
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        "import anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
-                        processed_to_anchor_id, processed_to_msgs_offset,
-                        working_state.prev_shard_data.gen_chain_time(),
-                    );
-
-                    let anchors_info = Self::import_anchors_on_init(
-                        processed_to_anchor_id,
-                        processed_to_msgs_offset as _,
-                        working_state.prev_shard_data.gen_chain_time(),
-                        self.shard_id,
-                        &mut self.anchors_cache,
-                        self.mpool_adapter.clone(),
-                    )
+            // reload prev data
+            let working_state =
+                Self::init_working_state(self.state_node_adapter.clone(), mc_data, prev_blocks_ids)
                     .await?;
 
-                    tracing::debug!(target: tracing_targets::COLLATOR,
-                        elapsed = timer.elapsed().as_millis(),
-                        "imported anchors on resume: {:?}",
-                        anchors_info.as_slice(),
-                    );
-                }
+            // calc last processed to anchor
+            let ext_processed_to_opt =
+                Self::try_calc_last_processed_to_anchor_info(&working_state)?;
 
-                // reset exec manager with msgs buffer
+            // import anchors
+            if let Some((processed_to_anchor_id, processed_to_msgs_offset)) = ext_processed_to_opt {
+                let timer = std::time::Instant::now();
+
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    "reset exec manager with msgs buffer",
+                    "import anchors from processed to anchor ({}) with offset ({}) to chain_time {}",
+                    processed_to_anchor_id, processed_to_msgs_offset,
+                    working_state.prev_shard_data.gen_chain_time(),
                 );
-                self.init_exec_manager();
-            } else {
+
+                let anchors_info = match Self::import_anchors_on_init(
+                    processed_to_anchor_id,
+                    processed_to_msgs_offset as _,
+                    working_state.prev_shard_data.gen_chain_time(),
+                    self.shard_id,
+                    &mut self.anchors_cache,
+                    self.mpool_adapter.clone(),
+                )
+                .await
+                {
+                    Err(CollatorError::Cancelled(reason)) => {
+                        self.listener
+                            .on_cancelled(
+                                working_state.mc_data.block_id,
+                                working_state.next_block_id_short,
+                                reason,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                    res => res?,
+                };
+
                 tracing::debug!(target: tracing_targets::COLLATOR,
-                    mc_data_block_id = %working_state.mc_data.block_id.as_short_id(),
-                    "resume collation without reset",
+                    elapsed = timer.elapsed().as_millis(),
+                    "imported anchors on resume: {:?}",
+                    anchors_info.as_slice(),
                 );
             }
-        }
+
+            // reset exec manager with msgs buffer
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "reset exec manager with msgs buffer",
+            );
+            self.init_exec_manager();
+
+            working_state
+        };
 
         if self.shard_id.is_masterchain() {
             self.try_collate_next_master_block_impl(working_state).await
@@ -629,7 +664,7 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
-    ) -> Result<(Arc<MempoolAnchor>, bool)> {
+    ) -> Result<(Arc<MempoolAnchor>, bool), CollatorError> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         let _histogram =
@@ -641,7 +676,11 @@ impl CollatorStdImpl {
             .get_last_imported_anchor_id_and_ct()
             .unwrap_or_default();
 
-        let next_anchor = mpool_adapter.get_next_anchor(id).await?.unwrap();
+        let Some(next_anchor) = mpool_adapter.get_next_anchor(id).await? else {
+            return Err(CollatorError::Cancelled(
+                CollationCancelReason::NextAnchorNotFound(id),
+            ));
+        };
 
         let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
 
@@ -678,7 +717,7 @@ impl CollatorStdImpl {
         shard_id: ShardIdent,
         anchors_cache: &mut AnchorsCache,
         mpool_adapter: Arc<dyn MempoolAdapter>,
-    ) -> Result<Vec<AnchorInfo>> {
+    ) -> Result<Vec<AnchorInfo>, CollatorError> {
         let labels = [("workchain", shard_id.workchain().to_string())];
 
         let mut anchors_info = vec![];
@@ -703,10 +742,14 @@ impl CollatorStdImpl {
 
             anchor
         } else {
-            let next_anchor = mpool_adapter
+            let Some(next_anchor) = mpool_adapter
                 .get_anchor_by_id(processed_to_anchor_id)
                 .await?
-                .unwrap();
+            else {
+                return Err(CollatorError::Cancelled(
+                    CollationCancelReason::AnchorNotFound(processed_to_anchor_id),
+                ));
+            };
 
             let our_exts_count =
                 next_anchor.count_externals_for(&shard_id, processed_to_msgs_offset);
@@ -723,10 +766,12 @@ impl CollatorStdImpl {
         let mut prev_anchor_id = next_anchor.id;
 
         while last_block_chain_time > last_imported_anchor_ct {
-            next_anchor = mpool_adapter
-                .get_next_anchor(prev_anchor_id)
-                .await?
-                .unwrap();
+            let Some(anchor) = mpool_adapter.get_next_anchor(prev_anchor_id).await? else {
+                return Err(CollatorError::Cancelled(
+                    CollationCancelReason::NextAnchorNotFound(prev_anchor_id),
+                ));
+            };
+            next_anchor = anchor;
 
             let our_exts_count = next_anchor.count_externals_for(&shard_id, 0);
             our_exts_count_total += our_exts_count;

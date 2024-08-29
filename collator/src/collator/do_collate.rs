@@ -72,6 +72,7 @@ impl CollatorStdImpl {
             .get_last_imported_anchor_ct_and_author()
             .unwrap();
 
+        // TODO: need to generate unique for each block
         // generate seed from the chain_time from the anchor
         let hash_bytes = sha2::Sha256::digest(next_chain_time.to_be_bytes());
         let rand_seed = HashBytes::from_slice(hash_bytes.as_slice());
