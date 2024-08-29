@@ -9,17 +9,19 @@ use tycho_core::blockchain_rpc::BlockchainRpcClient;
 use tycho_core::overlay_client::{PublicOverlayClient, PublicOverlayClientConfig};
 use tycho_network::PeerId;
 
-mod common;
+mod network;
+mod storage;
+mod utils;
 
 #[tokio::test]
 async fn storage_block_strider() -> anyhow::Result<()> {
     tycho_util::test::init_logger("storage_block_strider", "info");
 
-    let (storage, _tmp_dir) = common::storage::init_storage().await?;
+    let (storage, _tmp_dir) = storage::init_storage().await?;
 
     let storage_provider = StorageBlockProvider::new(storage);
 
-    let archive = common::storage::get_archive()?;
+    let (archive, _) = utils::get_archive_with_data("archive.bin", false).await?;
     for (block_id, data) in archive.blocks {
         if block_id.shard.is_masterchain() {
             let block = storage_provider.get_block(&block_id).await;
@@ -50,10 +52,10 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         known_by: usize,
     }
 
-    let (storage, tmp_dir) = common::storage::init_storage().await?;
+    let (storage, tmp_dir) = storage::init_storage().await?;
 
     const NODE_COUNT: usize = 10;
-    let nodes = common::node::make_network(storage.clone(), NODE_COUNT);
+    let nodes = network::make_network(storage.clone(), NODE_COUNT);
 
     tracing::info!("discovering nodes");
     loop {
@@ -122,7 +124,7 @@ async fn overlay_block_strider() -> anyhow::Result<()> {
         .build();
     let provider = BlockchainBlockProvider::new(client, storage.clone(), Default::default());
 
-    let archive = common::storage::get_archive()?;
+    let (archive, _) = utils::get_archive_with_data("archive.bin", false).await?;
     for block_id in archive.mc_block_ids.values() {
         let block = provider.get_block(block_id).await;
         assert!(block.is_some());
