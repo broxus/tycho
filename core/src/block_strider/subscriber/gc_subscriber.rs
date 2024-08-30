@@ -1,16 +1,19 @@
+use std::collections::HashMap;
 use std::pin::pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use everscale_types::models::BlockId;
+use anyhow::{Context, Result};
+use everscale_types::models::{BlockId, PrevBlockRef, ShardIdent};
 use rand::Rng;
 use scopeguard::defer;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
+use tycho_block_util::queue::{QueueDiff, QueueKey, QueueState};
+use tycho_block_util::state::is_persistent_state;
 use tycho_storage::{BlocksGcType, Storage};
 use tycho_util::metrics::HistogramGuard;
 
@@ -39,6 +42,11 @@ impl GcSubscriber {
             .find_last_key_block()
             .map_or(0, |handle| handle.id().seqno);
 
+        let last_key_block_utime = storage
+            .block_handle_storage()
+            .find_last_key_block()
+            .map_or(0, |handle| handle.meta().gen_utime());
+
         let (tick_tx, tick_rx) = watch::channel(None::<Tick>);
 
         let (archives_gc_trigger, archives_gc_rx) = watch::channel(None::<ManualGcTrigger>);
@@ -62,6 +70,7 @@ impl GcSubscriber {
             inner: Arc::new(Inner {
                 tick_tx,
                 last_key_block_seqno: AtomicU32::new(last_key_block_seqno),
+                last_key_block_utime: AtomicU32::new(last_key_block_utime),
 
                 archives_gc_trigger,
                 blocks_gc_trigger,
@@ -70,6 +79,7 @@ impl GcSubscriber {
                 archive_gc_handle: archives_gc.abort_handle(),
                 blocks_gc_handle: blocks_gc.abort_handle(),
                 states_gc_handle: states_gc.abort_handle(),
+                storage: storage.clone(),
             }),
         }
     }
@@ -92,6 +102,21 @@ impl GcSubscriber {
         }
 
         if is_key_block {
+            let key_block_utime = block.block().load_info().unwrap().gen_utime;
+
+            if is_persistent_state(
+                key_block_utime,
+                self.inner.last_key_block_utime.load(Ordering::Relaxed),
+            ) && block.id().seqno != 0
+            {
+                let prev_key_block_seqno = self.inner.last_key_block_seqno.load(Ordering::Relaxed);
+                self.save_queue_persistent_state(block, prev_key_block_seqno);
+            }
+
+            self.inner
+                .last_key_block_utime
+                .store(key_block_utime, Ordering::Relaxed);
+
             self.inner
                 .last_key_block_seqno
                 .store(block.id().seqno, Ordering::Relaxed);
@@ -101,6 +126,41 @@ impl GcSubscriber {
             last_key_block_seqno: self.inner.last_key_block_seqno.load(Ordering::Relaxed),
             mc_block_id: *block.id(),
         }));
+    }
+
+    fn save_queue_persistent_state(&self, block: &BlockStuff, previous_key_block_seqno: u32) {
+        let cloned_storage = self.inner.storage.clone();
+        let cloned_block = block.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = async {
+                // Load the queue states
+                let states = load_queue_states(&cloned_block, &cloned_storage).await?;
+
+                // Store the persistent queue state
+                cloned_storage
+                    .persistent_state_storage()
+                    .store_persistent_queue_state(cloned_block.id().seqno, states)
+                    .await?;
+
+                // Cleanup the previous key block state
+                cloned_storage
+                    .persistent_state_storage()
+                    .cleanup_queue_state(previous_key_block_seqno)
+                    .context("failed to cleanup queue state")?;
+
+                Ok::<(), anyhow::Error>(())
+            }
+            .await
+            {
+                tracing::error!("failed to save queue persistent state: {e:?}");
+            } else {
+                tracing::info!(
+                    "successfully saved queue persistent state for block seqno {}",
+                    cloned_block.id().seqno
+                );
+            }
+        });
     }
 
     #[tracing::instrument(skip_all)]
@@ -378,6 +438,7 @@ impl GcSubscriber {
 struct Inner {
     tick_tx: TickTx,
     last_key_block_seqno: AtomicU32,
+    last_key_block_utime: AtomicU32,
 
     archives_gc_trigger: ManualTriggerTx,
     blocks_gc_trigger: ManualTriggerTx,
@@ -386,6 +447,7 @@ struct Inner {
     blocks_gc_handle: AbortHandle,
     states_gc_handle: AbortHandle,
     archive_gc_handle: AbortHandle,
+    storage: Storage,
 }
 
 impl Drop for Inner {
@@ -477,4 +539,157 @@ impl BlockSubscriber for GcSubscriber {
         self.handle_impl(cx.is_key_block, &cx.block);
         futures_util::future::ready(Ok(()))
     }
+}
+
+async fn load_queue_states(mc_block: &BlockStuff, storage: &Storage) -> Result<Vec<QueueState>> {
+    let mc_block_id = mc_block.id();
+
+    // Load the main shard state
+    let mc_state = storage
+        .shard_state_storage()
+        .load_state(mc_block_id)
+        .await?;
+
+    // Prepare to store top block IDs and corresponding BlockStuff
+    let mut mc_top_blocks_ids = HashMap::<ShardIdent, BlockId>::new();
+    let mut mc_top_blocks = HashMap::<ShardIdent, BlockStuff>::new();
+
+    // Populate mc_top_blocks_ids with shard identifiers
+    for item in mc_state.shards()?.iter() {
+        let (shard_ident, shard_descr) = item?;
+        if shard_descr.seqno != 0 {
+            mc_top_blocks_ids.insert(shard_ident, BlockId {
+                shard: shard_ident,
+                seqno: shard_descr.seqno,
+                root_hash: shard_descr.root_hash,
+                file_hash: shard_descr.file_hash,
+            });
+        }
+    }
+    // Include the main block in the top blocks
+    mc_top_blocks_ids.insert(mc_block_id.shard, *mc_block_id);
+
+    // Initialize the map for tracking the minimum processed queue keys
+    let mut min_processed_uptos = HashMap::<ShardIdent, QueueKey>::new();
+
+    // Process each shard's top block to find the minimum processed queue keys
+    for (shard, top_block_id) in &mc_top_blocks_ids {
+        let top_block_handle = storage
+            .block_handle_storage()
+            .load_handle(top_block_id)
+            .context(format!(
+                "Failed to load handle for top block: {:?}",
+                top_block_id
+            ))?;
+        let top_block_stuff = storage
+            .block_storage()
+            .load_block_data(&top_block_handle)
+            .await?;
+
+        mc_top_blocks.insert(*shard, top_block_stuff);
+
+        if let Ok(top_block_diff) = storage
+            .block_storage()
+            .load_queue_diff(&top_block_handle)
+            .await
+        {
+            for (shard_ident, queue_key) in top_block_diff.diff().processed_upto.iter() {
+                if queue_key.lt != 0 {
+                    min_processed_uptos
+                        .entry(*shard_ident)
+                        .and_modify(|last_key| {
+                            if queue_key < last_key {
+                                *last_key = *queue_key;
+                            }
+                        })
+                        .or_insert_with(|| *queue_key);
+                }
+            }
+        } else {
+            tracing::warn!(
+                "Failed to load queue diff for top block: {:?}",
+                top_block_id
+            );
+        }
+    }
+
+    // Track the diff states for each shard
+    let mut shard_diffs_state = HashMap::<ShardIdent, (u32, Vec<QueueDiff>)>::new();
+
+    for (shard_ident, processed_upto_queue_key) in min_processed_uptos {
+        let block_id = mc_top_blocks_ids.get(&shard_ident).context(format!(
+            "Failed to find top block for shard: {:?}",
+            shard_ident
+        ))?;
+        let mut block_handle = storage
+            .block_handle_storage()
+            .load_handle(block_id)
+            .context(format!(
+                "Failed to load handle for top block: {:?}",
+                block_id
+            ))?;
+        let mut diffs = Vec::new();
+        let mut block_stuff = mc_top_blocks
+            .get(&shard_ident)
+            .context(format!(
+                "Failed to find top block stuff for shard: {:?}",
+                shard_ident
+            ))?
+            .clone();
+
+        loop {
+            let diff = storage
+                .block_storage()
+                .load_queue_diff(&block_handle)
+                .await?;
+            diffs.push(diff.diff().clone());
+
+            let prev_block_ref = block_stuff.load_info()?.load_prev_ref()?;
+
+            match prev_block_ref {
+                PrevBlockRef::Single(prev_block) => {
+                    if prev_block.seqno == 0 || prev_block.end_lt <= processed_upto_queue_key.lt {
+                        break;
+                    }
+
+                    let block_id = BlockId {
+                        shard: shard_ident,
+                        seqno: prev_block.seqno,
+                        root_hash: prev_block.root_hash,
+                        file_hash: prev_block.file_hash,
+                    };
+
+                    block_handle = storage
+                        .block_handle_storage()
+                        .load_handle(&block_id)
+                        .context(format!(
+                            "Failed to load handle for prev block: {:?}",
+                            block_id
+                        ))?;
+
+                    block_stuff = storage
+                        .block_storage()
+                        .load_block_data(&block_handle)
+                        .await?;
+                }
+                PrevBlockRef::AfterMerge { .. } => {
+                    return Err(anyhow::anyhow!("Split/Merge is not supported"));
+                }
+            }
+        }
+
+        shard_diffs_state.insert(shard_ident, (block_id.seqno, diffs));
+    }
+
+    // Convert shard diffs into QueueState objects
+    let states = shard_diffs_state
+        .into_iter()
+        .map(|(shard_ident, (seqno, queue_diffs))| QueueState {
+            shard_ident,
+            seqno,
+            queue_diffs,
+        })
+        .collect();
+
+    Ok(states)
 }

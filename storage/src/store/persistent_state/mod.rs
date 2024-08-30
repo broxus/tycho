@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use everscale_types::models::BlockId;
 use parking_lot::Mutex;
 use tokio::time::Instant;
 use tycho_block_util::block::KEY_BLOCK_UTIME_STEP;
+use tycho_block_util::queue::QueueState;
 use tycho_util::sync::rayon_run;
 
 use crate::db::{BaseDb, FileDb, MappedFile};
@@ -17,8 +19,11 @@ use crate::models::BlockHandle;
 use crate::store::BlockHandleStorage;
 
 mod state_writer;
+// mod queue_state_writer;
 
 const BASE_DIR: &str = "states";
+const QUEUE_STATE_FILE_EXTENSION: &str = "queue";
+const QUEUE_STATE_TMP_FILE_EXTENSION: &str = "queue_tmp";
 
 pub struct PersistentStateStorage {
     db: BaseDb,
@@ -127,6 +132,33 @@ impl PersistentStateStorage {
         .await;
 
         self.cache_state(handle)
+    }
+
+    pub async fn store_persistent_queue_state(
+        &self,
+        mc_seqno: u32,
+        states: Vec<QueueState>,
+    ) -> Result<()> {
+        let dir = self.mc_states_dir(mc_seqno);
+        rayon_run({
+            let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
+            move || {
+                let result = state_writer::QueueStateWriter::new(&states_dir, &states).write();
+                if let Err(e) = result {
+                    tracing::error!(mc_seqno, "failed to write queue state: {e:?}");
+                    // cleanup if something was created
+                    Self::remove_file_by_extension(&dir, QUEUE_STATE_TMP_FILE_EXTENSION)?;
+                    Self::remove_file_by_extension(&dir, QUEUE_STATE_FILE_EXTENSION)?;
+                }
+                Ok(())
+            }
+        })
+        .await
+    }
+
+    pub fn cleanup_queue_state(&self, mc_seqno: u32) -> Result<()> {
+        let dir = self.mc_states_dir(mc_seqno);
+        Self::remove_file_by_extension(&dir, QUEUE_STATE_FILE_EXTENSION)
     }
 
     pub fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<FileDb> {
@@ -336,6 +368,17 @@ impl PersistentStateStorage {
 
     fn mc_states_dir(&self, mc_seqno: u32) -> FileDb {
         FileDb::new_readonly(self.storage_dir.path().join(mc_seqno.to_string()))
+    }
+
+    pub fn remove_file_by_extension(dir: &FileDb, extension: &str) -> Result<()> {
+        for entry in fs::read_dir(dir.path())? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some(extension) {
+                fs::remove_file(&path)?;
+            }
+        }
+        Ok(())
     }
 }
 

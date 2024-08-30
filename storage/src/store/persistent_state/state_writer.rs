@@ -1,15 +1,18 @@
 use std::collections::hash_map;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs;
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use everscale_types::cell::{CellDescriptor, HashBytes};
 use everscale_types::models::*;
 use smallvec::SmallVec;
+use tycho_block_util::queue::QueueState;
 use tycho_util::FastHashMap;
 
 use crate::db::{BaseDb, FileDb, TempFile};
+use crate::store::persistent_state::{QUEUE_STATE_FILE_EXTENSION, QUEUE_STATE_TMP_FILE_EXTENSION};
 
 pub struct StateWriter<'a> {
     db: &'a BaseDb,
@@ -398,4 +401,80 @@ enum CellWriterError {
     CellNotFound,
     #[error("Invalid cell")]
     InvalidCell,
+}
+
+pub struct QueueStateWriter<'a> {
+    states_dir: &'a FileDb,
+    states: &'a [QueueState],
+}
+
+impl<'a> QueueStateWriter<'a> {
+    pub fn new(states_dir: &'a FileDb, states: &'a [QueueState]) -> Self {
+        Self { states_dir, states }
+    }
+
+    pub fn write(&self) -> Result<()> {
+        let mut created_files = Vec::with_capacity(self.states.len());
+
+        for state in self.states {
+            let serialized_state = tl_proto::serialize(state);
+            let file_size = serialized_state.len();
+
+            // Generate a temporary file name
+            let temp_file_name = format!(
+                "{:?}_{}.{}",
+                state.shard_ident, state.seqno, QUEUE_STATE_TMP_FILE_EXTENSION
+            );
+            let temp_file_path = self.states_dir.path().join(&temp_file_name);
+
+            // Create and write to the temporary file
+            let file = self
+                .states_dir
+                .file(&temp_file_path)
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .prealloc(file_size)
+                .open()
+                .with_context(|| {
+                    format!(
+                        "Failed to open temporary file: {}",
+                        temp_file_path.display()
+                    )
+                })?;
+
+            let mut buffer = BufWriter::with_capacity(FILE_BUFFER_LEN / 10, file);
+            if let Err(e) = buffer.write_all(&serialized_state) {
+                tracing::error!(
+                    "Failed to write to file {}: {}",
+                    temp_file_path.display(),
+                    e
+                );
+                bail!(e);
+            }
+
+            buffer.flush().with_context(|| {
+                format!(
+                    "Failed to flush buffer for file: {}",
+                    temp_file_path.display()
+                )
+            })?;
+
+            created_files.push(temp_file_path);
+        }
+
+        // Rename all temporary files to their final names with the .queue extension
+        for temp_file in &created_files {
+            let final_file_path = temp_file.with_extension(QUEUE_STATE_FILE_EXTENSION);
+            fs::rename(temp_file, &final_file_path).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    temp_file.display(),
+                    final_file_path.display()
+                )
+            })?;
+        }
+
+        Ok(())
+    }
 }

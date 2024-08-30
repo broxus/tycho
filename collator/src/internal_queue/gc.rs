@@ -18,7 +18,7 @@ pub struct GcManager {
 
 impl GcManager {
     pub fn start<V: InternalMessageValue>(
-        persistent_state: Arc<dyn PersistentState<V>>,
+        persistent_state: Arc<dyn PersistentState<V> + Send + Sync>,
         execution_interval: Duration,
     ) -> Self {
         let delete_until = Arc::new(Mutex::new(GcRange::new()));
