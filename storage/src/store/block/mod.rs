@@ -465,7 +465,7 @@ impl BlockStorage {
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
         let archive_size = self
             .get_archive_size(id)?
-            .ok_or(BlockStorageError::ArchiveNotFound)? as u64;
+            .ok_or(BlockStorageError::ArchiveNotFound(id))? as u64;
 
         if offset % ARCHIVE_CHUNK_SIZE != 0 || offset >= archive_size {
             return Err(BlockStorageError::InvalidOffset.into());
@@ -481,7 +481,7 @@ impl BlockStorage {
             .db
             .archives
             .get(key.as_slice())?
-            .ok_or(BlockStorageError::ArchiveNotFound)?;
+            .ok_or(BlockStorageError::ArchiveNotFound(id))?;
 
         Ok(chunk.to_vec())
     }
@@ -693,7 +693,7 @@ impl BlockStorage {
             let raw_block_ids = db
                 .archive_block_ids
                 .get(archive_id.to_be_bytes())?
-                .ok_or(BlockStorageError::ArchiveNotFound)?;
+                .ok_or(BlockStorageError::ArchiveNotFound(archive_id))?;
             assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
             let mut writer = ArchiveWriter::new(&db, archive_id, ARCHIVE_CHUNK_SIZE)?;
@@ -1060,8 +1060,8 @@ struct ArchiveId {
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
-    #[error("Archive not found")]
-    ArchiveNotFound,
+    #[error("Archive not found: {0}")]
+    ArchiveNotFound(u32),
     #[error("Block data not found")]
     BlockDataNotFound,
     #[error("Block proof not found")]

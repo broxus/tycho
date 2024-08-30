@@ -10,7 +10,8 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
     let blocks = storage.block_storage();
 
     // Init zerostate
-    let zerostate = utils::get_zerostate("zerostate.boc", false).await?;
+    let zerostate_data = utils::read_file("zerostate.boc")?;
+    let zerostate = utils::parse_zerostate(&zerostate_data)?;
 
     let (handle, _) =
         storage
@@ -27,7 +28,8 @@ pub(crate) async fn init_storage() -> Result<(Storage, TempDir)> {
         .await?;
 
     // Init blocks
-    let (block_provider, _) = utils::get_archive_with_data("archive.bin", false).await?;
+    let archive_data = utils::read_file("archive.bin")?;
+    let block_provider = utils::parse_archive(&archive_data)?;
 
     for block_id in block_provider.mc_block_ids.values() {
         let (block, proof, diff) = block_provider.get_entry_by_id(block_id)?;
