@@ -422,53 +422,94 @@ impl ShardDescriptionExt for ShardDescription {
     }
 }
 
-pub(super) struct DisplayFullBlockIdsSlice<'a, BID: ToString>(pub &'a [BID]);
+struct DebugDisplay<'a, T>(pub &'a T);
+impl<T: std::fmt::Display> std::fmt::Debug for DebugDisplay<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.0, f)
+    }
+}
 
-impl<BID: ToString> std::fmt::Debug for DisplayFullBlockIdsSlice<'_, BID> {
+pub(super) struct DisplaySlice<'a, T>(pub &'a [T]);
+impl<T: std::fmt::Display> std::fmt::Debug for DisplaySlice<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
-
-impl<BID: ToString> std::fmt::Display for DisplayFullBlockIdsSlice<'_, BID> {
+impl<T: std::fmt::Display> std::fmt::Display for DisplaySlice<'_, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut l = f.debug_list();
         for block_id in self.0 {
-            l.entry(&block_id.to_string());
+            l.entry(&DebugDisplay(block_id));
         }
         l.finish()
     }
 }
 
-pub(super) struct DisplayBlockIdsSlice<'a>(pub &'a [BlockId]);
+pub(super) struct DisplayAsShortId<'a>(pub &'a BlockId);
+impl std::fmt::Debug for DisplayAsShortId<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::fmt::Display for DisplayAsShortId<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.as_short_id())
+    }
+}
 
+pub(super) struct DisplayBlockIdsSlice<'a>(pub &'a [BlockId]);
 impl std::fmt::Debug for DisplayBlockIdsSlice<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
-
 impl std::fmt::Display for DisplayBlockIdsSlice<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut l = f.debug_list();
         for block_id in self.0 {
-            l.entry(&block_id.as_short_id().to_string());
+            l.entry(&DisplayAsShortId(block_id));
         }
         l.finish()
     }
 }
 
 pub(super) struct DisplayBlockIdsList(pub Vec<BlockId>);
-
 impl std::fmt::Debug for DisplayBlockIdsList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
     }
 }
-
 impl std::fmt::Display for DisplayBlockIdsList {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let slice = self.0.as_slice();
         std::fmt::Display::fmt(&DisplayBlockIdsSlice(slice), f)
+    }
+}
+
+pub(super) struct DisplayTuple2<'a, T1, T2>(pub (&'a T1, &'a T2));
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Debug for DisplayTuple2<'_, T1, T2> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl<T1: std::fmt::Display, T2: std::fmt::Display> std::fmt::Display for DisplayTuple2<'_, T1, T2> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, {})", self.0 .0, self.0 .1)
+    }
+}
+
+pub(super) struct DisplayBTreeMap<'a, K, V>(pub &'a BTreeMap<K, V>);
+impl<K: std::fmt::Display, V: std::fmt::Display> std::fmt::Debug for DisplayBTreeMap<'_, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl<K: std::fmt::Display, V: std::fmt::Display> std::fmt::Display for DisplayBTreeMap<'_, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut l = f.debug_list();
+        for kv in self.0.iter() {
+            l.entry(&DisplayTuple2(kv));
+        }
+        l.finish()
     }
 }
