@@ -84,7 +84,6 @@ impl PublicOverlayBuilder {
 
         let entries = PublicOverlayEntries {
             items: Default::default(),
-            peer_resolver: self.peer_resolver,
         };
 
         let entry_ttl_sec = self.entry_ttl.as_secs().try_into().unwrap_or(u32::MAX);
@@ -94,6 +93,7 @@ impl PublicOverlayBuilder {
                 overlay_id: self.overlay_id,
                 min_capacity: self.min_capacity,
                 entry_ttl_sec,
+                peer_resolver: self.peer_resolver,
                 entries: RwLock::new(entries),
                 entries_added: Notify::new(),
                 entries_changed: Notify::new(),
@@ -136,6 +136,10 @@ impl PublicOverlay {
 
     pub fn entry_ttl_sec(&self) -> u32 {
         self.inner.entry_ttl_sec
+    }
+
+    pub fn peer_resolver(&self) -> &Option<PeerResolver> {
+        &self.inner.peer_resolver
     }
 
     pub async fn query(
@@ -302,7 +306,7 @@ impl PublicOverlay {
                     continue;
                 }
 
-                let status = stored.insert(entry);
+                let status = stored.insert(&this.peer_resolver, entry);
                 changed |= status.is_changed();
                 added += status.is_added() as usize;
 
@@ -369,6 +373,7 @@ struct Inner {
     overlay_id: OverlayId,
     min_capacity: usize,
     entry_ttl_sec: u32,
+    peer_resolver: Option<PeerResolver>,
     entries: RwLock<PublicOverlayEntries>,
     entry_count: AtomicUsize,
     entries_added: Notify,
@@ -382,7 +387,6 @@ struct Inner {
 
 pub struct PublicOverlayEntries {
     items: OverlayItems,
-    peer_resolver: Option<PeerResolver>,
 }
 
 impl PublicOverlayEntries {
@@ -445,11 +449,11 @@ impl PublicOverlayEntries {
         self.choose_multiple(rng, self.items.len())
     }
 
-    fn insert(&mut self, item: &PublicEntry) -> UpdateStatus {
+    fn insert(&mut self, peer_resolver: &Option<PeerResolver>, item: &PublicEntry) -> UpdateStatus {
         match self.items.entry(item.peer_id) {
             // No entry for the peer_id, insert a new one
             indexmap::map::Entry::Vacant(entry) => {
-                let resolver_handle = self.peer_resolver.as_ref().map_or_else(
+                let resolver_handle = peer_resolver.as_ref().map_or_else(
                     || PeerResolverHandle::new_noop(&item.peer_id),
                     |resolver| resolver.insert(&item.peer_id, false),
                 );

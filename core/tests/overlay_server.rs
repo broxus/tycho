@@ -18,6 +18,7 @@ mod common;
 trait TestNode {
     fn network(&self) -> &Network;
     fn public_overlay(&self) -> &PublicOverlay;
+    fn force_update_validators(&self, peers: Vec<PeerId>);
 }
 
 impl TestNode for common::node::Node {
@@ -28,6 +29,8 @@ impl TestNode for common::node::Node {
     fn public_overlay(&self) -> &PublicOverlay {
         self.public_overlay()
     }
+
+    fn force_update_validators(&self, _: Vec<PeerId>) {}
 }
 
 async fn discover<N: TestNode>(nodes: &[N]) -> Result<()> {
@@ -97,7 +100,7 @@ struct PeerState {
 
 #[tokio::test]
 async fn overlay_server_msg_broadcast() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_msg_broadcast", "debug");
+    tycho_util::test::init_logger("overlay_server_msg_broadcast", "info");
 
     #[derive(Default, Clone)]
     struct BroadcastCounter {
@@ -145,13 +148,11 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
             base.overlay_service.add_public_overlay(&public_overlay);
 
             let dht_client = base.dht_service.make_client(&base.network);
+            let client =
+                PublicOverlayClient::new(base.network.clone(), public_overlay, Default::default());
 
             let blockchain_client = BlockchainRpcClient::builder()
-                .with_public_overlay_client(PublicOverlayClient::new(
-                    base.network.clone(),
-                    public_overlay,
-                    Default::default(),
-                ))
+                .with_public_overlay_client(client.clone())
                 .build();
 
             Self {
@@ -169,6 +170,12 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
 
         fn public_overlay(&self) -> &PublicOverlay {
             self.blockchain_client.overlay()
+        }
+
+        fn force_update_validators(&self, peers: Vec<PeerId>) {
+            self.blockchain_client
+                .overlay_client()
+                .update_validator_set(&peers);
         }
     }
 
@@ -191,25 +198,33 @@ async fn overlay_server_msg_broadcast() -> Result<()> {
 
     discover(&nodes).await?;
 
+    let peers = nodes
+        .iter()
+        .map(|x| *x.dht_client.network().peer_id())
+        .collect::<Vec<PeerId>>();
+
     tracing::info!("broadcasting messages...");
     for node in &nodes {
+        node.force_update_validators(peers.clone());
+
+        // NOTE: Yield is required to wait until validators are resolved.
+        //       Might fail on multi-threaded tests. In that cast use sleep.
+        tokio::task::yield_now().await;
+
         node.blockchain_client
             .broadcast_external_message(b"hello world")
             .await;
     }
+    let total_received = broadcast_counter.total_received.load(Ordering::Acquire);
 
-    // TODO: Replace `* 5` with a proper number of expected messages, possibly a range check
-    assert_eq!(
-        broadcast_counter.total_received.load(Ordering::Acquire),
-        nodes.len() * 5
-    );
+    assert!(total_received > nodes.len() * 4 && total_received <= nodes.len() * 5);
 
     Ok(())
 }
 
 #[tokio::test]
 async fn overlay_server_with_empty_storage() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_with_empty_storage", "debug");
+    tycho_util::test::init_logger("overlay_server_with_empty_storage", "info");
 
     let (storage, _tmp_dir) = Storage::new_temp()?;
 
@@ -273,7 +288,7 @@ async fn overlay_server_with_empty_storage() -> Result<()> {
 
 #[tokio::test]
 async fn overlay_server_blocks() -> Result<()> {
-    tycho_util::test::init_logger("overlay_server_blocks", "debug");
+    tycho_util::test::init_logger("overlay_server_blocks", "info");
 
     let (storage, _tmp_dir) = common::storage::init_storage().await?;
 

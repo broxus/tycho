@@ -9,11 +9,13 @@ use tycho_network::{Network, PublicOverlay, Request};
 pub use self::config::PublicOverlayClientConfig;
 pub use self::neighbour::{Neighbour, NeighbourStats};
 pub use self::neighbours::Neighbours;
+pub use self::validators::{Validator, ValidatorSetPeers, ValidatorsResolver};
 use crate::proto::overlay;
 
 mod config;
 mod neighbour;
 mod neighbours;
+mod validators;
 
 #[derive(Clone)]
 #[repr(transparent)]
@@ -42,12 +44,14 @@ impl PublicOverlayClient {
             .collect::<Vec<_>>();
 
         let neighbours = Neighbours::new(entries, config.max_neighbours);
+        let subscriber = ValidatorsResolver::new(overlay.peer_resolver().clone());
 
         let mut res = Inner {
             network,
             overlay,
             neighbours,
             config,
+            validators_resolver: subscriber,
             ping_task: None,
             update_task: None,
             cleanup_task: None,
@@ -72,6 +76,18 @@ impl PublicOverlayClient {
         &self.inner.neighbours
     }
 
+    pub fn update_validator_set<T: ValidatorSetPeers>(&self, vset: &T) {
+        self.inner.validators_resolver.update_validator_set(vset);
+    }
+
+    pub fn get_random_validators(&self, amount: usize) -> Vec<Validator> {
+        self.inner.validators_resolver.choose_multiple(amount)
+    }
+
+    pub fn validators_resolver(&self) -> &ValidatorsResolver {
+        &self.inner.validators_resolver
+    }
+
     pub fn overlay(&self) -> &PublicOverlay {
         &self.inner.overlay
     }
@@ -85,6 +101,14 @@ impl PublicOverlayClient {
         R: tl_proto::TlWrite<Repr = tl_proto::Boxed>,
     {
         self.inner.send(data).await
+    }
+
+    pub async fn send_to_validator(
+        &self,
+        validator: Validator,
+        data: Request,
+    ) -> Result<(), Error> {
+        self.inner.send_to_validator(validator.clone(), data).await
     }
 
     #[inline]
@@ -133,6 +157,8 @@ struct Inner {
     neighbours: Neighbours,
     config: PublicOverlayClientConfig,
 
+    validators_resolver: ValidatorsResolver,
+
     ping_task: Option<AbortHandle>,
     update_task: Option<AbortHandle>,
     cleanup_task: Option<AbortHandle>,
@@ -145,6 +171,7 @@ impl Clone for Inner {
             overlay: self.overlay.clone(),
             neighbours: self.neighbours.clone(),
             config: self.config.clone(),
+            validators_resolver: self.validators_resolver.clone(),
             ping_task: None,
             update_task: None,
             cleanup_task: None,
@@ -243,6 +270,14 @@ impl Inner {
         };
 
         self.send_impl(neighbour, Request::from_tl(data)).await
+    }
+
+    async fn send_to_validator(&self, validator: Validator, data: Request) -> Result<(), Error> {
+        let res = self
+            .overlay
+            .send(&self.network, &validator.peer_id(), data)
+            .await;
+        res.map_err(Error::NetworkError)
     }
 
     async fn query<R, A>(&self, data: R) -> Result<QueryResponse<A>, Error>
