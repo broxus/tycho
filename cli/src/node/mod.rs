@@ -256,14 +256,24 @@ fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Result
 fn init_metrics(config: &MetricsConfig) -> Result<()> {
     use metrics_exporter_prometheus::Matcher;
     const EXPONENTIAL_SECONDS: &[f64] = &[
-        0.000001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-        60.0, 120.0, 300.0, 600.0, 3600.0,
+        0.000001, 0.00001, 0.0001, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.75, 1.0, 2.5, 5.0,
+        7.5, 10.0, 30.0, 60.0, 120.0, 180.0, 240.0, 300.0,
     ];
+
+    const EXPONENTIAL_LONG_SECONDS: &[f64] = &[
+        0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0, 300.0, 600.0, 1800.0, 3600.0, 7200.0,
+        14400.0, 28800.0, 43200.0, 86400.0,
+    ];
+
     const EXPONENTIAL_THREADS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
 
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .set_buckets_for_metric(Matcher::Suffix("_time".to_string()), EXPONENTIAL_SECONDS)?
         .set_buckets_for_metric(Matcher::Suffix("_threads".to_string()), EXPONENTIAL_THREADS)?
+        .set_buckets_for_metric(
+            Matcher::Suffix("_time_long".to_string()),
+            EXPONENTIAL_LONG_SECONDS,
+        )?
         .with_http_listener(config.listen_addr)
         .install()
         .wrap_err("failed to initialize a metrics exporter")?;

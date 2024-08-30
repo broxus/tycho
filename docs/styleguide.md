@@ -595,6 +595,9 @@ metrics::histogram!("tycho_metric_name_time").record(elapsed_time)
 
 **Rationale:** The `_time` postfix is handled by the collector, which transforms it into a lightweight histogram. Otherwise, the collector will try to build a complex summary. [Read more](https://prometheus.io/docs/practices/histograms/#quantiles)
 
+> [!IMPORTANT]
+> Use '_time_long' postfix for long time measurements (e.g. 10 seconds or more).
+
 ### Metrics performance
 
 In most cases incrementing a metric is cheap enough never to give it a second thought. However accessing a metric with labels on a hot path needs to be done carefully.
