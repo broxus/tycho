@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 // Counters
-const METRIC_IN_REQ_TOTAL: &str = "tycho_rpc_in_req_total";
 const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
 
 pub trait ParseParams {
     type Params;
 
     fn parse_params(self, params: &RawValue) -> Result<Self::Params, serde_json::Error>;
+
+    fn method_name(&self) -> &'static str;
 }
 
 macro_rules! declare_jrpc_method {
@@ -37,6 +38,7 @@ macro_rules! declare_jrpc_method {
             )*
         }
 
+
         impl $crate::endpoint::jrpc::extractor::ParseParams for $method_name_enum {
             type Params = $method_enum;
 
@@ -44,6 +46,12 @@ macro_rules! declare_jrpc_method {
                 let params = params.get();
                 match self {
                     $(Self::$method_name => serde_json::from_str(params).map($method_enum::$method_name),)*
+                }
+            }
+
+             fn method_name(&self) -> &'static str {
+                match self {
+                    $(Self::$method_name => stringify!($method_name),)*
                 }
             }
         }
@@ -63,6 +71,7 @@ pub(crate) use declare_jrpc_method;
 pub struct Jrpc<T: ParseParams> {
     pub id: i64,
     pub params: <T as ParseParams>::Params,
+    pub method: &'static str,
 }
 
 #[async_trait]
@@ -74,8 +83,6 @@ where
     type Rejection = JrpcErrorResponse;
 
     async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        metrics::counter!(METRIC_IN_REQ_TOTAL).increment(1);
-
         #[derive(Deserialize)]
         enum Unknown {
             #[serde(other)]
@@ -111,10 +118,19 @@ where
 
         let (id, code, message) = match serde_json::from_slice::<Request<'_, T>>(&bytes) {
             Ok(req) if req.jsonrpc == JSONRPC_VERSION => match req.method {
-                ParsedMethod::Known(method) => match method.parse_params(req.params) {
-                    Ok(params) => return Ok(Self { id: req.id, params }),
-                    Err(e) => (Some(req.id), INVALID_PARAMS_CODE, e.to_string().into()),
-                },
+                ParsedMethod::Known(known) => {
+                    let method = known.method_name();
+                    match known.parse_params(req.params) {
+                        Ok(params) => {
+                            return Ok(Self {
+                                id: req.id,
+                                method,
+                                params,
+                            })
+                        }
+                        Err(e) => (Some(req.id), INVALID_PARAMS_CODE, e.to_string().into()),
+                    }
+                }
                 ParsedMethod::Unknown(Unknown::Unknown) => {
                     (Some(req.id), METHOD_NOT_FOUND_CODE, "unknown method".into())
                 }
