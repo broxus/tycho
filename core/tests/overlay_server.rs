@@ -7,6 +7,7 @@ use anyhow::Result;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tycho_block_util::block::{BlockProofStuff, BlockStuff};
+use tycho_block_util::queue::QueueDiffStuff;
 use tycho_core::blockchain_rpc::{BlockchainRpcClient, BlockchainRpcService, BroadcastListener};
 use tycho_core::overlay_client::PublicOverlayClient;
 use tycho_core::proto::blockchain::{BlockFull, KeyBlockIds, PersistentStateInfo};
@@ -310,11 +311,16 @@ async fn overlay_server_blocks() -> Result<()> {
         ))
         .build();
 
-    let (archive, _) = utils::get_archive_with_data("archive.bin", false).await?;
-    for (block_id, archive_data) in archive.blocks {
+    let archive_data = utils::read_file("archive.bin")?;
+    let archive = utils::parse_archive(&archive_data)?;
+
+    for block_id in archive.blocks.keys() {
         if block_id.shard.is_masterchain() {
-            let result = client.get_block_full(&block_id).await;
+            let result = client.get_block_full(block_id).await;
             assert!(result.is_ok());
+
+            let (archive_block, archive_proof, archive_queue_diff) =
+                archive.get_entry_by_id(block_id)?;
 
             if let Ok(response) = &result {
                 match response.data() {
@@ -322,23 +328,17 @@ async fn overlay_server_blocks() -> Result<()> {
                         block_id,
                         block,
                         proof,
-                        ..
+                        queue_diff,
                     } => {
                         let block = BlockStuff::deserialize_checked(block_id, block)?;
-
-                        let archive_block = BlockStuff::deserialize_checked(
-                            block_id,
-                            archive_data.block.unwrap().as_ref(),
-                        )?;
                         assert_eq!(block.as_ref(), archive_block.block());
 
                         let proof = BlockProofStuff::deserialize(block_id, proof)?;
-
-                        let proof_data = archive_data.proof.unwrap();
-                        let archive_proof =
-                            BlockProofStuff::deserialize(block_id, proof_data.as_ref())?;
                         assert_eq!(proof.as_ref().proof_for, archive_proof.as_ref().proof_for);
                         assert_eq!(proof.as_ref().root, archive_proof.as_ref().root);
+
+                        let queue_diff = QueueDiffStuff::deserialize(block_id, queue_diff)?;
+                        assert_eq!(queue_diff.diff(), archive_queue_diff.diff());
                     }
                     BlockFull::NotFound => anyhow::bail!("block not found"),
                 }

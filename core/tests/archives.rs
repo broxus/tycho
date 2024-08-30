@@ -3,14 +3,15 @@ use bytesize::ByteSize;
 use everscale_types::models::{BlockId, ShardStateUnsplit};
 use everscale_types::prelude::*;
 use futures_util::future;
-use itertools::Itertools;
+use futures_util::future::BoxFuture;
 use tycho_block_util::archive::Archive;
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::block_strider::{
-    BlockSubscriber, BlockSubscriberContext, ShardStateApplier, StateSubscriber,
-    StateSubscriberContext,
+    BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
+    ProofChecker, ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
 use tycho_storage::{ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
+use tycho_util::project_root;
 
 mod utils;
 
@@ -25,90 +26,49 @@ impl StateSubscriber for DummySubscriber {
     }
 }
 
-async fn apply_archive<S>(
+pub struct ArchiveProvider {
     archive: Archive,
-    storage: &Storage,
-    state_applier: &ShardStateApplier<S>,
-) -> Result<()>
-where
-    S: StateSubscriber,
-{
-    for block_id in archive.mc_block_ids.values() {
-        apply_block(block_id, block_id, &archive, storage, state_applier).await?;
+    proof_checker: ProofChecker,
+}
 
-        for (id, _) in archive
-            .blocks
-            .iter()
-            .sorted_by_key(|(&block_id, _)| block_id)
+impl ArchiveProvider {
+    async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
+        let (block, proof, diff) = match self.archive.get_entry_by_id(block_id) {
+            Ok(entry) => entry,
+            Err(e) => return Some(Err(e.into())),
+        };
+
+        match self
+            .proof_checker
+            .check_proof(&block, &proof, &diff, true)
+            .await
         {
-            if !id.is_masterchain() {
-                let block = archive.get_block_by_id(id)?;
-                let block_info = block.block().load_info()?;
-                if block_info.min_ref_mc_seqno == block_id.seqno {
-                    apply_block(id, block_id, &archive, storage, state_applier).await?;
-                }
-            }
+            Ok(_) => Some(Ok(block.clone())),
+            Err(e) => Some(Err(e)),
         }
     }
-    Ok(())
 }
 
-async fn apply_block<S>(
-    block_id: &BlockId,
-    mc_block_id: &BlockId,
-    archive: &Archive,
-    storage: &Storage,
-    state_applier: &ShardStateApplier<S>,
-) -> Result<()>
-where
-    S: StateSubscriber,
-{
-    let (block, proof, diff) = archive.get_entry_by_id(block_id)?;
+impl BlockProvider for ArchiveProvider {
+    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
-    let block_info = block.block().load_info()?;
+    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
+        let id = match self.archive.mc_block_ids.get(&(prev_block_id.seqno + 1)) {
+            Some(id) => id,
+            None => return Box::pin(futures_util::future::ready(None)),
+        };
 
-    let cx = BlockSubscriberContext {
-        mc_block_id: *mc_block_id,
-        is_key_block: block_info.key_block,
-        block: block.data,
-        archive_data: block.archive_data,
-    };
+        self.get_block(id)
+    }
 
-    let prepared = state_applier.prepare_block(&cx).await?;
-    state_applier.handle_block(&cx, prepared).await?;
-
-    let handle = storage
-        .block_handle_storage()
-        .load_handle(block_id)
-        .unwrap();
-
-    let handle = storage
-        .block_storage()
-        .store_block_proof(&proof, handle.into())
-        .await?
-        .handle;
-
-    storage
-        .block_storage()
-        .store_queue_diff(&diff, handle.into())
-        .await?;
-
-    Ok(())
+    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+        Box::pin(self.get_block_impl(block_id))
+    }
 }
 
-async fn prepare_storage(zerostate: ShardStateStuff) -> Result<(Storage, tempfile::TempDir)> {
-    let tmp_dir = tempfile::tempdir()?;
-    let storage = Storage::builder()
-        .with_config(StorageConfig {
-            root_dir: tmp_dir.path().to_owned(),
-            rocksdb_lru_capacity: ByteSize::kb(1024),
-            cells_cache_size: ByteSize::kb(1024),
-            rocksdb_enable_metrics: false,
-            archives_gc: Some(ArchivesGcConfig::default()),
-            states_gc: None,
-            blocks_gc: None,
-        })
-        .build()?;
+async fn prepare_storage(config: StorageConfig, zerostate: ShardStateStuff) -> Result<Storage> {
+    let storage = Storage::builder().with_config(config).build()?;
 
     let (handle, _) =
         storage
@@ -168,16 +128,31 @@ async fn prepare_storage(zerostate: ShardStateStuff) -> Result<(Storage, tempfil
             .await?;
     }
 
-    Ok((storage, tmp_dir))
+    Ok(storage)
 }
 
 #[tokio::test]
 async fn archives() -> Result<()> {
     tycho_util::test::init_logger("archives", "debug");
 
+    // Prepare directory
+    let tmp_dir = tempfile::tempdir()?;
+
     // Init storage
-    let zerostate = utils::get_zerostate("zerostate.boc", false).await?;
-    let (storage, _temp_dir) = prepare_storage(zerostate).await?;
+    let config = StorageConfig {
+        root_dir: tmp_dir.path().to_owned(),
+        rocksdb_lru_capacity: ByteSize::kb(1024),
+        cells_cache_size: ByteSize::kb(1024),
+        rocksdb_enable_metrics: false,
+        archives_gc: Some(ArchivesGcConfig::default()),
+        states_gc: None,
+        blocks_gc: None,
+    };
+
+    let zerostate_data = utils::read_file("zerostate.boc")?;
+    let zerostate = utils::parse_zerostate(&zerostate_data)?;
+    let zerostate_id = *zerostate.block_id();
+    let storage = prepare_storage(config, zerostate).await?;
 
     // Init state applier
     let state_tracker = MinRefMcStateTracker::new();
@@ -185,24 +160,59 @@ async fn archives() -> Result<()> {
 
     let state_applier = ShardStateApplier::new(state_tracker, storage.clone(), state_subscriber);
 
-    let (archive, archive_data) = utils::get_archive_with_data("archive.bin", false).await?;
-    apply_archive(archive, &storage, &state_applier).await?;
+    // Archive provider
+    let archive_data = utils::read_file("archive.bin")?;
+    let archive = utils::parse_archive(&archive_data)?;
 
-    let (next_archive, _) = utils::get_archive_with_data("next_archive.bin", false).await?;
-    apply_archive(next_archive, &storage, &state_applier).await?;
+    let archive_provider = ArchiveProvider {
+        archive,
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
 
-    let (last_archive, _) = utils::get_archive_with_data("last_archive.bin", false).await?;
-    apply_archive(last_archive, &storage, &state_applier).await?;
+    // Next archive provider
+    let next_archive_data = utils::read_file("next_archive.bin")?;
+    let next_archive = utils::parse_archive(&next_archive_data)?;
+
+    let next_archive_provider = ArchiveProvider {
+        archive: next_archive,
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    // Last archive provider
+    let last_archive_data = utils::read_file("last_archive.bin")?;
+    let last_archive = utils::parse_archive(&last_archive_data)?;
+
+    let last_archive_provider = ArchiveProvider {
+        archive: last_archive,
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    // Strider state
+    let strider_state = PersistentBlockStriderState::new(zerostate_id, storage.clone());
+
+    // Init block strider
+    let block_strider = BlockStrider::builder()
+        .with_provider(
+            archive_provider
+                .chain(next_archive_provider)
+                .chain(last_archive_provider),
+        )
+        .with_state(strider_state)
+        .with_block_subscriber(state_applier)
+        .build();
+
+    block_strider.run().await?;
 
     let archive_id = storage.block_storage().get_archive_id(1).unwrap();
 
+    // Check archive size
     let archive_size = storage
         .block_storage()
         .get_archive_size(archive_id)?
         .unwrap();
-
     assert_eq!(archive_size, archive_data.len());
 
+    // Check archive data
     let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
 
     let mut expected_archive_data = vec![];
@@ -223,9 +233,29 @@ async fn archives() -> Result<()> {
 async fn heavy_archives() -> Result<()> {
     tycho_util::test::init_logger("heavy_archives", "debug");
 
+    // Prepare directory
+    let project_root = project_root()?.join(".scratch");
+    let integration_test_path = project_root.join("integration_tests");
+    let current_test_path = integration_test_path.join("heavy_archives");
+    std::fs::remove_dir_all(&current_test_path).ok();
+    std::fs::create_dir_all(&current_test_path)?;
+
     // Init storage
-    let zerostate = utils::get_zerostate("zerostate.boc", true).await?;
-    let (storage, _tmp_dir) = prepare_storage(zerostate).await?;
+    let config = StorageConfig {
+        root_dir: current_test_path.join("db"),
+        rocksdb_lru_capacity: ByteSize::kb(1024 * 1024),
+        cells_cache_size: ByteSize::kb(1024 * 1024),
+        rocksdb_enable_metrics: false,
+        archives_gc: Some(ArchivesGcConfig::default()),
+        states_gc: None,
+        blocks_gc: None,
+    };
+
+    let zerostate_path = integration_test_path.join("zerostate.boc");
+    let zerostate_data = std::fs::read(zerostate_path)?;
+    let zerostate = utils::parse_zerostate(&zerostate_data)?;
+    let zerostate_id = *zerostate.block_id();
+    let storage = prepare_storage(config, zerostate).await?;
 
     // Init state applier
     let state_tracker = MinRefMcStateTracker::new();
@@ -233,24 +263,62 @@ async fn heavy_archives() -> Result<()> {
 
     let state_applier = ShardStateApplier::new(state_tracker, storage.clone(), state_subscriber);
 
-    let (archive, archive_data) = utils::get_archive_with_data("archive.bin", true).await?;
-    apply_archive(archive, &storage, &state_applier).await?;
+    // Archive provider
+    let archive_path = integration_test_path.join("archive.bin");
+    let archive_data = std::fs::read(archive_path)?;
+    let archive = utils::parse_archive(&archive_data)?;
 
-    let (next_archive, _) = utils::get_archive_with_data("next_archive.bin", true).await?;
-    apply_archive(next_archive, &storage, &state_applier).await?;
+    let archive_provider = ArchiveProvider {
+        archive,
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
 
-    let (last_archive, _) = utils::get_archive_with_data("last_archive.bin", true).await?;
-    apply_archive(last_archive, &storage, &state_applier).await?;
+    // Next archive provider
+    let next_archive_path = integration_test_path.join("next_archive.bin");
+    let next_archive_data = std::fs::read(next_archive_path)?;
+    let next_archive = utils::parse_archive(&next_archive_data)?;
+
+    let next_archive_provider = ArchiveProvider {
+        archive: next_archive,
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    // Last archive provider
+    let last_archive_path = integration_test_path.join("last_archive.bin");
+    let last_archive_data = std::fs::read(last_archive_path)?;
+    let last_archive = utils::parse_archive(&last_archive_data)?;
+
+    let last_archive_provider = ArchiveProvider {
+        archive: last_archive,
+        proof_checker: ProofChecker::new(storage.clone()),
+    };
+
+    // Strider state
+    let strider_state = PersistentBlockStriderState::new(zerostate_id, storage.clone());
+
+    // Init block strider
+    let block_strider = BlockStrider::builder()
+        .with_provider(
+            archive_provider
+                .chain(next_archive_provider)
+                .chain(last_archive_provider),
+        )
+        .with_state(strider_state)
+        .with_block_subscriber(state_applier)
+        .build();
+
+    block_strider.run().await?;
 
     let archive_id = storage.block_storage().get_archive_id(1).unwrap();
 
+    // Check archive size
     let archive_size = storage
         .block_storage()
         .get_archive_size(archive_id)?
         .unwrap();
-
     assert_eq!(archive_size, archive_data.len());
 
+    // Check archive data
     let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
 
     let mut expected_archive_data = vec![];
