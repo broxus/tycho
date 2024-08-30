@@ -222,7 +222,7 @@ impl BlockCacheEntry {
     }
 
     pub fn from_block_from_bc(
-        state: ShardStateStuff,
+        state: &ShardStateStuff,
         prev_blocks_ids: Vec<BlockId>,
         queue_diff_and_msgs: Option<(QueueDiffStuff, Lazy<OutMsgDescr>)>,
     ) -> Result<Self> {
@@ -241,7 +241,7 @@ impl BlockCacheEntry {
         }
 
         let applied_block_stuff = AppliedBlockStuff {
-            state: Some(state),
+            state: Some(state.clone()),
             queue_diff_and_msgs,
         };
 
