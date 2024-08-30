@@ -221,9 +221,11 @@ async fn test_add_read_handle_1000_blocks_parallel() {
                 );
 
                 let mcstate_tracker = MinRefMcStateTracker::new();
-                let mut shard_state = ShardStateUnsplit::default();
-                shard_state.shard_ident = block_id.shard;
-                shard_state.seqno = block_id.seqno;
+                let shard_state = ShardStateUnsplit {
+                    shard_ident: block_id.shard,
+                    seqno: block_id.seqno,
+                    ..Default::default()
+                };
 
                 let state = ShardStateStuff::from_state_and_root(
                     &block_id,

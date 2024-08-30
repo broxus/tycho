@@ -11,26 +11,6 @@ use crate::mempool::{
 };
 use crate::test_utils::try_init_test_tracing;
 
-fn get_test_block_limits() -> BlockLimits {
-    BlockLimits {
-        bytes: everscale_types::models::BlockParamLimits {
-            underload: 1_000_000,
-            soft_limit: 2_000_000,
-            hard_limit: 3_000_000,
-        },
-        gas: everscale_types::models::BlockParamLimits {
-            underload: 1_000_000,
-            soft_limit: 2_000_000,
-            hard_limit: 3_000_000,
-        },
-        lt_delta: everscale_types::models::BlockParamLimits {
-            underload: 1_000_000,
-            soft_limit: 2_000_000,
-            hard_limit: 3_000_000,
-        },
-    }
-}
-
 #[test]
 fn test_read_next_externals() {
     try_init_test_tracing(tracing_subscriber::filter::LevelFilter::TRACE);

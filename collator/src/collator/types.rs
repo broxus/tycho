@@ -186,6 +186,7 @@ pub(super) struct BlockCollationDataBuilder {
     pub value_flow: ValueFlow,
     pub min_ref_mc_seqno: u32,
     pub rand_seed: HashBytes,
+    #[cfg(feature = "block-creator-stats")]
     pub block_create_count: FastHashMap<HashBytes, u64>,
     pub created_by: HashBytes,
     pub top_shard_blocks_ids: Vec<BlockId>,
@@ -212,6 +213,7 @@ impl BlockCollationDataBuilder {
             value_flow: Default::default(),
             min_ref_mc_seqno,
             rand_seed,
+            #[cfg(feature = "block-creator-stats")]
             block_create_count: Default::default(),
             created_by,
             shards: None,
@@ -251,6 +253,7 @@ impl BlockCollationDataBuilder {
         Ok(())
     }
 
+    #[cfg(feature = "block-creator-stats")]
     pub fn register_shard_block_creators(&mut self, creators: Vec<HashBytes>) -> Result<()> {
         for creator in creators {
             self.block_create_count
@@ -296,6 +299,8 @@ impl BlockCollationDataBuilder {
             out_msgs: Default::default(),
             mint_msg: None,
             recover_create_msg: None,
+            #[cfg(feature = "block-creator-stats")]
+            block_create_count: self.block_create_count,
         }
     }
 }
@@ -356,8 +361,10 @@ pub(super) struct BlockCollationData {
 
     pub rand_seed: HashBytes,
 
-    // TODO: set from anchor
     pub created_by: HashBytes,
+
+    #[cfg(feature = "block-creator-stats")]
+    pub block_create_count: FastHashMap<HashBytes, u64>,
 }
 
 impl BlockCollationData {
@@ -1014,6 +1021,7 @@ impl MessageGroups {
 // pub(super) type MessageGroup = FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>;
 #[derive(Default)]
 pub(super) struct MessageGroup {
+    #[allow(clippy::vec_box)]
     inner: FastHashMap<HashBytes, Vec<Box<ParsedMessage>>>,
     int_messages_count: usize,
     ext_messages_count: usize,
@@ -1169,9 +1177,7 @@ impl AnchorsCache {
         processed_to_anchor_id: MempoolAnchorId,
     ) -> Box<dyn Iterator<Item = Arc<MempoolAnchor>> + '_> {
         if let Some(mut anchor_index_in_cache) = self.find_index(processed_to_anchor_id) {
-            if anchor_index_in_cache > 0 {
-                anchor_index_in_cache -= 1;
-            }
+            anchor_index_in_cache = anchor_index_in_cache.saturating_sub(1);
             Box::new(self.take_after_index(anchor_index_in_cache))
         } else {
             Box::new(std::iter::empty::<Arc<MempoolAnchor>>())

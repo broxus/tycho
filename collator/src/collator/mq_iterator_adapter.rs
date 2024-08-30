@@ -25,7 +25,7 @@ pub(super) struct QueueIteratorAdapter<V: InternalMessageValue> {
     no_pending_existing_internals: bool,
     /// there is no more new messages in mq iterator
     no_pending_new_messages: bool,
-    /// current new messages to read_to border
+    /// current new messages to `read_to` border
     new_messages_read_to: QueueKey,
     /// current read position of internals mq iterator
     current_positions: FastHashMap<ShardIdent, QueueKey>,

@@ -133,7 +133,7 @@ impl CollatorStdImpl {
                 labels,
             );
 
-            let (extra, min_ref_mc_seqno) = self.create_mc_state_extra(
+            let (extra, min_ref_mc_seqno) = Self::create_mc_state_extra(
                 collation_data,
                 processed_accounts
                     .new_config_params
@@ -394,7 +394,6 @@ impl CollatorStdImpl {
     }
 
     fn create_mc_state_extra(
-        &self,
         collation_data: &mut BlockCollationData,
         config_params: Option<BlockchainConfig>,
         working_state: &WorkingState,
@@ -431,7 +430,7 @@ impl CollatorStdImpl {
             is_key_block || (lifetimes > prev_lifetimes)
         };
         let min_ref_mc_seqno =
-            self.update_shard_config(collation_data, &workchains, update_shard_cc)?;
+            Self::update_shard_config(collation_data, &workchains, update_shard_cc)?;
 
         // 3. save new shard_hashes
         let shards_iter = collation_data
@@ -521,7 +520,6 @@ impl CollatorStdImpl {
     }
 
     fn update_shard_config(
-        &self,
         collation_data: &mut BlockCollationData,
         _wc_set: &Dict<i32, WorkchainDescription>,
         _update_cc: bool,
@@ -557,10 +555,11 @@ impl CollatorStdImpl {
             match &loaded_account {
                 Some(account) => {
                     if is_masterchain && &updated_account.account_addr == config_address {
-                        if let AccountState::Active(StateInit { data, .. }) = &account.state {
-                            if let Some(data) = data {
-                                new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
-                            }
+                        if let AccountState::Active(StateInit {
+                            data: Some(data), ..
+                        }) = &account.state
+                        {
+                            new_config_params = Some(data.parse::<BlockchainConfigParams>()?);
                         }
                     }
 

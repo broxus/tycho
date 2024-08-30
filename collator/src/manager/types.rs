@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Result};
-use everscale_types::cell::HashBytes;
 use everscale_types::models::{BlockId, BlockIdShort, Lazy, OutMsgDescr, ShardIdent, ValueFlow};
 use parking_lot::Mutex;
 use tycho_block_util::queue::QueueDiffStuff;
@@ -90,7 +89,8 @@ pub(super) struct ShardBlocksCache {
     pub last_known_synced: Option<BlockSeqno>,
     pub value_flow: ValueFlow,
     pub proof_funds: ProofFunds,
-    pub creators: Vec<HashBytes>,
+    #[cfg(feature = "block-creator-stats")]
+    pub creators: Vec<everscale_types::cell::HashBytes>,
 }
 
 /// Returns Some(seqno: u32) of last known synced block when it newer than provided

@@ -27,7 +27,7 @@ use tycho_collator::internal_queue::types::{InternalMessageValue, QueueDiffWithM
 use tycho_collator::test_utils::prepare_test_storage;
 use tycho_util::FastHashMap;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct StoredObject {
     key: u64,
     dest: IntAddr,
@@ -36,6 +36,11 @@ struct StoredObject {
 impl Ord for StoredObject {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.key.cmp(&other.key)
+    }
+}
+impl PartialOrd for StoredObject {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -62,7 +67,7 @@ impl InternalMessageValue for StoredObject {
                 bytes.extend_from_slice(&addr.workchain.to_be_bytes());
                 bytes.extend_from_slice(&addr.address.0);
             }
-            _ => return Err(anyhow!("Unsupported address type")),
+            IntAddr::Var(_) => return Err(anyhow!("Unsupported address type")),
         }
         Ok(bytes)
     }
@@ -143,9 +148,7 @@ async fn test_queue() -> anyhow::Result<()> {
         .apply_diff(diff, block, &HashBytes::from([1; 32]))
         .await?;
 
-    let mut top_blocks = vec![];
-
-    top_blocks.push((block, true));
+    let top_blocks = vec![(block, true)];
 
     queue.commit_diff(top_blocks).await?;
 
@@ -189,9 +192,7 @@ async fn test_queue() -> anyhow::Result<()> {
             .insert(stored_object.key(), stored_object.clone());
     }
 
-    let mut top_blocks = vec![];
-
-    top_blocks.push((block2, true));
+    let top_blocks = vec![(block2, true)];
 
     queue
         .apply_diff(diff, block2, &HashBytes::from([0; 32]))

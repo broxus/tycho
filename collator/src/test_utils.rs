@@ -35,12 +35,8 @@ pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
 
     let mc_state_extra = master_state.load_custom()?;
     let mc_state_extra = mc_state_extra.unwrap();
-    let mut shard_info_opt = None;
-    for shard_info in mc_state_extra.shards.iter() {
-        shard_info_opt = Some(shard_info?);
-        break;
-    }
-    let shard_info = shard_info_opt.unwrap();
+    let shard_info_opt = mc_state_extra.shards.iter().next();
+    let shard_info = shard_info_opt.unwrap().unwrap();
 
     let master_id = BlockId {
         shard: master_state.shard_ident,
