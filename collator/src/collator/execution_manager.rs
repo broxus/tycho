@@ -37,7 +37,7 @@ pub(super) struct ExecutionManager {
     messages_buffer_limit: usize,
     /// flag indicates that should process ext messages
     process_ext_messages: bool,
-    /// we started ext messages reading before and can continue reading from read_to
+    /// we started ext messages reading before and can continue reading from `read_to`
     ext_messages_reader_started: bool,
     /// flag indicates that should process new messages
     process_new_messages: bool,
@@ -623,6 +623,7 @@ impl MessagesExecutor {
         })
     }
 
+    #[allow(clippy::vec_box)]
     fn execute_messages(
         &self,
         mut account_state: Box<ShardAccountStuff>,

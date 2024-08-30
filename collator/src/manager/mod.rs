@@ -1697,6 +1697,7 @@ where
                             .ext_processed_upto_anchor_id,
                         value_flow: std::mem::take(&mut shard_cache.value_flow),
                         proof_funds: std::mem::take(&mut shard_cache.proof_funds),
+                        #[cfg(feature = "block-creator-stats")]
                         creators: std::mem::take(&mut shard_cache.creators),
                     });
                     break;
@@ -1951,6 +1952,7 @@ where
                         (
                             e.candidate.fees_collected.clone(),
                             e.candidate.funds_created.clone(),
+                            #[cfg(feature = "block-creator-stats")]
                             e.candidate.created_by,
                         )
                     });
@@ -1960,16 +1962,17 @@ where
             };
 
             // aggregate additional info for TopBlockDescription
-            if let Some((fees_collected, funds_created, created_by)) = aggregate {
+            if let Some(aggregate) = aggregate {
                 shard_cache
                     .proof_funds
                     .fees_collected
-                    .checked_add(&fees_collected)?;
+                    .checked_add(&aggregate.0)?;
                 shard_cache
                     .proof_funds
                     .funds_created
-                    .checked_add(&funds_created)?;
-                shard_cache.creators.push(created_by);
+                    .checked_add(&aggregate.1)?;
+                #[cfg(feature = "block-creator-stats")]
+                shard_cache.creators.push(aggregate.2);
             }
             drop(shard_cache); // TODO: use scope instead
 
@@ -2368,7 +2371,7 @@ where
     fn read_before_tail_ids_of_mc_block(
         blocks_cache: &BlocksCache,
         mc_block_key: &BlockCacheKey,
-    ) -> Result<BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>> {
+    ) -> Result<BeforeTailIdsResult> {
         let mut result = BTreeMap::new();
 
         if mc_block_key.seqno == 0 {
@@ -2815,3 +2818,5 @@ where
         Ok(())
     }
 }
+
+type BeforeTailIdsResult = BTreeMap<ShardIdent, (Option<BlockId>, Vec<BlockId>)>;

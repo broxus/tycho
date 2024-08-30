@@ -363,6 +363,7 @@ pub struct TopBlockDescription {
     pub ext_processed_to_anchor_id: u32,
     pub value_flow: ValueFlow,
     pub proof_funds: ProofFunds,
+    #[cfg(feature = "block-creator-stats")]
     pub creators: Vec<HashBytes>,
 }
 

@@ -640,6 +640,7 @@ impl CollatorStdImpl {
 
     /// Read specified number of externals from imported anchors
     /// using actual `processed_upto` info
+    #[allow(clippy::vec_box)]
     pub(super) fn read_next_externals(
         &mut self,
         count: usize,
@@ -655,6 +656,7 @@ impl CollatorStdImpl {
         )
     }
 
+    #[allow(clippy::vec_box)]
     fn read_next_externals_impl(
         shard_id: &ShardIdent,
         anchors_cache: &mut AnchorsCache,
@@ -720,7 +722,7 @@ impl CollatorStdImpl {
             if key < was_read_to.0 {
                 // skip and remove already processed anchor from cache
                 assert_eq!(next_idx, 0);
-                let _ = anchors_cache.remove(next_idx);
+                anchors_cache.remove(next_idx);
                 tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                     "anchor with key {} already processed, removed from anchors cache", key,
                 );
@@ -765,7 +767,7 @@ impl CollatorStdImpl {
 
                     // skip and remove expired anchor
                     assert_eq!(next_idx, 0);
-                    let _ = anchors_cache.remove(next_idx);
+                    anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully skipped due to expiration, removed from anchors cache", key,
                     );
@@ -777,7 +779,7 @@ impl CollatorStdImpl {
                 if key == was_read_to.0 && anchor.externals.len() == was_read_to.1 as usize {
                     // skip and remove fully processed anchor
                     assert_eq!(next_idx, 0);
-                    let _ = anchors_cache.remove(next_idx);
+                    anchors_cache.remove(next_idx);
                     tracing::debug!(target: tracing_targets::COLLATOR_READ_NEXT_EXTS,
                         "anchor with key {} fully processed, removed from anchors cache", key,
                     );
@@ -1246,6 +1248,7 @@ impl CollatorStdImpl {
                 ext_processed_to_anchor_id,
                 value_flow,
                 proof_funds,
+                #[cfg(feature = "block-creator-stats")]
                 creators,
             } = top_block_descr;
 
@@ -1297,6 +1300,7 @@ impl CollatorStdImpl {
 
             collation_data_builder.top_shard_blocks_ids.push(block_id);
             collation_data_builder.store_shard_fees(shard_id, proof_funds)?;
+            #[cfg(feature = "block-creator-stats")]
             collation_data_builder.register_shard_block_creators(creators)?;
         }
 
@@ -1347,6 +1351,7 @@ impl CollatorStdImpl {
 }
 
 /// add in and out messages from to block
+#[allow(clippy::vec_box)]
 fn new_transaction(
     collation_data: &mut BlockCollationData,
     shard_id: &ShardIdent,

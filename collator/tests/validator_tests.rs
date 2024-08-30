@@ -62,7 +62,7 @@ fn generate_network(
     rng: &mut impl rand::Rng,
 ) -> Vec<ValidatorNode> {
     let nodes = (0..node_count)
-        .map(|_| ValidatorNode::generate(&zerostate_id, rng))
+        .map(|_| ValidatorNode::generate(zerostate_id, rng))
         .collect::<Vec<_>>();
 
     for i in 0..nodes.len() {
@@ -90,7 +90,7 @@ fn make_description(seqno: u32, nodes: &[ValidatorNode]) -> Vec<ValidatorDescrip
             weight: 1,
             adnl_addr: Some(HashBytes(*node.descr.peer_id.as_bytes())),
             mc_seqno_since: seqno,
-            prev_total_weight: prev_total_weight,
+            prev_total_weight,
         });
         prev_total_weight += node.descr.weight;
     }
