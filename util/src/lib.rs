@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
+pub mod compression;
 pub mod progress_bar;
 pub mod serde_helpers;
 pub mod time;

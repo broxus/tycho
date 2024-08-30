@@ -24,7 +24,6 @@ tl-proto = { workspace = true }
 tycho-util = { workspace = true }
 
 [dev-dependencies]
-rand = { workspace = true }
 
 [features]
 test = []
