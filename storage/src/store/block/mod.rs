@@ -427,7 +427,9 @@ impl BlockStorage {
             // commit previous archive
             let mut prev_archive_commit = self.prev_archive_commit.lock().await;
             if let Some(handle) = prev_archive_commit.take() {
-                handle.await??;
+                if let Err(err) = handle.await? {
+                    tracing::warn!("error on prev_archive_commit: {:?}", err);
+                }
             }
             *prev_archive_commit = Some(self.spawn_commit_archive(prev_id).await);
         }
