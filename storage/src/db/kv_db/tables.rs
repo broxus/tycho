@@ -47,8 +47,9 @@ impl ColumnFamilyOptions<Caches> for ArchiveBlockIds {
         optimize_for_level_compaction(opts, ByteSize::mib(512u64));
 
         opts.set_merge_operator_associative("archive_data_merge", archive_data_merge);
-        opts.set_compression_type(DBCompressionType::Zstd);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+        // data is hardly compressible and dataset is small
+        opts.set_compression_type(DBCompressionType::None);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
     }
 }
 
@@ -70,8 +71,9 @@ impl ColumnFamilyOptions<Caches> for Archives {
         default_block_based_table_factory(opts, caches);
         optimize_for_level_compaction(opts, ByteSize::mib(512u64));
 
-        opts.set_compression_type(DBCompressionType::Zstd);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+        // data is already compressed
+        opts.set_compression_type(DBCompressionType::None);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
     }
 }
 
@@ -151,7 +153,7 @@ impl ColumnFamilyOptions<Caches> for PackageEntries {
         // to the higher level.
         // https://github.com/facebook/rocksdb/blob/81aeb15988e43c49952c795e32e5c8b224793589/include/rocksdb/advanced_options.h#L846
         opts.set_optimize_filters_for_hits(true);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
     }
 }
 
@@ -290,8 +292,11 @@ impl ColumnFamilyOptions<Caches> for ShardsInternalMessages {
         block_factory.set_block_cache(&caches.block_cache);
         opts.set_block_based_table_factory(&block_factory);
 
-        opts.set_disable_auto_compactions(true); // we will trigger compactions manually
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+        // we will trigger compactions manually
+        opts.set_disable_auto_compactions(true);
+        // it's temporary fifo like storage, so we don't need to compress it
+        opts.set_compression_type(DBCompressionType::None);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::None);
     }
 }
 
@@ -401,7 +406,8 @@ impl ColumnFamily for Transactions {
 impl ColumnFamilyOptions<Caches> for Transactions {
     fn options(opts: &mut Options, caches: &mut Caches) {
         zstd_block_based_table_factory(opts, caches);
-        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE);
+        opts.set_compression_type(DBCompressionType::Zstd);
+        with_blob_db(opts, DEFAULT_MIN_BLOB_SIZE, DBCompressionType::Zstd);
     }
 }
 
@@ -537,10 +543,10 @@ fn zstd_block_based_table_factory(opts: &mut Options, caches: &Caches) {
     opts.set_compression_type(DBCompressionType::Zstd);
 }
 
-fn with_blob_db(opts: &mut Options, min_value_size: u64) {
+fn with_blob_db(opts: &mut Options, min_value_size: u64, compression_type: DBCompressionType) {
     opts.set_enable_blob_files(true);
     opts.set_enable_blob_gc(true);
 
     opts.set_min_blob_size(min_value_size);
-    opts.set_blob_compression_type(DBCompressionType::Zstd);
+    opts.set_blob_compression_type(compression_type);
 }
