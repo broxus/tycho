@@ -18,10 +18,12 @@ use tycho_util::metrics::HistogramGuard;
 
 pub use self::archive_provider::{ArchiveBlockProvider, ArchiveBlockProviderConfig};
 pub use self::blockchain_provider::{BlockchainBlockProvider, BlockchainBlockProviderConfig};
+use self::futures::SelectNonEmptyFut;
 pub use self::storage_provider::StorageBlockProvider;
 
 mod archive_provider;
 mod blockchain_provider;
+mod futures;
 mod storage_provider;
 
 pub type OptionalBlockStuff = Option<Result<BlockStuffAug>>;
@@ -126,45 +128,60 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
     }
 }
 
-impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for (T1, T2) {
-    type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
-    type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+macro_rules! impl_provider_tuple {
+    ($($n:tt: $var:ident = $ty:ident),*$(,)?) => {
+        impl<$($ty),*> BlockProvider for ($($ty),*)
+        where
+            $($ty: BlockProvider),*
+        {
+            type GetNextBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
+            type GetBlockFut<'a> = BoxFuture<'a, OptionalBlockStuff>;
 
-    fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a> {
-        let left = self.0.get_next_block(prev_block_id);
-        let right = self.1.get_next_block(prev_block_id);
+            fn get_next_block<'a>(
+                &'a self,
+                prev_block_id: &'a BlockId,
+            ) -> Self::GetNextBlockFut<'a> {
+                $(let $var = self.$n.get_next_block(prev_block_id));*;
 
-        Box::pin(async move {
-            match future::select(pin!(left), pin!(right)).await {
-                future::Either::Left((res, right)) => match res {
-                    Some(res) => Some(res),
-                    None => right.await,
-                },
-                future::Either::Right((res, left)) => match res {
-                    Some(res) => Some(res),
-                    None => left.await,
-                },
+                Box::pin(async move {
+                    $(let $var = pin!($var));*;
+                    SelectNonEmptyFut::from(($($var),*)).await
+                })
             }
-        })
-    }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        let left = self.0.get_block(block_id);
-        let right = self.1.get_block(block_id);
+            fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+                $(let $var = self.$n.get_block(block_id));*;
 
-        Box::pin(async move {
-            match future::select(pin!(left), pin!(right)).await {
-                future::Either::Left((res, right)) => match res {
-                    Some(res) => Some(res),
-                    None => right.await,
-                },
-                future::Either::Right((res, left)) => match res {
-                    Some(res) => Some(res),
-                    None => left.await,
-                },
+                Box::pin(async move {
+                    $(let $var = pin!($var));*;
+                    SelectNonEmptyFut::from(($($var),*)).await
+                })
             }
-        })
-    }
+        }
+    };
+}
+
+impl_provider_tuple! {
+    0: a = T0,
+    1: b = T1,
+}
+impl_provider_tuple! {
+    0: a = T0,
+    1: b = T1,
+    2: c = T2,
+}
+impl_provider_tuple! {
+    0: a = T0,
+    1: b = T1,
+    2: c = T2,
+    3: d = T3,
+}
+impl_provider_tuple! {
+    0: a = T0,
+    1: b = T1,
+    2: c = T2,
+    3: d = T3,
+    4: e = T4,
 }
 
 // TODO: Rename to something better since it checks proofs queue diffs now,
