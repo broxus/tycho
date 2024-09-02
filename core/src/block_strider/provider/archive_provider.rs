@@ -14,9 +14,11 @@ use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::{NewBlockMeta, Storage};
 use tycho_util::time::now_sec;
+use tycho_util::{DashMapEntry, FastDashMap};
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
 use crate::blockchain_rpc::{BlockchainRpcClient, PendingArchive};
+use crate::overlay_client::Neighbour;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -52,7 +54,9 @@ impl ArchiveBlockProvider {
                 proof_checker,
                 last_known_archive: ArcSwapOption::empty(),
                 prev_known_archive: ArcSwapOption::empty(),
+
                 next_archive: tokio::sync::Mutex::new(None),
+                archive_download_attempts: FastDashMap::default(),
 
                 storage,
                 config,
@@ -78,47 +82,61 @@ impl ArchiveBlockProvider {
             }
         }
 
-        let block_id;
-        let archive = loop {
-            if let Some(archive) = this.last_known_archive.load_full() {
-                if let Some(mc_block_id) = archive.mc_block_ids.get(&next_block_seqno) {
-                    block_id = *mc_block_id;
-                    tracing::debug!(%mc_block_id, "block found in the last known archive");
-                    break archive;
-                }
-            }
-
-            match self.get_next_archive(next_block_seqno).await {
-                Ok(archive) => {
-                    // Duplicate the last known archive
-                    if let Some(last) = this.last_known_archive.load_full() {
-                        this.prev_known_archive.store(Some(last));
+        'main: loop {
+            let block_id;
+            let archive = 'download: loop {
+                if let Some(archive) = this.last_known_archive.load_full() {
+                    if let Some(mc_block_id) = archive.mc_block_ids.get(&next_block_seqno) {
+                        block_id = *mc_block_id;
+                        tracing::debug!(%mc_block_id, "block found in the last known archive");
+                        break 'download archive;
                     }
-
-                    // Update the last known archive
-                    this.last_known_archive.store(Some(Arc::new(archive)));
                 }
-                Err(e) => return Some(Err(e)),
-            }
-        };
 
-        let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
-            Ok(entry) => entry,
-            Err(e) => return Some(Err(e.into())),
-        };
+                match self.get_next_archive(next_block_seqno).await {
+                    Ok(archive) => {
+                        // Duplicate the last known archive
+                        if let Some(last) = this.last_known_archive.load_full() {
+                            this.prev_known_archive.store(Some(last));
+                        }
 
-        match this
-            .proof_checker
-            .check_proof(&block, &proof, &diff, true)
-            .await
-        {
-            // Stop using archives if the block is recent enough
-            Ok(meta) if is_block_recent(&meta) => {
-                tracing::info!(%block_id, "archive block provider finished");
-                None
+                        // Update the last known archive
+                        this.last_known_archive.store(Some(Arc::new(archive)));
+                    }
+                    Err(e) => return Some(Err(e)),
+                }
+            };
+
+            let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
+                Ok(entry) => entry,
+                Err(e) => {
+                    tracing::error!("Archive is corrupted {e:?}. Retrying archive downloading.");
+                    self.inner.track_failed_archive(next_block_seqno);
+                    continue 'main;
+                }
+            };
+
+            match this
+                .proof_checker
+                .check_proof(&block, &proof, &diff, true)
+                .await
+            {
+                // Stop using archives if the block is recent enough
+                Ok(meta) if is_block_recent(&meta) => {
+                    tracing::info!(%block_id, "archive block provider finished");
+                    self.inner.track_success_archive(next_block_seqno);
+                    break None;
+                }
+                Ok(_) => {
+                    self.inner.track_success_archive(next_block_seqno);
+                    break Some(Ok(block.clone()));
+                }
+                Err(e) => {
+                    tracing::error!("Failed to check block proof {e:?}");
+                    self.inner.track_failed_archive(next_block_seqno);
+                    continue;
+                }
             }
-            Ok(_) => Some(Ok(block.clone())),
-            Err(e) => Some(Err(e)),
         }
     }
 
@@ -207,15 +225,17 @@ impl ArchiveBlockProvider {
 
         // NOTE: Use a separate downloader to prevent reference cycles
         let downloader = self.inner.make_downloader();
+        let this = self.inner.clone();
+
         let handle = tokio::spawn(async move {
             tracing::debug!(seqno, "started preloading archive");
             scopeguard::defer! {
                 tracing::debug!(seqno, "finished preloading archive");
             }
-
             loop {
                 match downloader.try_download(seqno).await {
-                    Ok(archive) => {
+                    Ok((archive, neighbour)) => {
+                        this.track_archive_download(seqno, neighbour);
                         tx.send(archive).ok();
                         break;
                     }
@@ -247,11 +267,38 @@ struct Inner {
     prev_known_archive: ArcSwapOption<Archive>,
 
     next_archive: tokio::sync::Mutex<Option<NextArchive>>,
+    archive_download_attempts: FastDashMap<u32, Neighbour>,
 
     config: ArchiveBlockProviderConfig,
 }
 
 impl Inner {
+    fn track_archive_download(&self, seqno: u32, neighbour: Neighbour) {
+        match self.archive_download_attempts.entry(seqno) {
+            DashMapEntry::Occupied(entry) => {
+                entry.replace_entry(neighbour);
+            }
+            DashMapEntry::Vacant(entry) => {
+                entry.insert(neighbour);
+            }
+        }
+    }
+
+    fn track_failed_archive(&self, seqno: u32) {
+        match self.archive_download_attempts.entry(seqno) {
+            DashMapEntry::Occupied(attempt) => attempt.get().track_reliability(false),
+            DashMapEntry::Vacant(_) => (),
+        }
+    }
+
+    fn track_success_archive(&self, seqno: u32) {
+        match self.archive_download_attempts.entry(seqno) {
+            DashMapEntry::Occupied(attempt) => {
+                attempt.remove_entry();
+            }
+            DashMapEntry::Vacant(_) => (),
+        };
+    }
     fn make_downloader(&self) -> ArchiveDownloader {
         ArchiveDownloader {
             client: self.client.clone(),
@@ -286,17 +333,20 @@ struct ArchiveDownloader {
 }
 
 impl ArchiveDownloader {
-    async fn try_download(&self, seqno: u32) -> Result<ArchiveData> {
+    async fn try_download(&self, seqno: u32) -> Result<(ArchiveData, Neighbour)> {
         let pending = self.client.find_archive(seqno).await?;
+        let selected_neighbour = pending.neighbour.clone();
         let archive_id = pending.id;
 
         let writer = self.get_archive_writer(&pending)?;
         let writer = self.client.download_archive(pending, writer).await?;
 
-        Ok(match writer {
+        let archive_data = match writer {
             ArchiveWriter::File(_) => ArchiveData::File { id: archive_id },
             ArchiveWriter::Bytes(data) => ArchiveData::Bytes(data.into_inner().freeze()),
-        })
+        };
+
+        Ok((archive_data, selected_neighbour))
     }
 
     fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
