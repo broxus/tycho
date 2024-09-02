@@ -295,42 +295,6 @@ impl BlockCacheEntry {
         self.top_shard_blocks_info.iter().map(|(id, _)| id)
     }
 
-    pub fn extract_entry_stuff(&mut self) -> Result<BlockCacheEntryStuff> {
-        Ok(self.extract_entry_stuff_with_status(self.send_sync_status))
-    }
-
-    pub fn extract_entry_stuff_for_sync(&mut self) -> Result<BlockCacheEntryStuff> {
-        let send_sync_status = self.send_sync_status;
-        match self.send_sync_status {
-            SendSyncStatus::NotReady => {
-                bail!(
-                    "Block is not ready for sync: ({})",
-                    self.block_id().as_short_id()
-                );
-            }
-            SendSyncStatus::Ready => {
-                self.send_sync_status = SendSyncStatus::Sending;
-            }
-            _ => {
-                // do not update send_sync_status
-            }
-        }
-        Ok(self.extract_entry_stuff_with_status(send_sync_status))
-    }
-
-    fn extract_entry_stuff_with_status(
-        &mut self,
-        send_sync_status: SendSyncStatus,
-    ) -> BlockCacheEntryStuff {
-        BlockCacheEntryStuff {
-            key: self.key,
-            kind: self.kind,
-            candidate_stuff: self.candidate_stuff.take(),
-            applied_block_stuff: self.applied_block_stuff.take(),
-            send_sync_status,
-        }
-    }
-
     pub fn candidate_stuff(&self) -> Result<&BlockCandidateStuff> {
         self.candidate_stuff
             .as_ref()
@@ -339,24 +303,6 @@ impl BlockCacheEntry {
 }
 
 impl AppliedBlockStuffContainer for BlockCacheEntry {
-    fn key(&self) -> &BlockCacheKey {
-        &self.key
-    }
-
-    fn applied_block_stuff(&self) -> Option<&AppliedBlockStuff> {
-        self.applied_block_stuff.as_ref()
-    }
-}
-
-pub(super) struct BlockCacheEntryStuff {
-    pub key: BlockCacheKey,
-    pub kind: BlockCacheEntryKind,
-    pub candidate_stuff: Option<BlockCandidateStuff>,
-    pub applied_block_stuff: Option<AppliedBlockStuff>,
-    pub send_sync_status: SendSyncStatus,
-}
-
-impl AppliedBlockStuffContainer for BlockCacheEntryStuff {
     fn key(&self) -> &BlockCacheKey {
         &self.key
     }
@@ -402,8 +348,8 @@ pub(super) trait AppliedBlockStuffContainer {
 }
 
 pub(super) struct McBlockSubgraph {
-    pub master_block: Option<BlockCacheEntryStuff>,
-    pub shard_blocks: Vec<BlockCacheEntryStuff>,
+    pub master_block: Option<BlockCacheEntry>,
+    pub shard_blocks: Vec<BlockCacheEntry>,
 }
 
 pub(super) enum McBlockSubgraphExtract {

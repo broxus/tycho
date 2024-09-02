@@ -15,13 +15,12 @@ use tycho_block_util::state::ShardStateStuff;
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use types::{
-    ActiveCollator, AppliedBlockStuffContainer, BlockCacheEntryKind, BlockSeqno, CollatorState,
-    DisplayBlockCacheStoreResult,
+    ActiveCollator, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryKind, BlockSeqno,
+    CollatorState, DisplayBlockCacheStoreResult,
 };
 
 use self::types::{
-    BlockCacheEntryStuff, BlockCacheKey, BlocksCache, ChainTimesSyncState, McBlockSubgraphExtract,
-    SendSyncStatus,
+    BlockCacheKey, BlocksCache, ChainTimesSyncState, McBlockSubgraphExtract, SendSyncStatus,
 };
 use self::utils::find_us_in_collators_set;
 use crate::collator::{
@@ -361,45 +360,34 @@ where
         Ok(())
     }
 
-    /// Tries to determine top anchor that was processed to
-    /// by info from received state and notify mempool
-    #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
-    async fn commit_block_queue_diff(&self, state: &ShardStateStuff) -> Result<()> {
-        let block_short_id = state.block_id().as_short_id();
+    #[tracing::instrument(skip_all, fields(block_id = %block_entry.block_id().as_short_id()))]
+    async fn commit_block_queue_diff(&self, block_entry: &BlockCacheEntry) -> Result<()> {
+        let block_short_id = block_entry.block_id().as_short_id();
 
         if !block_short_id.shard.is_masterchain() {
             return Ok(());
         }
 
-        let histogram =
+        let _histogram =
             HistogramGuard::begin("tycho_collator_send_blocks_to_sync_commit_diffs_time");
 
-        let mut top_blocks = vec![];
-
-        for item in state.shards()?.iter() {
-            let (shard_ident, shard_descr) = item?;
-            top_blocks.push((
-                BlockIdShort::from((shard_ident, shard_descr.seqno)),
-                shard_descr.top_sc_block_updated,
-            ));
-        }
-
+        let mut top_blocks: Vec<_> = block_entry
+            .top_shard_blocks_info
+            .iter()
+            .map(|(id, updated)| (id.as_short_id(), *updated))
+            .collect();
         top_blocks.push((block_short_id, true));
 
         if let Err(err) = self.mq_adapter.commit_diff(top_blocks).await {
             bail!(
-                "Block ({}) sync: error committing message queue diff: {:?}",
+                "Error committing message queue diff of block ({}): {:?}",
                 block_short_id,
-                err
-            );
+                err,
+            )
         }
 
-        histogram.finish();
-
-        tracing::debug!(
-            target: tracing_targets::COLLATION_MANAGER,
-            "Block ({}) sync: message queue diff was committed",
-            block_short_id,
+        tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            "message queue diff was committed",
         );
 
         Ok(())
@@ -407,15 +395,15 @@ where
 
     async fn apply_block_queue_diff_from_entry_stuff(
         mq_adapter: Arc<dyn MessageQueueAdapter<EnqueuedMessage>>,
-        block_entry_stuff: &BlockCacheEntryStuff,
+        block_entry: &BlockCacheEntry,
     ) -> Result<()> {
-        if block_entry_stuff.key.seqno == 0 {
+        if block_entry.block_id().seqno == 0 {
             return Ok(());
         }
 
         // if block was collated then queue diff is already applied
         if matches!(
-            block_entry_stuff.kind,
+            block_entry.kind,
             BlockCacheEntryKind::Collated
                 | BlockCacheEntryKind::CollatedAndReceived
                 | BlockCacheEntryKind::ReceivedAndCollated
@@ -423,7 +411,7 @@ where
             return Ok(());
         }
 
-        let (queue_diff_stuff, out_msgs) = block_entry_stuff.queue_diff_and_msgs()?;
+        let (queue_diff_stuff, out_msgs) = block_entry.queue_diff_and_msgs()?;
         let queue_diff_with_msgs =
             QueueDiffWithMessages::from_queue_diff(queue_diff_stuff, &out_msgs.load()?)?;
         mq_adapter
@@ -601,9 +589,12 @@ where
         let should_sync_to_last_applied_mc_block = {
             if let Some(applied_range) = store_res.applied_mc_queue_range {
                 if let Some(last_collated_mc_block_id) = store_res.last_collated_mc_block_id {
-                    let applied_range_start_delta =
-                        applied_range.0 - last_collated_mc_block_id.seqno;
-                    let applied_range_end_delta = applied_range.1 - last_collated_mc_block_id.seqno;
+                    let applied_range_start_delta = applied_range
+                        .0
+                        .saturating_sub(last_collated_mc_block_id.seqno);
+                    let applied_range_end_delta = applied_range
+                        .1
+                        .saturating_sub(last_collated_mc_block_id.seqno);
                     if applied_range_start_delta > 1 {
                         // should collate next own mc block because first applied is not next
                         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
@@ -1014,19 +1005,16 @@ where
             };
 
             // apply queue diffs
-            for sc_block_entry_stuff in subgraph.shard_blocks.iter() {
+            for sc_block_entry in subgraph.shard_blocks.iter() {
                 Self::apply_block_queue_diff_from_entry_stuff(
                     self.mq_adapter.clone(),
-                    sc_block_entry_stuff,
+                    sc_block_entry,
                 )
                 .await?;
             }
-            let mc_block_entry_stuff = subgraph.master_block.as_ref().unwrap();
-            Self::apply_block_queue_diff_from_entry_stuff(
-                self.mq_adapter.clone(),
-                mc_block_entry_stuff,
-            )
-            .await?;
+            let mc_block_entry = subgraph.master_block.as_ref().unwrap();
+            Self::apply_block_queue_diff_from_entry_stuff(self.mq_adapter.clone(), mc_block_entry)
+                .await?;
 
             // if it is last one then commit diffs, notify mempool and refresh collation sessions
             if is_last {
@@ -1034,12 +1022,15 @@ where
                     "Will notify mempool and refresh collation sessions with HARD RESET",
                 );
 
-                let state = mc_block_entry_stuff.state()?;
+                Self::notify_mempool_about_mc_block(
+                    self.mpool_adapter.clone(),
+                    mc_block_entry.block_id(),
+                )
+                .await?;
 
-                Self::notify_mempool_about_mc_block(self.mpool_adapter.clone(), state.block_id())
-                    .await?;
+                self.commit_block_queue_diff(mc_block_entry).await?;
 
-                self.commit_block_queue_diff(state).await?;
+                let state = mc_block_entry.state()?;
 
                 // HACK: do not need to set master block latest chain time from zerostate when using mempool stub
                 //      because anchors from stub have older chain time than in zerostate and it will brake collation
@@ -1050,29 +1041,21 @@ where
                 // TODO: refactor this logic
                 // replace last collated block id with last applied
                 self.blocks_cache
-                    .set_last_collated_mc_block_id(*state.block_id());
+                    .update_last_collated_mc_block_id(*state.block_id());
 
                 let mc_data = McData::load_from_state(state)?;
                 self.refresh_collation_sessions(mc_data, true).await?;
 
                 // remove all previous blocks from cache
-                let mut to_block_keys = vec![state.block_id().as_short_id()];
-                for item in state.shards()?.latest_blocks() {
-                    to_block_keys.push(item?.as_short_id());
-                }
+                let mut to_block_keys = vec![*mc_block_entry.key()];
+                to_block_keys.extend(
+                    mc_block_entry
+                        .top_shard_blocks_ids_iter()
+                        .map(|id| id.as_short_id()),
+                );
                 self.blocks_cache
                     .remove_prev_blocks_from_cache(&to_block_keys);
-            }
 
-            // TODO: remove this when pop will remove from cache on extract
-            // clean up blocks from cache
-            self.blocks_cache.cleanup_blocks_from_cache(
-                subgraph.shard_blocks.iter().map(|sb| sb.key).collect(),
-            )?;
-            self.blocks_cache
-                .cleanup_blocks_from_cache(vec![mc_block_entry_stuff.key])?;
-
-            if is_last {
                 break;
             }
         }
@@ -1943,6 +1926,7 @@ where
                             build_stuff_for_sync_elapsed += timer.elapsed();
 
                             let timer = std::time::Instant::now();
+                            entry_to_sync.send_sync_status = SendSyncStatus::Sending;
                             self.state_node_adapter
                                 .accept_block(block_stuff_for_sync)
                                 .await?;
@@ -1954,7 +1938,7 @@ where
                             entry_to_sync.send_sync_status = SendSyncStatus::Sent;
                             sync_stuff_elapsed += timer.elapsed();
                         }
-                        if entry_to_sync.key.shard.is_masterchain() {
+                        if entry_to_sync.block_id().shard.is_masterchain() {
                             mc_block_subgraph.master_block = Some(entry_to_sync);
                         } else {
                             mc_block_subgraph.shard_blocks.push(entry_to_sync);
@@ -1975,20 +1959,8 @@ where
                 }
                 sync_elapsed = timer.elapsed();
 
-                // TODO: commit queue diffs
-                // self.commit_block_queue_diff(state)
-
-                // clean up blocks from cache
-                self.blocks_cache.cleanup_blocks_from_cache(
-                    mc_block_subgraph
-                        .shard_blocks
-                        .iter()
-                        .map(|sb| sb.key)
-                        .collect(),
-                )?;
-                self.blocks_cache.cleanup_blocks_from_cache(vec![
-                    mc_block_subgraph.master_block.as_ref().unwrap().key,
-                ])?;
+                self.commit_block_queue_diff(mc_block_subgraph.master_block.as_ref().unwrap())
+                    .await?;
             }
             McBlockSubgraphExtract::NotFullValid => {
                 bail!(
