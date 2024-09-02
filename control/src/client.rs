@@ -1,12 +1,14 @@
+use std::io::Write;
 use std::path::Path;
 
 use everscale_types::models::BlockId;
 use futures_util::StreamExt;
 use tarpc::tokio_serde::formats::Bincode;
 use tarpc::{client, context};
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tracing::Instrument;
 use tycho_core::block_strider::ManualGcTrigger;
+use tycho_util::compression::ZstdDecompressStream;
 use tycho_util::futures::JoinTask;
 
 use crate::error::{ClientError, ClientResult};
@@ -105,14 +107,36 @@ impl ControlClient {
         }
     }
 
-    pub async fn download_archive<T>(&self, info: ArchiveInfo, target: &mut T) -> ClientResult<()>
+    pub async fn download_archive<W>(&self, info: ArchiveInfo, mut output: W) -> ClientResult<W>
     where
-        T: AsyncWrite + Unpin,
+        W: Write + Send + 'static,
     {
         const PARALLEL_CHUNKS: usize = 10;
 
+        let target_size = info.size.get();
         let chunk_size = info.chunk_size.get() as u64;
         let chunk_num = (info.size.get() + chunk_size - 1) / chunk_size;
+
+        let (chunks_tx, mut chunks_rx) = mpsc::channel::<ArchiveSliceResponse>(PARALLEL_CHUNKS);
+
+        let processing_task = tokio::task::spawn_blocking(move || {
+            let mut zstd_decoder = ZstdDecompressStream::new(chunk_size as _)?;
+
+            let mut decompressed_chunk = Vec::new();
+            let mut downloaded = 0;
+            while let Some(res) = chunks_rx.blocking_recv() {
+                downloaded += res.data.len() as u64;
+
+                decompressed_chunk.clear();
+                zstd_decoder.write(&res.data, &mut decompressed_chunk)?;
+                output.write_all(&decompressed_chunk)?;
+            }
+
+            anyhow::ensure!(downloaded == target_size, "downloaded size mismatch");
+
+            output.flush()?;
+            Ok(output)
+        });
 
         let mut chunks = futures_util::stream::iter(0..chunk_num)
             .map(|chunk| {
@@ -138,12 +162,14 @@ impl ControlClient {
 
         while let Some(chunk) = chunks.next().await {
             let chunk = chunk??;
-            target
-                .write_all(&chunk.data)
-                .await
-                .map_err(|e| ClientError::ClientFailed(e.into()))?;
+            chunks_tx.send(chunk).await.ok();
         }
 
-        Ok(())
+        processing_task
+            .await
+            .map_err(|e| {
+                ClientError::ClientFailed(anyhow::anyhow!("Failed to join blocking task: {e}"))
+            })?
+            .map_err(ClientError::ClientFailed)
     }
 }

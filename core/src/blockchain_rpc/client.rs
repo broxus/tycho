@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +8,7 @@ use bytes::Bytes;
 use everscale_types::models::BlockId;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use scopeguard::ScopeGuard;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tycho_block_util::archive::ArchiveVerifier;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_network::{PublicOverlay, Request};
@@ -432,93 +433,93 @@ impl BlockchainRpcClient {
         archive_size = %bytesize::ByteSize::b(archive.size.get()),
         archive_chunk_size = %bytesize::ByteSize::b(archive.chunk_size.get() as _),
     ))]
-    pub async fn download_archive(
+    pub async fn download_archive<W>(
         &self,
         archive: PendingArchive,
-        output: &mut DynArchiveWriter,
-    ) -> Result<(), Error> {
+        mut output: W,
+    ) -> Result<W, Error>
+    where
+        W: Write + Send + 'static,
+    {
         const PARALLEL_REQUESTS: usize = 10;
 
         tracing::debug!("started");
 
-        let mut stream = futures_util::stream::iter(
-            (0..archive.size.get()).step_by(archive.chunk_size.get() as usize),
-        )
-        .map(|offset| {
-            let archive_id = archive.id;
-            let neighbour = archive.neighbour.clone();
-            let overlay_client = self.overlay_client().clone();
+        let target_size = archive.size.get();
+        let chunk_size = archive.chunk_size.get() as usize;
 
-            tracing::debug!(archive_id, offset, "downloading archive chunk");
-            JoinTask::new(download_archive_inner(
-                Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
-                overlay_client,
-                neighbour,
-            ))
-        })
-        .buffered(PARALLEL_REQUESTS);
+        let (chunks_tx, mut chunks_rx) =
+            mpsc::channel::<(QueryResponseHandle, Bytes)>(PARALLEL_REQUESTS);
 
-        let mut downloaded = 0;
-        let mut verifier = ArchiveVerifier::default();
-        let mut stream = std::pin::pin!(stream);
-        let mut zstd_decoder = ZstdDecompressStream::new(archive.chunk_size.get() as usize)
-            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to init zstd decoder: {e}")))?;
+        let processing_task = tokio::task::spawn_blocking(move || {
+            let mut verifier = ArchiveVerifier::default();
+            let mut zstd_decoder = ZstdDecompressStream::new(chunk_size)?;
 
-        // Prealloc buffer for decompressed data
-        let mut decompressed_chunk = Vec::new();
+            // Reuse buffer for decompressed data
+            let mut decompressed_chunk = Vec::new();
 
-        while let Some((h, chunk)) = stream.next().await.transpose()? {
-            let guard = scopeguard::guard(h, |handle| {
-                handle.reject();
-            });
+            // Receive and process chunks
+            let mut downloaded = 0;
+            while let Some((h, chunk)) = chunks_rx.blocking_recv() {
+                let guard = scopeguard::guard(h, |handle| {
+                    handle.reject();
+                });
 
-            downloaded += chunk.len() as u64;
+                downloaded += chunk.len() as u64;
 
-            tracing::debug!(
-                downloaded = %bytesize::ByteSize::b(downloaded),
-                "got archive chunk"
+                tracing::debug!(
+                    downloaded = %bytesize::ByteSize::b(downloaded),
+                    "got archive chunk"
+                );
+
+                decompressed_chunk.clear();
+                zstd_decoder.write(chunk.as_ref(), &mut decompressed_chunk)?;
+                verifier.write_verify(&decompressed_chunk)?;
+                output.write_all(&decompressed_chunk)?;
+
+                ScopeGuard::into_inner(guard).accept(); // defuse the guard
+            }
+
+            anyhow::ensure!(
+                target_size == downloaded,
+                "archive size mismatch (target size: {target_size}; downloaded: {downloaded})",
             );
 
-            decompressed_chunk.clear();
-            zstd_decoder
-                .write(chunk.as_ref(), &mut decompressed_chunk)
-                .map_err(|e| {
-                    Error::Internal(anyhow::anyhow!("Failed to decode archive chunk: {e}"))
-                })?;
+            verifier.final_check()?;
+            output.flush()?;
 
-            verifier.write_verify(&decompressed_chunk).map_err(|e| {
-                Error::Internal(anyhow::anyhow!("Received invalid archive chunk: {e}"))
-            })?;
+            Ok(output)
+        });
 
-            output.write_all(&decompressed_chunk).await.map_err(|e| {
-                Error::Internal(anyhow::anyhow!("Failed to write archive chunk: {e}"))
-            })?;
+        let mut stream = futures_util::stream::iter((0..archive.size.get()).step_by(chunk_size))
+            .map(|offset| {
+                let archive_id = archive.id;
+                let neighbour = archive.neighbour.clone();
+                let overlay_client = self.overlay_client().clone();
 
-            ScopeGuard::into_inner(guard).accept(); // defuse the guard
+                tracing::debug!(archive_id, offset, "downloading archive chunk");
+                JoinTask::new(download_archive_inner(
+                    Request::from_tl(rpc::GetArchiveChunk { archive_id, offset }),
+                    overlay_client,
+                    neighbour,
+                ))
+            })
+            .buffered(PARALLEL_REQUESTS);
+
+        let mut stream = std::pin::pin!(stream);
+        while let Some(chunk) = stream.next().await.transpose()? {
+            chunks_tx.send(chunk).await.ok();
         }
 
-        if archive.size.get() != downloaded {
-            return Err(Error::Internal(anyhow::anyhow!(
-                "archive size mismatch: requested - {}, downloaded - {}",
-                archive.size.get(),
-                downloaded
-            )));
-        }
-
-        verifier
-            .final_check()
-            .map_err(|e| Error::Internal(anyhow::anyhow!("Received invalid archive: {e}")))?;
-        output
-            .flush()
+        let output = processing_task
             .await
-            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to flush archive: {e}")))?;
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to join blocking task: {e}")))?
+            .map_err(Error::Internal)?;
 
         tracing::debug!("finished");
-        Ok(())
+        Ok(output)
     }
 }
-
-pub type DynArchiveWriter = dyn AsyncWrite + Unpin + Send;
 
 struct Inner {
     overlay_client: PublicOverlayClient,

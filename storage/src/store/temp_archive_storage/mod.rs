@@ -1,8 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use bytes::{BufMut, Bytes, BytesMut};
-use tycho_util::io::BytesWriter;
+use bytes::Bytes;
 
 use crate::FileDb;
 
@@ -27,7 +26,7 @@ impl TempArchiveStorage {
         Ok(Self { storage_dir })
     }
 
-    pub fn create_archive_file(&self, id: u64) -> Result<tokio::fs::File> {
+    pub fn create_archive_file(&self, id: u64) -> Result<std::fs::File> {
         let path = PathBuf::from(id.to_string());
         if let Err(e) = self.storage_dir.remove_file(&path) {
             tracing::warn!(id = id, "Failed to remove file {e:?}");
@@ -41,31 +40,20 @@ impl TempArchiveStorage {
             .write(true)
             .open()?;
 
-        tracing::debug!(id = id, "temp archive created");
-        Ok(tokio::fs::File::from(file))
+        tracing::debug!(id, "temp archive created");
+        Ok(file)
     }
 
     pub async fn read_archive_to_bytes(&self, id: u64) -> Result<Bytes> {
-        let file = self
-            .storage_dir
-            .file(PathBuf::from(id.to_string()))
-            .read(true)
-            .open()?;
-
-        let file = tokio::fs::File::from(file);
-
-        let mut writer = BytesWriter {
-            writer: BytesMut::new().writer(),
-        };
-
-        tokio::io::copy(&mut tokio::io::BufReader::new(file), &mut writer).await?;
-        Ok(writer.writer.into_inner().freeze())
+        let file = self.storage_dir.file(PathBuf::from(id.to_string()));
+        let bytes = tokio::fs::read(file.path()).await?;
+        Ok(Bytes::from(bytes))
     }
 
     pub fn remove_archive(&self, id: u64) -> Result<()> {
         self.storage_dir
             .remove_file(PathBuf::from(id.to_string()))?;
-        tracing::debug!(id = id, "temp archive removed");
+        tracing::debug!(id, "temp archive removed");
         Ok(())
     }
 }

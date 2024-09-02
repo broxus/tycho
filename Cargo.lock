@@ -3372,7 +3372,6 @@ dependencies = [
  "thiserror",
  "tl-proto",
  "tokio",
- "tokio-util",
  "tracing",
  "tycho-block-util",
  "tycho-network",

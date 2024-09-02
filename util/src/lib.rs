@@ -18,12 +18,6 @@ pub mod futures {
     mod shared;
 }
 
-pub mod io {
-    pub use self::bytes_writer::BytesWriter;
-
-    mod bytes_writer;
-}
-
 pub mod sync {
     pub use self::once_take::*;
     pub use self::priority_semaphore::{AcquireError, PrioritySemaphore, TryAcquireError};

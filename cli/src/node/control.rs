@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use everscale_types::models::BlockId;
 use serde::Serialize;
-use tokio::io::AsyncWriteExt;
 use tycho_control::ControlClient;
 use tycho_core::block_strider::ManualGcTrigger;
 use tycho_util::futures::JoinTask;
@@ -251,16 +250,14 @@ impl CmdDumpArchive {
                 anyhow::bail!("archive not found");
             };
 
-            let file = tokio::fs::OpenOptions::new()
+            let file = std::fs::OpenOptions::new()
                 .create(true)
                 .truncate(true)
                 .write(true)
-                .open(&self.output)
-                .await?;
+                .open(&self.output)?;
 
-            let mut writer = tokio::io::BufWriter::new(file);
-            client.download_archive(info, &mut writer).await?;
-            writer.flush().await?;
+            let writer = std::io::BufWriter::new(file);
+            client.download_archive(info, writer).await?;
 
             print_json(serde_json::json!({
                 "archive_id": info.id,

@@ -8,14 +8,10 @@ use bytesize::ByteSize;
 use everscale_types::models::BlockId;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
-use tokio::fs::File;
-use tokio::io::BufWriter;
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
-use tokio_util::either::Either;
 use tycho_block_util::archive::{Archive, ArchiveError};
 use tycho_storage::{NewBlockMeta, Storage};
-use tycho_util::io::BytesWriter;
 use tycho_util::time::now_sec;
 
 use crate::block_strider::provider::{BlockProvider, OptionalBlockStuff, ProofChecker};
@@ -293,29 +289,24 @@ impl ArchiveDownloader {
         let pending = self.client.find_archive(seqno).await?;
         let archive_id = pending.id;
 
-        let mut writer = self.get_archive_writer(&pending)?;
-        self.client.download_archive(pending, &mut writer).await?;
+        let writer = self.get_archive_writer(&pending)?;
+        let writer = self.client.download_archive(pending, writer).await?;
 
         Ok(match writer {
-            Either::Left(_) => ArchiveData::File { id: archive_id },
-            Either::Right(data) => ArchiveData::Bytes(data.writer.into_inner().freeze()),
+            ArchiveWriter::File(_) => ArchiveData::File { id: archive_id },
+            ArchiveWriter::Bytes(data) => ArchiveData::Bytes(data.into_inner().freeze()),
         })
     }
 
-    fn get_archive_writer(
-        &self,
-        pending: &PendingArchive,
-    ) -> Result<Either<BufWriter<File>, BytesWriter>> {
+    fn get_archive_writer(&self, pending: &PendingArchive) -> Result<ArchiveWriter> {
         Ok(if pending.size.get() > self.memory_threshold.as_u64() {
             let file = self
                 .storage
                 .temp_archive_storage()
                 .create_archive_file(pending.id)?;
-            Either::Left(BufWriter::new(file))
+            ArchiveWriter::File(std::io::BufWriter::new(file))
         } else {
-            Either::Right(BytesWriter {
-                writer: BytesMut::new().writer(),
-            })
+            ArchiveWriter::Bytes(BytesMut::new().writer())
         })
     }
 }
@@ -357,5 +348,40 @@ impl BlockProvider for ArchiveBlockProvider {
 
     fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
         Box::pin(self.get_block_impl(block_id))
+    }
+}
+
+enum ArchiveWriter {
+    File(std::io::BufWriter<std::fs::File>),
+    Bytes(bytes::buf::Writer<BytesMut>),
+}
+
+impl std::io::Write for ArchiveWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(writer) => writer.write(buf),
+            Self::Bytes(writer) => writer.write(buf),
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::File(writer) => writer.write_all(buf),
+            Self::Bytes(writer) => writer.write_all(buf),
+        }
+    }
+
+    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+        match self {
+            Self::File(writer) => writer.write_fmt(fmt),
+            Self::Bytes(writer) => writer.write_fmt(fmt),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::File(writer) => writer.flush(),
+            Self::Bytes(writer) => writer.flush(),
+        }
     }
 }
