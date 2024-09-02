@@ -6,7 +6,7 @@ use futures_util::future::BoxFuture;
 use futures_util::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tarpc::server::Channel;
-use tycho_core::block_strider::{GcSubscriber, ManualGcTrigger};
+use tycho_core::block_strider::{ManualGcTrigger, UpdateStateSubscriber};
 use tycho_storage::Storage;
 
 use crate::error::ServerResult;
@@ -68,21 +68,21 @@ impl ControlEndpoint {
     }
 }
 
-pub struct ControlServerBuilder<MandatoryFields = (Storage, GcSubscriber)> {
+pub struct ControlServerBuilder<MandatoryFields = (Storage, UpdateStateSubscriber)> {
     mandatory_fields: MandatoryFields,
     memory_profiler: Option<Arc<dyn MemoryProfiler>>,
 }
 
 impl ControlServerBuilder {
     pub fn build(self) -> ControlServer {
-        let (storage, gc_subscriber) = self.mandatory_fields;
+        let (storage, state_subscriber) = self.mandatory_fields;
         let memory_profiler = self
             .memory_profiler
             .unwrap_or_else(|| Arc::new(StubMemoryProfiler));
 
         ControlServer {
             inner: Arc::new(Inner {
-                gc_subscriber,
+                state_subscriber,
                 storage,
                 memory_profiler,
             }),
@@ -101,13 +101,13 @@ impl<T2> ControlServerBuilder<((), T2)> {
 }
 
 impl<T1> ControlServerBuilder<(T1, ())> {
-    pub fn with_gc_subscriber(
+    pub fn with_state_subscriber(
         self,
-        gc_subscriber: GcSubscriber,
-    ) -> ControlServerBuilder<(T1, GcSubscriber)> {
+        state_subscriber: UpdateStateSubscriber,
+    ) -> ControlServerBuilder<(T1, UpdateStateSubscriber)> {
         let (t1, _) = self.mandatory_fields;
         ControlServerBuilder {
-            mandatory_fields: (t1, gc_subscriber),
+            mandatory_fields: (t1, state_subscriber),
             memory_profiler: self.memory_profiler,
         }
     }
@@ -146,15 +146,15 @@ impl proto::ControlServer for ControlServer {
     }
 
     async fn trigger_archives_gc(self, _: Context, trigger: ManualGcTrigger) {
-        self.inner.gc_subscriber.trigger_archives_gc(trigger);
+        self.inner.state_subscriber.trigger_archives_gc(trigger);
     }
 
     async fn trigger_blocks_gc(self, _: Context, trigger: ManualGcTrigger) {
-        self.inner.gc_subscriber.trigger_blocks_gc(trigger);
+        self.inner.state_subscriber.trigger_blocks_gc(trigger);
     }
 
     async fn trigger_states_gc(self, _: Context, trigger: ManualGcTrigger) {
-        self.inner.gc_subscriber.trigger_states_gc(trigger);
+        self.inner.state_subscriber.trigger_states_gc(trigger);
     }
 
     async fn set_memory_profiler_enabled(self, _: Context, enabled: bool) -> bool {
@@ -233,7 +233,7 @@ impl proto::ControlServer for ControlServer {
 }
 
 struct Inner {
-    gc_subscriber: GcSubscriber,
+    state_subscriber: UpdateStateSubscriber,
     storage: Storage,
     memory_profiler: Arc<dyn MemoryProfiler>,
 }

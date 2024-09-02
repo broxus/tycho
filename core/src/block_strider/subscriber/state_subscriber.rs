@@ -14,7 +14,7 @@ use tokio::task::AbortHandle;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::queue::{QueueDiff, QueueKey, QueueState};
 use tycho_block_util::state::is_persistent_state;
-use tycho_storage::{BlocksGcType, Storage};
+use tycho_storage::{BlockHandle, BlocksGcType, Storage};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::block_strider::{
@@ -31,11 +31,11 @@ pub enum ManualGcTrigger {
 
 #[derive(Clone)]
 #[repr(transparent)]
-pub struct GcSubscriber {
+pub struct UpdateStateSubscriber {
     inner: Arc<Inner>,
 }
 
-impl GcSubscriber {
+impl UpdateStateSubscriber {
     pub fn new(storage: Storage) -> Self {
         let last_key_block_seqno = storage
             .block_handle_storage()
@@ -103,14 +103,19 @@ impl GcSubscriber {
 
         if is_key_block {
             let key_block_utime = block.block().load_info().unwrap().gen_utime;
+            let prev_key_block_utime = self.inner.last_key_block_utime.load(Ordering::Relaxed);
 
-            if is_persistent_state(
-                key_block_utime,
-                self.inner.last_key_block_utime.load(Ordering::Relaxed),
-            ) && block.id().seqno != 0
-            {
-                let prev_key_block_seqno = self.inner.last_key_block_seqno.load(Ordering::Relaxed);
-                self.save_queue_persistent_state(block, prev_key_block_seqno);
+            if is_persistent_state(key_block_utime, prev_key_block_utime) && block.id().seqno != 0 {
+                let cloned_storage = self.inner.storage.clone();
+                let block_clone = block.clone();
+
+                tokio::spawn(async move {
+                    if let Err(error) =
+                        Self::save_persistent_state(&cloned_storage, block_clone).await
+                    {
+                        tracing::error!("failed to handle persistent state: {:?}", error);
+                    }
+                });
             }
 
             self.inner
@@ -128,39 +133,23 @@ impl GcSubscriber {
         }));
     }
 
-    fn save_queue_persistent_state(&self, block: &BlockStuff, previous_key_block_seqno: u32) {
-        let cloned_storage = self.inner.storage.clone();
-        let cloned_block = block.clone();
+    async fn save_persistent_state(storage: &Storage, block: BlockStuff) -> Result<()> {
+        let (queue_result, state_result) = tokio::join!(
+            save_queue_persistent_state(storage, &block),
+            save_persistent_state(storage, block.id())
+        );
 
-        tokio::spawn(async move {
-            if let Err(e) = async {
-                // Load the queue states
-                let states = load_queue_states(&cloned_block, &cloned_storage).await?;
+        if let Some(error) = queue_result.err().or(state_result.err()) {
+            tracing::error!("failed to save persistent state: {error}");
+            return Err(error);
+        }
 
-                // Store the persistent queue state
-                cloned_storage
-                    .persistent_state_storage()
-                    .store_persistent_queue_state(cloned_block.id().seqno, states)
-                    .await?;
+        storage
+            .persistent_state_storage()
+            .clear_old_persistent_states()
+            .await?;
 
-                // Cleanup the previous key block state
-                cloned_storage
-                    .persistent_state_storage()
-                    .cleanup_queue_state(previous_key_block_seqno)
-                    .context("failed to cleanup queue state")?;
-
-                Ok::<(), anyhow::Error>(())
-            }
-            .await
-            {
-                tracing::error!("failed to save queue persistent state: {e:?}");
-            } else {
-                tracing::info!(
-                    "successfully saved queue persistent state for block seqno {}",
-                    cloned_block.id().seqno
-                );
-            }
-        });
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -513,7 +502,7 @@ async fn wait_with_sleep(
     }
 }
 
-impl StateSubscriber for GcSubscriber {
+impl StateSubscriber for UpdateStateSubscriber {
     type HandleStateFut<'a> = futures_util::future::Ready<Result<()>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
@@ -522,7 +511,7 @@ impl StateSubscriber for GcSubscriber {
     }
 }
 
-impl BlockSubscriber for GcSubscriber {
+impl BlockSubscriber for UpdateStateSubscriber {
     type Prepared = ();
     type PrepareBlockFut<'a> = futures_util::future::Ready<Result<()>>;
     type HandleBlockFut<'a> = futures_util::future::Ready<Result<()>>;
@@ -541,20 +530,17 @@ impl BlockSubscriber for GcSubscriber {
     }
 }
 
-async fn load_queue_states(mc_block: &BlockStuff, storage: &Storage) -> Result<Vec<QueueState>> {
-    let mc_block_id = mc_block.id();
-
-    // Load the main shard state
+async fn load_top_blocks(
+    mc_block_id: &BlockId,
+    storage: &Storage,
+) -> Result<HashMap<ShardIdent, BlockId>> {
     let mc_state = storage
         .shard_state_storage()
         .load_state(mc_block_id)
         .await?;
 
-    // Prepare to store top block IDs and corresponding BlockStuff
     let mut mc_top_blocks_ids = HashMap::<ShardIdent, BlockId>::new();
-    let mut mc_top_blocks = HashMap::<ShardIdent, BlockStuff>::new();
 
-    // Populate mc_top_blocks_ids with shard identifiers
     for item in mc_state.shards()?.iter() {
         let (shard_ident, shard_descr) = item?;
         if shard_descr.seqno != 0 {
@@ -566,8 +552,18 @@ async fn load_queue_states(mc_block: &BlockStuff, storage: &Storage) -> Result<V
             });
         }
     }
-    // Include the main block in the top blocks
     mc_top_blocks_ids.insert(mc_block_id.shard, *mc_block_id);
+
+    Ok(mc_top_blocks_ids)
+}
+
+async fn load_queue_states(
+    mc_block: &BlockStuff,
+    storage: &Storage,
+) -> Result<Vec<(QueueState, BlockHandle)>> {
+    let mc_top_blocks_ids = load_top_blocks(mc_block.id(), storage).await?;
+
+    let mut mc_top_blocks = HashMap::<ShardIdent, BlockStuff>::new();
 
     // Initialize the map for tracking the minimum processed queue keys
     let mut min_processed_uptos = HashMap::<ShardIdent, QueueKey>::new();
@@ -614,7 +610,7 @@ async fn load_queue_states(mc_block: &BlockStuff, storage: &Storage) -> Result<V
     }
 
     // Track the diff states for each shard
-    let mut shard_diffs_state = HashMap::<ShardIdent, (u32, Vec<QueueDiff>)>::new();
+    let mut shard_diffs_state = HashMap::<ShardIdent, (BlockHandle, Vec<QueueDiff>)>::new();
 
     for (shard_ident, processed_upto_queue_key) in min_processed_uptos {
         let block_id = mc_top_blocks_ids.get(&shard_ident).context(format!(
@@ -628,6 +624,8 @@ async fn load_queue_states(mc_block: &BlockStuff, storage: &Storage) -> Result<V
                 "Failed to load handle for top block: {:?}",
                 block_id
             ))?;
+
+        let top_block_handle = block_handle.clone();
         let mut diffs = Vec::new();
         let mut block_stuff = mc_top_blocks
             .get(&shard_ident)
@@ -678,18 +676,54 @@ async fn load_queue_states(mc_block: &BlockStuff, storage: &Storage) -> Result<V
             }
         }
 
-        shard_diffs_state.insert(shard_ident, (block_id.seqno, diffs));
+        shard_diffs_state.insert(shard_ident, (top_block_handle, diffs));
     }
 
     // Convert shard diffs into QueueState objects
     let states = shard_diffs_state
         .into_iter()
-        .map(|(shard_ident, (seqno, queue_diffs))| QueueState {
-            shard_ident,
-            seqno,
-            queue_diffs,
+        .map(|(shard_ident, (top_block_handle, queue_diffs))| {
+            (
+                QueueState {
+                    shard_ident,
+                    seqno: top_block_handle.id().seqno,
+                    queue_diffs,
+                },
+                top_block_handle,
+            )
         })
         .collect();
 
     Ok(states)
+}
+
+async fn save_queue_persistent_state(storage: &Storage, block: &BlockStuff) -> Result<()> {
+    let states = load_queue_states(block, storage).await?;
+    let handle = storage
+        .block_handle_storage()
+        .load_handle(block.id())
+        .ok_or_else(|| anyhow::anyhow!("Block handle not found"))?;
+
+    storage
+        .persistent_state_storage()
+        .store_queue_state(&handle, states)
+        .await
+}
+
+async fn save_persistent_state(storage: &Storage, block_id: &BlockId) -> Result<()> {
+    let top_blocks = load_top_blocks(block_id, storage).await?;
+
+    for (_, top_block) in top_blocks {
+        let root_hash = storage.shard_state_storage().load_state_root(&top_block)?;
+        let block_handle = storage
+            .block_handle_storage()
+            .load_handle(&top_block)
+            .ok_or_else(|| anyhow::anyhow!("Block handle not found"))?;
+        storage
+            .persistent_state_storage()
+            .store_state(&block_handle, &root_hash)
+            .await?;
+    }
+
+    Ok(())
 }

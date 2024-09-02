@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use dashmap::DashMap;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::BlockId;
@@ -12,24 +12,52 @@ use parking_lot::Mutex;
 use tokio::time::Instant;
 use tycho_block_util::block::KEY_BLOCK_UTIME_STEP;
 use tycho_block_util::queue::QueueState;
-use tycho_util::sync::rayon_run;
 
 use crate::db::{BaseDb, FileDb, MappedFile};
 use crate::models::BlockHandle;
 use crate::store::BlockHandleStorage;
 
 mod state_writer;
-// mod queue_state_writer;
 
 const BASE_DIR: &str = "states";
 const QUEUE_STATE_FILE_EXTENSION: &str = "queue";
+const STATE_FILE_EXTENSION: &str = "boc";
 const QUEUE_STATE_TMP_FILE_EXTENSION: &str = "queue_tmp";
+
+#[derive(Debug, Eq, Hash, PartialEq)]
+pub enum CacheStateKind {
+    BLOCK,
+    QUEUE,
+}
+
+impl CacheStateKind {
+    fn from_extension(extension: &str) -> Option<Self> {
+        match extension {
+            QUEUE_STATE_FILE_EXTENSION => Some(Self::QUEUE),
+            STATE_FILE_EXTENSION => Some(Self::BLOCK),
+            _ => None,
+        }
+    }
+
+    fn extension(&self) -> &'static str {
+        match self {
+            Self::BLOCK => STATE_FILE_EXTENSION,
+            Self::QUEUE => QUEUE_STATE_FILE_EXTENSION,
+        }
+    }
+}
+
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct CacheKey {
+    block_id: BlockId,
+    kind: CacheStateKind,
+}
 
 pub struct PersistentStateStorage {
     db: BaseDb,
     storage_dir: FileDb,
     block_handle_storage: Arc<BlockHandleStorage>,
-    descriptor_cache: Arc<DashMap<BlockId, Arc<CachedState>>>,
+    descriptor_cache: Arc<DashMap<CacheKey, Arc<CachedState>>>,
     mc_seqno_to_block_ids: Mutex<BTreeMap<u32, Vec<BlockId>>>,
     is_cancelled: Arc<AtomicBool>,
 }
@@ -56,13 +84,19 @@ impl PersistentStateStorage {
         Ok(res)
     }
 
-    pub fn state_exists(&self, block_id: &BlockId) -> bool {
-        self.descriptor_cache.contains_key(block_id)
+    pub fn state_exists(&self, block_id: &BlockId, kind: CacheStateKind) -> bool {
+        self.descriptor_cache.contains_key(&CacheKey {
+            block_id: *block_id,
+            kind,
+        })
     }
 
     pub fn get_state_info(&self, block_id: &BlockId) -> Option<PersistentStateInfo> {
         self.descriptor_cache
-            .get(block_id)
+            .get(&CacheKey {
+                block_id: *block_id,
+                kind: CacheStateKind::BLOCK,
+            })
             .map(|cached| PersistentStateInfo {
                 size: cached.file.length(),
             })
@@ -78,7 +112,11 @@ impl PersistentStateStorage {
         let offset = usize::try_from(offset).ok()?;
         let limit = limit as usize;
 
-        let cached = self.descriptor_cache.get(block_id)?.clone();
+        let key = CacheKey {
+            block_id: *block_id,
+            kind: CacheStateKind::BLOCK,
+        };
+        let cached = self.descriptor_cache.get(&key)?.clone();
         if offset > cached.file.length() {
             return None;
         }
@@ -98,7 +136,7 @@ impl PersistentStateStorage {
             return Ok(());
         }
 
-        rayon_run({
+        tokio::task::spawn_blocking({
             let handle = handle.clone();
             let root_hash = *root_hash;
             let is_cancelled = self.is_cancelled.clone();
@@ -129,36 +167,39 @@ impl PersistentStateStorage {
                 }
             }
         })
-        .await;
+        .await?;
 
-        self.cache_state(handle)
+        self.cache_state(handle, CacheStateKind::BLOCK, handle.mc_ref_seqno())
     }
 
-    pub async fn store_persistent_queue_state(
+    pub async fn store_queue_state(
         &self,
-        mc_seqno: u32,
-        states: Vec<QueueState>,
+        handle: &BlockHandle,
+        states: Vec<(QueueState, BlockHandle)>,
     ) -> Result<()> {
-        let dir = self.mc_states_dir(mc_seqno);
-        rayon_run({
-            let states_dir = self.prepare_persistent_states_dir(mc_seqno)?;
+        let cloned_states = states.clone();
+        tokio::task::spawn_blocking({
+            let mc_ref_seqno = handle.mc_ref_seqno();
+            let dir = self.mc_states_dir(mc_ref_seqno);
+            let states_dir = self.prepare_persistent_states_dir(mc_ref_seqno)?;
+
             move || {
-                let result = state_writer::QueueStateWriter::new(&states_dir, &states).write();
+                let result =
+                    state_writer::QueueStateWriter::new(&states_dir, &cloned_states).write();
                 if let Err(e) = result {
-                    tracing::error!(mc_seqno, "failed to write queue state: {e:?}");
-                    // cleanup if something was created
                     Self::remove_file_by_extension(&dir, QUEUE_STATE_TMP_FILE_EXTENSION)?;
                     Self::remove_file_by_extension(&dir, QUEUE_STATE_FILE_EXTENSION)?;
+                    bail!("failed to write queue state: {e}");
                 }
                 Ok(())
             }
         })
-        .await
-    }
+        .await??;
 
-    pub fn cleanup_queue_state(&self, mc_seqno: u32) -> Result<()> {
-        let dir = self.mc_states_dir(mc_seqno);
-        Self::remove_file_by_extension(&dir, QUEUE_STATE_FILE_EXTENSION)
+        for (_, block_handle) in states {
+            self.cache_state(&block_handle, CacheStateKind::QUEUE, handle.mc_ref_seqno())?;
+        }
+        Ok(())
     }
 
     pub fn prepare_persistent_states_dir(&self, mc_seqno: u32) -> Result<FileDb> {
@@ -211,7 +252,7 @@ impl PersistentStateStorage {
 
                 for block_id in block_ids.drain(..) {
                     // TODO: Clear flag in block handle
-                    self.descriptor_cache.remove(&block_id);
+                    self.clear_cache(&block_id);
                 }
                 false
             });
@@ -283,10 +324,23 @@ impl PersistentStateStorage {
 
                 'file: {
                     // Try to parse the file name as a block_id
-                    let Ok(name) = entry.file_name().into_string() else {
+                    let Ok(block_id) = path
+                        // TODO should use file_prefix
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or_default()
+                        .parse::<BlockId>()
+                    else {
                         break 'file;
                     };
-                    let Ok(block_id) = name.parse::<BlockId>() else {
+
+                    let extension = path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .unwrap_or_default();
+
+                    let Some(cache_type) = CacheStateKind::from_extension(extension) else {
                         break 'file;
                     };
 
@@ -300,8 +354,7 @@ impl PersistentStateStorage {
                         continue 'outer;
                     }
 
-                    // Cache the state
-                    self.cache_state(&handle)?;
+                    self.cache_state(&handle, cache_type, mc_seqno)?;
                     continue 'outer;
                 }
                 tracing::warn!(path = %path.display(), "unexpected file");
@@ -336,17 +389,31 @@ impl PersistentStateStorage {
         Ok(())
     }
 
-    fn cache_state(&self, block_handle: &BlockHandle) -> Result<()> {
+    fn cache_state(
+        &self,
+        block_handle: &BlockHandle,
+        kind: CacheStateKind,
+        mc_seqno: u32,
+    ) -> Result<()> {
         use dashmap::mapref::entry::Entry;
 
-        let mc_seqno = block_handle.mc_ref_seqno();
         let block_id = block_handle.id();
 
         let states = self.mc_states_dir(mc_seqno);
-        let mut file = states.file(block_id.to_string());
+        let path = states
+            .path()
+            .join(block_id.to_string())
+            .with_extension(kind.extension());
+        let mut file = states.file(path);
 
         let mut is_new = false;
-        if let Entry::Vacant(entry) = self.descriptor_cache.entry(*block_id) {
+
+        let key = CacheKey {
+            block_id: *block_id,
+            kind,
+        };
+
+        if let Entry::Vacant(entry) = self.descriptor_cache.entry(key) {
             let file = file
                 .read(true)
                 .write(true)
@@ -379,6 +446,17 @@ impl PersistentStateStorage {
             }
         }
         Ok(())
+    }
+
+    fn clear_cache(&self, block_id: &BlockId) {
+        self.descriptor_cache.remove(&CacheKey {
+            block_id: *block_id,
+            kind: CacheStateKind::BLOCK,
+        });
+        self.descriptor_cache.remove(&CacheKey {
+            block_id: *block_id,
+            kind: CacheStateKind::QUEUE,
+        });
     }
 }
 

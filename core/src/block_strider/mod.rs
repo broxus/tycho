@@ -24,9 +24,9 @@ pub use self::state_applier::ShardStateApplier;
 #[cfg(any(test, feature = "test"))]
 pub use self::subscriber::test::PrintSubscriber;
 pub use self::subscriber::{
-    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, GcSubscriber,
-    ManualGcTrigger, MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext,
-    StateSubscriberExt,
+    BlockSubscriber, BlockSubscriberContext, BlockSubscriberExt, ChainSubscriber, ManualGcTrigger,
+    MetricsSubscriber, NoopSubscriber, StateSubscriber, StateSubscriberContext, StateSubscriberExt,
+    UpdateStateSubscriber,
 };
 
 mod provider;

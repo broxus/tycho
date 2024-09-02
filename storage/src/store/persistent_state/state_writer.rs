@@ -12,7 +12,10 @@ use tycho_block_util::queue::QueueState;
 use tycho_util::FastHashMap;
 
 use crate::db::{BaseDb, FileDb, TempFile};
-use crate::store::persistent_state::{QUEUE_STATE_FILE_EXTENSION, QUEUE_STATE_TMP_FILE_EXTENSION};
+use crate::store::persistent_state::{
+    QUEUE_STATE_FILE_EXTENSION, QUEUE_STATE_TMP_FILE_EXTENSION, STATE_FILE_EXTENSION,
+};
+use crate::BlockHandle;
 
 pub struct StateWriter<'a> {
     db: &'a BaseDb,
@@ -51,7 +54,7 @@ impl<'a> StateWriter<'a> {
         // Create states file
         let mut file = self
             .states_dir
-            .file(self.file_name())
+            .file(self.file_name().with_extension(STATE_FILE_EXTENSION))
             .create(true)
             .write(true)
             .truncate(true)
@@ -187,7 +190,7 @@ impl<'a> StateWriter<'a> {
         while let Some((index, data)) = stack.pop() {
             if let Some(is_cancelled) = is_cancelled {
                 if iteration % 1000 == 0 && is_cancelled.load(Ordering::Relaxed) {
-                    anyhow::bail!("Persistent state writing cancelled.")
+                    bail!("Persistent state writing cancelled.")
                 }
             }
 
@@ -405,27 +408,28 @@ enum CellWriterError {
 
 pub struct QueueStateWriter<'a> {
     states_dir: &'a FileDb,
-    states: &'a [QueueState],
+    states: &'a Vec<(QueueState, BlockHandle)>,
 }
 
 impl<'a> QueueStateWriter<'a> {
-    pub fn new(states_dir: &'a FileDb, states: &'a [QueueState]) -> Self {
+    pub fn new(states_dir: &'a FileDb, states: &'a Vec<(QueueState, BlockHandle)>) -> Self {
         Self { states_dir, states }
     }
 
     pub fn write(&self) -> Result<()> {
         let mut created_files = Vec::with_capacity(self.states.len());
 
-        for state in self.states {
+        for (state, block_handle) in self.states {
             let serialized_state = tl_proto::serialize(state);
             let file_size = serialized_state.len();
 
             // Generate a temporary file name
-            let temp_file_name = format!(
-                "{:?}_{}.{}",
-                state.shard_ident, state.seqno, QUEUE_STATE_TMP_FILE_EXTENSION
-            );
-            let temp_file_path = self.states_dir.path().join(&temp_file_name);
+            let temp_file_name = block_handle.id().to_string();
+            let temp_file_path = self
+                .states_dir
+                .path()
+                .join(&temp_file_name)
+                .with_extension(QUEUE_STATE_TMP_FILE_EXTENSION);
 
             // Create and write to the temporary file
             let file = self
@@ -435,30 +439,13 @@ impl<'a> QueueStateWriter<'a> {
                 .write(true)
                 .truncate(true)
                 .prealloc(file_size)
-                .open()
-                .with_context(|| {
-                    format!(
-                        "Failed to open temporary file: {}",
-                        temp_file_path.display()
-                    )
-                })?;
+                .open()?;
 
             let mut buffer = BufWriter::with_capacity(FILE_BUFFER_LEN / 10, file);
-            if let Err(e) = buffer.write_all(&serialized_state) {
-                tracing::error!(
-                    "Failed to write to file {}: {}",
-                    temp_file_path.display(),
-                    e
-                );
-                bail!(e);
-            }
 
-            buffer.flush().with_context(|| {
-                format!(
-                    "Failed to flush buffer for file: {}",
-                    temp_file_path.display()
-                )
-            })?;
+            buffer.write_all(&serialized_state)?;
+
+            buffer.flush()?;
 
             created_files.push(temp_file_path);
         }
@@ -466,13 +453,7 @@ impl<'a> QueueStateWriter<'a> {
         // Rename all temporary files to their final names with the .queue extension
         for temp_file in &created_files {
             let final_file_path = temp_file.with_extension(QUEUE_STATE_FILE_EXTENSION);
-            fs::rename(temp_file, &final_file_path).with_context(|| {
-                format!(
-                    "Failed to rename {} to {}",
-                    temp_file.display(),
-                    final_file_path.display()
-                )
-            })?;
+            fs::rename(temp_file, &final_file_path)?;
         }
 
         Ok(())

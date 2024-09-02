@@ -307,7 +307,7 @@ impl ShardStateStorage {
             .map(Some)
     }
 
-    fn load_state_root(&self, block_id: &BlockId) -> Result<HashBytes> {
+    pub fn load_state_root(&self, block_id: &BlockId) -> Result<HashBytes> {
         let shard_states = &self.db.shard_states;
         let shard_state = shard_states.get(block_id.to_vec())?;
         match shard_state {

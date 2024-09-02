@@ -27,9 +27,9 @@ use tycho_control::{ControlEndpoint, ControlServer, ControlServerConfig};
 use tycho_core::block_strider::{
     ArchiveBlockProvider, ArchiveBlockProviderConfig, BlockProvider, BlockProviderExt,
     BlockStrider, BlockSubscriber, BlockSubscriberExt, BlockchainBlockProvider,
-    BlockchainBlockProviderConfig, FileZerostateProvider, GcSubscriber, MetricsSubscriber,
-    OptionalBlockStuff, PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
-    StateSubscriberContext, StorageBlockProvider,
+    BlockchainBlockProviderConfig, FileZerostateProvider, MetricsSubscriber, OptionalBlockStuff,
+    PersistentBlockStriderState, ShardStateApplier, Starter, StateSubscriber,
+    StateSubscriberContext, StorageBlockProvider, UpdateStateSubscriber,
 };
 use tycho_core::blockchain_rpc::{
     BlockchainRpcClient, BlockchainRpcService, BroadcastListener, SelfBroadcastListener,
@@ -595,14 +595,14 @@ impl Node {
 
         tracing::info!("collator started");
 
-        let gc_subscriber = GcSubscriber::new(self.storage.clone());
+        let state_subscriber = UpdateStateSubscriber::new(self.storage.clone());
 
         // Create RPC
         // NOTE: This variable is used as a guard to abort the server future on drop.
         let _control_state = if let Some(config) = &self.control_config {
             let server = {
                 let mut builder = ControlServer::builder()
-                    .with_gc_subscriber(gc_subscriber.clone())
+                    .with_state_subscriber(state_subscriber.clone())
                     .with_storage(self.storage.clone());
 
                 #[cfg(feature = "jemalloc")]
@@ -670,7 +670,7 @@ impl Node {
                         (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
                     ),
                 )
-                    .chain(gc_subscriber),
+                    .chain(state_subscriber),
             )
             .build();
 
