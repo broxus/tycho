@@ -3,13 +3,14 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use everscale_types::models::{BlockId, ShardIdent};
+use parking_lot::MutexGuard;
 use tycho_block_util::queue::QueueKey;
 use tycho_block_util::state::ShardStateStuff;
 use tycho_util::FastHashMap;
 
 use super::types::{
-    self, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryKind, BlockCacheEntryStuff,
-    BlockCacheKey, BlockCacheStoreResult, BlockSeqno, BlocksCache, McBlockSubgraph,
+    self, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryKind, BlockCacheKey,
+    BlockCacheStoreResult, BlockSeqno, BlocksCache, MasterBlocksCache, McBlockSubgraph,
     McBlockSubgraphExtract, SendSyncStatus,
 };
 use super::utils;
@@ -24,9 +25,33 @@ impl BlocksCache {
         master_cache.applied_mc_queue_range
     }
 
-    pub(super) fn set_last_collated_mc_block_id(&self, block_id: BlockId) {
+    pub(super) fn update_last_collated_mc_block_id(&self, block_id: BlockId) {
         let mut guard = self.masters.lock();
+        Self::update_last_collated_mc_block_id_and_applied_mc_queue_range(&mut guard, block_id);
+    }
+
+    fn update_last_collated_mc_block_id_and_applied_mc_queue_range(
+        guard: &mut MutexGuard<'_, MasterBlocksCache>,
+        block_id: BlockId,
+    ) {
+        Self::update_applied_mc_queue_range(guard, block_id.seqno);
         guard.last_collated_mc_block_id = Some(block_id);
+    }
+
+    fn update_applied_mc_queue_range(
+        guard: &mut MutexGuard<'_, MasterBlocksCache>,
+        block_seqno: u32,
+    ) {
+        if let Some((range_start, range_end)) = guard.applied_mc_queue_range {
+            if block_seqno >= range_start {
+                let new_range_start = block_seqno + 1;
+                if new_range_start > range_end {
+                    guard.applied_mc_queue_range = None;
+                } else {
+                    guard.applied_mc_queue_range = Some((new_range_start, range_end));
+                }
+            }
+        }
     }
 
     pub(super) fn get_all_processed_to_by_mc_block_from_cache(
@@ -223,20 +248,8 @@ impl BlocksCache {
                 }
             };
 
-            // update last collated mc block id
-            guard.last_collated_mc_block_id = Some(block_id);
-
-            // update applied mc queue range info
-            if let Some((range_start, range_end)) = guard.applied_mc_queue_range {
-                if block_id.seqno >= range_start {
-                    let new_range_start = block_id.seqno + 1;
-                    if new_range_start > range_end {
-                        guard.applied_mc_queue_range = None;
-                    } else {
-                        guard.applied_mc_queue_range = Some((new_range_start, range_end));
-                    }
-                }
-            }
+            // update last collated mc block id and applied mc queue range info
+            Self::update_last_collated_mc_block_id_and_applied_mc_queue_range(&mut guard, block_id);
 
             let result = BlockCacheStoreResult {
                 block_id,
@@ -586,43 +599,36 @@ impl BlocksCache {
         let mut is_last = true;
         {
             let mut guard = self.masters.lock();
-            let range = guard.blocks.range_mut(from_seqno..);
+            let keys = guard.blocks.keys().copied().collect::<Vec<_>>();
+            for key in keys {
+                if key < from_seqno {
+                    continue;
+                }
 
-            for (_, mc_block_entry) in range {
+                let btree_map::Entry::Occupied(occupied_entry) = guard.blocks.entry(key) else {
+                    bail!("Block cache entry should exist ({})", key)
+                };
+
                 if matches!(
-                    mc_block_entry.kind,
+                    occupied_entry.get().kind,
                     BlockCacheEntryKind::Received | BlockCacheEntryKind::ReceivedAndCollated
                 ) {
                     if extracted_mc_block_entry.is_some() {
                         is_last = false;
                         break;
                     } else {
-                        let mc_block_entry_stuff = mc_block_entry.extract_entry_stuff()?;
-                        let prev_shard_blocks_ids = mc_block_entry
-                            .top_shard_blocks_info
-                            .iter()
-                            .filter(|(_, updated)| *updated)
-                            .map(|(id, _)| id)
-                            .cloned()
-                            .collect::<VecDeque<_>>();
-                        extracted_mc_block_entry =
-                            Some((mc_block_entry_stuff, prev_shard_blocks_ids));
+                        let mc_block_entry = occupied_entry.remove();
+                        Self::update_applied_mc_queue_range(
+                            &mut guard,
+                            mc_block_entry.block_id().seqno,
+                        );
+                        extracted_mc_block_entry = Some(mc_block_entry);
                     }
-                } else {
-                    bail!(
-                        "pop_front_appliend_mc_block_subgraph: should not be with kind {:?} ({})",
-                        mc_block_entry.kind,
-                        mc_block_entry.key(),
-                    )
                 }
             }
         }
-        let (mc_block_entry_stuff, prev_shard_blocks_ids) = extracted_mc_block_entry.unwrap();
-        let subgraph_extract = self.extract_mc_block_subgraph_internal(
-            mc_block_entry_stuff,
-            prev_shard_blocks_ids,
-            false,
-        )?;
+        let mc_block_entry = extracted_mc_block_entry.unwrap();
+        let subgraph_extract = self.extract_mc_block_subgraph_internal(mc_block_entry)?;
         Ok((subgraph_extract, is_last))
     }
 
@@ -634,51 +640,59 @@ impl BlocksCache {
         only_if_valid: bool,
     ) -> Result<McBlockSubgraphExtract> {
         // 1. Find requested master block
-        let mc_block_entry_stuff;
-        let prev_shard_blocks_ids;
+        let mc_block_entry;
         {
             let mut guard = self.masters.lock();
 
-            let Some(mc_block_entry) = guard.blocks.get_mut(&block_id.seqno) else {
+            let btree_map::Entry::Occupied(occupied_entry) = guard.blocks.entry(block_id.seqno)
+            else {
                 return Ok(McBlockSubgraphExtract::AlreadyExtracted);
             };
 
-            if !mc_block_entry.is_valid && only_if_valid {
-                return Ok(McBlockSubgraphExtract::NotFullValid);
+            {
+                let mc_block_entry = occupied_entry.get();
+                if !mc_block_entry.is_valid && only_if_valid {
+                    return Ok(McBlockSubgraphExtract::NotFullValid);
+                }
             }
 
-            // 2. Extract stuff for sync
-            mc_block_entry_stuff = mc_block_entry.extract_entry_stuff_for_sync()?;
+            // 2. Extract
+            mc_block_entry = occupied_entry.remove();
 
-            prev_shard_blocks_ids = mc_block_entry
-                .top_shard_blocks_info
-                .iter()
-                .filter(|(_, updated)| *updated)
-                .map(|(id, _)| id)
-                .cloned()
-                .collect::<VecDeque<_>>();
+            if matches!(
+                mc_block_entry.kind,
+                BlockCacheEntryKind::Received | BlockCacheEntryKind::ReceivedAndCollated
+            ) {
+                Self::update_applied_mc_queue_range(&mut guard, block_id.seqno);
+            }
 
             // update last known synced block seqno in cache
             types::check_refresh_last_known_synced(&mut guard.last_known_synced, block_id.seqno);
         }
 
-        self.extract_mc_block_subgraph_internal(mc_block_entry_stuff, prev_shard_blocks_ids, true)
+        self.extract_mc_block_subgraph_internal(mc_block_entry)
     }
 
     fn extract_mc_block_subgraph_internal(
         &self,
-        mc_block_entry_stuff: BlockCacheEntryStuff,
-        mut prev_shard_blocks_ids: VecDeque<BlockId>,
-        for_sync: bool,
+        mc_block_entry: BlockCacheEntry,
     ) -> Result<McBlockSubgraphExtract> {
-        let mc_block_key = mc_block_entry_stuff.key;
+        let mc_block_key = *mc_block_entry.key();
+
+        // 3. By the top shard blocks info find shard blocks of current master block
+        let mut prev_shard_blocks_ids = mc_block_entry
+            .top_shard_blocks_info
+            .iter()
+            .filter(|(_, updated)| *updated)
+            .map(|(id, _)| id)
+            .cloned()
+            .collect::<VecDeque<_>>();
 
         let mut subgraph = McBlockSubgraph {
-            master_block: Some(mc_block_entry_stuff),
+            master_block: Some(mc_block_entry),
             shard_blocks: vec![],
         };
 
-        // 3. By the top shard blocks info find shard blocks of current master block
         // 4. Recursively find prev shard blocks until the end or top shard blocks of prev master reached
         while let Some(prev_shard_block_id) = prev_shard_blocks_ids.pop_front() {
             if prev_shard_block_id.seqno == 0 {
@@ -690,22 +704,17 @@ impl BlocksCache {
                 continue;
             };
 
-            if let Some(sc_block_entry) = shard_cache.blocks.get_mut(&prev_shard_block_id.seqno) {
+            if let Some(sc_block_entry) = shard_cache.blocks.remove(&prev_shard_block_id.seqno) {
                 let sc_block_id = *sc_block_entry.block_id();
 
                 // if shard block included in current master block subgraph
                 if matches!(sc_block_entry.containing_mc_block, Some(key) if key == mc_block_key) {
-                    // 5. Extract stuff for sync
-                    let sc_block_entry_stuff = if for_sync {
-                        sc_block_entry.extract_entry_stuff_for_sync()?
-                    } else {
-                        sc_block_entry.extract_entry_stuff()?
-                    };
-                    subgraph.shard_blocks.push(sc_block_entry_stuff);
+                    // 5. Extract
                     sc_block_entry
                         .prev_blocks_ids
                         .iter()
                         .for_each(|sub_prev| prev_shard_blocks_ids.push_back(*sub_prev));
+                    subgraph.shard_blocks.push(sc_block_entry);
 
                     // update last known synced block seqno in cache
                     types::check_refresh_last_known_synced(
@@ -720,10 +729,10 @@ impl BlocksCache {
 
         tracing::debug!(
             target: tracing_targets::COLLATION_MANAGER,
-            "Extracted valid master block subgraph for sending to sync ({}): {}",
+            "Extracted master block subgraph ({}): {}",
             mc_block_key,
             DisplaySlice(
-                subgraph.shard_blocks.iter().map(|sb| sb.key)
+                subgraph.shard_blocks.iter().map(|sb| *sb.key())
                 .collect::<Vec<_>>().as_slice()
             ),
         );
@@ -753,7 +762,7 @@ impl BlocksCache {
     }
 
     /// Remove block entries from cache and compact cache
-    pub(super) fn cleanup_blocks_from_cache(&self, blocks_keys: Vec<BlockCacheKey>) -> Result<()> {
+    pub(super) fn _cleanup_blocks_from_cache(&self, blocks_keys: Vec<BlockCacheKey>) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Cleaning up blocks from cache: {}",
             DisplaySlice(&blocks_keys),
@@ -772,17 +781,7 @@ impl BlocksCache {
                         mc_block_entry.kind,
                         BlockCacheEntryKind::Received | BlockCacheEntryKind::ReceivedAndCollated
                     ) {
-                        if let Some((range_start, range_end)) = guard.applied_mc_queue_range {
-                            if block_key.seqno >= range_start {
-                                let new_range_start = block_key.seqno + 1;
-                                if new_range_start > range_end {
-                                    guard.applied_mc_queue_range = None;
-                                } else {
-                                    guard.applied_mc_queue_range =
-                                        Some((new_range_start, range_end));
-                                }
-                            }
-                        }
+                        Self::update_applied_mc_queue_range(&mut guard, block_key.seqno);
                     }
                 }
             } else if let Some(mut shard_cache) = self.shards.get_mut(&block_key.shard) {
