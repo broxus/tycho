@@ -54,132 +54,43 @@ fi
 echo "Integration test directory: ${test_dir}"
 mkdir -p "${test_dir}"
 
-# States
-state_checksum_file="${test_dir}/states.tar.zst.sha256"
-state_checksum_url="${test_base_url}/states.tar.zst.sha256"
-
-state_file="${test_dir}/states.tar.zst"
-state_url="${test_base_url}/states.tar.zst"
-
-# Zerostate
-zerostate_checksum_file="${test_dir}/zerostate.boc.sha256"
-zerostate_checksum_url="${test_base_url}/zerostate.boc.sha256"
-
-zerostate_file="${test_dir}/zerostate.boc"
-zerostate_url="${test_base_url}/zerostate.boc"
-
-# Archives
-archive_checksum_file="${test_dir}/archive.bin.sha256"
-archive_checksum_url="${test_base_url}/archive.bin.sha256"
-
-next_archive_checksum_file="${test_dir}/next_archive.bin.sha256"
-next_archive_checksum_url="${test_base_url}/next_archive.bin.sha256"
-
-last_archive_checksum_file="${test_dir}/last_archive.bin.sha256"
-last_archive_checksum_url="${test_base_url}/last_archive.bin.sha256"
-
-archive_file="${test_dir}/archive.bin"
-archive_url="${test_base_url}/archive.bin"
-
-next_archive_file="${test_dir}/next_archive.bin"
-next_archive_url="${test_base_url}/next_archive.bin"
-
-last_archive_file="${test_dir}/last_archive.bin"
-last_archive_url="${test_base_url}/last_archive.bin"
-
-# Always download the checksum file first to ensure it's the latest
-echo "Downloading checksum file..."
-curl --request GET -sL --url "${state_checksum_url}" --output "${state_checksum_file}"
-curl --request GET -sL --url "${zerostate_checksum_url}" --output "${zerostate_checksum_file}"
-curl --request GET -sL --url "${archive_checksum_url}" --output "${archive_checksum_file}"
-curl --request GET -sL --url "${next_archive_checksum_url}" --output "${next_archive_checksum_file}"
-curl --request GET -sL --url "${last_archive_checksum_url}" --output "${last_archive_checksum_file}"
-
 function download() {
     curl --request GET -L --url $1 --output $2
 }
 
-# Check if the states file exists
-if [ -f "${test_dir}/states.tar.zst" ]; then
-    # Verify the archive against the checksum
-    echo "Verifying existing states against checksum..."
+function ensure_exists() {
+    local file_url="${test_base_url}/$1"
+    local file_path="${test_dir}/$1"
+    local checksum_url="${test_base_url}/$1.sha256"
+    local checksum_path="${test_dir}/$1.sha256"
 
-    cd "${test_dir}"
-    if sha256sum -c "${test_dir}/states.tar.zst.sha256"; then
-        echo "Checksum matches. No need to download the states."
+    echo "[$1]: Downloading checksum file..."
+    curl --request GET -sL --url "${checksum_url}" --output "${checksum_path}"
+
+    # Check if file exists
+    if [ -f "$file_path" ]; then
+        # Verify it against the checksum
+        echo "[$1]: Verifying $1 against checksum..."
+
+        cd "${test_dir}"
+        if sha256sum -c "$checksum_path"; then
+            echo "[$1]: Checksum matches. No need to download..."
+        else
+            echo "[$1]: Checksum does not match. Downloading..."
+            download ${file_url} ${file_path}
+        fi
+        cd -
     else
-        echo "Checksum does not match. Downloading the states..."
-        download ${state_url} ${state_file}
+        echo "[$1]: File does not exist. Downloading it..."
+        download ${file_url} ${file_path}
     fi
-else
-    echo "States file does not exist. Downloading the states..."
-    download ${state_url} ${state_file}
-fi
 
-# Check if the zerostate file exists
-if [ -f "${test_dir}/zerostate.boc" ]; then
-    # Verify the zerostate against the checksum
-    echo "Verifying existing zerostate against checksum..."
+    echo "[$1]: Done."
+}
 
-    cd "${test_dir}"
-    if sha256sum -c "${test_dir}/zerostate.boc.sha256"; then
-        echo "Checksum matches. No need to download the zerostate."
-    else
-        echo "Checksum does not match. Downloading the zerostate..."
-        download ${zerostate_url} ${zerostate_file}
-    fi
-else
-    echo "Zerostate file does not exist. Downloading the zerostate..."
-    download ${zerostate_url} ${zerostate_file}
-fi
+ensure_exists "states.tar.zst"
+ensure_exists "zerostate.boc"
 
-# Check if the archive file exists
-if [ -f "${test_dir}/archive.bin" ]; then
-    # Verify the archive against the checksum
-    echo "Verifying existing archive against checksum..."
-
-    cd "${test_dir}"
-    if sha256sum -c "${test_dir}/archive.bin.sha256"; then
-        echo "Checksum matches. No need to download the archive."
-    else
-        echo "Checksum does not match. Downloading the archive..."
-        download ${archive_url} ${archive_file}
-    fi
-else
-    echo "Archive file does not exist. Downloading the archive..."
-    download ${archive_url} ${archive_file}
-fi
-
-# Check if the next archive file exists
-if [ -f "${test_dir}/next_archive.bin" ]; then
-    # Verify the next archive against the checksum
-    echo "Verifying existing next archive against checksum..."
-
-    cd "${test_dir}"
-    if sha256sum -c "${test_dir}/next_archive.bin.sha256"; then
-        echo "Checksum matches. No need to download the next archive."
-    else
-        echo "Checksum does not match. Downloading the next archive..."
-        download ${next_archive_url} ${next_archive_file}
-    fi
-else
-    echo "Next archive file does not exist. Downloading the next archive..."
-    download ${next_archive_url} ${next_archive_file}
-fi
-
-# Check if the last archive file exists
-if [ -f "${test_dir}/last_archive.bin" ]; then
-    # Verify the last archive against the checksum
-    echo "Verifying existing last archive against checksum..."
-
-    cd "${test_dir}"
-    if sha256sum -c "${test_dir}/last_archive.bin.sha256"; then
-        echo "Checksum matches. No need to download the last archive."
-    else
-        echo "Checksum does not match. Downloading the last archive..."
-        download ${last_archive_url} ${last_archive_file}
-    fi
-else
-    echo "Last archive file does not exist. Downloading the last archive..."
-    download ${last_archive_url} ${last_archive_file}
-fi
+ensure_exists "archive.bin"
+ensure_exists "next_archive.bin"
+ensure_exists "last_archive.bin"
