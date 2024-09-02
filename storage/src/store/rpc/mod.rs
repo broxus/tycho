@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwapOption;
+use bytes::Bytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use metrics::atomics::AtomicU64;
@@ -47,7 +48,7 @@ impl RpcStorage {
         &self,
         code_hash: &HashBytes,
         continuation: Option<&StdAddr>,
-    ) -> Result<CodeHashesIter<'_>> {
+    ) -> Result<rocksdb::DBRawIterator<'_>> {
         let mut key = [0u8; tables::CodeHashes::KEY_LEN];
         key[0..32].copy_from_slice(code_hash.as_ref());
         if let Some(continuation) = continuation {
@@ -76,7 +77,7 @@ impl RpcStorage {
             iter.next();
         }
 
-        Ok(CodeHashesIter { inner: iter })
+        Ok(iter)
     }
 
     pub fn get_transactions(
@@ -845,6 +846,12 @@ pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
 }
 
+impl<'a> CodeHashesIter<'a> {
+    pub fn new(iter: rocksdb::DBRawIterator<'a>) -> Self {
+        Self { inner: iter }
+    }
+}
+
 impl Iterator for CodeHashesIter<'_> {
     type Item = StdAddr;
 
@@ -857,6 +864,29 @@ impl Iterator for CodeHashesIter<'_> {
             workchain: value[32] as i8,
             address: HashBytes(value[33..65].try_into().unwrap()),
         });
+        self.inner.next();
+        result
+    }
+}
+
+pub struct RawCodeHashesIter<'a> {
+    inner: rocksdb::DBRawIterator<'a>,
+}
+
+impl<'a> RawCodeHashesIter<'a> {
+    pub fn new(iter: rocksdb::DBRawIterator<'a>) -> Self {
+        Self { inner: iter }
+    }
+}
+
+impl Iterator for RawCodeHashesIter<'_> {
+    type Item = Bytes;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.inner.key()?;
+        debug_assert!(value.len() == tables::CodeHashes::KEY_LEN);
+
+        let result = Some(Bytes::copy_from_slice(&value[32..65]));
         self.inner.next();
         result
     }

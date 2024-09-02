@@ -16,7 +16,9 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
+use tycho_storage::{
+    CodeHashesIter, KeyBlocksDirection, RawCodeHashesIter, Storage, TransactionsIterBuilder,
+};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
@@ -54,6 +56,8 @@ impl RpcStateBuilder {
                 timings: ArcSwap::new(Default::default()),
                 latest_key_block_json: ArcSwapOption::default(),
                 blockchain_config_json: ArcSwapOption::default(),
+                latest_key_block_proto: ArcSwapOption::default(),
+                blockchain_config_proto: ArcSwapOption::default(),
                 gc_notify,
                 gc_handle,
             }),
@@ -148,6 +152,16 @@ impl RpcState {
         self.inner.blockchain_config_json.load()
     }
 
+    pub fn load_latest_key_block_proto(&self) -> arc_swap::Guard<Option<Arc<bytes::Bytes>>> {
+        self.inner.latest_key_block_proto.load()
+    }
+
+    pub fn load_blockchain_config_proto(
+        &self,
+    ) -> arc_swap::Guard<Option<Arc<BlockchainConfigProto>>> {
+        self.inner.blockchain_config_proto.load()
+    }
+
     pub async fn broadcast_external_message(&self, message: &[u8]) {
         metrics::counter!("tycho_rpc_broadcast_external_message_tx_bytes_total")
             .increment(message.len() as u64);
@@ -172,9 +186,26 @@ impl RpcState {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
-        storage
+        let iter = storage
             .get_accounts_by_code_hash(code_hash, continuation)
-            .map_err(RpcStateError::Internal)
+            .map_err(RpcStateError::Internal)?;
+
+        Ok(CodeHashesIter::new(iter))
+    }
+
+    pub fn get_raw_accounts_by_code_hash(
+        &self,
+        code_hash: &HashBytes,
+        continuation: Option<&StdAddr>,
+    ) -> Result<RawCodeHashesIter<'_>, RpcStateError> {
+        let Some(storage) = &self.inner.storage.rpc_storage() else {
+            return Err(RpcStateError::NotSupported);
+        };
+        let iter = storage
+            .get_accounts_by_code_hash(code_hash, continuation)
+            .map_err(RpcStateError::Internal)?;
+
+        Ok(RawCodeHashesIter::new(iter))
     }
 
     pub fn get_transactions(
@@ -271,6 +302,8 @@ struct Inner {
     timings: ArcSwap<StateTimings>,
     latest_key_block_json: ArcSwapOption<Box<RawValue>>,
     blockchain_config_json: ArcSwapOption<Box<RawValue>>,
+    latest_key_block_proto: ArcSwapOption<bytes::Bytes>,
+    blockchain_config_proto: ArcSwapOption<BlockchainConfigProto>,
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
@@ -443,7 +476,17 @@ impl Inner {
                 self.latest_key_block_json.store(Some(Arc::new(value)));
             }
             Err(e) => {
-                tracing::error!("failed to serialize key block: {e}");
+                tracing::error!("failed to serialize key block json: {e}");
+            }
+        }
+
+        match BocRepr::encode(block.as_ref()) {
+            Ok(block) => {
+                self.latest_key_block_proto
+                    .store(Some(Arc::new(block.into())));
+            }
+            Err(e) => {
+                tracing::error!("failed to serialize key block proto: {e}");
             }
         }
 
@@ -466,9 +509,25 @@ impl Inner {
             seqno,
             config,
         }) {
-            Ok(value) => self.blockchain_config_json.store(Some(Arc::new(value))),
+            Ok(value) => {
+                self.blockchain_config_json.store(Some(Arc::new(value)));
+            }
             Err(e) => {
-                tracing::error!("failed to serialize blockchain config: {e}");
+                tracing::error!("failed to serialize blockchain config json: {e}");
+            }
+        }
+
+        match BocRepr::encode(config) {
+            Ok(config) => {
+                self.blockchain_config_proto
+                    .store(Some(Arc::new(BlockchainConfigProto {
+                        global_id,
+                        seqno,
+                        config: config.into(),
+                    })));
+            }
+            Err(e) => {
+                tracing::error!("failed to serialize blockchain config proto: {e}");
             }
         }
     }
@@ -647,6 +706,12 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     let (virt_block, _) = block_proof.virtualize_block()?;
     let info = virt_block.info.load()?;
     Ok(info.start_lt)
+}
+
+pub struct BlockchainConfigProto {
+    pub global_id: i32,
+    pub seqno: u32,
+    pub config: bytes::Bytes,
 }
 
 #[derive(Debug, thiserror::Error)]

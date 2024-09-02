@@ -8,6 +8,10 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use crate::endpoint::{
+    INVALID_PARAMS_CODE, INVALID_REQUEST_CODE, METHOD_NOT_FOUND_CODE, PARSE_ERROR_CODE,
+};
+
 // Counters
 const METRIC_IN_REQ_FAIL_TOTAL: &str = "tycho_rpc_in_req_fail_total";
 
@@ -232,8 +236,3 @@ impl IntoResponse for JrpcErrorResponse {
 
 const JSONRPC_FIELD: &str = "jsonrpc";
 const JSONRPC_VERSION: &str = "2.0";
-
-const PARSE_ERROR_CODE: i32 = -32700;
-const INVALID_REQUEST_CODE: i32 = -32600;
-const METHOD_NOT_FOUND_CODE: i32 = -32601;
-const INVALID_PARAMS_CODE: i32 = -32602;

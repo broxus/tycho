@@ -14,6 +14,9 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
 use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
+use crate::endpoint::{
+    INTERNAL_ERROR_CODE, INVALID_BOC_CODE, NOT_READY_CODE, NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
+};
 use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
@@ -391,11 +394,3 @@ fn too_large_limit_response(id: i64) -> Response {
     }
     .into_response()
 }
-
-// === Error codes ===
-
-const INTERNAL_ERROR_CODE: i32 = -32000;
-const NOT_READY_CODE: i32 = -32001;
-const NOT_SUPPORTED_CODE: i32 = -32002;
-const INVALID_BOC_CODE: i32 = -32003;
-const TOO_LARGE_LIMIT_CODE: i32 = -32004;

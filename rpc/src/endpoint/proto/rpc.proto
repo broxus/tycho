@@ -1,0 +1,148 @@
+syntax = "proto3";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+package rpc;
+
+message Request {
+  message GetContractState {
+    bytes address = 1;
+    optional uint64 last_transaction_lt = 2;
+  }
+
+  message GetTransaction {
+    bytes id = 1;
+  }
+
+  message GetDstTransaction {
+    bytes message_hash = 1;
+  }
+
+  message GetTransactionsList {
+    bytes           account = 1;
+    optional uint64 last_transaction_lt = 2;
+    uint32          limit = 3;
+  }
+
+  message GetAccountsByCodeHash {
+    bytes           code_hash = 1;
+    optional bytes  continuation = 2;
+    uint32          limit = 3;
+  }
+
+  message SendMessage {
+    bytes message = 1;
+  }
+
+  oneof Call {
+    google.protobuf.Empty  get_capabilities = 1;
+    google.protobuf.Empty  get_latest_key_block = 2;
+    google.protobuf.Empty  get_blockchain_config = 3;
+    google.protobuf.Empty  get_status = 4;
+    google.protobuf.Empty  get_timings = 5;
+    GetContractState       get_contract_state = 6;
+
+    GetTransaction         get_transaction = 7;
+    GetDstTransaction      get_dst_transaction = 8;
+    GetTransactionsList    get_transactions_list = 9;
+    GetAccountsByCodeHash  get_accounts_by_code_hash = 10;
+    SendMessage            send_message = 11;
+  }
+}
+
+message Response {
+  message GetRawTransaction {
+    optional bytes transaction = 1;
+  }
+
+  message GetTransactionsList {
+    repeated bytes transactions = 1;
+  }
+
+  message GetTimings {
+    uint32  last_mc_block_seqno = 1;
+    uint32  last_mc_utime = 2;
+    int64   mc_time_diff = 3;
+    optional uint64  smallest_known_lt = 4;
+  }
+
+  message GetStatus {
+    bool ready = 1;
+  }
+
+  message GetCapabilities {
+    repeated string capabilities = 1;
+  }
+
+  message GetLatestKeyBlock {
+    bytes block = 1;
+  }
+
+  message GetBlockchainConfig {
+    int32  global_id = 1;
+    uint32 seqno = 2;
+    bytes  config = 3;
+  }
+
+  message GetAccountsByCodeHash {
+    repeated bytes account = 1;
+  }
+
+  message GetContractState {
+    message Timings {
+      uint64  gen_lt = 1;
+      uint32  gen_utime = 2;
+    }
+
+    message NotExist {
+      oneof GenTimings {
+        Timings               known = 2;
+        google.protobuf.Empty unknown = 3;
+      }
+    }
+
+    message Exists {
+      message Exact {
+        uint64  lt = 1;
+        bytes   hash = 2;
+      }
+
+      message Inexact {
+        uint64 latest_lt = 1;
+      }
+
+      bytes account = 1;
+      Timings gen_timings = 2;
+
+      oneof LastTransactionId {
+        Exact   exact = 3;
+        Inexact inexact = 4;
+      }
+    }
+
+    oneof State {
+      NotExist  not_exists = 1;
+      Exists    exists = 2;
+      Timings   unchanged = 3;
+    }
+  }
+
+  oneof Result {
+    GetRawTransaction       get_raw_transaction = 1;
+    GetTransactionsList     get_transactions_list = 2;
+    GetTimings              get_timings = 3;
+    GetStatus               get_status = 4;
+    GetCapabilities         get_capabilities = 5;
+    GetLatestKeyBlock       get_latest_key_block = 6;
+    GetBlockchainConfig     get_blockchain_config = 7;
+    GetAccountsByCodeHash   get_accounts = 8;
+    GetContractState        get_contract_state = 9;
+    google.protobuf.Empty   send_message = 10;
+  }
+}
+
+message Error {
+  int32 code = 1;
+  string message = 2;
+}

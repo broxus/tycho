@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use crate::state::RpcState;
 
 mod jrpc;
+mod proto;
 
 pub struct RpcEndpoint {
     listener: TcpListener,
@@ -68,10 +69,10 @@ async fn common_route(state: State<RpcState>, req: Request) -> Response {
             Ok(method) => jrpc::route(state, method).await,
             Err(e) => e.into_response(),
         },
-        Some(mime) if mime.starts_with(APPLICATION_PROTOBUF) => {
-            // TODO: Add protobuf support
-            StatusCode::NOT_IMPLEMENTED.into_response()
-        }
+        Some(mime) if mime.starts_with(APPLICATION_PROTOBUF) => match req.extract().await {
+            Ok(request) => proto::route(state, request).await,
+            Err(e) => e.into_response(),
+        },
         _ => StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response(),
     }
 }
@@ -86,3 +87,17 @@ const APPLICATION_JSON: &str = "application/json";
 const APPLICATION_PROTOBUF: &str = "application/x-protobuf";
 
 const MAX_REQUEST_SIZE: usize = 2 << 17; // 256kb
+
+// === Error codes ===
+
+const INTERNAL_ERROR_CODE: i32 = -32000;
+const NOT_READY_CODE: i32 = -32001;
+const NOT_SUPPORTED_CODE: i32 = -32002;
+const INVALID_BOC_CODE: i32 = -32003;
+const TOO_LARGE_LIMIT_CODE: i32 = -32004;
+const INVALID_ADDRESS: i32 = -32005;
+
+const PARSE_ERROR_CODE: i32 = -32700;
+const INVALID_REQUEST_CODE: i32 = -32600;
+const METHOD_NOT_FOUND_CODE: i32 = -32601;
+const INVALID_PARAMS_CODE: i32 = -32602;
