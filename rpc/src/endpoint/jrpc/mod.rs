@@ -10,6 +10,7 @@ use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
+use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
 use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
@@ -17,23 +18,6 @@ use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
 mod extractor;
-
-// Counters
-const METRIC_IN_REQ_GET_CAPABILITIES_TOTAL: &str = "tycho_rpc_in_req_get_capabilities_total";
-const METRIC_IN_REQ_GET_LATEST_KEY_BLOCK_TOTAL: &str =
-    "tycho_rpc_in_req_get_latest_key_block_total";
-const METRIC_IN_REQ_GET_BLOCKCHAIN_CONFIG_TOTAL: &str =
-    "tycho_rpc_in_req_get_blockchain_config_total";
-const METRIC_IN_REQ_GET_STATUS_TOTAL: &str = "tycho_rpc_in_req_get_status_total";
-const METRIC_IN_REQ_GET_TIMINGS_TOTAL: &str = "tycho_rpc_in_req_get_timings_total";
-const METRIC_IN_REQ_SEND_MESSAGE_TOTAL: &str = "tycho_rpc_in_req_send_message_total";
-const METRIC_IN_REQ_GET_CONTRACT_STATE_TOTAL: &str = "tycho_rpc_in_req_get_contract_state_total";
-const METRIC_IN_REQ_GET_ACCOUNTS_BY_CODE_HASH_TOTAL: &str =
-    "tycho_rpc_in_req_get_accounts_by_code_hash_total";
-const METRIC_IN_REQ_GET_TRANSACTIONS_LIST_TOTAL: &str =
-    "tycho_rpc_in_req_get_transactions_list_total";
-const METRIC_IN_REQ_GET_TRANSACTION_TOTAL: &str = "tycho_rpc_in_req_get_transaction_total";
-const METRIC_IN_REQ_GET_DST_TRANSACTION_TOTAL: &str = "tycho_rpc_in_req_get_dst_transaction_total";
 
 declare_jrpc_method! {
     pub enum MethodParams: Method {
@@ -52,33 +36,22 @@ declare_jrpc_method! {
 }
 
 pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response {
+    let label = [("method", req.method)];
+    let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
-        MethodParams::GetCapabilities(_) => {
-            metrics::counter!(METRIC_IN_REQ_GET_CAPABILITIES_TOTAL).increment(1);
-            ok_to_response(req.id, get_capabilities(&state))
-        }
-        MethodParams::GetLatestKeyBlock(_) => {
-            metrics::counter!(METRIC_IN_REQ_GET_LATEST_KEY_BLOCK_TOTAL).increment(1);
-            match &*state.load_latest_key_block_json() {
-                Some(config) => ok_to_response(req.id, config.as_ref()),
-                None => error_to_response(req.id, RpcStateError::NotReady),
-            }
-        }
-        MethodParams::GetBlockchainConfig(_) => {
-            metrics::counter!(METRIC_IN_REQ_GET_BLOCKCHAIN_CONFIG_TOTAL).increment(1);
-            match &*state.load_blockchain_config_json() {
-                Some(config) => ok_to_response(req.id, config.as_ref()),
-                None => error_to_response(req.id, RpcStateError::NotReady),
-            }
-        }
-        MethodParams::GetStatus(_) => {
-            metrics::counter!(METRIC_IN_REQ_GET_STATUS_TOTAL).increment(1);
-            ok_to_response(req.id, GetStatusResponse {
-                ready: state.is_ready(),
-            })
-        }
+        MethodParams::GetCapabilities(_) => ok_to_response(req.id, get_capabilities(&state)),
+        MethodParams::GetLatestKeyBlock(_) => match &*state.load_latest_key_block_json() {
+            Some(config) => ok_to_response(req.id, config.as_ref()),
+            None => error_to_response(req.id, RpcStateError::NotReady),
+        },
+        MethodParams::GetBlockchainConfig(_) => match &*state.load_blockchain_config_json() {
+            Some(config) => ok_to_response(req.id, config.as_ref()),
+            None => error_to_response(req.id, RpcStateError::NotReady),
+        },
+        MethodParams::GetStatus(_) => ok_to_response(req.id, GetStatusResponse {
+            ready: state.is_ready(),
+        }),
         MethodParams::GetTimings(_) => {
-            metrics::counter!(METRIC_IN_REQ_GET_TIMINGS_TOTAL).increment(1);
             if state.is_ready() {
                 ok_to_response(req.id, state.load_timings().as_ref())
             } else {
@@ -86,7 +59,6 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             }
         }
         MethodParams::SendMessage(p) => {
-            metrics::counter!(METRIC_IN_REQ_SEND_MESSAGE_TOTAL).increment(1);
             let Ok(data) = BocRepr::encode(p.message) else {
                 return JrpcErrorResponse {
                     id: Some(req.id),
@@ -99,7 +71,6 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             ok_to_response(req.id, ())
         }
         MethodParams::GetContractState(p) => {
-            metrics::counter!(METRIC_IN_REQ_GET_CONTRACT_STATE_TOTAL).increment(1);
             let item = match state.get_account_state(&p.address) {
                 Ok(item) => item,
                 Err(e) => return error_to_response(req.id, e),
@@ -148,7 +119,6 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             })
         }
         MethodParams::GetAccountsByCodeHash(p) => {
-            metrics::counter!(METRIC_IN_REQ_GET_ACCOUNTS_BY_CODE_HASH_TOTAL).increment(1);
             if p.limit == 0 {
                 return JrpcOkResponse::new(req.id, [(); 0]).into_response();
             } else if p.limit > GetAccountsByCodeHashResponse::MAX_LIMIT {
@@ -163,7 +133,6 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
             }
         }
         MethodParams::GetTransactionsList(p) => {
-            metrics::counter!(METRIC_IN_REQ_GET_TRANSACTIONS_LIST_TOTAL).increment(1);
             if p.limit == 0 {
                 return JrpcOkResponse::new(req.id, [(); 0]).into_response();
             } else if p.limit > GetTransactionsListResponse::MAX_LIMIT {
@@ -177,20 +146,14 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
                 Err(e) => error_to_response(req.id, e),
             }
         }
-        MethodParams::GetTransaction(p) => {
-            metrics::counter!(METRIC_IN_REQ_GET_TRANSACTION_TOTAL).increment(1);
-            match state.get_transaction(&p.id) {
-                Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
-                Err(e) => error_to_response(req.id, e),
-            }
-        }
-        MethodParams::GetDstTransaction(p) => {
-            metrics::counter!(METRIC_IN_REQ_GET_DST_TRANSACTION_TOTAL).increment(1);
-            match state.get_dst_transaction(&p.message_hash) {
-                Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
-                Err(e) => error_to_response(req.id, e),
-            }
-        }
+        MethodParams::GetTransaction(p) => match state.get_transaction(&p.id) {
+            Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
+            Err(e) => error_to_response(req.id, e),
+        },
+        MethodParams::GetDstTransaction(p) => match state.get_dst_transaction(&p.message_hash) {
+            Ok(value) => ok_to_response(req.id, value.map(encode_base64)),
+            Err(e) => error_to_response(req.id, e),
+        },
     }
 }
 

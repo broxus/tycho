@@ -13,6 +13,7 @@ from dashboard_builder import (
     heatmap_panel,
     yaxis,
     expr_operator,
+    expr_sum,
 )
 from grafanalib import formatunits as UNITS, _gen
 from grafanalib.core import (
@@ -587,6 +588,20 @@ def storage() -> RowPanel:
 
 
 def jrpc() -> RowPanel:
+    methods = [
+        "GetCapabilities",
+        "GetLatestKeyBlock",
+        "GetBlockchainConfig",
+        "GetStatus",
+        "GetTimings",
+        "SendMessage",
+        "GetContractState",
+        "GetAccountsByCodeHash",
+        "GetTransactionsList",
+        "GetTransaction",
+        "GetDstTransaction",
+    ]
+
     metrics = [
         create_heatmap_panel(
             "tycho_rpc_state_update_time", "Time to update RPC state on block"
@@ -604,58 +619,39 @@ def jrpc() -> RowPanel:
             "Time to execute RPC storage update batch",
         ),
         create_counter_panel(
-            "tycho_rpc_in_req_total", "Number of incoming JRPC requests over time"
+            expr_sum_rate("tycho_jrpc_request_time_count"),
+            "Number of incoming JRPC requests over time",
         ),
         create_counter_panel(
             "tycho_rpc_in_req_fail_total",
             "Number of failed incoming JRPC requests over time",
         ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_capabilities_total",
-            "Number of incoming JRPC getCapabilities requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_latest_key_block_total",
-            "Number of incoming JRPC getLatestKeyBlock requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_blockchain_config_total",
-            "Number of incoming JRPC getBlockchainConfig requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_status_total",
-            "Number of incoming JRPC getStatus requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_timings_total",
-            "Number of incoming JRPC getTimings requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_send_message_total",
-            "Number of incoming JRPC sendMessage requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_contract_state_total",
-            "Number of incoming JRPC getContractState requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_accounts_by_code_hash_total",
-            "Number of incoming JRPC getAccountsByCodeHash requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_transactions_list_total",
-            "Number of incoming JRPC getTransactionsList requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_transaction_total",
-            "Number of incoming JRPC getTransaction requests over time",
-        ),
-        create_counter_panel(
-            "tycho_rpc_in_req_get_dst_transaction_total",
-            "Number of incoming JRPC getDstTransaction requests over time",
-        ),
     ]
+    for method in methods:
+        metrics.append(
+            create_counter_panel(
+                expr="tycho_jrpc_request_time_count",
+                title=f"JRPC {method} requests over time",
+                labels_selectors=[f'method="{method}"'],
+                legend_format="{{instance}}",
+            )
+        )
+
     return create_row("JRPC", metrics)
+
+
+def jrpc_timings() -> RowPanel:
+    return create_row(
+        "JRPC: timings",
+        [
+            create_heatmap_panel(
+                "tycho_jrpc_request_time",
+                f"JRPC $method time",
+                labels=['method=~"$method"'],
+            )
+        ],
+        repeat="method",
+    )
 
 
 def collator_finalize_block() -> RowPanel:
@@ -884,7 +880,9 @@ def collator_queue_metrics() -> RowPanel:
         create_counter_panel(
             "tycho_internal_queue_uncommitted_diffs_count", "Uncommited diffs"
         ),
-        create_heatmap_panel("tycho_internal_queue_gc_execute_task_time", "GC execute time"),
+        create_heatmap_panel(
+            "tycho_internal_queue_gc_execute_task_time", "GC execute time"
+        ),
     ]
     return create_row("collator: Queue Metrics", metrics)
 
@@ -1282,7 +1280,9 @@ def mempool_engine_rates() -> RowPanel:
 def mempool_engine() -> RowPanel:
     metrics = [
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_engine_rounds_skipped", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_engine_rounds_skipped", range_selector="$__interval"
+            ),
             "Engine: skipped rounds (total at moment)",
         ),
         create_heatmap_panel(
@@ -1290,7 +1290,9 @@ def mempool_engine() -> RowPanel:
             "Engine: round duration",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_points_no_proof_produced", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_points_no_proof_produced", range_selector="$__interval"
+            ),
             "Engine: produced points without proof (total at moment)",
         ),
         create_heatmap_panel(
@@ -1298,7 +1300,9 @@ def mempool_engine() -> RowPanel:
             "Engine: produce point task duration",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_engine_produce_skipped", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_engine_produce_skipped", range_selector="$__interval"
+            ),
             "Engine: points to produce skipped (total at moment)",
         ),
         create_heatmap_panel(
@@ -1380,7 +1384,9 @@ def mempool_intercom() -> RowPanel:
         ),
         # == Download tasks - multiple per round == #
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_download_task_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_download_task_count", range_selector="$__interval"
+            ),
             "Downloader: tasks (unique point id) (total at moment)",
         ),
         create_heatmap_panel(
@@ -1398,15 +1404,24 @@ def mempool_intercom() -> RowPanel:
             "Downloader: point depth (max rounds from current) (total at moment)",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_download_not_found_responses", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_download_not_found_responses",
+                range_selector="$__interval",
+            ),
             "Downloader: received None in response (total at moment)",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_download_aborted_on_exit_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_download_aborted_on_exit_count",
+                range_selector="$__interval",
+            ),
             "Downloader: queries aborted (on task completion) (total at moment)",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_download_query_failed_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_download_query_failed_count",
+                range_selector="$__interval",
+            ),
             "Downloader: queries network error (total at moment)",
         ),
     ]
@@ -1432,7 +1447,9 @@ def mempool_storage() -> RowPanel:
             "Set flags",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_store_get_point_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_store_get_point_count", range_selector="$__interval"
+            ),
             "Get point count (total at moment)",
         ),
         create_heatmap_panel(
@@ -1440,7 +1457,9 @@ def mempool_storage() -> RowPanel:
             "Get point",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_store_get_flags_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_store_get_flags_count", range_selector="$__interval"
+            ),
             "Get flags count (total at moment)",
         ),
         create_heatmap_panel(
@@ -1448,7 +1467,9 @@ def mempool_storage() -> RowPanel:
             "Get flags",
         ),
         create_counter_panel(
-            expr_sum_increase("tycho_mempool_store_get_info_count", range_selector="$__interval"),
+            expr_sum_increase(
+                "tycho_mempool_store_get_info_count", range_selector="$__interval"
+            ),
             "Get info count (total at moment)",
         ),
         create_heatmap_panel(
@@ -1549,6 +1570,16 @@ def templates() -> Templating:
                 include_all=True,
                 all_value=".*",
             ),
+            template(
+                name="method",
+                query="label_values(tycho_jrpc_request_time_bucket,method)",
+                data_source="${source}",
+                hide=0,
+                regex=None,
+                multi=True,
+                include_all=True,
+                all_value=".*",
+            ),
         ]
     )
 
@@ -1590,6 +1621,7 @@ dashboard = Dashboard(
         allocator_stats(),
         rayon_stats(),
         jrpc(),
+        jrpc_timings(),
     ],
     annotations=Annotations(),
     uid="cdlaji62a1b0gb",
