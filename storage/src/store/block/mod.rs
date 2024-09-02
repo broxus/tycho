@@ -2,6 +2,7 @@ use std::borrow::Borrow;
 use std::collections::BTreeSet;
 use std::hash::Hash;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,7 +38,7 @@ pub struct BlockStorage {
     archive_ids: RwLock<BTreeSet<u32>>,
     block_subscriptions: SlotSubscriptions<BlockId, BlockStuff>,
     store_block_data: tokio::sync::RwLock<()>,
-    prev_archive_commit: tokio::sync::Mutex<Option<JoinHandle<Result<()>>>>,
+    prev_archive_commit: tokio::sync::Mutex<Option<CommitArchiveTask>>,
 }
 
 impl BlockStorage {
@@ -425,10 +426,12 @@ impl BlockStorage {
         // Block will be removed after blocks gc
 
         if let (Some(prev_id), true) = (archive_id.prev_id, archive_id.is_new) {
-            // commit previous archive
+            // Commit previous archive
             let mut prev_archive_commit = self.prev_archive_commit.lock().await;
-            if let Some(handle) = prev_archive_commit.take() {
-                handle.await??;
+
+            // NOTE: Wait on reference to make sure that the task is cancel safe
+            if let Some(task) = &mut *prev_archive_commit {
+                task.finish().await?;
             }
             *prev_archive_commit = Some(self.spawn_commit_archive(prev_id).await);
         }
@@ -454,9 +457,9 @@ impl BlockStorage {
         key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
 
         match self.db.archives.get(key.as_slice())? {
-            Some(slice) => Ok(Some(usize::from_be_bytes(
-                slice.as_ref().try_into().unwrap(),
-            ))),
+            Some(slice) => Ok(Some(
+                u64::from_le_bytes(slice.as_ref().try_into().unwrap()) as usize
+            )),
             None => Ok(None),
         }
     }
@@ -465,7 +468,7 @@ impl BlockStorage {
     pub async fn get_archive_chunk(&self, id: u32, offset: u64) -> Result<Vec<u8>> {
         let archive_size = self
             .get_archive_size(id)?
-            .ok_or(BlockStorageError::ArchiveNotFound(id))? as u64;
+            .ok_or(BlockStorageError::ArchiveNotFound)? as u64;
 
         if offset % ARCHIVE_CHUNK_SIZE != 0 || offset >= archive_size {
             return Err(BlockStorageError::InvalidOffset.into());
@@ -481,7 +484,7 @@ impl BlockStorage {
             .db
             .archives
             .get(key.as_slice())?
-            .ok_or(BlockStorageError::ArchiveNotFound(id))?;
+            .ok_or(BlockStorageError::ArchiveNotFound)?;
 
         Ok(chunk.to_vec())
     }
@@ -683,91 +686,131 @@ impl BlockStorage {
         archive_id
     }
 
-    async fn spawn_commit_archive(&self, archive_id: u32) -> JoinHandle<Result<()>> {
+    async fn spawn_commit_archive(&self, archive_id: u32) -> CommitArchiveTask {
         let db = self.db.clone();
         let block_handle_storage = self.block_handle_storage.clone();
 
-        tokio::task::spawn_blocking(move || {
-            let _histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
+        let is_running = Arc::new(AtomicBool::new(true));
+        let handle = tokio::task::spawn_blocking({
+            let is_running = is_running.clone();
+            move || {
+                let _histogram = HistogramGuard::begin("tycho_storage_commit_archive_time");
 
-            let raw_block_ids = db
-                .archive_block_ids
-                .get(archive_id.to_be_bytes())?
-                .ok_or(BlockStorageError::ArchiveNotFound(archive_id))?;
-            assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
+                let raw_block_ids = db
+                    .archive_block_ids
+                    .get(archive_id.to_be_bytes())?
+                    .ok_or(BlockStorageError::ArchiveNotFound)?;
+                assert_eq!(raw_block_ids.len() % BlockId::SIZE_HINT, 0);
 
-            let mut writer = ArchiveWriter::new(&db, archive_id, ARCHIVE_CHUNK_SIZE)?;
-            let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
+                let mut writer = ArchiveWriter::new(&db, archive_id, ARCHIVE_CHUNK_SIZE)?;
+                let mut header_buffer = Vec::with_capacity(ARCHIVE_ENTRY_HEADER_LEN);
 
-            // Write archive prefix
-            writer.write_with_compression(&ARCHIVE_PREFIX)?;
+                // Write archive prefix
+                writer.write(&ARCHIVE_PREFIX)?;
 
-            // Write all entries
-            for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
-                let block_id = BlockId::from_slice(raw_block_id);
-                let handle = block_handle_storage
-                    .load_handle(&block_id)
-                    .ok_or(BlockStorageError::BlockHandleNotFound)?;
+                // Write all entries
+                for raw_block_id in raw_block_ids.chunks_exact(BlockId::SIZE_HINT) {
+                    anyhow::ensure!(is_running.load(Ordering::Relaxed), "task aborted");
 
-                let flags = handle.meta().flags();
-                anyhow::ensure!(
-                    flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
-                    "block not full"
-                );
+                    let block_id = BlockId::from_slice(raw_block_id);
+                    let handle = block_handle_storage
+                        .load_handle(&block_id)
+                        .ok_or(BlockStorageError::BlockHandleNotFound)?;
 
-                for ty in [
-                    ArchiveEntryType::Block,
-                    ArchiveEntryType::Proof,
-                    ArchiveEntryType::QueueDiff,
-                ] {
-                    let key = entry_key(&block_id, ty);
-                    let Some(data) = db.package_entries.get(key).unwrap() else {
-                        return Err(BlockStorageError::BlockDataNotFound.into());
-                    };
+                    let flags = handle.meta().flags();
+                    anyhow::ensure!(
+                        flags.contains(BlockFlags::HAS_ALL_BLOCK_PARTS),
+                        "block does not have all parts"
+                    );
 
-                    // Serialize entry header
-                    header_buffer.clear();
-                    ArchiveEntryHeader {
-                        block_id,
-                        ty,
-                        data_len: data.len() as u32,
+                    for ty in [
+                        ArchiveEntryType::Block,
+                        ArchiveEntryType::Proof,
+                        ArchiveEntryType::QueueDiff,
+                    ] {
+                        let key = entry_key(&block_id, ty);
+                        let Some(data) = db.package_entries.get(key).unwrap() else {
+                            return Err(BlockStorageError::BlockDataNotFound.into());
+                        };
+
+                        // Serialize entry header
+                        header_buffer.clear();
+                        ArchiveEntryHeader {
+                            block_id,
+                            ty,
+                            data_len: data.len() as u32,
+                        }
+                        .write_to(&mut header_buffer);
+
+                        // Write entry header and data
+                        writer.write(&header_buffer)?;
+                        writer.write(data.as_ref())?;
                     }
-                    .write_to(&mut header_buffer);
-
-                    // Write entry header and data
-                    writer.write_with_compression(&header_buffer)?;
-                    writer.write_with_compression(data.as_ref())?;
                 }
+
+                // Drop ids entry just in case (before removing it)
+                drop(raw_block_ids);
+
+                // Finalize the archive
+                writer.finalize()
+            }
+        });
+
+        CommitArchiveTask {
+            archive_id,
+            is_running,
+            handle: Some(handle),
+        }
+    }
+}
+
+struct CommitArchiveTask {
+    archive_id: u32,
+    is_running: Arc<AtomicBool>,
+    handle: Option<JoinHandle<Result<()>>>,
+}
+
+impl CommitArchiveTask {
+    async fn finish(&mut self) -> Result<()> {
+        // NOTE: Await on reference to make sure that the task is cancel safe
+        if let Some(handle) = &mut self.handle {
+            if let Err(e) = handle.await {
+                tracing::error!(
+                    archive_id = self.archive_id,
+                    "failed to commit archive: {e:?}"
+                );
             }
 
-            // Drop ids entry just in case (before removing it)
-            drop(raw_block_ids);
+            self.handle = None;
+        }
 
-            // Ends zstd stream
-            writer.compression_finalize()?;
+        Ok(())
+    }
+}
 
-            // Write the remaining data in the buffer if any
-            writer.flush()?;
-
-            // Finalize the archive
-            writer.finalize()
-        })
+impl Drop for CommitArchiveTask {
+    fn drop(&mut self) {
+        self.is_running.store(false, Ordering::Relaxed);
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
     }
 }
 
 struct ArchiveWriter<'a> {
     db: &'a BaseDb,
     archive_id: u32,
-    chunk_len: u64,
+    chunk_len: usize,
     total_len: u64,
     chunk_index: u64,
-    chunk_buffer: Vec<u8>,
+    chunks_buffer: Vec<u8>,
     zstd_compressor: ZstdCompressStream<'a>,
 }
 
 impl<'a> ArchiveWriter<'a> {
     fn new(db: &'a BaseDb, archive_id: u32, chunk_len: u64) -> Result<Self> {
-        let zstd_compressor = ZstdCompressStream::new(9, chunk_len as usize)?;
+        let chunk_len = chunk_len as usize;
+        let zstd_compressor = ZstdCompressStream::new(9, chunk_len)?;
 
         Ok(Self {
             db,
@@ -775,62 +818,22 @@ impl<'a> ArchiveWriter<'a> {
             chunk_len,
             total_len: 0,
             chunk_index: 0,
-            chunk_buffer: Vec::with_capacity(chunk_len as usize),
+            chunks_buffer: Vec::with_capacity(chunk_len),
             zstd_compressor,
         })
     }
 
-    fn write(&mut self, mut data: &[u8]) -> Result<()> {
-        loop {
-            let data_len = data.len() as u64;
-            let current_chunk_len = self.chunk_buffer.len() as u64;
-            if current_chunk_len + data_len < self.chunk_len {
-                self.chunk_buffer.extend_from_slice(data);
-                return Ok(());
-            }
-
-            let (prefix, rem) = data.split_at((self.chunk_len - current_chunk_len) as usize);
-            self.chunk_buffer.extend_from_slice(prefix);
-            debug_assert_eq!(self.chunk_buffer.len() as u64, self.chunk_len);
-
-            self.flush()?;
-            data = rem;
-        }
+    fn write(&mut self, data: &[u8]) -> Result<()> {
+        self.zstd_compressor.write(data, &mut self.chunks_buffer)?;
+        self.flush(false)
     }
 
-    fn write_with_compression(&mut self, data: &[u8]) -> Result<()> {
-        let mut compressed = Vec::new();
-        self.zstd_compressor.write(data, &mut compressed)?;
+    fn finalize(mut self) -> Result<()> {
+        self.zstd_compressor.finish(&mut self.chunks_buffer)?;
 
-        self.write(&compressed)
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        if self.chunk_buffer.is_empty() {
-            return Ok(());
-        }
-
-        let mut key = [0u8; tables::Archives::KEY_LEN];
-        key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
-        key[4..].copy_from_slice(&self.chunk_index.to_be_bytes());
-
-        self.total_len += self.chunk_buffer.len() as u64;
-        self.chunk_index += 1;
-
-        self.db.archives.insert(key, self.chunk_buffer.as_slice())?;
-        self.chunk_buffer.clear();
-        Ok(())
-    }
-
-    fn compression_finalize(&mut self) -> Result<()> {
-        let mut compressed = Vec::new();
-        self.zstd_compressor.finish(&mut compressed)?;
-
-        self.write(&compressed)
-    }
-
-    fn finalize(self) -> Result<()> {
-        debug_assert!(self.chunk_buffer.is_empty());
+        // Write the last chunk
+        self.flush(true)?;
+        debug_assert!(self.chunks_buffer.is_empty());
 
         // Write archive size and remove archive block ids atomically
         let archives_cf = self.db.archives.cf();
@@ -842,12 +845,56 @@ impl<'a> ArchiveWriter<'a> {
         let mut key = [0u8; tables::Archives::KEY_LEN];
         key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
         key[4..].copy_from_slice(&ARCHIVE_SIZE_MAGIC.to_be_bytes());
-        batch.put_cf(&archives_cf, key.as_slice(), self.total_len.to_be_bytes());
+        batch.put_cf(&archives_cf, key.as_slice(), self.total_len.to_le_bytes());
 
         // Remove related block ids
         batch.delete_cf(&block_ids_cf, self.archive_id.to_be_bytes());
 
         self.db.rocksdb().write(batch)?;
+        Ok(())
+    }
+
+    fn flush(&mut self, finalize: bool) -> Result<()> {
+        let buffer_len = self.chunks_buffer.len();
+        if buffer_len == 0 {
+            return Ok(());
+        }
+
+        let mut key = [0u8; tables::Archives::KEY_LEN];
+        key[..4].copy_from_slice(&self.archive_id.to_be_bytes());
+
+        let mut do_flush = |data: &[u8]| {
+            key[4..].copy_from_slice(&self.chunk_index.to_be_bytes());
+
+            self.total_len += data.len() as u64;
+            self.chunk_index += 1;
+
+            self.db.archives.insert(key, data)
+        };
+
+        // Write all full chunks
+        let mut buffer_offset = 0;
+        while buffer_offset + self.chunk_len <= buffer_len {
+            do_flush(&self.chunks_buffer[buffer_offset..buffer_offset + self.chunk_len])?;
+            buffer_offset += self.chunk_len;
+        }
+
+        if finalize {
+            // Just write the remaining data on finalize
+            do_flush(&self.chunks_buffer[buffer_offset..])?;
+            self.chunks_buffer.clear();
+        } else {
+            // Shift the remaining data to the beginning of the buffer and clear the rest
+            let rem = buffer_len % self.chunk_len;
+            if rem == 0 {
+                self.chunks_buffer.clear();
+            } else if buffer_offset > 0 {
+                // TODO: Use memmove since we are copying non-overlapping regions
+                self.chunks_buffer.copy_within(buffer_offset.., 0);
+                self.chunks_buffer.truncate(rem);
+            }
+        }
+
         Ok(())
     }
 }
@@ -1060,8 +1107,8 @@ struct ArchiveId {
 
 #[derive(thiserror::Error, Debug)]
 enum BlockStorageError {
-    #[error("Archive not found: {0}")]
-    ArchiveNotFound(u32),
+    #[error("Archive not found")]
+    ArchiveNotFound,
     #[error("Block data not found")]
     BlockDataNotFound,
     #[error("Block proof not found")]
