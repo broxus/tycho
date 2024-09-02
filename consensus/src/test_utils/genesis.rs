@@ -16,7 +16,7 @@ pub fn genesis() -> Point {
 
     Point::new(
         &genesis_keys,
-        MempoolConfig::GENESIS_ROUND,
+        MempoolConfig::genesis_round(),
         None,
         vec![],
         PointData {

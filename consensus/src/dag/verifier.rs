@@ -71,7 +71,7 @@ impl Verifier {
         // it cannot be validated against AnchorStage (as it knows nothing about genesis)
         // and cannot contain dependencies
         assert!(
-            point.round() > MempoolConfig::GENESIS_ROUND,
+            point.round() > MempoolConfig::genesis_round(),
             "Coding error: can only validate points older than genesis"
         );
         let Some(r_0) = r_0.upgrade() else {
@@ -271,7 +271,7 @@ impl Verifier {
                 (stage.leader == point.data().author)
                     == (point.anchor_link(stage.role) == &Link::ToSelf)
             }
-        }) || point.round() == MempoolConfig::GENESIS_ROUND
+        }) || point.round() == MempoolConfig::genesis_round()
     }
 
     /// the only method that scans the DAG deeper than 2 rounds
@@ -292,7 +292,7 @@ impl Verifier {
             return true;
         };
 
-        if round.round() == MempoolConfig::GENESIS_ROUND {
+        if round.round() == MempoolConfig::genesis_round() {
             // notice that point is required to link to the freshest leader point
             // among all its (in)direct dependencies, which is checked later
             return linked_id == crate::test_utils::genesis_point_id();
@@ -534,7 +534,7 @@ impl Verifier {
         point: &Point, // @ r+0
         peer_schedule: &PeerSchedule,
     ) -> bool {
-        if point.round() == MempoolConfig::GENESIS_ROUND {
+        if point.round() == MempoolConfig::genesis_round() {
             // `is_well_formed()` ensured that genesis has empty includes, witness and evidence
             return true;
         }
@@ -552,7 +552,7 @@ impl Verifier {
                 return false;
             }
         }
-        let peer_count = if point.round().prev() == MempoolConfig::GENESIS_ROUND {
+        let peer_count = if point.round().prev() == MempoolConfig::genesis_round() {
             PeerCount::GENESIS
         } else {
             match PeerCount::try_from(proof_peers.len()) {

@@ -14,3 +14,5 @@ mod dag_round;
 mod impl_;
 mod producer;
 mod verifier;
+
+pub const WAVE_ROUNDS: u32 = 4;
