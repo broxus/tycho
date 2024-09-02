@@ -60,7 +60,7 @@ impl MempoolConfig {
 
     /// amount of future [Round]s that [`BroadcastFilter`](crate::intercom::BroadcastFilter) caches
     /// to extend [`Dag`](crate::dag::Dag) without downloading points for locally skipped rounds
-    pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 21;
+    pub const CACHE_AHEAD_ENGINE_ROUNDS: u8 = 105;
 
     /// see [`LogFlavor`]
     pub const LOG_FLAVOR: LogFlavor = LogFlavor::Truncated;
