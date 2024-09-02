@@ -28,7 +28,7 @@ impl PointBody {
 
     pub fn is_well_formed(&self) -> bool {
         // any genesis is suitable, round number may be taken from configs
-        let is_special_ok = match self.round.cmp(&MempoolConfig::GENESIS_ROUND) {
+        let is_special_ok = match self.round.cmp(&MempoolConfig::genesis_round()) {
             cmp::Ordering::Equal => {
                 self.data.time == self.data.anchor_time
                     && self.data.anchor_trigger == Link::ToSelf
@@ -42,7 +42,7 @@ impl PointBody {
             cmp::Ordering::Greater => {
                 // no witness is possible at the round right after genesis;
                 // the other way: we may panic on round.prev().prev() while extracting link's round
-                (self.round > MempoolConfig::GENESIS_ROUND.next() || self.data.witness.is_empty())
+                (self.round > MempoolConfig::genesis_round().next() || self.data.witness.is_empty())
                     // leader must maintain its chain of proofs,
                     // while others must link to previous points (checked at the end of this method);
                     // its decided later (using dag round data) whether current point belongs to leader
@@ -69,12 +69,12 @@ impl PointBody {
             self.data.anchor_round(AnchorStageRole::Proof, self.round),
             self.data.anchor_round(AnchorStageRole::Trigger, self.round)
         ) {
-            (x, MempoolConfig::GENESIS_ROUND) => x >= MempoolConfig::GENESIS_ROUND,
-            (MempoolConfig::GENESIS_ROUND, y) => y >= MempoolConfig::GENESIS_ROUND,
+            (x, y) if y == MempoolConfig::genesis_round() => x >= MempoolConfig::genesis_round(),
+            (x, y) if x == MempoolConfig::genesis_round() => y >= MempoolConfig::genesis_round(),
             // equality is impossible due to commit waves do not start every round;
             // anchor trigger may belong to a later round than proof and vice versa;
             // no indirect links over genesis tombstone
-            (x, y) => x != y && x > MempoolConfig::GENESIS_ROUND && y > MempoolConfig::GENESIS_ROUND,
+            (x, y) => x != y && x > MempoolConfig::genesis_round() && y > MempoolConfig::genesis_round(),
         }
     }
 

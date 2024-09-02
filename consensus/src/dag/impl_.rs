@@ -8,8 +8,8 @@ use rand::prelude::SliceRandom;
 use rand::SeedableRng;
 use tycho_network::PeerId;
 
-use crate::dag::anchor_stage::{AnchorStage, WAVE_ROUNDS};
-use crate::dag::DagRound;
+use crate::dag::anchor_stage::AnchorStage;
+use crate::dag::{DagRound, WAVE_ROUNDS};
 use crate::effects::{AltFormat, Effects, EngineContext};
 use crate::engine::MempoolConfig;
 use crate::intercom::PeerSchedule;
@@ -226,7 +226,7 @@ impl Dag {
             .skip({
                 let (first, _) = self.rounds.first_key_value().expect("DAG cannot be empty");
                 // +1 to skip either proof round or a trigger right above the needed depth
-                match MempoolConfig::GENESIS_ROUND.cmp(first) {
+                match MempoolConfig::genesis_round().cmp(first) {
                     // cannot commit anchors with too shallow history
                     cmp::Ordering::Less => MempoolConfig::COMMIT_DEPTH as usize,
                     // commit right after genesis, do not wait for full depth
@@ -401,7 +401,7 @@ impl Dag {
                 .round()
                 .0
                 .saturating_sub(MempoolConfig::COMMIT_DEPTH as _)
-                .max(MempoolConfig::GENESIS_ROUND.0),
+                .max(MempoolConfig::genesis_round().0),
         );
 
         let mut r = array::from_fn::<_, 3, _>(|_| BTreeMap::new()); // [r+0, r-1, r-2]

@@ -102,6 +102,10 @@ pub struct CmdRun {
     /// list of zerostate files to import
     #[clap(long)]
     import_zerostate: Option<Vec<PathBuf>>,
+
+    /// Round of a new consensus genesis
+    #[clap(long)]
+    mempool_start_round: Option<u32>,
 }
 
 impl CmdRun {
@@ -164,7 +168,7 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        node.run(&init_block_id).await?;
+        node.run(&init_block_id, self.mempool_start_round).await?;
 
         Ok(())
     }
@@ -479,7 +483,7 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    async fn run(self, last_block_id: &BlockId) -> Result<()> {
+    async fn run(self, last_block_id: &BlockId, mempool_start_round: Option<u32>) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage
@@ -508,6 +512,7 @@ impl Node {
             self.storage.mempool_storage(),
             get_validator_peer_ids(&mc_state)?,
             last_block_id.seqno == 0,
+            mempool_start_round,
         );
 
         // Create RPC
