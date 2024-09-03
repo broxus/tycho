@@ -836,7 +836,7 @@ dependencies = [
 [[package]]
 name = "everscale-types"
 version = "0.1.0-rc.6"
-source = "git+https://www.github.com/broxus/everscale-types.git?rev=8c82294e090ce9dbb0474b868e7c78cb6729b1c3#8c82294e090ce9dbb0474b868e7c78cb6729b1c3"
+source = "git+https://www.github.com/broxus/everscale-types.git?rev=084eb2380fa9daffa74907724bb53b6999544fe4#084eb2380fa9daffa74907724bb53b6999544fe4"
 dependencies = [
  "ahash",
  "base64",
@@ -859,7 +859,7 @@ dependencies = [
 [[package]]
 name = "everscale-types-proc"
 version = "0.1.4"
-source = "git+https://www.github.com/broxus/everscale-types.git?rev=8c82294e090ce9dbb0474b868e7c78cb6729b1c3#8c82294e090ce9dbb0474b868e7c78cb6729b1c3"
+source = "git+https://www.github.com/broxus/everscale-types.git?rev=084eb2380fa9daffa74907724bb53b6999544fe4#084eb2380fa9daffa74907724bb53b6999544fe4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3365,6 +3365,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "parking_lot",
+ "pin-project-lite",
  "rand",
  "scopeguard",
  "serde",

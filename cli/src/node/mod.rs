@@ -654,7 +654,8 @@ impl Node {
 
         let block_strider = BlockStrider::builder()
             .with_provider(activate_collator.chain((
-                (blockchain_block_provider, storage_block_provider),
+                blockchain_block_provider,
+                storage_block_provider,
                 collator_block_provider,
             )))
             .with_state(strider_state)
@@ -665,10 +666,10 @@ impl Node {
                         self.storage.clone(),
                         (collator_state_subscriber, rpc_state_subscriber),
                     ),
-                    (
-                        (rpc_block_subscriber, validator_subscriber),
-                        (MetricsSubscriber, ValidatorBlockSubscriber { validator }),
-                    ),
+                    rpc_block_subscriber,
+                    validator_subscriber,
+                    MetricsSubscriber,
+                    ValidatorBlockSubscriber { validator },
                 )
                     .chain(gc_subscriber),
             )

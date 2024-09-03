@@ -1,5 +1,5 @@
 use anyhow::Result;
-use everscale_types::models::{AccountStatus, ComputePhase, InMsg, MsgInfo, OutMsg, TxInfo};
+use everscale_types::models::*;
 use futures_util::future::{BoxFuture, FutureExt};
 use tycho_block_util::block::BlockStuff;
 use tycho_util::metrics::HistogramGuard;
@@ -96,8 +96,8 @@ fn handle_block(block: &BlockStuff) -> Result<()> {
             transaction_count += 1;
             message_count += tx.in_msg.is_some() as u32 + tx.out_msg_count.into_inner() as u32;
 
-            if let Some(in_msg) = tx.load_in_msg()? {
-                ext_message_count += matches!(&in_msg.info, MsgInfo::ExtIn(_)) as u32;
+            if let Some(in_msg) = &tx.in_msg {
+                ext_message_count += in_msg.parse::<MsgType>()?.is_external_in() as u32;
             }
 
             let was_active = tx.orig_status == AccountStatus::Active;

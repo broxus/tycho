@@ -8,9 +8,11 @@ use tycho_block_util::archive::ArchiveData;
 use tycho_block_util::block::BlockStuff;
 use tycho_block_util::state::ShardStateStuff;
 
+pub use self::futures::{OptionHandleFut, OptionPrepareFut};
 pub use self::gc_subscriber::{GcSubscriber, ManualGcTrigger};
 pub use self::metrics_subscriber::MetricsSubscriber;
 
+mod futures;
 mod gc_subscriber;
 mod metrics_subscriber;
 
@@ -41,19 +43,12 @@ pub trait BlockSubscriber: Send + Sync + 'static {
 impl<T: BlockSubscriber> BlockSubscriber for Option<T> {
     type Prepared = Option<T::Prepared>;
 
-    type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
-    type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+    type PrepareBlockFut<'a> = OptionPrepareFut<T::PrepareBlockFut<'a>>;
+    type HandleBlockFut<'a> = OptionHandleFut<T::HandleBlockFut<'a>>;
 
     #[inline]
     fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
-        match self {
-            Some(subscriber) => Box::pin(async move {
-                <T as BlockSubscriber>::prepare_block(subscriber, cx)
-                    .await
-                    .map(Some)
-            }),
-            None => Box::pin(future::ready(Ok(None))),
-        }
+        OptionPrepareFut::from(self.as_ref().map(|s| s.prepare_block(cx)))
     }
 
     fn handle_block<'a>(
@@ -61,11 +56,10 @@ impl<T: BlockSubscriber> BlockSubscriber for Option<T> {
         cx: &'a BlockSubscriberContext,
         prepared: Self::Prepared,
     ) -> Self::HandleBlockFut<'a> {
-        let (Some(subscriber), Some(prepared)) = (self, prepared) else {
-            return Box::pin(future::ready(Ok(())));
-        };
-
-        Box::pin(subscriber.handle_block(cx, prepared))
+        OptionHandleFut::from(match (self, prepared) {
+            (Some(subscriber), Some(prepared)) => Some(subscriber.handle_block(cx, prepared)),
+            _ => None,
+        })
     }
 }
 
@@ -141,14 +135,10 @@ pub trait StateSubscriber: Send + Sync + 'static {
 }
 
 impl<T: StateSubscriber> StateSubscriber for Option<T> {
-    // TODO: Replace with a custom future to reduce allocations.
-    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+    type HandleStateFut<'a> = OptionHandleFut<T::HandleStateFut<'a>>;
 
     fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        match self {
-            Some(subscriber) => Box::pin(subscriber.handle_state(cx)),
-            None => Box::pin(future::ready(Ok(()))),
-        }
+        OptionHandleFut::<_>::from(self.as_ref().map(|s| s.handle_state(cx)))
     }
 }
 
@@ -269,52 +259,110 @@ impl<T1: StateSubscriber, T2: StateSubscriber> StateSubscriber for ChainSubscrib
     }
 }
 
-// === (T1, T2) aka `join` ===
+// === (T1, ..., Tn) aka `join` ===
 
-impl<T1: BlockSubscriber, T2: BlockSubscriber> BlockSubscriber for (T1, T2) {
-    type Prepared = (T1::Prepared, T2::Prepared);
+macro_rules! impl_subscriber_tuple {
+    ($join_fn:path, |$e:ident| $err_pat:pat, { $($n:tt: $var:ident = $ty:ident),*$(,)? }) => {
+        impl<$($ty),*> BlockSubscriber for ($($ty),*)
+        where
+            $($ty: BlockSubscriber),*
+        {
+            type Prepared = ($($ty::Prepared),*);
 
-    type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
-    type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
+            type PrepareBlockFut<'a> = BoxFuture<'a, Result<Self::Prepared>>;
+            type HandleBlockFut<'a> = BoxFuture<'a, Result<()>>;
 
-    fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
-        let left = self.0.prepare_block(cx);
-        let right = self.1.prepare_block(cx);
+            fn prepare_block<'a>(&'a self, cx: &'a BlockSubscriberContext) -> Self::PrepareBlockFut<'a> {
+                $(let $var = self.$n.prepare_block(cx));*;
 
-        Box::pin(async move {
-            match future::join(left, right).await {
-                (Ok(l), Ok(r)) => Ok((l, r)),
-                (Err(e), _) | (_, Err(e)) => Err(e),
+                Box::pin(async move {
+                    match $join_fn($($var),*).await {
+                        ($(Ok($var)),*) => Ok(($($var),*)),
+                        $err_pat => Err($e),
+                    }
+                })
             }
-        })
-    }
 
-    fn handle_block<'a>(
-        &'a self,
-        cx: &'a BlockSubscriberContext,
-        (left_prepared, right_prepared): Self::Prepared,
-    ) -> Self::HandleBlockFut<'a> {
-        let left = self.0.handle_block(cx, left_prepared);
-        let right = self.1.handle_block(cx, right_prepared);
+            fn handle_block<'a>(
+                &'a self,
+                cx: &'a BlockSubscriberContext,
+                ($($var),*): Self::Prepared,
+            ) -> Self::HandleBlockFut<'a> {
+                $(let $var = self.$n.handle_block(cx, $var));*;
 
-        Box::pin(async move {
-            let (l, r) = future::join(left, right).await;
-            l.and(r)
-        })
+                Box::pin(async move {
+                    match $join_fn($($var),*).await {
+                        $err_pat => Err($e),
+                        _ => Ok(()),
+                    }
+                })
+            }
+        }
+
+        impl<$($ty),*> StateSubscriber for ($($ty),*)
+        where
+            $($ty: StateSubscriber),*
+        {
+            type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+
+            fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
+                $(let $var = self.$n.handle_state(cx));*;
+
+                Box::pin(async move {
+                    match $join_fn($($var),*).await {
+                        $err_pat => Err($e),
+                        _ => Ok(()),
+                    }
+                })
+            }
+        }
+    };
+}
+
+impl_subscriber_tuple! {
+    futures_util::future::join,
+    |e| (Err(e), _) | (_, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
     }
 }
 
-impl<T1: StateSubscriber, T2: StateSubscriber> StateSubscriber for (T1, T2) {
-    type HandleStateFut<'a> = BoxFuture<'a, Result<()>>;
+impl_subscriber_tuple! {
+    futures_util::future::join3,
+    |e| (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+        2: c = T2,
+    }
+}
 
-    fn handle_state<'a>(&'a self, cx: &'a StateSubscriberContext) -> Self::HandleStateFut<'a> {
-        let left = self.0.handle_state(cx);
-        let right = self.1.handle_state(cx);
+impl_subscriber_tuple! {
+    futures_util::future::join4,
+    |e| (Err(e), _, _, _) | (_, Err(e), _, _) | (_, _, Err(e), _) | (_, _, _, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+        2: c = T2,
+        3: d = T3,
+    }
+}
 
-        Box::pin(async move {
-            let (l, r) = future::join(left, right).await;
-            l.and(r)
-        })
+impl_subscriber_tuple! {
+    futures_util::future::join5,
+    |e|
+        (Err(e), _, _, _, _)
+        | (_, Err(e), _, _, _)
+        | (_, _, Err(e), _, _)
+        | (_, _, _, Err(e), _)
+        | (_, _, _, _, Err(e)),
+    {
+        0: a = T0,
+        1: b = T1,
+        2: c = T2,
+        3: d = T3,
+        4: e = T4,
     }
 }
 
