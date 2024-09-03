@@ -107,7 +107,12 @@ impl ControlClient {
         }
     }
 
-    pub async fn download_archive<W>(&self, info: ArchiveInfo, mut output: W) -> ClientResult<W>
+    pub async fn download_archive<W>(
+        &self,
+        info: ArchiveInfo,
+        decompress: bool,
+        mut output: W,
+    ) -> ClientResult<W>
     where
         W: Write + Send + 'static,
     {
@@ -127,9 +132,13 @@ impl ControlClient {
             while let Some(res) = chunks_rx.blocking_recv() {
                 downloaded += res.data.len() as u64;
 
-                decompressed_chunk.clear();
-                zstd_decoder.write(&res.data, &mut decompressed_chunk)?;
-                output.write_all(&decompressed_chunk)?;
+                output.write_all(if decompress {
+                    decompressed_chunk.clear();
+                    zstd_decoder.write(&res.data, &mut decompressed_chunk)?;
+                    &decompressed_chunk
+                } else {
+                    &res.data
+                })?;
             }
 
             anyhow::ensure!(downloaded == target_size, "downloaded size mismatch");
