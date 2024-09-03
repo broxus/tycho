@@ -1085,13 +1085,6 @@ def collator_sync_metrics() -> RowPanel:
             "tycho_collator_send_blocks_to_sync_time", "send blocks to sync total"
         ),
         create_heatmap_panel(
-            "tycho_collator_build_block_stuff_for_sync_time",
-            "send blocks to sync: build stuff",
-        ),
-        create_heatmap_panel(
-            "tycho_collator_sync_block_stuff_time", "send blocks to sync: sync"
-        ),
-        create_heatmap_panel(
             "tycho_collator_send_blocks_to_sync_commit_diffs_time",
             "send blocks to sync: commit diffs",
         ),

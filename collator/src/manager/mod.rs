@@ -1,6 +1,5 @@
 use std::collections::{hash_map, BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
@@ -16,7 +15,7 @@ use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastDashMap, FastHashMap, FastHashSet};
 use types::{
     ActiveCollator, AppliedBlockStuffContainer, BlockCacheEntry, BlockCacheEntryKind, BlockSeqno,
-    CollatorState, DisplayBlockCacheStoreResult,
+    CollatorState, DisplayBlockCacheStoreResult, McBlockSubgraph,
 };
 
 use self::types::{
@@ -1012,7 +1011,7 @@ where
                 )
                 .await?;
             }
-            let mc_block_entry = subgraph.master_block.as_ref().unwrap();
+            let mc_block_entry = &subgraph.master_block;
             Self::apply_block_queue_diff_from_entry_stuff(self.mq_adapter.clone(), mc_block_entry)
                 .await?;
 
@@ -1897,70 +1896,31 @@ where
             .blocks_cache
             .extract_mc_block_subgraph_for_sync(block_id, true)?
         {
-            McBlockSubgraphExtract::Extracted(mut mc_block_subgraph) => {
+            McBlockSubgraphExtract::Extracted(McBlockSubgraph {
+                mut master_block,
+                shard_blocks,
+            }) => {
                 extract_elapsed = histogram_extract.finish();
-                let timer = std::time::Instant::now();
 
                 // send to sync only if was not received from bc
-                if mc_block_subgraph.master_block.as_ref().unwrap().kind
-                    == BlockCacheEntryKind::Collated
-                {
+                if master_block.kind == BlockCacheEntryKind::Collated {
                     let histogram =
                         HistogramGuard::begin("tycho_collator_send_blocks_to_sync_time");
 
-                    let mut build_stuff_for_sync_elapsed = Duration::ZERO;
-                    let mut sync_stuff_elapsed = Duration::ZERO;
+                    self.send_block_to_sync(&mut master_block).await?;
 
-                    let mut entries_to_sync = std::mem::take(&mut mc_block_subgraph.shard_blocks);
-                    entries_to_sync.push(mc_block_subgraph.master_block.take().unwrap());
-
-                    for mut entry_to_sync in entries_to_sync {
-                        if !matches!(
-                            entry_to_sync.send_sync_status,
-                            SendSyncStatus::Sending | SendSyncStatus::Sent | SendSyncStatus::Synced,
-                        ) {
-                            let timer = std::time::Instant::now();
-                            let candidate_stuff = entry_to_sync.candidate_stuff.take().unwrap();
-                            let block_id = *candidate_stuff.candidate.block.id();
-                            let block_stuff_for_sync = candidate_stuff.as_block_for_sync();
-                            build_stuff_for_sync_elapsed += timer.elapsed();
-
-                            let timer = std::time::Instant::now();
-                            entry_to_sync.send_sync_status = SendSyncStatus::Sending;
-                            self.state_node_adapter
-                                .accept_block(block_stuff_for_sync)
-                                .await?;
-                            tracing::debug!(
-                                target: tracing_targets::COLLATION_MANAGER,
-                                "Block was successfully sent to sync ({})",
-                                block_id,
-                            );
-                            entry_to_sync.send_sync_status = SendSyncStatus::Sent;
-                            sync_stuff_elapsed += timer.elapsed();
-                        }
-                        if entry_to_sync.block_id().shard.is_masterchain() {
-                            mc_block_subgraph.master_block = Some(entry_to_sync);
-                        } else {
-                            mc_block_subgraph.shard_blocks.push(entry_to_sync);
-                        }
+                    for mut entry_to_sync in shard_blocks {
+                        self.send_block_to_sync(&mut entry_to_sync).await?;
                     }
 
-                    metrics::histogram!("tycho_collator_build_block_stuff_for_sync_time")
-                        .record(build_stuff_for_sync_elapsed);
-                    metrics::histogram!("tycho_collator_sync_block_stuff_time")
-                        .record(sync_stuff_elapsed);
-
+                    sync_elapsed = histogram.finish();
                     tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
-                        total = histogram.finish().as_millis(),
-                        build_stuff_for_sync = build_stuff_for_sync_elapsed.as_millis(),
-                        sync = sync_stuff_elapsed.as_millis(),
+                        total = sync_elapsed.as_millis(),
                         "send_blocks_to_sync timings",
                     );
                 }
-                sync_elapsed = timer.elapsed();
 
-                self.commit_block_queue_diff(mc_block_subgraph.master_block.as_ref().unwrap())
-                    .await?;
+                self.commit_block_queue_diff(&master_block).await?;
             }
             McBlockSubgraphExtract::NotFullValid => {
                 bail!(
@@ -1983,6 +1943,29 @@ where
             sync = sync_elapsed.as_millis(),
             "commit_valid_master_block timings",
         );
+
+        Ok(())
+    }
+
+    async fn send_block_to_sync(&self, entry_to_sync: &mut BlockCacheEntry) -> Result<()> {
+        if !matches!(
+            entry_to_sync.send_sync_status,
+            SendSyncStatus::Sending | SendSyncStatus::Sent | SendSyncStatus::Synced,
+        ) {
+            let candidate_stuff = entry_to_sync.candidate_stuff.take().unwrap();
+            let block_id = *candidate_stuff.candidate.block.id();
+            let block_stuff_for_sync = candidate_stuff.into();
+            entry_to_sync.send_sync_status = SendSyncStatus::Sending;
+            self.state_node_adapter
+                .accept_block(block_stuff_for_sync)
+                .await?;
+            tracing::debug!(
+                target: tracing_targets::COLLATION_MANAGER,
+                "Block was successfully sent to sync ({})",
+                block_id,
+            );
+            entry_to_sync.send_sync_status = SendSyncStatus::Sent;
+        }
 
         Ok(())
     }
