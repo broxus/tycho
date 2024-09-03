@@ -238,6 +238,10 @@ pub struct CmdDumpArchive {
     #[clap(long)]
     seqno: u32,
 
+    /// decompress the downloaded archive.
+    #[clap(short, long)]
+    decompress: bool,
+
     /// path to the output file.
     #[clap()]
     output: PathBuf,
@@ -257,10 +261,13 @@ impl CmdDumpArchive {
                 .open(&self.output)?;
 
             let writer = std::io::BufWriter::new(file);
-            client.download_archive(info, writer).await?;
+            client
+                .download_archive(info, self.decompress, writer)
+                .await?;
 
             print_json(serde_json::json!({
                 "archive_id": info.id,
+                "compressed": !self.decompress,
                 "size": info.size,
             }))
         })
