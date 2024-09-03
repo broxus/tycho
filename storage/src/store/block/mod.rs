@@ -14,8 +14,8 @@ use parking_lot::RwLock;
 use tl_proto::TlWrite;
 use tokio::task::JoinHandle;
 use tycho_block_util::archive::{
-    ArchiveData, ArchiveEntryHeader, ArchiveEntryId, ArchiveEntryType, ArchiveReaderError,
-    ArchiveVerifier, ARCHIVE_ENTRY_HEADER_LEN, ARCHIVE_PREFIX,
+    ArchiveData, ArchiveEntryHeader, ArchiveEntryId, ArchiveEntryType, ARCHIVE_ENTRY_HEADER_LEN,
+    ARCHIVE_PREFIX,
 };
 use tycho_block_util::block::{
     BlockProofStuff, BlockProofStuffAug, BlockStuff, BlockStuffAug, ShardHeights,
@@ -64,14 +64,9 @@ impl BlockStorage {
         NonZeroU32::new(ARCHIVE_CHUNK_SIZE as _).unwrap()
     }
 
+    // TODO: Make this method `async` and verify all archives on startup.
     /// Iterates over all archives and preloads their ids into memory.
     pub fn preload_archive_ids(&self) -> Result<()> {
-        fn check_archive(value: &[u8]) -> Result<(), ArchiveReaderError> {
-            let mut verifier = ArchiveVerifier::default();
-            verifier.write_verify(value)?;
-            verifier.final_check()
-        }
-
         let started_at = Instant::now();
 
         tracing::info!("started preloading archive ids");
@@ -81,27 +76,19 @@ impl BlockStorage {
 
         let mut new_archive_ids = BTreeSet::new();
 
-        let mut current_archive_data = Vec::new();
         loop {
-            let (key, value) = match iter.item() {
-                Some(item) => item,
-                None => {
-                    if let Err(e) = iter.status() {
-                        tracing::error!("failed to iterate through archives: {e:?}");
-                    }
-                    break;
+            let Some(key) = iter.key() else {
+                if let Err(e) = iter.status() {
+                    tracing::error!("failed to iterate through archives: {e:?}");
                 }
+                break;
             };
 
             let archive_id = u32::from_be_bytes(key[..4].try_into().unwrap());
             let chunk_index = u64::from_be_bytes(key[4..].try_into().unwrap());
 
             if chunk_index == ARCHIVE_SIZE_MAGIC {
-                check_archive(&current_archive_data)?;
                 new_archive_ids.insert(archive_id);
-                current_archive_data.clear();
-            } else {
-                current_archive_data.extend_from_slice(value);
             }
 
             iter.next();
