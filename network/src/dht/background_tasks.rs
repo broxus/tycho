@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use futures_util::stream::FuturesUnordered;
 use futures_util::StreamExt;
-use tokio::sync::Semaphore;
+use tokio::sync::{broadcast, Semaphore};
 use tokio::task::JoinHandle;
 use tycho_util::time::{now_sec, shifted_interval};
 
@@ -47,7 +47,11 @@ impl DhtInner {
                     _ = refresh_routing_table_interval.tick() => Action::RefreshRoutingTable,
                     peer = announced_peers.recv() => match peer {
                         Ok(peer) => Action::AddPeer(peer),
-                        Err(_) => continue,
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        Err(broadcast::error::RecvError::Lagged(lag)) => {
+                            tracing::warn!(lag, "announced peers channel lagged");
+                            continue
+                        },
                     }
                 };
 
