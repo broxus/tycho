@@ -107,21 +107,32 @@ pub(super) fn check_refresh_last_known_synced(
     None
 }
 
-#[derive(Clone)]
 pub(super) struct BlockCandidateStuff {
-    pub candidate: Arc<BlockCandidate>,
+    pub candidate: BlockCandidate,
     pub signatures: FastHashMap<PeerId, ArcSignature>,
 }
 
-impl BlockCandidateStuff {
-    pub fn as_block_for_sync(&self) -> BlockStuffForSync {
-        // TODO: Rework cloning here
-        BlockStuffForSync {
-            block_stuff_aug: self.candidate.block.clone(),
-            queue_diff_aug: self.candidate.queue_diff_aug.clone(),
-            signatures: self.signatures.clone(),
-            prev_blocks_ids: self.candidate.prev_blocks_ids.clone(),
-            top_shard_blocks_ids: self.candidate.top_shard_blocks_ids.clone(),
+impl From<BlockCandidateStuff> for BlockStuffForSync {
+    fn from(stuff: BlockCandidateStuff) -> Self {
+        let BlockCandidateStuff {
+            candidate,
+            signatures,
+        } = stuff;
+
+        let BlockCandidate {
+            block: block_stuff_aug,
+            prev_blocks_ids,
+            top_shard_blocks_ids,
+            queue_diff_aug,
+            ..
+        } = candidate;
+
+        Self {
+            block_stuff_aug,
+            queue_diff_aug,
+            signatures,
+            prev_blocks_ids,
+            top_shard_blocks_ids,
         }
     }
 }
@@ -149,7 +160,6 @@ pub(super) enum BlockCacheEntryKind {
     ReceivedAndCollated,
 }
 
-#[derive(Clone)]
 pub(super) struct BlockCacheEntry {
     key: BlockCacheKey,
     block_id: BlockId,
@@ -192,7 +202,7 @@ impl BlockCacheEntry {
         let block_id = *candidate.block.id();
         let key = block_id.as_short_id();
         let entry = BlockCandidateStuff {
-            candidate: Arc::new(*candidate),
+            candidate: *candidate,
             signatures: Default::default(),
         };
 
@@ -348,7 +358,7 @@ pub(super) trait AppliedBlockStuffContainer {
 }
 
 pub(super) struct McBlockSubgraph {
-    pub master_block: Option<BlockCacheEntry>,
+    pub master_block: BlockCacheEntry,
     pub shard_blocks: Vec<BlockCacheEntry>,
 }
 

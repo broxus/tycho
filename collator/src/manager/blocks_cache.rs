@@ -689,7 +689,7 @@ impl BlocksCache {
             .collect::<VecDeque<_>>();
 
         let mut subgraph = McBlockSubgraph {
-            master_block: Some(mc_block_entry),
+            master_block: mc_block_entry,
             shard_blocks: vec![],
         };
 
