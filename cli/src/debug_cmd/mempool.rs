@@ -40,6 +40,14 @@ pub struct CmdRun {
     /// Round of a new consensus genesis
     #[clap(long)]
     mempool_start_round: Option<u32>,
+
+    /// step is an amount of points produced by node for payload to grow in size
+    #[arg(short, long, default_value_t = 0)]
+    payload_step: usize,
+
+    /// number of steps in which payload will increase from 0 to max configured value
+    #[arg(short, long, default_value_t = NonZeroUsize::new(1).unwrap())]
+    steps_until_full: NonZeroUsize,
 }
 
 impl CmdRun {
@@ -90,8 +98,10 @@ impl CmdRun {
             Mempool::new(socket_addr, keys, node_config, global_config).await?
         };
 
+        let input_buffer = InputBuffer::new_stub(self.payload_step, self.steps_until_full);
+
         let (engine, anchor_consumer) = mempool
-            .boot(self.mempool_start_round)
+            .boot(input_buffer, self.mempool_start_round)
             .await
             .wrap_err("failed to init mempool")?;
 
@@ -112,6 +122,7 @@ struct Mempool {
     peer_resolver: PeerResolver,
     overlay_service: OverlayService,
     storage: Storage,
+
     all_peers: Vec<PeerId>,
 }
 
@@ -179,7 +190,11 @@ impl Mempool {
         })
     }
 
-    pub async fn boot(self, mempool_start_round: Option<u32>) -> Result<(Engine, AnchorConsumer)> {
+    pub async fn boot(
+        self,
+        input_buffer: InputBuffer,
+        mempool_start_round: Option<u32>,
+    ) -> Result<(Engine, AnchorConsumer)> {
         let local_id = self.dht_client.network().peer_id();
 
         let (committed_tx, committed_rx) = mpsc::unbounded_channel();
@@ -194,10 +209,7 @@ impl Mempool {
             self.storage.mempool_storage(),
             committed_tx,
             anchor_consumer.collator_round(),
-            InputBuffer::new_stub(
-                NonZeroUsize::new(100).unwrap(),
-                NonZeroUsize::new(5).unwrap(),
-            ),
+            input_buffer,
             mempool_start_round,
         );
 

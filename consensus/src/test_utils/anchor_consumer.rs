@@ -1,4 +1,6 @@
 use std::collections::hash_map::Entry::{Occupied, Vacant};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use itertools::Itertools;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -22,6 +24,7 @@ pub struct AnchorConsumer {
     // simulates feedback from collator, as if anchor committed by all peers
     // is immediately confirmed by a top known block
     collator_round: OuterRound<Collator>,
+    common_anchor_count: Arc<AtomicUsize>,
 }
 
 impl AnchorConsumer {
@@ -47,6 +50,10 @@ impl AnchorConsumer {
                 .expect("committed anchor reader must be alive");
             self.collator_round.set_max(anchor.round());
         }
+    }
+
+    pub fn common_anchor_count(&self) -> &Arc<AtomicUsize> {
+        &self.common_anchor_count
     }
 
     pub async fn check(mut self) {
@@ -163,6 +170,8 @@ impl AnchorConsumer {
                 next_expected_history_round = Some(max.next());
             }
 
+            self.common_anchor_count
+                .fetch_add(common_anchors.len(), Ordering::Relaxed);
             common_anchors.sort_unstable();
             tracing::debug!("Anchor hashmap len: {}", self.anchors.len());
             tracing::trace!("History hashmap len: {}", self.history.len());
