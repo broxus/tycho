@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle as StdJoinHandle;
 use std::time::Duration;
 
 use clap::Parser;
@@ -32,11 +33,12 @@ struct Cli {
     /// tokio worker threads per node
     #[arg(short, long, default_value_t = NonZeroUsize::new(2).unwrap())]
     workers_per_node: NonZeroUsize,
-    /// step is an amount of points produced by every node independently
-    #[arg(short, long, default_value_t = NonZeroUsize::new(33).unwrap())]
-    points_in_step: NonZeroUsize,
-    /// number of steps in which payload will increase from 0
-    /// to [`PAYLOAD_BATCH_BYTES`](tycho_consensus::MempoolConfig::PAYLOAD_BATCH_BYTES)
+    /// step is an amount of points produced by node for payload to grow in size;
+    /// every node counts its points in step independently
+    #[arg(short, long, default_value_t = 33)]
+    payload_step: usize,
+    /// number of steps in which payload will increase from 0 to max configured value
+    /// by [`PAYLOAD_BATCH_BYTES`](tycho_consensus::MempoolConfig::PAYLOAD_BATCH_BYTES)
     #[arg(short, long, default_value_t = NonZeroUsize::new(3).unwrap())]
     steps_until_full: NonZeroUsize,
     /// generate data for span-aware flame graph (changes log format);
@@ -59,13 +61,29 @@ impl Cli {
             logger::spans("engine", "info,tycho_consensus=info,tycho_network=info");
         }
         check_parking_lot();
-        heart_beat(self.duration);
-        make_network(self);
+
+        let anchor_consumer = AnchorConsumer::default();
+        let common_anchor_count = anchor_consumer.common_anchor_count().clone();
+        let run_guard = RunGuard::default();
+
+        heart_beat(self.duration, common_anchor_count, run_guard.clone());
+
+        for handle in make_network(self, anchor_consumer, run_guard)? {
+            match handle.join() {
+                Ok(()) => {}
+                Err(e) => std::panic::resume_unwind(e),
+            }
+        }
+
         Ok(())
     }
 }
 
-fn make_network(cli: Cli) {
+fn make_network(
+    cli: Cli,
+    mut anchor_consumer: AnchorConsumer,
+    run_guard: RunGuard,
+) -> anyhow::Result<Vec<StdJoinHandle<()>>> {
     let keys = (0..cli.nodes.get())
         .map(|_| SecretKey::generate(&mut rand::thread_rng()))
         .map(|secret| (secret, Arc::new(KeyPair::from(&secret))))
@@ -93,8 +111,6 @@ fn make_network(cli: Cli) {
         .map(|((_, key_pair), addr)| Arc::new(make_peer_info(key_pair, vec![addr.clone()], None)))
         .collect::<Vec<_>>();
 
-    let run_guard = RunGuard::new();
-    let mut anchor_consumer = AnchorConsumer::default();
     let mut handles = vec![];
 
     for (((secret_key, key_pair), bind_address), peer_id) in keys
@@ -154,7 +170,7 @@ fn make_network(cli: Cli) {
                             mock_storage.mempool_storage(),
                             committed_tx.clone(),
                             &collator_round,
-                            InputBuffer::new_stub(cli.points_in_step, cli.steps_until_full),
+                            InputBuffer::new_stub(cli.payload_step, cli.steps_until_full),
                             None,
                         );
                         engine.init_with_genesis(&all_peers);
@@ -165,7 +181,7 @@ fn make_network(cli: Cli) {
                         )
                         .ok();
                     });
-            });
+            })?;
         handles.push(handle);
     }
 
@@ -183,18 +199,10 @@ fn make_network(cli: Cli) {
                     )
                     .ok();
                 });
-        });
+        })?;
     handles.push(handle);
-    for handle in handles {
-        match handle {
-            Ok(handle) => _ = handle.join(),
-            Err(_ignored) => {} // from std::thread::spawn()
-        }
-    }
-    // for all panic hooks
-    use std::io::Write;
-    std::io::stderr().flush().ok();
-    std::io::stdout().flush().ok();
+
+    Ok(handles)
 }
 
 fn check_parking_lot() {
@@ -216,29 +224,41 @@ fn check_parking_lot() {
     });
 }
 
-fn heart_beat(duration: Option<Duration>) {
+fn heart_beat(
+    duration: Option<Duration>,
+    common_anchor_count: Arc<AtomicUsize>,
+    run_guard: RunGuard,
+) {
     std::thread::spawn(move || {
+        let _run_guard = run_guard;
         let start = std::time::Instant::now();
         loop {
             std::thread::sleep(Duration::from_secs(1));
             tracing::info!("heart beat");
             if let Some(duration) = duration {
-                if start.elapsed() >= duration {
-                    tracing::info!(
-                        "test stopped after {}",
-                        humantime::format_duration(start.elapsed())
+                let elapsed = start.elapsed();
+                if elapsed >= duration {
+                    let common_anchor_count = common_anchor_count.load(Ordering::Relaxed);
+                    let expected_anchor_count = elapsed.as_secs() as usize * 2 / 3;
+                    assert!(
+                        common_anchor_count >= expected_anchor_count,
+                        "mempool network produced just {common_anchor_count} common anchors, \
+                        expected at least {expected_anchor_count} during {} ",
+                        humantime::format_duration(elapsed)
                     );
-                    use std::io::Write;
-                    std::io::stderr().flush().ok();
-                    std::io::stdout().flush().ok();
-                    #[allow(clippy::exit)] // ok in example if it deadlocked
-                    std::process::exit(0);
+                    tracing::info!(
+                        "test stopped after {}, \
+                        produced {common_anchor_count} common anchors, \
+                        expected at least {expected_anchor_count}",
+                        humantime::format_duration(elapsed)
+                    );
+                    break;
                 }
             }
         }
     });
 }
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct RunGuard {
     notify: Arc<Notify>,
 }
@@ -250,10 +270,6 @@ impl Drop for RunGuard {
 }
 
 impl RunGuard {
-    pub fn new() -> Self {
-        let notify = Arc::new(Notify::new());
-        Self { notify }
-    }
     pub async fn until_any_dropped(self) -> Result<(), ()> {
         self.notify.notified().await;
         Err(())

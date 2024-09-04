@@ -267,7 +267,8 @@ impl Engine {
                 .expect("Failed to send anchor history to mpsc channel");
             commit_round.set_max(round);
         }
-        panic!("engine commit info channel closed")
+        tracing::warn!("engine commit info channel closed");
+        futures_util::future::pending().await
     }
 }
 

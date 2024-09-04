@@ -165,27 +165,27 @@ mod stub {
     const EXTERNAL_MSG_MAX_BYTES: usize = 64 * 1024;
     struct InputBufferStub {
         fetch_count: NonZeroUsize,
+        payload_step: usize,
         steps_until_full: NonZeroUsize,
-        points_in_step: NonZeroUsize,
     }
 
     impl InputBuffer {
-        pub fn new_stub(
-            points_in_step: NonZeroUsize,
-            steps_until_full: NonZeroUsize,
-        ) -> InputBuffer {
+        pub fn new_stub(payload_step: usize, steps_until_full: NonZeroUsize) -> InputBuffer {
             InputBuffer(Arc::new(Mutex::new(InputBufferStub {
                 fetch_count: NonZeroUsize::MIN,
                 steps_until_full,
-                points_in_step,
+                payload_step,
             })))
         }
     }
 
     impl InputBufferInner for InputBufferStub {
         fn fetch_inner(&mut self, _: bool) -> Vec<Bytes> {
-            let step = (self.fetch_count.get() / self.points_in_step.get())
-                .min(self.steps_until_full.get());
+            if self.payload_step == 0 {
+                return Vec::new();
+            }
+            let step =
+                (self.fetch_count.get() / self.payload_step).min(self.steps_until_full.get());
             let msg_count = (MempoolConfig::PAYLOAD_BATCH_BYTES * step)
                 / self.steps_until_full
                 / EXTERNAL_MSG_MAX_BYTES;
