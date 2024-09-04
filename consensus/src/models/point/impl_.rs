@@ -64,7 +64,7 @@ impl Point {
     pub fn new(
         local_keypair: &KeyPair,
         round: Round,
-        evidence: Option<BTreeMap<PeerId, Signature>>,
+        evidence: BTreeMap<PeerId, Signature>,
         payload: Vec<Bytes>,
         data: PointData,
     ) -> Self {
@@ -103,8 +103,8 @@ impl Point {
         &self.0.body.data
     }
 
-    pub fn evidence(&self) -> Option<&BTreeMap<PeerId, Signature>> {
-        self.0.body.evidence.as_ref()
+    pub fn evidence(&self) -> &BTreeMap<PeerId, Signature> {
+        &self.0.body.evidence
     }
 
     pub fn payload(&self) -> &Vec<Bytes> {
@@ -123,14 +123,14 @@ impl Point {
         Some(PointId {
             author: self.0.body.data.author,
             round: self.0.body.round.prev(),
-            digest: self.0.body.data.prev_digest.as_ref()?.clone(),
+            digest: self.0.body.data.prev_digest()?.clone(),
         })
     }
 
     pub fn prev_proof(&self) -> Option<PrevPoint> {
         Some(PrevPoint {
-            digest: self.0.body.data.prev_digest.as_ref()?.clone(),
-            evidence: self.0.body.evidence.as_ref()?.clone(),
+            digest: self.0.body.data.prev_digest()?.clone(),
+            evidence: self.0.body.evidence.clone(),
         })
     }
 
@@ -239,7 +239,6 @@ mod tests {
             data: PointData {
                 author: PeerId::from(key_pair.public_key),
                 time: UnixTime::now(),
-                prev_digest: Some(prev_digest),
                 includes,
                 witness: BTreeMap::from([
                     (PeerId([1; 32]), Digest::new(&[1])),
@@ -256,7 +255,7 @@ mod tests {
                 },
                 anchor_time: UnixTime::now(),
             },
-            evidence: Some(evidence),
+            evidence,
             payload,
         }
     }

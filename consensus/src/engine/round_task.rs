@@ -354,8 +354,8 @@ impl Effects<EngineContext> {
             .increment(own_point.is_none() as _);
         metrics::counter!("tycho_mempool_points_produced").increment(own_point.is_some() as _);
 
-        let proof = own_point.and_then(|point| point.data().prev_digest.as_ref());
-        metrics::counter!("tycho_mempool_points_no_proof_produced").increment(proof.is_none() as _);
+        let no_proof = own_point.map_or(false, |point| point.evidence().is_empty());
+        metrics::counter!("tycho_mempool_points_no_proof_produced").increment(no_proof as _);
 
         metrics::counter!("tycho_mempool_point_payload_count")
             .increment(own_point.map_or(0, |point| point.payload().len() as _));

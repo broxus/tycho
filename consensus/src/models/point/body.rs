@@ -13,10 +13,10 @@ use crate::models::point::{AnchorStageRole, Digest, Link, PointData, Round, Sign
 pub struct PointBody {
     pub round: Round, // let it be @ r+0
     pub data: PointData,
-    /// signatures for [`self.body.prev_digest`] if one exists:
-    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter;
-    /// point author is excluded: everyone must use the proven point to validate its proof
-    pub evidence: Option<BTreeMap<PeerId, Signature>>,
+    /// signatures for own point from previous round (if one exists, else empty map):
+    /// the node may prove its vertex@r-1 with its point@r+0 only; contains signatures from
+    /// `>= 2F` neighbours @ r+0 (inside point @ r+0), order does not matter, author is excluded;
+    pub evidence: BTreeMap<PeerId, Signature>,
     pub payload: Vec<Bytes>,
 }
 
@@ -30,14 +30,13 @@ impl PointBody {
         // any genesis is suitable, round number may be taken from configs
         let is_special_ok = match self.round.cmp(&MempoolConfig::genesis_round()) {
             cmp::Ordering::Equal => {
-                self.data.time == self.data.anchor_time
-                    && self.data.anchor_trigger == Link::ToSelf
-                    && self.data.anchor_proof == Link::ToSelf
+                self.payload.is_empty()
+                    && self.evidence.is_empty()
                     && self.data.includes.is_empty()
                     && self.data.witness.is_empty()
-                    && self.data.prev_digest.is_none()
-                    && self.evidence.is_none()
-                    && self.payload.is_empty()
+                    && self.data.anchor_trigger == Link::ToSelf
+                    && self.data.anchor_proof == Link::ToSelf
+                    && self.data.time == self.data.anchor_time
             }
             cmp::Ordering::Greater => {
                 // no witness is possible at the round right after genesis;
@@ -46,25 +45,24 @@ impl PointBody {
                     // leader must maintain its chain of proofs,
                     // while others must link to previous points (checked at the end of this method);
                     // its decided later (using dag round data) whether current point belongs to leader
-                    && !(self.data.anchor_proof == Link::ToSelf && self.data.prev_digest.is_none())
-                    && !(self.data.anchor_trigger == Link::ToSelf && self.data.prev_digest.is_none())
+                    && !(self.data.anchor_proof == Link::ToSelf && self.evidence.is_empty())
+                    && !(self.data.anchor_trigger == Link::ToSelf && self.evidence.is_empty())
             }
 
             cmp::Ordering::Less => false,
         };
         is_special_ok
+            && MempoolConfig::PAYLOAD_BATCH_BYTES >= self.payload.iter().map(|x| x.len()).sum()
             // proof for previous point consists of digest and 2F++ evidences
-            && self.evidence.is_none() == self.data.prev_digest.is_none()
             // proof is listed in includes - to count for 2/3+1, verify and commit dependencies
-            && self.data.prev_digest.as_ref() == self.data.includes.get(&self.data.author)
-            // in contrast, evidence must contain only signatures of others
-            && self.evidence.as_ref().map_or(true, |map| !map.contains_key(&self.data.author))
+            && self.evidence.is_empty() != self.data.includes.contains_key(&self.data.author)
+            // evidence must contain only signatures of others
+            && !self.evidence.contains_key(&self.data.author)
             // also cannot witness own point
             && !self.data.witness.contains_key(&self.data.author)
-            && self.is_link_well_formed(AnchorStageRole::Proof)
             && self.is_link_well_formed(AnchorStageRole::Trigger)
+            && self.is_link_well_formed(AnchorStageRole::Proof)
             && self.data.time >= self.data.anchor_time
-            && MempoolConfig::PAYLOAD_BATCH_BYTES >= self.payload.iter().map(|x| x.len()).sum()
             && match (
             self.data.anchor_round(AnchorStageRole::Proof, self.round),
             self.data.anchor_round(AnchorStageRole::Trigger, self.round)

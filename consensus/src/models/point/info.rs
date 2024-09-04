@@ -92,7 +92,7 @@ impl PointInfo {
         Some(PointId {
             author: self.0.data.author,
             round: self.0.round.prev(),
-            digest: self.0.data.prev_digest.as_ref()?.clone(),
+            digest: self.0.data.prev_digest()?.clone(),
         })
     }
 

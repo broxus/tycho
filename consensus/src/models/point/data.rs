@@ -16,11 +16,6 @@ pub struct PointId {
 #[cfg_attr(test, derive(PartialEq))]
 pub struct PointData {
     pub author: PeerId,
-    pub time: UnixTime,
-    // until weak links are supported,
-    /// any node may proof its vertex@r-1 with its point@r+0 only;
-    /// `evidence` is kept in a wrapping struct
-    pub prev_digest: Option<Digest>,
     /// `>= 2F+1` points @ r-1,
     /// signed by author @ r-1 with some additional points just mentioned;
     /// mandatory includes author's own vertex iff proof is given.
@@ -33,6 +28,8 @@ pub struct PointData {
     pub anchor_trigger: Link,
     /// last included by author; maintains anchor chain linked without explicit DAG traverse
     pub anchor_proof: Link,
+    /// local peer time at the moment of point creation, cannot be less than `anchor_time`
+    pub time: UnixTime,
     /// time of previous anchor candidate, linked through its proof
     pub anchor_time: UnixTime,
 }
@@ -41,12 +38,11 @@ pub struct PointData {
 /// Note: fields and their order must be the same with [`PointData`]
 pub struct PointDataRef<'a> {
     author: &'a PeerId,
-    time: &'a UnixTime,
-    prev_digest: Option<&'a Digest>,
     includes: &'a BTreeMap<PeerId, Digest>,
     witness: &'a BTreeMap<PeerId, Digest>,
     anchor_trigger: &'a Link,
     anchor_proof: &'a Link,
+    time: &'a UnixTime,
     anchor_time: &'a UnixTime,
 }
 
@@ -54,12 +50,11 @@ impl<'a> From<&'a PointData> for PointDataRef<'a> {
     fn from(data: &'a PointData) -> Self {
         Self {
             author: &data.author,
-            time: &data.time,
-            prev_digest: data.prev_digest.as_ref(),
             includes: &data.includes,
             witness: &data.witness,
             anchor_trigger: &data.anchor_trigger,
             anchor_proof: &data.anchor_proof,
+            time: &data.time,
             anchor_time: &data.anchor_time,
         }
     }
@@ -85,6 +80,10 @@ pub enum AnchorStageRole {
 }
 
 impl PointData {
+    pub fn prev_digest(&self) -> Option<&Digest> {
+        self.includes.get(&self.author)
+    }
+
     /// should be disclosed by wrapping point
     pub(super) fn anchor_link(&self, link_field: AnchorStageRole) -> &'_ Link {
         match link_field {
