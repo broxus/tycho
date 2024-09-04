@@ -121,6 +121,8 @@ async fn test_collation_process_on_stubs() {
             Default::default(),
         ),
         CollatorStdImplFactory,
+        None,
+        None,
         #[cfg(feature = "test")]
         vec![
             node_1_keypair,

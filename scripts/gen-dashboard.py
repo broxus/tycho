@@ -227,6 +227,16 @@ def create_row(
 
 def core_bc() -> RowPanel:
     metrics = [
+        create_gauge_panel(
+            "tycho_last_applied_block_seqno",
+            "Last applied block seqno",
+            labels=['workchain=~"$workchain"'],
+        ),
+        create_gauge_panel(
+            "tycho_last_processed_to_anchor_id",
+            "Last processed to anchor",
+            labels=['workchain=~"$workchain"'],
+        ),
         create_counter_panel("tycho_bc_txs_total", "Number of transactions over time"),
         create_counter_panel(
             "tycho_bc_ext_msgs_total", "Number of external messages over time"

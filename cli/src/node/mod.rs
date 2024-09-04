@@ -104,8 +104,14 @@ pub struct CmdRun {
     import_zerostate: Option<Vec<PathBuf>>,
 
     /// Round of a new consensus genesis
+    #[allow(clippy::option_option)]
     #[clap(long)]
-    mempool_start_round: Option<u32>,
+    pub mempool_start_round: Option<Option<u32>>,
+
+    /// Last know applied master block seqno to recover from
+    #[allow(clippy::option_option)]
+    #[clap(long)]
+    pub from_mc_block_seqno: Option<Option<u32>>,
 }
 
 impl CmdRun {
@@ -168,7 +174,11 @@ impl CmdRun {
 
         tracing::info!(%init_block_id, "node initialized");
 
-        node.run(&init_block_id, self.mempool_start_round).await?;
+        let mempool_start_round = self.mempool_start_round.unwrap_or_default();
+        let from_mc_block_seqno = self.from_mc_block_seqno.unwrap_or_default();
+
+        node.run(&init_block_id, mempool_start_round, from_mc_block_seqno)
+            .await?;
 
         Ok(())
     }
@@ -483,7 +493,12 @@ impl Node {
         Ok(last_mc_block_id)
     }
 
-    async fn run(self, last_block_id: &BlockId, mempool_start_round: Option<u32>) -> Result<()> {
+    async fn run(
+        self,
+        last_block_id: &BlockId,
+        mempool_start_round: Option<u32>,
+        last_mc_block_seqno: Option<u32>,
+    ) -> Result<()> {
         // Force load last applied state
         let mc_state = self
             .storage
@@ -577,6 +592,8 @@ impl Node {
             mempool_adapter,
             validator.clone(),
             CollatorStdImplFactory,
+            mempool_start_round,
+            last_mc_block_seqno,
             #[cfg(test)]
             vec![],
         );

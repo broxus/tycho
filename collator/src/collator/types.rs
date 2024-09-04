@@ -1109,6 +1109,22 @@ pub struct AnchorsCache {
 }
 
 impl AnchorsCache {
+    pub fn set_last_imported_anchor_info(
+        &mut self,
+        anchor_id: MempoolAnchorId,
+        anchor_ct: u64,
+        created_by: HashBytes,
+    ) {
+        let anchor_info = AnchorInfo {
+            id: anchor_id,
+            ct: anchor_ct,
+            all_exts_count: 0,
+            our_exts_count: 0,
+            author: PeerId(created_by.0),
+        };
+        self.last_imported_anchor = Some(anchor_info);
+    }
+
     pub fn get_last_imported_anchor_ct(&self) -> Option<u64> {
         self.last_imported_anchor.as_ref().map(|anchor| anchor.ct)
     }

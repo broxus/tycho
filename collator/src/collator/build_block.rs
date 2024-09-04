@@ -359,7 +359,7 @@ impl CollatorStdImpl {
             collated_data,
             collated_file_hash: HashBytes::ZERO,
             chain_time: collation_data.get_gen_chain_time(),
-            ext_processed_upto_anchor_id: collation_data
+            processed_to_anchor_id: collation_data
                 .processed_upto
                 .externals
                 .as_ref()

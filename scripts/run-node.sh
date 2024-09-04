@@ -20,6 +20,18 @@ while [[ $# -gt 0 ]]; do
           exit 1
         fi
       ;;
+      --mempool-start-round)
+        mempool_start_round=$2
+        shift # past argument
+        if [ "$#" -gt 0 ]; then shift;
+        fi
+      ;;
+      --from-mc-block-seqno)
+        from_mc_block_seqno=$2
+        shift # past argument
+        if [ "$#" -gt 0 ]; then shift;
+        fi
+      ;;
       *) # positional
         if ! [ -z "$N" ]; then
             echo "ERROR: Too many args"
@@ -45,4 +57,6 @@ $tycho_bin node run \
     --config "${base_dir}/config${N}.json" \
     --global-config "${base_dir}/global-config.json" \
     --import-zerostate "${base_dir}/zerostate.boc" \
-    --logger-config "${root_dir}/logger.json"
+    --logger-config "${root_dir}/logger.json" \
+    --mempool-start-round ${mempool_start_round} \
+    --from-mc-block-seqno ${from_mc_block_seqno}
