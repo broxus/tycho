@@ -147,8 +147,6 @@ impl<V: InternalMessageValue> SessionState<V> for SessionStateStdImpl {
     }
 
     fn truncate(&self) -> Result<()> {
-        self.storage
-            .internal_queue_storage()
-            .truncate_session_queue()
+        self.storage.internal_queue_storage().clear_session_queue()
     }
 }

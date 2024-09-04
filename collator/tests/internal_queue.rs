@@ -235,6 +235,75 @@ async fn test_queue() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_queue_clear() -> anyhow::Result<()> {
+    let storage = prepare_test_storage().await?;
+
+    let queue_factory = QueueFactoryStdImpl {
+        session_state_factory: SessionStateImplFactory {
+            storage: storage.clone(),
+        },
+        persistent_state_factory: PersistentStateImplFactory { storage },
+        config: QueueConfig {
+            gc_interval: Duration::from_secs(1),
+        },
+    };
+
+    let queue: QueueImpl<SessionStateStdImpl, PersistentStateStdImpl, StoredObject> =
+        queue_factory.create();
+    let block = BlockIdShort {
+        shard: ShardIdent::new_full(0),
+        seqno: 0,
+    };
+    let mut diff = QueueDiffWithMessages::new();
+
+    let stored_objects = vec![
+        create_stored_object(
+            1,
+            "1:6d6e566da0b322193d90020ff65b9b9e91582c953ed587ffd281d8344a7d5732",
+        )
+        .await?,
+    ];
+
+    for stored_object in &stored_objects {
+        diff.messages
+            .insert(stored_object.key(), stored_object.clone());
+    }
+
+    queue
+        .apply_diff(diff, block, &HashBytes::from([1; 32]))
+        .await?;
+
+    let mut ranges = FastHashMap::default();
+    ranges.insert(
+        ShardIdent::new_full(0),
+        (
+            QueueKey {
+                lt: 1,
+                hash: HashBytes::default(),
+            },
+            QueueKey {
+                lt: 4,
+                hash: HashBytes::default(),
+            },
+        ),
+    );
+
+    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1)).await;
+
+    let mut iterator_manager = StatesIteratorsManager::new(iterators);
+    assert!(iterator_manager.next().ok().is_some());
+
+    queue.clear_session_state()?;
+
+    let iterators = queue.iterator(&ranges, ShardIdent::new_full(1)).await;
+
+    let mut iterator_manager = StatesIteratorsManager::new(iterators);
+    assert!(iterator_manager.next()?.is_none());
+
+    Ok(())
+}
+
 #[test]
 fn test_queue_diff_with_messages_from_queue_diff_stuff() -> anyhow::Result<()> {
     let mut out_msg = OutMsgDescr::default();

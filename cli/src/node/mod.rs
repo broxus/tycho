@@ -575,7 +575,7 @@ impl Node {
 
         // drop uncommitted queue state on recovery reset
         if matches!(mempool_start_round, Some(round_id) if round_id > 0) {
-            message_queue_adapter.truncate_session_state()?;
+            message_queue_adapter.clear_session_state()?;
         }
 
         let validator = ValidatorStdImpl::new(

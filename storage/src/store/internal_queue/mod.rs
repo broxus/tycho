@@ -2,12 +2,11 @@ use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
-use weedb::rocksdb::{Options, ReadOptions, WriteBatch};
-use weedb::{BoundedCfHandle, ColumnFamily, ColumnFamilyOptions, OwnedSnapshot};
+use weedb::rocksdb::{ReadOptions, WriteBatch};
+use weedb::{BoundedCfHandle, OwnedSnapshot};
 
 use crate::db::*;
 use crate::model::ShardsInternalMessagesKey;
-use crate::tables::ShardsInternalMessagesSession;
 use crate::util::{OwnedIterator, StoredValue};
 
 pub mod model;
@@ -41,19 +40,20 @@ impl InternalQueueStorage {
         )
     }
 
-    pub fn truncate_session_queue(&self) -> Result<()> {
-        self.db
-            .rocksdb()
-            .drop_cf(ShardsInternalMessagesSession::NAME)?;
-
-        let mut cache = self.db.caches().clone();
-        let mut opts = Options::default();
-        ShardsInternalMessagesSession::options(&mut opts, &mut cache);
-
-        self.db
-            .rocksdb()
-            .create_cf(ShardsInternalMessagesSession::NAME, &opts)?;
-
+    pub fn clear_session_queue(&self) -> Result<()> {
+        let start_key = vec![0x00; ShardsInternalMessagesKey::SIZE_HINT];
+        let end_key = vec![0xFF; ShardsInternalMessagesKey::SIZE_HINT];
+        let shards_internal_messages_session_cf = self.db.shards_internal_messages_session.cf();
+        self.db.rocksdb().delete_range_cf(
+            &shards_internal_messages_session_cf,
+            &start_key,
+            &end_key,
+        )?;
+        self.db.rocksdb().compact_range_cf(
+            &shards_internal_messages_session_cf,
+            Some(start_key),
+            Some(end_key),
+        );
         Ok(())
     }
 

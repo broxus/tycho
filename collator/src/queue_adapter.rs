@@ -55,7 +55,7 @@ where
         messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()>;
 
-    fn truncate_session_state(&self) -> Result<()>;
+    fn clear_session_state(&self) -> Result<()>;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -149,7 +149,7 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
         iterator.commit(messages)
     }
 
-    fn truncate_session_state(&self) -> Result<()> {
-        self.queue.truncate_session_state()
+    fn clear_session_state(&self) -> Result<()> {
+        self.queue.clear_session_state()
     }
 }

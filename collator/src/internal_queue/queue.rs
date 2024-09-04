@@ -80,7 +80,7 @@ where
         diff_hash: &HashBytes,
     ) -> Result<()>;
     async fn commit_diff(&self, mc_top_blocks: Vec<(BlockIdShort, bool)>) -> Result<()>;
-    fn truncate_session_state(&self) -> Result<()>;
+    fn clear_session_state(&self) -> Result<()>;
 }
 
 // IMPLEMENTATION
@@ -261,7 +261,7 @@ where
         Ok(())
     }
 
-    fn truncate_session_state(&self) -> Result<()> {
+    fn clear_session_state(&self) -> Result<()> {
         self.session_state.truncate()
     }
 }
