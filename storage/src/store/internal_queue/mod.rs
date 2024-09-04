@@ -2,11 +2,12 @@ use anyhow::Result;
 use everscale_types::models::{IntAddr, ShardIdent};
 use tycho_block_util::queue::QueueKey;
 use tycho_util::FastHashMap;
-use weedb::rocksdb::{ReadOptions, WriteBatch};
-use weedb::{BoundedCfHandle, OwnedSnapshot};
+use weedb::rocksdb::{Options, ReadOptions, WriteBatch};
+use weedb::{BoundedCfHandle, ColumnFamily, ColumnFamilyOptions, OwnedSnapshot};
 
 use crate::db::*;
 use crate::model::ShardsInternalMessagesKey;
+use crate::tables::ShardsInternalMessagesSession;
 use crate::util::{OwnedIterator, StoredValue};
 
 pub mod model;
@@ -38,6 +39,22 @@ impl InternalQueueStorage {
             self.db.shards_internal_messages_session.new_read_config(),
             snapshot,
         )
+    }
+
+    pub fn truncate_session_queue(&self) -> Result<()> {
+        self.db
+            .rocksdb()
+            .drop_cf(ShardsInternalMessagesSession::NAME)?;
+
+        let mut cache = self.db.caches().clone();
+        let mut opts = Options::default();
+        ShardsInternalMessagesSession::options(&mut opts, &mut cache);
+
+        self.db
+            .rocksdb()
+            .create_cf(ShardsInternalMessagesSession::NAME, &opts)?;
+
+        Ok(())
     }
 
     pub fn write_batch(&self, batch: WriteBatch) -> Result<()> {

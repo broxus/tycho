@@ -54,6 +54,8 @@ where
         iterator: &mut Box<dyn QueueIterator<V>>,
         messages: Vec<(ShardIdent, QueueKey)>,
     ) -> Result<()>;
+
+    fn truncate_session_state(&self) -> Result<()>;
 }
 
 impl<V: InternalMessageValue> MessageQueueAdapterStdImpl<V> {
@@ -145,5 +147,9 @@ impl<V: InternalMessageValue> MessageQueueAdapter<V> for MessageQueueAdapterStdI
             "Committing messages to iterator"
         );
         iterator.commit(messages)
+    }
+
+    fn truncate_session_state(&self) -> Result<()> {
+        self.queue.truncate_session_state()
     }
 }
