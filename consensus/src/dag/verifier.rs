@@ -552,16 +552,16 @@ impl Verifier {
                 return false;
             }
         }
-        let peer_count = if point.round().prev() == MempoolConfig::genesis_round() {
+        let includes_peer_count = if point.round().prev() == MempoolConfig::genesis_round() {
             PeerCount::GENESIS
         } else {
-            match PeerCount::try_from(proof_peers.len()) {
+            match PeerCount::try_from(includes_peers.len()) {
                 Ok(peer_count) => peer_count,
                 // reject the point in case we don't know validators for its round
                 Err(_) => return false,
             }
         };
-        if point.data().includes.len() < peer_count.majority() {
+        if point.data().includes.len() < includes_peer_count.majority() {
             return false;
         };
         for peer_id in point.data().includes.keys() {
@@ -575,10 +575,10 @@ impl Verifier {
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
 
-        let Ok(peer_count) = PeerCount::try_from(proof_peers.len()) else {
+        let Ok(proof_peer_count) = PeerCount::try_from(proof_peers.len()) else {
             return false;
         };
-        if evidence.len() < peer_count.majority_of_others() {
+        if evidence.len() < proof_peer_count.majority_of_others() {
             return false;
         }
         for (peer_id, _) in evidence.iter() {
