@@ -1,8 +1,8 @@
-use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
 
-use futures_util::{future, TryFutureExt};
+use futures_util::future::BoxFuture;
+use futures_util::{future, FutureExt, TryFutureExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::{JoinError, JoinHandle};
 use tracing::Instrument;
@@ -20,53 +20,53 @@ use crate::intercom::{
 };
 use crate::models::{Link, Point, Round};
 
-struct RoundTaskState {
-    peer_schedule: PeerSchedule,
-    store: MempoolStore,
-    responder: Responder,
+pub struct RoundTaskState {
+    pub peer_schedule: PeerSchedule,
+    pub store: MempoolStore,
+    pub responder: Responder,
     collator_round: OuterRound<Collator>,
     input_buffer: InputBuffer,
-    broadcast_filter: BroadcastFilter,
-    downloader: Downloader,
+    pub broadcast_filter: BroadcastFilter,
+    pub downloader: Downloader,
 }
 
 pub struct RoundTaskReady {
-    state: RoundTaskState,
+    pub state: RoundTaskState,
     // contains all collected signatures, even if they are insufficient to produce valid point;
     // may reference own point older than from a last round, as its payload may be not resend
     last_own_point: Option<Arc<LastOwnPoint>>,
     broadcaster: Broadcaster,
-    collector: Collector,
+    pub collector: Collector,
 }
 
 impl RoundTaskReady {
     pub fn new(
         dispatcher: &Dispatcher,
-        peer_schedule: &PeerSchedule,
-        store: &MempoolStore,
+        peer_schedule: PeerSchedule,
+        store: MempoolStore,
         consensus_round: &OuterRound<Consensus>,
         collator_round: OuterRound<Collator>,
         responder: Responder,
         input_buffer: InputBuffer,
     ) -> Self {
         let (bcast_tx, bcast_rx) = mpsc::unbounded_channel();
-        let broadcast_filter = BroadcastFilter::new(peer_schedule, consensus_round, bcast_tx);
+        let broadcast_filter = BroadcastFilter::new(&peer_schedule, consensus_round, bcast_tx);
         tokio::spawn({
             let this = broadcast_filter.clone();
             async move {
                 this.clear_cache().await;
             }
         });
-
+        let downloader = Downloader::new(dispatcher, &peer_schedule);
         Self {
             state: RoundTaskState {
-                peer_schedule: peer_schedule.clone(),
-                store: store.clone(),
+                peer_schedule,
+                store,
                 responder,
                 collator_round,
                 input_buffer,
                 broadcast_filter,
-                downloader: Downloader::new(dispatcher, peer_schedule),
+                downloader,
             },
             broadcaster: Broadcaster::new(dispatcher),
             collector: Collector::new(bcast_rx),
@@ -74,112 +74,143 @@ impl RoundTaskReady {
         }
     }
 
-    pub fn init(&mut self, next_round: Round, genesis_state: InclusionState) {
-        self.collector.init(next_round, iter::once(genesis_state));
+    pub fn own_point_task(
+        &self,
+        prev_round_ok: bool,
+        collector_signal_rx: &watch::Receiver<CollectorSignal>,
+        current_dag_round: &DagRound,
+        round_effects: &Effects<EngineContext>,
+    ) -> (
+        BoxFuture<'static, Result<Option<Point>, JoinError>>,
+        BoxFuture<'static, InclusionState>,
+    ) {
+        let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
+        let point_fut = if prev_round_ok {
+            self.own_point_fut(
+                own_point_state_tx,
+                collector_signal_rx,
+                current_dag_round,
+                round_effects,
+            )
+        } else {
+            drop(own_point_state_tx);
+            future::ready(Ok(None)).boxed()
+        };
+        let own_point_state = async move {
+            match own_point_state_rx.await {
+                Ok(state) => state,
+                Err(_) => future::pending().await,
+            }
+        };
+        (point_fut, own_point_state.boxed())
+    }
+
+    fn own_point_fut(
+        &self,
+        own_point_state_tx: oneshot::Sender<InclusionState>,
+        collector_signal_rx: &watch::Receiver<CollectorSignal>,
+        current_dag_round: &DagRound,
+        round_effects: &Effects<EngineContext>,
+    ) -> BoxFuture<'static, Result<Option<Point>, JoinError>> {
+        let not_silent_since = Round(
+            (current_dag_round.round().0) // latest reliably detected consensus round
+                .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32),
+        );
+        let mut collator_round_recv = self.state.collator_round.receiver();
+        let collator_round = collator_round_recv.get();
+        #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
+        let wait_collator_ready = if true || collator_round >= not_silent_since {
+            future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
+        } else {
+            tracing::info!(
+                parent: round_effects.span(),
+                collator_round = collator_round.0,
+                not_silent_since = not_silent_since.0,
+                "enter silent mode by collator feedback",
+            );
+            // must cancel on collector finish/err signal
+            let mut collector_signal_rx = collector_signal_rx.clone();
+            future::Either::Left(tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        collator_round = collator_round_recv.next() => {
+                            //  exit if ready to produce point: collator synced enough
+                            let exit = collator_round >= not_silent_since;
+                            tracing::info!(
+                                collator_round = collator_round.0,
+                                not_silent_since = not_silent_since.0,
+                                exit = exit,
+                                "collator feedback in silent mode"
+                            );
+                            if exit {
+                                break true;
+                            }
+                        },
+                        collector_signal = collector_signal_rx.changed() => {
+                            match collector_signal {
+                                Ok(()) => {
+                                    match *collector_signal_rx.borrow_and_update() {
+                                        CollectorSignal::Finish | CollectorSignal::Err => break false,
+                                        CollectorSignal::Retry => {}
+                                    };
+                                }
+                                Err(_collector_exited) => break false,
+                            }
+                        }
+                    }
+                }
+            }).instrument(round_effects.span().clone()))
+        };
+
+        let current_dag_round = current_dag_round.clone();
+        let input_buffer = self.state.input_buffer.clone();
+        let last_own_point = self.last_own_point.clone();
+        let store = self.state.store.clone();
+
+        wait_collator_ready
+            .and_then(|is_ready_to_produce| {
+                if is_ready_to_produce {
+                    future::Either::Right(tokio::task::spawn_blocking(move || {
+                        let task_start_time = Instant::now();
+                        let point_opt = Producer::new_point(
+                            &current_dag_round,
+                            last_own_point.as_deref(),
+                            &input_buffer,
+                        );
+                        if let Some(own_point) = point_opt.as_ref() {
+                            let state = current_dag_round.insert_exact_sign(
+                                own_point,
+                                current_dag_round.key_pair(),
+                                &store,
+                            );
+                            own_point_state_tx.send(state).ok();
+                            metrics::histogram!("tycho_mempool_engine_produce_time")
+                                .record(task_start_time.elapsed());
+                        };
+                        point_opt
+                        // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
+                    }))
+                } else {
+                    future::Either::Left(future::ready(Ok(None)))
+                }
+            })
+            .instrument(round_effects.span().clone())
+            .boxed()
     }
 
     pub fn run(
         self,
-        prev_round_ok: bool,
-        current_dag_round: &DagRound,
+        own_point_fut: BoxFuture<'static, Result<Option<Point>, JoinError>>,
+        own_point_state: BoxFuture<'static, InclusionState>,
+        collector_signal_tx: watch::Sender<CollectorSignal>,
+        collector_signal_rx: watch::Receiver<CollectorSignal>,
         next_dag_round: &DagRound,
         round_effects: &Effects<EngineContext>,
     ) -> RoundTaskRunning {
         let (bcaster_ready_tx, bcaster_ready_rx) = oneshot::channel();
-        let (collector_signal_tx, collector_signal_rx) = watch::channel(CollectorSignal::Retry);
-        let (own_point_state_tx, own_point_state_rx) = oneshot::channel();
-
-        let own_point_fut = if prev_round_ok {
-            let not_silent_since = Round(
-                (current_dag_round.round().0) // latest reliably detected consensus round
-                    .saturating_sub(MempoolConfig::MAX_ANCHOR_DISTANCE as u32),
-            );
-            let mut collator_round_recv = self.state.collator_round.receiver();
-            let collator_round = collator_round_recv.get();
-            #[allow(clippy::overly_complex_bool_expr)] // Fixme temporarily disable silent mode
-            let wait_collator_ready = if true || collator_round >= not_silent_since {
-                future::Either::Right(future::ready(Ok(true))) // ready; Ok for `JoinError`
-            } else {
-                tracing::info!(
-                    parent: round_effects.span(),
-                    collator_round = collator_round.0,
-                    not_silent_since = not_silent_since.0,
-                    "enter silent mode by collator feedback",
-                );
-                // must cancel on collector finish/err signal
-                let mut collector_signal_rx = collector_signal_rx.clone();
-                future::Either::Left(tokio::spawn(async move {
-                    loop {
-                        tokio::select! {
-                            collator_round = collator_round_recv.next() => {
-                                //  exit if ready to produce point: collator synced enough
-                                let exit = collator_round >= not_silent_since;
-                                tracing::info!(
-                                    collator_round = collator_round.0,
-                                    not_silent_since = not_silent_since.0,
-                                    exit = exit,
-                                    "collator feedback in silent mode"
-                                );
-                                if exit {
-                                    break true;
-                                }
-                            },
-                            collector_signal = collector_signal_rx.changed() => {
-                                match collector_signal {
-                                    Ok(()) => {
-                                        match *collector_signal_rx.borrow_and_update() {
-                                            CollectorSignal::Finish | CollectorSignal::Err => break false,
-                                            CollectorSignal::Retry => {}
-                                        };
-                                    }
-                                    Err(_collector_exited) => break false,
-                                }
-                            }
-                        }
-                    }
-                }).instrument(round_effects.span().clone()))
-            };
-
-            let current_dag_round = current_dag_round.clone();
-            let input_buffer = self.state.input_buffer.clone();
-            let last_own_point = self.last_own_point.clone();
-            let store = self.state.store.clone();
-            let task = wait_collator_ready
-                .and_then(|is_ready_to_produce| {
-                    if is_ready_to_produce {
-                        future::Either::Right(tokio::task::spawn_blocking(move || {
-                            let task_start_time = Instant::now();
-                            let point_opt = Producer::new_point(
-                                &current_dag_round,
-                                last_own_point.as_deref(),
-                                &input_buffer,
-                            );
-                            if let Some(own_point) = point_opt.as_ref() {
-                                let state = current_dag_round.insert_exact_sign(
-                                    own_point,
-                                    current_dag_round.key_pair(),
-                                    &store,
-                                );
-                                own_point_state_tx.send(state).ok();
-                                metrics::histogram!("tycho_mempool_engine_produce_time")
-                                    .record(task_start_time.elapsed());
-                            };
-                            point_opt
-                            // if None: `drop(own_point_state_tx)`; it is moved and goes out of scope
-                        }))
-                    } else {
-                        future::Either::Left(future::ready(Ok(None)))
-                    }
-                })
-                .instrument(round_effects.span().clone());
-            future::Either::Right(task)
-        } else {
-            drop(own_point_state_tx);
-            future::Either::Left(future::ready(Ok(None::<Point>)))
-        };
 
         let broadcaster_run = tokio::spawn({
-            let own_point_round = current_dag_round.downgrade();
+            let own_point_round = next_dag_round.prev().clone();
             let round_effects = round_effects.clone();
             let mut broadcaster = self.broadcaster;
             let peer_schedule = self.state.peer_schedule.clone();
@@ -227,7 +258,7 @@ impl RoundTaskReady {
                     .run(
                         effects,
                         next_dag_round,
-                        own_point_state_rx,
+                        own_point_state,
                         collector_signal_tx,
                         bcaster_ready_rx,
                     )
@@ -238,7 +269,7 @@ impl RoundTaskReady {
 
         self.state.responder.update(
             &self.state.broadcast_filter,
-            next_dag_round,
+            Some(next_dag_round),
             &self.state.downloader,
             &self.state.store,
             round_effects,

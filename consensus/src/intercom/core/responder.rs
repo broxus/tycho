@@ -18,7 +18,7 @@ pub struct Responder(Arc<ArcSwapOption<ResponderInner>>);
 struct ResponderInner {
     // state and storage components go here
     broadcast_filter: BroadcastFilter,
-    top_dag_round: DagRound,
+    top_dag_round: Option<DagRound>,
     downloader: Downloader,
     store: MempoolStore,
     effects: Effects<EngineContext>,
@@ -28,15 +28,17 @@ impl Responder {
     pub fn update(
         &self,
         broadcast_filter: &BroadcastFilter,
-        top_dag_round: &DagRound,
+        top_dag_round: Option<&DagRound>,
         downloader: &Downloader,
         store: &MempoolStore,
         round_effects: &Effects<EngineContext>,
     ) {
-        broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
+        if let Some(top_dag_round) = top_dag_round {
+            broadcast_filter.advance_round(top_dag_round, downloader, store, round_effects);
+        }
         self.0.store(Some(Arc::new(ResponderInner {
             broadcast_filter: broadcast_filter.clone(),
-            top_dag_round: top_dag_round.clone(),
+            top_dag_round: top_dag_round.cloned(),
             downloader: downloader.clone(),
             store: store.clone(),
             effects: round_effects.clone(),
@@ -87,7 +89,7 @@ impl Responder {
                     Some(inner) => inner.broadcast_filter.add(
                         &req.metadata.peer_id,
                         &Arc::new(point),
-                        &inner.top_dag_round,
+                        inner.top_dag_round.as_ref(),
                         &inner.downloader,
                         &inner.store,
                         &inner.effects,
@@ -97,22 +99,25 @@ impl Responder {
             }
             MPQuery::PointById(point_id) => MPResponse::PointById(match inner {
                 None => PointByIdResponse::TryLater,
-                Some(inner) => Uploader::find(
-                    &peer_id,
-                    &point_id,
-                    &inner.top_dag_round,
-                    &inner.store,
-                    &inner.effects,
-                ),
+                Some(inner) => match &inner.top_dag_round {
+                    None => PointByIdResponse::TryLater,
+                    Some(top_dag_round) => Uploader::find(
+                        &peer_id,
+                        &point_id,
+                        top_dag_round,
+                        &inner.store,
+                        &inner.effects,
+                    ),
+                },
             }),
             MPQuery::Signature(round) => MPResponse::Signature(match inner {
                 None => SignatureResponse::TryLater,
-                Some(inner) => Signer::signature_response(
-                    round,
-                    &peer_id,
-                    &inner.top_dag_round,
-                    &inner.effects,
-                ),
+                Some(inner) => match &inner.top_dag_round {
+                    None => SignatureResponse::TryLater,
+                    Some(top_dag_round) => {
+                        Signer::signature_response(round, &peer_id, top_dag_round, &inner.effects)
+                    }
+                },
             }),
         };
         let response = Response::try_from(&mp_response).expect("should serialize own response");

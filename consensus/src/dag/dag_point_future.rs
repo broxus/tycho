@@ -1,5 +1,6 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -15,7 +16,7 @@ use crate::dag::dag_location::InclusionState;
 use crate::dag::{DagRound, Verifier};
 use crate::effects::{DownloadContext, Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::{DownloadResult, Downloader};
-use crate::models::{DagPoint, Digest, Point, PointId, ValidPoint};
+use crate::models::{DagPoint, Digest, Point, PointId, PointInfo, ValidPoint};
 
 #[derive(Clone)]
 pub struct DagPointFuture(DagPointFutureType);
@@ -26,7 +27,7 @@ impl Future for DagPointFuture {
     #[inline]
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match &mut self.0 {
-            DagPointFutureType::Broadcast { task, .. } | DagPointFutureType::Load { task, .. } => {
+            DagPointFutureType::Validate { task, .. } | DagPointFutureType::Load { task, .. } => {
                 match task.poll_unpin(cx) {
                     Poll::Ready((dag_point, _)) => Poll::Ready(dag_point),
                     Poll::Pending => Poll::Pending,
@@ -39,7 +40,7 @@ impl Future for DagPointFuture {
 
 #[derive(Clone)]
 enum DagPointFutureType {
-    Broadcast {
+    Validate {
         task: Shared<JoinTask<DagPoint>>,
         // normally, if we are among the last nodes to validate some broadcast point,
         // we can receive its proof from author, trust its signatures and skip vertex validation;
@@ -95,7 +96,7 @@ impl DagPointFuture {
             }
         });
         let task = async move { store_fut.await.expect("db insert ill-formed broadcast") };
-        Self(DagPointFutureType::Broadcast {
+        Self(DagPointFutureType::Validate {
             task: Shared::new(JoinTask::new(task.instrument(effects.span().clone()))),
             certified: Arc::new(OnceTake::empty()),
         })
@@ -156,9 +157,88 @@ impl DagPointFuture {
             state.init(&dag_point);
             dag_point
         };
-        DagPointFuture(DagPointFutureType::Broadcast {
+        DagPointFuture(DagPointFutureType::Validate {
             task: Shared::new(JoinTask::new(task.instrument(span))),
             certified: once_certified_tx,
+        })
+    }
+
+    pub fn new_restore(
+        point_dag_round: &DagRound,
+        info: &PointInfo,
+        flags: &PointFlags,
+        state: &InclusionState,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        effects: &Effects<EngineContext>,
+    ) -> Self {
+        let ready_dag_point = if flags.is_trusted | flags.is_certified {
+            Some(DagPoint::Trusted(ValidPoint::new(info.clone())))
+        } else if flags.is_valid {
+            Some(DagPoint::Suspicious(ValidPoint::new(info.clone())))
+        } else if flags.is_ill_formed {
+            Some(DagPoint::IllFormed(Arc::new(info.id())))
+        } else if flags.is_validated {
+            Some(DagPoint::Invalid(info.clone()))
+        } else {
+            None
+        };
+        if let Some(dag_point) = ready_dag_point {
+            if let Some(valid) = dag_point.valid() {
+                if flags.is_committed {
+                    valid.is_committed.store(true, Ordering::Relaxed);
+                }
+            }
+            state.init(&dag_point);
+            return Self(DagPointFutureType::Ready(future::ready(dag_point)));
+        }
+        let point_dag_round = point_dag_round.downgrade();
+        let store = store.clone();
+        let point_id = info.id();
+        let state = state.clone();
+        let downloader = downloader.clone();
+        let (certified_tx, certified_rx) = oneshot::channel();
+        let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
+        let once_certified_tx_clone = once_certified_tx.clone();
+        let effects_clone = effects.clone();
+        let task = async move {
+            let point = tokio::task::spawn_blocking({
+                let store = store.clone();
+                let digest = point_id.digest.clone();
+                move || store.get_point(point_id.round, &digest)
+            })
+            .await
+            .expect("db get point")
+            .expect("point with info and flags was not loaded");
+            let effects = Effects::<ValidateContext>::new(&effects_clone, &point);
+            let dag_point = Verifier::validate(
+                point,
+                point_dag_round,
+                downloader,
+                store.clone(),
+                certified_rx,
+                effects,
+            )
+            .await;
+            let flags = PointFlags {
+                is_ill_formed: matches!(dag_point, DagPoint::IllFormed(_)),
+                is_validated: true,
+                is_valid: dag_point.valid().is_some(),
+                is_trusted: dag_point.trusted().is_some(),
+                is_certified: !once_certified_tx_clone.has_value(),
+                ..Default::default()
+            };
+            tokio::task::spawn_blocking(move || {
+                store.set_flags(point_id.round, &point_id.digest, &flags);
+            })
+            .await
+            .expect("db set point flags");
+            state.init(&dag_point); // only after persisted
+            dag_point
+        };
+        Self(DagPointFutureType::Validate {
+            task: Shared::new(JoinTask::new(task.instrument(effects.span().clone()))),
+            certified: Arc::new(OnceTake::empty()),
         })
     }
 
@@ -315,7 +395,7 @@ impl DagPointFuture {
     pub fn mark_certified(&self) {
         // every vertex is certified by definition,
         // but also every vertex dependency is certified transitively
-        if let DagPointFutureType::Broadcast { certified, .. }
+        if let DagPointFutureType::Validate { certified, .. }
         | DagPointFutureType::Load { certified, .. } = &self.0
         {
             // FIXME limit by validation depth

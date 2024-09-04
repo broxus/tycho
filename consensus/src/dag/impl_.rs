@@ -29,18 +29,9 @@ struct LinkedAnchor {
 }
 
 impl Dag {
-    pub fn init(&mut self, dag_round: DagRound, next_dag_round: DagRound) {
-        assert_eq!(
-            Some(dag_round.round()),
-            next_dag_round
-                .prev()
-                .upgrade()
-                .map(|dag_round| dag_round.round()),
-            "incorrect rounds to init DAG"
-        );
+    pub fn init(&mut self, dag_round: DagRound) {
         assert!(self.rounds.is_empty(), "DAG already initialized");
         self.rounds.insert(dag_round.round(), dag_round);
-        self.rounds.insert(next_dag_round.round(), next_dag_round);
     }
 
     /// the next after current engine round
@@ -80,7 +71,7 @@ impl Dag {
             top = self
                 .rounds
                 .entry(top.round().next())
-                .or_insert(top.next(peer_schedule))
+                .or_insert(top.new_next(peer_schedule))
                 .clone();
         }
         top
