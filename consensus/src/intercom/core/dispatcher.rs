@@ -1,11 +1,10 @@
 use anyhow::Result;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-use tycho_network::{DhtClient, Network, OverlayId, OverlayService, PeerId, PrivateOverlay};
+use tycho_network::{Network, PeerId, PrivateOverlay};
 use tycho_util::metrics::HistogramGuard;
 
 use crate::intercom::core::dto::{MPQuery, MPResponse};
-use crate::intercom::core::responder::Responder;
 use crate::models::{Point, PointId, Round};
 
 #[derive(Clone)]
@@ -15,29 +14,11 @@ pub struct Dispatcher {
 }
 
 impl Dispatcher {
-    const PRIVATE_OVERLAY_ID: OverlayId = OverlayId(*b"ac87b6945b4f6f736963f7f65d025943");
-
-    pub fn new(
-        dht_client: &DhtClient,
-        overlay_service: &OverlayService,
-        responder: Responder,
-    ) -> (Self, PrivateOverlay) {
-        let dht_service = dht_client.service();
-        let peer_resolver = dht_service.make_peer_resolver().build(dht_client.network());
-
-        let private_overlay = PrivateOverlay::builder(Self::PRIVATE_OVERLAY_ID)
-            .with_peer_resolver(peer_resolver)
-            .named("mempool")
-            .build(responder);
-
-        overlay_service.add_private_overlay(&private_overlay);
-
-        let this = Self {
+    pub fn new(network: &Network, private_overlay: &PrivateOverlay) -> Self {
+        Self {
             overlay: private_overlay.clone(),
-            network: dht_client.network().clone(),
-        };
-
-        (this, private_overlay)
+            network: network.clone(),
+        }
     }
 
     pub fn broadcast_request(point: &Point) -> QueryKind {

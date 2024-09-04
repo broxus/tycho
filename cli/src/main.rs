@@ -16,6 +16,10 @@ mod tools {
 
 mod node;
 mod util;
+#[cfg(feature = "debug")]
+mod debug_cmd {
+    pub mod mempool;
+}
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -58,6 +62,9 @@ enum Cmd {
     Node(NodeCmd),
     #[clap(subcommand)]
     Tool(ToolCmd),
+    #[cfg(feature = "debug")]
+    #[clap(subcommand)]
+    Debug(DebugCmd),
 }
 
 impl Cmd {
@@ -65,6 +72,8 @@ impl Cmd {
         match self {
             Cmd::Node(cmd) => cmd.run(),
             Cmd::Tool(cmd) => cmd.run(),
+            #[cfg(feature = "debug")]
+            Cmd::Debug(cmd) => cmd.run(),
         }
     }
 }
@@ -107,6 +116,23 @@ impl ToolCmd {
             ToolCmd::GenZerostate(cmd) => cmd.run(),
             ToolCmd::GenAccount(cmd) => cmd.run(),
             ToolCmd::Bc(cmd) => cmd.run(),
+        }
+    }
+}
+
+/// A collection of debug modes
+#[derive(Subcommand)]
+#[cfg(feature = "debug")]
+#[allow(clippy::enum_variant_names)]
+enum DebugCmd {
+    Mempool(debug_cmd::mempool::CmdRun),
+}
+
+#[cfg(feature = "debug")]
+impl DebugCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Mempool(cmd) => cmd.run(),
         }
     }
 }

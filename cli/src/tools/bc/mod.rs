@@ -11,11 +11,12 @@ use everscale_types::models::{
     StdAddr,
 };
 use reqwest::Url;
+use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 use tycho_util::time::now_sec;
 
 use self::jrpc_client::{AccountStateResponse, JrpcClient};
-use crate::util::{parse_public_key, parse_secret_key, print_json, signal};
+use crate::util::{parse_public_key, parse_secret_key, print_json};
 
 // TODO: Move into a standalone crate
 mod jrpc_client;

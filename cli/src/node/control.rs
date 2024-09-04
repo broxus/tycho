@@ -7,9 +7,10 @@ use everscale_types::models::BlockId;
 use serde::Serialize;
 use tycho_control::ControlClient;
 use tycho_core::block_strider::ManualGcTrigger;
+use tycho_util::cli::signal;
 use tycho_util::futures::JoinTask;
 
-use crate::util::{print_json, signal};
+use crate::util::print_json;
 
 #[derive(Subcommand)]
 pub enum CmdControl {

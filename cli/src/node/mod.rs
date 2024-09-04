@@ -1,8 +1,7 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -42,17 +41,19 @@ use tycho_network::{
 };
 use tycho_rpc::{RpcConfig, RpcState};
 use tycho_storage::Storage;
-use tycho_util::cli::{LoggerConfig, LoggerTargets};
+use tycho_util::cli::error::ResultExt;
+use tycho_util::cli::logger::{init_logger, set_abort_with_tracing};
+use tycho_util::cli::{resolve_public_ip, signal};
 use tycho_util::futures::JoinTask;
 
-use self::config::{MetricsConfig, NodeConfig, NodeKeys};
+use self::config::{NodeConfig, NodeKeys};
 pub use self::control::CmdControl;
+use crate::node::config::MetricsConfig;
+use crate::util::alloc::spawn_allocator_metrics_loop;
 #[cfg(feature = "jemalloc")]
-use crate::util::alloc::{spawn_allocator_metrics_loop, JemallocMemoryProfiler};
-use crate::util::error::ResultExt;
-use crate::util::signal;
+use crate::util::alloc::JemallocMemoryProfiler;
 
-mod config;
+pub mod config;
 mod control;
 
 const SERVICE_NAME: &str = "tycho-node";
@@ -148,6 +149,7 @@ impl CmdRun {
 
     async fn run_impl(self, node_config: NodeConfig) -> Result<()> {
         init_logger(&node_config.logger, self.logger_config)?;
+        set_abort_with_tracing();
 
         if let Some(metrics_config) = &node_config.metrics {
             init_metrics(metrics_config)?;
@@ -184,89 +186,6 @@ impl CmdRun {
     }
 }
 
-fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::{reload, EnvFilter};
-
-    let try_make_filter = {
-        let logger_targets = logger_targets.clone();
-        move || {
-            Ok::<_, anyhow::Error>(match &logger_targets {
-                None => EnvFilter::builder()
-                    .with_default_directive(tracing::Level::INFO.into())
-                    .from_env_lossy(),
-                Some(path) => LoggerTargets::load_from(path)
-                    .wrap_err("failed to load logger config")?
-                    .build_subscriber(),
-            })
-        }
-    };
-
-    let (layer, handle) = reload::Layer::new(try_make_filter()?);
-
-    let subscriber = tracing_subscriber::registry().with(layer).with(
-        config
-            .outputs
-            .iter()
-            .map(|o| o.as_layer())
-            .collect::<Result<Vec<_>>>()?,
-    );
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-
-    if let Some(logger_config) = logger_targets {
-        tokio::spawn(async move {
-            tracing::info!(
-                logger_config = %logger_config.display(),
-                "started watching for changes in logger config"
-            );
-
-            let get_metadata = move || {
-                std::fs::metadata(&logger_config)
-                    .ok()
-                    .and_then(|m| m.modified().ok())
-            };
-
-            let mut last_modified = get_metadata();
-
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-
-                let modified = get_metadata();
-                if last_modified == modified {
-                    continue;
-                }
-                last_modified = modified;
-
-                match try_make_filter() {
-                    Ok(filter) => {
-                        if handle.reload(filter).is_err() {
-                            break;
-                        }
-                        tracing::info!("reloaded logger config");
-                    }
-                    Err(e) => tracing::error!(%e, "failed to reload logger config"),
-                }
-            }
-
-            tracing::info!("stopped watching for changes in logger config");
-        });
-    }
-
-    std::panic::set_hook(Box::new(|info| {
-        use std::io::Write;
-
-        tracing::error!("panic: {}", info.to_string());
-
-        std::io::stderr().flush().ok();
-        std::io::stdout().flush().ok();
-
-        std::process::exit(1);
-    }));
-
-    Ok(())
-}
-
 fn init_metrics(config: &MetricsConfig) -> Result<()> {
     use metrics_exporter_prometheus::Matcher;
     const EXPONENTIAL_SECONDS: &[f64] = &[
@@ -296,16 +215,6 @@ fn init_metrics(config: &MetricsConfig) -> Result<()> {
     spawn_allocator_metrics_loop();
 
     Ok(())
-}
-
-async fn resolve_public_ip(ip: Option<IpAddr>) -> Result<IpAddr> {
-    match ip {
-        Some(address) => Ok(address),
-        None => match getip::addr_v4().await {
-            Ok(address) => Ok(IpAddr::V4(address)),
-            Err(e) => anyhow::bail!("failed to resolve public IP address: {e:?}"),
-        },
-    }
 }
 
 pub struct Node {
@@ -523,7 +432,8 @@ impl Node {
         let mempool_adapter = self.rpc_mempool_adapter.inner.clone();
         mempool_adapter.run(
             self.keypair.clone(),
-            &self.dht_client,
+            self.dht_client.network(),
+            &self.peer_resolver,
             &self.overlay_service,
             self.storage.mempool_storage(),
             get_validator_peer_ids(&mc_state)?,

@@ -9,7 +9,7 @@ use futures_util::FutureExt;
 use rand::prelude::SliceRandom;
 use rand::{thread_rng, RngCore};
 use tokio::sync::oneshot;
-use tycho_network::{DhtService, Network, OverlayService, PeerId, Router};
+use tycho_network::{Network, OverlayId, PeerId, PrivateOverlay, Router};
 use tycho_util::FastHashMap;
 
 use crate::dag::{AnchorStage, Dag, DagRound, Verifier};
@@ -27,29 +27,18 @@ pub fn make_dag<const PEER_COUNT: usize>(
     genesis: &Point,
     store: &MempoolStore,
 ) -> (Dag, PeerSchedule, Downloader) {
-    let local_id = PeerId::from(peers[0].1.public_key);
-
-    let (_, dht_service) = DhtService::builder(local_id).build();
-
-    let (_, overlay_service) = OverlayService::builder(local_id)
-        .with_dht_service(dht_service.clone())
-        .build();
-
-    let network_builder = Network::builder()
+    let network = Network::builder()
         .with_random_private_key()
-        .with_service_name("mempool-stub-network-service");
-
-    let network = network_builder
+        .with_service_name("mempool-stub-network-service")
         .build("0.0.0.0:0", Router::builder().build())
         .expect("network with unused stub socket");
 
-    let (dispatcher, overlay) = Dispatcher::new(
-        &dht_service.make_client(&network),
-        &overlay_service,
-        Responder::default(),
-    );
+    let private_overlay =
+        PrivateOverlay::builder(*OverlayId::wrap(&[0; 32])).build(Responder::default());
 
-    let peer_schedule = PeerSchedule::new(Arc::new(peers[0].1), overlay);
+    let dispatcher = Dispatcher::new(&network, &private_overlay);
+
+    let peer_schedule = PeerSchedule::new(Arc::new(peers[0].1), private_overlay);
 
     let stub_downloader = Downloader::new(&dispatcher, &peer_schedule);
 

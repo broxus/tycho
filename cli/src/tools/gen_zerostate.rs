@@ -7,9 +7,9 @@ use everscale_types::models::*;
 use everscale_types::num::Tokens;
 use everscale_types::prelude::*;
 use serde::{Deserialize, Serialize};
+use tycho_util::cli::error::ResultExt;
 use tycho_util::FastHashMap;
 
-use crate::util::error::ResultExt;
 use crate::util::{compute_storage_used, print_json};
 
 /// Generate a zero state for a network.

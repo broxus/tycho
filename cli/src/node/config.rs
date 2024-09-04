@@ -15,7 +15,8 @@ use tycho_core::overlay_client::PublicOverlayClientConfig;
 use tycho_network::{DhtConfig, NetworkConfig, OverlayConfig, PeerResolverConfig};
 use tycho_rpc::RpcConfig;
 use tycho_storage::StorageConfig;
-use tycho_util::cli::LoggerConfig;
+use tycho_util::cli::config::ThreadPoolConfig;
+use tycho_util::cli::logger::LoggerConfig;
 
 #[derive(Debug, Deserialize)]
 pub struct NodeKeys {
@@ -138,25 +139,6 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 10000),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ThreadPoolConfig {
-    pub rayon_threads: usize,
-    pub tokio_workers: usize,
-}
-
-impl Default for ThreadPoolConfig {
-    fn default() -> Self {
-        let total_threads = std::thread::available_parallelism()
-            .expect("failed to get total threads")
-            .get();
-        Self {
-            rayon_threads: total_threads,
-            tokio_workers: total_threads,
         }
     }
 }
