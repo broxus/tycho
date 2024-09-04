@@ -20,18 +20,28 @@ pub struct ControlServerConfig {
     ///
     /// Default: `/var/venom/data/tycho.sock`
     pub socket_path: PathBuf,
+
+    /// Whether to recreate the socket file if it already exists.
+    ///
+    /// NOTE: If the `socket_path` from multiple instances on the same machine
+    /// points to the same file, every instance will just "grab" it to itself.
+    ///
+    /// Default: `true`
+    pub overwrite_socket: bool,
 }
 
 impl Default for ControlServerConfig {
     fn default() -> Self {
         Self {
             socket_path: crate::DEFAULT_SOCKET_PATH.into(),
+            overwrite_socket: true,
         }
     }
 }
 
 pub struct ControlEndpoint {
     inner: BoxFuture<'static, ()>,
+    socket_path: PathBuf,
 }
 
 impl ControlEndpoint {
@@ -41,8 +51,14 @@ impl ControlEndpoint {
     ) -> std::io::Result<Self> {
         use tarpc::tokio_serde::formats::Bincode;
 
+        let socket_path = config.socket_path.clone();
+
+        if config.overwrite_socket && socket_path.exists() {
+            std::fs::remove_file(&socket_path)?;
+        }
+
         let mut listener =
-            tarpc::serde_transport::unix::listen(&config.socket_path, Bincode::default).await?;
+            tarpc::serde_transport::unix::listen(&socket_path, Bincode::default).await?;
         listener.config_mut().max_frame_length(usize::MAX);
 
         let inner = listener
@@ -60,11 +76,17 @@ impl ControlEndpoint {
             .for_each(|_| async {})
             .boxed();
 
-        Ok(Self { inner })
+        Ok(Self { inner, socket_path })
     }
 
-    pub async fn serve(self) {
-        self.inner.await;
+    pub async fn serve(mut self) {
+        (&mut self.inner).await;
+    }
+}
+
+impl Drop for ControlEndpoint {
+    fn drop(&mut self) {
+        _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
