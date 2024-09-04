@@ -9,8 +9,8 @@ use everscale_types::boc::BocRepr;
 use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
-use rpc::{request, response, Request};
 
+use self::protos::rpc::{self, request, response, Request};
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
@@ -21,10 +21,7 @@ use crate::endpoint::{
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
 mod extractor;
-
-mod rpc {
-    include!(concat!(env!("OUT_DIR"), "/rpc.rs"));
-}
+mod protos;
 
 pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Request>) -> Response {
     match req.call {

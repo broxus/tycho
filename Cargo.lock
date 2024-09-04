@@ -3440,6 +3440,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tycho-gen-protos"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "prost-build",
+]
+
+[[package]]
 name = "tycho-network"
 version = "0.0.1"
 dependencies = [

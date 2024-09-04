@@ -15,6 +15,7 @@ members = [
     "consensus",
     "control",
     "core",
+    "gen-protos",
     "network",
     "rpc",
     "simulator",

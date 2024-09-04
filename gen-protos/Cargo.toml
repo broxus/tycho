@@ -1,0 +1,13 @@
+[package]
+name = "tycho-gen-protos"
+description = "Generate Protocol Buffers definitions for tycho-rpc crate"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+prost-build = { workspace = true }
