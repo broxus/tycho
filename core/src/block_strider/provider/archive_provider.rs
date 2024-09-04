@@ -103,39 +103,72 @@ impl ArchiveBlockProvider {
                         // Update the last known archive
                         this.last_known_archive.store(Some(Arc::new(archive)));
                     }
-                    Err(e) => return Some(Err(e)),
+                    Err(e) => {
+                        tracing::error!("failed to get next archive {e:?}");
+                        self.inner.track_failed_archive(next_block_seqno);
+                        self.inner.last_known_archive.store(None);
+                        continue;
+                    }
                 }
             };
 
-            let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
-                Ok(entry) => entry,
-                Err(e) => {
-                    tracing::error!("Archive is corrupted {e:?}. Retrying archive downloading.");
-                    self.inner.track_failed_archive(next_block_seqno);
-                    continue 'main;
+            let check_successful = 'checks: {
+                match (
+                    archive.mc_block_ids.first_key_value(),
+                    archive.mc_block_ids.last_key_value(),
+                ) {
+                    (Some((first_seqno, _)), Some((last_seqno, _))) => {
+                        if (*last_seqno - first_seqno) != archive.mc_block_ids.len() as u32 {
+                            tracing::error!("Archive does not contain some mc blocks");
+                            break 'checks false;
+                        }
+                    }
+                    _ => {
+                        tracing::error!("Archive is empty");
+                        break 'checks false;
+                    }
+
                 }
+
+
+                let (block, proof, diff) = match archive.get_entry_by_id(&block_id) {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        tracing::error!("Archive is corrupted {e:?}. Retrying archive downloading.");
+                        break 'checks false;
+                    }
+                };
+
+                match this
+                    .proof_checker
+                    .check_proof(&block, &proof, &diff, true)
+                    .await
+                {
+                    // Stop using archives if the block is recent enough
+                    Ok(meta) if is_block_recent(&meta) => {
+                        tracing::info!(%block_id, "archive block provider finished");
+                        self.inner.track_success_archive(next_block_seqno);
+                        break None;
+                    }
+                    Ok(_) => {
+                        self.inner.track_success_archive(next_block_seqno);
+                        break Some(Ok(block.clone()));
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to check block proof {e:?}");
+                        break 'checks false;
+                    }
+                }
+
+
+                true
             };
 
-            match this
-                .proof_checker
-                .check_proof(&block, &proof, &diff, true)
-                .await
-            {
-                // Stop using archives if the block is recent enough
-                Ok(meta) if is_block_recent(&meta) => {
-                    tracing::info!(%block_id, "archive block provider finished");
-                    self.inner.track_success_archive(next_block_seqno);
-                    break None;
-                }
-                Ok(_) => {
-                    self.inner.track_success_archive(next_block_seqno);
-                    break Some(Ok(block.clone()));
-                }
-                Err(e) => {
-                    tracing::error!("Failed to check block proof {e:?}");
-                    self.inner.track_failed_archive(next_block_seqno);
-                    continue;
-                }
+
+            if !check_successful {
+                self.inner.track_failed_archive(next_block_seqno);
+                self.inner.last_known_archive.store(None);
+                continue 'main;
             }
         }
     }
