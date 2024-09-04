@@ -164,10 +164,10 @@ impl BroadcastFilterInner {
             match verified {
                 Ok(()) => self.send_validating(&point_round, point, downloader, store, effects),
                 Err(Some(VerifyError::IllFormed)) => {
-                    point_round.insert_ill_formed_exact(point, store);
+                    point_round.add_ill_formed_broadcast_exact(point, store, effects);
                 }
                 Err(Some(VerifyError::BadSig)) => {
-                    point_round.set_bad_sig_in_broadcast(&author);
+                    point_round.set_bad_sig_in_broadcast_exact(&author);
                 }
                 Err(None) => {} // should ban sender
             };

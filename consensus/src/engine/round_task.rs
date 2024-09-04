@@ -1,6 +1,6 @@
+use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{iter, panic};
 
 use futures_util::{future, TryFutureExt};
 use tokio::sync::{mpsc, oneshot, watch};

@@ -11,7 +11,7 @@ use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{DagPoint, Digest, PeerCount, Point, Round};
+use crate::models::{Digest, PeerCount, Point, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -129,6 +129,61 @@ impl DagRound {
         WeakDagRound(Arc::downgrade(&self.0))
     }
 
+    /// for genesis (next round key pair) and own points (point round key pair)
+    pub fn insert_exact_sign(
+        &self,
+        point: &Point,
+        key_pair: Option<&KeyPair>,
+        store: &MempoolStore,
+    ) -> InclusionState {
+        assert_eq!(
+            point.round(),
+            self.round(),
+            "Coding error: point round does not match dag round"
+        );
+        let state = self.edit(&point.data().author, |loc| {
+            let _ready = loc.init_or_modify(
+                point.digest(),
+                |state| DagPointFuture::new_local_trusted(point, state, store),
+                |_existing| {},
+            );
+            loc.state().clone()
+        });
+        if let Some(signable) = state.signable() {
+            signable.sign(self.round(), key_pair);
+        }
+        assert!(
+            state.signed_point(self.round()).is_some(),
+            "Coding or configuration error: local point cannot be signed; \
+            node is not in validator set?"
+        );
+        state
+    }
+
+    pub fn set_bad_sig_in_broadcast_exact(&self, author: &PeerId) {
+        self.edit(author, |loc| loc.bad_sig_in_broadcast = true);
+    }
+
+    pub fn add_ill_formed_broadcast_exact(
+        &self,
+        point: &Point,
+        store: &MempoolStore,
+        effects: &Effects<EngineContext>,
+    ) {
+        assert_eq!(
+            point.round(),
+            self.round(),
+            "Coding error: point round does not match dag round"
+        );
+        self.edit(&point.data().author, |loc| {
+            let _ready = loc.init_or_modify(
+                point.digest(),
+                |state| DagPointFuture::new_ill_formed_broadcast(point, state, store, effects),
+                |existing| existing.resolve_download(point),
+            );
+        });
+    }
+
     /// Point already verified
     pub fn add_broadcast_exact(
         &self,
@@ -180,52 +235,6 @@ impl DagRound {
         });
         future.add_depender(depender);
         future
-    }
-
-    /// for genesis (next round key pair) and own points (point round key pair)
-    pub fn insert_exact_sign(
-        &self,
-        point: &Point,
-        key_pair: Option<&KeyPair>,
-        store: &MempoolStore,
-    ) -> InclusionState {
-        assert_eq!(
-            point.round(),
-            self.round(),
-            "Coding error: dag round mismatches point round on insert"
-        );
-        let state = self.edit(&point.data().author, |loc| {
-            let _ready = loc.init_or_modify(
-                point.digest(),
-                |state| DagPointFuture::new_local_trusted(point, state, store),
-                |_fut| {},
-            );
-            loc.state().clone()
-        });
-        if let Some(signable) = state.signable() {
-            signable.sign(self.round(), key_pair);
-        }
-        assert!(
-            state.signed_point(self.round()).is_some(),
-            "Coding or configuration error: valid point cannot be signed; \
-            time issue or node is not in validator set?"
-        );
-        state
-    }
-
-    pub fn insert_ill_formed_exact(&self, point: &Point, store: &MempoolStore) {
-        let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
-        self.edit(&point.data().author, |loc| {
-            let _ready = loc.init_or_modify(
-                point.digest(),
-                |state| DagPointFuture::new_invalid(dag_point, state, store),
-                |_fut| {},
-            );
-        });
-    }
-
-    pub fn set_bad_sig_in_broadcast(&self, author: &PeerId) {
-        self.edit(author, |loc| loc.bad_sig_in_broadcast = true);
     }
 
     pub fn scan(&self, round: Round) -> Option<Self> {
