@@ -52,6 +52,7 @@ impl MempoolAdapterStdImpl {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         self: &Arc<Self>,
         key_pair: Arc<KeyPair>,

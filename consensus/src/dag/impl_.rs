@@ -490,6 +490,8 @@ mod test {
     async fn test_commit_with_gap() {
         let stub_store = MempoolStore::no_read_stub();
 
+        crate::engine::MempoolConfig::set_genesis_round(Round(1));
+
         let genesis = test_utils::genesis();
         let peers: [(PeerId, KeyPair); PEER_COUNT] = array::from_fn(|i| {
             let keys = KeyPair::from(&SecretKey::from_bytes([i as u8; 32]));

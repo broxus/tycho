@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{BlockId, BlockIdShort, ShardIdent};
+use everscale_types::models::{BlockId, BlockIdShort, ProcessedUptoInfo, ShardIdent};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tracing::Instrument;
@@ -100,6 +100,11 @@ where
 
     chain_times_sync_state: Mutex<ChainTimesSyncState>,
 
+    /// Round of a new consensus genesis
+    mempool_start_round: Option<u32>,
+    /// Last know applied master block seqno to recover from
+    from_mc_block_seqno: Option<u32>,
+
     #[cfg(any(test, feature = "test"))]
     test_validators_keypairs: Vec<Arc<KeyPair>>,
 }
@@ -126,12 +131,9 @@ where
     V: Validator,
 {
     async fn on_block_accepted(&self, state: &ShardStateStuff) -> Result<()> {
-        let state_cloned = state.clone();
-        self.spawn_task(method_to_async_closure!(
-            detect_top_processed_to_anchor_and_notify_mempool,
-            state_cloned
-        ))
-        .await?;
+        let processed_upto = state.state().processed_upto.load()?;
+
+        metrics_report_last_applied_block_and_anchor(state, &processed_upto);
 
         // TODO: remove accepted block from cache
         // STUB: do nothing, currently we remove block from cache when it sent to state node
@@ -142,10 +144,15 @@ where
     async fn on_block_accepted_external(&self, state: &ShardStateStuff) -> Result<()> {
         // TODO: should use received block info to cancel and prevent it collation
 
+        let processed_upto = state.state().processed_upto.load()?;
+
+        metrics_report_last_applied_block_and_anchor(state, &processed_upto);
+
         let state_cloned = state.clone();
         self.spawn_task(method_to_async_closure!(
             detect_top_processed_to_anchor_and_notify_mempool,
-            state_cloned
+            state_cloned,
+            processed_upto
         ))
         .await?;
 
@@ -155,6 +162,29 @@ where
 
         Ok(())
     }
+}
+
+fn metrics_report_last_applied_block_and_anchor(
+    state: &ShardStateStuff,
+    processed_upto: &ProcessedUptoInfo,
+) {
+    let block_id = state.block_id();
+    let labels = [("workchain", block_id.shard.workchain().to_string())];
+
+    let processed_to_anchor_id = processed_upto
+        .externals
+        .as_ref()
+        .map(|upto| upto.processed_to.0)
+        .unwrap_or_default();
+
+    metrics::gauge!("tycho_last_applied_block_seqno", &labels).set(block_id.seqno);
+    metrics::gauge!("tycho_last_processed_to_anchor_id", &labels).set(processed_to_anchor_id);
+
+    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+        block_id = %DisplayAsShortId(block_id),
+        processed_to_anchor_id = processed_to_anchor_id,
+        "last applied block",
+    );
 }
 
 #[async_trait]
@@ -223,6 +253,8 @@ where
         mpool_adapter_factory: MPF,
         validator: V,
         collator_factory: CF,
+        mempool_start_round: Option<u32>,
+        from_mc_block_seqno: Option<u32>,
         #[cfg(any(test, feature = "test"))] test_validators_keypairs: Vec<Arc<KeyPair>>,
     ) -> RunningCollationManager<CF, V>
     where
@@ -271,6 +303,9 @@ where
 
             chain_times_sync_state: Default::default(),
 
+            mempool_start_round,
+            from_mc_block_seqno,
+
             #[cfg(any(test, feature = "test"))]
             test_validators_keypairs,
         };
@@ -287,7 +322,7 @@ where
             tokio::time::Duration::from_secs(10),
             || async move {
                 arc_dispatcher
-                    .spawn_task(method_to_async_closure!(check_refresh_collation_sessions,))
+                    .spawn_task(method_to_async_closure!(check_and_start_collation_sessions,))
                     .await
             },
             "CollationProcessor::check_refresh_collation_sessions()".into(),
@@ -322,6 +357,7 @@ where
     async fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
         state: ShardStateStuff,
+        processed_upto: ProcessedUptoInfo,
     ) -> Result<()> {
         let block_id = *state.block_id();
 
@@ -332,7 +368,7 @@ where
 
         let mut min_top_anchor_id = 0;
         let mut mc_processed_to_anchor_id = None;
-        if let Some(externals_processed_upto) = state.state().processed_upto.load()?.externals {
+        if let Some(externals_processed_upto) = processed_upto.externals {
             // get top processed to anchor id for master block
             mc_processed_to_anchor_id = Some(externals_processed_upto.processed_to.0);
             min_top_anchor_id = externals_processed_upto.processed_to.0;
@@ -537,16 +573,15 @@ where
     /// 6. Execute master block processing routines
     #[tracing::instrument(
         skip_all,
-        fields(
-            block_id = %collation_result.candidate.block.id().as_short_id(),
-            ct = collation_result.candidate.chain_time,
-        ),
+        fields(block_id = %collation_result.candidate.block.id().as_short_id()),
     )]
     pub async fn handle_collated_block_candidate(
         &self,
         collation_result: BlockCollationResult,
     ) -> Result<()> {
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+            ct = collation_result.candidate.chain_time,
+            processed_to_anchor_id = collation_result.candidate.processed_to_anchor_id,
             "Start processing block candidate",
         );
 
@@ -768,6 +803,18 @@ where
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             "Start processing block from bc",
         );
+
+        if block_id.is_masterchain() {
+            if let Some(from_mc_block_seqno) = self.from_mc_block_seqno {
+                if block_id.seqno < from_mc_block_seqno {
+                    tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
+                        "recovery mode: skip block, should wait for specified last applied with seqno {}",
+                        from_mc_block_seqno,
+                    );
+                    return Ok(());
+                }
+            }
+        }
 
         if block_id.is_masterchain() {
             self.ready_to_sync.notified().await;
@@ -1158,11 +1205,10 @@ where
     }
 
     /// Check if collation sessions initialized and try to force refresh them if they not.
-    /// This needed when start from zerostate. State node adapter will be initialized after
-    /// zerostate load and won't fire `[StateNodeListener::on_mc_block_event()]` for the 1 block.
-    /// Also when whole network was restarted then nobody will produce next master block and we need
-    /// to start collation sessions based on the actual state
-    pub async fn check_refresh_collation_sessions(&self) -> Result<()> {
+    /// This needed when start from zerostate or whole network was restarted
+    /// and nobody will produce next master block and we need
+    /// to start collation sessions based on the actual state.
+    pub async fn check_and_start_collation_sessions(&self) -> Result<()> {
         // the sessions list is not enpty so the collation process was already started from
         // actual state or incoming master block from blockchain
         if !self.active_collation_sessions.read().is_empty() {
@@ -1196,12 +1242,13 @@ where
                 .load_state(&last_mc_block_id)
                 .await?;
 
-            let mc_data = McData::load_from_state(&state)?;
+            self.detect_top_processed_to_anchor_and_notify_mempool(
+                state.clone(),
+                state.state().processed_upto.load()?,
+            )
+            .await?;
 
-            self.detect_top_processed_to_anchor_and_notify_mempool(state)
-                .await?;
-
-            self.refresh_collation_sessions(mc_data, false).await
+            self.handle_block_from_bc(state).await
         }
         .instrument(span)
         .await
@@ -1444,6 +1491,7 @@ where
                             shard_id,
                             prev_blocks_ids,
                             mc_data: mc_data.clone(),
+                            mempool_start_round: self.mempool_start_round,
                         })
                         .await;
 
@@ -1719,9 +1767,7 @@ where
                     result.push(TopBlockDescription {
                         block_id: *entry.block_id(),
                         block_info: candidate_stuff.candidate.block.load_info()?,
-                        ext_processed_to_anchor_id: candidate_stuff
-                            .candidate
-                            .ext_processed_upto_anchor_id,
+                        processed_to_anchor_id: candidate_stuff.candidate.processed_to_anchor_id,
                         value_flow: std::mem::take(&mut shard_cache.value_flow),
                         proof_funds: std::mem::take(&mut shard_cache.proof_funds),
                         #[cfg(feature = "block-creator-stats")]

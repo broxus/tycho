@@ -1245,7 +1245,7 @@ impl CollatorStdImpl {
             let TopBlockDescription {
                 block_id,
                 block_info,
-                ext_processed_to_anchor_id,
+                processed_to_anchor_id,
                 value_flow,
                 proof_funds,
                 #[cfg(feature = "block-creator-stats")]
@@ -1255,7 +1255,7 @@ impl CollatorStdImpl {
             let mut new_shard_descr = Box::new(ShardDescription::from_block_info(
                 block_id,
                 &block_info,
-                ext_processed_to_anchor_id,
+                processed_to_anchor_id,
                 &value_flow,
             ));
             new_shard_descr.reg_mc_seqno = collation_data_builder.block_id_short.seqno;
