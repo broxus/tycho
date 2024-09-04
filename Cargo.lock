@@ -3505,7 +3505,6 @@ dependencies = [
  "metrics",
  "parking_lot",
  "prost",
- "prost-build",
  "serde",
  "serde_json",
  "tempfile",

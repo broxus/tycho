@@ -38,9 +38,6 @@ tempfile = { workspace = true }
 tycho-network = { workspace = true }
 tycho-util = { workspace = true, features = ["test"] }
 
-[build-dependencies]
-prost-build = { workspace = true }
-
 [features]
 default = []
 compression = ["tower-http/compression-gzip"]

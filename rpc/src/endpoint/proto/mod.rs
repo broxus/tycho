@@ -11,11 +11,12 @@ use everscale_types::models::*;
 use everscale_types::prelude::*;
 
 use self::protos::rpc::{self, request, response, Request};
+use super::INVALID_PARAMS_CODE;
 use crate::endpoint::proto::extractor::{
     ProtoErrorResponse, ProtoOkResponse, Protobuf, ProtobufRef,
 };
 use crate::endpoint::{
-    INTERNAL_ERROR_CODE, INVALID_ADDRESS, INVALID_BOC_CODE, METHOD_NOT_FOUND_CODE, NOT_READY_CODE,
+    INTERNAL_ERROR_CODE, INVALID_BOC_CODE, METHOD_NOT_FOUND_CODE, NOT_READY_CODE,
     NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
 };
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
@@ -73,7 +74,7 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         Some(request::Call::SendMessage(p)) => {
-            if let Err(e) = BocRepr::decode::<Box<OwnedMessage>, _>(&p.message) {
+            if let Err(e) = BocRepr::decode::<OwnedMessage, _>(&p.message) {
                 return ProtoErrorResponse {
                     code: INVALID_BOC_CODE,
                     message: e.to_string().into(),
@@ -84,15 +85,12 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             ok_to_response(response::Result::SendMessage(()))
         }
         Some(request::Call::GetContractState(p)) => {
-            let address = match BocRepr::decode::<StdAddr, _>(&p.address) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    return ProtoErrorResponse {
-                        code: INVALID_ADDRESS,
-                        message: e.to_string().into(),
-                    }
-                    .into_response()
+            let Some(address) = addr_from_bytes(p.address) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid address".into(),
                 }
+                .into_response();
             };
 
             let item = match state.get_account_state(&address) {
@@ -184,33 +182,41 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
         Some(request::Call::GetAccountsByCodeHash(p)) => {
             if p.limit == 0 {
                 let result = response::Result::GetAccounts(response::GetAccountsByCodeHash {
-                    account: vec![],
+                    account: Vec::new(),
                 });
                 return ok_to_response(result);
             } else if p.limit > MAX_LIMIT {
                 return too_large_limit_response();
             }
 
-            let code_hash = HashBytes::from_slice(p.code_hash.as_ref());
-            let continuation = match p
-                .continuation
-                .map(|x| BocRepr::decode::<StdAddr, _>(&x))
-                .transpose()
-            {
-                Ok(continuation) => continuation,
-                Err(e) => {
+            let Some(code_hash) = hash_from_bytes(p.code_hash) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid code hash".into(),
+                }
+                .into_response();
+            };
+
+            let continuation = match p.continuation.map(addr_from_bytes) {
+                Some(Some(continuation)) => Some(continuation),
+                Some(None) => {
                     return ProtoErrorResponse {
-                        code: INVALID_ADDRESS,
-                        message: e.to_string().into(),
+                        code: INVALID_PARAMS_CODE,
+                        message: "invalid continuation".into(),
                     }
                     .into_response()
                 }
+                None => None,
             };
 
-            match state.get_raw_accounts_by_code_hash(&code_hash, continuation.as_ref()) {
+            match state.get_accounts_by_code_hash(&code_hash, continuation.as_ref()) {
                 Ok(list) => {
                     let result = response::Result::GetAccounts(response::GetAccountsByCodeHash {
-                        account: list.take(p.limit as usize).collect(),
+                        account: list
+                            .into_raw()
+                            .take(p.limit as usize)
+                            .map(|addr| Bytes::copy_from_slice(&addr))
+                            .collect(),
                     });
                     ok_to_response(result)
                 }
@@ -220,22 +226,19 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
         Some(request::Call::GetTransactionsList(p)) => {
             if p.limit == 0 {
                 let result = response::Result::GetTransactionsList(response::GetTransactionsList {
-                    transactions: vec![],
+                    transactions: Vec::new(),
                 });
                 return ok_to_response(result);
             } else if p.limit > MAX_LIMIT {
                 return too_large_limit_response();
             }
 
-            let account = match BocRepr::decode::<StdAddr, _>(&p.account) {
-                Ok(addr) => addr,
-                Err(e) => {
-                    return ProtoErrorResponse {
-                        code: INVALID_ADDRESS,
-                        message: e.to_string().into(),
-                    }
-                    .into_response()
+            let Some(account) = addr_from_bytes(p.account) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid address".into(),
                 }
+                .into_response();
             };
 
             match state.get_transactions(&account, p.last_transaction_lt) {
@@ -254,7 +257,14 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         Some(request::Call::GetTransaction(p)) => {
-            let hash = HashBytes::from_slice(&p.id);
+            let Some(hash) = hash_from_bytes(p.id) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid tx id".into(),
+                }
+                .into_response();
+            };
+
             match state.get_transaction(&hash) {
                 Ok(tx) => {
                     let result = response::Result::GetRawTransaction(response::GetRawTransaction {
@@ -266,7 +276,14 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             }
         }
         Some(request::Call::GetDstTransaction(p)) => {
-            let hash = HashBytes::from_slice(&p.message_hash);
+            let Some(hash) = hash_from_bytes(p.message_hash) else {
+                return ProtoErrorResponse {
+                    code: INVALID_PARAMS_CODE,
+                    message: "invalid msg id".into(),
+                }
+                .into_response();
+            };
+
             match state.get_dst_transaction(&hash) {
                 Ok(tx) => {
                     let result = response::Result::GetRawTransaction(response::GetRawTransaction {
@@ -288,8 +305,10 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
 // NOTE: `RpcState` full/not-full state is determined only once at startup,
 // so it is ok to cache the response.
 fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
-    static RESULT: OnceLock<Box<rpc::Response>> = OnceLock::new();
+    static RESULT: OnceLock<rpc::Response> = OnceLock::new();
     RESULT.get_or_init(|| {
+        // FIXME: Why strings when we have enums in the proto?
+
         let mut capabilities = vec![
             "getCapabilities",
             "getLatestKeyBlock",
@@ -309,13 +328,13 @@ fn get_capabilities(state: &RpcState) -> &'static rpc::Response {
             ]);
         }
 
-        Box::new(rpc::Response {
+        rpc::Response {
             result: Some(response::Result::GetCapabilities(
                 response::GetCapabilities {
                     capabilities: capabilities.into_iter().map(|s| s.into()).collect(),
                 },
             )),
-        })
+        }
     })
 }
 
@@ -341,18 +360,17 @@ fn too_large_limit_response() -> Response {
     .into_response()
 }
 
+fn addr_from_bytes(bytes: Bytes) -> Option<StdAddr> {
+    (bytes.len() == 33)
+        .then(|| StdAddr::new(bytes[0] as i8, HashBytes(bytes[1..33].try_into().unwrap())))
+}
+
+fn hash_from_bytes(bytes: Bytes) -> Option<HashBytes> {
+    (bytes.len() == 32).then(|| HashBytes::from_slice(&bytes))
+}
+
 fn serialize_account(account: &Account) -> Result<Bytes, everscale_types::error::Error> {
-    let cx = &mut Cell::empty_context();
-    let mut builder = CellBuilder::new();
-    account.address.store_into(&mut builder, cx)?;
-    account.storage_stat.store_into(&mut builder, cx)?;
-    account.last_trans_lt.store_into(&mut builder, cx)?;
-    account.balance.store_into(&mut builder, cx)?;
-    account.state.store_into(&mut builder, cx)?;
-    if account.init_code_hash.is_some() {
-        account.init_code_hash.store_into(&mut builder, cx)?;
-    }
-    let cell = builder.build_ext(cx)?;
+    let cell = crate::models::serialize_account(&account)?;
     Ok(Boc::encode(cell).into())
 }
 

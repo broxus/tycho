@@ -16,9 +16,7 @@ use tycho_core::block_strider::{
     BlockSubscriber, BlockSubscriberContext, StateSubscriber, StateSubscriberContext,
 };
 use tycho_core::blockchain_rpc::BlockchainRpcClient;
-use tycho_storage::{
-    CodeHashesIter, KeyBlocksDirection, RawCodeHashesIter, Storage, TransactionsIterBuilder,
-};
+use tycho_storage::{CodeHashesIter, KeyBlocksDirection, Storage, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
@@ -186,26 +184,9 @@ impl RpcState {
         let Some(storage) = &self.inner.storage.rpc_storage() else {
             return Err(RpcStateError::NotSupported);
         };
-        let iter = storage
+        storage
             .get_accounts_by_code_hash(code_hash, continuation)
-            .map_err(RpcStateError::Internal)?;
-
-        Ok(CodeHashesIter::new(iter))
-    }
-
-    pub fn get_raw_accounts_by_code_hash(
-        &self,
-        code_hash: &HashBytes,
-        continuation: Option<&StdAddr>,
-    ) -> Result<RawCodeHashesIter<'_>, RpcStateError> {
-        let Some(storage) = &self.inner.storage.rpc_storage() else {
-            return Err(RpcStateError::NotSupported);
-        };
-        let iter = storage
-            .get_accounts_by_code_hash(code_hash, continuation)
-            .map_err(RpcStateError::Internal)?;
-
-        Ok(RawCodeHashesIter::new(iter))
+            .map_err(RpcStateError::Internal)
     }
 
     pub fn get_transactions(

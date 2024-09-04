@@ -280,21 +280,7 @@ where
 {
     use serde::ser::Error;
 
-    fn write_account(account: &Account) -> Result<Cell, everscale_types::error::Error> {
-        let cx = &mut Cell::empty_context();
-        let mut builder = CellBuilder::new();
-        account.address.store_into(&mut builder, cx)?;
-        account.storage_stat.store_into(&mut builder, cx)?;
-        account.last_trans_lt.store_into(&mut builder, cx)?;
-        account.balance.store_into(&mut builder, cx)?;
-        account.state.store_into(&mut builder, cx)?;
-        if account.init_code_hash.is_some() {
-            account.init_code_hash.store_into(&mut builder, cx)?;
-        }
-        builder.build_ext(cx)
-    }
-
-    let cell = write_account(account).map_err(Error::custom)?;
+    let cell = crate::models::serialize_account(account).map_err(Error::custom)?;
     Boc::encode_base64(cell).serialize(serializer)
 }
 
