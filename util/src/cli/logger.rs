@@ -1,6 +1,7 @@
 use std::io::IsTerminal;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde::de::Visitor;
@@ -9,6 +10,8 @@ use tracing::Subscriber;
 use tracing_appender::rolling::Rotation;
 use tracing_subscriber::filter::Directive;
 use tracing_subscriber::{fmt, Layer};
+
+use crate::cli::error::ResultExt;
 
 pub struct LoggerTargets {
     directives: Vec<Directive>,
@@ -167,4 +170,90 @@ pub fn is_systemd_child() -> bool {
     {
         false
     }
+}
+
+pub fn init_logger(config: &LoggerConfig, logger_targets: Option<PathBuf>) -> Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::{reload, EnvFilter};
+
+    let try_make_filter = {
+        let logger_targets = logger_targets.clone();
+        move || {
+            Ok::<_, anyhow::Error>(match &logger_targets {
+                None => EnvFilter::builder()
+                    .with_default_directive(tracing::Level::INFO.into())
+                    .from_env_lossy(),
+                Some(path) => LoggerTargets::load_from(path)
+                    .wrap_err("failed to load logger config")?
+                    .build_subscriber(),
+            })
+        }
+    };
+
+    let (layer, handle) = reload::Layer::new(try_make_filter()?);
+
+    let subscriber = tracing_subscriber::registry().with(layer).with(
+        config
+            .outputs
+            .iter()
+            .map(|o| o.as_layer())
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    );
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
+    if let Some(logger_config) = logger_targets {
+        tokio::spawn(async move {
+            tracing::info!(
+                logger_config = %logger_config.display(),
+                "started watching for changes in logger config"
+            );
+
+            let get_metadata = move || {
+                std::fs::metadata(&logger_config)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+            };
+
+            let mut last_modified = get_metadata();
+
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+
+                let modified = get_metadata();
+                if last_modified == modified {
+                    continue;
+                }
+                last_modified = modified;
+
+                match try_make_filter() {
+                    Ok(filter) => {
+                        if handle.reload(filter).is_err() {
+                            break;
+                        }
+                        tracing::info!("reloaded logger config");
+                    }
+                    Err(e) => tracing::error!(%e, "failed to reload logger config"),
+                }
+            }
+
+            tracing::info!("stopped watching for changes in logger config");
+        });
+    }
+
+    Ok(())
+}
+
+pub fn set_abort_with_tracing() {
+    std::panic::set_hook(Box::new(|info| {
+        use std::io::Write;
+
+        tracing::error!("panic: {}", info.to_string());
+
+        std::io::stderr().flush().ok();
+        std::io::stdout().flush().ok();
+
+        #[allow(clippy::exit)]
+        std::process::exit(1);
+    }));
 }

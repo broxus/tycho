@@ -10,8 +10,6 @@ use serde::Serialize;
 
 #[cfg(feature = "jemalloc")]
 pub mod alloc;
-pub mod error;
-pub mod signal;
 
 pub fn print_json<T: Serialize>(output: T) -> Result<()> {
     let output = if std::io::stdin().is_terminal() {

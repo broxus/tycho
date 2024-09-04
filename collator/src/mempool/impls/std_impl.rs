@@ -11,7 +11,7 @@ use parking_lot::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::{mpsc, Notify};
 use tycho_consensus::prelude::*;
-use tycho_network::{DhtClient, OverlayService, PeerId};
+use tycho_network::{Network, OverlayService, PeerId, PeerResolver};
 use tycho_storage::MempoolStorage;
 
 use crate::mempool::{
@@ -56,7 +56,8 @@ impl MempoolAdapterStdImpl {
     pub fn run(
         self: &Arc<Self>,
         key_pair: Arc<KeyPair>,
-        dht_client: &DhtClient,
+        network: &Network,
+        peer_resolver: &PeerResolver,
         overlay_service: &OverlayService,
         mempool_storage: &MempoolStorage,
         peers: Vec<PeerId>,
@@ -69,7 +70,8 @@ impl MempoolAdapterStdImpl {
 
         let mut engine = Engine::new(
             key_pair,
-            dht_client,
+            network,
+            peer_resolver,
             overlay_service,
             mempool_storage,
             sender,

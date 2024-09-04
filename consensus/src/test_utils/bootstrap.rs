@@ -1,7 +1,7 @@
 use everscale_crypto::ed25519::{KeyPair, PublicKey, SecretKey};
 use tycho_network::{
-    Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayService, PeerId,
-    PeerInfo, Router, ToSocket,
+    Address, DhtClient, DhtConfig, DhtService, Network, NetworkConfig, OverlayConfig,
+    OverlayService, PeerId, PeerInfo, PeerResolver, PeerResolverConfig, Router, ToSocket,
 };
 use tycho_util::time::now_sec;
 
@@ -20,22 +20,28 @@ pub fn make_peer_info(keypair: &KeyPair, address_list: Vec<Address>, ttl: Option
     peer_info
 }
 
-pub fn from_validator<T: ToSocket>(
+pub fn from_validator<T: ToSocket, A: Into<Address>>(
     bind_address: T,
     secret_key: &SecretKey,
-    remote_addr: Option<Address>,
+    remote_addr: Option<A>,
     dht_config: DhtConfig,
+    peer_resolver_config: Option<PeerResolverConfig>,
+    overlay_config: Option<OverlayConfig>,
     network_config: NetworkConfig,
-) -> (DhtClient, OverlayService) {
+) -> (DhtClient, PeerResolver, OverlayService) {
     let local_id = PeerId::from(PublicKey::from(secret_key));
 
     let (dht_tasks, dht_service) = DhtService::builder(local_id)
         .with_config(dht_config)
         .build();
 
-    let (overlay_tasks, overlay_service) = OverlayService::builder(local_id)
-        .with_dht_service(dht_service.clone())
-        .build();
+    let mut overlay_service_builder =
+        OverlayService::builder(local_id).with_dht_service(dht_service.clone());
+
+    if let Some(overlay_config) = overlay_config {
+        overlay_service_builder = overlay_service_builder.with_config(overlay_config);
+    }
+    let (overlay_tasks, overlay_service) = overlay_service_builder.build();
 
     let router = Router::builder()
         .route(dht_service.clone())
@@ -52,8 +58,18 @@ pub fn from_validator<T: ToSocket>(
 
     let network = network_builder.build(bind_address, router).unwrap();
 
+    let mut peer_resolver_builder = dht_service.make_peer_resolver();
+    if let Some(peer_resolver_config) = peer_resolver_config {
+        peer_resolver_builder = peer_resolver_builder.with_config(peer_resolver_config);
+    }
+    let peer_resolver = peer_resolver_builder.build(&network);
+
     dht_tasks.spawn(&network);
     overlay_tasks.spawn(&network);
 
-    (dht_service.make_client(&network), overlay_service)
+    (
+        dht_service.make_client(&network),
+        peer_resolver,
+        overlay_service,
+    )
 }
