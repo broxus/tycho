@@ -23,7 +23,7 @@ impl ValidPoint {
 
 #[derive(Clone, Debug)]
 /// cases with point hash or signature mismatch are not represented in enum;
-/// at most we are able to use [`crate::dag::DagRound::set_bad_sig_in_broadcast`],
+/// at most we are able to use [`crate::dag::DagRound::set_bad_sig_in_broadcast_exact`],
 /// but any bad signatures from third party nodes:
 /// * in download response - makes sender not reliable
 /// * in dependency graph - cannot be used, most likely will not be downloaded, i.e. `NotExist`
@@ -46,23 +46,23 @@ pub enum DagPoint {
 }
 
 impl DagPoint {
+    pub fn trusted(&self) -> Option<&ValidPoint> {
+        match self {
+            Self::Trusted(valid) => Some(valid),
+            _ => None,
+        }
+    }
+
+    pub fn valid(&self) -> Option<&ValidPoint> {
+        match self {
+            Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
+            _ => None,
+        }
+    }
+
     pub fn into_valid(self) -> Option<ValidPoint> {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
-            _ => None,
-        }
-    }
-
-    pub fn valid(&self) -> Option<&'_ ValidPoint> {
-        match self {
-            Self::Trusted(valid) | Self::Suspicious(valid) => Some(valid),
-            _ => None,
-        }
-    }
-
-    pub fn trusted(&self) -> Option<&'_ ValidPoint> {
-        match self {
-            Self::Trusted(valid) => Some(valid),
             _ => None,
         }
     }
@@ -83,7 +83,7 @@ impl DagPoint {
         }
     }
 
-    pub fn digest(&self) -> &'_ Digest {
+    pub fn digest(&self) -> &Digest {
         match self {
             Self::Trusted(valid) | Self::Suspicious(valid) => valid.info.digest(),
             Self::Invalid(info) => info.digest(),

@@ -13,7 +13,7 @@ use crate::models::{Digest, Point, PointInfo, Round};
 pub struct MempoolStore(Arc<dyn MempoolStoreImpl>);
 
 trait MempoolStoreImpl: Send + Sync {
-    fn insert_point(&self, point: &Point, flags: Option<&PointFlags>);
+    fn insert_point(&self, point: &Point, flags: &PointFlags);
 
     fn set_flags(&self, round: Round, digest: &Digest, flags: &PointFlags);
 
@@ -48,7 +48,7 @@ impl MempoolStore {
         Self(Arc::new(()))
     }
 
-    pub fn insert_point(&self, point: &Point, flags: Option<&PointFlags>) {
+    pub fn insert_point(&self, point: &Point, flags: &PointFlags) {
         self.0.insert_point(point, flags);
     }
 
@@ -193,7 +193,7 @@ fn fill_prefix(round: Round, key: &mut [u8; MempoolStorage::KEY_LEN]) {
 }
 
 impl MempoolStoreImpl for MempoolStorage {
-    fn insert_point(&self, point: &Point, flags: Option<&PointFlags>) {
+    fn insert_point(&self, point: &Point, flags: &PointFlags) {
         let _call_duration = HistogramGuard::begin("tycho_mempool_store_insert_point_time");
         let mut key = [0_u8; MempoolStorage::KEY_LEN];
         fill_key(point.round(), point.digest(), &mut key);
@@ -201,11 +201,12 @@ impl MempoolStoreImpl for MempoolStorage {
         let info = bincode::serialize(&PointInfo::serializable_from(point))
             .expect("serialize db point info equivalent from point");
         let point = bincode::serialize(point).expect("serialize db point");
-        let flags = flags.map(PointFlags::encode);
+        let flags = PointFlags::encode(flags);
 
         let db = self.db.rocksdb();
         let points_cf = self.db.points.cf();
         let info_cf = self.db.points_info.cf();
+        let flags_cf = self.db.points_flags.cf();
 
         // transaction not needed as there is no concurrent puts for the same key,
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
@@ -213,11 +214,7 @@ impl MempoolStoreImpl for MempoolStorage {
         let mut batch = MempoolStorage::write_batch();
         batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
         batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
-
-        if let Some(flags) = flags {
-            let flags_cf = self.db.points_flags.cf();
-            batch.merge_cf(&flags_cf, key.as_slice(), flags.as_slice());
-        }
+        batch.merge_cf(&flags_cf, key.as_slice(), flags.as_slice());
 
         db.write(batch).expect("db batch insert point, info, flags");
     }
@@ -333,7 +330,7 @@ impl MempoolStoreImpl for MempoolStorage {
 
 #[cfg(feature = "test")]
 impl MempoolStoreImpl for () {
-    fn insert_point(&self, _: &Point, _: Option<&PointFlags>) {}
+    fn insert_point(&self, _: &Point, _: &PointFlags) {}
 
     fn set_flags(&self, _: Round, _: &Digest, _: &PointFlags) {}
 

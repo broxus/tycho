@@ -61,24 +61,44 @@ impl DagPointFuture {
     /// for points of others - there are all other methods
     pub fn new_local_trusted(point: &Point, state: &InclusionState, store: &MempoolStore) -> Self {
         let flags = PointFlags {
+            is_ill_formed: false,
+            is_validated: false,
             is_valid: true,
             is_trusted: true,
             ..Default::default()
         };
-        store.insert_point(point, Some(&flags));
+        store.insert_point(point, &flags);
         let dag_point = DagPoint::Trusted(ValidPoint::new(point));
         state.init(&dag_point); // only after persisted
         Self(DagPointFutureType::Ready(future::ready(dag_point)))
     }
 
-    pub fn new_invalid(dag_point: DagPoint, state: &InclusionState, _store: &MempoolStore) -> Self {
-        assert!(
-            dag_point.valid().is_none(),
-            "point must be invalid, but it is valid"
-        );
-        // TODO separate table? maybe use flags to load invalids only from flags?
-        state.init(&dag_point);
-        Self(DagPointFutureType::Ready(future::ready(dag_point)))
+    pub fn new_ill_formed_broadcast(
+        point: &Point,
+        state: &InclusionState,
+        store: &MempoolStore,
+        effects: &Effects<EngineContext>,
+    ) -> Self {
+        let store_fut = tokio::task::spawn_blocking({
+            let point = point.clone();
+            let state = state.clone();
+            let store = store.clone();
+            move || {
+                let flags = PointFlags {
+                    is_ill_formed: true,
+                    ..Default::default()
+                };
+                store.insert_point(&point, &flags);
+                let dag_point = DagPoint::IllFormed(Arc::new(point.id()));
+                state.init(&dag_point);
+                dag_point
+            }
+        });
+        let task = async move { store_fut.await.expect("db insert ill-formed broadcast") };
+        Self(DagPointFutureType::Broadcast {
+            task: Shared::new(JoinTask::new(task.instrument(effects.span().clone()))),
+            certified: Arc::new(OnceTake::empty()),
+        })
     }
 
     pub fn new_broadcast(
@@ -97,14 +117,14 @@ impl DagPointFuture {
         let state = state.clone();
         let store = store.clone();
         let (certified_tx, certified_rx) = oneshot::channel();
-        let certified = Arc::new(OnceTake::new(certified_tx));
-        let certified_clone = certified.clone();
+        let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
+        let once_certified_tx_clone = once_certified_tx.clone();
         let task = async move {
             let point_id = point.id();
             let stored_fut = tokio::task::spawn_blocking({
                 let verified = point.clone();
                 let store = store.clone();
-                move || store.insert_point(&verified, None)
+                move || store.insert_point(&verified, &PointFlags::default())
             });
             let validated_fut = Verifier::validate(
                 point,
@@ -121,10 +141,11 @@ impl DagPointFuture {
                 (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
             let flags = PointFlags {
+                is_ill_formed: matches!(dag_point, DagPoint::IllFormed(_)),
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
                 is_trusted: dag_point.trusted().is_some(),
-                is_certified: certified_clone.is_taken(),
+                is_certified: !once_certified_tx_clone.has_value(),
                 ..Default::default()
             };
             tokio::task::spawn_blocking(move || {
@@ -137,7 +158,7 @@ impl DagPointFuture {
         };
         DagPointFuture(DagPointFutureType::Broadcast {
             task: Shared::new(JoinTask::new(task.instrument(span))),
-            certified,
+            certified: once_certified_tx,
         })
     }
 
@@ -155,8 +176,8 @@ impl DagPointFuture {
         let (dependents_tx, dependents_rx) = mpsc::unbounded_channel();
         let (broadcast_tx, broadcast_rx) = oneshot::channel();
         let (certified_tx, certified_rx) = oneshot::channel();
-        let certified = Arc::new(OnceTake::new(certified_tx));
-        let certified_clone = certified.clone();
+        let once_certified_tx = Arc::new(OnceTake::new(certified_tx));
+        let once_certified_tx_clone = once_certified_tx.clone();
         let point_id = PointId {
             author: *author,
             round: point_dag_round.round(),
@@ -206,8 +227,17 @@ impl DagPointFuture {
                         .await;
                     let verified = match downloaded {
                         DownloadResult::Verified(point) => point,
-                        DownloadResult::IllFormed(_) => {
-                            // TODO use separate store for invalid points, as it has valid sig
+                        DownloadResult::IllFormed(point) => {
+                            tokio::task::spawn_blocking({
+                                let store = store.clone();
+                                let flags = PointFlags {
+                                    is_ill_formed: true,
+                                    ..Default::default()
+                                };
+                                move || store.insert_point(&point, &flags)
+                            })
+                            .await
+                            .expect("db store ill-formed download");
                             return DagPoint::IllFormed(Arc::new(point_id));
                         }
                         DownloadResult::NotFound => return DagPoint::NotFound(Arc::new(point_id)),
@@ -215,7 +245,7 @@ impl DagPointFuture {
                     let stored_fut = future::Either::Right(tokio::task::spawn_blocking({
                         let verified = verified.clone();
                         let store = store.clone();
-                        move || store.insert_point(&verified, None)
+                        move || store.insert_point(&verified, &PointFlags::default())
                     }));
                     (verified, stored_fut)
                 }
@@ -242,10 +272,11 @@ impl DagPointFuture {
                 (Err(e), _) => panic!("store point was cancelled: {e:?}"),
             };
             let flags = PointFlags {
+                is_ill_formed: matches!(dag_point, DagPoint::IllFormed(_)),
                 is_validated: true,
                 is_valid: dag_point.valid().is_some(),
                 is_trusted: dag_point.trusted().is_some(),
-                is_certified: certified_clone.is_taken(),
+                is_certified: !once_certified_tx_clone.has_value(),
                 ..Default::default()
             };
             tokio::task::spawn_blocking(move || {
@@ -259,7 +290,7 @@ impl DagPointFuture {
         };
         DagPointFuture(DagPointFutureType::Load {
             task: Shared::new(JoinTask::new(task.instrument(span))),
-            certified,
+            certified: once_certified_tx,
             dependents: dependents_tx,
             verified: Arc::new(OnceTake::new(broadcast_tx)),
         })
