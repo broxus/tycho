@@ -18,6 +18,8 @@ fn main() -> anyhow::Result<()> {
     prost_build::Config::new()
         .out_dir(&protos_dir)
         .include_file("mod.rs")
+        // For old protoc versions
+        .protoc_arg("--experimental_allow_proto3_optional")
         // Replace Vec<u8> to Bytes
         .bytes(["."])
         .compile_protos(

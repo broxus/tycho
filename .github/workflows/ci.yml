@@ -121,6 +121,24 @@ jobs:
           command: clippy
           args: --all-targets --all-features -p tycho-block-util -p tycho-core -p tycho-network -p tycho-rpc -p tycho-storage -p tycho-consensus -p tycho-util -- -D warnings # change to --workspace later
 
+  check-protos:
+    name: Check protos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v3
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - name: Install protobuf
+        run: sudo apt update && sudo apt-get -y install protobuf-compiler
+      - name: Generate Rust code from .proto files
+        run: cargo run -p tycho-gen-protos
+      - name: Check for uncommitted changes
+        run: git diff --exit-code
 
   # docs:
   #   name: Docs
