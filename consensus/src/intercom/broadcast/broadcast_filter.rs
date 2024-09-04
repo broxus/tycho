@@ -43,7 +43,7 @@ impl BroadcastFilter {
         &self,
         sender: &PeerId,
         point: &Point,
-        top_dag_round: &DagRound,
+        top_dag_round: Option<&DagRound>,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -115,7 +115,7 @@ impl BroadcastFilterInner {
         &self,
         sender: &PeerId,
         point: &Point,
-        top_dag_round: &DagRound,
+        top_dag_round: Option<&DagRound>,
         downloader: &Downloader,
         store: &MempoolStore,
         effects: &Effects<EngineContext>,
@@ -152,28 +152,31 @@ impl BroadcastFilterInner {
             })
         };
 
-        if round <= top_dag_round.round() {
-            // commented out: outdated broadcast may resolve download or short-circuit a validation
-            // if round < top_dag_round.round().prev() {
-            //     return; // will not be certified; look Signer's response `TooOldRound`
-            // }
-            let Some(point_round) = top_dag_round.scan(point.round()) else {
-                // tracing::warn!("DAG is too shallow", round = round.0);
-                return; // cannot process anyway
-            };
-            match verified {
-                Ok(()) => self.send_validating(&point_round, point, downloader, store, effects),
-                Err(Some(VerifyError::IllFormed)) => {
-                    point_round.add_ill_formed_broadcast_exact(point, store, effects);
-                }
-                Err(Some(VerifyError::BadSig)) => {
-                    point_round.set_bad_sig_in_broadcast_exact(&author);
-                }
-                Err(None) => {} // should ban sender
-            };
-            return;
-        } // else: either consensus moved forward without us,
-          // or we shouldn't accept the point yet, or it's a spam
+        if let Some(top_dag_round) = top_dag_round {
+            if round <= top_dag_round.round() {
+                // commented out: outdated broadcast may resolve download or short-circuit a validation
+                // if round < top_dag_round.round().prev() {
+                //     return; // will not be certified; look Signer's response `TooOldRound`
+                // }
+                let Some(point_round) = top_dag_round.scan(point.round()) else {
+                    // tracing::warn!("DAG is too shallow", round = round.0);
+                    return; // cannot process anyway
+                };
+                match verified {
+                    Ok(()) => self.send_validating(&point_round, point, downloader, store, effects),
+                    Err(Some(VerifyError::IllFormed)) => {
+                        point_round.add_ill_formed_broadcast_exact(point, store, effects);
+                    }
+                    Err(Some(VerifyError::BadSig)) => {
+                        point_round.set_bad_sig_in_broadcast_exact(&author);
+                    }
+                    Err(None) => {} // should ban sender
+                };
+                return;
+            } // else: either consensus moved forward without us,
+              // or we shouldn't accept the point yet, or it's a spam
+        } // else: node start is not finished and dag is not ready, has to cache incoming points
+          // in Filter's map first, and later - in channel to Collector
 
         let (last_peer_round, duplicates) = *self
             .last_by_peer

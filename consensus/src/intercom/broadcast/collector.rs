@@ -39,20 +39,20 @@ impl Collector {
         }
     }
 
-    pub fn init(&mut self, next_round: Round, next_includes: impl Iterator<Item = InclusionState>) {
-        self.next_round = next_round;
-        self.next_includes = Some(
-            next_includes
-                .map(|a| future::ready(a).boxed())
-                .collect::<FuturesUnordered<_>>(),
-        );
+    pub fn init(
+        &mut self,
+        start_round: Round,
+        start_with_includes: FuturesUnordered<BoxFuture<'static, InclusionState>>,
+    ) {
+        self.next_round = start_round;
+        self.next_includes = Some(start_with_includes);
     }
 
     pub async fn run(
         &mut self,
         effects: Effects<CollectorContext>,
         next_dag_round: DagRound, // r+1
-        own_point_state: oneshot::Receiver<InclusionState>,
+        own_point_state: BoxFuture<'static, InclusionState>,
         collector_signal: watch::Sender<CollectorSignal>,
         bcaster_signal: oneshot::Receiver<BroadcasterSignal>,
     ) -> Round {
@@ -79,18 +79,7 @@ impl Collector {
                 FuturesUnordered::new()
             }
         };
-        includes.push(
-            (async move {
-                match own_point_state.await {
-                    Ok(state) => state,
-                    Err(_) => {
-                        futures_util::pending!();
-                        unreachable!("dropped own point state in collector")
-                    }
-                }
-            })
-            .boxed(),
-        );
+        includes.push(own_point_state);
 
         self.next_round = next_dag_round.round();
         let includes_ready = FastHashSet::with_capacity(current_dag_round.peer_count().full());

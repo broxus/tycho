@@ -33,6 +33,7 @@ serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, default-features = false }
 tokio-stream = { workspace = true, optional = true }
 tracing = { workspace = true }
+weedb = { workspace = true }
 
 # local deps
 tycho-network = { workspace = true }

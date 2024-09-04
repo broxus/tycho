@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use ahash::HashMapExt;
+use itertools::Itertools;
 use tycho_storage::{MempoolStorage, PointFlags};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::{FastHashMap, FastHashSet};
+use weedb::rocksdb::{ReadOptions, WriteBatch};
 
+use crate::effects::AltFormat;
 use crate::engine::outer_round::{Collator, Commit, Consensus, OuterRoundRecv};
 use crate::engine::MempoolConfig;
 use crate::models::{Digest, Point, PointInfo, Round};
@@ -24,6 +27,10 @@ trait MempoolStoreImpl: Send + Sync {
     fn get_flags(&self, round: Round, digest: &Digest) -> PointFlags;
 
     fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point>;
+
+    fn latest_round(&self) -> Round;
+
+    fn load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointFlags)>;
 }
 
 impl MempoolStore {
@@ -70,6 +77,14 @@ impl MempoolStore {
 
     pub fn expand_anchor_history(&self, history: &[PointInfo]) -> Vec<Point> {
         self.0.expand_anchor_history(history)
+    }
+
+    pub fn latest_round(&self) -> Round {
+        self.0.latest_round()
+    }
+
+    pub fn load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointFlags)> {
+        self.0.load_rounds(first, last)
     }
 
     fn clean_task(
@@ -170,7 +185,7 @@ impl MempoolStore {
         // * then delete info, as it leaves points usable only for upload
         // * at last delete points safely
 
-        let mut batch = MempoolStorage::write_batch();
+        let mut batch = WriteBatch::default();
         batch.delete_range_cf(&flags_cf, zero.as_slice(), up_to_exclusive.as_slice());
         batch.delete_range_cf(&info_cf, zero.as_slice(), up_to_exclusive.as_slice());
         batch.delete_range_cf(&points_cf, zero.as_slice(), up_to_exclusive.as_slice());
@@ -181,6 +196,24 @@ impl MempoolStore {
         db.compact_range_cf(&flags_cf, none, Some(up_to_exclusive.as_slice()));
         db.compact_range_cf(&info_cf, none, Some(up_to_exclusive.as_slice()));
         db.compact_range_cf(&points_cf, none, Some(up_to_exclusive.as_slice()));
+    }
+}
+
+fn format_key(bytes: &[u8]) -> String {
+    if bytes.len() >= 4 {
+        let mut round_bytes = [0_u8; 4];
+        round_bytes.copy_from_slice(&bytes[..4]);
+        let round = u32::from_be_bytes(round_bytes);
+        let digest = bytes
+            .iter()
+            .skip(4)
+            .take(MempoolStorage::KEY_LEN - 4)
+            .map(|b| format!("{b:02x?}"))
+            .join("");
+        format!("round {round} digest {digest} total bytes: {}", bytes.len())
+    } else {
+        let smth = bytes.iter().map(|b| format!("{b:02x?}")).join("");
+        format!("unknown short bytes {smth}")
     }
 }
 
@@ -211,7 +244,7 @@ impl MempoolStoreImpl for MempoolStorage {
         // transaction not needed as there is no concurrent puts for the same key,
         // as they occur inside DAG futures whose uniqueness is protected by dash map;
         // in contrast, flags are written from random places, but only via `merge_cf()`
-        let mut batch = MempoolStorage::write_batch();
+        let mut batch = WriteBatch::default();
         batch.put_cf(&points_cf, key.as_slice(), point.as_slice());
         batch.put_cf(&info_cf, key.as_slice(), info.as_slice());
         batch.merge_cf(&flags_cf, key.as_slice(), flags.as_slice());
@@ -280,13 +313,13 @@ impl MempoolStoreImpl for MempoolStorage {
             .collect::<FastHashSet<Vec<u8>>>();
         buf.fill(0);
 
-        let mut opt = MempoolStorage::read_options();
+        let mut opt = ReadOptions::default();
 
-        let first = history.first().expect("anchor history mut not be empty");
+        let first = history.first().expect("anchor history must not be empty");
         fill_prefix(first.round(), &mut buf);
         opt.set_iterate_lower_bound(buf);
 
-        let last = history.last().expect("anchor history mut not be empty");
+        let last = history.last().expect("anchor history must not be empty");
         fill_prefix(last.round().next(), &mut buf);
         opt.set_iterate_upper_bound(buf);
 
@@ -326,6 +359,81 @@ impl MempoolStoreImpl for MempoolStorage {
 
         result
     }
+
+    fn latest_round(&self) -> Round {
+        let db = self.db.rocksdb();
+        let flags_cf = self.db.points_flags.cf();
+
+        let mut iter = db.raw_iterator_cf(&flags_cf);
+        iter.seek_to_last();
+
+        let last_key = iter
+            .key()
+            .expect("db is empty, at least last genesis must be supplied");
+        let mut round = [0_u8; 4];
+        round.copy_from_slice(&last_key[..4]);
+
+        Round(u32::from_be_bytes(round))
+    }
+
+    fn load_rounds(&self, first: Round, last: Round) -> Vec<(PointInfo, PointFlags)> {
+        fn opts(first: Round, last: Round, buf: &mut [u8; MempoolStorage::KEY_LEN]) -> ReadOptions {
+            let mut opt = ReadOptions::default();
+            fill_prefix(first, buf);
+            opt.set_iterate_lower_bound(&buf[..]);
+            fill_prefix(last.next(), buf);
+            opt.set_iterate_upper_bound(&buf[..]);
+            opt
+        }
+
+        let mut buf = [0_u8; MempoolStorage::KEY_LEN];
+        let db = self.db.rocksdb();
+        let info_cf = self.db.points_info.cf();
+        let flags_cf = self.db.points_flags.cf();
+
+        let opt = opts(first, last, &mut buf);
+        let mut iter = db.raw_iterator_cf_opt(&flags_cf, opt);
+        let mut flags = FastHashMap::default();
+        iter.seek_to_first();
+
+        while iter.valid() {
+            let Some((key, bytes)) = iter.item() else {
+                break;
+            };
+            flags.insert(Vec::from(key).into_boxed_slice(), PointFlags::decode(bytes));
+            iter.next();
+        }
+        iter.status()
+            .expect("load rounds: point flags iter is not ok");
+        drop(iter);
+
+        let opt = opts(first, last, &mut buf);
+        let mut iter = db.raw_iterator_cf_opt(&info_cf, opt);
+        iter.seek_to_first();
+
+        let mut result = Vec::with_capacity(flags.len());
+        while iter.valid() {
+            let Some((key, info)) = iter.item() else {
+                break;
+            };
+            let info = bincode::deserialize::<PointInfo>(info).expect("db deserialize point info");
+            if let Some(flags) = flags.remove(key) {
+                result.push((info, flags));
+            } else {
+                panic!("point stored without flag: {:?}", info.id().alt())
+            }
+            iter.next();
+        }
+
+        iter.status()
+            .expect("load rounds: point info iter is not ok");
+        if !flags.is_empty() {
+            let keys = flags.keys().map(|key| format_key(key)).collect::<Vec<_>>();
+            panic!("point info stored without point flags: {keys:?}");
+        }
+
+        result
+    }
 }
 
 #[cfg(feature = "test")]
@@ -347,6 +455,14 @@ impl MempoolStoreImpl for () {
     }
 
     fn expand_anchor_history(&self, _: &[PointInfo]) -> Vec<Point> {
+        panic!("should not be used in tests")
+    }
+
+    fn latest_round(&self) -> Round {
+        panic!("should not be used in tests")
+    }
+
+    fn load_rounds(&self, _: Round, _: Round) -> Vec<(PointInfo, PointFlags)> {
         panic!("should not be used in tests")
     }
 }

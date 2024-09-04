@@ -3440,6 +3440,7 @@ dependencies = [
  "tycho-network",
  "tycho-storage",
  "tycho-util",
+ "weedb",
 ]
 
 [[package]]

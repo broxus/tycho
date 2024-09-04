@@ -4,14 +4,16 @@ use everscale_crypto::ed25519::KeyPair;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use tycho_network::PeerId;
+use tycho_storage::PointFlags;
 use tycho_util::FastDashMap;
 
 use crate::dag::anchor_stage::AnchorStage;
 use crate::dag::dag_location::{DagLocation, InclusionState};
 use crate::dag::dag_point_future::DagPointFuture;
 use crate::effects::{Effects, EngineContext, MempoolStore, ValidateContext};
+use crate::engine::MempoolConfig;
 use crate::intercom::{Downloader, PeerSchedule};
-use crate::models::{Digest, PeerCount, Point, Round};
+use crate::models::{Digest, PeerCount, Point, PointInfo, Round};
 
 #[derive(Clone)]
 /// Allows memory allocated by DAG to be freed
@@ -36,42 +38,39 @@ struct DagRoundInner {
 }
 
 impl WeakDagRound {
-    const BOTTOM: Self = WeakDagRound(Weak::new());
     pub fn upgrade(&self) -> Option<DagRound> {
         self.0.upgrade().map(DagRound)
     }
 }
 
 impl DagRound {
-    pub fn next(&self, peer_schedule: &PeerSchedule) -> Self {
-        let next_round = self.round().next();
-        let (peers_len, key_pair) = {
-            let guard = peer_schedule.atomic();
-            let peers_len = guard.peers_for(next_round).len();
-            (peers_len, guard.local_keys(next_round))
-        };
-        let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
-        Self(Arc::new(DagRoundInner {
-            round: next_round,
-            peer_count: PeerCount::try_from(peers_len)
-                .unwrap_or_else(|e| panic!("{e} for {next_round:?}")),
-            key_pair,
-            anchor_stage: AnchorStage::of(next_round, peer_schedule),
-            locations,
-            prev: self.downgrade(),
-        }))
+    pub fn new_bottom(round: Round, peer_schedule: &PeerSchedule) -> Self {
+        Self::new(round, peer_schedule, WeakDagRound(Weak::new()))
     }
 
-    pub fn genesis(genesis: &Point, peer_schedule: &PeerSchedule) -> Self {
-        let locations = FastDashMap::with_capacity_and_hasher(1, Default::default());
-        let round = genesis.round();
+    pub fn new_next(&self, peer_schedule: &PeerSchedule) -> Self {
+        Self::new(self.round().next(), peer_schedule, self.downgrade())
+    }
+
+    fn new(round: Round, peer_schedule: &PeerSchedule, prev: WeakDagRound) -> Self {
+        let (peers_len, key_pair) = {
+            let guard = peer_schedule.atomic();
+            let peers_len = guard.peers_for(round).len();
+            (peers_len, guard.local_keys(round))
+        };
+        let locations = FastDashMap::with_capacity_and_hasher(peers_len, Default::default());
+        let peer_count = if round == MempoolConfig::genesis_round() {
+            PeerCount::GENESIS
+        } else {
+            PeerCount::try_from(peers_len).unwrap_or_else(|e| panic!("{e} for {round:?}"))
+        };
         Self(Arc::new(DagRoundInner {
             round,
-            peer_count: PeerCount::GENESIS,
-            key_pair: None,
+            peer_count,
+            key_pair,
             anchor_stage: AnchorStage::of(round, peer_schedule),
             locations,
-            prev: WeakDagRound::BOTTOM,
+            prev,
         }))
     }
 
@@ -213,6 +212,32 @@ impl DagRound {
                 |existing| existing.resolve_download(point),
             )
             .map(|first| first.clone().map(|_| result_state).boxed())
+        })
+    }
+
+    pub fn restore_exact(
+        &self,
+        info: &PointInfo,
+        flags: &PointFlags,
+        downloader: &Downloader,
+        store: &MempoolStore,
+        effects: &Effects<EngineContext>,
+    ) -> BoxFuture<'static, InclusionState> {
+        let _guard = effects.span().enter();
+        assert_eq!(
+            info.round(),
+            self.round(),
+            "Coding error: point info round does not match dag round"
+        );
+        let digest = info.digest();
+        self.edit(&info.data().author, |loc| {
+            let result_state = loc.state().clone();
+            loc.get_or_init(digest, |state| {
+                DagPointFuture::new_restore(self, info, flags, state, downloader, store, effects)
+            })
+            .clone()
+            .map(|_| result_state)
+            .boxed()
         })
     }
 

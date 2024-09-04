@@ -62,14 +62,14 @@ pub fn make_dag<const PEER_COUNT: usize>(
         );
         guard.rotate(&peer_schedule);
     }
-    let genesis_round = DagRound::genesis(genesis, &peer_schedule);
-    let next_dag_round = genesis_round.next(&peer_schedule);
+    let genesis_round = DagRound::new_bottom(genesis.round(), &peer_schedule);
+    let next_dag_round = genesis_round.new_next(&peer_schedule);
 
     let _ = genesis_round.insert_exact_sign(genesis, next_dag_round.key_pair(), store);
 
     let mut dag = Dag::default();
 
-    dag.init(genesis_round.clone(), genesis_round.next(&peer_schedule));
+    dag.init(genesis_round.clone());
 
     (dag, peer_schedule, stub_downloader)
 }

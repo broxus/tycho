@@ -80,8 +80,8 @@ impl Verifier {
             return ValidateContext::validated(dag_point);
         };
         assert_eq!(
-            point.round(),
             r_0.round(),
+            point.round(),
             "Coding error: dag round mismatches point round"
         );
 
