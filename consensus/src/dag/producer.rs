@@ -70,8 +70,13 @@ impl Producer {
             AnchorStageRole::Proof,
         );
 
-        let (time, anchor_time) =
-            Self::get_time(&anchor_proof, last_own_point, &includes, &witness);
+        let (time, anchor_time) = Self::get_time(
+            &anchor_proof,
+            &local_id,
+            last_own_point,
+            &includes,
+            &witness,
+        );
 
         let includes = includes
             .into_iter()
@@ -92,12 +97,13 @@ impl Producer {
         Some(Point::new(
             key_pair,
             current_round.round(),
-            last_own_point.map(|p| p.evidence.clone()),
+            last_own_point
+                .map(|p| p.evidence.clone())
+                .unwrap_or_default(),
             payload,
             PointData {
                 author: local_id,
                 time,
-                prev_digest: last_own_point.map(|p| p.digest.clone()),
                 includes,
                 witness,
                 anchor_trigger,
@@ -203,24 +209,27 @@ impl Producer {
 
     fn get_time(
         anchor_proof: &Link,
+        local_id: &PeerId,
         prev_point: Option<&LastOwnPoint>,
         includes: &[PointInfo],
         witness: &[PointInfo],
     ) -> (UnixTime, UnixTime) {
         let mut time = UnixTime::now();
 
-        let prev_point = prev_point.and_then(|prev| {
-            includes
-                .iter()
-                .find(|point| point.digest() == &prev.digest)
-                .inspect(|point| {
-                    time = point.data().time.max(time);
-                })
-        });
+        let prev_info = includes
+            .iter()
+            .find(|point| point.data().author == local_id)
+            .inspect(|info| time = info.data().time.max(time));
+
+        assert_eq!(
+            prev_info.map(|prev| prev.digest()),
+            prev_point.map(|prev| &prev.digest),
+            "included prev point digest does not match broadcasted one"
+        );
 
         match anchor_proof {
             Link::ToSelf => {
-                let point = prev_point.expect("anchor candidate should exist");
+                let point = prev_info.expect("anchor candidate should exist");
 
                 let anchor_time = point.data().time;
 

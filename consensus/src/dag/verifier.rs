@@ -155,7 +155,7 @@ impl Verifier {
                     // peer has to jump over a round if it had some invalid point in prev loc
                     r_1.view(&point.data().author, |loc| {
                         // do not add same prev_digest twice - it is added as one of 'includes'
-                        Self::versions_except(loc, point.data().prev_digest.as_ref())
+                        Self::versions_except(loc, point.data().prev_digest())
                     })
                     .into_iter()
                     .flatten()
@@ -437,7 +437,7 @@ impl Verifier {
     /// check only direct dependencies and location for previous point (let it jump over round)
     async fn is_valid(point: &Point, mut deps_and_prev: FuturesUnordered<DagPointFuture>) -> bool {
         // point is well-formed if we got here, so point.proof matches point.includes
-        let prev_digest_in_point = point.data().prev_digest.as_ref();
+        let prev_digest_in_point = point.data().prev_digest();
         let prev_round = point.round().prev();
 
         // Indirect dependencies may be evicted from memory and not participate in this check,
@@ -569,19 +569,19 @@ impl Verifier {
                 return false;
             }
         }
-        let Some(evidence /* @ r-1 */) = point.evidence() else {
+        if point.evidence().is_empty() {
             return true;
-        };
+        }
         // Every point producer @ r-1 must prove its delivery to 2/3 signers @ r+0
         // inside proving point @ r+0.
 
         let Ok(proof_peer_count) = PeerCount::try_from(proof_peers.len()) else {
             return false;
         };
-        if evidence.len() < proof_peer_count.majority_of_others() {
+        if point.evidence().len() < proof_peer_count.majority_of_others() {
             return false;
         }
-        for (peer_id, _) in evidence.iter() {
+        for peer_id in point.evidence().keys() {
             if !proof_peers.contains(peer_id) {
                 return false;
             }
@@ -606,8 +606,7 @@ impl Verifier {
         );
         let prev_digest = point
             .data()
-            .prev_digest
-            .as_ref()
+            .prev_digest()
             .expect("Coding error: passed point doesn't contain proof for a given vertex");
         assert_eq!(
             prev_digest, proven.digest(),

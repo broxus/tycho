@@ -198,7 +198,7 @@ pub fn point<const PEER_COUNT: usize>(
     );
     let peer_count = PeerCount::try_from(PEER_COUNT).expect("enough peers in non-genesis round");
 
-    let (prev_digest, evidence) = match prev_points.get(&peers[idx].0) {
+    let evidence = match prev_points.get(&peers[idx].0) {
         Some(prev_point) => {
             let mut evidence = BTreeMap::default();
             for i in &rand_arr::<PEER_COUNT>()[..(peer_count.majority_of_others() + 1)] {
@@ -207,9 +207,9 @@ pub fn point<const PEER_COUNT: usize>(
                 }
                 evidence.insert(peers[*i].0, Signature::new(&peers[*i].1, prev_point));
             }
-            (Some(prev_point.clone()), Some(evidence))
+            evidence
         }
-        None => (None, None),
+        None => BTreeMap::default(),
     };
 
     let mut payload = Vec::with_capacity(msg_count);
@@ -238,7 +238,6 @@ pub fn point<const PEER_COUNT: usize>(
     Point::new(&peers[idx].1, round, evidence, payload, PointData {
         author: peers[idx].0,
         time: last_candidate.data().time.max(UnixTime::now()),
-        prev_digest,
         includes: prev_points.clone(),
         witness: Default::default(),
         anchor_trigger,

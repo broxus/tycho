@@ -17,12 +17,11 @@ pub fn genesis() -> Point {
     Point::new(
         &genesis_keys,
         MempoolConfig::genesis_round(),
-        None,
-        vec![],
+        Default::default(),
+        Default::default(),
         PointData {
             author: genesis_keys.public_key.into(),
             time: UnixTime::from_millis(GENESIS_MILLIS),
-            prev_digest: None,
             includes: Default::default(),
             witness: Default::default(),
             anchor_trigger: Link::ToSelf,

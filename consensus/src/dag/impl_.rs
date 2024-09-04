@@ -341,7 +341,7 @@ impl Dag {
             if is_used.load(Ordering::Relaxed) {
                 break Some(result_stack);
             };
-            let anchor_digest = match proof.info.data().prev_digest.as_ref() {
+            let anchor_digest = match proof.info.data().prev_digest() {
                 Some(anchor_digest) => anchor_digest,
                 None => panic!("anchor proof must prove to anchor point, verify() is broken"),
             };
