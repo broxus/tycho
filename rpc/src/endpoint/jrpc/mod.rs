@@ -13,10 +13,15 @@ use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
+pub use self::cache::JrpcEndpointCache;
 use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
+use crate::endpoint::{
+    INTERNAL_ERROR_CODE, INVALID_BOC_CODE, NOT_READY_CODE, NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
+};
 use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
+mod cache;
 mod extractor;
 
 declare_jrpc_method! {
@@ -40,11 +45,12 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
         MethodParams::GetCapabilities(_) => ok_to_response(req.id, get_capabilities(&state)),
-        MethodParams::GetLatestKeyBlock(_) => match &*state.load_latest_key_block_json() {
+        MethodParams::GetLatestKeyBlock(_) => match &*state.jrpc_cache().load_latest_key_block() {
             Some(config) => ok_to_response(req.id, config.as_ref()),
             None => error_to_response(req.id, RpcStateError::NotReady),
         },
-        MethodParams::GetBlockchainConfig(_) => match &*state.load_blockchain_config_json() {
+        MethodParams::GetBlockchainConfig(_) => match &*state.jrpc_cache().load_blockchain_config()
+        {
             Some(config) => ok_to_response(req.id, config.as_ref()),
             None => error_to_response(req.id, RpcStateError::NotReady),
         },
@@ -277,21 +283,7 @@ where
 {
     use serde::ser::Error;
 
-    fn write_account(account: &Account) -> Result<Cell, everscale_types::error::Error> {
-        let cx = &mut Cell::empty_context();
-        let mut builder = CellBuilder::new();
-        account.address.store_into(&mut builder, cx)?;
-        account.storage_stat.store_into(&mut builder, cx)?;
-        account.last_trans_lt.store_into(&mut builder, cx)?;
-        account.balance.store_into(&mut builder, cx)?;
-        account.state.store_into(&mut builder, cx)?;
-        if account.init_code_hash.is_some() {
-            account.init_code_hash.store_into(&mut builder, cx)?;
-        }
-        builder.build_ext(cx)
-    }
-
-    let cell = write_account(account).map_err(Error::custom)?;
+    let cell = crate::models::serialize_account(account).map_err(Error::custom)?;
     Boc::encode_base64(cell).serialize(serializer)
 }
 
@@ -391,11 +383,3 @@ fn too_large_limit_response(id: i64) -> Response {
     }
     .into_response()
 }
-
-// === Error codes ===
-
-const INTERNAL_ERROR_CODE: i32 = -32000;
-const NOT_READY_CODE: i32 = -32001;
-const NOT_SUPPORTED_CODE: i32 = -32002;
-const INVALID_BOC_CODE: i32 = -32003;
-const TOO_LARGE_LIMIT_CODE: i32 = -32004;

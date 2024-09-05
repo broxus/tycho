@@ -845,6 +845,12 @@ pub struct CodeHashesIter<'a> {
     inner: rocksdb::DBRawIterator<'a>,
 }
 
+impl<'a> CodeHashesIter<'a> {
+    pub fn into_raw(self) -> RawCodeHashesIter<'a> {
+        RawCodeHashesIter { inner: self.inner }
+    }
+}
+
 impl Iterator for CodeHashesIter<'_> {
     type Item = StdAddr;
 
@@ -857,6 +863,23 @@ impl Iterator for CodeHashesIter<'_> {
             workchain: value[32] as i8,
             address: HashBytes(value[33..65].try_into().unwrap()),
         });
+        self.inner.next();
+        result
+    }
+}
+
+pub struct RawCodeHashesIter<'a> {
+    inner: rocksdb::DBRawIterator<'a>,
+}
+
+impl Iterator for RawCodeHashesIter<'_> {
+    type Item = [u8; 33];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let value = self.inner.key()?;
+        debug_assert!(value.len() == tables::CodeHashes::KEY_LEN);
+
+        let result = Some(value[32..65].try_into().unwrap());
         self.inner.next();
         result
     }

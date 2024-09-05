@@ -51,17 +51,16 @@ pub struct StateTimings {
     pub smallest_known_lt: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct LatestKeyBlockRef<'a> {
-    #[serde(with = "BocRepr")]
-    pub block: &'a Block,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LatestBlockchainConfigRef<'a> {
-    pub global_id: i32,
-    pub seqno: u32,
-    #[serde(with = "BocRepr")]
-    pub config: &'a BlockchainConfig,
+pub fn serialize_account(account: &Account) -> Result<Cell, everscale_types::error::Error> {
+    let cx = &mut Cell::empty_context();
+    let mut builder = CellBuilder::new();
+    account.address.store_into(&mut builder, cx)?;
+    account.storage_stat.store_into(&mut builder, cx)?;
+    account.last_trans_lt.store_into(&mut builder, cx)?;
+    account.balance.store_into(&mut builder, cx)?;
+    account.state.store_into(&mut builder, cx)?;
+    if account.init_code_hash.is_some() {
+        account.init_code_hash.store_into(&mut builder, cx)?;
+    }
+    builder.build_ext(cx)
 }
