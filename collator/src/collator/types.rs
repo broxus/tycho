@@ -18,6 +18,7 @@ use tycho_network::PeerId;
 use tycho_util::FastHashMap;
 
 use crate::mempool::{MempoolAnchor, MempoolAnchorId};
+use crate::tracing_targets;
 use crate::types::{McData, ProcessedUptoInfoStuff, ProofFunds};
 
 pub(super) struct WorkingState {
@@ -984,6 +985,13 @@ impl MessageGroups {
         if first_group_opt.is_some() {
             self.offset += 1;
         }
+        if let Some(first_group) = first_group_opt.as_ref() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "extracted first message group from message_groups buffer: offset={}, buffer int={}, ext={}, group {}",
+                self.offset(), self.int_messages_count(), self.ext_messages_count(),
+                DisplayMessageGroup(first_group),
+            );
+        }
         first_group_opt
     }
 
@@ -1013,6 +1021,13 @@ impl MessageGroups {
                 self.offset += 1;
                 merged_group_opt = Some(next_group);
             }
+        }
+        if let Some(merged_group) = merged_group_opt.as_ref() {
+            tracing::debug!(target: tracing_targets::COLLATOR,
+                "extracted merged message group of new messages from message_groups buffer: buffer int={}, ext={}, group {}",
+                self.int_messages_count(), self.ext_messages_count(),
+                DisplayMessageGroup(merged_group),
+            );
         }
         merged_group_opt
     }

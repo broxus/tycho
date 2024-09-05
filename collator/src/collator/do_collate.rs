@@ -183,7 +183,7 @@ impl CollatorStdImpl {
             );
 
             while exec_manager.message_groups_offset() < prev_processed_offset {
-                exec_manager
+                let msg_group = exec_manager
                     .get_next_message_group(
                         self,
                         &mut collation_data,
@@ -192,6 +192,11 @@ impl CollatorStdImpl {
                         &working_state,
                     )
                     .await?;
+                if msg_group.is_none() {
+                    // on recovery we will be unable to refill buffer with externals
+                    // so we stop refilling when there is no more groups in buffer
+                    break;
+                }
             }
         }
 

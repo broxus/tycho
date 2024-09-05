@@ -772,7 +772,7 @@ impl CollatorStdImpl {
         metrics::gauge!("tycho_collator_ext_msgs_imported_queue_size", &labels)
             .increment(our_exts_count as f64);
 
-        let chain_time_elapsed = next_anchor.chain_time - ct;
+        let chain_time_elapsed = next_anchor.chain_time.saturating_sub(ct);
 
         tracing::debug!(target: tracing_targets::COLLATOR,
             elapsed = timer.elapsed().as_millis(),
