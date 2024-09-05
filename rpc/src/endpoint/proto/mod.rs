@@ -10,6 +10,7 @@ use everscale_types::cell::HashBytes;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 
+pub use self::cache::ProtoEndpointCache;
 use self::protos::rpc::{self, request, response, Request};
 use super::INVALID_PARAMS_CODE;
 use crate::endpoint::proto::extractor::{
@@ -21,6 +22,7 @@ use crate::endpoint::{
 };
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
+mod cache;
 mod extractor;
 mod protos;
 
@@ -30,26 +32,15 @@ pub async fn route(State(state): State<RpcState>, Protobuf(req): Protobuf<Reques
             let result = get_capabilities(&state);
             (StatusCode::OK, ProtobufRef(result)).into_response()
         }
-        Some(request::Call::GetLatestKeyBlock(())) => match &*state.load_latest_key_block_proto() {
-            Some(config) => {
-                let result = response::Result::GetLatestKeyBlock(response::GetLatestKeyBlock {
-                    block: config.as_ref().clone(),
-                });
-                ok_to_response(result)
+        Some(request::Call::GetLatestKeyBlock(())) => {
+            match &*state.proto_cache().load_latest_key_block() {
+                Some(config) => config.as_ref().clone().into_response(),
+                None => error_to_response(RpcStateError::NotReady),
             }
-            None => error_to_response(RpcStateError::NotReady),
-        },
+        }
         Some(request::Call::GetBlockchainConfig(())) => {
-            match &*state.load_blockchain_config_proto() {
-                Some(config) => {
-                    let result =
-                        response::Result::GetBlockchainConfig(response::GetBlockchainConfig {
-                            global_id: config.global_id,
-                            seqno: config.seqno,
-                            config: config.config.clone(),
-                        });
-                    ok_to_response(result)
-                }
+            match &*state.proto_cache().load_blockchain_config() {
+                Some(config) => config.as_ref().clone().into_response(),
                 None => error_to_response(RpcStateError::NotReady),
             }
         }
@@ -370,7 +361,7 @@ fn hash_from_bytes(bytes: Bytes) -> Option<HashBytes> {
 }
 
 fn serialize_account(account: &Account) -> Result<Bytes, everscale_types::error::Error> {
-    let cell = crate::models::serialize_account(&account)?;
+    let cell = crate::models::serialize_account(account)?;
     Ok(Boc::encode(cell).into())
 }
 

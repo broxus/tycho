@@ -79,11 +79,43 @@ impl ProtoOkResponse {
             result: Some(result),
         })
     }
+
+    pub fn into_raw(self) -> RawProtoOkResponse {
+        RawProtoOkResponse::from(self)
+    }
+
+    pub fn as_raw(&self) -> RawProtoOkResponse {
+        RawProtoOkResponse::from(self)
+    }
 }
 
 impl IntoResponse for ProtoOkResponse {
     fn into_response(self) -> Response {
         (StatusCode::OK, Protobuf(self.0)).into_response()
+    }
+}
+
+#[derive(Clone)]
+pub struct RawProtoOkResponse(pub bytes::Bytes);
+
+impl From<ProtoOkResponse> for RawProtoOkResponse {
+    fn from(value: ProtoOkResponse) -> Self {
+        RawProtoOkResponse(value.0.encode_to_vec().into())
+    }
+}
+
+impl From<&ProtoOkResponse> for RawProtoOkResponse {
+    fn from(value: &ProtoOkResponse) -> Self {
+        RawProtoOkResponse(value.0.encode_to_vec().into())
+    }
+}
+
+impl IntoResponse for RawProtoOkResponse {
+    fn into_response(self) -> Response {
+        let mut res = Response::new(self.0.into());
+        res.headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static(APPLICATION_PROTOBUF));
+        res
     }
 }
 

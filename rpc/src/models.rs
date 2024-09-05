@@ -51,21 +51,6 @@ pub struct StateTimings {
     pub smallest_known_lt: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct LatestKeyBlockRef<'a> {
-    #[serde(with = "BocRepr")]
-    pub block: &'a Block,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LatestBlockchainConfigRef<'a> {
-    pub global_id: i32,
-    pub seqno: u32,
-    #[serde(with = "BocRepr")]
-    pub config: &'a BlockchainConfig,
-}
-
 pub fn serialize_account(account: &Account) -> Result<Cell, everscale_types::error::Error> {
     let cx = &mut Cell::empty_context();
     let mut builder = CellBuilder::new();

@@ -2,12 +2,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arc_swap::{ArcSwap, ArcSwapOption};
+use arc_swap::ArcSwap;
 use everscale_types::models::*;
 use everscale_types::prelude::*;
 use futures_util::future::BoxFuture;
 use parking_lot::RwLock;
-use serde_json::value::RawValue;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use tycho_block_util::block::BlockStuff;
@@ -22,8 +21,8 @@ use tycho_util::time::now_sec;
 use tycho_util::FastHashMap;
 
 use crate::config::{RpcConfig, TransactionsGcConfig};
-use crate::endpoint::RpcEndpoint;
-use crate::models::{GenTimings, LatestBlockchainConfigRef, LatestKeyBlockRef, StateTimings};
+use crate::endpoint::{JrpcEndpointCache, ProtoEndpointCache, RpcEndpoint};
+use crate::models::{GenTimings, StateTimings};
 
 pub struct RpcStateBuilder<MandatoryFields = (Storage, BlockchainRpcClient)> {
     config: RpcConfig,
@@ -52,10 +51,8 @@ impl RpcStateBuilder {
                 sc_accounts: Default::default(),
                 is_ready: AtomicBool::new(false),
                 timings: ArcSwap::new(Default::default()),
-                latest_key_block_json: ArcSwapOption::default(),
-                blockchain_config_json: ArcSwapOption::default(),
-                latest_key_block_proto: ArcSwapOption::default(),
-                blockchain_config_proto: ArcSwapOption::default(),
+                jrpc_cache: Default::default(),
+                proto_cache: Default::default(),
                 gc_notify,
                 gc_handle,
             }),
@@ -142,22 +139,12 @@ impl RpcState {
         self.inner.timings.load()
     }
 
-    pub fn load_latest_key_block_json(&self) -> arc_swap::Guard<Option<CachedJson>> {
-        self.inner.latest_key_block_json.load()
+    pub fn jrpc_cache(&self) -> &JrpcEndpointCache {
+        &self.inner.jrpc_cache
     }
 
-    pub fn load_blockchain_config_json(&self) -> arc_swap::Guard<Option<CachedJson>> {
-        self.inner.blockchain_config_json.load()
-    }
-
-    pub fn load_latest_key_block_proto(&self) -> arc_swap::Guard<Option<Arc<bytes::Bytes>>> {
-        self.inner.latest_key_block_proto.load()
-    }
-
-    pub fn load_blockchain_config_proto(
-        &self,
-    ) -> arc_swap::Guard<Option<Arc<BlockchainConfigProto>>> {
-        self.inner.blockchain_config_proto.load()
+    pub fn proto_cache(&self) -> &ProtoEndpointCache {
+        &self.inner.proto_cache
     }
 
     pub async fn broadcast_external_message(&self, message: &[u8]) {
@@ -281,10 +268,8 @@ struct Inner {
     sc_accounts: RwLock<FastHashMap<ShardIdent, CachedAccounts>>,
     is_ready: AtomicBool,
     timings: ArcSwap<StateTimings>,
-    latest_key_block_json: ArcSwapOption<Box<RawValue>>,
-    blockchain_config_json: ArcSwapOption<Box<RawValue>>,
-    latest_key_block_proto: ArcSwapOption<bytes::Bytes>,
-    blockchain_config_proto: ArcSwapOption<BlockchainConfigProto>,
+    jrpc_cache: JrpcEndpointCache,
+    proto_cache: ProtoEndpointCache,
     // GC
     gc_notify: Arc<Notify>,
     gc_handle: Option<JoinHandle<()>>,
@@ -449,28 +434,8 @@ impl Inner {
             tracing::error!("key block without config");
         }
 
-        // Try to update cached key block:
-        match serde_json::value::to_raw_value(&LatestKeyBlockRef {
-            block: block.as_ref(),
-        }) {
-            Ok(value) => {
-                self.latest_key_block_json.store(Some(Arc::new(value)));
-            }
-            Err(e) => {
-                tracing::error!("failed to serialize key block json: {e}");
-            }
-        }
-
-        match BocRepr::encode(block.as_ref()) {
-            Ok(block) => {
-                self.latest_key_block_proto
-                    .store(Some(Arc::new(block.into())));
-            }
-            Err(e) => {
-                tracing::error!("failed to serialize key block proto: {e}");
-            }
-        }
-
+        self.jrpc_cache.handle_key_block(block.as_ref());
+        self.proto_cache.handle_key_block(block.as_ref());
         Ok(())
     }
 
@@ -485,32 +450,8 @@ impl Inner {
     }
 
     fn update_config(&self, global_id: i32, seqno: u32, config: &BlockchainConfig) {
-        match serde_json::value::to_raw_value(&LatestBlockchainConfigRef {
-            global_id,
-            seqno,
-            config,
-        }) {
-            Ok(value) => {
-                self.blockchain_config_json.store(Some(Arc::new(value)));
-            }
-            Err(e) => {
-                tracing::error!("failed to serialize blockchain config json: {e}");
-            }
-        }
-
-        match BocRepr::encode(config) {
-            Ok(config) => {
-                self.blockchain_config_proto
-                    .store(Some(Arc::new(BlockchainConfigProto {
-                        global_id,
-                        seqno,
-                        config: config.into(),
-                    })));
-            }
-            Err(e) => {
-                tracing::error!("failed to serialize blockchain config proto: {e}");
-            }
-        }
+        self.jrpc_cache.handle_config(global_id, seqno, config);
+        self.proto_cache.handle_config(global_id, seqno, config);
     }
 
     fn update_accounts_cache(&self, block: &BlockStuff, state: &ShardStateStuff) -> Result<()> {
@@ -627,8 +568,6 @@ impl CachedAccounts {
 
 type ShardAccountsDict = Dict<HashBytes, (DepthBalanceInfo, ShardAccount)>;
 
-type CachedJson = Arc<Box<RawValue>>;
-
 async fn transactions_gc(config: TransactionsGcConfig, storage: Storage, gc_notify: Arc<Notify>) {
     let Some(persistent_storage) = storage.rpc_storage() else {
         return;
@@ -687,12 +626,6 @@ async fn find_closest_key_block_lt(storage: &Storage, utime: u32) -> Result<u64>
     let (virt_block, _) = block_proof.virtualize_block()?;
     let info = virt_block.info.load()?;
     Ok(info.start_lt)
-}
-
-pub struct BlockchainConfigProto {
-    pub global_id: i32,
-    pub seqno: u32,
-    pub config: bytes::Bytes,
 }
 
 #[derive(Debug, thiserror::Error)]

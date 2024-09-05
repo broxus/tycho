@@ -7,6 +7,8 @@ use axum::routing::{get, post};
 use axum::RequestExt;
 use tokio::net::TcpListener;
 
+pub use self::jrpc::JrpcEndpointCache;
+pub use self::proto::ProtoEndpointCache;
 use crate::state::RpcState;
 
 mod jrpc;

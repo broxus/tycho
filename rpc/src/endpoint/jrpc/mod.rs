@@ -13,6 +13,7 @@ use tycho_storage::{CodeHashesIter, TransactionsIterBuilder};
 use tycho_util::metrics::HistogramGuard;
 use tycho_util::serde_helpers;
 
+pub use self::cache::JrpcEndpointCache;
 use self::extractor::{declare_jrpc_method, Jrpc, JrpcErrorResponse, JrpcOkResponse};
 use crate::endpoint::{
     INTERNAL_ERROR_CODE, INVALID_BOC_CODE, NOT_READY_CODE, NOT_SUPPORTED_CODE, TOO_LARGE_LIMIT_CODE,
@@ -20,6 +21,7 @@ use crate::endpoint::{
 use crate::models::{GenTimings, LastTransactionId};
 use crate::state::{LoadedAccountState, RpcState, RpcStateError};
 
+mod cache;
 mod extractor;
 
 declare_jrpc_method! {
@@ -43,11 +45,12 @@ pub async fn route(State(state): State<RpcState>, req: Jrpc<Method>) -> Response
     let _hist = HistogramGuard::begin_with_labels("tycho_jrpc_request_time", &label);
     match req.params {
         MethodParams::GetCapabilities(_) => ok_to_response(req.id, get_capabilities(&state)),
-        MethodParams::GetLatestKeyBlock(_) => match &*state.load_latest_key_block_json() {
+        MethodParams::GetLatestKeyBlock(_) => match &*state.jrpc_cache().load_latest_key_block() {
             Some(config) => ok_to_response(req.id, config.as_ref()),
             None => error_to_response(req.id, RpcStateError::NotReady),
         },
-        MethodParams::GetBlockchainConfig(_) => match &*state.load_blockchain_config_json() {
+        MethodParams::GetBlockchainConfig(_) => match &*state.jrpc_cache().load_blockchain_config()
+        {
             Some(config) => ok_to_response(req.id, config.as_ref()),
             None => error_to_response(req.id, RpcStateError::NotReady),
         },
