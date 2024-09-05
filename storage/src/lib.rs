@@ -152,7 +152,7 @@ impl StorageBuilder {
                 .with_options(|opts, _| update_options(opts, threads, fdlimit))
                 .build()?;
 
-        let mempool_storage = MempoolStorage::new(mempool_db);
+        let mempool_storage = MempoolStorage::new(mempool_db).await?;
 
         let inner = Arc::new(Inner {
             root,
