@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 use tycho_block_util::archive::{Archive, ArchiveError};
+use tycho_block_util::block::BlockIdRelation;
 use tycho_storage::{NewBlockMeta, Storage};
 use tycho_util::time::now_sec;
 
@@ -121,7 +122,7 @@ impl ArchiveBlockProvider {
         }
     }
 
-    async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
+    async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
         let this = self.inner.as_ref();
 
         let mut archive = this.last_known_archive.load_full();
@@ -129,7 +130,7 @@ impl ArchiveBlockProvider {
             let mut fallback = Some(&this.prev_known_archive);
 
             while let Some(a) = &archive {
-                match a.get_entry_by_id(block_id) {
+                match a.get_entry_by_id(block_id_relation.block_id()) {
                     // Successfully found the block and proof
                     Ok(entry) => break 'found entry,
                     // Block not found in the archive so try the fallback archive
@@ -346,8 +347,8 @@ impl BlockProvider for ArchiveBlockProvider {
         Box::pin(self.get_next_block_impl(prev_block_id))
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(self.get_block_impl(block_id))
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        Box::pin(self.get_block_impl(block_id_relation))
     }
 }
 

@@ -5,6 +5,7 @@ use everscale_types::prelude::*;
 use futures_util::future;
 use futures_util::future::BoxFuture;
 use tycho_block_util::archive::Archive;
+use tycho_block_util::block::{BlockIdExt, BlockIdRelation};
 use tycho_block_util::state::{MinRefMcStateTracker, ShardStateStuff};
 use tycho_core::block_strider::{
     BlockProvider, BlockProviderExt, BlockStrider, OptionalBlockStuff, PersistentBlockStriderState,
@@ -33,8 +34,9 @@ pub struct ArchiveProvider {
 }
 
 impl ArchiveProvider {
-    async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
-        let (block, proof, diff) = match self.archive.get_entry_by_id(block_id) {
+    async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
+        let (block, proof, diff) = match self.archive.get_entry_by_id(block_id_relation.block_id())
+        {
             Ok(entry) => entry,
             Err(e) => return Some(Err(e.into())),
         };
@@ -59,12 +61,13 @@ impl BlockProvider for ArchiveProvider {
             Some(id) => id,
             None => return Box::pin(futures_util::future::ready(None)),
         };
-
-        self.get_block(id)
+        let id = *id;
+        let value = id.relative_to_self();
+        self.get_block(&value)
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(self.get_block_impl(block_id))
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        Box::pin(self.get_block_impl(block_id_relation))
     }
 }
 

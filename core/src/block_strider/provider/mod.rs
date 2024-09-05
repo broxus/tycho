@@ -8,8 +8,8 @@ use arc_swap::ArcSwapAny;
 use everscale_types::models::BlockId;
 use futures_util::future::{self, BoxFuture};
 use tycho_block_util::block::{
-    check_with_master_state, check_with_prev_key_block_proof, BlockProofStuff, BlockProofStuffAug,
-    BlockStuff, BlockStuffAug,
+    check_with_master_state, check_with_prev_key_block_proof, BlockIdRelation, BlockProofStuff,
+    BlockProofStuffAug, BlockStuff, BlockStuffAug,
 };
 use tycho_block_util::queue::QueueDiffStuffAug;
 use tycho_block_util::state::ShardStateStuff;
@@ -34,7 +34,7 @@ pub trait BlockProvider: Send + Sync + 'static {
     type GetBlockFut<'a>: Future<Output = OptionalBlockStuff> + Send + 'a;
 
     fn get_next_block<'a>(&'a self, prev_block_id: &'a BlockId) -> Self::GetNextBlockFut<'a>;
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a>;
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a>;
 }
 
 impl<T: BlockProvider> BlockProvider for Box<T> {
@@ -45,8 +45,8 @@ impl<T: BlockProvider> BlockProvider for Box<T> {
         <T as BlockProvider>::get_next_block(self, prev_block_id)
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        <T as BlockProvider>::get_block(self, block_id)
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        <T as BlockProvider>::get_block(self, block_id_relation)
     }
 }
 
@@ -58,8 +58,8 @@ impl<T: BlockProvider> BlockProvider for Arc<T> {
         <T as BlockProvider>::get_next_block(self, prev_block_id)
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        <T as BlockProvider>::get_block(self, block_id)
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        <T as BlockProvider>::get_block(self, block_id_relation)
     }
 }
 
@@ -89,7 +89,7 @@ impl BlockProvider for EmptyBlockProvider {
         future::ready(None)
     }
 
-    fn get_block<'a>(&'a self, _block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
+    fn get_block<'a>(&'a self, _block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
         future::ready(None)
     }
 }
@@ -117,12 +117,12 @@ impl<T1: BlockProvider, T2: BlockProvider> BlockProvider for ChainBlockProvider<
         })
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'_> {
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'_> {
         Box::pin(async {
             if self.is_right.load(Ordering::Acquire) {
-                self.right.get_block(block_id).await
+                self.right.get_block(block_id_relation).await
             } else {
-                self.left.get_block(block_id).await
+                self.left.get_block(block_id_relation).await
             }
         })
     }
@@ -149,8 +149,8 @@ macro_rules! impl_provider_tuple {
                 })
             }
 
-            fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-                $(let $var = self.$n.get_block(block_id));*;
+            fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+                $(let $var = self.$n.get_block(block_id_relation));*;
 
                 Box::pin(async move {
                     $(let $var = pin!($var));*;
@@ -337,7 +337,7 @@ mod test {
             })
         }
 
-        fn get_block(&self, _block_id: &BlockId) -> Self::GetBlockFut<'_> {
+        fn get_block(&self, _block_id: &BlockIdRelation) -> Self::GetBlockFut<'_> {
             Box::pin(async {
                 if self.has_block.load(Ordering::Acquire) {
                     Some(Ok(get_empty_block()))

@@ -5,7 +5,7 @@ use everscale_types::models::*;
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use tycho_block_util::archive::WithArchiveData;
-use tycho_block_util::block::{BlockProofStuff, BlockStuff};
+use tycho_block_util::block::{BlockIdRelation, BlockProofStuff, BlockStuff};
 use tycho_block_util::queue::QueueDiffStuff;
 use tycho_storage::Storage;
 use tycho_util::serde_helpers;
@@ -86,13 +86,13 @@ impl BlockchainBlockProvider {
         }
     }
 
-    async fn get_block_impl(&self, block_id: &BlockId) -> OptionalBlockStuff {
+    async fn get_block_impl(&self, block_id_relation: &BlockIdRelation) -> OptionalBlockStuff {
         // TODO: Backoff?
         let mut interval = tokio::time::interval(self.config.get_block_polling_interval);
 
         loop {
-            tracing::debug!(%block_id, "get_block_full requested");
-            match self.client.get_block_full(block_id).await {
+            tracing::debug!(%block_id_relation.block_id(), "get_block_full requested");
+            match self.client.get_block_full(block_id_relation.block_id()).await {
                 Ok(response) => {
                     let parsed = self.process_received_block(response).await;
                     if parsed.is_some() {
@@ -176,7 +176,7 @@ impl BlockProvider for BlockchainBlockProvider {
         Box::pin(self.get_next_block_impl(prev_block_id))
     }
 
-    fn get_block<'a>(&'a self, block_id: &'a BlockId) -> Self::GetBlockFut<'a> {
-        Box::pin(self.get_block_impl(block_id))
+    fn get_block<'a>(&'a self, block_id_relation: &'a BlockIdRelation) -> Self::GetBlockFut<'a> {
+        Box::pin(self.get_block_impl(block_id_relation))
     }
 }
