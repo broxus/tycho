@@ -8,9 +8,8 @@ pub fn schedule_async_action<F, Fut>(
 {
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        async_action().await.map_err(|err| {
-            tracing::warn!("Error executing async action: {}", action_descr);
-            err
-        })
+        if let Err(e) = async_action().await {
+            tracing::warn!(action_descr, "Error executing async action: {e:?}");
+        }
     });
 }

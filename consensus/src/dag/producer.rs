@@ -213,9 +213,8 @@ impl Producer {
             includes
                 .iter()
                 .find(|point| point.digest() == &prev.digest)
-                .map(|point| {
+                .inspect(|point| {
                     time = point.data().time.max(time);
-                    point
                 })
         });
 
