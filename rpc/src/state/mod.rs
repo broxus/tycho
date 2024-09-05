@@ -716,7 +716,8 @@ mod test {
         let storage = Storage::builder()
             .with_config(StorageConfig::new_potato(tmp_dir.path()))
             .with_rpc_storage(true)
-            .build()?;
+            .build()
+            .await?;
 
         let config = RpcConfig::default();
 
@@ -785,7 +786,8 @@ mod test {
         let storage = Storage::builder()
             .with_config(StorageConfig::new_potato(tmp_dir.path()))
             .with_rpc_storage(true)
-            .build()?;
+            .build()
+            .await?;
 
         let network = make_network("tycho")?;
 

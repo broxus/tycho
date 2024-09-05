@@ -613,7 +613,8 @@ mod test {
                 cells_cache_size: ByteSize::mb(256),
                 ..Default::default()
             })
-            .build()?;
+            .build()
+            .await?;
         let base_db = storage.base_db();
         let cell_storage = &storage.shard_state_storage().cell_storage;
 

@@ -36,7 +36,7 @@ impl StateNodeEventListener for MockEventListener {
 
 #[tokio::test]
 async fn test_add_and_get_block() {
-    let (mock_storage, _tmp_dir) = Storage::new_temp().unwrap();
+    let (mock_storage, _tmp_dir) = Storage::new_temp().await.unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),
@@ -105,7 +105,7 @@ async fn test_storage_accessors() {
 
 #[tokio::test]
 async fn test_add_and_get_next_block() {
-    let (mock_storage, _tmp_dir) = Storage::new_temp().unwrap();
+    let (mock_storage, _tmp_dir) = Storage::new_temp().await.unwrap();
     let counter = Arc::new(AtomicUsize::new(0));
     let listener = Arc::new(MockEventListener {
         accepted_count: counter.clone(),

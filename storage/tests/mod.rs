@@ -53,7 +53,7 @@ fn compare_cells(orig_cell: &DynCell, stored_cell: &DynCell) {
 async fn persistent_storage_everscale() -> Result<()> {
     tycho_util::test::init_logger("persistent_storage_everscale", "debug");
 
-    let (storage, _tmp_dir) = Storage::new_temp()?;
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
     assert!(storage.node_state().load_init_mc_block_id().is_none());
 
     // Read zerostate

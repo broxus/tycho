@@ -23,7 +23,7 @@ pub fn try_init_test_tracing(level_filter: tracing_subscriber::filter::LevelFilt
 }
 
 pub async fn prepare_test_storage() -> anyhow::Result<Storage> {
-    let (storage, _tmp_dir) = Storage::new_temp()?;
+    let (storage, _tmp_dir) = Storage::new_temp().await?;
     let tracker = MinRefMcStateTracker::default();
 
     // master state

@@ -39,7 +39,7 @@ pub struct StorageBuilder {
 }
 
 impl StorageBuilder {
-    pub fn build(self) -> Result<Storage> {
+    pub async fn build(self) -> Result<Storage> {
         let root = FileDb::new(&self.config.root_dir)?;
 
         let file_db = root.create_subdir(FILES_SUBDIR)?;
@@ -144,7 +144,7 @@ impl StorageBuilder {
 
         let internal_queue_storage = InternalQueueStorage::new(base_db.clone());
 
-        block_storage.preload_archive_ids()?;
+        block_storage.preload_archive_ids().await?;
 
         let mempool_db =
             MempoolDb::builder_prepared(self.config.root_dir.join(MEMPOOL_SUBDIR), caches)
@@ -153,8 +153,6 @@ impl StorageBuilder {
                 .build()?;
 
         let mempool_storage = MempoolStorage::new(mempool_db);
-
-        // TODO: preload archive ids
 
         let inner = Arc::new(Inner {
             root,
@@ -216,11 +214,12 @@ impl Storage {
     /// NOTE: Temp dir must live longer than the storage,
     /// otherwise compaction filter will not work.
     #[cfg(any(test, feature = "test"))]
-    pub fn new_temp() -> Result<(Self, tempfile::TempDir)> {
+    pub async fn new_temp() -> Result<(Self, tempfile::TempDir)> {
         let tmp_dir = tempfile::tempdir()?;
         let storage = Storage::builder()
             .with_config(StorageConfig::new_potato(tmp_dir.path()))
-            .build()?;
+            .build()
+            .await?;
         Ok((storage, tmp_dir))
     }
 
