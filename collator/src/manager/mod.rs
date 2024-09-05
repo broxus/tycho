@@ -134,6 +134,14 @@ where
 
         metrics_report_last_applied_block_and_anchor(state, &processed_upto);
 
+        let state_cloned = state.clone();
+        self.spawn_task(method_to_async_closure!(
+            detect_top_processed_to_anchor_and_notify_mempool,
+            state_cloned,
+            processed_upto
+        ))
+        .await?;
+
         // TODO: remove accepted block from cache
         // STUB: do nothing, currently we remove block from cache when it sent to state node
 
