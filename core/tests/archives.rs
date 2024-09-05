@@ -11,6 +11,7 @@ use tycho_core::block_strider::{
     ProofChecker, ShardStateApplier, StateSubscriber, StateSubscriberContext,
 };
 use tycho_storage::{ArchivesGcConfig, NewBlockMeta, Storage, StorageConfig};
+use tycho_util::compression::zstd_decompress;
 use tycho_util::project_root;
 
 mod utils;
@@ -308,28 +309,61 @@ async fn heavy_archives() -> Result<()> {
         .build();
 
     block_strider.run().await?;
+    storage.block_storage().wait_for_archive_commit().await?;
 
-    let archive_id = storage.block_storage().get_archive_id(1).unwrap();
+    // Check archive data
+    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
+
+    check_archive(&storage, &archive_data, archive_chunk_size, 1).await?;
+    check_archive(&storage, &next_archive_data, archive_chunk_size, 101).await?;
+
+    Ok(())
+}
+
+async fn check_archive(
+    storage: &Storage,
+    original_archive: &[u8],
+    archive_chunk_size: usize,
+    seqno: u32,
+) -> Result<()> {
+    tracing::info!("Checking archive {}", seqno);
+    let archive_id = storage.block_storage().get_archive_id(seqno).unwrap();
 
     // Check archive size
     let archive_size = storage
         .block_storage()
         .get_archive_size(archive_id)?
         .unwrap();
-    assert_eq!(archive_size, archive_data.len());
 
-    // Check archive data
-    let archive_chunk_size = storage.block_storage().archive_chunk_size().get() as usize;
-
-    let mut expected_archive_data = vec![];
+    let mut got_archive = vec![];
     for offset in (0..archive_size).step_by(archive_chunk_size) {
         let chunk = storage
             .block_storage()
             .get_archive_chunk(archive_id, offset as u64)
             .await?;
-        expected_archive_data.extend(chunk);
+        got_archive.extend(chunk);
     }
-    assert_eq!(archive_data, expected_archive_data);
+
+    let original_decompressed = decompress(original_archive);
+    let got_decompressed = decompress(&got_archive);
+
+    let original_len = original_decompressed.len();
+    let got_len = got_decompressed.len();
+
+    assert_eq!(archive_size, original_archive.len(), "Size mismatch");
+    assert_eq!(got_archive.len(), archive_size, "Retrieved size mismatch");
+    assert_eq!(original_archive, &got_archive, "Content mismatch");
+    assert_eq!(
+        original_decompressed, got_decompressed,
+        "Decompressed mismatch"
+    );
+    assert_eq!(original_len, got_len, "Decompressed size mismatch");
 
     Ok(())
+}
+
+fn decompress(data: &[u8]) -> Vec<u8> {
+    let mut decompressed = Vec::new();
+    zstd_decompress(data, &mut decompressed).unwrap();
+    decompressed
 }

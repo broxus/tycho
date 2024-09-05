@@ -3,7 +3,7 @@ set -eE
 
 #cargo test -r --all-targets --all-features --workspace -- --ignored #uncomment this when all crates will compile ˙◠˙
 # for now add tests one by one
-RUST_BACKTRACE=1 cargo test --package tycho-core --test archives heavy_archives \
+RUST_BACKTRACE=1 cargo test --package tycho-core --profile=release_check --test archives heavy_archives \
     -- --ignored --exact --nocapture
 
 #RUST_LIB_BACKTRACE=1 RUST_BACKTRACE=1 cargo test -r --package tycho-storage \

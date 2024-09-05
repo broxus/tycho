@@ -461,7 +461,7 @@ impl BlockStorage {
         // 4. Execute transaction
         self.db.rocksdb().write(batch)?;
 
-        tracing::trace!(block_id = %handle.id(), "saved block id into archive");
+        tracing::debug!(block_id = %handle.id(), "saved block id into archive");
         // Block will be removed after blocks gc
 
         if let Some(to_commit) = archive_id.to_commit {
@@ -476,6 +476,15 @@ impl BlockStorage {
         }
 
         // Done
+        Ok(())
+    }
+
+    pub async fn wait_for_archive_commit(&self) -> Result<()> {
+        let mut prev_archive_commit = self.prev_archive_commit.lock().await;
+        if let Some(task) = &mut *prev_archive_commit {
+            task.finish().await?;
+            *prev_archive_commit = None;
+        }
         Ok(())
     }
 
