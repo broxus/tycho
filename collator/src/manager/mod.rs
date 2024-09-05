@@ -4,7 +4,9 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use everscale_crypto::ed25519::KeyPair;
-use everscale_types::models::{BlockId, BlockIdShort, ProcessedUptoInfo, ShardIdent};
+use everscale_types::models::{
+    BlockId, BlockIdShort, ExternalsProcessedUpto, ProcessedUptoInfo, ShardHashes, ShardIdent,
+};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::Notify;
 use tracing::Instrument;
@@ -26,7 +28,9 @@ use crate::collator::{
     CollationCancelReason, Collator, CollatorContext, CollatorEventListener, CollatorFactory,
 };
 use crate::internal_queue::types::{EnqueuedMessage, QueueDiffWithMessages};
-use crate::mempool::{MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolEventListener};
+use crate::mempool::{
+    MempoolAdapter, MempoolAdapterFactory, MempoolAnchor, MempoolAnchorId, MempoolEventListener,
+};
 use crate::queue_adapter::MessageQueueAdapter;
 use crate::state_node::{StateNodeAdapter, StateNodeAdapterFactory, StateNodeEventListener};
 use crate::types::{
@@ -137,6 +141,7 @@ where
         let state_cloned = state.clone();
         self.spawn_task(method_to_async_closure!(
             detect_top_processed_to_anchor_and_notify_mempool,
+            true,
             state_cloned,
             processed_upto
         ))
@@ -158,6 +163,7 @@ where
         let state_cloned = state.clone();
         self.spawn_task(method_to_async_closure!(
             detect_top_processed_to_anchor_and_notify_mempool,
+            false,
             state_cloned,
             processed_upto
         ))
@@ -363,6 +369,7 @@ where
     #[tracing::instrument(skip_all, fields(block_id = %state.block_id().as_short_id()))]
     async fn detect_top_processed_to_anchor_and_notify_mempool(
         &self,
+        on_own_collated_block: bool,
         state: ShardStateStuff,
         processed_upto: ProcessedUptoInfo,
     ) -> Result<()> {
@@ -373,34 +380,54 @@ where
             return Ok(());
         }
 
-        let mut min_top_anchor_id = 0;
-        let mut mc_processed_to_anchor_id = None;
-        if let Some(externals_processed_upto) = processed_upto.externals {
-            // get top processed to anchor id for master block
-            mc_processed_to_anchor_id = Some(externals_processed_upto.processed_to.0);
-            min_top_anchor_id = externals_processed_upto.processed_to.0;
-
-            // read from shard descriptions to get min
-            for item in state.shards()?.iter() {
-                let (_, shard_descr) = item?;
-                if shard_descr.top_sc_block_updated {
-                    min_top_anchor_id =
-                        min_top_anchor_id.min(shard_descr.ext_processed_to_anchor_id);
-                }
-            }
-        }
+        let (top_processed_to_anchor_id, mc_processed_to_anchor_id) =
+            Self::detect_top_processed_to_anchor(
+                state.shards()?,
+                processed_upto.externals.as_ref(),
+            )?;
 
         tracing::debug!(target: tracing_targets::COLLATION_MANAGER,
             mc_processed_to_anchor_id,
-            "detected min_top_anchor_id={}, will notify mempool",
-            min_top_anchor_id,
+            "detected min_top_processed_to_anchor_id={}, will notify mempool",
+            top_processed_to_anchor_id,
         );
 
         self.mpool_adapter
-            .handle_top_processed_to_anchor(min_top_anchor_id)
+            .handle_top_processed_to_anchor(top_processed_to_anchor_id)
             .await?;
 
+        // clean anchors cache in mempool
+        if on_own_collated_block {
+            self.mpool_adapter
+                .clear_anchors_cache(top_processed_to_anchor_id)
+                .await?;
+        }
+
         Ok(())
+    }
+
+    /// Returns (`min_top_processed_to_anchor_id`, Option<`mc_processed_to_anchor_id`>)
+    fn detect_top_processed_to_anchor(
+        shards_info: &ShardHashes,
+        externals_processed_upto: Option<&ExternalsProcessedUpto>,
+    ) -> Result<(MempoolAnchorId, Option<MempoolAnchorId>)> {
+        let mut min_top_processed_to_anchor_id = 0;
+        let mut mc_processed_to_anchor_id = None;
+        if let Some(upto) = externals_processed_upto {
+            // get top processed to anchor id for master block
+            mc_processed_to_anchor_id = Some(upto.processed_to.0);
+            min_top_processed_to_anchor_id = upto.processed_to.0;
+
+            // read from shard descriptions to get min
+            for item in shards_info.iter() {
+                let (_, shard_descr) = item?;
+                if shard_descr.top_sc_block_updated {
+                    min_top_processed_to_anchor_id =
+                        min_top_processed_to_anchor_id.min(shard_descr.ext_processed_to_anchor_id);
+                }
+            }
+        }
+        Ok((min_top_processed_to_anchor_id, mc_processed_to_anchor_id))
     }
 
     #[tracing::instrument(skip_all, fields(block_id = %block_entry.block_id().as_short_id()))]
@@ -1108,6 +1135,16 @@ where
                     .update_last_collated_mc_block_id(*state.block_id());
 
                 let mc_data = McData::load_from_state(state)?;
+
+                // clean anchors cache in mempool
+                let (top_processed_to_anchor_id, _) = Self::detect_top_processed_to_anchor(
+                    &mc_data.shards,
+                    state.state().processed_upto.load()?.externals.as_ref(),
+                )?;
+                self.mpool_adapter
+                    .clear_anchors_cache(top_processed_to_anchor_id)
+                    .await?;
+
                 self.refresh_collation_sessions(mc_data, true).await?;
 
                 // remove all previous blocks from cache
@@ -1257,6 +1294,7 @@ where
                 .await?;
 
             self.detect_top_processed_to_anchor_and_notify_mempool(
+                false,
                 state.clone(),
                 state.state().processed_upto.load()?,
             )

@@ -253,6 +253,12 @@ impl MempoolAdapter for MempoolAdapterStdImpl {
         let mut anchors_cache_rw = self.anchors.write();
 
         anchors_cache_rw.retain(|anchor_id, _| anchor_id >= &before_anchor_id);
+
+        tracing::info!(target: tracing_targets::MEMPOOL_ADAPTER,
+            "anchors cache was cleared before anchor {}",
+            before_anchor_id,
+        );
+
         Ok(())
     }
 }
